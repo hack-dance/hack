@@ -66,8 +66,9 @@ const CASE_TIMEOUT_MS = 2 * STARTUP_TIMEOUT_MS;
 /** A caller's 50 ms startup deadline must return the frontend well inside this wall bound. */
 const DEADLINE_WALL_BOUND_MS = 1000;
 /**
- * Upper bound for a stand-in owner that never receives its release or SIGTERM,
- * so a broken case cannot leave an orphan. Passing cases release it explicitly.
+ * Upper bound for a stand-in owner that never receives its release or SIGTERM.
+ * This bounds the orphan a broken case can leave rather than preventing it: the
+ * cap outlasts the case's Bun timeout. Passing cases release it explicitly.
  */
 const OWNER_RELEASE_CAP_MS = 2 * CASE_TIMEOUT_MS;
 const cases = createNativeFixtureCases({

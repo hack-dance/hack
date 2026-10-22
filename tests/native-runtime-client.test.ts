@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, test as bunTest, expect, spyOn } from "bun:test";
 import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,10 +29,29 @@ afterEach(async () => {
 const REQUEST_TIMEOUT_MS = 30_000;
 /** Budget for a fixture handshake file to appear. */
 const HANDSHAKE_BUDGET_MS = 30_000;
-/** A keeper never released by its case still exits, so it cannot be orphaned. */
+/**
+ * A keeper its case never releases still exits after this cap. That bounds the
+ * orphan rather than preventing it: the cap outlasts the case's Bun timeout.
+ */
 const KEEPER_RELEASE_CAP_MS = 120_000;
-/** Bun timeout for cases that spawn descendants and await handshakes. */
+/** Bun timeout for every case here: most spawn the stand-in runtime. */
 const CASE_TIMEOUT_MS = 2 * HANDSHAKE_BUDGET_MS;
+/**
+ * Upper bound from the stand-in's exit (or the caller's abort) to the request
+ * settling while a descendant still holds stdout/stderr. The client stops
+ * draining 250 ms after exit; this is far above that, so load cannot flake it,
+ * and far below the request timeout, so an unbounded drain still fails.
+ */
+const DRAIN_SETTLE_BOUND_MS = 5000;
+
+/** Every case gets a named budget; none relies on Bun's 5 s default. */
+function test(
+  name: string,
+  body: Parameters<typeof bunTest>[1],
+  timeoutMs = CASE_TIMEOUT_MS
+): void {
+  bunTest(name, body, timeoutMs);
+}
 
 /** Wait for a fixture to write `path`; replaces fixed windows before acting. */
 async function waitForFile(
@@ -308,7 +327,7 @@ test("native recovery draining requires exact independent selectors and refuses 
   }
 });
 
-test.each([
+bunTest.each([
   ["read", "exit"],
   ["read", "abort"],
   ["selection", "exit"],
@@ -322,9 +341,11 @@ test.each([
     const holding = join(runtime.home, "holding");
     const release = join(runtime.home, "release");
     const finished = join(runtime.home, "finished");
+    const exiting = join(runtime.home, "exiting");
     // The keeper holds the request's stdout/stderr until the test releases it,
-    // so the request can only finish by not waiting for its descendant. No
-    // fixed keeper lifetime or wall-clock bound decides the outcome.
+    // so the request can only finish by bounding its drain. The bound is
+    // measured from the stand-in's own exit (or the abort), never from spawn,
+    // so slow process startup under load cannot decide the outcome.
     const keeper = `import {existsSync,writeFileSync} from 'node:fs';
 writeFileSync(${JSON.stringify(holding)},String(process.pid));
 const cap=performance.now()+${KEEPER_RELEASE_CAP_MS};
@@ -339,7 +360,7 @@ const cap=performance.now()+${KEEPER_RELEASE_CAP_MS};
 while(!(await Bun.file(${JSON.stringify(holding)}).exists())&&performance.now()<cap)await Bun.sleep(10);
 if(!(await Bun.file(${JSON.stringify(holding)}).exists()))process.exit(2);
 console.log(JSON.stringify({ready:true}));
-${mode === "abort" ? "await Bun.sleep(60_000);" : "process.exit(0);"}
+${mode === "abort" ? "await Bun.sleep(60_000);" : `(await import('node:fs')).writeFileSync(${JSON.stringify(exiting)},String(Date.now()));process.exit(0);`}
 `
     );
     const controller = new AbortController();
@@ -371,18 +392,31 @@ ${mode === "abort" ? "await Bun.sleep(60_000);" : "process.exit(0);"}
       boundNativeAuthoredRecoveryDrain:
         selection === "read" ? undefined : selection,
     });
+    let settledAt: number | undefined;
+    const stamp = () => {
+      settledAt = Date.now();
+    };
+    request.then(stamp, stamp);
     void request.catch(() => undefined);
     let failed: unknown;
     let completed = false;
     try {
+      let endedAt: number;
       if (mode === "abort") {
         await waitForFile(holding);
+        endedAt = Date.now();
         controller.abort();
         await expect(request).rejects.toThrow("canceled");
       } else {
         expect(await request).toEqual({ ready: true });
+        endedAt = Number(await Bun.file(exiting).text());
       }
-      // The request settled while the unreleased keeper still holds both pipes.
+      // The drain is bounded: settlement follows the child's end promptly even
+      // though the unreleased keeper still holds both pipes.
+      expect(settledAt).toBeDefined();
+      expect((settledAt ?? Number.POSITIVE_INFINITY) - endedAt).toBeLessThan(
+        DRAIN_SETTLE_BOUND_MS
+      );
       expect(await Bun.file(finished).exists()).toBe(false);
       const keeperPid = Number(await Bun.file(holding).text());
       expect(Number.isSafeInteger(keeperPid) && keeperPid > 1).toBe(true);
@@ -615,42 +649,42 @@ test("structured failures expose only a bounded code, never their message", asyn
   );
 });
 
-test.each([
+bunTest.each([
   {
     argument: "foreground-stopped",
     stopped: true,
     cause: "runtime_not_running",
   },
   { argument: "foreground-other", stopped: false, cause: undefined },
-])("authored control failure preserves only the stopped-runtime cause: $argument", async ({
-  argument,
-  stopped,
-  cause,
-}) => {
-  const runtime = await fixture();
-  const error: unknown = await invokeNativeRuntime({
-    runtime,
-    cwd: runtime.home,
-    args: [argument],
-  }).catch((caught: unknown) => caught);
-  expect(error).toBeInstanceOf(NativeRuntimeRequestError);
-  expect(error).toHaveProperty("nativeCode", "native_graph_foreground");
-  expect(error).toHaveProperty("nativeCauseCode", cause);
-  expect(isNativeRuntimeNotRunning(error)).toBe(stopped);
-  expect(String(error)).not.toContain("synthetic-secret-diagnostic");
-  expect(
-    isNativeRuntimeNotRunning(
-      new NativeRuntimeRequestError({
-        message: "unrelated ownership refusal",
-        nativeCode: "graph_owner_recovery",
-        nativeCauseCode: "runtime_not_running",
-      })
-    )
-  ).toBe(false);
-  expect(isNativeRuntimeNotRunning({ nativeCode: "runtime_not_running" })).toBe(
-    false
-  );
-});
+])(
+  "authored control failure preserves only the stopped-runtime cause: $argument",
+  async ({ argument, stopped, cause }) => {
+    const runtime = await fixture();
+    const error: unknown = await invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: [argument],
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+    expect(error).toHaveProperty("nativeCode", "native_graph_foreground");
+    expect(error).toHaveProperty("nativeCauseCode", cause);
+    expect(isNativeRuntimeNotRunning(error)).toBe(stopped);
+    expect(String(error)).not.toContain("synthetic-secret-diagnostic");
+    expect(
+      isNativeRuntimeNotRunning(
+        new NativeRuntimeRequestError({
+          message: "unrelated ownership refusal",
+          nativeCode: "graph_owner_recovery",
+          nativeCauseCode: "runtime_not_running",
+        })
+      )
+    ).toBe(false);
+    expect(
+      isNativeRuntimeNotRunning({ nativeCode: "runtime_not_running" })
+    ).toBe(false);
+  },
+  CASE_TIMEOUT_MS
+);
 
 test("a carried code pair reports a direct or foreground-wrapped stopped runtime only", () => {
   expect(

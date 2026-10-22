@@ -8,6 +8,7 @@ import {
   getLaunchdServiceStatus,
   installLaunchdService,
   kickstartLaunchdService,
+  resolveLaunchdAccess,
 } from "./launchd.ts";
 import { resolveDaemonPaths } from "./paths.ts";
 import { readDaemonStatus } from "./status.ts";
@@ -90,7 +91,8 @@ export async function requestDaemonJson(opts: {
  * Starts (or restarts) hackd automatically when autoStart is enabled and the daemon is unavailable.
  *
  * Uses launchd on macOS for startup/login persistence and process keepalive, with bounded retries
- * and cooldown to avoid runaway restart loops.
+ * and cooldown to avoid runaway restart loops. When launchd access is denied (an isolated
+ * HACK_HOME; see `resolveLaunchdAccess`), it starts hackd directly instead.
  *
  * Non-interactive invocations (no TTY, HACK_NO_INTERACTIVE, --no-interactive)
  * never autostart: callers fall back to direct docker inspection instead of
@@ -118,7 +120,11 @@ async function ensureDaemonReady(opts: {
   }
   lastDaemonAutostartAttemptAtMs = now;
 
-  if (process.platform === "darwin") {
+  // An isolated HACK_HOME does not own the per-user launchd service, so it
+  // starts hackd directly under its own state root, as on Linux. Refusing to
+  // autostart would leave isolated runs without the daemon they configured,
+  // and the direct path touches nothing outside HACK_HOME (HACK-1313).
+  if (process.platform === "darwin" && resolveLaunchdAccess().allowed) {
     const launched = await ensureLaunchdDaemonReady({
       paths: opts.paths,
       runAtLoad: controlPlane.config.daemon.launchd.runAtLoad,

@@ -1217,3 +1217,74 @@ test("save-active repeats full volume authority after its scoped routing observa
     await store.close();
   }
 });
+/** Every synthetic binding fact except the running state, which a stop
+ * legitimately changes. Compared, never reported. */
+function bindingFacts() {
+  const { running: _running, ...facts } = h.model;
+  return JSON.stringify(facts);
+}
+/** The closed refusal code of a rejected retained operation. */
+async function refusalCode(
+  value: Promise<unknown>
+): Promise<LegacyComposeAdoptedGenerationError["code"]> {
+  try {
+    await value;
+  } catch (error: unknown) {
+    expect(error).toBeInstanceOf(LegacyComposeAdoptedGenerationError);
+    expect(String(error)).toMatch(/values omitted/i);
+    expect(String(error)).not.toContain(ROUTING_CANARY);
+    expect(String(error)).not.toContain(h.root);
+    if (error instanceof LegacyComposeAdoptedGenerationError) {
+      return error.code;
+    }
+  }
+  throw new Error("unexpected synthetic success");
+}
+// HACK-1340: the harness gives each operation a 15 s caller deadline. A
+// synthetic clock jumps past it after the operation's first probe, so the
+// operation is slow by the product's own clock while nothing it observes moves.
+test("HACK-1340: an unchanged retained v14 operation past its caller deadline refuses as a deadline, not a binding change", async () => {
+  const { store, generation } = await prepare();
+  const realNow = Date.now;
+  let offset = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+  const before = bindingFacts();
+  try {
+    h.hooks.afterProbe = async () => {
+      offset = 16_000;
+    };
+    const code = await refusalCode(
+      h.operation(store, generation, "stop", { preparation: true })
+    );
+    expect(offset).toBe(16_000);
+    expect(bindingFacts()).toBe(before);
+    expect(code).toBe("E_LEGACY_ADOPTION_DEADLINE");
+    expect(new LegacyComposeAdoptedGenerationError(code).message).toBe(
+      "Legacy adoption operation reached its caller deadline before it could finish; values omitted."
+    );
+    expect((await h.receipt()).routingHandoff).toBe("held");
+  } finally {
+    h.hooks.afterProbe = undefined;
+    clock.mockRestore();
+    await store.close();
+  }
+});
+test("HACK-1340: a real binding drift within the caller deadline still refuses as a binding change", async () => {
+  const { store, generation } = await prepare();
+  const before = bindingFacts();
+  try {
+    h.hooks.afterEffect = async () => {
+      h.model.volumeBirth = "2026-02-02T01:02:03Z";
+    };
+    const code = await refusalCode(
+      h.operation(store, generation, "stop", { preparation: true })
+    );
+    expect(bindingFacts()).not.toBe(before);
+    expect(code).toBe("E_LEGACY_ADOPTION_CHANGED");
+    expect(h.effects).toHaveLength(1);
+    expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
+  } finally {
+    h.hooks.afterEffect = undefined;
+    await store.close();
+  }
+});

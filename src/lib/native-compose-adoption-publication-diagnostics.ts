@@ -45,6 +45,7 @@ export type LegacyComposePublicationRefusal = {
     | "private-stale"
     | "compiler-transport"
     | "proof-deadline"
+    | "literal-env-override"
     | "unclassified";
 };
 
@@ -92,6 +93,7 @@ const reasons: readonly LegacyComposePublicationRefusal["reason"][] = [
   "private-stale",
   "compiler-transport",
   "proof-deadline",
+  "literal-env-override",
   "unclassified",
 ];
 

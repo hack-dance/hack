@@ -276,9 +276,16 @@ does not keep it. `hack doctor` reports such a file in its "compose env at rest"
 A legacy adoption (`hack config adopt`) pins the override's exact bytes and file
 identity for as long as the adoption exists, and adopted commands never rewrite it. So:
 
-- `hack config adopt` and `hack config adopt --dry-run` refuse a literal override. Run
-  `hack up` once so Hack rewrites it with references, then adopt.
-- An adoption made by an earlier version over a literal override keeps that file. Hack
+- `hack config adopt`, `hack config adopt --stop` and `hack config adopt --dry-run`
+  refuse a literal override before they prepare anything. Run `hack up` once so Hack
+  rewrites it with references, then adopt.
+- A preparation that an earlier version made over a literal override is never
+  published. `hack config adopt --recover --stop` (which retries the stop, then
+  publishes) and `hack config adopt --recover` (which completes a pending switch) refuse
+  before any original file moves. The switch stays journaled as pending, and the error
+  names `hack config adopt --recover --rollback` as the step that releases it. After that
+  rollback, run `hack up` and adopt again.
+- An active adoption made by an earlier version over a literal override keeps that file. Hack
   never removes it while a prepared, active or pending adoption exists, because removal
   would make the adoption refuse to load. `hack doctor` reports it with this next step.
   To drop the values, stop the adopted containers (`hack down`), run

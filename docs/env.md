@@ -57,7 +57,8 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 How it is maintained:
 
 - written by `hack init`, re-ensured by `hack doctor --fix`, and refreshed
-  when you write `--local` env overrides with `hack env set`
+  when you write machine-local env overrides (`hack env set --local`,
+  `hack env hydrate`)
 - runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
   into your working tree to set up ignores, so they leave `git status`
   unchanged. Before they write `.hack/.internal/` or `.hack/.branch/` files,

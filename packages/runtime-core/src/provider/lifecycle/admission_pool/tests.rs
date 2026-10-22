@@ -407,19 +407,33 @@ fn leased_refusal(pool: &Pool) -> &'static str {
         .code
 }
 
-fn exclusive_lock(path: &Path) -> fs::File {
+/// A provider's exclusive VM lock, held by this test process. Dropping it unlocks the
+/// open file description explicitly, as the product's `VmLock` does: closing alone keeps
+/// the `flock` held while a pre-exec fork of an unrelated parallel test still shares the
+/// description, so a release check right after the drop would still see a held lock.
+struct HeldLock(fs::File);
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the owned descriptor remains open through this call.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+fn exclusive_lock(path: &Path) -> HeldLock {
     use std::os::fd::AsRawFd;
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
         .unwrap();
-    // SAFETY: the descriptor stays open for this call; the lock ends when `file` drops.
+    // SAFETY: the descriptor stays open for this call; the guard unlocks it on drop.
     assert_eq!(
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
         0
     );
-    file
+    HeldLock(file)
 }
 
 #[test]
@@ -1124,6 +1138,23 @@ fn window(owned: admission::OwnedPool, free: &[u64]) -> Vec<admission::Admission
 
 #[test]
 fn a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check() {
+    // The release checks after the lock is dropped must pass: run them where no unrelated
+    // parallel test's pre-exec fork can hold a copy of this pool's VM lock or disk handles
+    // for the host-wide `lsof` scan to report. Holding `serial` keeps the module's whole-host
+    // scans one at a time.
+    let _serial = serial();
+    crate::provider::test_executable::run_isolated(
+        "provider::lifecycle::admission_pool::tests::fresh_headroom_start_child",
+        ISOLATED_TEST_BOUND,
+    );
+}
+
+/// Hang guard for launching the whole test binary on a loaded host.
+const ISOLATED_TEST_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
+#[test]
+#[ignore = "isolated fixture launched by a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check"]
+fn fresh_headroom_start_child() {
     let _serial = serial();
     let stopped = admission::OwnedPool::Stopped;
     let fresh_floor = 58 * GIB;

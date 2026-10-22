@@ -170,6 +170,62 @@ finalization checks still apply. Fresh and already branch-scoped graphs keep
 their normal branch namespace. This compatibility path does not authorize
 adopting an unrelated branch or project.
 
+## Compose projects that stay on the Compose backend
+
+In v5, an unchanged Compose project (`.hack/hack.config.json` with
+`.hack/docker-compose.yml`) that uses any of the following features runs on the
+Compose backend. Native support for them is planned after v5.
+
+| Compose feature | Kept on the Compose backend when |
+| --- | --- |
+| External network | A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the `HACK_NATIVE_ADAPTATION` selection (see [Frontend integration status](#frontend-integration-status)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
+| Reserved ownership label | A service, network or volume label key starts with `com.docker.compose.`, `io.hack-local.` or `io.hack.native-config.`. Compose, the native runtime and native-config Compose use these labels to prove which resources they own. |
+| Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. |
+| Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64 only. |
+
+Native `hack up` and `hack restart` check for these features after selecting the
+project and before branch, environment, lifecycle, storage or runtime work. They
+refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and one line that names each feature
+found, without network names, label keys, paths or platform values. Nothing is
+started, stopped or written. Every service is checked, including services outside
+the selected profiles.
+
+The check applies the explicit `HACK_NATIVE_ADAPTATION` selection first, as native
+start does. An unchanged Compose file whose external network is listed in
+`isolatedNetworks` therefore stays on native, and native start replaces that
+network with an owned isolated one. The selection is read only when the Compose
+file has an external network. If it cannot be read, is not version 1, or its
+`isolatedNetworks` is not a list of unique names, the command refuses with the
+same one-line `E_CONFIG_INVALID` message native start gives, before any runtime
+request.
+
+To run such a project, select the Compose backend:
+
+```sh
+HACK_RUNTIME_BACKEND=compose hack up
+```
+
+The bundle's `hack-v5` entrypoint and the `hack-next` launcher accept the same
+selection; see [Test both backends](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends).
+
+Other labels keep their native behavior. Routing (`caddy*`) and dependency cache
+(`hack.dependencies.*`) labels are reviewed as before, and other ordinary labels
+are refused with the general native configuration refusal. A basic build is also
+refused by native image-project `up`, with the general refusal: it needs the
+authored native format.
+
+`hack doctor` reports the same features for the current project in its
+`compose backend features` check. With `--json`, the check's `composeBackend.features`
+lists the closed names `external_network`, `reserved_label`, `unsupported_build`
+and `foreign_platform`. On the native backend a found feature is a warning; on
+the Compose backend it is informational. Native doctor applies the same
+`HACK_NATIVE_ADAPTATION` selection before it reports.
+
+Native `up` and `restart` also stay in the foreground in every project:
+`--detach` refuses with one `E_USAGE` line. Run `hack up` in its own terminal and
+keep it open, use `hack ps` and `hack logs` from another terminal, and press
+Ctrl-C to stop it. For detached startup, use the Compose backend.
+
 ## Manual candidate upgrade and rollback
 
 Manual candidate bundles are selected by their full path. The separate
@@ -675,7 +731,9 @@ Without that grant, `up` and `restart` refuse with `E_PERMISSION` before any sto
 runtime request; set it and run the command again.
 
 This initial foreground path does not support detached/JSON startup, selected
-services or external networks. `--detach`, `--json`, `--target` and service names
+services, or the Compose features listed in
+[Compose projects that stay on the Compose backend](#compose-projects-that-stay-on-the-compose-backend),
+such as external networks. `--detach`, `--json`, `--target` and service names
 each refuse with a one-line `E_USAGE` message that names the option and the supported
 form: run `hack up` in the foreground in its own terminal and use `hack ps` and
 `hack logs` from another. Routed services and host dependencies require the
@@ -1216,7 +1274,9 @@ adaptations are accepted:
 ```
 
 Networks must already be declared external; selection explicitly replaces their
-connectivity with the owned isolated network. Probes apply only when no existing
+connectivity with the owned isolated network. Native `up`, `restart` and doctor
+then treat those networks as owned, not as external Compose networks (see
+[Compose projects that stay on the Compose backend](#compose-projects-that-stay-on-the-compose-backend)). Probes apply only when no existing
 healthcheck is present. Additional hostnames append to existing Caddy labels.
 Additional host aliases append explicit `host-gateway` declarations and still need
 separate pinned dependency selections; they do not enable general host access or

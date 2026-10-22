@@ -220,6 +220,7 @@ import {
   resolveShouldTryLoki,
   resolveUseLoki,
 } from "../lib/logs.ts";
+import { refuseNativeComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
@@ -4969,6 +4970,15 @@ async function handleNativeUp({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
     touchRegistration: false,
+  });
+  // Before branch, config, env, lifecycle, storage or runtime work. `down`
+  // stays available for any graph a project already has.
+  // The explicit adaptation applies first: a network it isolates is not
+  // external here, exactly as native start normalizes it.
+  await refuseNativeComposeBackendFeatures({
+    composeFile: project.composeFile,
+    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
+    restart,
   });
   const branch = await resolveEffectiveBranchForCommand({
     project,

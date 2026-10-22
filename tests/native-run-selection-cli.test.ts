@@ -9,7 +9,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { NATIVE_RUN_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
+import {
+  NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
+  NATIVE_RUN_SELECTION_REFUSAL,
+} from "../src/backends/native-project-one-off.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
@@ -259,3 +262,43 @@ for (const request of [
     expect(await nativeCalls(f.root)).toEqual([]);
   }, 30_000);
 }
+
+/**
+ * HACK-1338: an empty `--env` or `--profile` is a closed usage error, never a
+ * silent "inherit" or an explicit empty selection. The fixture runs with no
+ * profiles and the base env, so without this rule `--env ""` (base) and
+ * `--profile ""` (no profiles) would match the running selection and run.
+ */
+for (const request of [
+  { name: "an empty --env", args: ["--env", ""] },
+  { name: "an empty --env=", args: ["--env="] },
+  { name: "a whitespace --env", args: ["--env", "  "] },
+  { name: "an empty --profile", args: ["--profile", ""] },
+  { name: "a comma-only --profile", args: ["--profile", " , "] },
+]) {
+  test(`run with ${request.name} refuses with one closed line and no runtime request`, async () => {
+    const f = await fixture({ profiles: [], effectiveEnvName: null });
+    const result = await cli({
+      fixture: f,
+      args: ["run", ...request.args, "toolchain", "bun", "--version"],
+    });
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr.trim()).toBe(
+      `ERROR: E_USAGE: ${NATIVE_RUN_EMPTY_SELECTION_REFUSAL}`
+    );
+    expect(result.stderr).not.toMatch(STACK_FRAME);
+    expect(await nativeCalls(f.root)).toEqual([]);
+  }, 30_000);
+}
+
+test("run without --env or --profile still inherits the running selection", async () => {
+  const f = await fixture({ profiles: [], effectiveEnvName: null });
+  const result = await cli({
+    fixture: f,
+    args: ["run", "toolchain", "bun", "--version"],
+  });
+  expect(result.code).toBe(0);
+  expect(result.stdout).toBe(CHILD_STDOUT);
+  expect(operations(await nativeCalls(f.root))).toContain("run-service");
+}, 30_000);

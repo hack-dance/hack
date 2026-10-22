@@ -215,6 +215,60 @@ test("the child-command boundary uses the resolved command's option types", () =
   expect(findPassthroughStart(COLLIDING_CLI, ["gamma", "-r", "ls"])).toBe(2);
 });
 
+test("a lone - is a positional, so it can start the child command", () => {
+  // `-` is never an option: here it is gamma's child command, and the `-r`
+  // after it belongs to the child.
+  expect(findPassthroughStart(COLLIDING_CLI, ["gamma", "-", "-r"])).toBe(1);
+  expect(parseCliArgv(COLLIDING_CLI, ["gamma", "-", "-r"]).positionals).toEqual(
+    ["gamma", "-", "-r"]
+  );
+});
+
+/**
+ * A passthrough command that also has a subcommand, so a subcommand name can
+ * appear after the command's own positional.
+ */
+const SUBCOMMAND_CLI = defineCli({
+  name: "demo",
+  version: "0.0.0",
+  summary: "A passthrough command with a subcommand",
+  globalOptions: [],
+  commands: [
+    defineCommand({
+      name: "delta",
+      summary: "service then child command",
+      group: "Project",
+      options: [optFlag],
+      positionals: [
+        { name: "service" },
+        { name: "command", multiple: true, passthrough: true },
+      ],
+      subcommands: [
+        defineCommand({
+          name: "ls",
+          summary: "a subcommand of delta",
+          group: "Project",
+          options: [],
+          positionals: [],
+          subcommands: [],
+        } as const),
+      ],
+    } as const),
+  ],
+} as const);
+
+test("after a command's own positional, a subcommand name is the child command", () => {
+  // `ls` names a subcommand of delta only before delta's first positional;
+  // after `web` it is the child command, and its `-r` belongs to the child.
+  expect(
+    findPassthroughStart(SUBCOMMAND_CLI, ["delta", "web", "ls", "-r"])
+  ).toBe(2);
+  // Before any positional, `ls` still resolves as the subcommand.
+  expect(
+    findPassthroughStart(SUBCOMMAND_CLI, ["delta", "ls", "-r"])
+  ).toBeNull();
+});
+
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) {

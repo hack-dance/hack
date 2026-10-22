@@ -63,8 +63,16 @@ How it is maintained:
   and `hack doctor --fix` creates the file, or restores its managed block,
   as its own step. Commit the result so fresh clones and worktrees get the
   rules. `hack init` does not repair an existing project. Hack never writes
-  through a symlinked `.hack/.gitignore` or `.hack/`; doctor reports that case
-  and leaves it alone.
+  through a symlinked `.hack/.gitignore` or `.hack/` (including a `.hack/`
+  that links outside the repository); doctor reports that case and leaves it
+  alone.
+- a read-only `.hack/.gitignore` (for example mode 0444) is never replaced,
+  the same policy as for `info/exclude`. When it lacks the managed block,
+  `hack doctor` warns and names the fix (make it writable, then run
+  `hack doctor --fix`), and `--fix` leaves it unchanged. `hack env set --local`
+  and `hack env hydrate` still write the local layer, print the same warning
+  on stderr (so `--json` output on stdout stays valid JSON), and leave the
+  file unchanged. A read-only file that already has the block is fine.
 - runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
   into your working tree to set up ignores, so they leave `git status`
   unchanged. Before they write `.hack/.internal/` or `.hack/.branch/` files,
@@ -237,12 +245,27 @@ integration or a test harness) gets a blank value for every managed variable, wi
 per-variable warning from Compose. Use `hack run` or `hack exec`, or supply the same
 `HACK_ENV_*` variables to that command.
 
-Every service gets its own `HACK_ENV_*` copy of each value, including values that come
-from the global scope, so the Compose client environment grows with services times keys.
-The platform limits apply to it: about 1 MiB of arguments and environment in total on
-macOS, and on Linux also 128 KiB (`MAX_ARG_STRLEN`) for a single `NAME=value` string. A
-larger single value, such as a big JSON credential, makes the Compose start fail with
-`E2BIG`.
+A value that a service gets from the global scope uses one `HACK_ENV_*` reference shared
+by every such service. A key that a service scope sets keeps a reference of its own for
+that service. The Compose client environment therefore grows with the distinct values,
+not with services times keys: twenty services that share one 64 KiB global value add
+about 64 KiB, not 1.25 MiB. The choice follows which scope sets each key, never the
+values, so the override file still holds no value. Compose also receives each global
+value under its own name for `${KEY}` interpolation in your Compose file, so a global
+value reaches the `docker compose` process twice.
+
+The operating system limits the arguments and environment of a new process (`ARG_MAX`):
+1 MiB in total on macOS, and on Linux a quarter of the stack size limit (2 MiB with the
+default 8 MiB stack, at most 6 MiB), plus 128 KiB (`MAX_ARG_STRLEN`) for a single
+`NAME=value` string. Hack measures the environment the `docker compose` process would
+get (your shell environment plus the managed values) before it writes the override or
+starts Compose. It keeps 64 KiB for the Compose arguments. When the environment does not
+fit, `up`, `restart`, `run` and `exec` fail with `E_ENV_TOO_LARGE`. The message and the
+`--json` detail name the limit (`ARG_MAX` or `MAX_ARG_STRLEN`) and give byte counts only,
+never a name or a value. To fix it, make large values smaller or remove them (for
+example, mount a large credential as a file and pass its path), set a value once in the
+global scope instead of in each service scope, or unset large variables in the shell
+that runs `hack`.
 
 When you upgrade from an earlier version, read the two subsections at the end of this
 section: managed values that contain `$` now reach containers differently, and an

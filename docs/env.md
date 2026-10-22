@@ -295,6 +295,15 @@ reports such files by count, and the next removal, `hack doctor --fix`, or `hack
 `hack restart`, `hack run` or `hack exec` deletes each one once it is more than a minute
 old. A newer one may belong to a removal that is still running, so it is left alone.
 
+Every step that touches the override first checks, without following a symlink, that
+`.hack` and `.hack/.internal` are real directories and that the override is a regular
+file; a step that moves or deletes something checks the directories again first. If
+`.hack`, `.hack/.internal` or the override is a symlink or not a regular file or
+directory, a Compose command that renders the override refuses with a fixed message,
+and `hack doctor` reports a fixed refusal that names no value. Neither `hack doctor --fix`,
+a removal nor the sweep of leftover `.remove` files lists, reads, moves or deletes
+anything behind the link. Replace the link with a regular directory or file.
+
 ## Choosing the right execution surface
 
 - `hack host exec` / `hack host shell`: run on your host machine with Hack-resolved env injected.

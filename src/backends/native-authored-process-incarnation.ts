@@ -341,6 +341,15 @@ function sameRow(
 function changedIdentity(): never {
   throw new Error("Native process census identity changed; values omitted.");
 }
+/** The attempt is discarded whole within budget, with no denial fact. Nothing
+ * from it is ever accepted, so this cannot weaken the evidence. */
+function superseded(): never {
+  const failure = new Error(
+    "Native process census superseded by foreign churn; values omitted."
+  );
+  supersededCensuses.add(failure);
+  throw failure;
+}
 function observation(
   rows: readonly NativeAuthoredProcessRow[]
 ): ReadonlyMap<number, NativeAuthoredProcessRow> {
@@ -396,7 +405,7 @@ export function mergeNativeAuthoredProcessCensuses(
     );
   const merged = new Map<number, NativeAuthoredProcessRow>();
   const unstable: number[] = [];
-  let superseded = false;
+  let churned = false;
   for (const pid of new Set([...earlier.keys(), ...later.keys()])) {
     const first = earlier.get(pid);
     const second = later.get(pid);
@@ -423,17 +432,13 @@ export function mergeNativeAuthoredProcessCensuses(
       merged.set(pid, second);
       continue;
     }
-    superseded = true;
+    churned = true;
   }
   if (unstable.some(decides)) {
     return refused();
   }
-  if (superseded || unstable.length > 0) {
-    const failure = new Error(
-      "Native process census superseded by foreign churn; values omitted."
-    );
-    supersededCensuses.add(failure);
-    throw failure;
+  if (churned || unstable.length > 0) {
+    return superseded();
   }
   return [...merged.values()];
 }
@@ -484,10 +489,30 @@ async function unavailableSession(
   }
   throw failure;
 }
+/** A live row whose SID lookup failed has no known session, so only its PID
+ * and PGID can show it is of interest. On macOS a process that exits, or turns
+ * into a zombie, between `ps` and `getsid` fails the lookup; on a busy host
+ * that is ordinary churn. With `interest`, a row whose PID and PGID are both
+ * foreign therefore supersedes the attempt at once: no diagnostic re-listing,
+ * no denial fact, and nothing from the attempt is accepted. Its session may
+ * still be the original's, so it is never dropped from an accepted pair. A row
+ * of interest, and every row of an unbounded census, keeps the classified
+ * disappearance or refusal below. */
+function unavailableForeignSession(
+  row: NativeAuthoredProcessRow,
+  interest: NativeAuthoredCensusInterest | undefined
+): boolean {
+  return (
+    interest !== undefined &&
+    row.pid !== interest.pid &&
+    row.group !== interest.group
+  );
+}
 async function sessionRows(
   end: number,
   denied: ReadonlySet<number>,
-  diagnostics?: NativeProcessCensusDiagnostics
+  diagnostics?: NativeProcessCensusDiagnostics,
+  interest?: NativeAuthoredCensusInterest
 ): Promise<readonly NativeAuthoredProcessRow[]> {
   const metadata = beginNativeProcessCensusPhase({
     diagnostics,
@@ -532,7 +557,9 @@ async function sessionRows(
         }
         const sid = row.pid === probe ? session : inspector.session(row.pid);
         if (sid === null) {
-          return await unavailableSession(row, end, denied);
+          return unavailableForeignSession(row, interest)
+            ? superseded()
+            : await unavailableSession(row, end, denied);
         }
         result.push({ ...row, session: String(sid) });
       }
@@ -600,8 +627,9 @@ function discardable(opts: {
  * disappeared live row may discard an entire attempt; its successor requires
  * two new complete observations within the original monotonic budget. Only
  * disappeared PIDs survive as denial facts: any reappearance refuses. With
- * `interest`, a pair superseded by foreign churn is likewise discarded whole,
- * without a denial fact. Unknown or changed membership refuses immediately.
+ * `interest`, a pair superseded by foreign churn, or an attempt where a foreign
+ * row's SID lookup failed, is likewise discarded whole, without a denial fact.
+ * Otherwise unknown or changed membership refuses immediately.
  * No saved PID signals. */
 export async function readNativeAuthoredProcessCensus(
   timeoutMs = 3000,
@@ -623,8 +651,18 @@ export async function readNativeAuthoredProcessCensus(
     const denied = new Set<number>();
     while (performance.now() < end) {
       try {
-        const before = await sessionRows(end, denied, opts?.diagnostics);
-        const after = await sessionRows(end, denied, opts?.diagnostics);
+        const before = await sessionRows(
+          end,
+          denied,
+          opts?.diagnostics,
+          opts?.interest
+        );
+        const after = await sessionRows(
+          end,
+          denied,
+          opts?.diagnostics,
+          opts?.interest
+        );
         if (performance.now() >= end) {
           return refused();
         }

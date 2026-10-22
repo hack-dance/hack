@@ -473,6 +473,93 @@ censusTest(
     }
   }
 );
+/** The stand-in fails the SID lookup of PIDs 88, 89 and 90, as macOS does for a
+ * process that exits or becomes a zombie between `ps` and `getsid`. */
+censusTest.each([
+  { name: "before", frames: [raw(88), raw(77), raw(77)] },
+  { name: "after", frames: [raw(77), raw(88), raw(77), raw(77)] },
+  {
+    name: "repeatedly for one PID",
+    frames: [raw(88), raw(88), raw(77), raw(77)],
+  },
+  {
+    name: "for a foreign group member",
+    frames: [raw(77) + raw(88, 77), raw(77), raw(77)],
+  },
+])(
+  "foreign SID lookup failure $name supersedes without re-listing and needs a fresh stable pair",
+  async ({ frames }) => {
+    await standin({ frames }, async (calls) => {
+      const rows = await readNativeAuthoredProcessCensus(3000, {
+        interest: original,
+      });
+      expect(rows.map((row) => row.pid)).toEqual([77]);
+      expect(calls()).toBe(frames.length);
+    });
+  }
+);
+censusTest.each([
+  {
+    name: "group member, same live",
+    frames: [raw(88, 123), raw(88, 123)],
+    reason: "same-live-SID-unavailable",
+  },
+  {
+    name: "group member, live to zombie",
+    frames: [raw(88, 123), zombie(raw(88, 123))],
+    reason: "changed",
+  },
+  {
+    name: "group member, reappeared PID",
+    frames: [raw(88, 123), raw(77), raw(88, 123)],
+    reason: "PID reappeared",
+  },
+  {
+    name: "original PID, PID reuse",
+    frames: [raw(88), raw(88, 88, reborn)],
+    reason: "changed",
+    pid: 88,
+  },
+])(
+  "row of interest SID lookup failure $name keeps its classified refusal",
+  async ({ frames, reason, pid }) => {
+    await standin({ frames }, async (calls) => {
+      await expect(
+        readNativeAuthoredProcessCensus(3000, {
+          interest: { ...original, pid: pid ?? original.pid },
+        })
+      ).rejects.toThrow(reason);
+      expect(calls()).toBe(frames.length);
+    });
+  }
+);
+censusTest(
+  "a disappeared row of interest still becomes a denial fact before a fresh pair",
+  async () => {
+    await standin(
+      { frames: [raw(88, 123), raw(77), raw(77), raw(77)] },
+      async (calls) => {
+        const rows = await readNativeAuthoredProcessCensus(3000, {
+          interest: original,
+        });
+        expect(rows.map((row) => row.pid)).toEqual([77]);
+        expect(calls()).toBe(4);
+      }
+    );
+  }
+);
+censusTest(
+  "foreign SID lookup churn until expiry confers no census",
+  async () => {
+    const frames = [raw(88), raw(89), raw(90)];
+    await standin({ frames, expiry: "churn" }, async (calls) => {
+      await expect(
+        readNativeAuthoredProcessCensus(3000, { interest: original })
+      ).rejects.toThrow();
+      expect(calls()).toBe(frames.length);
+    });
+  }
+);
 censusTest(
   "recovery quiescence bounds its census to the original's rows of interest",
   async () => {

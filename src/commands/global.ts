@@ -53,6 +53,7 @@ import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
 import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { resolveDaemonAutostartAccess } from "../daemon/client.ts";
 import {
   getLaunchdServiceStatus,
   resolveLaunchdAccess,
@@ -1696,6 +1697,38 @@ async function writeWithPromptIfDifferent(
   await writeTextFileIfChanged(absolutePath, content);
 }
 
+/**
+ * The `daemon.autoStart` step of `hack global up`: runs `hack daemon start`
+ * through the first `hack` on PATH and only warns when it fails.
+ *
+ * HACK-1368: for a candidate run that `hack` is the stable CLI, so a candidate
+ * run, or any run with `HACK_DAEMON_AUTOSTART_DISABLE=1`, skips the step
+ * through {@link resolveDaemonAutostartAccess}, as the implicit autostart in
+ * `requestDaemonJson` does. A denied run reads no config and spawns nothing.
+ */
+async function ensureHackdForGlobalUp(): Promise<void> {
+  const access = resolveDaemonAutostartAccess();
+  if (!access.allowed) {
+    logger.info({ message: `Skipping hackd start: ${access.message}` });
+    return;
+  }
+  const controlPlane = await readControlPlaneConfig({});
+  if (!controlPlane.config.daemon.autoStart) {
+    return;
+  }
+  logger.step({ message: "Ensuring hackd is running…" });
+  const invocation = await resolveHackInvocation();
+  const daemonExit = await run(
+    [invocation.bin, ...invocation.args, "daemon", "start"],
+    {
+      stdin: "ignore",
+    }
+  );
+  if (daemonExit !== 0) {
+    logger.warn({ message: "Unable to start hackd (continuing)" });
+  }
+}
+
 export async function globalUp(): Promise<number> {
   const slimExit = failIfSlimMode({
     feature: "hack global up",
@@ -1764,20 +1797,7 @@ export async function globalUp(): Promise<number> {
     }
   }
 
-  const controlPlane = await readControlPlaneConfig({});
-  if (controlPlane.config.daemon.autoStart) {
-    logger.step({ message: "Ensuring hackd is running…" });
-    const invocation = await resolveHackInvocation();
-    const daemonExit = await run(
-      [invocation.bin, ...invocation.args, "daemon", "start"],
-      {
-        stdin: "ignore",
-      }
-    );
-    if (daemonExit !== 0) {
-      logger.warn({ message: "Unable to start hackd (continuing)" });
-    }
-  }
+  await ensureHackdForGlobalUp();
 
   logger.step({ message: "Starting Caddy…" });
   const caddyExit = await run(

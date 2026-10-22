@@ -4,6 +4,7 @@ import {
   beforeAll,
   beforeEach,
   expect,
+  spyOn,
   test,
 } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -30,6 +31,12 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 let tempDir: string | null = null;
 let originalHome: string | undefined;
 let originalLogger: string | undefined;
+// HACK-1368: `global up` skips its `hack daemon start` step under either one.
+const DAEMON_AUTOSTART_DENY_ENV = [
+  "HACK_CANDIDATE_ENTRYPOINT",
+  "HACK_DAEMON_AUTOSTART_DISABLE",
+] as const;
+const originalDenyEnv = new Map<string, string | undefined>();
 const execCalls: string[][] = [];
 const runCalls: string[][] = [];
 let execMockResponder:
@@ -84,6 +91,10 @@ beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-global-"));
   process.env.HOME = tempDir;
   process.env.HACK_LOGGER = "console";
+  for (const key of DAEMON_AUTOSTART_DENY_ENV) {
+    originalDenyEnv.set(key, process.env[key]);
+    Reflect.deleteProperty(process.env, key);
+  }
   execCalls.length = 0;
   runCalls.length = 0;
   execMockResponder = null;
@@ -96,6 +107,9 @@ afterEach(async () => {
   }
   restoreEnv("HOME", originalHome);
   restoreEnv("HACK_LOGGER", originalLogger);
+  for (const key of DAEMON_AUTOSTART_DENY_ENV) {
+    restoreEnv(key, originalDenyEnv.get(key));
+  }
   resetGumPathCacheForTests();
 });
 
@@ -158,6 +172,77 @@ test(
     expect(
       runCalls.some((call) => call.includes("daemon") && call.includes("start"))
     ).toBe(true);
+    expect(
+      runCalls.some(
+        (call) => call.includes(caddyCompose) && call.includes("up")
+      )
+    ).toBe(true);
+    expect(
+      runCalls.some(
+        (call) => call.includes(loggingCompose) && call.includes("up")
+      )
+    ).toBe(true);
+  },
+  { timeout: 20_000 }
+);
+
+test.each([
+  {
+    label: "a candidate run",
+    key: "HACK_CANDIDATE_ENTRYPOINT",
+    value: "hack-v5",
+    reason: "candidate run",
+  },
+  {
+    label: "the autostart opt-out",
+    key: "HACK_DAEMON_AUTOSTART_DISABLE",
+    value: "1",
+    reason: "HACK_DAEMON_AUTOSTART_DISABLE=1",
+  },
+])(
+  "global up never runs `hack daemon start` under $label (HACK-1368)",
+  async ({ key, value, reason }) => {
+    const caddyCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_CADDY_DIR_NAME,
+      GLOBAL_CADDY_COMPOSE_FILENAME
+    );
+    const loggingCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_LOGGING_DIR_NAME,
+      GLOBAL_LOGGING_COMPOSE_FILENAME
+    );
+    await writeComposeFile(caddyCompose);
+    await writeComposeFile(loggingCompose);
+    process.env[key] = value;
+
+    const stderrLines: string[] = [];
+    const stderrSpy = spyOn(process.stderr, "write").mockImplementation(
+      (chunk: string | Uint8Array) => {
+        stderrLines.push(String(chunk));
+        return true;
+      }
+    );
+    let code: number;
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      code = await runCli(["global", "up"]);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    expect(code).toBe(0);
+    expect(runCalls.filter((call) => call.includes("daemon"))).toEqual([]);
+    const skip = stderrLines.filter((line) =>
+      line.includes("Skipping hackd start")
+    );
+    expect(skip).toHaveLength(1);
+    expect(skip[0]).toContain(reason);
+    expect(
+      stderrLines.some((line) => line.includes("Ensuring hackd is running"))
+    ).toBe(false);
     expect(
       runCalls.some(
         (call) => call.includes(caddyCompose) && call.includes("up")

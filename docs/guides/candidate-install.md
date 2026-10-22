@@ -132,7 +132,8 @@ stopped, because the stable `daemon.autoStart` setting is on by default. Stable
 `hack doctor --fix` (v4.2.0) also offers to start a stopped `hackd`. Other
 stable commands that talk to `hackd` can also start it again. Newer candidate
 builds turn off daemon autostart in `hack-next` and the bundled `hack-v5`
-entrypoint, so the candidate itself does not start the stable `hackd`. Older
+entrypoint, so the candidate itself does not start the stable `hackd`, not even
+from a candidate `global up`. Older
 candidate bundles can start it, so use this order with every bundle.
 
 Use this order:

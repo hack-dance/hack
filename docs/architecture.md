@@ -247,7 +247,9 @@ daemon; after an explicit stop, use `hack daemon start` to restore cached querie
 too. Candidate runs never autostart: `hack-next` and the bundled `hack-v5`
 entrypoint set `HACK_CANDIDATE_ENTRYPOINT`, and `hack-v5` also sets the opt-out.
 Autostart would start whatever hackd the host resolves (the launchd plist or the
-first `hack` on PATH), which is the stable daemon, not the candidate.
+first `hack` on PATH), which is the stable daemon, not the candidate. Under
+either variable, `hack global up` also skips its `daemon.autoStart` step (the
+`hack daemon start` it runs through the first `hack` on PATH) and logs the skip.
 
 launchd and isolated state roots: on macOS the hackd launchd service is one
 per-user service (`gui/<uid>/dance.hack.hackd`, plist in

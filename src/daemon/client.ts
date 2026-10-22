@@ -28,8 +28,11 @@ let lastDaemonAutostartAttemptAtMs = 0;
 
 /**
  * Opt-out: when set to `1`, CLI commands never start hackd implicitly, on any
- * platform, through launchd or directly. An explicit `hack daemon start`
- * still works. Candidate launchers set it for every candidate run.
+ * platform, through launchd or directly. That covers the autostart in
+ * {@link requestDaemonJson} and the `daemon.autoStart` step of
+ * `hack global up`. An explicit `hack daemon start` still works. The bundled
+ * `hack-v5` entrypoint sets it; `hack-next` sets only the candidate marker,
+ * which denies the same way.
  */
 export const DAEMON_AUTOSTART_DISABLE_ENV = "HACK_DAEMON_AUTOSTART_DISABLE";
 

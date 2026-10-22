@@ -596,3 +596,31 @@ for (const linked of [".hack", ".hack/.internal"] as const) {
     expect(described.message).not.toContain(root);
   });
 }
+
+/**
+ * HACK-1316: the writer refuses a symlinked `.hack` before its `mkdir`, so a
+ * link to an outside directory without `.internal` gains nothing; the later
+ * read and replace checks alone would refuse only after creating it.
+ */
+test("the writer refuses a symlinked .hack before creating .internal behind it (HACK-1316)", async () => {
+  const outside = join(root, "outside");
+  await mkdir(outside);
+  await mkdir(join(root, "linked-root"));
+  const dir = join(root, "linked-root", ".hack");
+  await symlink(outside, dir);
+  const references =
+    renderComposeEnvReferenceOverride({
+      targetServices: ["web"],
+      globalEnv: {},
+      serviceEnv,
+    })?.text ?? "";
+
+  const refusal = await writeComposeEnvOverride({
+    projectDir: dir,
+    text: references,
+  }).catch((error: unknown) => error);
+  expect(String(refusal)).toBe(
+    "Error: Refused the generated Compose env override: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Replace it with a regular file or directory and retry; values omitted."
+  );
+  expect(await readdir(outside)).toEqual([]);
+});

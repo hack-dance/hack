@@ -427,8 +427,10 @@ mode, materialization and overlay warnings, worktree keys and instances, Caddy h
 reads inputs that the adoption owns, so doctor lists it as not checked instead of
 failing. A pending adoption is a warning that asks for explicit recovery. The
 `--fix` plan says that it leaves the adoption's inputs, retained containers and state
-alone: for the project it only untracks generated files from the Git index, and it
-keeps an env override that the adoption pins. Global repairs still run.
+alone. For the project it only removes tracked generated files from the Git index
+(the files stay on disk) and keeps an env override that the adoption pins. It leaves
+`.hack/.gitignore` unchanged; a committed `.hack.secret.key` is also added to the
+root `.gitignore`. Global repairs still run.
 
 ## Rollback and interruption recovery
 

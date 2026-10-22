@@ -3876,7 +3876,9 @@ export async function buildDoctorRemediationPlanLines(opts: {
     : null;
   if (trackedGenerated && trackedGenerated.trackedPaths.length > 0) {
     steps.push(
-      `Untrack machine-local generated files from git (git rm --cached; files stay on disk) and ensure the committed ${target?.projectDirName}/.gitignore: ${trackedGenerated.trackedPaths.join(", ")}`
+      adopted
+        ? `Untrack machine-local generated files from git (git rm --cached; files stay on disk) and leave the adopted project's ${adopted.projectDirName}/.gitignore unchanged: ${trackedGenerated.trackedPaths.join(", ")}`
+        : `Untrack machine-local generated files from git (git rm --cached; files stay on disk) and ensure the committed ${target?.projectDirName}/.gitignore: ${trackedGenerated.trackedPaths.join(", ")}`
     );
   }
 
@@ -3941,10 +3943,11 @@ async function buildEnvMigrationPlanStep(opts: {
 async function maybeUntrackGeneratedFiles(opts: {
   readonly startDir: string;
 }): Promise<void> {
-  // Git index only, plus `.hack/.gitignore`: safe for an adopted project too.
-  const project =
-    (await findDoctorAdoptedProject({ startDir: opts.startDir })) ??
-    (await findProjectContext(opts.startDir));
+  // An adopted project gets the git-index change and the root key entry only:
+  // its `.hack/` belongs to the adoption, and the legacy `.hack/.gitignore`
+  // writer refuses it as native input (HACK-1311).
+  const adopted = await findDoctorAdoptedProject({ startDir: opts.startDir });
+  const project = adopted ?? (await findProjectContext(opts.startDir));
   if (!project) {
     return;
   }
@@ -3977,11 +3980,19 @@ async function maybeUntrackGeneratedFiles(opts: {
     return;
   }
 
-  await ensureHackDirGitignore({ projectDir: project.projectDir });
-  const notes = [
-    `Removed ${inspection.trackedPaths.length} path(s) from the git index and ensured ${project.projectDirName}/.gitignore.`,
-    "Commit the removal to stop sharing these files.",
-  ];
+  const notes: string[] = [];
+  if (adopted) {
+    notes.push(
+      `Removed ${inspection.trackedPaths.length} path(s) from the git index. Left ${project.projectDirName}/.gitignore unchanged: an adopted Compose project's ${project.projectDirName}/ belongs to 'hack config adopt'.`,
+      "Commit the removal to stop sharing these files, and keep them out of later commits."
+    );
+  } else {
+    await ensureHackDirGitignore({ projectDir: project.projectDir });
+    notes.push(
+      `Removed ${inspection.trackedPaths.length} path(s) from the git index and ensured ${project.projectDirName}/.gitignore.`,
+      "Commit the removal to stop sharing these files."
+    );
+  }
   if (inspection.secretKeyTracked) {
     // The nested .hack/.gitignore cannot cover the repo-root key file; without
     // the root entry the just-untracked key shows up as untracked and gets

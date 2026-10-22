@@ -3959,6 +3959,10 @@ function composeEnvAtRestFixLines(opts: {
     lines.push(
       `Kept ${file}: a saved 'hack config adopt' generation now pins it (values omitted).`
     );
+  } else if (removal.state.kind === "refused") {
+    lines.push(
+      `Left ${file} in place: it or its directory is now a symlink or not a regular file or directory (values omitted).`
+    );
   } else {
     lines.push(`Left ${file} in place: it no longer holds env values.`);
   }

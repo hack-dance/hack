@@ -10,8 +10,10 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -291,4 +293,33 @@ test("doctor --fix removes a literal Compose env override and keeps a reference-
     expect(message).not.toContain(canary);
   }
   // Two full doctor --fix runs; the default 5 s budget is too tight on CI.
+}, 30_000);
+
+test("doctor --fix leaves a file behind a symlinked .hack/.internal untouched (HACK-1316)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  if (!tempDir) {
+    throw new Error("tempDir not set");
+  }
+  const canary = "doctor-fix-outside-canary";
+  // An outside directory that happens to hold a file named like the override,
+  // which is not a Compose override Hack can verify (the reported case).
+  const outside = resolve(tempDir, "outside");
+  await mkdir(outside);
+  const override = resolve(outside, "compose.env.override.yml");
+  await writeFile(override, `${canary}\n`);
+  const internal = resolve(projectRoot, ".hack", ".internal");
+  await symlink(outside, internal);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot])
+  ).toBe(0);
+  expect(await readFile(override, "utf8")).toBe(`${canary}\n`);
+  expect(await readdir(outside)).toEqual(["compose.env.override.yml"]);
+  expect((await lstat(internal)).isSymbolicLink()).toBe(true);
+  const notes = noteCalls.join("\n");
+  // Neither planned nor performed.
+  expect(notes).not.toContain(".hack/.internal/compose.env.override.yml");
+  expect(notes).not.toContain(canary);
+  expect(notes).not.toContain(outside);
 }, 30_000);

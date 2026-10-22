@@ -243,27 +243,25 @@ test("inspection and removal act only on literal or unverifiable overrides", asy
   expect(removed.removed).toBe(true);
   expect(await lstat(path).catch(() => null)).toBeNull();
 
-  // A symlink is never followed: it is unverifiable, removed only on request,
-  // and its target is untouched.
+  // A symlink is never followed and never removed, even on request: it is
+  // refused (HACK-1316), and both it and its target are left in place.
   const target = join(root, "target.yml");
   await writeFile(target, `A: ${CANARY}\n`);
   await symlink(target, path);
-  const linked = await removePlaintextComposeEnvOverride({ projectDir });
-  expect(linked).toEqual({
-    removed: false,
-    state: { kind: "unverifiable", path },
-    adoptionBound: false,
-    asidesRemoved: 0,
-  });
-  expect(
-    (
+  for (const includeUnverifiable of [false, true]) {
+    expect(
       await removePlaintextComposeEnvOverride({
         projectDir,
-        includeUnverifiable: true,
+        includeUnverifiable,
       })
-    ).removed
-  ).toBe(true);
-  expect(await lstat(path).catch(() => null)).toBeNull();
+    ).toEqual({
+      removed: false,
+      state: { kind: "refused", path },
+      adoptionBound: false,
+      asidesRemoved: 0,
+    });
+  }
+  expect((await lstat(path)).isSymbolicLink()).toBe(true);
   expect(await readFile(target, "utf8")).toContain(CANARY);
 });
 
@@ -499,3 +497,102 @@ test("an override that an adoption state may pin is kept by removal and reported
   expect(removed).toMatchObject({ removed: true, adoptionBound: false });
   expect(await lstat(path).catch(() => null)).toBeNull();
 });
+
+/** Names and contents of every entry in a directory outside the project. */
+async function snapshotDirectory(
+  directory: string
+): Promise<Record<string, string>> {
+  const names = (await readdir(directory)).sort();
+  return Object.fromEntries(
+    await Promise.all(
+      names.map(async (name) => [
+        name,
+        await readFile(join(directory, name), "utf8"),
+      ])
+    )
+  );
+}
+
+/**
+ * HACK-1316: a symlinked `.hack` or `.hack/.internal` points outside the
+ * project, at a directory that holds a file named like the override (not one
+ * Hack can verify, the reported case) and a stale-aged aside. Inspection, the
+ * `--fix` removal, the aside sweep and the writer all refuse it, closed and
+ * value-free, and nothing behind the link is listed, read or changed.
+ */
+for (const linked of [".hack", ".hack/.internal"] as const) {
+  test(`a symlinked ${linked} is refused by inspection, removal, the sweep and the writer, and nothing behind it changes (HACK-1316)`, async () => {
+    const behind = join(root, "outside", ".internal");
+    await mkdir(behind, { recursive: true });
+    await writeFile(join(behind, "compose.env.override.yml"), `${CANARY}\n`);
+    await writeFile(join(behind, ASIDE), literalText());
+    let dir = projectDir;
+    if (linked === ".hack") {
+      await mkdir(join(root, "linked-root"));
+      dir = join(root, "linked-root", ".hack");
+      await symlink(join(root, "outside"), dir);
+    } else {
+      await symlink(behind, join(projectDir, ".internal"));
+    }
+    const before = await snapshotDirectory(behind);
+    // Old enough that a sweep through the link would take the aside.
+    const later = () => Date.now() + 61_000;
+    const path = composeEnvOverridePath({ projectDir: dir });
+
+    const report = await inspectComposeEnvAtRest({
+      projectDir: dir,
+      now: later,
+    });
+    expect(report).toEqual({
+      override: { kind: "refused", path },
+      adoptionBound: false,
+      asides: { stale: 0, fresh: 0 },
+    });
+    expect(composeEnvAtRestRepairs(report)).toEqual({
+      override: false,
+      asides: false,
+    });
+    const described = describeComposeEnvAtRest({
+      report,
+      projectDirName: ".hack",
+    });
+    expect(described).toEqual({
+      status: "warn",
+      message:
+        "Refused to inspect .hack/.internal/compose.env.override.yml: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Hack does not follow or change it, and 'hack doctor --fix' leaves it in place (values omitted). Replace it with a regular file or directory.",
+    });
+
+    expect(
+      await removePlaintextComposeEnvOverride({
+        projectDir: dir,
+        includeUnverifiable: true,
+        now: later,
+      })
+    ).toEqual({
+      removed: false,
+      state: { kind: "refused", path },
+      adoptionBound: false,
+      asidesRemoved: 0,
+    });
+    const references =
+      renderComposeEnvReferenceOverride({
+        targetServices: ["web"],
+        globalEnv: {},
+        serviceEnv,
+      })?.text ?? "";
+    const refusal = await writeComposeEnvOverride({
+      projectDir: dir,
+      text: references,
+      now: later,
+    }).catch((error: unknown) => error);
+    expect(String(refusal)).toBe(
+      "Error: Refused the generated Compose env override: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Replace it with a regular file or directory and retry; values omitted."
+    );
+
+    expect(await snapshotDirectory(behind)).toEqual(before);
+    expect(JSON.stringify([report, described, String(refusal)])).not.toContain(
+      CANARY
+    );
+    expect(described.message).not.toContain(root);
+  });
+}

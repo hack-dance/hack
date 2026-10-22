@@ -287,6 +287,44 @@ type Evaluator = {
    * (`node --import data:text/javascript,…`, `deno run data:…`).
    */
   readonly dataUrlModules: boolean;
+  /**
+   * True when one-dash arguments are single-letter clusters (`-ec`), so a
+   * one-letter inline flag inside a cluster counts. False for programs whose
+   * one-dash options are words (`sqlite3 -csv`, `duckdb -json`).
+   */
+  readonly clusters: boolean;
+  /**
+   * True when the program's option parser accepts an unambiguous prefix of
+   * a long option (Git's parse-options, `getopt_long`): `--upl=cmd` is
+   * `--upload-pack=cmd`. A long inline flag then also matches any prefix of
+   * it, and a one-letter inline flag also matches a value attached to it at
+   * the end of a letter cluster (`-u/path/cmd`, `-qu/path/cmd`),
+   * case-sensitively.
+   */
+  readonly abbreviates: boolean;
+  /**
+   * Operands after this many are inline code (`sqlite3 db.sqlite 'SQL'`,
+   * `duckdb db.duckdb 'SQL'`), or null when operands are never code.
+   */
+  readonly codeOperandsAfter: number | null;
+  /**
+   * Modules that, run with `-m` (`python -m code`), start a REPL or evaluate
+   * an argument as code. Matched lowercased on the module's first dotted
+   * segment, wherever `-m` appears after the program.
+   */
+  readonly replModules: readonly string[];
+  /**
+   * Inline flags that count only under one subcommand (the first operand),
+   * because the same letter is harmless elsewhere: `git clone -u <cmd>`
+   * runs a command, while `git push -u` sets an upstream.
+   */
+  readonly subcommandInline: Readonly<Record<string, readonly string[]>>;
+  /**
+   * True when a value starting with `!` (a whole argument, or after `=`)
+   * is a shell command: a Git alias defined as `!cmd`, through
+   * `git config alias.x '!cmd'` or `git -c alias.x=!cmd`.
+   */
+  readonly bangCommands: boolean;
 };
 
 function evaluator(spec: Partial<Evaluator>): Evaluator {
@@ -299,6 +337,12 @@ function evaluator(spec: Partial<Evaluator>): Evaluator {
     needsOperand: false,
     evaluatesOperands: false,
     dataUrlModules: false,
+    clusters: true,
+    abbreviates: false,
+    codeOperandsAfter: null,
+    replModules: [],
+    subcommandInline: {},
+    bangCommands: false,
     ...spec,
   };
 }
@@ -311,6 +355,53 @@ const SHELL = evaluator({
 });
 
 const JS_INLINE = ["-e", "--eval", "-p", "--print"] as const;
+
+/**
+ * Python modules that start an interactive or eval REPL (`code`, `idlelib`,
+ * `asyncio`, `_pyrepl`, the IPython family, the `sqlite3` shell, the `pdb`
+ * debugger) or evaluate a statement argument (`timeit`).
+ */
+const PYTHON_REPL_MODULES = [
+  "code",
+  "idlelib",
+  "asyncio",
+  "_pyrepl",
+  "pdb",
+  "timeit",
+  "sqlite3",
+  "ipython",
+  "bpython",
+  "ptpython",
+] as const;
+
+/** `mysql`/`mariadb` `-e`, `--execute` and `--init-command` run SQL text. */
+const MYSQL = evaluator({
+  inline: ["-e", "--execute", "--init-command"],
+  abbreviates: true,
+});
+
+/** `sqlite3` options that consume the next argument (also used by DuckDB). */
+const SQLITE_VALUE_OPTIONS = [
+  "-cmd",
+  "--cmd",
+  "-init",
+  "--init",
+  "-separator",
+  "--separator",
+  "-newline",
+  "--newline",
+  "-nullvalue",
+  "--nullvalue",
+  "-vfs",
+  "--vfs",
+  "-mmap",
+  "--mmap",
+  "-maxsize",
+  "--maxsize",
+  "-lookaside",
+  "-pagecache",
+  "-heap",
+] as const;
 const PWSH_INLINE = ["-c", "-command", "-encodedcommand", "-e", "-ec"] as const;
 
 /**
@@ -393,8 +484,14 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
     stdin: ["-i"],
     valueOptions: ["-W", "-X", "--check-hash-based-pycs"],
     needsOperand: true,
+    replModules: PYTHON_REPL_MODULES,
   }),
-  pypy: evaluator({ inline: ["-c"], stdin: ["-i"], needsOperand: true }),
+  pypy: evaluator({
+    inline: ["-c"],
+    stdin: ["-i"],
+    needsOperand: true,
+    replModules: PYTHON_REPL_MODULES,
+  }),
   perl: evaluator({
     inline: ["-e", "-E"],
     valueOptions: ["-I", "-M", "-m"],
@@ -447,13 +544,17 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   sudo: evaluator({ stdin: ["-s", "-i", "--shell", "--login"] }),
   doas: evaluator({ stdin: ["-s"] }),
   // Config values and subcommands that run a string in a shell:
-  // `git -c alias.x='!cmd' x`, `rebase --exec`, `difftool --extcmd`,
-  // `submodule foreach`, `bisect run`, the `filter-branch` filters and the
-  // remote-side commands of `fetch`/`clone`/`ls-remote --upload-pack` and
-  // `push --receive-pack`.
+  // `git -c alias.x='!cmd' x`, `clone -c`/`--config`, `rebase --exec`,
+  // `difftool --extcmd`, `submodule foreach`, `bisect run`, the
+  // `filter-branch` filters, the remote-side commands of
+  // `fetch`/`clone`/`ls-remote --upload-pack` (`clone -u`) and
+  // `push --receive-pack`, and `!` alias values (`git config alias.x '!cmd'`).
+  // Git accepts abbreviated long options (`--upl=cmd`) and a value attached
+  // to a short option (`-u/path/cmd`).
   git: evaluator({
     inline: [
       "-c",
+      "--config",
       "--config-env",
       "--exec",
       "-x",
@@ -462,6 +563,39 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
       "--receive-pack",
     ],
     words: ["foreach", "bisect", "filter-branch"],
+    // Global options before the subcommand that consume the next argument.
+    valueOptions: [
+      "-C",
+      "-c",
+      "--git-dir",
+      "--work-tree",
+      "--namespace",
+      "--config-env",
+      "--super-prefix",
+    ],
+    abbreviates: true,
+    subcommandInline: { clone: ["-u"] },
+    bangCommands: true,
+  }),
+  // SQL clients given a statement string. A statement can also reach the
+  // host shell (`psql` `\!`, `mysql` `system`, the `sqlite3` `.shell`).
+  psql: evaluator({ inline: ["-c", "--command"], abbreviates: true }),
+  mysql: MYSQL,
+  mariadb: MYSQL,
+  // `sqlite3` (`sqlite` once the version suffix is removed) and `duckdb`
+  // run any operand after the database as SQL. Their one-dash options are
+  // words, not letter clusters.
+  sqlite: evaluator({
+    inline: ["-cmd", "--cmd"],
+    valueOptions: SQLITE_VALUE_OPTIONS,
+    clusters: false,
+    codeOperandsAfter: 1,
+  }),
+  duckdb: evaluator({
+    inline: ["-c", "-cmd", "-s"],
+    valueOptions: [...SQLITE_VALUE_OPTIONS, "-c", "-s", "-f"],
+    clusters: false,
+    codeOperandsAfter: 1,
   }),
   nix: evaluator({
     inline: ["--expr"],
@@ -548,51 +682,104 @@ function programName(arg: string): string {
 
 /**
  * An argument that selects one of `flags`: the flag itself, its `=` form,
- * or a single-dash cluster that contains a one-letter flag (`-Ic`, `-ec`).
- * Both sides are lowercased, so `-C` also matches `-c` (fail-closed).
+ * or (for a program with letter clusters) a single-dash cluster that
+ * contains a one-letter flag (`-Ic`, `-ec`). Both sides are lowercased, so
+ * `-C` also matches `-c` (fail-closed). For a program that abbreviates long
+ * options, a prefix of a long flag (`--upl` for `--upload-pack`) and a
+ * one-letter flag with its value attached after a letter cluster
+ * (`-u/path`, `-qu/path`) match too.
  */
 function matchesFlag(opts: {
   readonly arg: string;
   readonly flags: readonly string[];
+  readonly spec: Evaluator;
 }): boolean {
   const arg = opts.arg.toLowerCase();
+  const longName = arg.split("=", 1)[0] ?? arg;
   return opts.flags.some((raw) => {
     const flag = raw.toLowerCase();
     if (arg === flag || arg.startsWith(`${flag}=`)) {
       return true;
     }
-    return (
-      flag.length === 2 &&
-      flag.startsWith("-") &&
+    const oneLetter = flag.length === 2 && flag.startsWith("-");
+    if (
+      oneLetter &&
+      opts.spec.clusters &&
       SHORT_OPTION_CLUSTER.test(arg) &&
       arg.includes(flag.slice(1))
+    ) {
+      return true;
+    }
+    if (!opts.spec.abbreviates) {
+      return false;
+    }
+    if (oneLetter) {
+      return attachedShortValue(raw.slice(1)).test(opts.arg);
+    }
+    return (
+      flag.startsWith("--") &&
+      longName.startsWith("--") &&
+      longName.length > 2 &&
+      flag.startsWith(longName)
     );
   });
 }
 
+/** `-u…`, `-qu…`: a letter cluster ending in `letter`, then its value. */
+function attachedShortValue(letter: string): RegExp {
+  return new RegExp(`^-[A-Za-z]*${letter}`);
+}
+
 /**
- * The first argument that is neither an option nor a known option's value:
- * the script operand, or null when there is none. `-` (read the script from
- * stdin) is returned as is.
+ * The module each `-m` selects (`-m code`, `-mcode`, `-Im code`), for a
+ * program with Python's option grammar: in a one-dash cluster, the first
+ * `m` takes the rest of the cluster or, when nothing follows, the next
+ * argument. Every position is checked (fail-closed).
  */
-function firstOperand(opts: {
+function moduleNames(rest: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let index = 0; index < rest.length; index++) {
+    const match = PYTHON_MODULE_OPTION.exec(rest[index] ?? "");
+    if (match === null) {
+      continue;
+    }
+    const attached = match[1] ?? "";
+    const module = attached === "" ? rest[index + 1] : attached;
+    if (module !== undefined) {
+      out.push(module);
+    }
+  }
+  return out;
+}
+
+const PYTHON_MODULE_OPTION = /^-[A-Za-z]*?m(.*)$/;
+
+/**
+ * Every argument that is neither an option nor a known option's value,
+ * in order. Everything after `--` is an operand.
+ */
+function operands(opts: {
   readonly rest: readonly string[];
   readonly valueOptions: readonly string[];
-}): string | null {
+}): string[] {
+  const out: string[] = [];
   for (let index = 0; index < opts.rest.length; index++) {
     const arg = opts.rest[index] ?? "";
     if (arg === "--") {
-      return opts.rest[index + 1] ?? null;
+      out.push(...opts.rest.slice(index + 1));
+      break;
     }
     if (arg === "-" || !(arg.startsWith("-") || arg.startsWith("+"))) {
-      return arg;
-    }
-    if (opts.valueOptions.includes(arg)) {
+      out.push(arg);
+    } else if (opts.valueOptions.includes(arg)) {
       index += 1;
     }
   }
-  return null;
+  return out;
 }
+
+/** A value that is a shell command to Git: `!cmd` or `key=!cmd`. */
+const BANG_COMMAND = /(?:^|=)\s*!/;
 
 function isShellSyntax(arg: string): boolean {
   return (
@@ -614,18 +801,40 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
   if (spec.evaluatesOperands) {
     return rest.length > 0;
   }
-  const flags = [...spec.inline, ...spec.stdin];
+  const positional = operands({ rest, valueOptions: spec.valueOptions });
+  const operand = positional[0] ?? null;
+  const scoped =
+    operand !== null && Object.hasOwn(spec.subcommandInline, operand)
+      ? (spec.subcommandInline[operand] ?? [])
+      : [];
+  const flags = [...spec.inline, ...spec.stdin, ...scoped];
   if (
     rest.some(
       (arg) =>
-        matchesFlag({ arg, flags }) ||
+        matchesFlag({ arg, flags, spec }) ||
         spec.words.includes(arg.toLowerCase()) ||
-        (spec.dataUrlModules && DATA_URL.test(arg))
+        (spec.dataUrlModules && DATA_URL.test(arg)) ||
+        (spec.bangCommands && BANG_COMMAND.test(arg))
     )
   ) {
     return true;
   }
-  const operand = firstOperand({ rest, valueOptions: spec.valueOptions });
+  if (
+    spec.replModules.length > 0 &&
+    moduleNames(rest).some((module) =>
+      spec.replModules.includes(
+        (module.split(".", 1)[0] ?? module).toLowerCase()
+      )
+    )
+  ) {
+    return true;
+  }
+  if (
+    spec.codeOperandsAfter !== null &&
+    positional.length > spec.codeOperandsAfter
+  ) {
+    return true;
+  }
   if (operand === null) {
     return spec.needsOperand;
   }
@@ -636,8 +845,10 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
  * True when argv could evaluate a string as code or depend on a shell
  * parser: a shell or interpreter given an inline-code or stdin flag
  * (anywhere after it, even after an option value or a script path), given
- * `-` or no script operand, or a REPL/eval subcommand; a package runner,
- * privilege wrapper or tool given its string-to-shell option or word;
+ * `-` or no script operand, or a REPL/eval subcommand or module
+ * (`python -m code`); a SQL client given a statement string (`psql -c`,
+ * `sqlite3 db 'SQL'`); a package runner, privilege wrapper or tool given
+ * its string-to-shell option, word or `!` alias value;
  * `eval`, `env`, `xargs`, `su`, `ssh`, awk, sed or another always-refused
  * program anywhere; or bare shell syntax copied from a log line. Recipes
  * must run a reviewed script file instead; there is no shell endpoint.

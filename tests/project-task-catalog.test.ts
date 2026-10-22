@@ -358,12 +358,20 @@ async function writeAlpha(alpha: string, canary: string): Promise<void> {
  * Run git in a fixture project with no global or system config, a private
  * HOME and only PATH/TMPDIR inherited.
  */
-async function git(cwd: string, args: readonly string[]): Promise<string> {
+async function git(
+  cwd: string,
+  args: readonly string[],
+  env: Readonly<Record<string, string>> = {}
+): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
     env: privateCliEnv({
       root: dirname(cwd),
-      env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+      env: {
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+        ...env,
+      },
     }),
     stdin: "ignore",
     stdout: "pipe",
@@ -1040,6 +1048,70 @@ describe("catalog domain", () => {
     });
   });
 
+  test("HACK-1331: the tracked-pin query ignores the caller's GIT_* env", async () => {
+    const { dir, registryPath } = await project("git-env");
+    const inspect = (taskId: string) =>
+      inspectTask({ cwd: dir, selector: {}, registryPath, taskId });
+    // An alternate index that does track the gitignored secrets file.
+    const altIndex = join(fixture.root, "git-env-alt-index");
+    await writeFile(altIndex, await readFile(join(dir, ".git", "index")));
+    await git(dir, ["add", "--force", "config/secrets.json"], {
+      GIT_INDEX_FILE: altIndex,
+    });
+    // Positive control: through that index the file reads as tracked.
+    expect(
+      await git(dir, ["ls-files", "--cached", "--", "config/secrets.json"], {
+        GIT_INDEX_FILE: altIndex,
+      })
+    ).toBe("config/secrets.json\n");
+    const withCallerEnv = async <T>(
+      env: Readonly<Record<string, string>>,
+      run: () => Promise<T>
+    ): Promise<T> => {
+      const saved = Object.keys(env).map((key) => [key, process.env[key]]);
+      Object.assign(process.env, env);
+      try {
+        return await run();
+      } finally {
+        for (const [key, value] of saved) {
+          if (key === undefined) {
+            continue;
+          }
+          if (value === undefined) {
+            Reflect.deleteProperty(process.env, key);
+          } else {
+            process.env[key] = value;
+          }
+        }
+      }
+    };
+    // A caller's index override cannot make an untracked file pinnable.
+    const untracked = await withCallerEnv(
+      {
+        GIT_INDEX_FILE: altIndex,
+        GIT_DIR: join(dir, ".git"),
+        GIT_WORK_TREE: dir,
+      },
+      () => inspect("untracked-secret")
+    );
+    expect(untracked).toMatchObject({
+      ok: false,
+      error: { detail: { reason: "input_path_invalid" } },
+    });
+    expect(JSON.stringify(untracked)).not.toContain(
+      sha256(canonical("fixture-value"))
+    );
+    // A caller's GIT_DIR elsewhere does not hide the checkout's own index.
+    const reviewed = await withCallerEnv(
+      {
+        GIT_DIR: join(fixture.root, "git-env-not-a-repository"),
+        GIT_INDEX_FILE: join(fixture.root, "git-env-missing-index"),
+      },
+      () => inspect("lint")
+    );
+    expect(reviewed.ok).toBe(true);
+  });
+
   test("a catalog or config edit during the read is refused", async () => {
     const { dir, registryPath } = await project("racing");
     const catalog = join(dir, ".hack", "tasks.json");
@@ -1241,6 +1313,145 @@ describe("recipe grammar", () => {
         inline: false,
       });
     }
+  });
+
+  // HACK-1331: each refused form names the rule that catches it; the paired
+  // accepted forms prove the rule is scoped, not a blanket refusal.
+  const gapCases: readonly {
+    readonly rule: string;
+    readonly refused: readonly (readonly string[])[];
+    readonly accepted: readonly (readonly string[])[];
+  }[] = [
+    {
+      rule: "SQL clients given a statement string",
+      refused: [
+        ["psql", "-c", "select 1"],
+        ["exec", "psql", "--command=select 1"],
+        ["psql", "-Atc", "\\! id"],
+        ["psql", "--comm", "select 1"],
+        ["mysql", "-e", "system id"],
+        ["mysql", "--execute=select 1"],
+        ["mysql", "-Bse", "select 1"],
+        ["mysql", "--exec", "select 1"],
+        ["mysql", "--init-command=select 1", "db"],
+        ["mariadb", "-e", "select 1"],
+        ["duckdb", "-c", "select 1"],
+        ["duckdb", "-cmd", "select 1", "data.duckdb"],
+      ],
+      accepted: [
+        ["psql", "-f", "scripts/x.sql"],
+        ["psql", "--csv", "-f", "scripts/x.sql"],
+        ["mysql", "--batch", "app"],
+        ["mariadb", "app"],
+        ["duckdb", "-csv", "-json", "data.duckdb"],
+      ],
+    },
+    {
+      rule: "sqlite3/duckdb SQL operand after the database",
+      refused: [
+        ["sqlite3", "app.db", "select 1"],
+        ["exec", "sqlite3", "-csv", "app.db", ".shell id"],
+        ["sqlite3", "-separator", ",", "app.db", "select 1"],
+        ["sqlite3", "--", "app.db", "select 1"],
+        ["sqlite3", "-cmd", ".shell id", "app.db"],
+        ["duckdb", "data.duckdb", "select 1"],
+      ],
+      accepted: [
+        ["sqlite3", "app.db"],
+        ["sqlite3", "-csv", "-header", "app.db"],
+        ["sqlite3", "-separator", ",", "app.db"],
+        ["duckdb", "-f", "scripts/x.sql", "data.duckdb"],
+      ],
+    },
+    {
+      rule: "Python modules that start a REPL or evaluate an argument",
+      refused: [
+        ["python3", "-m", "code"],
+        ["exec", "python", "-u", "-m", "code"],
+        ["python3", "-um", "code"],
+        ["python3", "-mcode"],
+        // `-mcode` is also a `-c` cluster; `-mpdb` has no inline letter.
+        ["python3", "-mpdb", "scripts/x.py"],
+        ["python3", "-m", "idlelib"],
+        ["python3", "-m", "idlelib.idle"],
+        ["python3", "-m", "asyncio"],
+        ["python3", "-m", "timeit", "__import__('os').system('id')"],
+        ["python3", "-m", "pdb", "scripts/x.py"],
+        ["python3", "-m", "cProfile", "-m", "code"],
+        ["pypy3", "-m", "code"],
+      ],
+      accepted: [
+        ["python3", "-m", "pytest"],
+        ["python3", "-m", "codecs"],
+        ["python3", "-um", "pytest", "tests"],
+        ["python3", "-W", "ignore", "-m", "mypy", "src"],
+      ],
+    },
+    {
+      rule: "git clone -u and every --upload-pack spelling",
+      refused: [
+        ["git", "clone", "-u", "id", "url", "dir"],
+        ["exec", "git", "clone", "-u/tmp/x.sh", "url"],
+        ["git", "clone", "-qu", "/tmp/x.sh", "url"],
+        ["git", "clone", "-qu/tmp/x.sh", "url"],
+        ["git", "--git-dir", "x", "clone", "-u", "id", "url"],
+        ["git", "clone", "--upload-pack=id", "url"],
+        ["git", "clone", "--upl=id", "url"],
+        ["git", "fetch", "--upload", "id", "origin"],
+        ["git", "ls-remote", "--upload-p=id", "origin"],
+        ["git", "push", "--rec=id", "origin"],
+        ["git", "rebase", "--exe", "id"],
+        ["git", "rebase", "-x/tmp/x.sh"],
+      ],
+      accepted: [
+        ["git", "clone", "url", "dir"],
+        ["git", "clone", "--quiet", "--depth", "1", "url"],
+        ["git", "push", "-u", "origin", "main"],
+        ["git", "add", "-u"],
+        ["git", "fetch", "--update-shallow", "origin"],
+        ["git", "rebase", "--continue"],
+      ],
+    },
+    {
+      rule: "git config and -c with ! alias values",
+      refused: [
+        ["git", "config", "alias.x", "!id"],
+        ["exec", "git", "config", "--global", "alias.x", " !id"],
+        ["git", "config", "set", "alias.x", "!id"],
+        ["git", "config", "alias.x", "-c alias.y=!id y"],
+        ["git", "-c", "alias.x=!id", "x"],
+        ["git", "clone", "--config", "core.fsmonitor=/tmp/x.sh", "url"],
+        ["git", "clone", "--conf=alias.x=x", "url"],
+      ],
+      accepted: [
+        ["git", "config", "alias.st", "status"],
+        ["git", "config", "--get", "user.name"],
+        ["git", "log", "HEAD^!"],
+      ],
+    },
+  ];
+
+  for (const gap of gapCases) {
+    test(`HACK-1331: ${gap.rule}`, () => {
+      for (const argv of gap.refused) {
+        expect({ argv, inline: isInlineCommandArgv(argv) }).toEqual({
+          argv,
+          inline: true,
+        });
+      }
+      for (const argv of gap.accepted) {
+        expect({ argv, inline: isInlineCommandArgv(argv) }).toEqual({
+          argv,
+          inline: false,
+        });
+      }
+    });
+  }
+
+  test("HACK-1331: documented fail-closed collateral stays refused", () => {
+    // `-C` matches `-c` (case-folded), so `git -C dir status` is refused;
+    // a recipe must set the Compose workdir instead.
+    expect(isInlineCommandArgv(["git", "-C", "dir", "status"])).toBe(true);
   });
 
   test("effects must be covered by required capabilities", () => {

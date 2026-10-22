@@ -32,17 +32,32 @@ is not implemented here.
    recipe, even after an option value or a script path, because option
    values and operands cannot be told apart without each program's own
    parser. A shell or interpreter given `-` or no script operand (code from
-   stdin), a REPL or eval subcommand (`bun repl`, `deno eval`) and a
-   `data:` URL module given to Node, Bun, Deno or tsx
-   (`node --import data:text/javascript,…`) are refused too. So are the
-   string-to-shell forms of package runners and wrappers (`npx -c`,
-   `npm exec -c`, `pnpm -c`, `yarn exec`, `bun exec`, `nodemon --exec`,
-   `tsx -e`, `ts-node -e`, `julia -e`, `sudo -s`, `doas -s`,
-   `git -c`/`--exec`/`--upload-pack`/`--receive-pack`/`submodule foreach`/
-   `bisect`/`filter-branch`, `make --eval`, `nix eval`) and
-   `eval`, `env`, `xargs`, `su`, `runuser`, `ssh`, `nix-shell`,
-   `concurrently`, `watchexec`, `tmux`, `iex`, the vi and Emacs editors, awk
-   or sed anywhere in argv, and `watch`, `parallel` or `sg` with a command.
+   stdin), a REPL or eval subcommand (`bun repl`, `deno eval`), a Python
+   REPL or eval module (`python -m code`, `idlelib`, `asyncio`, `_pyrepl`,
+   `pdb`, `timeit`, `sqlite3` and the IPython family, also as `-mcode` or
+   `-um code`) and a `data:` URL module given to Node, Bun, Deno or tsx
+   (`node --import data:text/javascript,…`) are refused too. So are SQL
+   clients given a statement string (`psql -c`/`--command`,
+   `mysql`/`mariadb -e`/`--execute`/`--init-command`, `duckdb -c`/`-cmd`,
+   `sqlite3 -cmd`, and any `sqlite3` or `duckdb` operand after the
+   database). So are the string-to-shell forms of package runners and
+   wrappers (`npx -c`, `npm exec -c`, `pnpm -c`, `yarn exec`, `bun exec`,
+   `nodemon --exec`, `tsx -e`, `ts-node -e`, `julia -e`, `sudo -s`,
+   `doas -s`, `git -c`/`--config`/`--exec`/`--upload-pack`/
+   `--receive-pack`/`clone -u`/`submodule foreach`/`bisect`/
+   `filter-branch`, a Git `!` alias value such as
+   `git config alias.x '!cmd'`, `make --eval`, `nix eval`) and `eval`,
+   `env`, `xargs`, `su`, `runuser`, `ssh`, `nix-shell`, `concurrently`,
+   `watchexec`, `tmux`, `iex`, the vi and Emacs editors, awk or sed
+   anywhere in argv, and `watch`, `parallel` or `sg` with a command. Git,
+   `psql`, `mysql` and `mariadb` accept abbreviated long options, so any
+   prefix of a refused long option counts (`git clone --upl=cmd`), and so
+   does a value attached to a refused one-letter option
+   (`git clone -u/path/cmd`). Accepted forms include `psql -f script.sql`,
+   `mysql --batch db`, `sqlite3 -csv app.db`,
+   `duckdb -f script.sql data.duckdb`, `python -m pytest`,
+   `git clone url dir`, `git push -u origin main`, `git add -u` and
+   `git config alias.st status`.
 3. **Repository and log text grant no authority.** A recipe that passes every
    check is `reviewed`: its pins still match what a reviewer approved. Results
    still say `authority: "none"` and `execution: "unavailable"`. A recipe that
@@ -143,7 +158,10 @@ Rules (all _provisional_):
   observed digest, and the name rules above cannot list every local secret
   file (`.npmrc`, `.netrc`, `secrets.json`, ...), so only files whose
   content is already shared through the repository can be pinned. A
-  checkout without Git cannot pin anything.
+  checkout without Git cannot pin anything. The tracked-file query runs
+  with every inherited `GIT_*` variable removed, so a caller's `GIT_DIR`,
+  `GIT_INDEX_FILE`, `GIT_WORK_TREE` or config override cannot make a file
+  count as tracked through another index.
 - Digests are lowercase SHA-256 hex. A whole-file pin hashes the file's bytes.
   A pointer pin and `definition_sha256` hash canonical JSON: object keys
   sorted, no whitespace. The service definition is the parsed
@@ -272,6 +290,10 @@ until its recipes are re-reviewed.
 | Package-runner, TypeScript-runner, privilege-wrapper, `git -c`, `make --eval`, `deno run -` and editor forms | `inline_command`; `npm run`, `npx tsc`, `tsx script.ts`, `sudo -u`, `git status`, `make test` still pass | domain test |
 | `data:` URL modules (`node --import data:…`, `deno run data:…`), `git bisect run`, `git filter-branch` and `julia -e` | `inline_command`; `node --import ./register.js`, `git log`, `julia -t 4 script.jl` still pass | domain test |
 | `git fetch`/`clone --upload-pack`, `git push --receive-pack` and a dash version suffix (`node-22 -e`) | `inline_command`; `git push -u origin main`, `git fetch origin`, `node-22 script.js` still pass | domain test |
+| SQL statement strings (`psql -c`, `mysql -e`, `mariadb -e`, `duckdb -c`, `sqlite3 app.db 'SQL'`), including abbreviated long options | `inline_command`; `psql -f script.sql`, `sqlite3 -csv app.db`, `duckdb -f script.sql data.duckdb` still pass | domain test |
+| Python REPL and eval modules (`python -m code`, `-mcode`, `-m idlelib`, `-m timeit`) | `inline_command`; `python -m pytest`, `python -m codecs` still pass | domain test |
+| `git clone -u`, abbreviated or attached `--upload-pack`/`--receive-pack`/`--exec`, `clone --config`, and `!` alias values (`git config alias.x '!cmd'`, `git -c alias.x=!cmd`) | `inline_command`; `git clone url dir`, `git push -u origin main`, `git add -u`, `git config alias.st status` still pass | domain test |
+| Caller `GIT_DIR`/`GIT_INDEX_FILE`/`GIT_WORK_TREE` naming another index that tracks a secret | `input_path_invalid` with no digest; a foreign `GIT_DIR` does not hide the checkout's own index | domain test |
 | Pin through a symlinked directory (outside the checkout, or aliasing `.hack`) | `input_path_invalid` | paired fixture |
 | Pointer pin into a gitignored, untracked secrets file | `input_path_invalid` with no digest; the same pin is checked once the file is tracked | paired fixture, domain test |
 | Pin of a file removed from the Git index, or in a checkout without Git | `input_path_invalid` | domain test |
@@ -311,8 +333,14 @@ until its recipes are re-reviewed.
   reviewer must check argv, and WU26 execution must not rely on this check
   as a sandbox. For a known program it is fail-closed, so it can also refuse
   an ordinary argument that looks like an inline flag (`script.sh -c`,
-  `git clean -x`, `make -e`). Bare `R` is not refused, because a one-letter
-  word is too common as an ordinary argument.
+  `git clean -x`, `git -C dir status`, `make -e`, `python -I`, `mysql -E`,
+  an attached `mysql -Dname` whose name contains an `e`, a Git argument such as
+  `--grep=!x` that starts a value with `!`). Bare `R` is not refused,
+  because a one-letter word is too common as an ordinary argument. A SQL
+  client that reads statements from stdin (`psql db`, `mysql db`,
+  `sqlite3 app.db` with no SQL operand) is not refused; only a statement
+  string in argv is. Git config writes other than `!` aliases (for example
+  `git config core.pager cmd` or `include.path`) are not detected.
 - **Tracked pins hash working-tree bytes.** A pin must be tracked by Git,
   but its digest is of the file in the working tree. An uncommitted local
   edit to a tracked file (for example a credential added to a tracked

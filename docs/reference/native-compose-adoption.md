@@ -419,6 +419,17 @@ TTY/stdin forwarding, deadlines and process-group cleanup use the existing
 shared runner. The store's AbortSignal is a cooperative admission/recheck control;
 it does not independently terminate a caller-owned engine callback.
 
+`hack doctor` selects an active or pending adoption before ordinary discovery, which
+would refuse the project as native input. It reports the adopted project, the env key,
+tracked generated files and Compose env values at rest. Each other project check
+(runtime and lifecycle hygiene, Compose networks and backend features, `DEV_HOST`, env
+mode, materialization and overlay warnings, worktree keys and instances, Caddy hosts)
+reads inputs that the adoption owns, so doctor lists it as not checked instead of
+failing. A pending adoption is a warning that asks for explicit recovery. The
+`--fix` plan says that it leaves the adoption's inputs, retained containers and state
+alone: for the project it only untracks generated files from the Git index, and it
+keeps an env override that the adoption pins. Global repairs still run.
+
 ## Rollback and interruption recovery
 
 ### Original file grants: private version 8

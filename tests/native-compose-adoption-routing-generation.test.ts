@@ -492,7 +492,7 @@ test(
   { timeoutMs: SINGLE_OPERATION_TEST_BUDGET_MS }
 );
 test(
-  "HACK-1283: the same slow operation under the 15 s default refuses as CHANGED only because its deadline expired",
+  "HACK-1283: the same slow operation under the 15 s default refuses as DEADLINE, not CHANGED, when only its deadline expired",
   async () => {
     const { store, generation } = await prepare({
       timeoutMs: COMPOUND_STORE_TIMEOUT_MS,
@@ -505,10 +505,10 @@ test(
       );
       expect(h.lastOperation()).toMatchObject({
         outcome: "refused",
-        code: "E_LEGACY_ADOPTION_CHANGED",
+        code: "E_LEGACY_ADOPTION_DEADLINE",
         deadlineMs: 15_000,
         deadlineExpired: true,
-        // Nothing in the synthetic binding moved: "changed" here is the deadline.
+        // Nothing in the synthetic binding moved, so HACK-1318 reports the deadline.
         bindingUnchanged: true,
       });
       expect((await h.receipt()).routingHandoff).toBe("held");

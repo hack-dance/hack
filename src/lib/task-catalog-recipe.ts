@@ -1012,33 +1012,75 @@ const PYTHON_MODULE_OPTION = /^-[A-Za-z]*?m(.*)$/;
 const LETTER = /^[A-Za-z]$/;
 
 /**
- * True when an argument certainly selects a module, so the program has
- * something to run besides stdin: `-mpytest`, `-um pytest`. A cluster is
- * read only up to an option that takes a value (`-Ximporttime` is `-X`
- * given `importtime`, not `-m`), so use this only to accept.
+ * True when the options before the first operand certainly select a
+ * module, so the program has something to run besides stdin: `-mpytest`,
+ * `-um pytest`, `-W ignore -m pytest`. Arguments are read the way Python
+ * reads them: an option's value is never an option, whether it is the next
+ * argument (`-W -m`, `-X -mpytest`, `--check-hash-based-pycs -m`) or the
+ * rest of a cluster (`-Ximporttime` is `-X` given `importtime`), and a
+ * cluster ending in a value option takes the next argument (`-bW -m`). A
+ * separate module name must not start with `-`. Anything else unexpected,
+ * `--` or an operand ends the walk with false, so use this only to accept.
  */
 function selectsModule(opts: {
   readonly rest: readonly string[];
   readonly spec: Evaluator;
 }): boolean {
-  return opts.rest.some((arg, index) => {
-    if (!arg.startsWith("-") || arg.startsWith("--")) {
+  for (let index = 0; index < opts.rest.length; index++) {
+    const arg = opts.rest[index] ?? "";
+    if (arg === "-" || !arg.startsWith("-") || arg === "--") {
       return false;
     }
-    for (let at = 1; at < arg.length; at++) {
-      const char = arg[at] ?? "";
-      if (!LETTER.test(char)) {
-        return false;
-      }
-      if (char === "m") {
-        return at + 1 < arg.length || index + 1 < opts.rest.length;
-      }
-      if (opts.spec.shortValueOptions?.includes(char)) {
-        return false;
-      }
+    if (opts.spec.valueOptions.includes(normalizeOption(arg, opts.spec))) {
+      index += 1;
+      continue;
     }
-    return false;
-  });
+    if (arg.startsWith("--")) {
+      continue;
+    }
+    const end = pythonClusterEnd(arg, opts.spec);
+    if (end === "module") {
+      return true;
+    }
+    if (end === "module_next") {
+      const module = opts.rest[index + 1];
+      return module !== undefined && !module.startsWith("-");
+    }
+    if (end === "invalid") {
+      return false;
+    }
+    if (end === "value_next") {
+      index += 1;
+    }
+  }
+  return false;
+}
+
+/**
+ * How a one-dash cluster ends when Python reads it: `-m` with its module
+ * attached (`module`) or next (`module_next`), a value option whose value
+ * is the next argument (`value_next`), only flags or a value option with
+ * its value attached (`flags`), or a character that is not an option
+ * letter (`invalid`).
+ */
+function pythonClusterEnd(
+  arg: string,
+  spec: Evaluator
+): "module" | "module_next" | "value_next" | "flags" | "invalid" {
+  for (let at = 1; at < arg.length; at++) {
+    const char = arg[at] ?? "";
+    if (!LETTER.test(char)) {
+      return "invalid";
+    }
+    const last = at + 1 === arg.length;
+    if (char === "m") {
+      return last ? "module_next" : "module";
+    }
+    if (spec.shortValueOptions?.includes(char)) {
+      return last ? "value_next" : "flags";
+    }
+  }
+  return "flags";
 }
 
 /** True when a module's first dotted segment, lowercased, is in `list`. */

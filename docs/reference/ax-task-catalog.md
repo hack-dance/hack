@@ -47,7 +47,12 @@ is not implemented here.
    `unittest builtins.breakpoint`). Every argument after a trampoline is
    checked against the REPL modules, `builtins` and `sys` (fail-closed),
    so a trampoline naming another one is caught too. An attached module
-   (`python -mpytest`) is the program's operand, so it passes. Python
+   (`python -mpytest`) is the program's operand, so it passes. Only a real
+   `-m` counts: a `-m` that is another option's value (`python -W -m --`,
+   `python -X -mpytest`, `python -bW -mpytest`,
+   `python --check-hash-based-pycs -m …`) leaves no script, so Python
+   reads stdin and the recipe is refused, and so is a `-m` whose separate
+   module name starts with `-`. Python
    launcher names are matched without their version, ABI and build-variant
    suffix (`python3.12`, `python3.13t`, `python3t`, `pythonw`,
    `python3.12-dbg`, `python3-intel64`). So are SQL
@@ -341,7 +346,7 @@ until its recipes are re-reviewed.
 | One-letter inline options with an attached value or in a flag cluster (`psql -cSQL`, `psql -1c`, `mysql -eSQL`, `python -c'code' x.py`) | `inline_command`; `psql -hlocalhost`, `psql -Ucustomer`, `mysql -uroot -psecret`, `python -mcompileall` still pass | domain test |
 | Python launcher names (`python3.13t`, `python3t`, `pythonw`, `python3.12-dbg`, `python3-intel64`) and `uv run -m`/`--module`/`-` with a REPL module or stdin | `inline_command`; `python3.13t script.py`, `python3-intel64 script.py`, `uv run -m pytest`, `uv run pytest` still pass | domain test |
 | Python trampolines naming a REPL or eval target (`python -m runpy timeit 'code'`, `trace --module code`, `cProfile -m -s time code`, `profiling.tracing`, `unittest code.interact`/`builtins.breakpoint`, also through `uv run -m`) | `inline_command`; `python -m runpy pytest`, `python -m trace --count script.py`, `python -m unittest discover -s tests` still pass | domain test |
-| An attached `-m` module (`python -mpytest`) as the program's operand | accepted; `python -mcode`, `python -m` and `python -Ximporttime` (stdin) still refused | domain test |
+| An attached `-m` module (`python -mpytest`) as the program's operand | accepted, also after a value option's value (`python -W ignore -mpytest`); `python -mcode`, `python -m`, `python -Ximporttime` and a `-m` taken as an option's value (`python -W -m --`, `python -X -mpytest`) still refused (stdin) | domain test |
 | `psql -o`/`--output` piped to a command (`-o '\|cmd'`, `-o\|cmd`, `-qo\|cmd`, `--output=\|cmd`, `--out=\|cmd`) | `inline_command`; `psql -o out.txt`, `psql -F'\|'`, `psql -L '\|log'` (a file name) still pass | domain test |
 | Dashed Git builtins (`/usr/lib/git-core/git-clone -u cmd`, `git-config alias.x '!cmd'`, `git-ls-remote --upload-pack=cmd`, `git-fetch-pack --exec=cmd`) | `inline_command`; `git-clone url dir`, `git-push -u origin main`, `git-config alias.st status` still pass | domain test |
 | `duckdb -storage-version VER db` | accepted; a SQL operand after the database is still refused | domain test |

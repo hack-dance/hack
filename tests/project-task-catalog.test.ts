@@ -1522,11 +1522,31 @@ describe("recipe grammar", () => {
         ["python3", "-m"],
         // `-X` takes `importtime`; no module or script, so stdin.
         ["python3", "-Ximporttime"],
+        // A value option's value is never `-m`: each reads stdin.
+        ["python3", "-W", "-m", "--"],
+        ["python3", "-W", "-m", "-X", "dev"],
+        ["python3", "-X", "-m", "-X", "dev"],
+        ["python3", "-X", "-mpytest"],
+        ["python3", "-bW", "-mpytest"],
+        ["python3", "--check-hash-based-pycs", "-m", "-X", "dev"],
+        ["python3", "--check-hash-based-pycs", "-mpytest"],
+        // Attached values: `-W-m` is `-W` given `-m`.
+        ["python3", "-W-m", "--"],
+        ["python3", "-Xdev", "-W-mpytest"],
+        // A separate module name must not look like an option.
+        ["python3", "-Wdefault", "-m", "-X", "dev"],
+        ["python3", "-m", "--"],
       ],
       accepted: [
         ["python3", "-mpytest"],
         ["python3", "-Bmpytest", "tests"],
         ["python3", "-mcompileall"],
+        ["python3", "-W", "ignore", "-mpytest"],
+        ["python3", "-Wignore", "-mpytest"],
+        ["python3", "-X", "dev", "-mpytest"],
+        ["python3", "-bW", "ignore", "-mpytest"],
+        ["python3", "--check-hash-based-pycs", "always", "-mpytest"],
+        ["python3", "-X", "dev", "-m", "pytest"],
       ],
     },
     {

@@ -244,6 +244,13 @@ const REDACTION_CASES: readonly RedactionCase[] = [
       "ran with --password '<x>'\"gluedfour\"",
       'password="<x>".gluedfive',
       'secret_key="plainvalue"gluedsix',
+      // A comma, closing bracket or backtick ends the value only before
+      // whitespace or the next key; otherwise the shell joins what follows.
+      'API_TOKEN="<x>",gluedcomma',
+      'API_TOKEN="<x>")gluedparen',
+      "API_TOKEN='<x>']gluedbracket",
+      'API_TOKEN="<x>"`gluedtick`',
+      'API_TOKEN="<x>","gluedquoted"',
     ].join("\n"),
     leaked: [
       "gluedone",
@@ -251,6 +258,11 @@ const REDACTION_CASES: readonly RedactionCase[] = [
       "gluedthree",
       "gluedfour",
       "gluedfive",
+      "gluedcomma",
+      "gluedparen",
+      "gluedbracket",
+      "gluedtick",
+      "gluedquoted",
     ].concat(["plainvalue", "gluedsix"]),
     kinds: ["secret"],
     kept: [
@@ -282,6 +294,13 @@ const REDACTION_CASES: readonly RedactionCase[] = [
       'mysqladmin -u root -p"admin quoted" status',
       "`mariadb -pmariadbticked`",
       "(mysql -pmysqlparen)",
+      // The client is the command after a container target, `--`, a
+      // wrapper, a quote that starts a command, or other prose.
+      "docker exec mysql mysql -pexectarget",
+      "kubectl exec -it pod -- mysql -p dashdash",
+      "sudo -E mysql -pwrapped",
+      'sh -c "mysql -pquotedcommand"',
+      "Then run mysql -p prosevalue",
     ].join("\n"),
     leaked: [
       "mysqlattached",
@@ -290,6 +309,11 @@ const REDACTION_CASES: readonly RedactionCase[] = [
       "admin quoted",
       "mariadbticked",
       "mysqlparen",
+      "exectarget",
+      "dashdash",
+      "wrapped",
+      "quotedcommand",
+      "prosevalue",
     ],
     kinds: ["secret"],
     kept: [
@@ -299,6 +323,8 @@ const REDACTION_CASES: readonly RedactionCase[] = [
       "-p<redacted:secret> status",
       "`mariadb -p<redacted:secret>`",
       "(mysql -p<redacted:secret>)",
+      "docker exec mysql mysql -p<redacted:secret>",
+      "-- mysql -p <redacted:secret>",
     ],
   },
   {
@@ -543,10 +569,15 @@ test("placeholders and ordinary Hack text pass through unchanged", () => {
     // A quoted placeholder that is the whole value stays, before any
     // separator, closing bracket, backtick or sentence end.
     `Use \`DB_PASSWORD="<password>"\`, {"API_KEY":"<key>","HACK_A":"<a>"} or token='<token>'.`,
+    'Set A="<a>",B=\'<b>\' or ("<key>") and [API_KEY="<key>"], then `TOKEN="<t>"`.',
     // `-p` is a port or a parents flag outside MySQL and MariaDB clients, and
     // a bare `-p` there prompts for the password.
     "Run `ssh -p 2222 <host>`, `mkdir -p .hack/tmp`, `docker run -p 8080:80 web`,",
     "`mysql -p -u <user> <db>`, `mysql -p<password>` or `mariadb -p '<password>'`.",
+    // A client name that is an option value or a service, container or
+    // image name is not the command, so the `-p` after it stays.
+    "`docker run --name mysql -p 3306:3306 -d mysql:8`, `docker compose logs mysql -p 20`,",
+    "`hack logs mysql -p ./app` or `kubectl port-forward svc/mysql -p 3306`.",
     // A bare `auth` key with a setting, not a secret, stays.
     'Set auth: true, auth: required, auth = none or {"auth": false, "auth": "basic"}.',
   ].join("\n");
@@ -1209,6 +1240,32 @@ test("negative control: an attachment listed only where a reader cannot see it n
       "math block hiding with phantom",
       withAttachments("```math\n\\phantom{\n- `dump.log`\n}\n```"),
     ],
+    // CommonMark decodes entities in the info string before GitHub reads
+    // the language, so an encoded name is still a diagram or math block.
+    [
+      "mermaid name with a decimal entity",
+      withAttachments("```&#109;ermaid\n- `dump.log`\n```"),
+    ],
+    [
+      "tilde stl name with a decimal entity",
+      withAttachments("~~~st&#108;\n- `dump.log`\n~~~"),
+    ],
+    [
+      "math name with a hexadecimal entity",
+      withAttachments("```&#x6D;ath\n- `dump.log`\n```"),
+    ],
+    [
+      "encoded space before the mermaid name",
+      withAttachments("```&#32;mermaid\n- `dump.log`\n```"),
+    ],
+    [
+      "encoded mermaid block opened before the heading",
+      beforeHeading("```&#109;ermaid", "- `dump.log`\n```"),
+    ],
+    [
+      "named entity in the info string",
+      withAttachments("```&mgr;ermaid\n- `dump.log`\n```"),
+    ],
     // GitHub drops an unreferenced footnote with its indented lines; a
     // line indented by four spaces or a tab never lists anything.
     [
@@ -1279,9 +1336,11 @@ test("negative control: an attachment listed only where a reader cannot see it n
       "From <redacted:path>, run ``hack run <script>`` and `<details>`.",
       "- `dump.log`"
     ),
-    // A plain code block is shown as text, and three spaces of indentation
-    // still make a visible list item.
+    // A plain code block is shown as text, also when its language is
+    // encoded, and three spaces of indentation still make a visible list
+    // item.
     beforeHeading("```sh\nhack up --json\n```", "- `dump.log`"),
+    beforeHeading("```&#115;h\nhack up --json\n```", "- `dump.log`"),
     withAttachments("   - `dump.log`"),
   ]) {
     const listing = payload.body;

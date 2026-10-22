@@ -299,7 +299,7 @@ type ValueRule = {
   readonly kind: RedactionKind;
   readonly pattern: RegExp;
   readonly replace: (match: string, ...groups: string[]) => string;
-  readonly accept?: (match: string) => boolean;
+  readonly accept?: (match: string, ...groups: string[]) => boolean;
 };
 
 /**
@@ -395,24 +395,31 @@ const HEADER_PLACEHOLDER = placeholderValue(String.raw`[\s"'\x60,;]`);
 /** A placeholder standing for a bare JSON value (`[^\s,}]+`). */
 const JSON_PLACEHOLDER = placeholderValue(String.raw`[\s,}]`);
 /**
- * What may follow the closing quote of a quoted placeholder: sentence
- * punctuation, then whitespace, a separator, a closing bracket, a backtick or
- * the end of the text. Anything else, such as more text or another quote,
- * continues the value (`"<x>"leaked`), so the value is not the placeholder.
+ * The start of the next assignment or JSON member after a `,`, as in
+ * `A="<a>",B="<b>"` or `{"A":"<a>","B":"<b>"}`.
  */
-const QUOTED_PLACEHOLDER_END = String.raw`(?=[.:!?]*(?:[\s,;\x60)\]}]|$))`;
+const NEXT_KEY = String.raw`[A-Za-z_][A-Za-z0-9_]*=|"[^"\n]*"\s*:|'[^'\n]*'\s*:`;
+/**
+ * Where a quoted value ends: after any closing brackets, backticks, commas
+ * and sentence punctuation, at whitespace, a `;` or the end of the text, or
+ * at a `,` that starts the next assignment or JSON member. Anything else
+ * glued after the closing quote, such as `"<x>",leaked`, `"<x>")leaked` or
+ * `"<x>""leaked"`, is part of the same shell value.
+ */
+const QUOTED_VALUE_END = String.raw`[.:!?,)\]}\x60]*(?:[\s;]|$)|[.:!?)\]}\x60]*,(?=${NEXT_KEY})`;
 /**
  * A double- or single-quoted value that is exactly one placeholder, read
  * after the opening quote. The exemption covers the whole value only.
  */
-const QUOTED_PLACEHOLDER_DOUBLE = String.raw`<[^<>"\n]*>"${QUOTED_PLACEHOLDER_END}`;
-const QUOTED_PLACEHOLDER_SINGLE = String.raw`<[^<>'\n]*>'${QUOTED_PLACEHOLDER_END}`;
+const QUOTED_PLACEHOLDER_DOUBLE = String.raw`<[^<>"\n]*>"(?=${QUOTED_VALUE_END})`;
+const QUOTED_PLACEHOLDER_SINGLE = String.raw`<[^<>'\n]*>'(?=${QUOTED_VALUE_END})`;
 /**
- * Text glued to a quoted value, which a shell joins to it: `"a"b` and
- * `'a'"b"` are one value. Whitespace, `,`, `;`, closing brackets and
- * backticks end it, so they stay in the text.
+ * Text glued to a quoted value, which a shell joins to it: `"a"b`,
+ * `'a'"b"` and `"a",b` are one value. It runs to {@link QUOTED_VALUE_END},
+ * so trailing punctuation and closing brackets stay in the text, and an
+ * unclosed quote runs to the end of the line.
  */
-const QUOTED_CONTINUATION = String.raw`(?:[^\s,;"'\x60)\]}]+|"[^"\n]*"|'[^'\n]*')*`;
+const QUOTED_CONTINUATION = String.raw`(?:(?!${QUOTED_VALUE_END})(?:[^\s;"']|"[^"\n]*"?|'[^'\n]*'?))*`;
 /** A quoted value with what is glued to it, unless it is one placeholder. */
 const DOUBLE_QUOTED_VALUE = String.raw`"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"${QUOTED_CONTINUATION}`;
 const SINGLE_QUOTED_VALUE = String.raw`'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*'${QUOTED_CONTINUATION}`;
@@ -504,27 +511,95 @@ function looksSecretShaped(value: string): boolean {
 /**
  * MySQL and MariaDB clients, which take a password as `-pVALUE` or
  * `-p VALUE`. Other commands use `-p` for a port, a path or a parent
- * directory, so `-p` counts only after one of these. The match runs to the
- * end of the line, a code span or a shell separator outside quotes.
+ * directory, so `-p` counts only after one of these when it is the command
+ * (see {@link isClientCommandPosition}). The lookbehind captures the rest of
+ * the command before the client name, from the last line break, shell
+ * separator, parenthesis, backtick or quote. The match runs to the end of
+ * the line, a code span or a shell separator outside quotes.
  */
 const PASSWORD_CLIENT_COMMAND =
-  /(?<![\w.-])(?:mysql|mysqldump|mysqladmin|mariadb|mariadb-dump)(?![\w-])(?:[ \t]+(?:"[^"\n]*"?|'[^'\n]*'?|[^\s|;&\x60"'])+)*/g;
+  /(?<=(?:^|[\n|;&(\x60"'])([^\n|;&(\x60"']*))(?<![\w.-])(?:mysql|mysqldump|mysqladmin|mariadb|mariadb-dump)(?![\w-])(?:[ \t]+(?:"[^"\n]*"?|'[^'\n]*'?|[^\s|;&\x60"'])+)*/g;
+const PASSWORD_CLIENT_NAME =
+  /^(?:mysql|mysqldump|mysqladmin|mariadb|mariadb-dump)$/;
 /** One shell word: quoted parts, which may hold spaces, and bare text. */
 const SHELL_WORD = /(?:"[^"\n]*"?|'[^'\n]*'?|[^\s"'])+/g;
 const SHORT_PASSWORD_FLAG = "-p";
+const WHITESPACE_END = /\s$/;
+const END_OF_OPTIONS = "--";
+/** A shell prompt or an environment assignment before a command. */
+const COMMAND_PREFIX_WORD = /^(?:[$#%>]|[A-Za-z_][A-Za-z0-9_]*=.*)$/;
+/** Commands that run the command after their own options. */
+const COMMAND_WRAPPER =
+  /^(?:sudo|doas|env|exec|command|time|nohup|nice|ionice|xargs|watch|timeout|stdbuf|winpty)$/;
+/**
+ * Container, cluster and Hack CLIs whose subcommands take a service,
+ * container or image name, which can be `mysql` itself.
+ */
+const TARGET_CLI =
+  /^(?:docker|docker-compose|podman|podman-compose|nerdctl|kubectl|oc|hack)$/;
+const TARGET_SUBCOMMAND =
+  /^(?:exec|run|logs?|port-forward|attach|restart|start|stop|up|down|ps|top|kill|rm|pause|unpause|inspect|describe|get|delete|scale|pull|push|build|create|tail|status|open|shell|debug|cp)$/;
 
 /**
- * The client command with the value of each `-pVALUE` and `-p VALUE`
- * redacted, unless the value is already a placeholder. A `-p` followed by
- * another flag, or by nothing, prompts for the password and stays.
+ * Whether a client name after `before`, the earlier words of its command,
+ * is the command itself rather than an argument. It is the command at the
+ * start of a command, after `--`, after a wrapper such as `sudo -E`, or
+ * after any other word, as in prose. It is an argument after an option,
+ * whose value it is (`docker run --name mysql -p 3306:3306`), and after a
+ * subcommand of a container, cluster or Hack CLI, whose target it is
+ * (`docker compose logs mysql -p 20`). So in `docker exec db mysql -pVALUE`
+ * the client follows the target `db` and is the command.
  */
-function redactPasswordArguments(command: string): string {
+function isClientCommandPosition(before: readonly string[]): boolean {
+  const words = [...before];
+  while (words[0] !== undefined && COMMAND_PREFIX_WORD.test(words[0])) {
+    words.shift();
+  }
+  const previous = words.at(-1);
+  if (previous === undefined || previous === END_OF_OPTIONS) {
+    return true;
+  }
+  const wrapper = words[0] !== undefined && COMMAND_WRAPPER.test(words[0]);
+  if (
+    wrapper &&
+    words
+      .slice(1)
+      .every((word) => word.startsWith("-") || COMMAND_PREFIX_WORD.test(word))
+  ) {
+    return true;
+  }
+  if (previous.startsWith("-")) {
+    return false;
+  }
+  return !(
+    TARGET_SUBCOMMAND.test(previous) &&
+    words.slice(0, -1).some((word) => TARGET_CLI.test(word))
+  );
+}
+
+/**
+ * The command with the value of each `-pVALUE` and `-p VALUE` after a
+ * client command redacted, unless the value is already a placeholder.
+ * `prefix` is the text of the command before `command`. A `-p` followed by
+ * another flag, or by nothing, prompts for the password and stays. A
+ * client name that is an argument, such as a container name, makes nothing
+ * after it a password, though a later client name in command position does.
+ */
+function redactPasswordArguments(prefix: string, command: string): string {
   const placeholder = redactionPlaceholder("secret");
-  let isCommandName = true;
+  const before: string[] = [...(prefix.match(SHELL_WORD) ?? [])];
+  // A client name glued to an earlier word, such as `/usr/bin/mysql`, is
+  // read after the words before that one.
+  if (prefix !== "" && !WHITESPACE_END.test(prefix)) {
+    before.pop();
+  }
+  let isClient = false;
   let passwordNext = false;
   return command.replace(SHELL_WORD, (word) => {
-    if (isCommandName) {
-      isCommandName = false;
+    if (!isClient) {
+      isClient =
+        PASSWORD_CLIENT_NAME.test(word) && isClientCommandPosition(before);
+      before.push(word);
       return word;
     }
     const valueFollows = passwordNext;
@@ -692,8 +767,9 @@ const VALUE_RULES: readonly ValueRule[] = [
     // `mysql -pVALUE` and `mysql -p VALUE`, for MySQL and MariaDB clients.
     kind: "secret",
     pattern: PASSWORD_CLIENT_COMMAND,
-    replace: (match) => redactPasswordArguments(match),
-    accept: (match) => redactPasswordArguments(match) !== match,
+    replace: (match, prefix) => redactPasswordArguments(prefix ?? "", match),
+    accept: (match, prefix) =>
+      redactPasswordArguments(prefix ?? "", match) !== match,
   },
   {
     kind: "config-value",
@@ -995,13 +1071,13 @@ export function sanitizeFeedbackText(text: string): SanitizedFeedbackText {
     result = result.replace(
       rule.pattern,
       (match: string, ...rest: unknown[]) => {
-        if (rule.accept && !rule.accept(match)) {
-          return match;
-        }
-        addCount(counts, rule.kind);
         const groups = rest.filter(
           (value): value is string => typeof value === "string"
         );
+        if (rule.accept && !rule.accept(match, ...groups)) {
+          return match;
+        }
+        addCount(counts, rule.kind);
         return rule.replace(match, ...groups);
       }
     );
@@ -1505,11 +1581,59 @@ const HIDING_MARKUP_BESIDE_COMMENTS = /<\?|<!(?!--)/;
  * `topojson`, `stl`, `math`). The source of the first four is hidden, and
  * math can hide text with `\phantom`, so a listing inside one is not
  * readable, and one opened before the heading holds the whole section.
- * GitHub reads the first word of the info string in lower case; this
- * matches any case behind any container marker, so it fails closed.
+ * GitHub reads the first word of the info string in lower case, after
+ * CommonMark decodes its entities and backslash escapes, so `&#109;ermaid`
+ * and `&#32;mermaid` are mermaid too. Fence openers match behind any
+ * container marker, so the check fails closed.
  */
-const RICH_RENDER_FENCE =
-  /^\s*(?:(?:>|[-*+]|\d{1,9}[.)])\s*)*(?:`{3,}|~{3,})[ \t]*(?:mermaid|geojson|topojson|stl|math)(?=\s|$)/i;
+const CODE_FENCE_INFO =
+  /^\s*(?:(?:>|[-*+]|\d{1,9}[.)])\s*)*(?:`{3,}|~{3,})(.*)$/;
+const RICH_RENDER_LANGUAGE = /^(?:mermaid|geojson|topojson|stl|math)$/;
+/**
+ * A backslash escape, a numeric character reference or a named entity in a
+ * fence info string, decoded in one pass as CommonMark does.
+ */
+const INFO_STRING_ESCAPE =
+  /\\([!-/:-@[-`{-~])|&#(\d{1,7});|&#[xX]([0-9a-fA-F]{1,6});|&[A-Za-z][A-Za-z0-9]{0,31};/g;
+const MAX_CODE_POINT = 0x10_ff_ff;
+
+/** A decimal or hexadecimal character reference as text. */
+function characterReference(code: number): string {
+  return code > 0 && code <= MAX_CODE_POINT
+    ? String.fromCodePoint(code)
+    : "\uFFFD";
+}
+
+/**
+ * Whether a line opens a code block that GitHub renders as a diagram, map,
+ * model or math. An info string with a named entity counts as one, because
+ * the language it decodes to is not checked here.
+ */
+function isRichRenderFence(line: string): boolean {
+  const info = CODE_FENCE_INFO.exec(line)?.[1];
+  if (info === undefined) {
+    return false;
+  }
+  let hasNamedEntity = false;
+  const decoded = info.replace(
+    INFO_STRING_ESCAPE,
+    (_entity, escaped?: string, decimal?: string, hex?: string) => {
+      if (escaped !== undefined) {
+        return escaped;
+      }
+      if (decimal !== undefined) {
+        return characterReference(Number.parseInt(decimal, 10));
+      }
+      if (hex !== undefined) {
+        return characterReference(Number.parseInt(hex, 16));
+      }
+      hasNamedEntity = true;
+      return "";
+    }
+  );
+  const language = decoded.trim().split(WHITESPACE)[0] ?? "";
+  return hasNamedEntity || RICH_RENDER_LANGUAGE.test(language.toLowerCase());
+}
 /**
  * A footnote definition. GitHub drops a definition that nothing references,
  * with the lines indented under it, so a listing there is never shown.
@@ -1658,7 +1782,7 @@ function visibleAttachmentListing(body: string): readonly string[] {
   const bodyLines = body.split(NEWLINE);
   if (
     hasHidingHtmlBesideComments(bodyLines) ||
-    bodyLines.some((line) => RICH_RENDER_FENCE.test(line))
+    bodyLines.some(isRichRenderFence)
   ) {
     return [];
   }

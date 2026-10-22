@@ -229,28 +229,40 @@ export interface ParsedCliInvocation {
   readonly positionals: readonly string[];
 }
 
+/**
+ * Parses argv in two passes. The first resolves the command path from the
+ * leading positionals ({@link scanInvocation}); the second parses with that
+ * command's own options plus the global and built-in ones, so each command
+ * keeps its own short flags and option types: `-p` is `--path` for project
+ * commands and `--port` for `ssh`, and one long name may be a flag in one
+ * command and take a value in another.
+ *
+ * An option only other commands declare is still parsed by its long name
+ * (never by its short flag), so the caller can refuse it as not valid for the
+ * resolved command rather than as unknown.
+ */
 export function parseCliArgv(
   cli: CliSpec,
   argv: readonly string[],
   opts?: { readonly allowUnknownOptions?: boolean }
 ): ParsedCliInvocation {
-  const childStart = findPassthroughStart(cli, argv);
+  const { command, childStart } = scanInvocation(cli, argv);
+  const table = optionTableFor(cli, command);
   const normalizedArgv =
     childStart === null
-      ? normalizeArgvForDefaults(cli, argv)
+      ? normalizeArgvForDefaults(table, argv)
       : [
-          ...normalizeArgvForDefaults(cli, argv.slice(0, childStart)),
+          ...normalizeArgvForDefaults(table, argv.slice(0, childStart)),
           // End Hack's option parsing: the child argv is passed on verbatim.
           "--",
           ...argv.slice(childStart),
         ];
-  const options = buildUnionParseOptions(cli);
 
   let parsed: unknown;
   try {
     parsed = bunParseArgs({
       args: [...normalizedArgv],
-      options,
+      options: parseArgsOptions(table),
       strict: opts?.allowUnknownOptions !== true,
       allowPositionals: true,
     });
@@ -276,16 +288,9 @@ export function parseCliArgv(
 }
 
 function normalizeArgvForDefaults(
-  cli: CliSpec,
+  table: OptionTable,
   argv: readonly string[]
 ): string[] {
-  const defaultable = new Map<string, OptionSpec>();
-  for (const opt of [...builtinOptions(), ...collectAllOptions(cli)]) {
-    if (isDefaultableOption(opt)) {
-      defaultable.set(opt.long, opt);
-    }
-  }
-
   const out: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i] ?? "";
@@ -300,8 +305,8 @@ function normalizeArgvForDefaults(
       continue;
     }
 
-    const opt = defaultable.get(token);
-    if (!opt) {
+    const opt = table.byLong.get(token);
+    if (!(opt && isDefaultableOption(opt))) {
       out.push(token);
       continue;
     }
@@ -322,51 +327,106 @@ function normalizeArgvForDefaults(
  * marked {@link PositionalSpec.passthrough}, or null when there is none or an
  * explicit `--` already ends Hack's options before it.
  *
- * The scan mirrors the parser: it resolves the command path from leading
- * positionals and skips the value token of each value-taking option, including
- * the omitted-value form of options with a default. Without this boundary,
- * `hack run web bun --version` would let Hack's own `--version` (or `--help`,
- * `--json`, `--path`...) consume a flag meant for the child.
+ * Without this boundary, `hack run web bun --version` would let Hack's own
+ * `--version` (or `--help`, `--json`, `--path`...) consume a flag meant for
+ * the child. See {@link scanInvocation} for how option values are skipped.
  */
 export function findPassthroughStart(
   cli: CliSpec,
   argv: readonly string[]
 ): number | null {
-  const valueOptions = collectValueOptions(cli);
-  let subcommands: readonly AnyCommandSpec[] = cli.commands;
-  let command: AnyCommandSpec | null = null;
-  let resolving = true;
-  let positionalIndex = 0;
+  return scanInvocation(cli, argv).childStart;
+}
+
+/** The command an argv resolves to, and where its child argv starts. */
+interface ScannedInvocation {
+  readonly command: AnyCommandSpec | null;
+  readonly childStart: number | null;
+}
+
+/**
+ * First parse pass: resolves the command path from the leading positionals
+ * and finds the child-command boundary, as the second pass will read them.
+ *
+ * Each option token is read with the options of the command resolved so far
+ * (plus the global and built-in ones), and its value token is skipped,
+ * including the omitted-value form of options with a default. An option that
+ * command does not declare, such as one placed before the command name, is
+ * read as the other declarations of that spelling read it; when they disagree
+ * on taking a value, it is read as a flag. After an explicit `--` every token
+ * is a positional and there is no child boundary.
+ */
+function scanInvocation(
+  cli: CliSpec,
+  argv: readonly string[]
+): ScannedInvocation {
+  const state: ScanState = {
+    command: null,
+    subcommands: cli.commands,
+    separated: false,
+    positionalIndex: 0,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i] ?? "";
-    if (token === "--") {
-      return null;
-    }
-    if (token.startsWith("-") && token !== "-") {
-      if (consumesNextToken({ token, nextToken: argv[i + 1], valueOptions })) {
-        i += 1;
+    if (state.separated || token === "-" || !token.startsWith("-")) {
+      const step = scanPositional(state, token);
+      if (step !== "next") {
+        return {
+          command: state.command,
+          childStart: step === "child" ? i : null,
+        };
       }
-      continue;
+    } else if (token === "--") {
+      state.separated = true;
+    } else if (
+      consumesNextToken({
+        opt: scanOption({ cli, command: state.command, token }),
+        token,
+        nextToken: argv[i + 1],
+      })
+    ) {
+      i += 1;
     }
-    const next = resolving
-      ? subcommands.find((c) => c.name === token)
-      : undefined;
-    if (next) {
-      command = next;
-      subcommands = next.subcommands;
-      continue;
-    }
-    resolving = false;
-    const start = passthroughPositionalIndex(command);
-    if (start === null) {
-      return null;
-    }
-    if (positionalIndex === start) {
-      return i;
-    }
-    positionalIndex += 1;
   }
-  return null;
+  return { command: state.command, childStart: null };
+}
+
+interface ScanState {
+  command: AnyCommandSpec | null;
+  subcommands: readonly AnyCommandSpec[];
+  /** An explicit `--` was seen: every later token is a positional. */
+  separated: boolean;
+  /** Index among the resolved command's own positionals. */
+  positionalIndex: number;
+}
+
+/**
+ * Reads one positional token: a subcommand name extends the path; otherwise
+ * it is the command's own positional, which may be where the child argv
+ * starts ("child") or show there is no child boundary ("done").
+ */
+function scanPositional(
+  state: ScanState,
+  token: string
+): "next" | "child" | "done" {
+  const next = state.subcommands.find((c) => c.name === token);
+  if (next) {
+    state.command = next;
+    state.subcommands = next.subcommands;
+    return "next";
+  }
+  const start = state.separated
+    ? null
+    : passthroughPositionalIndex(state.command);
+  if (start === null) {
+    return "done";
+  }
+  if (state.positionalIndex === start) {
+    return "child";
+  }
+  state.subcommands = [];
+  state.positionalIndex += 1;
+  return "next";
 }
 
 /**
@@ -388,32 +448,35 @@ export function hackOwnedArgv(
   return argv.slice(0, end);
 }
 
-/** Every value-taking option, by long and short spelling. */
-function collectValueOptions(cli: CliSpec): ReadonlyMap<string, OptionSpec> {
-  const valueOptions = new Map<string, OptionSpec>();
-  for (const opt of [...builtinOptions(), ...collectAllOptions(cli)]) {
-    if (opt.type === "boolean") {
-      continue;
-    }
-    valueOptions.set(opt.long, opt);
-    if (opt.short) {
-      valueOptions.set(opt.short, opt);
-    }
+/** The option an option token names while `command` is resolved so far. */
+function scanOption(opts: {
+  readonly cli: CliSpec;
+  readonly command: AnyCommandSpec | null;
+  readonly token: string;
+}): OptionSpec | undefined {
+  if (opts.token.includes("=")) {
+    return;
   }
-  return valueOptions;
+  const table = optionTableFor(opts.cli, opts.command);
+  if (opts.token.startsWith("--")) {
+    return table.byLong.get(opts.token);
+  }
+  return (
+    table.byShort.get(opts.token) ??
+    declarationsBySpelling(opts.cli).byShort.get(opts.token)
+  );
 }
 
 /** True when an option token takes the following token as its value. */
 function consumesNextToken(opts: {
+  readonly opt: OptionSpec | undefined;
   readonly token: string;
   readonly nextToken: string | undefined;
-  readonly valueOptions: ReadonlyMap<string, OptionSpec>;
 }): boolean {
-  const opt = opts.token.includes("=")
-    ? undefined
-    : opts.valueOptions.get(opts.token);
+  const { opt } = opts;
   return (
     opt !== undefined &&
+    opt.type !== "boolean" &&
     !omitsOptionValue({ token: opts.token, opt, nextToken: opts.nextToken })
   );
 }
@@ -459,20 +522,122 @@ function shouldApplyDefault(opts: {
   return false;
 }
 
-function buildUnionParseOptions(
-  cli: CliSpec
+/** The options one command parses with, by long and by short spelling. */
+interface OptionTable {
+  readonly byLong: ReadonlyMap<string, OptionSpec>;
+  readonly byShort: ReadonlyMap<string, OptionSpec>;
+}
+
+const commandOptionTables = new WeakMap<
+  CliSpec,
+  Map<AnyCommandSpec | null, OptionTable>
+>();
+
+/**
+ * The parse table for `command` (null before a command resolves): its own
+ * options plus the global and built-in ones, by long and short spelling, then
+ * each option only other commands declare, by long spelling alone. A short
+ * flag never carries over from another command.
+ */
+function optionTableFor(
+  cli: CliSpec,
+  command: AnyCommandSpec | null
+): OptionTable {
+  const cached = commandOptionTables.get(cli)?.get(command);
+  if (cached) {
+    return cached;
+  }
+  const byLong = new Map<string, OptionSpec>();
+  const byShort = new Map<string, OptionSpec>();
+  const scope = [
+    ...builtinOptions(),
+    ...cli.globalOptions,
+    ...(command?.options ?? []),
+  ];
+  for (const opt of scope) {
+    byLong.set(opt.long, opt);
+    if (opt.short) {
+      byShort.set(opt.short, opt);
+    }
+  }
+  for (const [long, opt] of declarationsBySpelling(cli).byLong) {
+    if (!byLong.has(long)) {
+      byLong.set(long, opt);
+    }
+  }
+  const table: OptionTable = { byLong, byShort };
+  const tables =
+    commandOptionTables.get(cli) ??
+    new Map<AnyCommandSpec | null, OptionTable>();
+  tables.set(command, table);
+  commandOptionTables.set(cli, tables);
+  return table;
+}
+
+const declarationTables = new WeakMap<CliSpec, OptionTable>();
+
+/**
+ * One representative per option spelling across the whole command tree, for
+ * reading an option outside a scope that declares it. When the declarations
+ * disagree on taking a value, the representative is a flag, so it never
+ * consumes a token that may be a command name or a positional.
+ */
+function declarationsBySpelling(cli: CliSpec): OptionTable {
+  const cached = declarationTables.get(cli);
+  if (cached) {
+    return cached;
+  }
+  const longs = new Map<string, OptionSpec[]>();
+  const shorts = new Map<string, OptionSpec[]>();
+  for (const opt of [...builtinOptions(), ...collectAllOptions(cli)]) {
+    longs.set(opt.long, [...(longs.get(opt.long) ?? []), opt]);
+    if (opt.short) {
+      shorts.set(opt.short, [...(shorts.get(opt.short) ?? []), opt]);
+    }
+  }
+  const table: OptionTable = {
+    byLong: representativeDeclarations(longs),
+    byShort: representativeDeclarations(shorts),
+  };
+  declarationTables.set(cli, table);
+  return table;
+}
+
+function representativeDeclarations(
+  declarations: ReadonlyMap<string, readonly OptionSpec[]>
+): ReadonlyMap<string, OptionSpec> {
+  const out = new Map<string, OptionSpec>();
+  for (const [spelling, opts] of declarations) {
+    const last = opts.at(-1);
+    if (!last) {
+      continue;
+    }
+    const kinds = new Set(opts.map((opt) => opt.type === "boolean"));
+    out.set(
+      spelling,
+      kinds.size === 1
+        ? last
+        : { ...last, type: "boolean", defaultValue: undefined }
+    );
+  }
+  return out;
+}
+
+function parseArgsOptions(
+  table: OptionTable
 ): Record<string, { type: "string" | "boolean"; short?: string }> {
   const out: Record<string, { type: "string" | "boolean"; short?: string }> =
     {};
-  for (const opt of [...builtinOptions(), ...collectAllOptions(cli)]) {
-    const longName = opt.long.replace(LONG_OPTION_PREFIX_REGEX, "");
-    const short = opt.short
-      ? opt.short.replace(SHORT_OPTION_PREFIX_REGEX, "")
-      : null;
-    out[longName] =
-      short === null
-        ? { type: opt.type === "boolean" ? "boolean" : "string" }
-        : { type: opt.type === "boolean" ? "boolean" : "string", short };
+  for (const [long, opt] of table.byLong) {
+    out[long.replace(LONG_OPTION_PREFIX_REGEX, "")] = {
+      type: opt.type === "boolean" ? "boolean" : "string",
+    };
+  }
+  for (const [short, opt] of table.byShort) {
+    const entry = out[opt.long.replace(LONG_OPTION_PREFIX_REGEX, "")];
+    if (entry) {
+      entry.short = short.replace(SHORT_OPTION_PREFIX_REGEX, "");
+    }
   }
   return out;
 }

@@ -1,3 +1,4 @@
+import { withoutComposeEnvReferences } from "./compose-managed-env.ts";
 import { isRecord } from "./guards.ts";
 import {
   type ProcessIdentityRow,
@@ -113,8 +114,14 @@ export async function withDependencyStartupProgress<T>(opts: {
       /* Progress must not replace startup outcome. */
     }
   }
+  // These children are `docker inspect/logs/events`, not Compose: they never
+  // read the generated env override, so its private `HACK_ENV_*` values stay
+  // with the Compose invocation (HACK-1273).
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries({ ...process.env, ...opts.env })) {
+  for (const [key, value] of Object.entries({
+    ...process.env,
+    ...withoutComposeEnvReferences(opts.env),
+  })) {
     if (value !== undefined) {
       env[key] = value;
     }

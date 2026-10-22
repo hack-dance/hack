@@ -1,6 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
 import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../agents/integration-revision.ts";
@@ -58,6 +58,13 @@ import {
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import {
+  ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+  composeEnvAtRestRepairs,
+  describeComposeEnvAtRest,
+  inspectComposeEnvAtRest,
+  removePlaintextComposeEnvOverride,
+} from "../lib/compose-env-at-rest.ts";
+import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
@@ -66,6 +73,11 @@ import {
   checkBrowserLocalNetwork,
   parseBrowserNetworkOptions,
 } from "../lib/doctor-browser-network.ts";
+import {
+  COMPOSE_BACKEND_CHECK,
+  type ComposeBackendReport,
+  composeBackendCheckResult,
+} from "../lib/doctor-compose-backend.ts";
 import {
   describeEnvKeyInspection,
   type EnvKeyInspection,
@@ -117,6 +129,8 @@ import {
   type NativeCaDoctorDependencies,
   repairNativeCaTrust,
 } from "../lib/native-ca-doctor.ts";
+import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
+import { readComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
 import {
   describeHackLocalRoute,
   HACK_LOCAL_ROLLBACK_COMMAND,
@@ -199,6 +213,8 @@ interface CheckResult {
   readonly hackLocalRoute?: HackLocalRouteReport;
   /** Closed, value-free env key findings; project-relative subjects only. */
   readonly envKey?: EnvKeyInspection;
+  /** Closed Compose-backend feature names only; never authored values. */
+  readonly composeBackend?: ComposeBackendReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -856,6 +872,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       )
     );
     results.push(
+      await runCheck(s, COMPOSE_BACKEND_CHECK, () =>
+        checkComposeBackendFeatures({ startDir, backend: "compose" })
+      )
+    );
+    results.push(
       await runCheck(s, "DEV_HOST", () => checkDevHost({ startDir }))
     );
     results.push(
@@ -894,6 +915,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
         {
           timeoutMs: 5000,
         }
+      )
+    );
+    results.push(
+      await runCheck(s, COMPOSE_ENV_AT_REST_CHECK, () =>
+        checkComposeEnvOverrideAtRest({ startDir })
       )
     );
     if (
@@ -1176,6 +1202,15 @@ async function handleNativeDoctor(opts: {
         { timeoutMs: 5000 }
       )
     );
+    results.push(
+      await runCheck(progress, COMPOSE_BACKEND_CHECK, () =>
+        checkComposeBackendFeatures({
+          startDir: opts.startDir,
+          backend: "native",
+          adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
+        })
+      )
+    );
   }
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
   const hasError = results.some((result) => result.status === "error");
@@ -1340,6 +1375,8 @@ export type DoctorJsonCheck = {
   readonly hackLocalRoute?: HackLocalRouteReport;
   /** Present only on the env key check: closed codes, no key bytes or absolute paths. */
   readonly envKey?: EnvKeyInspection;
+  /** Present only on the Compose-backend feature check: closed feature names. */
+  readonly composeBackend?: ComposeBackendReport;
 };
 
 export type DoctorJsonData = {
@@ -1375,6 +1412,9 @@ export function buildDoctorJsonData(opts: {
         ? { hackLocalRoute: result.hackLocalRoute }
         : {}),
       ...(result.envKey ? { envKey: result.envKey } : {}),
+      ...(result.composeBackend
+        ? { composeBackend: result.composeBackend }
+        : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,
@@ -2971,6 +3011,33 @@ export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
  * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
  * it; each finding suggests the exact command instead.
  */
+/**
+ * Reports which Compose features keep the current project on the Compose
+ * backend (HACK-1291). Reads only the project's Compose file and, on the native
+ * backend, the `HACK_NATIVE_ADAPTATION` selection native up applies. An
+ * invalid selection is the same value-free error native up gives.
+ */
+async function checkComposeBackendFeatures(opts: {
+  readonly startDir: string;
+  readonly backend: "native" | "compose";
+  readonly adaptationFile?: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(opts.startDir);
+  if (!ctx) {
+    return {
+      name: COMPOSE_BACKEND_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  return composeBackendCheckResult({
+    backend: opts.backend,
+    features: await readComposeBackendFeatures(ctx.composeFile, {
+      adaptationFile: opts.adaptationFile,
+    }),
+  });
+}
+
 async function checkProjectEnvKey({
   startDir,
 }: {
@@ -2999,7 +3066,8 @@ async function checkProjectEnvKey({
 /**
  * Warns when hack-generated machine-local files (`.hack/.internal/`,
  * `.hack/.branch/`, `.hack/.env`, `.hack/.env.state.json`,
- * `.hack/hack.env.*.local.yaml`, `.hack.secret.key`) are tracked in git.
+ * `.hack/hack.env.*.local.yaml`, `.hack/tickets`, `.hack/.hack.env*.tmp`
+ * staging files, `.hack.secret.key`) are tracked in git.
  * A tracked secret key is reported as an error because it is a committed
  * secret. `hack doctor --fix` untracks the offenders (files stay on disk) and
  * ensures the committed `.hack/.gitignore`.
@@ -3051,6 +3119,70 @@ async function checkTrackedGeneratedFiles({
     status: "warn",
     message: `Machine-local generated files are tracked in git: ${offenders}. Run 'hack doctor --fix' to untrack them (files stay on disk) and ensure the committed ${ctx.projectDirName}/.gitignore.`,
   };
+}
+
+const COMPOSE_ENV_AT_REST_CHECK = "compose env at rest";
+
+/**
+ * Warns when `.hack/.internal/compose.env.override.yml` holds literal env
+ * values (an earlier Hack version wrote decrypted values there) or cannot be
+ * verified, and when an interrupted removal left an aside that may hold them.
+ * Counts only; never a key or value. `hack doctor --fix` removes them, except
+ * an override that a saved adoption pins (the message gives the next step).
+ */
+export async function checkComposeEnvOverrideAtRest({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = COMPOSE_ENV_AT_REST_CHECK;
+  const ctx = await findComposeEnvAtRestProject({ startDir });
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  const report = await inspectComposeEnvAtRest({ projectDir: ctx.projectDir });
+  return {
+    name,
+    ...describeComposeEnvAtRest({
+      report,
+      projectDirName: ctx.projectDirName,
+    }),
+  };
+}
+
+/**
+ * The project whose generated Compose env override doctor inspects. A legacy
+ * adoption makes ordinary discovery refuse the project (its inputs become
+ * native), yet the adoption can pin an earlier version's literal override, so
+ * an active or pending adoption root is selected explicitly.
+ */
+async function findComposeEnvAtRestProject(opts: {
+  readonly startDir: string;
+}): Promise<{
+  readonly projectDir: string;
+  readonly projectDirName: string;
+} | null> {
+  try {
+    const ctx = await findProjectContext(opts.startDir);
+    if (ctx) {
+      return ctx;
+    }
+  } catch {
+    // Adopted or refused inputs: fall through to the adoption selector.
+  }
+  const adopted = await selectLegacyComposeAdoptedRoot({
+    cwd: opts.startDir,
+  }).catch(() => null);
+  return adopted
+    ? {
+        projectDir: join(adopted, HACK_PROJECT_DIR_PRIMARY),
+        projectDirName: HACK_PROJECT_DIR_PRIMARY,
+      }
+    : null;
 }
 
 async function checkWorktreeInstanceCollisions({
@@ -3278,6 +3410,7 @@ async function runDoctorFix(opts: {
 
   await maybeInstallMutagenForDoctorFix();
   await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
+  await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
   await maybeRepairHackd();
 
   const dockerOk = await dockerInfoOk();
@@ -3625,6 +3758,22 @@ export async function buildDoctorRemediationPlanLines(opts: {
     );
   }
 
+  const composeEnvAtRest = project
+    ? composeEnvAtRestRepairs(
+        await inspectComposeEnvAtRest({ projectDir: project.projectDir })
+      )
+    : null;
+  if (composeEnvAtRest?.override) {
+    steps.push(
+      `Remove ${project?.projectDirName}/.internal/compose.env.override.yml, which may hold env values at rest; Compose commands regenerate it with references only.`
+    );
+  }
+  if (composeEnvAtRest?.asides) {
+    steps.push(
+      `Remove leftover ${project?.projectDirName}/.internal/.compose.env.override.yml.<id>.remove files from an interrupted removal, which may hold env values.`
+    );
+  }
+
   if (opts.migrateEnvConfig) {
     steps.push(await buildEnvMigrationPlanStep({ project }));
   }
@@ -3719,6 +3868,101 @@ async function maybeUntrackGeneratedFiles(opts: {
     );
   }
   note(notes.join("\n"), "generated files");
+}
+
+/**
+ * `hack doctor --fix` step: removes a generated Compose env override that holds
+ * (or may hold) literal env values, and stale asides that an interrupted
+ * removal left. Hack-owned and regenerated value-free by the next Compose
+ * command, so it is a safe generated-file repair. The file is re-inspected
+ * immediately before removal; a value-free file is kept, and so is one that a
+ * saved adoption pins (removing it would break the adoption).
+ */
+async function maybeRemovePlaintextComposeEnvOverride(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findComposeEnvAtRestProject(opts);
+  if (!project) {
+    return;
+  }
+  const report = await inspectComposeEnvAtRest({
+    projectDir: project.projectDir,
+  });
+  const file = `${project.projectDirName}/.internal/compose.env.override.yml`;
+  const repairs = composeEnvAtRestRepairs(report);
+  if (report.adoptionBound) {
+    note(
+      `Kept ${file}: a saved 'hack config adopt' generation pins it, and removing it would break the adoption (values omitted). ${ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP}`,
+      "compose env at rest"
+    );
+  }
+  if (!(repairs.override || repairs.asides)) {
+    return;
+  }
+  const targets = [
+    ...(repairs.override ? [file] : []),
+    ...(repairs.asides
+      ? [
+          `leftover ${project.projectDirName}/.internal/.compose.env.override.yml.<id>.remove files`,
+        ]
+      : []),
+  ].join(" and ");
+  const ok = await doctorConfirm({
+    message: `Remove ${targets}? They may hold env values at rest; Compose commands regenerate the override with references only.`,
+    initialValue: true,
+  });
+  if (!ok) {
+    return;
+  }
+  try {
+    const removal = await removePlaintextComposeEnvOverride({
+      projectDir: project.projectDir,
+      includeUnverifiable: true,
+    });
+    note(
+      composeEnvAtRestFixLines({
+        removal,
+        file,
+        overrideRequested: repairs.override,
+      }).join("\n"),
+      "compose env at rest"
+    );
+  } catch {
+    note(
+      `Failed to remove ${targets}; remove them manually (values omitted).`,
+      "compose env at rest"
+    );
+  }
+}
+
+/** Value-free outcome lines for the `--fix` step above. */
+function composeEnvAtRestFixLines(opts: {
+  readonly removal: Awaited<
+    ReturnType<typeof removePlaintextComposeEnvOverride>
+  >;
+  readonly file: string;
+  readonly overrideRequested: boolean;
+}): string[] {
+  const { removal, file } = opts;
+  const lines =
+    removal.asidesRemoved > 0
+      ? [
+          `Removed ${removal.asidesRemoved} leftover removal file(s) (values omitted).`,
+        ]
+      : [];
+  if (!opts.overrideRequested) {
+    return lines;
+  }
+  if (removal.removed) {
+    lines.push(`Removed ${file} (values omitted).`);
+  } else if (removal.adoptionBound) {
+    lines.push(
+      `Kept ${file}: a saved 'hack config adopt' generation now pins it (values omitted).`
+    );
+  } else {
+    lines.push(`Left ${file} in place: it no longer holds env values.`);
+  }
+  return lines;
 }
 
 async function maybeRepairProjectLifecycleSessions(opts: {

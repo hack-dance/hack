@@ -4,7 +4,7 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { lstat, readdir, rm, stat } from "node:fs/promises";
+import { lstat, readdir, rm, stat, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
@@ -25,14 +25,17 @@ import {
   HACK_DIR_GITIGNORE_END_MARKER,
   HACK_DIR_GITIGNORE_ENTRIES,
 } from "../templates.ts";
+import { ClosedCliError } from "./cli-result.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import {
+  AtomicWriteConflictError,
   ensureDir,
   ensureGitignoreEntry,
   ensureManagedGitignoreBlock,
   pathExists,
   readTextFile,
   writeTextFile,
+  writeTextFileAtomicIfChanged,
   writeTextFileIfChanged,
 } from "./fs.ts";
 import {
@@ -56,6 +59,7 @@ import {
 } from "./native-project-inputs.ts";
 import { writePrivateEnvFileIfChanged } from "./private-env-file.ts";
 import {
+  createPrivateFileExclusive,
   decodeCanonicalBase64,
   publishPrivateFileExclusive,
   readBoundedPrivateFile,
@@ -477,6 +481,31 @@ async function isGitTrackedProjectEnvPath(opts: {
   return null;
 }
 
+/**
+ * Whether `startDir` or an ancestor holds a `.git` entry (directory, linked
+ * worktree file or symlink), or `GIT_DIR` points git elsewhere. It does not ask
+ * git, so it still answers when git itself refuses to run in the checkout.
+ */
+async function isInsideGitCheckoutMarker(opts: {
+  readonly startDir: string;
+}): Promise<boolean> {
+  if ((process.env.GIT_DIR ?? "").trim().length > 0) {
+    return true;
+  }
+  let current = resolve(opts.startDir);
+  while (true) {
+    const marker = await lstat(resolve(current, ".git")).catch(() => null);
+    if (marker !== null) {
+      return true;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return false;
+    }
+    current = parent;
+  }
+}
+
 async function hasLegacyLocalEnvironment(opts: {
   readonly path: string;
 }): Promise<boolean> {
@@ -649,6 +678,19 @@ async function readProjectEnvConfigFile(opts: {
   readonly strictRead?: boolean;
 }): Promise<ProjectEnvConfigReadResult> {
   const text = await readProjectEnvLayerText(opts);
+  return parseProjectEnvConfigText({
+    path: opts.path,
+    environment: opts.environment,
+    text,
+  });
+}
+
+function parseProjectEnvConfigText(opts: {
+  readonly path: string;
+  readonly environment: string;
+  readonly text: string | null;
+}): ProjectEnvConfigReadResult {
+  const text = opts.text;
   if (text === null) {
     return {
       path: opts.path,
@@ -2260,6 +2302,59 @@ function decryptProjectEnvStoredValue(opts: {
   });
 }
 
+/**
+ * Secret value to store for `plaintext`, keeping the entry's current ciphertext
+ * when it already opens to exactly `plaintext` under `keyText`.
+ *
+ * Fresh-IV encryption makes every write differ, so re-encrypting an unchanged
+ * value would churn a tracked file on each repeat. Reuse is semantic, not
+ * textual: an absent, plain, removed, malformed, wrong-key or different entry
+ * gets a new ciphertext with a fresh IV. Decryption failures are not reported;
+ * they only select rotation.
+ */
+function stableProjectEnvSecretValue(opts: {
+  readonly previous: ProjectEnvStoredValue | undefined;
+  readonly plaintext: string;
+  readonly keyText: string;
+}): ProjectEnvSecretValue {
+  const previous = opts.previous;
+  if (
+    previous !== undefined &&
+    previous !== null &&
+    isProjectEnvSecretValue(previous) &&
+    opensToPlaintext({
+      ciphertext: previous.secure,
+      plaintext: opts.plaintext,
+      keyText: opts.keyText,
+    })
+  ) {
+    return { secure: previous.secure };
+  }
+  return {
+    secure: encryptProjectEnvValue({
+      plaintext: opts.plaintext,
+      keyText: opts.keyText,
+    }),
+  };
+}
+
+function opensToPlaintext(opts: {
+  readonly ciphertext: string;
+  readonly plaintext: string;
+  readonly keyText: string;
+}): boolean {
+  try {
+    return (
+      decryptProjectEnvValue({
+        ciphertext: opts.ciphertext,
+        keyText: opts.keyText,
+      }) === opts.plaintext
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function setProjectEnvValue(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -2312,12 +2407,11 @@ export async function setProjectEnvValue(opts: {
       projectRoot: opts.projectRoot,
     });
     createdKey = ensuredKey.created;
-    storedValue = {
-      secure: encryptProjectEnvValue({
-        plaintext: opts.value,
-        keyText: ensuredKey.keyText,
-      }),
-    };
+    storedValue = stableProjectEnvSecretValue({
+      previous: read.config.values[scope]?.[opts.key],
+      plaintext: opts.value,
+      keyText: ensuredKey.keyText,
+    });
   }
   if (opts.local === true) {
     await ensureHackDirGitignore({
@@ -2418,14 +2512,543 @@ export async function unsetProjectEnvValue(opts: {
   return { changed, filePath };
 }
 
+/** Closed reasons `hydrateProjectEnvLocalLayer` refuses with; none writes a layer. */
+export const PROJECT_ENV_HYDRATION_REFUSAL_REASONS = [
+  "tracked_layer",
+  "tracking_unknown",
+  "locked",
+  "stale_lock",
+  "unreadable_layer",
+  "wrong_key",
+  "key_env_only",
+  "secret_downgrade",
+  "concurrent_write",
+] as const;
+
+export type ProjectEnvHydrationRefusalReason =
+  (typeof PROJECT_ENV_HYDRATION_REFUSAL_REASONS)[number];
+
+const PROJECT_ENV_HYDRATION_LOCK_FILENAME = "env-hydrate.lock";
+const PROJECT_ENV_HYDRATION_NOTHING_WRITTEN = "No env layer was changed.";
+
+function projectEnvHydrationRefusalMessage(opts: {
+  readonly reason: ProjectEnvHydrationRefusalReason;
+  readonly lockPath: string;
+}): string {
+  switch (opts.reason) {
+    case "tracked_layer":
+      return "Refusing to hydrate: git tracks the machine-local env layer, so hydrated values would be committed. Untrack it with `git rm --cached` and retry.";
+    case "tracking_unknown":
+      return "Refusing to hydrate: this checkout is a git repository, but git could not report whether it tracks the machine-local env layer (for example after a safe.directory refusal, with a damaged index, or without git installed), so hydrated values could be committed. Make `git status` work in this checkout and retry.";
+    case "locked":
+      return "Refusing to hydrate: another `hack env hydrate` is writing this project's machine-local env layer. Retry when it finishes.";
+    case "stale_lock":
+      return `Refusing to hydrate: an interrupted \`hack env hydrate\` left its lock at ${opts.lockPath}, and the process that held it has exited. Remove that file and retry.`;
+    case "unreadable_layer":
+      return "Refusing to hydrate: the machine-local env layer is not a readable, valid env file. Fix or remove it and retry.";
+    case "wrong_key":
+      return `Refusing to hydrate: a secret already in the machine-local env layer does not decrypt under the project env key, or no key is available. Restore the matching ${PROJECT_ENV_KEY_FILENAME} and retry.`;
+    case "key_env_only":
+      return `Refusing to hydrate secrets: ${PROJECT_ENV_SECRET_KEY_ENV} is set but no ${PROJECT_ENV_KEY_FILENAME} exists, and creating one would replace that key for every layer. Store the same key in ${PROJECT_ENV_KEY_FILENAME} and retry.`;
+    case "secret_downgrade":
+      return "Refusing to hydrate without --secret: an imported key is stored as a secret in the machine-local env layer, and a plain import would replace its ciphertext with plaintext. Re-run with --secret, or first remove that key with `hack env unset <key> --local` if it should be stored as plain text.";
+    case "concurrent_write":
+      return "Refusing to hydrate: the machine-local env layer changed while hydration was preparing it. Re-run hydration.";
+    default:
+      return "Refusing to hydrate.";
+  }
+}
+
+/**
+ * Closed, value-free refusal from `hydrateProjectEnvLocalLayer`. The message
+ * names no key, value or input line; it may name Hack's own lock path.
+ */
+export class ProjectEnvHydrationRefusalError extends ClosedCliError {
+  readonly reason: ProjectEnvHydrationRefusalReason;
+
+  constructor(opts: {
+    readonly reason: ProjectEnvHydrationRefusalReason;
+    readonly lockPath: string;
+  }) {
+    super(
+      `${projectEnvHydrationRefusalMessage(opts)} ${PROJECT_ENV_HYDRATION_NOTHING_WRITTEN}`
+    );
+    this.name = "ProjectEnvHydrationRefusalError";
+    this.reason = opts.reason;
+  }
+}
+
+export type ProjectEnvHydrationResult = {
+  readonly filePath: string;
+  readonly scope: string;
+  readonly changed: boolean;
+  readonly createdKey: boolean;
+  /** Imported keys that the layer's scope did not hold. Sorted. */
+  readonly added: readonly string[];
+  /** Imported keys whose stored entry was replaced. Sorted. */
+  readonly updated: readonly string[];
+  /** Imported keys whose stored entry already held the value. Sorted. */
+  readonly unchanged: readonly string[];
+};
+
+/**
+ * Writes several values into the machine-local env layer in one commit.
+ *
+ * Contract:
+ * - Only the effective machine-local layer for `envName` is written
+ *   (`hack.env.local.yaml` or `hack.env.<overlay>.local.yaml`); a layer that
+ *   git tracks is refused, and so is any layer inside a git checkout where
+ *   git cannot answer (fail closed). Tracked defaults are never read for
+ *   writing.
+ * - A layer that exists but is not a valid env file is refused, never
+ *   replaced, so hand-written content is not lost.
+ * - Without `secret`, an imported key that the target scope stores as a
+ *   secret is refused rather than downgraded to plaintext.
+ * - Keys outside `entries`, other scopes and removal markers for other keys
+ *   are kept as they are. An imported key replaces that key's local entry.
+ * - Idempotent: an entry that already holds its value is kept unchanged (a
+ *   secret keeps its ciphertext, a scalar keeps its YAML type). When no entry
+ *   changes, the file is not rewritten at all. A changed or newly secret value
+ *   gets new ciphertext with a fresh IV.
+ * - All-or-nothing: the whole new layer is published by one rename. Every
+ *   refusal ({@link ProjectEnvHydrationRefusalError}) happens before that
+ *   rename, so the previous layer stays in place.
+ * - Concurrency: hydrations of one project are serialized by an exclusive
+ *   lock file under `.internal/`; a second hydration refuses instead of
+ *   waiting. The write is also a compare-and-swap against the bytes read, so a
+ *   different writer that changed the layer meanwhile makes hydration refuse
+ *   rather than overwrite it. A lock left by a killed process is reported, not
+ *   removed.
+ * - Wrong key: every secret already in the layer must decrypt under the key
+ *   readers would use, or hydration refuses. Secret mode encrypts with the key
+ *   file `hack env add --secret` uses and refuses to create one while only
+ *   `HACK_ENV_SECRET_KEY` provides a key.
+ *
+ * Values never appear in errors or results; results name only keys.
+ */
+export async function hydrateProjectEnvLocalLayer(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName: string | null;
+  readonly scope: string;
+  /** Validated keys to plaintext values. */
+  readonly entries: ReadonlyMap<string, string>;
+  readonly secret: boolean;
+}): Promise<ProjectEnvHydrationResult> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  for (const key of opts.entries.keys()) {
+    if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
+      throw new Error(ENV_KEY_INVALID_MESSAGE);
+    }
+  }
+  const scope = assertValidProjectEnvScopeName({ scopeName: opts.scope });
+  const filePath = await resolveProjectEnvEffectiveLocalConfigPath({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    envName: opts.envName,
+  });
+  const lockPath = resolve(
+    opts.projectDir,
+    ".internal",
+    PROJECT_ENV_HYDRATION_LOCK_FILENAME
+  );
+  const refuse = (reason: ProjectEnvHydrationRefusalReason) =>
+    new ProjectEnvHydrationRefusalError({ reason, lockPath });
+
+  const tracked = await isGitTrackedProjectEnvPath({
+    projectRoot: opts.projectRoot,
+    path: filePath,
+  });
+  if (tracked === true) {
+    throw refuse("tracked_layer");
+  }
+  // `null` covers both "not a repository" and "git failed" (a safe.directory
+  // refusal, a damaged index, git missing). Only the first is safe to write.
+  if (
+    tracked === null &&
+    (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+  ) {
+    throw refuse("tracking_unknown");
+  }
+
+  const release = await acquireProjectEnvHydrationLock({
+    projectDir: opts.projectDir,
+    lockPath,
+    refuse,
+  });
+  try {
+    return await hydrateLockedProjectEnvLayer({
+      ...opts,
+      scope,
+      filePath,
+      refuse,
+    });
+  } finally {
+    await release();
+  }
+}
+
+type ProjectEnvHydrationRefuse = (
+  reason: ProjectEnvHydrationRefusalReason
+) => ProjectEnvHydrationRefusalError;
+
+async function hydrateLockedProjectEnvLayer(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName: string | null;
+  readonly scope: string;
+  readonly entries: ReadonlyMap<string, string>;
+  readonly secret: boolean;
+  readonly filePath: string;
+  readonly refuse: ProjectEnvHydrationRefuse;
+}): Promise<ProjectEnvHydrationResult> {
+  const environment = opts.envName ?? "default";
+  const layer = await readProjectEnvHydrationLayer({
+    filePath: opts.filePath,
+    environment,
+    refuse: opts.refuse,
+  });
+  const key = await resolveProjectEnvHydrationKey({
+    projectRoot: opts.projectRoot,
+    config: layer.config,
+    secret: opts.secret,
+    refuse: opts.refuse,
+  });
+  const previousScope = layer.config.values[opts.scope] ?? {};
+  if (
+    !opts.secret &&
+    [...opts.entries.keys()].some((entryKey) => {
+      const previous = Object.hasOwn(previousScope, entryKey)
+        ? previousScope[entryKey]
+        : undefined;
+      return (
+        previous !== undefined &&
+        previous !== null &&
+        isProjectEnvSecretValue(previous)
+      );
+    })
+  ) {
+    // A plain import would silently drop at-rest encryption for that key.
+    throw opts.refuse("secret_downgrade");
+  }
+  const plan = planProjectEnvHydration({
+    previousScope,
+    entries: opts.entries,
+    keyText: key.keyText,
+  });
+  const result = {
+    filePath: opts.filePath,
+    scope: opts.scope,
+    createdKey: key.createdKey,
+    added: plan.added,
+    updated: plan.updated,
+    unchanged: plan.unchanged,
+  };
+  if (plan.added.length === 0 && plan.updated.length === 0) {
+    // Nothing to change: leave the layer's bytes, including hand edits, alone.
+    return { ...result, changed: false };
+  }
+
+  const nextValues: ProjectEnvValuesByScope = {
+    ...layer.config.values,
+    [opts.scope]: plan.nextScope,
+  };
+  if (!("global" in nextValues)) {
+    nextValues.global = {};
+  }
+  await ensureHackDirGitignore({ projectDir: opts.projectDir });
+  try {
+    await writeProjectEnvConfigFile({
+      path: opts.filePath,
+      config: {
+        version: PROJECT_ENV_CONFIG_VERSION,
+        environment,
+        secretsprovider: PROJECT_ENV_SECRETS_PROVIDER,
+        values: nextValues,
+      },
+      expectedExisting: layer.text,
+    });
+  } catch (error: unknown) {
+    if (error instanceof AtomicWriteConflictError) {
+      throw opts.refuse("concurrent_write");
+    }
+    throw error;
+  }
+  return { ...result, changed: true };
+}
+
+/** The layer's exact bytes (null when absent) and its parsed config. */
+async function readProjectEnvHydrationLayer(opts: {
+  readonly filePath: string;
+  readonly environment: string;
+  readonly refuse: ProjectEnvHydrationRefuse;
+}): Promise<{
+  readonly text: string | null;
+  readonly config: ProjectEnvConfig;
+}> {
+  let text: string | null;
+  try {
+    text = await readProjectEnvLayerText({
+      path: opts.filePath,
+      strictRead: true,
+    });
+  } catch {
+    throw opts.refuse("unreadable_layer");
+  }
+  const read = parseProjectEnvConfigText({
+    path: opts.filePath,
+    environment: opts.environment,
+    text,
+  });
+  if (read.parseError !== undefined) {
+    throw opts.refuse("unreadable_layer");
+  }
+  return { text, config: read.config };
+}
+
+/**
+ * Checks every secret already in the layer against the key readers use and,
+ * in secret mode, selects (or first creates) the encryption key.
+ */
+async function resolveProjectEnvHydrationKey(opts: {
+  readonly projectRoot: string;
+  readonly config: ProjectEnvConfig;
+  readonly secret: boolean;
+  readonly refuse: ProjectEnvHydrationRefuse;
+}): Promise<{ readonly keyText: string | null; readonly createdKey: boolean }> {
+  const fileKey = await readExistingProjectEnvKeyFileText({
+    projectRoot: opts.projectRoot,
+  });
+  const environmentKey =
+    process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() || null;
+  // The same priority `resolveProjectEnvKey` gives readers of this layer.
+  const readerKey = fileKey ?? environmentKey;
+  const existingSecrets = Object.values(opts.config.values).flatMap(
+    (scopeValues) =>
+      Object.values(scopeValues).filter(
+        (value): value is ProjectEnvSecretValue =>
+          value !== null && isProjectEnvSecretValue(value)
+      )
+  );
+  const opensAll =
+    readerKey !== null &&
+    existingSecrets.every((secret) =>
+      canDecryptProjectEnvValue({
+        ciphertext: secret.secure,
+        keyText: readerKey,
+      })
+    );
+  if (existingSecrets.length > 0 && !opensAll) {
+    throw opts.refuse("wrong_key");
+  }
+  if (!opts.secret) {
+    return { keyText: null, createdKey: false };
+  }
+  if (fileKey === null && readerKey !== null) {
+    throw opts.refuse("key_env_only");
+  }
+  const ensured = await ensureProjectEnvSecretKey({
+    projectRoot: opts.projectRoot,
+  });
+  if (readerKey !== null && ensured.keyText !== readerKey) {
+    throw opts.refuse("wrong_key");
+  }
+  return { keyText: ensured.keyText, createdKey: ensured.created };
+}
+
+/** Pure merge of imported entries into one scope; keys are reported sorted. */
+function planProjectEnvHydration(opts: {
+  readonly previousScope: Readonly<Record<string, ProjectEnvStoredValue>>;
+  readonly entries: ReadonlyMap<string, string>;
+  /** Encrypts every imported value when set; stores plain values when null. */
+  readonly keyText: string | null;
+}) {
+  const nextScope: Record<string, ProjectEnvStoredValue> = {
+    ...opts.previousScope,
+  };
+  const added: string[] = [];
+  const updated: string[] = [];
+  const unchanged: string[] = [];
+  const keys = [...opts.entries.keys()].sort((left, right) =>
+    left.localeCompare(right)
+  );
+  for (const key of keys) {
+    const plaintext = opts.entries.get(key) ?? "";
+    const previous = Object.hasOwn(opts.previousScope, key)
+      ? opts.previousScope[key]
+      : undefined;
+    const stored: ProjectEnvStoredValue =
+      opts.keyText === null
+        ? stableProjectEnvPlainValue({ previous, plaintext })
+        : stableProjectEnvSecretValue({
+            previous,
+            plaintext,
+            keyText: opts.keyText,
+          });
+    if (sameProjectEnvStoredValue(previous, stored)) {
+      unchanged.push(key);
+      continue;
+    }
+    (previous === undefined ? added : updated).push(key);
+    nextScope[key] = stored;
+  }
+  return { nextScope, added, updated, unchanged };
+}
+
+/** A plain scalar that already prints as `plaintext` keeps its YAML type. */
+function stableProjectEnvPlainValue(opts: {
+  readonly previous: ProjectEnvStoredValue | undefined;
+  readonly plaintext: string;
+}): ProjectEnvStoredValue {
+  const previous = opts.previous;
+  if (
+    (typeof previous === "string" ||
+      typeof previous === "number" ||
+      typeof previous === "boolean") &&
+    String(previous) === opts.plaintext
+  ) {
+    return previous;
+  }
+  return opts.plaintext;
+}
+
+function sameProjectEnvStoredValue(
+  previous: ProjectEnvStoredValue | undefined,
+  next: ProjectEnvStoredValue
+): boolean {
+  if (previous === undefined || previous === null || next === null) {
+    return previous === next;
+  }
+  if (isProjectEnvSecretValue(previous) || isProjectEnvSecretValue(next)) {
+    return (
+      isProjectEnvSecretValue(previous) &&
+      isProjectEnvSecretValue(next) &&
+      previous.secure === next.secure
+    );
+  }
+  return previous === next;
+}
+
+function canDecryptProjectEnvValue(opts: {
+  readonly ciphertext: string;
+  readonly keyText: string;
+}): boolean {
+  try {
+    decryptProjectEnvValue(opts);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The key file `ensureProjectEnvSecretKey` would select (checkout-local,
+ * existing shared, then the primary checkout's), read without creating,
+ * copying or adopting anything.
+ */
+async function readExistingProjectEnvKeyFileText(opts: {
+  readonly projectRoot: string;
+}): Promise<string | null> {
+  const localKey = await readLegacyProjectEnvKeyFile({
+    path: resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot }),
+  });
+  if (localKey !== null) {
+    return localKey;
+  }
+  const sharedKeyPath = await resolveProjectEnvSharedKeyPath({
+    projectRoot: opts.projectRoot,
+  });
+  const sharedKey =
+    sharedKeyPath === null
+      ? null
+      : await readLegacyProjectEnvKeyFile({ path: sharedKeyPath });
+  if (sharedKey !== null) {
+    return sharedKey;
+  }
+  const inherited = await resolveInheritedProjectEnvKey({
+    projectRoot: opts.projectRoot,
+  });
+  return inherited?.keyText ?? null;
+}
+
+/**
+ * Takes the project's hydration lock: `.internal/env-hydrate.lock`, created
+ * exclusively (no symlink follow, mode 0600) and holding the owner's PID.
+ *
+ * An existing lock is never removed or taken over, because a second process
+ * cannot prove the first one is gone without racing a third. It refuses as
+ * `locked` while the recorded PID is alive (or unreadable, which includes a
+ * lock still being written) and as `stale_lock` once that process has exited.
+ * The returned release removes the lock only while the path still names the
+ * file this call created.
+ */
+async function acquireProjectEnvHydrationLock(opts: {
+  readonly projectDir: string;
+  readonly lockPath: string;
+  readonly refuse: ProjectEnvHydrationRefuse;
+}): Promise<() => Promise<void>> {
+  await ensureDir(dirname(opts.lockPath));
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  try {
+    await createPrivateFileExclusive({
+      path: opts.lockPath,
+      text: `${process.pid}\n`,
+    });
+  } catch (error: unknown) {
+    if (!(isRecord(error) && error.code === "EEXIST")) {
+      throw error;
+    }
+    const holder = await readTextFile(opts.lockPath);
+    const pid = Number.parseInt(holder?.trim() ?? "", 10);
+    throw opts.refuse(
+      Number.isSafeInteger(pid) && pid > 0 && !isProcessAlive(pid)
+        ? "stale_lock"
+        : "locked"
+    );
+  }
+  const created = await lstat(opts.lockPath);
+  return async () => {
+    const current = await lstat(opts.lockPath).catch(() => null);
+    if (
+      current?.isFile() &&
+      current.dev === created.dev &&
+      current.ino === created.ino
+    ) {
+      await unlink(opts.lockPath).catch(() => undefined);
+    }
+  };
+}
+
+/** Signal 0 probes existence only; EPERM means a live process of another user. */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: unknown) {
+    return isRecord(error) && error.code === "EPERM";
+  }
+}
+
 async function writeProjectEnvConfigFile(opts: {
   readonly path: string;
   readonly config: ProjectEnvConfig;
+  /** Compare-and-swap guard; see `writeTextFileAtomicIfChanged`. */
+  readonly expectedExisting?: string | null;
 }): Promise<boolean> {
   const yaml = YAML.stringify(opts.config, null, 2);
   const text = yaml.endsWith("\n") ? yaml : `${yaml}\n`;
   await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
-  return (await writeTextFileIfChanged(opts.path, text)).changed;
+  // Rename-committed: an interrupted mutation leaves the previous layer intact.
+  return (
+    await writeTextFileAtomicIfChanged(
+      opts.path,
+      text,
+      opts.expectedExisting === undefined
+        ? {}
+        : { expectedExisting: opts.expectedExisting }
+    )
+  ).changed;
 }
 
 export async function materializeProjectEnv(opts: {

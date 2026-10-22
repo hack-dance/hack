@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { YAML } from "bun";
 
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
@@ -200,7 +201,12 @@ test("run applies modern env overlays to service-specific compose overrides", as
 
   const call = runCalls[0];
   expect(call).toBeDefined();
-  expect(call?.env).toEqual({
+  const callEnv = call?.env ?? {};
+  expect(
+    Object.fromEntries(
+      Object.entries(callEnv).filter(([key]) => !key.startsWith("HACK_ENV_"))
+    )
+  ).toEqual({
     GLOBAL_FLAG: "qa",
     SHARED_KEY: "base",
   });
@@ -226,12 +232,27 @@ test("run applies modern env overlays to service-specific compose overrides", as
     throw new Error("Missing env override compose file.");
   }
 
+  // HACK-1273: the override holds `${NAME}` references only; Compose resolves
+  // each one from the env passed to it.
   const overrideText = await readFile(overridePath, "utf8");
-  expect(overrideText).toContain("api:");
-  expect(overrideText).toContain("GLOBAL_FLAG: qa");
-  expect(overrideText).toContain("SHARED_KEY: base");
-  expect(overrideText).toContain('PORT: "4000"');
-  expect(overrideText).toContain("SERVICE_TOKEN: overlay-secret");
+  expect(overrideText).not.toContain("overlay-secret");
+  const override = YAML.parse(overrideText) as {
+    readonly services: Record<
+      string,
+      { readonly environment: Record<string, string> }
+    >;
+  };
+  const delivered = Object.fromEntries(
+    Object.entries(override.services.api?.environment ?? {}).map(
+      ([key, reference]) => [key, callEnv[reference.slice(2, -1)]]
+    )
+  );
+  expect(delivered).toEqual({
+    GLOBAL_FLAG: "qa",
+    SHARED_KEY: "base",
+    PORT: "4000",
+    SERVICE_TOKEN: "overlay-secret",
+  });
   expectNoEnvScopeWarnings();
 });
 

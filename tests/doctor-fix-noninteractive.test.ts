@@ -6,7 +6,14 @@ import {
   expect,
   test,
 } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -15,6 +22,10 @@ import {
   GLOBAL_DAEMON_PID_FILENAME,
   GLOBAL_HACK_DIR_NAME,
 } from "../src/constants.ts";
+import {
+  renderComposeEnvReferenceOverride,
+  renderManagedComposeEnvOverride,
+} from "../src/lib/compose-managed-env.ts";
 import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
@@ -246,3 +257,38 @@ test("doctor --fix never calls the raw clack confirm prompt under HACK_NO_INTERA
   // non-interactive branch instead of the raw clack prompt.
   expect(code).toBe(0);
 });
+
+test("doctor --fix removes a literal Compose env override and keeps a reference-only one (HACK-1273)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const canary = "doctor-fix-synthetic-canary";
+  const projection = {
+    targetServices: ["api"],
+    globalEnv: {},
+    serviceEnv: { api: { TOKEN: canary } },
+  };
+  const internal = resolve(projectRoot, ".hack", ".internal");
+  const path = resolve(internal, "compose.env.override.yml");
+  await mkdir(internal, { recursive: true });
+  await writeFile(path, renderManagedComposeEnvOverride(projection) ?? "", {
+    mode: 0o600,
+  });
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const fix = () =>
+    runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot]);
+  expect(await fix()).toBe(0);
+  expect(await lstat(path).catch(() => null)).toBeNull();
+  expect(noteCalls.join("\n")).toContain(
+    "Removed .hack/.internal/compose.env.override.yml (values omitted)."
+  );
+
+  const references = renderComposeEnvReferenceOverride(projection)?.text ?? "";
+  await writeFile(path, references, { mode: 0o600 });
+  noteCalls.length = 0;
+  expect(await fix()).toBe(0);
+  expect(await readFile(path, "utf8")).toBe(references);
+  for (const message of noteCalls) {
+    expect(message).not.toContain(canary);
+  }
+  // Two full doctor --fix runs; the default 5 s budget is too tight on CI.
+}, 30_000);

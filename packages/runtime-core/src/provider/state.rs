@@ -241,7 +241,41 @@ pub struct Owner {
     pub profile: super::Profile,
     #[serde(default)]
     pub reclamation: Option<ReclamationPolicy>,
+    /// The boot a `down` stopped cleanly. Recorded only by `down`, in the same receipt write
+    /// as its `stopped` phase, after the guest acknowledged flush and shutdown and the
+    /// provider's absence was proven. Any other phase write and every new boot clear it, so
+    /// a later rewrite of the phase to `stopped` never relabels an unclean stop as clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_stop: Option<CleanStop>,
 }
+
+/// The engine identity of the boot whose `down` completed cleanly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanStop {
+    pub guest_boot_id: String,
+    pub daemon_pid: u32,
+    pub daemon_start: u64,
+}
+
+impl CleanStop {
+    /// The marker for `owner`'s current boot, when its engine identity is complete.
+    pub fn of(owner: &Owner) -> Option<Self> {
+        Some(Self {
+            guest_boot_id: owner.guest_boot_id.clone()?,
+            daemon_pid: owner.daemon_pid?,
+            daemon_start: owner.daemon_start?,
+        })
+    }
+
+    /// Whether this marker names exactly this boot and engine.
+    pub fn names(&self, guest_boot_id: &str, daemon_pid: u32, daemon_start: u64) -> bool {
+        self.guest_boot_id == guest_boot_id
+            && self.daemon_pid == daemon_pid
+            && self.daemon_start == daemon_start
+    }
+}
+
 impl Owner {
     pub fn load(candidate: &Candidate) -> Result<Self, CandidateError> {
         Self::load_with_short_home(candidate, false)
@@ -453,6 +487,7 @@ impl Owner {
             guest_boot_id: None,
             previous_guest_boot_id: None,
             reclamation: None,
+            clean_stop: None,
             daemon_pid: None,
             daemon_start: None,
             rootfs_digest: None,
@@ -494,6 +529,8 @@ impl Owner {
         write(&candidate.state_root.join("run/smolvm/owner.json"), self)
     }
     pub fn begin_boot(&mut self) -> Option<String> {
+        // A new boot supersedes any clean stop of the previous one.
+        self.clean_stop = None;
         self.previous_guest_boot_id = self
             .guest_boot_id
             .take()

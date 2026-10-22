@@ -36,13 +36,16 @@ import {
  * argv, tracked files, any Git object of the fixture repository, or any other
  * file on disk (HACK_HOME, the private HOME and its caches, generated Compose
  * and runtime files, host-command records and logs). The only exceptions are
- * the private-by-design plaintext materializations (`.hack/.env` and
- * `.hack/.internal/compose.env.override.yml`) and the key files themselves,
- * each of which must be git-ignored, untracked and mode 0600.
+ * the private-by-design plaintext materialization `.hack/.env` and the key
+ * files themselves, each of which must be git-ignored, untracked and mode
+ * 0600. The generated `.hack/.internal/compose.env.override.yml` holds only
+ * `${HACK_ENV_...}` references (HACK-1273): it gets no exception, and it must
+ * also be private, ignored and untracked.
  *
  * Positive controls prove the scan is not vacuous: every sentinel reaches the
- * exec'd command, the encrypted env file is committed, and each allowed
- * plaintext artifact actually contains a sentinel.
+ * exec'd command and the `docker compose` client environment, the encrypted
+ * env file is committed, each allowed plaintext artifact actually contains a
+ * sentinel, and the Compose env override exists with references.
  *
  * Isolation: private HOME/HACK_HOME/Docker client config (privateCliEnv), a
  * `docker` shim first on PATH that only records its argv and fails, so no real
@@ -404,19 +407,15 @@ async function allSecrets(): Promise<Record<string, string>> {
   return secrets;
 }
 
-/** Plaintext is allowed only in these documented private materializations. */
-const PRIVATE_PLAINTEXT_NAMES = new Set([".env", "compose.env.override.yml"]);
-
+/**
+ * Plaintext is allowed only in the documented private materialization
+ * `.hack/.env`. The Compose env override is value-free since HACK-1273.
+ */
 function isPrivatePlaintextArtifact(path: string): boolean {
   const { primaryRoot, linkedRoot } = requireFixture();
-  return [primaryRoot, linkedRoot].some((checkout) => {
-    const inside = relative(join(checkout, ".hack"), path);
-    return (
-      !inside.startsWith("..") &&
-      PRIVATE_PLAINTEXT_NAMES.has(basename(path)) &&
-      (inside === ".env" || inside.startsWith(`.internal${sep}`))
-    );
-  });
+  return [primaryRoot, linkedRoot].some(
+    (checkout) => path === join(checkout, ".hack", ".env")
+  );
 }
 
 function readSpawnRecords(text: string): SpawnRecord[] {
@@ -595,28 +594,34 @@ test("plaintext exists on disk only in private, ignored, 0600 materializations",
   }
   expect(unexpected).toEqual([]);
 
-  // Positive control: both checkouts materialized both private artifacts.
+  // Positive control: both checkouts materialized the private artifact.
   const { primaryRoot, linkedRoot } = requireFixture();
-  const expectedArtifacts = [primaryRoot, linkedRoot].flatMap((checkout) => [
-    join(checkout, ".hack", ".env"),
-    join(checkout, ".hack", ".internal", "compose.env.override.yml"),
-  ]);
-  for (const path of expectedArtifacts) {
+  for (const checkout of [primaryRoot, linkedRoot]) {
+    const path = join(checkout, ".hack", ".env");
     expect(allowed).toContain(path);
     expect(
       findHits(await readFile(path, "utf8"), valueNeedles).length
     ).toBeGreaterThan(0);
   }
+  // Positive control: Compose generation wrote the env override, and it holds
+  // references only (any value in it is in `unexpected` above).
+  const envOverrides = [primaryRoot, linkedRoot].map((checkout) =>
+    join(checkout, ".hack", ".internal", "compose.env.override.yml")
+  );
+  for (const path of envOverrides) {
+    expect(allowed).not.toContain(path);
+    expect(await readFile(path, "utf8")).toContain("${HACK_ENV_");
+  }
 
-  // Every plaintext artifact and key file is private and ignored.
-  for (const path of [...allowed, ...keyFiles]) {
+  // Every plaintext artifact, env override and key file is private and ignored.
+  for (const path of [...allowed, ...envOverrides, ...keyFiles]) {
     expect({
       path: relative(root, path),
       mode: (await lstat(path)).mode & 0o777,
     }).toEqual({ path: relative(root, path), mode: 0o600 });
   }
   for (const checkout of [primaryRoot, linkedRoot]) {
-    const inCheckout = [...allowed, ...keyFiles]
+    const inCheckout = [...allowed, ...envOverrides, ...keyFiles]
       .filter((path) => !relative(checkout, path).startsWith(".."))
       .map((path) => relative(checkout, path));
     const ignored = runFixtureGit({
@@ -636,6 +641,7 @@ test("secret values reach child environments only for runtime delivery", async (
   const shimDir = join(root, "shim");
   const unexpected: string[] = [];
   let execDeliveries = 0;
+  let composeDeliveries = 0;
   for (const record of records) {
     const argv = Array.isArray(record.argv)
       ? record.argv.map((part) => String(part))
@@ -659,10 +665,13 @@ test("secret values reach child environments only for runtime delivery", async (
       continue;
     }
     if (basename(program) === "docker" && argv[1] === "compose") {
+      composeDeliveries += 1;
       continue;
     }
     unexpected.push(`${record.via} ${basename(program)} ${argv[1] ?? ""}`);
   }
   expect(unexpected).toEqual([]);
   expect(execDeliveries).toBe(2);
+  // The value-free override resolves only through the Compose client env.
+  expect(composeDeliveries).toBeGreaterThan(0);
 });

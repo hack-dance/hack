@@ -52,6 +52,15 @@ test("parsePositionalsForCommand throws on extra args", () => {
   ).toThrow("Unexpected arguments");
 });
 
+test("parsePositionalsForCommand never echoes the extra arguments", () => {
+  // An extra argument is often a pasted `KEY=value`; only the count is shown.
+  expect(() =>
+    parsePositionalsForCommand([], ["API_TOKEN=synthetic-extra-4c2d", "more"])
+  ).toThrow(
+    "Unexpected arguments: 2 more than this command accepts. They are not shown because they may contain values."
+  );
+});
+
 test("parseOptionsForCommand converts number options", () => {
   const opts = [
     {
@@ -91,45 +100,51 @@ test("resolveCommand exposes host exec path", () => {
 });
 
 /**
- * argv is parsed once against the union of every command's options, keyed by
- * long name, so one long name declared as a boolean in one command and as a
- * value in another changes how every command parses it. A value-typed
- * `setup migrate --rollback` once made `config adopt --rollback --json` consume
- * `--json` as its value and fail with a usage error.
+ * argv is parsed with the resolved command's options plus the global and
+ * built-in ones, so a spelling may mean different options in different
+ * commands (`-p` is `--path` for project commands and `--port` for `ssh`).
+ * Within one command's scope, each long and short spelling must name exactly
+ * one option, or the parser would silently pick one of them.
  */
-test("each long option keeps one value type across the command tree", () => {
-  const declarations = new Map<string, Set<string>>();
-  const record = (opts: {
+test("each command scope declares every option spelling once", () => {
+  const conflicts: string[] = [];
+  const check = (opts: {
     readonly owner: string;
     readonly options: readonly OptionSpec[];
   }) => {
+    const seen = new Map<string, OptionSpec>();
     for (const option of opts.options) {
-      const kind = option.type === "boolean" ? "boolean" : "value";
-      const owners = declarations.get(option.long) ?? new Set<string>();
-      owners.add(`${kind} (${opts.owner})`);
-      declarations.set(option.long, owners);
+      for (const spelling of [option.long, option.short]) {
+        if (spelling === undefined) {
+          continue;
+        }
+        const previous = seen.get(spelling);
+        if (previous !== undefined && previous !== option) {
+          conflicts.push(
+            `${opts.owner}: ${spelling} names ${previous.long} and ${option.long}`
+          );
+        }
+        seen.set(spelling, option);
+      }
     }
   };
-  record({ owner: "builtin", options: builtinOptions() });
-  record({ owner: "global", options: CLI_SPEC.globalOptions });
+  const shared = [...builtinOptions(), ...CLI_SPEC.globalOptions];
+  check({ owner: "hack", options: shared });
   const walk = (
     commands: readonly AnyCommandSpec[],
     parent: readonly string[]
   ) => {
     for (const command of commands) {
       const path = [...parent, command.name];
-      record({ owner: path.join(" "), options: command.options });
+      check({
+        owner: ["hack", ...path].join(" "),
+        options: [...shared, ...command.options],
+      });
       walk(command.subcommands, path);
     }
   };
   walk(CLI_SPEC.commands, []);
 
-  const conflicts = [...declarations]
-    .filter(
-      ([, owners]) =>
-        new Set([...owners].map((owner) => owner.split(" ")[0])).size > 1
-    )
-    .map(([long, owners]) => `${long}: ${[...owners].sort().join(", ")}`);
   expect(conflicts).toEqual([]);
 });
 

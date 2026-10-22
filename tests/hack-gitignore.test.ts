@@ -186,6 +186,8 @@ test("nested .hack/.gitignore makes git ignore generated files, including in lin
     ".hack/.env.state.json",
     ".hack/hack.env.local.yaml",
     ".hack/hack.env.qa.local.yaml",
+    ".hack/.hack.env.local.yaml.0b88c1d2.tmp",
+    ".hack/.hack.env.default.yaml.0b88c1d2.tmp",
     ".hack/tickets/state/projection.sqlite",
   ]) {
     expect(

@@ -24,6 +24,7 @@ hack project <subcommand> [options]
 | --- | --- |
 | `hack project owner` | Inspect project ownership |
 | `hack project target` | Inspect the exact project, checkout, instance and service a command would target (read-only, provisional) |
+| `hack project task` | Discover reviewed task recipes without running them (read-only, provisional) |
 
 ### Options
 
@@ -78,6 +79,31 @@ hack project target [options]
 | `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--expect-generation <id>` | Refuse unless the project's config generation still equals this id |
 | `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack project task`
+
+Discover reviewed task recipes without running them (read-only, provisional)
+
+### Usage
+
+```bash
+hack project task <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack project task list` | List reviewed task recipes and refusals for the target (read-only, provisional; runs nothing) |
+| `hack project task inspect <task>` | Show one reviewed task recipe: argv, service, env scope, effects and pins (read-only, provisional; runs nothing) |
+
+### Options
+
+| Option | Description |
+| --- | --- |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2266,6 +2292,7 @@ hack env <subcommand> [options]
 | `hack env apply` | Recreate one service with its resolved env |
 | `hack env add [key] [value]` | Add or update an env value |
 | `hack env set [key] [value]` | Alias for env add |
+| `hack env hydrate` | Import many values into the machine-local env layer at once |
 | `hack env materialize` | Write a compatibility .env file from the selected overlay |
 | `hack env exec [command...]` | Run a host command with project env injected |
 | `hack env shell` | Open a host shell with project env injected |
@@ -2451,6 +2478,34 @@ Same value rules as `hack env add`: pipe secrets with --value-stdin or use the h
 | `--value-stdin` | Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack env hydrate`
+
+Import many values into the machine-local env layer at once
+
+### Usage
+
+```bash
+hack env hydrate [options]
+```
+
+Reads KEY=value entries from piped stdin or --file (never from arguments) and writes them, in one atomic commit, to the worktree-local env file (`hack.env.local.yaml`, or `hack.env.<overlay>.local.yaml` with --env). Tracked env files are never written. Repeating an import with the same values changes nothing; other local entries are kept. Values are never printed.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--json` | Output JSON (machine-readable) |
+| `--secret` | Store value as an encrypted secure entry |
+| `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--file <path>` | Read entries from this file (or a pipe such as <(producer)) instead of stdin |
+| `--format <env|json>` | Input format: KEY=value lines (env, default) or one JSON object of string values (json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

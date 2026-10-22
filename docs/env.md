@@ -575,15 +575,49 @@ rename has these effects:
 - a symlink whose target does not exist is replaced by a regular file
 - a hard link is broken: the env file gets a new inode, and any other name for the old
   file keeps the previous contents
-- the directory must be writable, even when the env file itself is writable
+- the directory must be writable, even when the env file itself is writable; if it is
+  not (for example a `.hack` directory at mode `0555`), Hack refuses with a one-line
+  error that names the env file and says its directory is not writable
 
 A rename does not need write access to the file it replaces, so Hack checks that access
 itself before it stages anything. It refuses to replace an existing env file that it
 cannot read, that is not a regular file, that is not writable, or whose owner and group
-it cannot keep (for example a root-owned file left by an earlier `sudo hack`). The error
-names the file and the reason, never a value, and the file is left as it was. Fix the
-file's permissions or ownership and run the command again. A rewrite keeps the file's
-permission bits, owner and group.
+it cannot keep (for example a root-owned file left by an earlier `sudo hack`). `hack env
+unset` refuses an env file it cannot read in the same way, rather than reporting that
+there is nothing to remove. The error is one line under every `HACK_LOGGER` backend
+(`HACK_DEBUG=1` adds the stack), names the file and the reason, never a value, and the
+file is left as it was. Fix the file's permissions or ownership and run the command
+again. A rewrite keeps the file's permission bits, owner and group.
+
+This includes a file you own whose group you are not a member of. Without root, the new
+file cannot be given that group, so Hack refuses rather than let the file fall back to
+your default group: keeping group-readable permission bits under a different group could let other
+accounts read it (on macOS the default group is usually `staff`, which every local
+account belongs to). Such a file usually comes from moving it (`mv`) out of a directory
+with another group, for example `/tmp` on macOS, where new files take the directory's
+group `wheel`, or from being removed from the file's group. Run `chgrp <your-group>
+<file>` and run the command again.
+
+The other files these commands write fail the same way. These are `.hack/.gitignore`
+(`--local` and `hydrate`), `.hack.secret.key` (the first `--secret` value, including
+the key lock Hack takes in the git directory first), the repository root `.gitignore`
+entry for that key, and `.hack/.internal/` (the `hydrate` lock). If a write is denied,
+the filesystem is read-only, the disk or quota is full, a parent path is not a
+directory, or a directory is in the way of a file, Hack prints one line. That line
+names the file or directory Hack was writing, gives the reason and says what to fix. It
+never shows the raw system error, the hidden staging file name or the lock's staging
+file. An env file on a read-only filesystem is reported as a read-only filesystem, not
+as a file that is not writable.
+
+Each of these lines starts with a stable code, and `--json` puts the same code and
+message in the envelope:
+
+- `E_PERMISSION`: permission denied, a read-only filesystem, or an owner or group Hack
+  cannot keep. A `.hack` directory you cannot search (for example mode `0644`) and one
+  you cannot write (for example mode `0555`) both give this code.
+- `E_NO_SPACE`: the disk or the disk quota is full.
+- `E_PATH_CONFLICT`: a path is the wrong kind of entry, such as a file where Hack needs
+  a directory, or a directory where Hack needs a file.
 
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the

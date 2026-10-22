@@ -8,6 +8,7 @@ import {
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,16 +22,22 @@ import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
   AtomicWriteConflictError,
   AtomicWriteRefusedError,
+  writeTextFileAtomicIfChanged,
 } from "../src/lib/fs.ts";
 import {
   assertValidProjectEnvScopeName,
   ENV_KEY_ASSIGNMENT_MESSAGE,
   ENV_KEY_INVALID_MESSAGE,
   ENV_SCOPE_INVALID_MESSAGE,
+  ENV_SCOPE_UNKNOWN_MESSAGE,
+  HACK_DIR_GITIGNORE_REFUSAL,
+  HackDirGitignoreRefusalError,
   hydrateProjectEnvLocalLayer,
+  ProjectEnvKeyRefusalError,
   parseProjectEnvTarget,
   resolveProjectEnvConfigPath,
   resolveProjectEnvLocalConfigPath,
+  resolveProjectEnvValue,
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
@@ -55,8 +62,11 @@ const KEPT_VALUE = "synthetic-kept-5d0e";
 const NEW_VALUE = "synthetic-new-a713";
 const LAYER = `version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    KEPT_SETTING: ${KEPT_VALUE}\n`;
 
-const RUNS_AS_ROOT =
-  typeof process.getuid === "function" && process.getuid() === 0;
+/**
+ * Permission bits do not bind an effective uid of 0, whatever the real uid is,
+ * so tests that rely on a refused permission skip under it.
+ */
+const RUNS_AS_ROOT = (process.geteuid?.() ?? process.getuid?.() ?? -1) === 0;
 
 const tempDirs = new Set<string>();
 
@@ -568,4 +578,282 @@ test("set, unset and hydrate argument refusals are closed errors", async () => {
     ])
   );
   expect(await readdir(repo.projectRoot)).toEqual([".hack"]);
+});
+
+/**
+ * Synthetic secret values for the key-file refusals, assembled at runtime so
+ * the source holds no secret-shaped literal. Neither may reach any output.
+ */
+const FIRST_SECRET = ["synthetic", "first", "secret", "8b41"].join("-");
+const SECOND_SECRET = ["synthetic", "second", "secret", "e07c"].join("-");
+
+async function runGit(repo: Repo, args: readonly string[]): Promise<void> {
+  const proc = Bun.spawn(["git", ...args], {
+    cwd: repo.projectRoot,
+    env: privateCliEnv({
+      root: repo.root,
+      env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+    }),
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const [stderr, exitCode] = await Promise.all([
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  expect({ args, exitCode, stderr }).toEqual({ args, exitCode: 0, stderr: "" });
+}
+
+function setSecretArgs(repo: Repo, key: string): string[] {
+  return [
+    "env",
+    "set",
+    key,
+    "--secret",
+    "--value-stdin",
+    "--path",
+    repo.projectRoot,
+  ];
+}
+
+/** Sets the first secret, which creates the project key file. */
+async function createProjectKey(
+  repo: Repo,
+  logger: string
+): Promise<{ readonly keyPath: string; readonly keyText: string }> {
+  const first = await runCli({
+    repo,
+    args: setSecretArgs(repo, "SECRET_ONE"),
+    stdin: `${FIRST_SECRET}\n`,
+    logger,
+  });
+  expect(first.exitCode).toBe(0);
+  const keyPath = resolve(repo.projectRoot, ".hack.secret.key");
+  return { keyPath, keyText: (await readFile(keyPath, "utf8")).trim() };
+}
+
+function expectNoSecretMaterial(run: CliRun, keyText: string): void {
+  const output = `${run.stdout}${run.stderr}`;
+  expect(keyText.length).toBeGreaterThan(0);
+  expect(output).not.toContain(keyText);
+  expect(output).not.toContain(FIRST_SECRET);
+  expect(output).not.toContain(SECOND_SECRET);
+}
+
+for (const logger of ["console", "clack", "gum"] as const) {
+  test.skipIf(RUNS_AS_ROOT)(
+    `project key refusals print one line with HACK_LOGGER=${logger}`,
+    async () => {
+      const repo = await createRepo();
+      const file = layerPath(repo, "tracked");
+      await writeFile(file, LAYER);
+      const { keyPath, keyText } = await createProjectKey(repo, logger);
+      const layerBefore = await readFile(file, "utf8");
+
+      // A git-tracked key is refused before it encrypts anything.
+      await runGit(repo, ["init", "-q"]);
+      await runGit(repo, ["add", "-f", ".hack.secret.key"]);
+      const tracked = await runCli({
+        repo,
+        args: setSecretArgs(repo, "SECRET_TWO"),
+        stdin: `${SECOND_SECRET}\n`,
+        logger,
+      });
+      expectOneLineRefusal(
+        tracked,
+        "Refusing to encrypt with a git-tracked .hack.secret.key"
+      );
+      expectNoSecretMaterial(tracked, keyText);
+
+      // An unreadable key is refused the same way.
+      await runGit(repo, ["rm", "-q", "--cached", ".hack.secret.key"]);
+      await chmod(keyPath, 0o000);
+      const unreadable = await runCli({
+        repo,
+        args: setSecretArgs(repo, "SECRET_TWO"),
+        stdin: `${SECOND_SECRET}\n`,
+        logger,
+      });
+      expectOneLineRefusal(
+        unreadable,
+        "Refusing project env key: .hack.secret.key must be"
+      );
+      expectNoSecretMaterial(unreadable, keyText);
+
+      await chmod(keyPath, 0o600);
+      expect(await readFile(file, "utf8")).toBe(layerBefore);
+      expect(await tmpSiblings(repo.projectDir)).toEqual([]);
+    },
+    60_000
+  );
+
+  test(`a symlinked .hack/.gitignore refusal prints one line with HACK_LOGGER=${logger}`, async () => {
+    const repo = await createRepo();
+    await writeFile(layerPath(repo, "tracked"), LAYER);
+    const linkTarget = join(repo.root, "elsewhere-gitignore");
+    await writeFile(linkTarget, "# synthetic\n");
+    await symlink(linkTarget, resolve(repo.projectDir, ".gitignore"));
+
+    const run = await runCli({
+      repo,
+      args: [
+        "env",
+        "set",
+        "NEW_SETTING",
+        "--value-stdin",
+        "--local",
+        "--path",
+        repo.projectRoot,
+      ],
+      stdin: `${NEW_VALUE}\n`,
+      logger,
+    });
+    expectOneLineRefusal(run, HACK_DIR_GITIGNORE_REFUSAL);
+    expect(await readFile(linkTarget, "utf8")).toBe("# synthetic\n");
+    expect(await readdir(repo.projectDir)).not.toContain(
+      layerPath(repo, "local").split("/").at(-1)
+    );
+  }, 60_000);
+
+  test(`an unknown scope refusal prints one line with HACK_LOGGER=${logger}`, async () => {
+    const repo = await createRepo();
+    await writeFile(layerPath(repo, "tracked"), LAYER);
+
+    const run = await runCli({
+      repo,
+      args: [
+        "env",
+        "list",
+        "--service",
+        "nosuch-synthetic-41d7",
+        "--path",
+        repo.projectRoot,
+      ],
+      stdin: "",
+      logger,
+    });
+    expectOneLineRefusal(run, ENV_SCOPE_UNKNOWN_MESSAGE);
+    expect(`${run.stdout}${run.stderr}`).not.toContain("nosuch-synthetic");
+  }, 60_000);
+
+  // Root can create files in a mode-0555 directory.
+  test.skipIf(RUNS_AS_ROOT)(
+    `set and unset in a non-writable .hack print one line with HACK_LOGGER=${logger}`,
+    async () => {
+      const repo = await createRepo();
+      const tracked = layerPath(repo, "tracked");
+      const local = layerPath(repo, "local");
+      await writeFile(tracked, LAYER);
+      await writeFile(local, LAYER);
+      // Make the managed ignore file current, so only the layer write remains.
+      const seeded = await runCli({
+        repo,
+        args: [
+          "env",
+          "set",
+          "KEPT_SETTING",
+          "--value-stdin",
+          "--local",
+          "--path",
+          repo.projectRoot,
+        ],
+        stdin: `${KEPT_VALUE}\n`,
+        logger,
+      });
+      expect(seeded.exitCode).toBe(0);
+      const before = (await readdir(repo.projectDir)).sort();
+      await chmod(repo.projectDir, 0o555);
+      try {
+        const runs: [readonly string[], string][] = [
+          [["env", "set", "NEW_SETTING", "--value-stdin"], tracked],
+          [["env", "set", "NEW_SETTING", "--value-stdin", "--local"], local],
+          [["env", "unset", "KEPT_SETTING"], tracked],
+          [["env", "unset", "KEPT_SETTING", "--local"], local],
+        ];
+        for (const [args, file] of runs) {
+          const run = await runCli({
+            repo,
+            args: [...args, "--path", repo.projectRoot],
+            stdin: `${NEW_VALUE}\n`,
+            logger,
+          });
+          expectOneLineRefusal(
+            run,
+            `Refusing to replace ${file}: its directory is not writable.`
+          );
+          // The random staging path and the raw errno never reach the output.
+          expect(`${run.stdout}${run.stderr}`).not.toContain(".tmp");
+          expect(`${run.stdout}${run.stderr}`).not.toContain("EACCES");
+        }
+      } finally {
+        await chmod(repo.projectDir, 0o755);
+      }
+      expect((await readdir(repo.projectDir)).sort()).toEqual(before);
+      expect(await readFile(tracked, "utf8")).toBe(LAYER);
+      expect(await readFile(local, "utf8")).toBe(LAYER);
+    },
+    60_000
+  );
+}
+
+test.skipIf(RUNS_AS_ROOT)(
+  "an atomic write into a non-writable directory is a closed refusal",
+  async () => {
+    const repo = await createRepo();
+    const file = layerPath(repo, "tracked");
+    await writeFile(file, LAYER);
+    await chmod(repo.projectDir, 0o555);
+    try {
+      const refusal = await refusalOf(
+        writeTextFileAtomicIfChanged(file, `${LAYER}# changed\n`)
+      );
+      expect(refusal).toBeInstanceOf(ClosedCliError);
+      expect(refusal.reason).toBe("directory_not_writable");
+      expect(refusal.message).toBe(
+        `Refusing to replace ${file}: its directory is not writable.`
+      );
+    } finally {
+      await chmod(repo.projectDir, 0o755);
+    }
+    expect(await readFile(file, "utf8")).toBe(LAYER);
+    expect(await tmpSiblings(repo.projectDir)).toEqual([]);
+  }
+);
+
+// The CLI prints a closed error as one line; other code still narrows on
+// these classes with instanceof, so they keep their names and messages.
+test("project key and .hack/.gitignore refusals are closed errors", () => {
+  const gitignore = new HackDirGitignoreRefusalError();
+  expect(gitignore).toBeInstanceOf(ClosedCliError);
+  expect(gitignore).toBeInstanceOf(HackDirGitignoreRefusalError);
+  expect(gitignore.name).toBe("HackDirGitignoreRefusalError");
+  expect(gitignore.message).toBe(HACK_DIR_GITIGNORE_REFUSAL);
+
+  const key = new ProjectEnvKeyRefusalError("Synthetic key refusal.");
+  expect(key).toBeInstanceOf(ClosedCliError);
+  expect(key).toBeInstanceOf(ProjectEnvKeyRefusalError);
+  expect(key.name).toBe("ProjectEnvKeyRefusalError");
+  expect(key.message).toBe("Synthetic key refusal.");
+});
+
+test("an unknown scope in a single-value read is a closed refusal", async () => {
+  const repo = await createRepo();
+  await writeFile(layerPath(repo, "tracked"), LAYER);
+  let caught: unknown;
+  try {
+    await resolveProjectEnvValue({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      serviceNames: ["api"],
+      scope: "nosuch-synthetic-41d7",
+      key: "KEPT_SETTING",
+    });
+  } catch (error: unknown) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(ClosedCliError);
+  expect((caught as Error).message).toBe(
+    `${ENV_SCOPE_UNKNOWN_MESSAGE} Configured scopes: global, api.`
+  );
 });

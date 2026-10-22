@@ -203,7 +203,7 @@ export function selectProjectEnvValues(opts: {
     ? opts.resolved.serviceEnv[scopeName]
     : undefined;
   if (!scoped) {
-    throw new Error(
+    throw new ClosedCliError(
       unknownProjectEnvScopeMessage({
         configuredScopes: Object.keys(opts.resolved.serviceEnv),
       })
@@ -469,9 +469,10 @@ export const HACK_DIR_GITIGNORE_REFUSAL =
 
 /**
  * Refusal to read or write `.hack/.gitignore` through a symlink or a
- * non-regular entry. Names no path or contents.
+ * non-regular entry. Names no path or contents. Closed: the CLI prints its
+ * message as one line, never with a stack.
  */
-export class HackDirGitignoreRefusalError extends Error {
+export class HackDirGitignoreRefusalError extends ClosedCliError {
   constructor() {
     super(HACK_DIR_GITIGNORE_REFUSAL);
     this.name = "HackDirGitignoreRefusalError";
@@ -1126,7 +1127,7 @@ export async function resolveProjectEnvValue(opts: {
     !opts.serviceNames.includes(scope) &&
     !Object.hasOwn(layers.merged.values, scope)
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       unknownProjectEnvScopeMessage({
         configuredScopes: [
           ...opts.serviceNames,
@@ -3647,8 +3648,11 @@ async function readLegacyProjectEnvKeyFile(opts: {
   }
 }
 
-/** Fixed, value-free refusal for legacy key selection, creation and encryption. */
-export class ProjectEnvKeyRefusalError extends Error {
+/**
+ * Fixed, value-free refusal for legacy key selection, creation and encryption.
+ * Closed: the CLI prints its message as one line, never with a stack.
+ */
+export class ProjectEnvKeyRefusalError extends ClosedCliError {
   constructor(message: string) {
     super(message);
     this.name = "ProjectEnvKeyRefusalError";

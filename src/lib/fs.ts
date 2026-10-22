@@ -151,7 +151,8 @@ export class AtomicWriteConflictError extends ClosedCliError {
  * gets the umask default. Unlike an in-place write, a dangling symlink is
  * replaced by a regular file, a hard link to the target is detached (its other
  * names keep the previous contents), and the containing directory must be
- * writable.
+ * writable: a directory that refuses the staging file is reported as an
+ * {@link AtomicWriteRefusedError} that names the target, not the staging path.
  *
  * With `expectedExisting`, the write is a compare-and-swap: the current text
  * (null when absent; an unreadable target is refused, never read as absent)
@@ -190,14 +191,7 @@ export async function writeTextFileAtomicIfChanged(
     dirname(target),
     `.${basename(target)}.${randomUUID()}.tmp`
   );
-  const file = await open(
-    staging,
-    constants.O_CREAT |
-      constants.O_EXCL |
-      constants.O_NOFOLLOW |
-      constants.O_WRONLY,
-    0o666
-  );
+  const file = await openAtomicWriteStaging({ staging, path: absolutePath });
   let committed = false;
   try {
     if (existing.kind === "existing") {
@@ -226,13 +220,54 @@ export async function writeTextFileAtomicIfChanged(
   return { changed: true };
 }
 
+/**
+ * Creates the staging sibling of an atomic write. A directory the caller
+ * cannot create files in (for example a `.hack` left at mode 0555, or a
+ * read-only mount) is refused with the closed `directory_not_writable`
+ * reason, which names the target, never the random staging path. Any other
+ * failure is unexpected and propagates as is. Nothing exists to clean up when
+ * the open fails.
+ */
+async function openAtomicWriteStaging(opts: {
+  readonly staging: string;
+  readonly path: string;
+}): Promise<Awaited<ReturnType<typeof open>>> {
+  try {
+    return await open(
+      opts.staging,
+      constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW |
+        constants.O_WRONLY,
+      0o666
+    );
+  } catch (error: unknown) {
+    if (isDirectoryNotWritableError(error)) {
+      throw new AtomicWriteRefusedError({
+        path: opts.path,
+        reason: "directory_not_writable",
+      });
+    }
+    throw error;
+  }
+}
+
+function isDirectoryNotWritableError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  const code = (error as { readonly code: unknown }).code;
+  return code === "EACCES" || code === "EPERM" || code === "EROFS";
+}
+
 /** Why {@link writeTextFileAtomicIfChanged} refused to replace a file. */
 export type AtomicWriteRefusal =
   | "unreadable"
   | "not_regular_file"
   | "not_writable"
   | "owner_not_preserved"
-  | "group_not_preserved";
+  | "group_not_preserved"
+  | "directory_not_writable";
 
 const ATOMIC_WRITE_REFUSAL_MESSAGES: Readonly<
   Record<AtomicWriteRefusal, string>
@@ -243,6 +278,7 @@ const ATOMIC_WRITE_REFUSAL_MESSAGES: Readonly<
   owner_not_preserved: "its owner and group cannot be preserved",
   group_not_preserved:
     "its group cannot be preserved because you are not a member of that group",
+  directory_not_writable: "its directory is not writable",
 };
 
 /**

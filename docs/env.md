@@ -543,7 +543,9 @@ rename has these effects:
 - a symlink whose target does not exist is replaced by a regular file
 - a hard link is broken: the env file gets a new inode, and any other name for the old
   file keeps the previous contents
-- the directory must be writable, even when the env file itself is writable
+- the directory must be writable, even when the env file itself is writable; if it is
+  not (for example a `.hack` directory at mode `0555`), Hack refuses with a one-line
+  error that names the env file and says its directory is not writable
 
 A rename does not need write access to the file it replaces, so Hack checks that access
 itself before it stages anything. It refuses to replace an existing env file that it

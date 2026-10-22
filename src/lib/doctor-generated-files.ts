@@ -1,4 +1,10 @@
+import { dirname, resolve } from "node:path";
+
 import { PROJECT_ENV_KEY_FILENAME } from "../constants.ts";
+import {
+  type HackDirGitignoreState,
+  inspectHackDirGitignore,
+} from "./project-env-config.ts";
 import { exec } from "./shell.ts";
 
 export type TrackedGeneratedFilesInspection = {
@@ -108,4 +114,33 @@ export async function untrackGeneratedFiles(opts: {
     return { ok: false, error: detail };
   }
   return { ok: true, error: null };
+}
+
+/**
+ * State of the committed `<projectDir>/.gitignore` for the doctor check and
+ * its `--fix` step, or null when the project root is not inside a git work
+ * tree (the file only matters to git). Read-only.
+ *
+ * The git probe runs in the project dir's parent (the project root), not in
+ * the project dir: git follows a symlinked project dir, so a `.hack` that
+ * links outside the repository would look like "not a git checkout" and hide
+ * the `unsafe` state.
+ */
+export async function inspectHackDirGitignoreForDoctor(opts: {
+  readonly projectDir: string;
+}): Promise<HackDirGitignoreState | null> {
+  const projectRoot = dirname(resolve(opts.projectDir));
+  let probe: Awaited<ReturnType<typeof exec>>;
+  try {
+    probe = await exec(
+      ["git", "-C", projectRoot, "rev-parse", "--is-inside-work-tree"],
+      { stdin: "ignore", timeoutMs: 5000 }
+    );
+  } catch {
+    return null;
+  }
+  if (probe.exitCode !== 0 || probe.stdout.trim() !== "true") {
+    return null;
+  }
+  return await inspectHackDirGitignore({ projectDir: opts.projectDir });
 }

@@ -4,7 +4,8 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { lstat, readdir, rm, stat, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, lstat, readdir, rm, stat, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
@@ -31,13 +32,14 @@ import {
   AtomicWriteConflictError,
   ensureDir,
   ensureGitignoreEntry,
-  ensureManagedGitignoreBlock,
+  mergeManagedGitignoreBlock,
   pathExists,
   readTextFile,
   writeTextFile,
   writeTextFileAtomicIfChanged,
   writeTextFileIfChanged,
 } from "./fs.ts";
+import { ensureHackGitInfoExclude } from "./git-info-exclude.ts";
 import {
   resolveGitPrimaryWorktreeRoot,
   resolveGitRepositoryIdentity,
@@ -62,7 +64,10 @@ import {
   createPrivateFileExclusive,
   decodeCanonicalBase64,
   publishPrivateFileExclusive,
+  type ReplaceablePrivateFileOptions,
   readBoundedPrivateFile,
+  readReplaceablePrivateFile,
+  replacePrivateFileAtomic,
 } from "./private-file.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
 import {
@@ -421,22 +426,200 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
  *
  * The file is meant to be committed, so fresh clones and linked worktrees
  * inherit the ignore rules with zero setup. User lines outside the managed
- * markers are preserved; see `ensureManagedGitignoreBlock` for the merge
- * scheme. Self-healing: called from `hack init`, `hack up`, the internal
- * override writers, and env-local override writes.
+ * markers are preserved; see `mergeManagedGitignoreBlock` for the merge
+ * scheme. Called only from explicit commands: `hack init`, `hack doctor
+ * --fix`, and machine-local env writes (`hack env set --local`,
+ * `hack env hydrate`). Runtime commands never call it; they use
+ * `ensureHackGitInfoExclude` so they do not change the working tree.
+ *
+ * No-follow: the file is read with O_NOFOLLOW and replaced through an
+ * exclusive, no-follow temp file and a rename, keeping its mode (0644 when
+ * new). A symlinked or non-regular `.gitignore`, or a symlinked project dir,
+ * throws {@link HackDirGitignoreRefusalError} before anything is written, so a
+ * planted link can never redirect the write outside the project. Ancestors
+ * above the project dir are not inspected.
+ *
+ * Read-only is respected (the same policy as `ensureHackGitInfoExclude` for
+ * `info/exclude`): an existing file that needs an update but that the user
+ * cannot write (for example mode 0444) is left unchanged instead of being
+ * replaced through the rename, which would only need a writable directory.
+ * The result then has `readOnly: true` and `changed: false`; nothing throws,
+ * so callers decide how to report it. A file that is already current is
+ * never probed.
  */
 export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
-}): Promise<{ readonly changed: boolean }> {
+}): Promise<HackDirGitignoreEnsureResult> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await ensureDir(opts.projectDir);
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  return await ensureManagedGitignoreBlock({
-    gitignorePath: resolve(opts.projectDir, ".gitignore"),
+  const options = hackDirGitignoreFileOptions({ projectDir: opts.projectDir });
+  const current = await readReplaceablePrivateFile(options);
+  const next = mergeHackDirGitignore({ existing: current?.text ?? null });
+  if (current?.text === next) {
+    return { changed: false, readOnly: false };
+  }
+  if (current && !(await isHackDirGitignoreWritable(options.path))) {
+    return { changed: false, readOnly: true };
+  }
+  await replacePrivateFileAtomic({
+    ...options,
+    text: next,
+    mode: current ? current.mode & 0o777 : 0o644,
+  });
+  return { changed: true, readOnly: false };
+}
+
+/**
+ * Outcome of {@link ensureHackDirGitignore}. `readOnly` is true only when an
+ * existing file lacked the managed block and was left unchanged because the
+ * user cannot write it.
+ */
+export type HackDirGitignoreEnsureResult = {
+  readonly changed: boolean;
+  readonly readOnly: boolean;
+};
+
+/** Error codes that mean the user may not write the file. */
+const HACK_DIR_GITIGNORE_READ_ONLY_CODES: ReadonlySet<string> = new Set([
+  "EACCES",
+  "EPERM",
+  "EROFS",
+]);
+
+/**
+ * Whether the user may write the existing `.hack/.gitignore`. Only a
+ * permission check: `access(2)` resolves a final symlink, but the caller has
+ * just read the path as a regular file without following links, and the write
+ * that this gates refuses a symlink again on its own. So a link swapped in
+ * between can only skip the write, never redirect it. A file that vanished
+ * counts as writable (the replace recreates it).
+ */
+async function isHackDirGitignoreWritable(path: string): Promise<boolean> {
+  try {
+    await access(path, constants.W_OK);
+    return true;
+  } catch (error: unknown) {
+    if (!(isRecord(error) && typeof error.code === "string")) {
+      throw error;
+    }
+    if (error.code === "ENOENT") {
+      return true;
+    }
+    if (HACK_DIR_GITIGNORE_READ_ONLY_CODES.has(error.code)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/** Fixed, value-free warning for a read-only, outdated `.hack/.gitignore`. */
+export const HACK_DIR_GITIGNORE_READ_ONLY_WARNING =
+  ".hack/.gitignore is read-only and lacks Hack's current managed block, so Hack left it unchanged. Make it writable (chmod u+w .hack/.gitignore), then run 'hack doctor --fix' and commit it.";
+
+/**
+ * {@link ensureHackDirGitignore} for machine-local env writes (`hack env set
+ * --local`, `hack env hydrate`). A read-only file does not fail the command:
+ * it is left unchanged and reported once with
+ * {@link HACK_DIR_GITIGNORE_READ_ONLY_WARNING}. Refusals still throw.
+ *
+ * The warning is written straight to stderr as `WARN: <message>` (like the
+ * env key warnings), never through the UI logger: its clack backend prints to
+ * stdout, and `hack env hydrate --json` must keep stdout pure JSON.
+ */
+async function ensureHackDirGitignoreForLocalEnvWrite(opts: {
+  readonly projectDir: string;
+}): Promise<void> {
+  const result = await ensureHackDirGitignore({ projectDir: opts.projectDir });
+  if (result.readOnly) {
+    process.stderr.write(`WARN: ${HACK_DIR_GITIGNORE_READ_ONLY_WARNING}\n`);
+  }
+}
+
+/** Fixed, value-free message of {@link HackDirGitignoreRefusalError}. */
+export const HACK_DIR_GITIGNORE_REFUSAL =
+  "Refused .hack/.gitignore access: the file or its .hack directory is a symlink or not a regular file. Replace it with a regular file or directory and retry.";
+
+/**
+ * Refusal to read or write `.hack/.gitignore` through a symlink or a
+ * non-regular entry. Names no path or contents.
+ */
+export class HackDirGitignoreRefusalError extends Error {
+  constructor() {
+    super(HACK_DIR_GITIGNORE_REFUSAL);
+    this.name = "HackDirGitignoreRefusalError";
+  }
+}
+
+function hackDirGitignoreFileOptions(opts: {
+  readonly projectDir: string;
+}): ReplaceablePrivateFileOptions {
+  return {
+    path: resolve(opts.projectDir, ".gitignore"),
+    directories: [resolve(opts.projectDir)],
+    refusal: () => new HackDirGitignoreRefusalError(),
+  };
+}
+
+function mergeHackDirGitignore(opts: {
+  readonly existing: string | null;
+}): string {
+  return mergeManagedGitignoreBlock({
+    existing: opts.existing,
     beginMarker: HACK_DIR_GITIGNORE_BEGIN_MARKER,
     endMarker: HACK_DIR_GITIGNORE_END_MARKER,
     entries: HACK_DIR_GITIGNORE_ENTRIES,
   });
+}
+
+/**
+ * State of the committed `.hack/.gitignore`, for `hack doctor`:
+ * - `current`: it carries the canonical managed block
+ * - `missing`: the file does not exist (for example, a project initialized by
+ *   an earlier Hack version)
+ * - `outdated`: it exists without the canonical managed block
+ * - `unsafe`: the file is a symlink or not a regular file, or the project dir
+ *   is a symlink; `--fix` never writes through it
+ * - `read-only`: it exists without the canonical managed block and the user
+ *   cannot write it (for example mode 0444); `--fix` leaves it alone
+ * - `unreadable`: it exists but cannot be read; `--fix` leaves it alone
+ *
+ * Read-only and no-follow: never writes, never reads through a symlink.
+ * `ensureHackDirGitignore` applies the repair.
+ */
+export type HackDirGitignoreState =
+  | "current"
+  | "missing"
+  | "outdated"
+  | "read-only"
+  | "unsafe"
+  | "unreadable";
+
+export async function inspectHackDirGitignore(opts: {
+  readonly projectDir: string;
+}): Promise<HackDirGitignoreState> {
+  const options = hackDirGitignoreFileOptions({ projectDir: opts.projectDir });
+  let current: Awaited<ReturnType<typeof readReplaceablePrivateFile>>;
+  try {
+    current = await readReplaceablePrivateFile(options);
+  } catch (error: unknown) {
+    return error instanceof HackDirGitignoreRefusalError
+      ? "unsafe"
+      : "unreadable";
+  }
+  if (current === null) {
+    return "missing";
+  }
+  if (mergeHackDirGitignore({ existing: current.text }) === current.text) {
+    return "current";
+  }
+  try {
+    return (await isHackDirGitignoreWritable(options.path))
+      ? "outdated"
+      : "read-only";
+  } catch {
+    return "unreadable";
+  }
 }
 
 function toGitRelativePath(opts: {
@@ -2414,7 +2597,7 @@ export async function setProjectEnvValue(opts: {
     });
   }
   if (opts.local === true) {
-    await ensureHackDirGitignore({
+    await ensureHackDirGitignoreForLocalEnvWrite({
       projectDir: opts.projectDir,
     });
   }
@@ -2757,7 +2940,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
   if (!("global" in nextValues)) {
     nextValues.global = {};
   }
-  await ensureHackDirGitignore({ projectDir: opts.projectDir });
+  await ensureHackDirGitignoreForLocalEnvWrite({ projectDir: opts.projectDir });
   try {
     await writeProjectEnvConfigFile({
       path: opts.filePath,
@@ -3080,6 +3263,7 @@ export async function materializeProjectEnv(opts: {
   });
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
   const text = serializeDotEnv(selectedEnv);
+  await ensureHackGitInfoExclude({ projectDir: opts.projectDir });
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   // Mode 0600, atomic replace; a symlinked .env or .hack is refused.
   const changed = (

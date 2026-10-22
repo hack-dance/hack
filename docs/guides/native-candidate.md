@@ -117,7 +117,12 @@ selects the native backend and the adjacent executor, even if an inherited
 with your own Hack home and existing global routing services. It needs no
 `HACK_NATIVE_HOME` and removes the native selectors. Other values refuse with exit
 code 64. The [candidate installer guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends)
-describes Compose testing and its shared-state limits. It preserves arguments, exit codes and
+describes Compose testing and its shared-state limits: run stable `hack global up`,
+then stable `hack daemon stop`, confirm `pgrep -fl "hack daemon start"` prints
+nothing, and run no stable `hack` command while the candidate uses your Hack home.
+Stable `hack global up` (v4.2.0) starts a stopped `hackd` again. Do not commit the
+project's generated `.hack/.internal/` directory; newer generators rewrite files
+such as `compose.override.yml`. The entrypoint preserves arguments, exit codes and
 signals through `exec`, and never replaces the installed `hack`. Project-specific
 native adaptation, dependency and routing selections remain explicit; this entrypoint
 does not prepare a provider or migrate existing projects. An unversioned local
@@ -875,8 +880,10 @@ confirmed. There is no automatic command replay or fallback to Compose.
 `run` uses the running project's environment and profiles. `--env` and `--profile`
 are optional; when given they must equal the selection recorded at startup
 (profiles compare as a set). A different selection, or a legacy mapping without
-recorded selectors, refuses with `E_USAGE` before any runtime request. `run` never
-restarts the project to change its selection.
+recorded selectors, refuses with `E_USAGE` before any runtime request. An empty
+value (`--env ""`, `--profile ""`, or one that is only spaces or commas) also
+refuses with `E_USAGE`: it does not mean "inherit" or an empty selection. Omit
+the option to inherit. `run` never restarts the project to change its selection.
 Services with no managed environment values also support `run`; they keep the
 admitted image's environment without creating a private environment mount or
 launcher. The one-off request still carries an explicit empty, identity-bound

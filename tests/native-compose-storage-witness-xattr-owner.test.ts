@@ -56,6 +56,7 @@ import {
 } from "../src/lib/native-compose-storage-witness-xattr-carrier.ts";
 import { encodeNativeComposeStorageXattrResponse } from "../src/lib/native-compose-storage-witness-xattr-codec.ts";
 import { runNativeComposeStorageXattrHelper } from "../src/lib/native-compose-storage-witness-xattr-helper.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { commandReaderFixture } from "./helpers/native-compose-storage-command-fixture.ts";
 
 const engineId = "d".repeat(64);
@@ -658,6 +659,54 @@ test("completion publication refusal retains its first boundary after complete h
   const saved = await store.loadCurrent();
   expect(saved.storageWitnessesPending).toBe(true);
   expect(saved.storageWitnesses?.[0]?.state).toBe("expected");
+});
+
+test.each([
+  ["unset", undefined, 90_000],
+  ["configured", "240000", 240_000],
+] as const)("command storage carriers use the %s named storage budget, never a short start budget", async (_label, configured, expected) => {
+  const { store, transport } = await rememberedActive();
+  const command = commandPorts(transport);
+  const deadlines: { readonly deadline: number; readonly from: number }[] = [];
+  const carrier = command.ports.carrier;
+  const ports = {
+    ...command.ports,
+    carrier: async (opts: {
+      readonly signal: AbortSignal;
+      readonly deadline: number;
+    }) => {
+      deadlines.push({ deadline: opts.deadline, from: Date.now() });
+      return await carrier(opts);
+    },
+  };
+  const oldStartup = process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS;
+  const oldStorage = process.env.HACK_NATIVE_STORAGE_TIMEOUT_MS;
+  restoreEnv("HACK_COMPOSE_STARTUP_TIMEOUT_MS", "15000");
+  restoreEnv("HACK_NATIVE_STORAGE_TIMEOUT_MS", configured);
+  try {
+    await store.withMutation(async (mutation) => {
+      const before = Date.now();
+      const storage = await prepareNativeComposeCommandStorage({
+        store,
+        mutation,
+        operation: "up",
+        selected: [selection],
+        signal: transport.controller.signal,
+        ports,
+      });
+      expect(storage).not.toBeNull();
+      expect(deadlines.length).toBeGreaterThanOrEqual(2);
+      for (const { deadline, from } of deadlines) {
+        // Each carrier deadline is taken when it is created, from the storage
+        // budget alone: never the 15 s start budget the command was given.
+        expect(deadline).toBeGreaterThanOrEqual(before + expected);
+        expect(deadline).toBeLessThanOrEqual(from + expected);
+      }
+    });
+  } finally {
+    restoreEnv("HACK_COMPOSE_STARTUP_TIMEOUT_MS", oldStartup);
+    restoreEnv("HACK_NATIVE_STORAGE_TIMEOUT_MS", oldStorage);
+  }
 });
 
 test.each([

@@ -203,7 +203,9 @@ async function apply(opts: {
 }) {
   const saved = opts.rollback || opts.recover;
   // A new preparation would pin a literal override for the life of the
-  // adoption. Recovery and rollback act on an existing generation's proof.
+  // adoption. Recovery and rollback act on an existing generation's proof:
+  // the store refuses to publish or complete one bound to a literal override
+  // (HACK-1318), and only `--recover --rollback` releases it.
   if (
     !saved &&
     (await legacyAdoptionEnvOverrideHoldsValues({

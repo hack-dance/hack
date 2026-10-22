@@ -517,7 +517,9 @@ export const portableBootstrapNegativesScenario: Scenario = {
       // 1-3: env refusals happen before any Docker resource exists.
       await stage({ stage: "refuse-missing-key", key: null });
       await nothingCreated("Missing key refusal");
-      // The first lifecycle command converges Hack's managed ignore block.
+      // Lifecycle commands no longer write .hack/.gitignore (HACK-1278). The
+      // allowance and conditional commit stay until this Docker scenario is
+      // rerun on a Docker host with an empty allowance.
       await worktree(
         [".hack/.gitignore"],
         "A refused bootstrap may only add the managed .hack ignore block"

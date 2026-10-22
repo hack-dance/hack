@@ -275,6 +275,10 @@ project name, the image (the cached `oven/bun:1.4.2-slim` repository digest with
 `pull_policy: never` instead of the pinned Alpine image), a declared platform
 (the daemon's architecture) and exact owner labels. Commands, mounts, dependency
 labels, gates and health checks stay as the fixture authored them.
+Owned-container queries list, then inspect. A container that a concurrent
+`hack up` recreates can disappear in between; the helper treats only a listed ID
+that Docker reports missing and `docker ps` confirms absent as removed, and
+fails on any other inspection error (HACK-1296).
 
 - P01 runs a cold and a warm `hack up --json`, a linked worktree, a `bun.lock`
   change and an installer killed mid-run under a fresh generation. Every running

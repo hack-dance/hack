@@ -1,5 +1,7 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import {
+  chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -22,6 +24,7 @@ import {
 } from "../src/lib/fs.ts";
 import {
   ensureHackDirGitignore,
+  HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   hydrateProjectEnvLocalLayer,
   ProjectEnvHydrationRefusalError,
   type ProjectEnvHydrationRefusalReason,
@@ -30,6 +33,7 @@ import {
   resolveProjectEnvLocalConfigPath,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
+import { logger } from "../src/ui/logger.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -252,6 +256,29 @@ async function createTrackedRepo(): Promise<Repo> {
   await commitAll(repo);
   return repo;
 }
+
+test("hydration keeps a read-only outdated .hack/.gitignore and warns instead of failing (HACK-1363)", async () => {
+  const repo = await createRepo();
+  await git(repo, ["init", "-q", "-b", "main"]);
+  const gitignore = resolve(repo.projectDir, ".gitignore");
+  await writeFile(gitignore, "my-own-entry\n");
+  await chmod(gitignore, 0o444);
+  const warn = spyOn(logger, "warn").mockImplementation(() => undefined);
+  try {
+    const result = await hydrate(repo, { PUBLIC_FLAG: "on" }, false);
+    expect(result).toMatchObject({ changed: true, added: ["PUBLIC_FLAG"] });
+    expect(await readFile(repo.localFile, "utf8")).toContain("PUBLIC_FLAG");
+    expect(await readFile(gitignore, "utf8")).toBe("my-own-entry\n");
+    expect((await lstat(gitignore)).mode & 0o777).toBe(0o444);
+    expect(warn.mock.calls).toEqual([
+      [{ message: HACK_DIR_GITIGNORE_READ_ONLY_WARNING }],
+    ]);
+    expect(await stagingFiles(repo)).toEqual([]);
+  } finally {
+    warn.mockRestore();
+    await chmod(gitignore, 0o644);
+  }
+});
 
 test("a repeated import leaves the local layer and the tracked tree byte-identical", async () => {
   const repo = await createTrackedRepo();

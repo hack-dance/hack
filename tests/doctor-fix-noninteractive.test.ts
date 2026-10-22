@@ -7,6 +7,7 @@ import {
   test,
 } from "bun:test";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -90,13 +91,14 @@ const shellMock = await registerScopedModuleMock({
       if (cmd[0] === "docker" && cmd[1] === "network" && cmd[2] === "inspect") {
         return { exitCode: 0, stdout: "[]", stderr: "" };
       }
-      // The fixture project dir counts as a git work tree for the
-      // `.hack/.gitignore` doctor step; every other git probe stays absent.
+      // The fixture project root counts as a git work tree for the
+      // `.hack/.gitignore` doctor step (probed from the root, so a symlinked
+      // `.hack` is not followed); every other git probe stays absent.
       if (
         cmd[0] === "git" &&
         cmd.at(-1) === "--is-inside-work-tree" &&
         typeof cmd[2] === "string" &&
-        cmd[2].endsWith("/project/.hack")
+        cmd[2].endsWith("/project")
       ) {
         return { exitCode: 0, stdout: "true\n", stderr: "" };
       }
@@ -292,6 +294,30 @@ test("doctor --fix creates a missing .hack/.gitignore and keeps user lines on a 
   expect(repaired.startsWith("my-own-entry\n")).toBe(true);
   expect(repaired).toContain(".internal/\n");
   expect(noteCalls.join("\n")).toContain("Updated .hack/.gitignore.");
+}, 30_000);
+
+test("doctor --fix leaves a read-only .hack/.gitignore without the managed block unchanged (HACK-1363)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const gitignore = resolve(projectRoot, ".hack", ".gitignore");
+  await writeFile(gitignore, "my-own-entry\n");
+  await chmod(gitignore, 0o444);
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(
+      await runCli([
+        "doctor",
+        "--fix",
+        "--no-interactive",
+        "--path",
+        projectRoot,
+      ])
+    ).toBe(0);
+    expect(await readFile(gitignore, "utf8")).toBe("my-own-entry\n");
+    expect((await lstat(gitignore)).mode & 0o777).toBe(0o444);
+    expect(noteCalls.join("\n")).not.toContain("Updated .hack/.gitignore.");
+  } finally {
+    await chmod(gitignore, 0o644);
+  }
 }, 30_000);
 
 const OUTSIDE_IGNORE_TEXT = "outside-file-must-not-change\n";

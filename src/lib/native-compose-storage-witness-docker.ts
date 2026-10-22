@@ -145,7 +145,10 @@ function same(left: unknown, right: unknown): boolean {
 }
 function lifetime(context: Context): void {
   if (context.signal.aborted) {
-    refuse();
+    // Same refusal; only its effect reason names the cancellation. A plain
+    // refusal here reached every carrier boundary, including the helper
+    // start's pre-spawn check, as `unclassified` (HACK-1365).
+    refuseCommand("probe-cancel");
   }
   if (Date.now() >= context.deadline) {
     // Same refusal; only its effect reason names the exhausted storage budget.

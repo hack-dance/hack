@@ -251,6 +251,7 @@ const REDACTION_CASES: readonly RedactionCase[] = [
       "API_TOKEN='<x>']gluedbracket",
       'API_TOKEN="<x>"`gluedtick`',
       'API_TOKEN="<x>","gluedquoted"',
+      "API_TOKEN='<x>';gluedsemicolon",
     ].join("\n"),
     leaked: [
       "gluedone",
@@ -263,6 +264,7 @@ const REDACTION_CASES: readonly RedactionCase[] = [
       "gluedbracket",
       "gluedtick",
       "gluedquoted",
+      "gluedsemicolon",
     ].concat(["plainvalue", "gluedsix"]),
     kinds: ["secret"],
     kept: [
@@ -569,7 +571,8 @@ test("placeholders and ordinary Hack text pass through unchanged", () => {
     // A quoted placeholder that is the whole value stays, before any
     // separator, closing bracket, backtick or sentence end.
     `Use \`DB_PASSWORD="<password>"\`, {"API_KEY":"<key>","HACK_A":"<a>"} or token='<token>'.`,
-    'Set A="<a>",B=\'<b>\' or ("<key>") and [API_KEY="<key>"], then `TOKEN="<t>"`.',
+    'Set A="<a>",B=\'<b>\';C="<c>" or ("<key>") and [API_KEY="<key>"], then `TOKEN="<t>"`;',
+    'and API_KEY="<key>"; done.',
     // `-p` is a port or a parents flag outside MySQL and MariaDB clients, and
     // a bare `-p` there prompts for the password.
     "Run `ssh -p 2222 <host>`, `mkdir -p .hack/tmp`, `docker run -p 8080:80 web`,",

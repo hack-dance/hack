@@ -395,18 +395,19 @@ const HEADER_PLACEHOLDER = placeholderValue(String.raw`[\s"'\x60,;]`);
 /** A placeholder standing for a bare JSON value (`[^\s,}]+`). */
 const JSON_PLACEHOLDER = placeholderValue(String.raw`[\s,}]`);
 /**
- * The start of the next assignment or JSON member after a `,`, as in
+ * The start of the next assignment or JSON member after a `,` or `;`, as in
  * `A="<a>",B="<b>"` or `{"A":"<a>","B":"<b>"}`.
  */
 const NEXT_KEY = String.raw`[A-Za-z_][A-Za-z0-9_]*=|"[^"\n]*"\s*:|'[^'\n]*'\s*:`;
 /**
- * Where a quoted value ends: after any closing brackets, backticks, commas
- * and sentence punctuation, at whitespace, a `;` or the end of the text, or
- * at a `,` that starts the next assignment or JSON member. Anything else
- * glued after the closing quote, such as `"<x>",leaked`, `"<x>")leaked` or
- * `"<x>""leaked"`, is part of the same shell value.
+ * Where a quoted value ends: after any closing brackets, backticks, `,`,
+ * `;` and sentence punctuation, at whitespace or the end of the text, or at
+ * a `,` or `;` that starts the next assignment or JSON member. Anything
+ * else glued after the closing quote, such as `"<x>",leaked`,
+ * `"<x>")leaked` or `"<x>""leaked"`, is part of the same value, as a bare
+ * value runs through `,` and `;`.
  */
-const QUOTED_VALUE_END = String.raw`[.:!?,)\]}\x60]*(?:[\s;]|$)|[.:!?)\]}\x60]*,(?=${NEXT_KEY})`;
+const QUOTED_VALUE_END = String.raw`[.:!?,;)\]}\x60]*(?:\s|$)|[.:!?)\]}\x60]*[,;](?=${NEXT_KEY})`;
 /**
  * A double- or single-quoted value that is exactly one placeholder, read
  * after the opening quote. The exemption covers the whole value only.
@@ -419,7 +420,7 @@ const QUOTED_PLACEHOLDER_SINGLE = String.raw`<[^<>'\n]*>'(?=${QUOTED_VALUE_END})
  * so trailing punctuation and closing brackets stay in the text, and an
  * unclosed quote runs to the end of the line.
  */
-const QUOTED_CONTINUATION = String.raw`(?:(?!${QUOTED_VALUE_END})(?:[^\s;"']|"[^"\n]*"?|'[^'\n]*'?))*`;
+const QUOTED_CONTINUATION = String.raw`(?:(?!${QUOTED_VALUE_END})(?:[^\s"']|"[^"\n]*"?|'[^'\n]*'?))*`;
 /** A quoted value with what is glued to it, unless it is one placeholder. */
 const DOUBLE_QUOTED_VALUE = String.raw`"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"${QUOTED_CONTINUATION}`;
 const SINGLE_QUOTED_VALUE = String.raw`'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*'${QUOTED_CONTINUATION}`;

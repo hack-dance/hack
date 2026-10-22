@@ -334,10 +334,12 @@ const REDACTION_CASES: readonly RedactionCase[] = [
       `"HACK_REGION=fixture-region" was set`,
       `ran \`tool --token ${FAKE.password}\` twice`,
       `curl -H 'Authorization: token ${"fx".repeat(8)}9)' once`,
+      `see \`--token=${FAKE.password}\`. Then (API_KEY=${FAKE.password})!`,
     ].join("\n"),
     leaked: [FAKE.password, "fixture-region", `${"fx".repeat(8)}9`],
     kinds: ["secret", "config-value"],
     kept: [
+      "see `--token=<redacted:secret>`. Then (API_KEY=<redacted:secret>)!",
       "`DB_PASSWORD=<redacted:secret>` failed",
       "(set API_TOKEN=<redacted:secret>) first",
       '"HACK_REGION=<redacted:config-value>" was set',
@@ -1188,6 +1190,44 @@ test("negative control: an attachment listed only where a reader cannot see it n
       "details inside a section comment",
       withAttachments("<!-->\n<details>\n\n- `dump.log`\n\n-->"),
     ],
+    // GitHub renders these code blocks as a diagram, map, model or math,
+    // so their source is hidden or typeset, also around the heading.
+    [
+      "mermaid block in the section",
+      withAttachments("```mermaid\n- `dump.log`\n```"),
+    ],
+    [
+      "geojson block around the heading",
+      beforeHeading("```geojson", "- `dump.log`\n```"),
+    ],
+    [
+      "tilde topojson block with more info",
+      withAttachments("~~~ topojson extra\n- `dump.log`\n~~~"),
+    ],
+    ["stl block in a quote", withAttachments("> ```stl\n- `dump.log`")],
+    [
+      "math block hiding with phantom",
+      withAttachments("```math\n\\phantom{\n- `dump.log`\n}\n```"),
+    ],
+    // GitHub drops an unreferenced footnote with its indented lines; a
+    // line indented by four spaces or a tab never lists anything.
+    [
+      "footnote continuation indented four spaces",
+      withAttachments("[^n]: note\n\n    - `dump.log`"),
+    ],
+    [
+      "footnote continuation after a tab",
+      withAttachments("[^n]: x\n\t- `dump.log`"),
+    ],
+    [
+      "footnote definition in the section",
+      withAttachments("[^n]: note\n- `dump.log`"),
+    ],
+    [
+      "footnote label with an escaped bracket",
+      withAttachments("[^a\\]b]: note\n- `dump.log`"),
+    ],
+    ["listing indented four spaces", withAttachments("    - `dump.log`")],
     // Table cells split at pipes before code spans are parsed.
     [
       "table cell splitting a code span",
@@ -1239,6 +1279,10 @@ test("negative control: an attachment listed only where a reader cannot see it n
       "From <redacted:path>, run ``hack run <script>`` and `<details>`.",
       "- `dump.log`"
     ),
+    // A plain code block is shown as text, and three spaces of indentation
+    // still make a visible list item.
+    beforeHeading("```sh\nhack up --json\n```", "- `dump.log`"),
+    withAttachments("   - `dump.log`"),
   ]) {
     const listing = payload.body;
     expect(

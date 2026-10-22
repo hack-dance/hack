@@ -433,9 +433,11 @@ const ASSIGNED_VALUE = String.raw`(?:${DOUBLE_QUOTED_VALUE}|${SINGLE_QUOTED_VALU
  * Closing punctuation at the end of a bare value, such as the backtick of
  * `` `TOKEN=abc` `` or the parenthesis of `(TOKEN=abc)`. It most likely closes
  * the surrounding text, so a redaction keeps up to three of these characters
- * for readability, and never the whole value.
+ * for readability, and never the whole value. Sentence punctuation after
+ * them, as in `` `TOKEN=abc`. ``, stays with them, so the code span still
+ * closes.
  */
-const VALUE_CLOSERS = /[)\]}"'\x60]{1,3}$/;
+const VALUE_CLOSERS = /[)\]}"'\x60]{1,3}[.:!?]{0,3}$/;
 
 /**
  * The placeholder that replaces `value`, followed by the closing punctuation
@@ -1340,7 +1342,7 @@ export const FEEDBACK_GATE_REFUSALS: readonly FeedbackVocabularyEntry<FeedbackGa
     {
       id: "attachment-unlisted",
       summary:
-        "An attachment is not listed by name in the visible Attachments section; HTML comments do not count, and raw HTML such as `<details>`, `<?` or `<!` anywhere in the body, even inside or beside an HTML comment, cancels the listing.",
+        "An attachment is not listed by name in the visible Attachments section; HTML comments do not count, and raw HTML such as `<details>`, `<?` or `<!` anywhere in the body, even inside or beside an HTML comment, cancels the listing. So does a `mermaid`, `geojson`, `topojson`, `stl` or `math` code block anywhere, or a footnote definition in the section; list each attachment as `` - `name` `` without indentation.",
     },
     {
       id: "approval-missing",
@@ -1497,6 +1499,27 @@ const HIDING_HTML_MARKUP = /<[?!]/;
  * start of an HTML comment, for scanning a body with its comments in place.
  */
 const HIDING_MARKUP_BESIDE_COMMENTS = /<\?|<!(?!--)/;
+/**
+ * The opening fence of a code block that GitHub renders as a diagram, map,
+ * 3D model or typeset math instead of text (`mermaid`, `geojson`,
+ * `topojson`, `stl`, `math`). The source of the first four is hidden, and
+ * math can hide text with `\phantom`, so a listing inside one is not
+ * readable, and one opened before the heading holds the whole section.
+ * GitHub reads the first word of the info string in lower case; this
+ * matches any case behind any container marker, so it fails closed.
+ */
+const RICH_RENDER_FENCE =
+  /^\s*(?:(?:>|[-*+]|\d{1,9}[.)])\s*)*(?:`{3,}|~{3,})[ \t]*(?:mermaid|geojson|topojson|stl|math)(?=\s|$)/i;
+/**
+ * A footnote definition. GitHub drops a definition that nothing references,
+ * with the lines indented under it, so a listing there is never shown.
+ */
+const FOOTNOTE_DEFINITION = /^\s*(?:>\s*)*\[\^(?:\\.|[^\]\n])*\]:/;
+/**
+ * A line that can list an attachment: indented by at most three spaces.
+ * A deeper line can continue a footnote definition, which GitHub may drop.
+ */
+const LISTING_LINE = /^ {0,3}\S/;
 const ATTACHMENTS_HEADING = /^##\s+Attachments\s*$/;
 const ANY_HEADING = /^#{1,6}\s/;
 const UNSAFE_ATTACHMENT_NAME = /[`\r\n]/;
@@ -1626,10 +1649,17 @@ function hasHidingHtmlBesideComments(lines: readonly string[]): boolean {
  * element opened before the heading can fold the whole section. The hiding
  * check runs both with comments removed and with them in place, so a listing
  * inside a comment, a `<details>` or a construct that GitHub reads
- * differently from this parser fails closed.
+ * differently from this parser fails closed. A code block that GitHub
+ * renders as a diagram or math anywhere in the body, or a footnote
+ * definition in the section, also cancels the listing, and a line indented
+ * by four or more spaces never lists anything.
  */
 function visibleAttachmentListing(body: string): readonly string[] {
-  if (hasHidingHtmlBesideComments(body.split(NEWLINE))) {
+  const bodyLines = body.split(NEWLINE);
+  if (
+    hasHidingHtmlBesideComments(bodyLines) ||
+    bodyLines.some((line) => RICH_RENDER_FENCE.test(line))
+  ) {
     return [];
   }
   const comments = body.match(HTML_COMMENT) ?? [];
@@ -1640,20 +1670,23 @@ function visibleAttachmentListing(body: string): readonly string[] {
   });
   const listing: string[] = [];
   let inSection = false;
-  let hasHtml = false;
+  let hidesListing = false;
   for (const [index, line] of lines.entries()) {
     const rendered = markup[index] ?? line;
-    hasHtml ||= hasHidingHtml(rendered);
+    hidesListing ||= hasHidingHtml(rendered);
     if (ANY_HEADING.test(line)) {
       inSection = ATTACHMENTS_HEADING.test(line);
       continue;
     }
     if (inSection) {
-      hasHtml ||= HTML_TAG.test(rendered);
-      listing.push(line.trim());
+      hidesListing ||=
+        HTML_TAG.test(rendered) || FOOTNOTE_DEFINITION.test(line);
+      if (LISTING_LINE.test(line)) {
+        listing.push(line.trim());
+      }
     }
   }
-  return hasHtml ? [] : listing;
+  return hidesListing ? [] : listing;
 }
 
 /**

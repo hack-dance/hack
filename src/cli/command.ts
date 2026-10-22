@@ -591,17 +591,21 @@ export function parsePositionalsForCommand<
   }
 
   if (idx < remaining.length) {
-    const extra = remaining.slice(idx).join(" ");
     const single = posSpecs.at(-1);
     if (single?.passthrough === true && single.multiple !== true) {
       // A single-valued child command (such as `session exec`'s <command>)
       // takes the whole command line as one quoted argument.
+      const extra = remaining.slice(idx).join(" ");
       const whole = [out[single.name], ...remaining.slice(idx)].join(" ");
       throw new CliUsageError(
         `Unexpected arguments: ${extra}. <${single.name}> is one argument; quote the whole command, as in ${JSON.stringify(whole)}.`
       );
     }
-    throw new CliUsageError(`Unexpected arguments: ${extra}`);
+    // Count only: an extra argument is often a pasted `KEY=value` or secret.
+    const extra = remaining.length - idx;
+    throw new CliUsageError(
+      `Unexpected arguments: ${extra} more than this command accepts. They are not shown because they may contain values.`
+    );
   }
 
   return out as PositionalsValues<Pos>;

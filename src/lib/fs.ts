@@ -102,6 +102,14 @@ export async function writeTextFileIfChanged(
   return { changed: true };
 }
 
+/** A compare-and-swap write found the file changed by another writer. */
+export class AtomicWriteConflictError extends Error {
+  constructor() {
+    super("The file changed while it was being replaced; nothing was written.");
+    this.name = "AtomicWriteConflictError";
+  }
+}
+
 /**
  * Replaces `absolutePath` with `content` only when the text differs, publishing
  * the new contents atomically.
@@ -131,12 +139,25 @@ export async function writeTextFileIfChanged(
  * replaced by a regular file, a hard link to the target is detached (its other
  * names keep the previous contents), and the containing directory must be
  * writable.
+ *
+ * With `expectedExisting`, the write is a compare-and-swap: the current text
+ * (null when absent; an unreadable target is refused, never read as absent)
+ * must equal it both before staging and again after the
+ * staging file is fsynced, immediately before the rename; otherwise the
+ * staging file is removed and {@link AtomicWriteConflictError} is thrown. The
+ * second check narrows, but cannot close, the window in which a writer that
+ * does not use this check can still be overwritten.
  */
 export async function writeTextFileAtomicIfChanged(
   absolutePath: string,
-  content: string
+  content: string,
+  options: { readonly expectedExisting?: string | null } = {}
 ): Promise<{ readonly changed: boolean }> {
   const existing = await inspectAtomicWriteTarget(absolutePath);
+  const expectsExisting = options.expectedExisting !== undefined;
+  if (expectsExisting && targetText(existing) !== options.expectedExisting) {
+    throw new AtomicWriteConflictError();
+  }
   if (existing.kind === "existing" && existing.text === content) {
     return { changed: false };
   }
@@ -173,6 +194,13 @@ export async function writeTextFileAtomicIfChanged(
     }
     await file.writeFile(content, "utf8");
     await file.sync();
+    if (
+      expectsExisting &&
+      targetText(await inspectAtomicWriteTarget(absolutePath)) !==
+        options.expectedExisting
+    ) {
+      throw new AtomicWriteConflictError();
+    }
     await rename(staging, target);
     committed = true;
   } finally {
@@ -274,6 +302,11 @@ async function inspectAtomicWriteTarget(
     uid: Number(info.uid),
     gid: Number(info.gid),
   };
+}
+
+/** The compare-and-swap view of a target: its text, or null when absent. */
+function targetText(target: AtomicWriteTarget): string | null {
+  return target.kind === "existing" ? target.text : null;
 }
 
 /** Gives the staging file the target's owner and group, or refuses. */

@@ -139,6 +139,7 @@ test(
       env: {
         ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath,
+        HACK_SECRETS_FILE_KEY: "hermetic-provisioning-test-key",
       },
     });
     expect(result.exitCode).toBe(0);
@@ -154,7 +155,7 @@ test(
     expect(json.encrypted_file.keyPath).toBe(keyPath);
 
     const keyText = await readFile(keyPath, "utf8");
-    expect(keyText.trim().length).toBeGreaterThan(10);
+    expect(keyText.trim()).toBe("hermetic-provisioning-test-key");
 
     const configText = await readFile(tempGlobalConfigPath, "utf8");
     expect(configText).toContain('"keyPath"');

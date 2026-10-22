@@ -256,6 +256,7 @@ import {
 import {
   discoverComposeServiceNames,
   ensureHackDirGitignore,
+  HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
@@ -3038,6 +3039,23 @@ async function promptInitUseDiscovery(opts: {
   return useDiscovery;
 }
 
+/**
+ * `hack init` step for the committed `.hack/.gitignore`. Interactive init
+ * reaches an existing file when the user confirms overwriting the scaffold;
+ * a read-only one that lacks the managed block is left unchanged (see
+ * `ensureHackDirGitignore`) and reported with the same fixed warning that
+ * `hack doctor` and the machine-local env writes print, instead of silently.
+ * Init still succeeds: the scaffold does not depend on the file.
+ */
+async function ensureInitHackDirGitignore(opts: {
+  readonly hackDir: string;
+}): Promise<void> {
+  const result = await ensureHackDirGitignore({ projectDir: opts.hackDir });
+  if (result.readOnly) {
+    logger.warn({ message: HACK_DIR_GITIGNORE_READ_ONLY_WARNING });
+  }
+}
+
 async function ensureInitHackDir(opts: {
   readonly io: InitInteractiveIo;
   readonly hackDir: string;
@@ -3186,7 +3204,7 @@ export async function handleInit({
   // Committed, hack-owned ignore file for machine-local generated files
   // (.internal/, .branch/, .env, env state, env-local overrides).
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  await ensureHackDirGitignore({ projectDir: hackDir });
+  await ensureInitHackDirGitignore({ hackDir });
 
   await writeInitScaffoldFile({
     repoRoot,
@@ -3359,7 +3377,7 @@ async function handleInitAuto({
   // Committed, hack-owned ignore file for machine-local generated files
   // (.internal/, .branch/, .env, env state, env-local overrides).
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  await ensureHackDirGitignore({ projectDir: hackDir });
+  await ensureInitHackDirGitignore({ hackDir });
 
   await writeInitScaffoldFile({
     repoRoot,

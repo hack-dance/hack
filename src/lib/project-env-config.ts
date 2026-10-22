@@ -445,10 +445,13 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
  * replaced through the rename, which would only need a writable directory.
  * The result then has `readOnly: true` and `changed: false`; nothing throws,
  * so callers decide how to report it. A file that is already current is
- * never probed.
+ * never probed. See {@link isHackDirGitignoreWritable} for how read-only is
+ * decided, including for root.
  */
 export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
+  /** Test seam; see {@link HackDirGitignoreWriteAccess}. */
+  readonly checkWriteAccess?: HackDirGitignoreWriteAccess;
 }): Promise<HackDirGitignoreEnsureResult> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await ensureDir(opts.projectDir);
@@ -459,7 +462,14 @@ export async function ensureHackDirGitignore(opts: {
   if (current?.text === next) {
     return { changed: false, readOnly: false };
   }
-  if (current && !(await isHackDirGitignoreWritable(options.path))) {
+  if (
+    current &&
+    !(await isHackDirGitignoreWritable({
+      path: options.path,
+      mode: current.mode,
+      checkWriteAccess: opts.checkWriteAccess,
+    }))
+  ) {
     return { changed: false, readOnly: true };
   }
   await replacePrivateFileAtomic({
@@ -488,16 +498,48 @@ const HACK_DIR_GITIGNORE_READ_ONLY_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Whether the user may write the existing `.hack/.gitignore`. Only a
- * permission check: `access(2)` resolves a final symlink, but the caller has
- * just read the path as a regular file without following links, and the write
- * that this gates refuses a symlink again on its own. So a link swapped in
- * between can only skip the write, never redirect it. A file that vanished
- * counts as writable (the replace recreates it).
+ * Write-permission probe for an existing `.hack/.gitignore`: resolves when the
+ * user may write the path, rejects with the `access(2)` error otherwise.
+ * Production uses `access(path, W_OK)`. Tests inject a probe that always
+ * resolves to model root, whose `access(2)` ignores mode bits.
  */
-async function isHackDirGitignoreWritable(path: string): Promise<boolean> {
+export type HackDirGitignoreWriteAccess = (path: string) => Promise<void>;
+
+const accessHackDirGitignoreForWrite: HackDirGitignoreWriteAccess = (path) =>
+  access(path, constants.W_OK);
+
+/** Permission bits that grant write access to owner, group or others. */
+const ANY_WRITE_PERMISSION_BITS = 0o222;
+
+/**
+ * Whether the user may write the existing `.hack/.gitignore`.
+ *
+ * Policy: a file with no write permission bit at all (for example mode 0444)
+ * is read-only for every user, root included. `access(2)` alone cannot decide
+ * this, because it grants root write access whatever the mode, so a 0444 file
+ * would be replaced under `sudo` or in a root container. `mode` is the one the
+ * caller read with the file. When some write bit is set, `access(2)` decides,
+ * so a file that only another user or group may write stays read-only for
+ * this user.
+ *
+ * Only a permission check: `access(2)` resolves a final symlink, but the
+ * caller has just read the path as a regular file without following links,
+ * and the write that this gates refuses a symlink again on its own. So a link
+ * swapped in between can only skip the write, never redirect it. A file that
+ * vanished counts as writable (the replace recreates it).
+ */
+async function isHackDirGitignoreWritable(opts: {
+  readonly path: string;
+  readonly mode: number;
+  readonly checkWriteAccess?: HackDirGitignoreWriteAccess;
+}): Promise<boolean> {
+  if ((opts.mode & ANY_WRITE_PERMISSION_BITS) === 0) {
+    return false;
+  }
+  const checkWriteAccess =
+    opts.checkWriteAccess ?? accessHackDirGitignoreForWrite;
   try {
-    await access(path, constants.W_OK);
+    await checkWriteAccess(opts.path);
     return true;
   } catch (error: unknown) {
     if (!(isRecord(error) && typeof error.code === "string")) {
@@ -597,6 +639,8 @@ export type HackDirGitignoreState =
 
 export async function inspectHackDirGitignore(opts: {
   readonly projectDir: string;
+  /** Test seam; see {@link HackDirGitignoreWriteAccess}. */
+  readonly checkWriteAccess?: HackDirGitignoreWriteAccess;
 }): Promise<HackDirGitignoreState> {
   const options = hackDirGitignoreFileOptions({ projectDir: opts.projectDir });
   let current: Awaited<ReturnType<typeof readReplaceablePrivateFile>>;
@@ -614,7 +658,11 @@ export async function inspectHackDirGitignore(opts: {
     return "current";
   }
   try {
-    return (await isHackDirGitignoreWritable(options.path))
+    return (await isHackDirGitignoreWritable({
+      path: options.path,
+      mode: current.mode,
+      checkWriteAccess: opts.checkWriteAccess,
+    }))
       ? "outdated"
       : "read-only";
   } catch {

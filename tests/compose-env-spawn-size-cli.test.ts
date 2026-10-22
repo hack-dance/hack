@@ -178,14 +178,14 @@ test("twenty services and one 64 KiB global secret start with one shared referen
   expect(args.includes(CANARY)).toBe(false);
 }, 120_000);
 
-test("an environment over the platform limit fails with E_ENV_TOO_LARGE before Compose starts", async () => {
-  // Three 200 KiB global values: each string is over Linux's 128 KiB
-  // MAX_ARG_STRLEN, and two copies of each are over the macOS 1 MiB ARG_MAX.
-  for (const key of ["HUGE_A", "HUGE_B", "HUGE_C"]) {
-    await setGlobal(key, syntheticValue(key, 200 * 1024));
-  }
-
-  const up = await runUp();
+/**
+ * Asserts the closed `E_ENV_TOO_LARGE` outcome of an oversized `up`: exit 1,
+ * byte counts only, no `docker compose` run and no override written.
+ */
+async function expectEnvTooLarge(up: {
+  readonly exitCode: number;
+  readonly stdout: string;
+}): Promise<void> {
   expect(up.exitCode).toBe(1);
   const envelope = JSON.parse(up.stdout) as {
     readonly ok: boolean;
@@ -220,4 +220,37 @@ test("an environment over the platform limit fails with E_ENV_TOO_LARGE before C
     null
   );
   expect(await lstat(overridePath).catch(() => null)).toBeNull();
+}
+
+test("a legacy hack.env.json environment over the platform limit fails with E_ENV_TOO_LARGE before Compose starts", async () => {
+  // Legacy contract path (no hack.env.*.yaml): the values come from
+  // `.hack/.env`, and the same preflight must run before the override is
+  // written or Compose starts. This path passes each value to Compose once,
+  // under its own name, so six 200 KiB values (1.2 MiB) are needed to exceed
+  // the macOS 1 MiB ARG_MAX; each is also over Linux's MAX_ARG_STRLEN.
+  const keys = ["HUGE_A", "HUGE_B", "HUGE_C", "HUGE_D", "HUGE_E", "HUGE_F"];
+  await writeFile(
+    join(hackDir, "hack.env.json"),
+    `${JSON.stringify({
+      version: 1,
+      vars: keys.map((key) => ({ key, source: "plain_env" })),
+    })}\n`
+  );
+  await writeFile(
+    join(hackDir, ".env"),
+    keys.map((key) => `${key}=${syntheticValue(key, 200 * 1024)}\n`).join(""),
+    { mode: 0o600 }
+  );
+
+  await expectEnvTooLarge(await runUp());
+}, 120_000);
+
+test("an environment over the platform limit fails with E_ENV_TOO_LARGE before Compose starts", async () => {
+  // Three 200 KiB global values: each string is over Linux's 128 KiB
+  // MAX_ARG_STRLEN, and two copies of each are over the macOS 1 MiB ARG_MAX.
+  for (const key of ["HUGE_A", "HUGE_B", "HUGE_C"]) {
+    await setGlobal(key, syntheticValue(key, 200 * 1024));
+  }
+
+  await expectEnvTooLarge(await runUp());
 }, 120_000);

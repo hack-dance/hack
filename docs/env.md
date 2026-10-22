@@ -62,17 +62,26 @@ How it is maintained:
   initialized), `hack doctor` reports the "hack gitignore" check as a warning,
   and `hack doctor --fix` creates the file, or restores its managed block,
   as its own step. Commit the result so fresh clones and worktrees get the
-  rules. `hack init` does not repair an existing project. Hack never writes
+  rules. `hack init` does not repair an existing project unless you confirm
+  overwriting its scaffold files. Hack never writes
   through a symlinked `.hack/.gitignore` or `.hack/` (including a `.hack/`
   that links outside the repository); doctor reports that case and leaves it
-  alone.
-- a read-only `.hack/.gitignore` (for example mode 0444) is never replaced,
-  the same policy as for `info/exclude`. When it lacks the managed block,
+  alone. Doctor asks git about the project root (the directory that holds
+  `.hack/`), not about `.hack/` itself. So when the project root is not a git
+  checkout, the check reports "Skipped (not a git checkout)" even if `.hack/`
+  links into another repository; Hack still refuses to write through that
+  link.
+- a read-only `.hack/.gitignore` is never replaced, the same policy as for
+  `info/exclude`. A file with no write permission bit (for example mode 0444)
+  is read-only for every user, root included; otherwise Hack asks the
+  operating system whether you may write it. When it lacks the managed block,
   `hack doctor` warns and names the fix (make it writable, then run
   `hack doctor --fix`), and `--fix` leaves it unchanged. `hack env set --local`
   and `hack env hydrate` still write the local layer, print the same warning
   on stderr (so `--json` output on stdout stays valid JSON), and leave the
-  file unchanged. A read-only file that already has the block is fine.
+  file unchanged. Interactive `hack init` that overwrites an existing scaffold
+  prints the same warning and leaves the file unchanged. A read-only file that
+  already has the block is fine.
 - runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
   into your working tree to set up ignores, so they leave `git status`
   unchanged. Before they write `.hack/.internal/` or `.hack/.branch/` files,
@@ -249,8 +258,14 @@ A value that a service gets from the global scope uses one `HACK_ENV_*` referenc
 by every such service. A key that a service scope sets keeps a reference of its own for
 that service. The Compose client environment therefore grows with the distinct values,
 not with services times keys: twenty services that share one 64 KiB global value add
-about 64 KiB, not 1.25 MiB. The choice follows which scope sets each key, never the
-values, so the override file still holds no value. Compose also receives each global
+about 64 KiB, not 1.25 MiB. The choice follows which scope sets each key, so the
+override file still holds no value. One safety check does compare values: if a key that
+the resolved scopes call global has a value for a service that differs from the global
+value, that service keeps a reference of its own for the key, so the container still gets
+its own value. In that case the file shows that the service's value differs from the
+global value, but never the value itself or its length. With a normal env config the
+scopes and values come from the same resolution and always agree, so this check never
+changes the file. Compose also receives each global
 value under its own name for `${KEY}` interpolation in your Compose file, so a global
 value reaches the `docker compose` process twice.
 

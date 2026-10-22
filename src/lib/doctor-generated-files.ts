@@ -125,6 +125,12 @@ export async function untrackGeneratedFiles(opts: {
  * the project dir: git follows a symlinked project dir, so a `.hack` that
  * links outside the repository would look like "not a git checkout" and hide
  * the `unsafe` state.
+ *
+ * The converse is intended: when the project root is not in a git work tree,
+ * the result is null even if `.hack` links into another repository, because
+ * the root's git (which has none) is the one the file would serve. Doctor
+ * then reports "Skipped (not a git checkout)"; writes through that link are
+ * still refused by `ensureHackDirGitignore`.
  */
 export async function inspectHackDirGitignoreForDoctor(opts: {
   readonly projectDir: string;

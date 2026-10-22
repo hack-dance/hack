@@ -268,6 +268,10 @@ export function normalizeProjectEnvScopeName(opts: {
   return scopeName.length === 0 ? "global" : scopeName;
 }
 
+/**
+ * Returns the normalized scope (`global` when empty), or refuses with the
+ * fixed, value-free `ENV_SCOPE_INVALID_MESSAGE` as a `ClosedCliError`.
+ */
 export function assertValidProjectEnvScopeName(opts: {
   readonly scopeName?: string | null;
 }): string {
@@ -275,7 +279,7 @@ export function assertValidProjectEnvScopeName(opts: {
     scopeName: opts.scopeName,
   });
   if (!isValidProjectEnvScopeName({ scopeName })) {
-    throw new Error(ENV_SCOPE_INVALID_MESSAGE);
+    throw new ClosedCliError(ENV_SCOPE_INVALID_MESSAGE);
   }
   return scopeName;
 }
@@ -2394,7 +2398,7 @@ export async function setProjectEnvValue(opts: {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   if (!PROJECT_ENV_KEY_PATTERN.test(opts.key)) {
-    throw new Error(ENV_KEY_INVALID_MESSAGE);
+    throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
   }
   const scope = assertValidProjectEnvScopeName({
     scopeName: opts.scope,
@@ -2659,7 +2663,7 @@ export async function hydrateProjectEnvLocalLayer(opts: {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   for (const key of opts.entries.keys()) {
     if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
-      throw new Error(ENV_KEY_INVALID_MESSAGE);
+      throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
     }
   }
   const scope = assertValidProjectEnvScopeName({ scopeName: opts.scope });
@@ -4836,6 +4840,11 @@ function addProjectLocalCleanupCandidate(opts: {
   }
 }
 
+/**
+ * Splits a `KEY` or `scope.KEY` argument for `hack env set`, `unset` and
+ * `explain`. Every refusal is a fixed, value-free `ClosedCliError`, so the CLI
+ * prints it as one line under every logger and never echoes the argument.
+ */
 export function parseProjectEnvTarget(input: {
   readonly keyOrPath: string;
   readonly scopeOverride?: string | undefined;
@@ -4845,30 +4854,32 @@ export function parseProjectEnvTarget(input: {
 } {
   const trimmed = input.keyOrPath.trim();
   if (trimmed.length === 0) {
-    throw new Error("Env key is required.");
+    throw new ClosedCliError("Env key is required.");
   }
   // Refuse `KEY=value` before any dotted-scope split, so no fragment of the
   // value can reach a scope or key error. Every refusal below is fixed text.
   if (trimmed.includes("=")) {
-    throw new Error(ENV_KEY_ASSIGNMENT_MESSAGE);
+    throw new ClosedCliError(ENV_KEY_ASSIGNMENT_MESSAGE);
   }
 
   const dotIndex = trimmed.lastIndexOf(".");
   if (dotIndex > 0) {
     if (input.scopeOverride) {
-      throw new Error("Do not combine dotted scope syntax with --service.");
+      throw new ClosedCliError(
+        "Do not combine dotted scope syntax with --service."
+      );
     }
     const scope = trimmed.slice(0, dotIndex).trim();
     const key = trimmed.slice(dotIndex + 1).trim();
     assertValidProjectEnvScopeName({ scopeName: scope });
     if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
-      throw new Error(ENV_KEY_INVALID_MESSAGE);
+      throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
     }
     return { scope, key };
   }
 
   if (!PROJECT_ENV_KEY_PATTERN.test(trimmed)) {
-    throw new Error(ENV_KEY_INVALID_MESSAGE);
+    throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
   }
   return {
     scope: assertValidProjectEnvScopeName({

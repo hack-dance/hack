@@ -18,8 +18,17 @@ import {
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
-import { AtomicWriteRefusedError } from "../src/lib/fs.ts";
 import {
+  AtomicWriteConflictError,
+  AtomicWriteRefusedError,
+} from "../src/lib/fs.ts";
+import {
+  assertValidProjectEnvScopeName,
+  ENV_KEY_ASSIGNMENT_MESSAGE,
+  ENV_KEY_INVALID_MESSAGE,
+  ENV_SCOPE_INVALID_MESSAGE,
+  hydrateProjectEnvLocalLayer,
+  parseProjectEnvTarget,
   resolveProjectEnvConfigPath,
   resolveProjectEnvLocalConfigPath,
   setProjectEnvValue,
@@ -416,3 +425,147 @@ for (const logger of ["console", "clack", "gum"] as const) {
     60_000
   );
 }
+
+/**
+ * Synthetic key and scope arguments shaped like a mistyped value. Neither may
+ * appear in output: the refusals are fixed text. The key is assembled at
+ * runtime so the source holds no secret-shaped literal.
+ */
+const INVALID_NAME_ARGUMENT = ["synthetic", "lowercase", "3c9e"].join("-");
+const BAD_SCOPE_ARGUMENT = "Bad Scope synthetic-6b2d!";
+
+const ARGUMENT_REFUSALS = [
+  {
+    name: "set with an invalid key",
+    args: ["env", "set", INVALID_NAME_ARGUMENT, "--value-stdin"],
+    message: ENV_KEY_INVALID_MESSAGE,
+  },
+  {
+    name: "unset with an invalid key",
+    args: ["env", "unset", INVALID_NAME_ARGUMENT],
+    message: ENV_KEY_INVALID_MESSAGE,
+  },
+  {
+    name: "set with an invalid --service scope",
+    args: [
+      "env",
+      "set",
+      "NEW_SETTING",
+      "--service",
+      BAD_SCOPE_ARGUMENT,
+      "--value-stdin",
+    ],
+    message: ENV_SCOPE_INVALID_MESSAGE,
+  },
+  {
+    name: "unset with an invalid dotted scope",
+    args: ["env", "unset", `${BAD_SCOPE_ARGUMENT}.KEPT_SETTING`],
+    message: ENV_SCOPE_INVALID_MESSAGE,
+  },
+] as const;
+
+for (const logger of ["console", "clack", "gum"] as const) {
+  test(`env set and unset argument refusals print one line with HACK_LOGGER=${logger}`, async () => {
+    const repo = await createRepo();
+    const file = layerPath(repo, "tracked");
+    await writeFile(file, LAYER);
+
+    for (const refusal of ARGUMENT_REFUSALS) {
+      const run = await runCli({
+        repo,
+        args: [...refusal.args, "--path", repo.projectRoot],
+        stdin: `${NEW_VALUE}\n`,
+        logger,
+      });
+      expectOneLineRefusal(run, refusal.message);
+      const output = `${run.stdout}${run.stderr}`;
+      expect(output).not.toContain(INVALID_NAME_ARGUMENT);
+      expect(output).not.toContain("synthetic-6b2d");
+    }
+    expect(await readFile(file, "utf8")).toBe(LAYER);
+    expect(await tmpSiblings(repo.projectDir)).toEqual([]);
+  }, 60_000);
+}
+
+// A lost compare-and-swap is reported by hydrate and other writers; the CLI
+// prints a closed error as one line, so the class must stay closed.
+test("a write conflict is a closed refusal", () => {
+  const conflict = new AtomicWriteConflictError();
+  expect(conflict).toBeInstanceOf(ClosedCliError);
+  expect(conflict.message).toBe(
+    "The file changed while it was being replaced; nothing was written."
+  );
+});
+
+test("set, unset and hydrate argument refusals are closed errors", async () => {
+  const repo = await createRepo();
+  const base = {
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+  };
+  const refusals: [() => unknown, string][] = [
+    [() => parseProjectEnvTarget({ keyOrPath: " " }), "Env key is required."],
+    [
+      () => parseProjectEnvTarget({ keyOrPath: `KEY=${NEW_VALUE}` }),
+      ENV_KEY_ASSIGNMENT_MESSAGE,
+    ],
+    [
+      () =>
+        parseProjectEnvTarget({ keyOrPath: "api.KEY", scopeOverride: "api" }),
+      "Do not combine dotted scope syntax with --service.",
+    ],
+    [
+      () =>
+        parseProjectEnvTarget({ keyOrPath: `api.${INVALID_NAME_ARGUMENT}` }),
+      ENV_KEY_INVALID_MESSAGE,
+    ],
+    [
+      () => parseProjectEnvTarget({ keyOrPath: INVALID_NAME_ARGUMENT }),
+      ENV_KEY_INVALID_MESSAGE,
+    ],
+    [
+      () => assertValidProjectEnvScopeName({ scopeName: BAD_SCOPE_ARGUMENT }),
+      ENV_SCOPE_INVALID_MESSAGE,
+    ],
+    [
+      () =>
+        setProjectEnvValue({
+          ...base,
+          scope: "global",
+          key: INVALID_NAME_ARGUMENT,
+          value: NEW_VALUE,
+          secret: false,
+        }),
+      ENV_KEY_INVALID_MESSAGE,
+    ],
+    [
+      () =>
+        hydrateProjectEnvLocalLayer({
+          ...base,
+          scope: "global",
+          entries: new Map([[INVALID_NAME_ARGUMENT, NEW_VALUE]]),
+          secret: false,
+        }),
+      ENV_KEY_INVALID_MESSAGE,
+    ],
+  ];
+  for (const [refuse, message] of refusals) {
+    let caught: unknown;
+    try {
+      await refuse();
+    } catch (error: unknown) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ClosedCliError);
+    expect((caught as Error).message).toBe(message);
+  }
+  // Nothing was written: no layer and no key file.
+  expect(await readdir(repo.projectDir)).toEqual(
+    expect.not.arrayContaining([
+      layerPath(repo, "tracked").split("/").at(-1),
+      layerPath(repo, "local").split("/").at(-1),
+    ])
+  );
+  expect(await readdir(repo.projectRoot)).toEqual([".hack"]);
+});

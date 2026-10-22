@@ -762,6 +762,9 @@ for (const logger of ["console", "clack", "gum"] as const) {
       });
       expect(seeded.exitCode).toBe(0);
       const before = (await readdir(repo.projectDir)).sort();
+      // The seeding set may reformat the local layer; compare to what it left.
+      const trackedBefore = await readFile(tracked, "utf8");
+      const localBefore = await readFile(local, "utf8");
       await chmod(repo.projectDir, 0o555);
       try {
         const runs: [readonly string[], string][] = [
@@ -789,8 +792,8 @@ for (const logger of ["console", "clack", "gum"] as const) {
         await chmod(repo.projectDir, 0o755);
       }
       expect((await readdir(repo.projectDir)).sort()).toEqual(before);
-      expect(await readFile(tracked, "utf8")).toBe(LAYER);
-      expect(await readFile(local, "utf8")).toBe(LAYER);
+      expect(await readFile(tracked, "utf8")).toBe(trackedBefore);
+      expect(await readFile(local, "utf8")).toBe(localBefore);
     },
     60_000
   );

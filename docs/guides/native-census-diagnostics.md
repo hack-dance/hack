@@ -8,21 +8,32 @@ Recovery quiescence bounds its census to those rows of interest. A foreign row
 decides nothing, but nothing about it is accepted on trust either:
 
 - Drift of one foreign process between the two observations (same PID and
-  birth, never a zombie) is accepted. Examples are exec, reparenting, a PGID or
-  SID change, and live/transient state.
-- Foreign PID reuse and foreign zombie churn supersede the pair.
-- A failed SID lookup for a live row whose PID and PGID are both foreign also
-  supersedes the attempt. On macOS this happens when a process exits, or
-  becomes a zombie, between the listing and the lookup.
+  birth) is accepted. Examples are exec, reparenting, a PGID or SID change,
+  live/transient state, and a live process becoming a zombie.
+- A foreign zombie seen in only one observation is kept and counted as an
+  unresolved zombie. A zombie cannot execute.
+- On macOS, a process that exits between the listing and its SID lookup fails
+  that lookup. For a live row whose PID and PGID are both foreign, the census
+  resolves the SID from stable rows: processes listed in both observations with
+  the same known SID, which is not the original's. The failed row takes the SID
+  its own process showed earlier, the SID of a stable row in its PGID (a process
+  group lies within one session), or the SID of a stable parent that never led
+  a session (its children are born into that SID). A resolved SID is never the
+  original's. A row of interest whose lookup fails still refuses.
+- Foreign PID reuse, a zombie turning live, or a failed SID lookup that cannot
+  be resolved supersedes the pair.
 
 A superseded attempt is discarded whole. It leaves no denial fact, and it needs
 two new complete observations within the same budget. A census without rows of
 interest still refuses every change. Diagnostics do not authorize retry, extend
 the three-second budget, or establish runtime acceptance.
 
-Heavy short-lived process churn can still exhaust the budget. If most listings
-include a process that exits before its SID is read, the census refuses as
-expired.
+Heavy short-lived process churn can still exhaust the budget. A whole
+short-lived process tree that exits before its SIDs are read, or a short-lived
+child that leads its own process group under a session leader, cannot be
+resolved. If most listings include one, the census refuses as expired. The
+parent rule trusts the listed parent; ptrace attachment also reparents a
+process, to its debugger.
 
 For source-level investigation, explicitly create a
 `createNativeProcessCensusDiagnostics()` collector from

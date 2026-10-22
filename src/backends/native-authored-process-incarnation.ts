@@ -350,12 +350,17 @@ function superseded(): never {
   supersededCensuses.add(failure);
   throw failure;
 }
+/** A live or transient row whose SID lookup failed. */
+function vanished(row: NativeAuthoredProcessRow): boolean {
+  return row.state !== "zombie" && row.session === null;
+}
 function observation(
-  rows: readonly NativeAuthoredProcessRow[]
+  rows: readonly NativeAuthoredProcessRow[],
+  interest: NativeAuthoredCensusInterest | undefined
 ): ReadonlyMap<number, NativeAuthoredProcessRow> {
   const result = new Map<number, NativeAuthoredProcessRow>();
   for (const row of rows) {
-    if (row.state !== "zombie" && row.session === null) {
+    if (vanished(row) && !unavailableForeignSession(row, interest)) {
       return refused();
     }
     const prior = result.get(row.pid);
@@ -367,10 +372,107 @@ function observation(
   return result;
 }
 
-/** Two complete observations preserve every row. Only irreversibly nonexecuting
- * Z rows may have unavailable SID; they must retain the same identity/state in
- * both snapshots. This is qualified no-live-members evidence, never whole
- * session absence.
+/** Resolves the SID of a foreign row whose own SID lookup failed, at the
+ * listing of the observation that holds it, or returns undefined. Only stable
+ * rows are proof: the same incarnation, live or transient, with one known SID
+ * that is not the original's in both observations (PID reuse already
+ * supersedes the pair, so the PID alone names it here). A process changes session
+ * only by `setsid`, which makes it the leader of a new session named by its own
+ * PID for the rest of its life. So a stable row held its SID throughout the
+ * later listing, and one whose SID is not its own PID (it never led a session)
+ * held it since its birth.
+ * - Group: a process group lies within one session, so a row listed in the
+ *   PGID of a stable row, every known SID in that PGID agreeing, shared its
+ *   SID. For the earlier listing a stable session leader proves only its own
+ *   PGID: `setsid` refuses a process group leader, so it would first have had
+ *   to leave the group it led. Such a row had exited before the later listing,
+ *   which holds every live descendant of it.
+ * - Parent: every child a stable parent that never led a session forked was
+ *   born into that SID, and can leave it only for a new session of its own.
+ *   Launchd (PID 1) adopts orphans and leads its own session, so it proves
+ *   nothing. Residual: ptrace attachment also reparents, to the debugger. */
+type ForeignSessionResolver = (
+  row: NativeAuthoredProcessRow,
+  side: "earlier" | "later"
+) => string | undefined;
+function foreignSessionResolver(
+  earlier: ReadonlyMap<number, NativeAuthoredProcessRow>,
+  later: ReadonlyMap<number, NativeAuthoredProcessRow>,
+  interest: NativeAuthoredCensusInterest
+): ForeignSessionResolver {
+  const stable = new Map<number, string>();
+  for (const [pid, second] of later) {
+    const first = earlier.get(pid);
+    if (
+      first !== undefined &&
+      second.state !== "zombie" &&
+      first.session !== null &&
+      first.session === second.session &&
+      first.session !== interest.session
+    ) {
+      stable.set(pid, first.session);
+    }
+  }
+  const leader = (pid: number) => stable.get(pid) === String(pid);
+  const groups = (side: ReadonlyMap<number, NativeAuthoredProcessRow>) => {
+    const known = new Map<number, string | null>();
+    const proven = new Set<number>();
+    for (const row of side.values()) {
+      if (row.state === "zombie" || row.session === null) {
+        continue;
+      }
+      const prior = known.get(row.group);
+      known.set(
+        row.group,
+        prior === undefined || prior === row.session ? row.session : null
+      );
+      if (
+        stable.has(row.pid) &&
+        (side === later || !leader(row.pid) || row.group === row.pid)
+      ) {
+        proven.add(row.group);
+      }
+    }
+    return (group: number) =>
+      proven.has(group) ? (known.get(group) ?? undefined) : undefined;
+  };
+  const proofs = { earlier: groups(earlier), later: groups(later) };
+  return (row, side) => {
+    const group = proofs[side](row.group);
+    if (group !== undefined) {
+      return group;
+    }
+    return leader(row.parent) ? undefined : stable.get(row.parent);
+  };
+}
+
+/** The row a pair keeps for one PID that is not a row of interest (or is seen
+ * in one observation only), or undefined when it supersedes the pair. */
+function settledForeignRow(opts: {
+  readonly first: NativeAuthoredProcessRow | undefined;
+  readonly second: NativeAuthoredProcessRow | undefined;
+  readonly resolve: ForeignSessionResolver;
+}): NativeAuthoredProcessRow | undefined {
+  const { first, second, resolve } = opts;
+  if (!(first && second)) {
+    const row = first ?? second ?? refused();
+    if (!vanished(row)) {
+      return row;
+    }
+    const session = resolve(row, first ? "earlier" : "later");
+    return session === undefined ? undefined : { ...row, session };
+  }
+  if (
+    first.birth !== second.birth ||
+    (second.state !== "zombie" && (vanished(first) || first.state === "zombie"))
+  ) {
+    return;
+  }
+  return vanished(second) ? { ...second, session: first.session } : second;
+}
+
+/** Two complete observations preserve every row. This is qualified
+ * no-live-members evidence, never whole session absence.
  *
  * Without `interest` every PID decides: reuse, any field or state change, or a
  * zombie seen in only one observation refuses. With `interest` a PID decides
@@ -378,22 +480,27 @@ function observation(
  * exactly that strict rule, so drift, PID reuse and unstable zombies of interest
  * still refuse. A foreign PID decides nothing, since only rows of interest can
  * veto quiescence:
- * - The same incarnation (PID and birth), live or transient in both: its SID
- *   was read between two listings of that one process, so exec, reparenting,
- *   PGID, SID or live/transient drift is ordinary host churn. The later row is
- *   kept; neither version is of interest, so neither could veto.
- * - PID reuse, or a zombie that appears, disappears or changes: the earlier SID
- *   may belong to another incarnation, and an unresolved zombie must be stable
- *   across an accepted pair. The pair is superseded, never accepted; the census
- *   discards it and needs two fresh complete observations within its budget.
+ * - The same incarnation (PID and birth) in both, live with a known SID or a
+ *   zombie in the later one: exec, reparenting, PGID, SID, live/transient or
+ *   live-to-zombie drift is ordinary host churn. The later row is kept.
+ * - A foreign zombie seen in only one observation cannot execute, so it is kept
+ *   and counted as an unresolved zombie.
+ * - A foreign row whose SID lookup failed (macOS: it exited between `ps` and
+ *   `getsid`) is never kept with an unknown SID. In the later observation it
+ *   takes the SID its incarnation showed in the earlier one. Otherwise it takes
+ *   the SID proven for its PGID or parent (see `foreignSessionResolver`), which
+ *   is never the original's.
+ * - PID reuse, a zombie turning live, a failed SID lookup followed by a live
+ *   row, or an unresolved failed lookup supersedes the pair. It is never
+ *   accepted; the census discards it and needs two fresh complete observations.
  * A refusal of a row of interest always wins over supersession. */
 export function mergeNativeAuthoredProcessCensuses(
   before: readonly NativeAuthoredProcessRow[],
   after: readonly NativeAuthoredProcessRow[],
   interest?: NativeAuthoredCensusInterest
 ): readonly NativeAuthoredProcessRow[] {
-  const earlier = observation(before);
-  const later = observation(after);
+  const earlier = observation(before, interest);
+  const later = observation(after, interest);
   const decides = (pid: number) =>
     [earlier.get(pid), later.get(pid)].some(
       (row) =>
@@ -403,41 +510,37 @@ export function mergeNativeAuthoredProcessCensuses(
           row.group === interest.group ||
           (row.session !== null && row.session === interest.session))
     );
+  const resolve =
+    interest === undefined
+      ? refused
+      : foreignSessionResolver(earlier, later, interest);
   const merged = new Map<number, NativeAuthoredProcessRow>();
   const unstable: number[] = [];
   let churned = false;
   for (const pid of new Set([...earlier.keys(), ...later.keys()])) {
     const first = earlier.get(pid);
     const second = later.get(pid);
-    if (!(first && second)) {
-      const row = first ?? second ?? refused();
-      if (row.state === "zombie") {
-        unstable.push(pid);
-      }
-      merged.set(pid, row);
-      continue;
+    if (!(first && second) && (first ?? second)?.state === "zombie") {
+      unstable.push(pid);
     }
-    if (sameRow(first, second)) {
+    if (first && second && sameRow(first, second) && !vanished(second)) {
       merged.set(pid, second);
       continue;
     }
-    if (decides(pid)) {
+    if (first && second && decides(pid)) {
       return changedIdentity();
     }
-    if (
-      first.birth === second.birth &&
-      first.state !== "zombie" &&
-      second.state !== "zombie"
-    ) {
-      merged.set(pid, second);
-      continue;
+    const kept = settledForeignRow({ first, second, resolve });
+    if (kept) {
+      merged.set(pid, kept);
+    } else {
+      churned = true;
     }
-    churned = true;
   }
   if (unstable.some(decides)) {
     return refused();
   }
-  if (churned || unstable.length > 0) {
+  if (churned) {
     return superseded();
   }
   return [...merged.values()];
@@ -493,11 +596,10 @@ async function unavailableSession(
  * and PGID can show it is of interest. On macOS a process that exits, or turns
  * into a zombie, between `ps` and `getsid` fails the lookup; on a busy host
  * that is ordinary churn. With `interest`, a row whose PID and PGID are both
- * foreign therefore supersedes the attempt at once: no diagnostic re-listing,
- * no denial fact, and nothing from the attempt is accepted. Its session may
- * still be the original's, so it is never dropped from an accepted pair. A row
- * of interest, and every row of an unbounded census, keeps the classified
- * disappearance or refusal below. */
+ * foreign is therefore kept with a null SID, without a diagnostic re-listing or
+ * a denial fact. The merge resolves it or supersedes the pair, and never
+ * accepts an unknown SID. A row of interest, and every row of an unbounded
+ * census, keeps the classified disappearance or refusal below. */
 function unavailableForeignSession(
   row: NativeAuthoredProcessRow,
   interest: NativeAuthoredCensusInterest | undefined
@@ -556,12 +658,10 @@ async function sessionRows(
           continue;
         }
         const sid = row.pid === probe ? session : inspector.session(row.pid);
-        if (sid === null) {
-          return unavailableForeignSession(row, interest)
-            ? superseded()
-            : await unavailableSession(row, end, denied);
+        if (sid === null && !unavailableForeignSession(row, interest)) {
+          return await unavailableSession(row, end, denied);
         }
-        result.push({ ...row, session: String(sid) });
+        result.push({ ...row, session: sid === null ? null : String(sid) });
       }
       complete = true;
       return result;
@@ -627,8 +727,8 @@ function discardable(opts: {
  * disappeared live row may discard an entire attempt; its successor requires
  * two new complete observations within the original monotonic budget. Only
  * disappeared PIDs survive as denial facts: any reappearance refuses. With
- * `interest`, a pair superseded by foreign churn, or an attempt where a foreign
- * row's SID lookup failed, is likewise discarded whole, without a denial fact.
+ * `interest`, a pair superseded by foreign churn is likewise discarded whole,
+ * without a denial fact.
  * Otherwise unknown or changed membership refuses immediately.
  * No saved PID signals. */
 export async function readNativeAuthoredProcessCensus(

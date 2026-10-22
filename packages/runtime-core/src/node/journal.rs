@@ -6,6 +6,13 @@ use std::path::{Path, PathBuf};
 
 pub const OUTPUT_LIMIT: usize = 16 * 1024;
 const CAPACITY: i64 = 2048;
+/// How long one connection waits for another's write transaction before failing closed
+/// with `node_error` ("database is locked"). Every writer (node service, supervisors,
+/// scheduler) holds the write lock only for one in-memory receipt change and its commit,
+/// so a cancel racing a completion waits for that commit; only a commit stalled beyond
+/// this bound refuses, and the refused mutation was never recorded, so a retry with the
+/// same operation ID is safe.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -177,9 +184,7 @@ impl Store {
         };
         let mut connection =
             Connection::open_with_flags(root.join("journal.sqlite"), flags).map_err(error)?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(2))
-            .map_err(error)?;
+        connection.busy_timeout(BUSY_TIMEOUT).map_err(error)?;
         if !read_only {
             connection
                 .execute_batch(
@@ -979,6 +984,25 @@ mod tests {
 
         // Completion holds the write lock while cancellation arrives. SQLite
         // serializes them: the cancel waits, then observes a terminal receipt.
+        // The order is a handshake, not a sleep: the completion commits only after
+        // the cancel has reported that it is blocked on this write lock, and the
+        // cancel keeps waiting until that commit. The production busy timeout is
+        // restored for the rest of the test.
+        static BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        /// Hang guard only; a scheduler stall on a loaded host must not decide the order.
+        const RACE_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+        const RETRY: std::time::Duration = std::time::Duration::from_millis(1);
+        // Each retry sleeps at least RETRY, so the cancel waits at least RACE_BOUND.
+        const ATTEMPTS: i32 = (RACE_BOUND.as_millis() / RETRY.as_millis()) as i32;
+        fn blocked_on_completion(attempt: i32) -> bool {
+            BLOCKED.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(RETRY);
+            attempt < ATTEMPTS
+        }
+        BLOCKED.store(false, std::sync::atomic::Ordering::SeqCst);
+        node.connection
+            .busy_handler(Some(blocked_on_completion))
+            .unwrap();
         supervisor
             .connection
             .execute_batch("BEGIN IMMEDIATE")
@@ -992,9 +1016,22 @@ mod tests {
             let response = node.handle(&request, uid);
             (node, request, response)
         });
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        while !BLOCKED.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                !waiting.is_finished(),
+                "cancel finished without waiting for the held completion"
+            );
+            assert!(
+                started.elapsed() < RACE_BOUND,
+                "cancel did not reach the held write lock after {:?}",
+                started.elapsed()
+            );
+            std::thread::sleep(RETRY);
+        }
         supervisor.connection.execute_batch("COMMIT").unwrap();
         let (mut node, request, response) = waiting.join().unwrap();
+        node.connection.busy_timeout(BUSY_TIMEOUT).unwrap();
         let response = response.unwrap();
         assert_eq!(response["generation"], 4);
         let terminal = snapshot(&node, first);

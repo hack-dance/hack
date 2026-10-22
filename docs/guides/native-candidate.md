@@ -117,7 +117,12 @@ selects the native backend and the adjacent executor, even if an inherited
 with your own Hack home and existing global routing services. It needs no
 `HACK_NATIVE_HOME` and removes the native selectors. Other values refuse with exit
 code 64. The [candidate installer guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends)
-describes Compose testing and its shared-state limits. It preserves arguments, exit codes and
+describes Compose testing and its shared-state limits: run stable `hack global up`,
+then stable `hack daemon stop`, confirm `pgrep -fl "hack daemon start"` prints
+nothing, and run no stable `hack` command while the candidate uses your Hack home.
+Stable `hack global up` (v4.2.0) starts a stopped `hackd` again. Do not commit the
+project's generated `.hack/.internal/` directory; newer generators rewrite files
+such as `compose.override.yml`. The entrypoint preserves arguments, exit codes and
 signals through `exec`, and never replaces the installed `hack`. Project-specific
 native adaptation, dependency and routing selections remain explicit; this entrypoint
 does not prepare a provider or migrate existing projects. An unversioned local

@@ -223,6 +223,18 @@ own another daemon. If socket ownership cannot be established, automatic orphan
 termination is skipped. Scripted/noninteractive commands do not autostart the
 daemon; after an explicit stop, use `hack daemon start` to restore cached queries.
 
+launchd and isolated state roots: on macOS the hackd launchd service is one
+per-user service (`gui/<uid>/dance.hack.hackd`, plist in
+`$HOME/Library/LaunchAgents`). It belongs to the default `$HOME/.hack` root.
+When `HACK_HOME` points anywhere else, the CLI does not read the plist, write
+it, or run `launchctl` for hackd. `hack daemon start` and autostart then start
+hackd directly under `HACK_HOME`, as on Linux. `hack daemon status` reports the
+launchd service as not installed. `hack daemon install` and
+`hack daemon uninstall` refuse with `E_PERMISSION` before they change anything.
+Set `HACK_LAUNCHD_ALLOW_ISOLATED_HOME=1` to manage the service from an isolated
+root anyway. `HACK_LAUNCHD_DISABLE=1` turns all launchd management off, opt-in
+included; the end-to-end harness sets it for every CLI call.
+
 Runtime health:
 - The daemon treats the container runtime as ephemeral; it fingerprints the engine (socket + engine id)
   and detects resets.

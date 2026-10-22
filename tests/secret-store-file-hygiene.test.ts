@@ -16,6 +16,7 @@ import { join, resolve } from "node:path";
 
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { requireFixtureRoot } from "./helpers/fixture-root.ts";
 
 const STORE_KEY = "synthetic-store-hygiene-key-for-tests-only";
 const STORE_SENTINEL = "synthetic-store-hygiene-value-never-in-errors";
@@ -54,9 +55,12 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  if (root) {
-    await rm(root, { recursive: true, force: true });
-    root = null;
+  // Reset first, so a writer spawned by a timed-out test from here on is
+  // refused instead of starting in the current directory (HACK-1343).
+  const removed = root;
+  root = null;
+  if (removed) {
+    await rm(removed, { recursive: true, force: true });
   }
   for (const key of ISOLATED_ENV_KEYS) {
     restoreEnv(key, previousEnv.get(key));
@@ -220,7 +224,8 @@ test("negative control: concurrent writer processes do not lose an update", asyn
   const children = prefixes.map((prefix) =>
     Bun.spawn({
       cmd: [process.execPath, script, prefix, startAt],
-      cwd: root ?? undefined,
+      // A null or empty cwd would start the writer in the checkout.
+      cwd: requireFixtureRoot(root, "secret-store-file-hygiene fixture"),
       env: childEnv,
       stdout: "ignore",
       stderr: "pipe",

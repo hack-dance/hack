@@ -82,6 +82,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "The selected env overlay cannot supply keys the command requires; the detail lists names only.",
     readFirst: "`hack env explain <key> --service <service>`",
   },
+  E_ENV_TOO_LARGE: {
+    meaning:
+      "The Compose environment exceeds the platform limit for a new process (ARG_MAX, or MAX_ARG_STRLEN for one variable), so Compose was not started; the detail has byte counts only.",
+    readFirst: "`hack env list --json`",
+  },
   E_PERMISSION: {
     meaning: "A filesystem or runtime permission was denied.",
     readFirst: "`hack doctor --json`",

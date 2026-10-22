@@ -1,5 +1,10 @@
 [test]
 root = "./tests"
-# Fails a test or file that leaves PATH, HOME, cwd or other process state
-# changed, and restores it so later files run clean (HACK-1327).
-preload = ["./tests/helpers/global-state-guard-preload.ts"]
+# global-state-guard: fails a test or file that leaves PATH, HOME, cwd or other
+# process state changed, and restores it so later files run clean (HACK-1327).
+# checkout-write-guard: fails the run when a test creates or changes a file in
+# the checkout (HACK-1343).
+preload = [
+  "./tests/helpers/global-state-guard-preload.ts",
+  "./tests/helpers/checkout-write-guard-preload.ts",
+]

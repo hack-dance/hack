@@ -9,6 +9,7 @@ import {
 import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { requireFixtureRoot } from "./helpers/fixture-root.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 /**
@@ -102,7 +103,10 @@ afterEach(async () => {
 });
 
 async function setupTempRepo(): Promise<string> {
-  const repoRoot = join(tempDir ?? "", "repo");
+  const repoRoot = join(
+    requireFixtureRoot(tempDir, "init-with-command fixture"),
+    "repo"
+  );
   await Bun.write(
     join(repoRoot, "package.json"),
     JSON.stringify({ name: "demo", scripts: { dev: "bun run dev.ts" } })

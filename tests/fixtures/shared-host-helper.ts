@@ -7,6 +7,9 @@
  *   {helper, upstream, pid}; `/` answers `served:<upstream>`;
  *   `/__fixture/env` lists this process's environment variable names.
  * - `stubborn`: like `identity`, but ignores SIGTERM (only SIGKILL stops it).
+ * - `slow-term`: like `identity`, but on SIGTERM keeps running for
+ *   {@link SLOW_TERM_MS}, then writes `<HOME>/term-exited` and exits 0 (a
+ *   helper that ignores TERM briefly; the marker proves it was not killed).
  * - `oversized`: like `identity`, but pads the identity answer past 4 KiB.
  * - `exit`: exits immediately (a helper that dies during startup).
  * - `tcp`: a plain TCP listener that never answers (a foreign port owner).
@@ -18,7 +21,11 @@
  * Every mode exits once its private HOME (the test's scratch root) is gone,
  * so no fixture outlives its test even when a failing run skips cleanup.
  */
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+/** How long `slow-term` keeps running after SIGTERM (the test mirrors it). */
+const SLOW_TERM_MS = 600;
 
 const [mode, portText, helper, upstream] = process.argv.slice(2);
 const port = Number(portText);
@@ -58,6 +65,17 @@ switch (mode) {
   case "stubborn":
     process.on("SIGTERM", () => {
       // Ignored on purpose: the stop path must escalate to SIGKILL.
+    });
+    serveIdentity();
+    break;
+  case "slow-term":
+    process.on("SIGTERM", () => {
+      setTimeout(() => {
+        if (home) {
+          writeFileSync(join(home, "term-exited"), `${process.pid}\n`);
+        }
+        process.exit(0);
+      }, SLOW_TERM_MS);
     });
     serveIdentity();
     break;

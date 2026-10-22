@@ -12,6 +12,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  readlink,
   rm,
   symlink,
   writeFile,
@@ -88,6 +89,16 @@ const shellMock = await registerScopedModuleMock({
       }
       if (cmd[0] === "docker" && cmd[1] === "network" && cmd[2] === "inspect") {
         return { exitCode: 0, stdout: "[]", stderr: "" };
+      }
+      // The fixture project dir counts as a git work tree for the
+      // `.hack/.gitignore` doctor step; every other git probe stays absent.
+      if (
+        cmd[0] === "git" &&
+        cmd.at(-1) === "--is-inside-work-tree" &&
+        typeof cmd[2] === "string" &&
+        cmd[2].endsWith("/project/.hack")
+      ) {
+        return { exitCode: 0, stdout: "true\n", stderr: "" };
       }
       return { exitCode: 1, stdout: "", stderr: "" };
     },
@@ -259,6 +270,73 @@ test("doctor --fix never calls the raw clack confirm prompt under HACK_NO_INTERA
   // non-interactive branch instead of the raw clack prompt.
   expect(code).toBe(0);
 });
+
+test("doctor --fix creates a missing .hack/.gitignore and keeps user lines on a repair (HACK-1278)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const gitignore = resolve(projectRoot, ".hack", ".gitignore");
+  expect(await lstat(gitignore).catch(() => null)).toBeNull();
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const fix = () =>
+    runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot]);
+  expect(await fix()).toBe(0);
+  const created = await readFile(gitignore, "utf8");
+  expect(created).toContain(".internal/\n");
+  expect(created).toContain("# end managed by hack");
+  expect(noteCalls.join("\n")).toContain("Created .hack/.gitignore.");
+
+  await writeFile(gitignore, "my-own-entry\n");
+  noteCalls.length = 0;
+  expect(await fix()).toBe(0);
+  const repaired = await readFile(gitignore, "utf8");
+  expect(repaired.startsWith("my-own-entry\n")).toBe(true);
+  expect(repaired).toContain(".internal/\n");
+  expect(noteCalls.join("\n")).toContain("Updated .hack/.gitignore.");
+}, 30_000);
+
+const OUTSIDE_IGNORE_TEXT = "outside-file-must-not-change\n";
+
+test("doctor --fix never writes through a symlinked .hack/.gitignore", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  if (!tempDir) {
+    throw new Error("tempDir not set");
+  }
+  const outside = resolve(tempDir, "outside-ignore");
+  await writeFile(outside, OUTSIDE_IGNORE_TEXT);
+  const gitignore = resolve(projectRoot, ".hack", ".gitignore");
+  await symlink(outside, gitignore);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot])
+  ).toBe(0);
+
+  expect(await readFile(outside, "utf8")).toBe(OUTSIDE_IGNORE_TEXT);
+  expect((await lstat(gitignore)).isSymbolicLink()).toBe(true);
+  expect(await readlink(gitignore)).toBe(outside);
+}, 30_000);
+
+test("doctor --fix never writes .gitignore through a symlinked .hack directory", async () => {
+  if (!tempDir) {
+    throw new Error("tempDir not set");
+  }
+  const projectRoot = resolve(tempDir, "project");
+  const outsideDir = resolve(tempDir, "outside-hack");
+  await mkdir(projectRoot, { recursive: true });
+  await mkdir(outsideDir);
+  await writeFile(
+    resolve(outsideDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.19\n"
+  );
+  await symlink(outsideDir, resolve(projectRoot, ".hack"));
+
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot])
+  ).toBe(0);
+
+  expect(await readdir(outsideDir)).toEqual(["docker-compose.yml"]);
+}, 30_000);
 
 test("doctor --fix removes a literal Compose env override and keeps a reference-only one (HACK-1273)", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();

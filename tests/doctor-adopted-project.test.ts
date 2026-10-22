@@ -113,6 +113,11 @@ test("doctor reports an adopted project with closed messages instead of refusing
     status: "ok",
     detail: "No generated Compose env override",
   });
+  // The adoption owns .hack/, so its committed .gitignore is not audited.
+  expect(byId.get("hack gitignore")).toMatchObject({
+    status: "ok",
+    detail: ADOPTED_PROJECT_NOT_APPLICABLE_MESSAGE,
+  });
   // The rest are reported as not applicable, never as discovery failures.
   for (const name of ADOPTED_PROJECT_NOT_APPLICABLE_CHECKS) {
     expect(byId.get(name)).toMatchObject({

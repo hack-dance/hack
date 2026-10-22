@@ -484,8 +484,8 @@ container.
 
 With the Compose backend, Hack materializes this contract in generated, machine-local Compose
 overrides. Do not edit or commit `.hack/.internal/compose.runtime.override.yml` or
-`.hack/.branch/compose.<branch>.runtime.override.yml`; runtime commands refresh them and Hack's
-managed `.hack/.gitignore` covers them.
+`.hack/.branch/compose.<branch>.runtime.override.yml`; runtime commands refresh them and keep them
+out of `git status` (see [ignore rules](env.md#ignore-rules-committed-hackgitignore)).
 
 With the native backend, foreground `hack up` and `hack restart` add the same values to the
 normalized Compose input that native review checks. They are public container environment, not
@@ -556,11 +556,14 @@ materialized `.hack/.env` or `.hack/.env.state.json` is stale and should be rege
 
 ## Project files
 
-Hack owns a committed `.hack/.gitignore` (self-healing on `init`/`up`) that ignores machine-local
-generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`). The
-retired `tickets/` path remains ignored only so upgrades cannot recommit legacy machine-local
-caches. Keep `.hack/.gitignore` committed. If generated files ever leak into git, `hack doctor
---fix` untracks them (the files stay on disk). Runtime metadata is written to
+Hack owns a committed `.hack/.gitignore` (created by `init`; for an existing project without it,
+`doctor` warns and `doctor --fix` creates or repairs it) that ignores
+machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`,
+`hack.env*.local.yaml`). The retired `tickets/` path remains ignored only so upgrades cannot
+recommit legacy machine-local caches. Keep `.hack/.gitignore` committed. Runtime commands (`up`,
+`down`, `restart`, `run`, `exec`) do not write it: they add the same patterns to the repository's
+local `info/exclude`, so `git status` stays unchanged. Never commit `.hack/.internal/`. If generated
+files ever leak into git, `hack doctor --fix` untracks them (the files stay on disk). Runtime metadata is written to
 `.internal/compose.runtime.override.yml` for the base instance and
 `.branch/compose.<branch>.runtime.override.yml` for branch instances. See [Architecture](architecture.md)
 for the full file map.

@@ -56,8 +56,28 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 
 How it is maintained:
 
-- written by `hack init`, and self-healed by `hack up` and whenever hack
-  writes `.hack/.internal/` overrides or `--local` env overrides
+- created by `hack init` for a new project, and refreshed when you write
+  machine-local env overrides (`hack env set --local`, `hack env hydrate`)
+- in an existing project without it (for example one an earlier Hack version
+  initialized), `hack doctor` reports the "hack gitignore" check as a warning,
+  and `hack doctor --fix` creates the file, or restores its managed block,
+  as its own step. Commit the result so fresh clones and worktrees get the
+  rules. `hack init` does not repair an existing project. Hack never writes
+  through a symlinked `.hack/.gitignore` or `.hack/`; doctor reports that case
+  and leaves it alone.
+- runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
+  into your working tree to set up ignores, so they leave `git status`
+  unchanged. Before they write `.hack/.internal/` or `.hack/.branch/` files,
+  they add the same patterns, anchored at the repository root, to a marked
+  block in the repository's `info/exclude` (resolved with
+  `git rev-parse --git-common-dir`, so one block covers every linked
+  worktree). Env commands that write `.hack/.env` (`hack env set` without an
+  env config, `hack env materialize`) do the same. That file is local to your
+  clone and never committed. The update
+  is best-effort: if git is unavailable, or `info/` or `info/exclude` is a
+  symlink or not writable, Hack leaves it alone and the command still runs.
+- never commit `.hack/.internal/`: it holds machine-local generated state that
+  runtime commands rewrite. If it is tracked, `hack doctor --fix` untracks it.
 - the entries live inside a marked, hack-managed block; anything you add
   outside the markers is preserved on every rewrite
 - the root `.gitignore` still gets a `.hack.secret.key` entry when the secret

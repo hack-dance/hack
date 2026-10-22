@@ -86,6 +86,7 @@ export const ADOPTED_PROJECT_NOT_APPLICABLE_CHECKS = [
   "env overlay warnings",
   "worktree keys",
   "worktree instances",
+  "hack gitignore",
   "caddy hosts",
 ] as const;
 

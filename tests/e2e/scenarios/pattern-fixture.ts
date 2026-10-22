@@ -316,7 +316,80 @@ export function ownedLabels(opts: {
   return labels;
 }
 
-/** Inspect owned containers, optionally narrowed to one project and service. */
+const MISSING_CONTAINER = /no such (?:object|container): (\S+)/i;
+
+/**
+ * Split a `docker inspect --type container <ids>` result, where `ids` came
+ * from `docker ps -aq`, into the inspected containers and the listed IDs that
+ * no longer exist.
+ *
+ * Listing and inspection are two calls, so a container can be removed in
+ * between: a concurrent `hack up` that changes a service's configuration makes
+ * Compose remove and recreate that service's container (HACK-1296). Docker
+ * then exits 1, prints only the surviving objects on stdout, and reports one
+ * "No such object/container" line per missing ID on stderr (wording varies by
+ * client version). Anything else is an error: a timeout, output that is not a
+ * JSON array, a stderr line that is not a missing listed ID, a listed ID that
+ * is neither inspected nor reported missing, or a non-zero exit with nothing
+ * missing. The caller must still confirm each missing ID is really gone.
+ */
+export function partitionContainerInspection(opts: {
+  readonly ids: readonly string[];
+  readonly result: CliResult;
+}):
+  | { readonly resources: DockerResource[]; readonly missing: string[] }
+  | { readonly error: string } {
+  if (opts.result.timedOut) {
+    return { error: "docker inspect timed out" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(opts.result.stdout);
+  } catch {
+    return { error: "docker inspect stdout is not JSON" };
+  }
+  if (!Array.isArray(parsed)) {
+    return { error: "docker inspect stdout is not a JSON array" };
+  }
+  const resources = parsed as DockerResource[];
+  const reported = new Set<string>();
+  for (const line of opts.result.stderr.split("\n")) {
+    if (line.trim() === "") {
+      continue;
+    }
+    const id = MISSING_CONTAINER.exec(line)?.[1];
+    if (id === undefined || !opts.ids.includes(id)) {
+      return { error: `unexpected docker inspect error: ${line.trim()}` };
+    }
+    reported.add(id);
+  }
+  const missing: string[] = [];
+  for (const id of opts.ids) {
+    const found = resources.some((resource) => resource.Id?.startsWith(id));
+    if (found === reported.has(id)) {
+      return {
+        error: `listed container ${id} must be either inspected or reported missing`,
+      };
+    }
+    if (!found) {
+      missing.push(id);
+    }
+  }
+  if ((opts.result.exitCode === 0) !== (missing.length === 0)) {
+    return {
+      error: `docker inspect exit ${opts.result.exitCode} disagrees with ${missing.length} missing container(s)`,
+    };
+  }
+  return { resources, missing };
+}
+
+/**
+ * Inspect owned containers, optionally narrowed to one project and service.
+ * A listed container that Docker removed before inspection (see
+ * `partitionContainerInspection`) is confirmed absent and omitted: it is no
+ * longer an owned container, so callers count, mount-check and exec only
+ * containers that still exist.
+ */
 export async function ownedContainers(opts: {
   readonly ctx: ScenarioContext;
   readonly owner: string;
@@ -344,15 +417,39 @@ export async function ownedContainers(opts: {
   if (ids.length === 0) {
     return [];
   }
-  const inspected = await checkedDocker({
+  const inspected = await docker({
     ctx: opts.ctx,
-    args: ["inspect", ...ids],
+    args: ["inspect", "--type", "container", ...ids],
   });
-  const resources = JSON.parse(inspected.stdout) as DockerResource[];
-  for (const resource of resources) {
+  const split = partitionContainerInspection({ ids, result: inspected });
+  if ("error" in split) {
+    expect({
+      that: false,
+      message: `docker inspect pattern fixture operation: ${split.error}`,
+      result: inspected,
+    });
+    return [];
+  }
+  for (const id of split.missing) {
+    const remaining = await checkedDocker({
+      ctx: opts.ctx,
+      args: ["ps", "-aq", "--filter", `id=${id}`],
+    });
+    expect({
+      that: remaining.stdout.trim() === "",
+      message: `container ${id} failed inspection but still exists`,
+      result: inspected,
+    });
+  }
+  if (split.missing.length > 0) {
+    opts.ctx.log(
+      `owned container(s) ${split.missing.join(", ")} were removed between listing and inspection; confirmed absent`
+    );
+  }
+  for (const resource of split.resources) {
     ownedLabels({ ...opts, resource });
   }
-  return resources;
+  return split.resources;
 }
 
 /** Inspect owned named volumes. */

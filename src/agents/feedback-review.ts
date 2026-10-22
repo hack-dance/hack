@@ -421,9 +421,14 @@ const QUOTED_PLACEHOLDER_SINGLE = String.raw`<[^<>'\n]*>'(?=${QUOTED_VALUE_END})
  * unclosed quote runs to the end of the line.
  */
 const QUOTED_CONTINUATION = String.raw`(?:(?!${QUOTED_VALUE_END})(?:[^\s"']|"[^"\n]*"?|'[^'\n]*'?))*`;
-/** A quoted value with what is glued to it, unless it is one placeholder. */
-const DOUBLE_QUOTED_VALUE = String.raw`"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"${QUOTED_CONTINUATION}`;
-const SINGLE_QUOTED_VALUE = String.raw`'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*'${QUOTED_CONTINUATION}`;
+/**
+ * A quoted value with what is glued to it, unless it is one placeholder. A
+ * quote that never closes on its line, as in `TOKEN="value` at the end of a
+ * truncated log line, still opens the value, which then runs to the end of
+ * the line.
+ */
+const DOUBLE_QUOTED_VALUE = String.raw`"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*(?:"${QUOTED_CONTINUATION})?`;
+const SINGLE_QUOTED_VALUE = String.raw`'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*(?:'${QUOTED_CONTINUATION})?`;
 /** A `,` or `;` that starts another assignment, as in `A=<a>,B=<b>`. */
 const NEXT_ASSIGNMENT = "[,;](?=[A-Za-z_][A-Za-z0-9_]*=)";
 /** A placeholder standing for a bare assignment value. */
@@ -1056,18 +1061,15 @@ function removeUnsafeLines(
   return kept.join("\n");
 }
 
-/**
- * Sanitize free text for a public feedback draft.
- *
- * Embedded instructions and raw log lines are removed first, then secrets,
- * ciphertext, config values, URLs, paths, emails, IP addresses and digests
- * are replaced with `<redacted:kind>` placeholders. The result is idempotent:
- * sanitizing sanitized text changes nothing and reports no redactions, which
- * is how {@link findFeedbackPrivacyIssues} rechecks an edited payload.
- */
-export function sanitizeFeedbackText(text: string): SanitizedFeedbackText {
-  const counts: Partial<Record<RedactionKind, number>> = {};
-  let result = removeUnsafeLines(text, counts);
+/** Passes of the value rules; real text settles in two. */
+const MAX_SANITIZE_PASSES = 8;
+
+/** One pass of {@link VALUE_RULES} over `text`, counting each redaction. */
+function applyValueRules(
+  text: string,
+  counts: Partial<Record<RedactionKind, number>>
+): string {
+  let result = text;
   for (const rule of VALUE_RULES) {
     result = result.replace(
       rule.pattern,
@@ -1082,6 +1084,34 @@ export function sanitizeFeedbackText(text: string): SanitizedFeedbackText {
         return rule.replace(match, ...groups);
       }
     );
+  }
+  return result;
+}
+
+/**
+ * Sanitize free text for a public feedback draft.
+ *
+ * Embedded instructions and raw log lines are removed first, then secrets,
+ * ciphertext, config values, URLs, paths, emails, IP addresses and digests
+ * are replaced with `<redacted:kind>` placeholders. The result is idempotent:
+ * sanitizing sanitized text changes nothing and reports no redactions, which
+ * is how {@link findFeedbackPrivacyIssues} rechecks an edited payload.
+ * The value rules run again until a pass changes nothing, because one
+ * redaction can expose another: `auth: OTHER=value"(` first becomes
+ * `auth: OTHER=<redacted:config-value>`, whose `auth` value now holds a
+ * placeholder. A text that still changes after
+ * {@link MAX_SANITIZE_PASSES} passes is returned as it is, and the posting
+ * gate's recheck then refuses it.
+ */
+export function sanitizeFeedbackText(text: string): SanitizedFeedbackText {
+  const counts: Partial<Record<RedactionKind, number>> = {};
+  let result = removeUnsafeLines(text, counts);
+  for (let pass = 0; pass < MAX_SANITIZE_PASSES; pass++) {
+    const next = applyValueRules(result, counts);
+    if (next === result) {
+      break;
+    }
+    result = next;
   }
   return { text: result, redactions: counts };
 }
@@ -1419,7 +1449,7 @@ export const FEEDBACK_GATE_REFUSALS: readonly FeedbackVocabularyEntry<FeedbackGa
     {
       id: "attachment-unlisted",
       summary:
-        "An attachment is not listed by name in the visible Attachments section; HTML comments do not count, and raw HTML such as `<details>`, `<?` or `<!` anywhere in the body, even inside or beside an HTML comment, cancels the listing. So does a `mermaid`, `geojson`, `topojson`, `stl` or `math` code block anywhere, or a footnote definition in the section; list each attachment as `` - `name` `` without indentation.",
+        'An attachment is not listed by name in the visible Attachments section; HTML comments do not count, and any raw HTML tag such as `<details>` or `<span title="`, or `<?` or `<!`, anywhere in the body outside code, even inside or beside an HTML comment, cancels the listing. So does a `mermaid`, `geojson`, `topojson`, `stl` or `math` code block anywhere, or a footnote definition in the section; list each attachment as `` - `name` `` without indentation.',
     },
     {
       id: "approval-missing",
@@ -1536,6 +1566,17 @@ function payloadIssue(
 /** HTML comments hide text on GitHub; an unterminated one hides the rest. */
 const HTML_COMMENT = /<!--[\s\S]*?(?:-->|$)/g;
 /**
+ * A line that is one whole HTML comment, such as a template hint
+ * `<!-- What happened, in words. -->`. It is an HTML block that starts and
+ * ends on that line, since such a block can interrupt a paragraph, so it
+ * renders nothing and no code span or tag can reach across it. Its first
+ * comment end must close the line, and `<!-->`, `<!--->` and `--!>`, which
+ * end an HTML comment early or do not end the block, never match. Such a
+ * line reads as blank, so a body that keeps the template hints is still
+ * parsed for inline code.
+ */
+const COMMENT_LINE = /^ {0,3}<!--(?!-?>)(?:(?!--!?>).)*-->\s*$/;
+/**
  * A tag with a CommonMark tag name. The tag may continue on the next line.
  * `<redacted:path>` is not a tag name, so GitHub renders it as text.
  */
@@ -1555,14 +1596,6 @@ const HTML_BLOCK_START =
   /^\s*(?:(?:>|[-*+]|\d{1,9}[.)])\s*)*<(?:\/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>]|$)|[?!])/;
 /** A GFM table delimiter row; table cells split at pipes inside code spans. */
 const TABLE_DELIMITER_ROW = /^(?=[^|\n]*\|)(?=[^-\n]*-)[\t |:-]+$/;
-/**
- * HTML elements that GitHub renders or drops with their content, so they can
- * fold (`<details>`), hide or swallow Markdown that follows them, including a
- * whole `## Attachments` section. Redaction placeholders such as
- * `<redacted:path>` are not element names and do not match.
- */
-const HIDING_HTML_ELEMENT =
-  /<\/?(?:a|abbr|address|article|aside|b|bdi|bdo|blockquote|center|cite|code|dd|del|details|dfn|dialog|div|dl|dt|em|embed|fieldset|figcaption|figure|font|footer|form|h[1-6]|header|i|iframe|ins|kbd|li|main|mark|math|nav|noembed|noframes|noscript|object|ol|p|picture|plaintext|pre|q|rp|rt|ruby|s|samp|script|section|select|small|span|strike|strong|style|sub|summary|sup|svg|table|tbody|td|template|textarea|tfoot|th|thead|title|tr|tt|u|ul|var|xmp)(?=[\s/>]|$)/i;
 /**
  * A processing instruction (`<?`), declaration (`<!X`) or CDATA section
  * (`<![CDATA[`). CommonMark passes each through as raw HTML, and GitHub drops
@@ -1721,74 +1754,134 @@ function markupOutsideCode(line: string): string | undefined {
 }
 
 /**
+ * The opening fence of a top-level fenced code block: three or more
+ * backticks or tildes at the start of the line. A backtick fence's info
+ * string holds no backtick, or the line is inline code instead.
+ */
+const FENCE_OPEN = /^(?:(`{3,})[^`]*|(~{3,}).*)$/;
+/**
+ * A fence indented by one to three spaces. It can open a top-level block
+ * whose content lines this parser would read as prose, or belong to a list
+ * item that a later line ends, so a body with one outside a fenced block is
+ * read raw.
+ */
+const INDENTED_FENCE = /^ {1,3}(?:`{3,}|~{3,})/;
+/** A closing fence: indented by at most three spaces, then only fence characters. */
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+/**
+ * For each line, whether it is a fence or the content of a top-level fenced
+ * code block. Such a line is shown as text, so it carries no markup. A block
+ * with no closing fence runs to the end of the body, as on GitHub.
+ */
+function fencedCodeLines(lines: readonly string[]): readonly boolean[] {
+  let fence: string | undefined;
+  return lines.map((line) => {
+    if (fence === undefined) {
+      const open = FENCE_OPEN.exec(line);
+      fence = open?.[1] ?? open?.[2];
+      return fence !== undefined;
+    }
+    const close = FENCE_CLOSE.exec(line)?.[1];
+    if (
+      close !== undefined &&
+      close.charAt(0) === fence.charAt(0) &&
+      close.length >= fence.length
+    ) {
+      fence = undefined;
+    }
+    return true;
+  });
+}
+
+/**
  * The rendered markup of each line, with inline code removed only when every
- * code span is certain. Code spans can cross lines, and GitHub reads no code
- * inside HTML blocks, table cells split at pipes before code is parsed, and
- * an HTML comment can take a backtick from a code span. In any of those
- * cases, and whenever a line is ambiguous, inline code hides nothing.
+ * code span is certain, and with top-level fenced code blocks shown as text.
+ * Code spans can cross lines, and GitHub reads no code inside HTML blocks,
+ * table cells split at pipes before code is parsed, and an HTML comment can
+ * take a backtick from a code span. In any of those cases, and whenever a
+ * line is ambiguous, code hides nothing: every line is read raw, also the
+ * lines of fenced code blocks.
  */
 function renderedMarkupLines(opts: {
   readonly lines: readonly string[];
   readonly commentsHoldBacktick: boolean;
 }): readonly string[] {
   const { lines } = opts;
+  const inCodeBlock = fencedCodeLines(lines);
+  const prose = lines.filter((_line, index) => !inCodeBlock[index]);
   if (
     opts.commentsHoldBacktick ||
-    lines.some(
-      (line) => HTML_BLOCK_START.test(line) || TABLE_DELIMITER_ROW.test(line)
+    prose.some(
+      (line) =>
+        HTML_BLOCK_START.test(line) ||
+        TABLE_DELIMITER_ROW.test(line) ||
+        INDENTED_FENCE.test(line)
     )
   ) {
     return lines;
   }
-  const markup = lines.map(markupOutsideCode);
+  const markup = lines.map((line, index) =>
+    inCodeBlock[index] ? "" : markupOutsideCode(line)
+  );
   return markup.every((line) => line !== undefined) ? markup : lines;
 }
 
-/** Whether markup carries an element or declaration that can hide Markdown. */
-function hasHidingHtml(markup: string): boolean {
-  return HIDING_HTML_ELEMENT.test(markup) || HIDING_HTML_MARKUP.test(markup);
+/**
+ * Whether markup carries raw HTML: any tag, processing instruction,
+ * declaration or CDATA section. Any of them can hide Markdown that follows
+ * it, not only elements that GitHub folds or drops: a tag left open before
+ * the Attachments heading can take the whole section into an attribute
+ * value (`<menu title="`), which GitHub then drops or shows only as a
+ * tooltip. So the check fails closed on every tag rather than on a list of
+ * element names. Redaction placeholders such as `<redacted:path>` and
+ * autolinks are not tags.
+ */
+function hasRawHtml(markup: string): boolean {
+  return HTML_TAG.test(markup) || HIDING_HTML_MARKUP.test(markup);
 }
 
 /**
- * Whether the body, read with its HTML comments in place, carries a hiding
- * element or declaration. Removing comments is not how GitHub reads a body:
- * `<!-->` and `<!--->` are whole comments there, and `<!--` inside a code
- * span is text. So removing from `<!--` to the next `-->` can also remove a
- * live `<details>` that folds the Attachments section. A comment outside
- * inline code makes every code span in the body uncertain, so then a hiding
- * element anywhere counts, even one that looks like inline code.
+ * Whether the body, read with its HTML comments in place, carries raw HTML.
+ * Removing comments is not how GitHub reads a body: `<!-->` and `<!--->` are
+ * whole comments there, and `<!--` inside a code span is text. So removing
+ * from `<!--` to the next `-->` can also remove a live `<details>` that folds
+ * the Attachments section. A comment outside inline code makes every code
+ * span in the body uncertain, so then a tag anywhere counts, even one that
+ * looks like inline code.
  */
-function hasHidingHtmlBesideComments(lines: readonly string[]): boolean {
+function hasRawHtmlBesideComments(lines: readonly string[]): boolean {
   return renderedMarkupLines({ lines, commentsHoldBacktick: false }).some(
     (markup) =>
-      HIDING_HTML_ELEMENT.test(markup) ||
-      HIDING_MARKUP_BESIDE_COMMENTS.test(markup)
+      HTML_TAG.test(markup) || HIDING_MARKUP_BESIDE_COMMENTS.test(markup)
   );
 }
 
 /**
  * The lines of the `## Attachments` section a reader actually sees: HTML
- * comments are removed first. A section that contains raw HTML outside inline
- * code, which can hide or restyle a listing, counts as listing nothing, and so
- * does a body with a hiding element such as `<details>` anywhere, because an
- * element opened before the heading can fold the whole section. The hiding
- * check runs both with comments removed and with them in place, so a listing
- * inside a comment, a `<details>` or a construct that GitHub reads
- * differently from this parser fails closed. A code block that GitHub
+ * comments are removed first. A body with raw HTML outside inline code
+ * anywhere, before or inside the section, counts as listing nothing: a tag
+ * or HTML block opened before the heading can fold, drop or swallow the
+ * whole section. The check runs both with comments removed and with them in
+ * place, so a listing inside a comment, a tag or a construct that GitHub
+ * reads differently from this parser fails closed. A code block that GitHub
  * renders as a diagram or math anywhere in the body, or a footnote
  * definition in the section, also cancels the listing, and a line indented
  * by four or more spaces never lists anything.
  */
 function visibleAttachmentListing(body: string): readonly string[] {
-  const bodyLines = body.split(NEWLINE);
+  const bodyLines = body
+    .split(NEWLINE)
+    .map((line) => (COMMENT_LINE.test(line) ? "" : line));
   if (
-    hasHidingHtmlBesideComments(bodyLines) ||
+    hasRawHtmlBesideComments(bodyLines) ||
     bodyLines.some(isRichRenderFence)
   ) {
     return [];
   }
-  const comments = body.match(HTML_COMMENT) ?? [];
-  const lines = body.replace(HTML_COMMENT, "").split(NEWLINE);
+  const visible = bodyLines.join("\n");
+  const comments = visible.match(HTML_COMMENT) ?? [];
+  const lines = visible.replace(HTML_COMMENT, "").split(NEWLINE);
   const markup = renderedMarkupLines({
     lines,
     commentsHoldBacktick: comments.some((comment) => comment.includes("`")),
@@ -1798,14 +1891,13 @@ function visibleAttachmentListing(body: string): readonly string[] {
   let hidesListing = false;
   for (const [index, line] of lines.entries()) {
     const rendered = markup[index] ?? line;
-    hidesListing ||= hasHidingHtml(rendered);
+    hidesListing ||= hasRawHtml(rendered);
     if (ANY_HEADING.test(line)) {
       inSection = ATTACHMENTS_HEADING.test(line);
       continue;
     }
     if (inSection) {
-      hidesListing ||=
-        HTML_TAG.test(rendered) || FOOTNOTE_DEFINITION.test(line);
+      hidesListing ||= FOOTNOTE_DEFINITION.test(line);
       if (LISTING_LINE.test(line)) {
         listing.push(line.trim());
       }

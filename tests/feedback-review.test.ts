@@ -274,6 +274,40 @@ const REDACTION_CASES: readonly RedactionCase[] = [
     ],
   },
   {
+    // A quote that never closes, as at the end of a truncated log line,
+    // still opens the value, which runs to the end of its line.
+    name: "secrets after a quote that never closes",
+    input: [
+      "TOKEN='unclosedone",
+      'TOKEN="unclosedtwo',
+      'export DB_PASSWORD="unclosedthree',
+      "next line stays",
+      'ran with --password "unclosedfour',
+      '"api_key": "unclosedfive',
+      // Assembled at runtime so secret scanners skip the fixture.
+      `auth: "${"Zml4".repeat(2)}unclosedsix`,
+      '{"ciphertext": "unclosedseven',
+    ].join("\n"),
+    leaked: [
+      "unclosedone",
+      "unclosedtwo",
+      "unclosedthree",
+      "unclosedfour",
+      "unclosedfive",
+      "unclosedsix",
+      "unclosedseven",
+    ],
+    kinds: ["secret", "ciphertext"],
+    kept: [
+      "TOKEN=<redacted:secret>\n",
+      "export DB_PASSWORD=<redacted:secret>\nnext line stays",
+      "--password <redacted:secret>",
+      '"api_key": <redacted:secret>',
+      "auth: <redacted:secret>",
+      '{"ciphertext": "<redacted:ciphertext>"',
+    ],
+  },
+  {
     name: "config values and ciphertext glued after a quoted placeholder",
     input: [
       '{"HACK_REGION": "<x>"gluedregion}',
@@ -555,6 +589,17 @@ test("synthetic secret, path, URL and config cases are redacted with closed kind
     expect(findFeedbackPrivacyIssues(text), fixture.name).toEqual([]);
     expect(findFeedbackPrivacyIssues(fixture.input).length).toBeGreaterThan(0);
   }
+});
+
+test("redactions settle in one call, so sanitized text passes the recheck", () => {
+  // One redaction can expose another: the config value under `auth`
+  // becomes a placeholder, which then makes the `auth` value secret.
+  const input = 'Config had auth: OTHER=fixturevalue"(';
+  const { text, redactions } = sanitizeFeedbackText(input);
+  expect(text).toBe("Config had auth: <redacted:secret>");
+  expect(redactions).toEqual({ secret: 1, "config-value": 1 });
+  expect(sanitizeFeedbackText(text)).toEqual({ text, redactions: {} });
+  expect(findFeedbackPrivacyIssues(text)).toEqual([]);
 });
 
 test("placeholders and ordinary Hack text pass through unchanged", () => {
@@ -1288,6 +1333,50 @@ test("negative control: an attachment listed only where a reader cannot see it n
       withAttachments("[^a\\]b]: note\n- `dump.log`"),
     ],
     ["listing indented four spaces", withAttachments("    - `dump.log`")],
+    // Any tag left open before the heading can take the whole section into
+    // an attribute value, which GitHub drops or shows only as a tooltip,
+    // whatever the element. So every raw tag anywhere fails closed.
+    ...[
+      '<menu title="',
+      '<legend data-x="',
+      '<hr title="',
+      '<img>\n<bar title="',
+      'Note <span title="',
+    ].map((prefix): [string, FeedbackPayload] => [
+      `attribute opened by ${prefix.split(" ")[0]}`,
+      beforeHeading(prefix, '- `dump.log`\n">'),
+    ]),
+    [
+      "attribute opened right above the heading, without blank lines",
+      ((payload: FeedbackPayload): FeedbackPayload => ({
+        ...payload,
+        body: payload.body.replace(
+          "## Attachments\n\n",
+          '<menu title="\n## Attachments\n'
+        ),
+      }))(withAttachments('- `dump.log`\n">')),
+    ],
+    [
+      "comment line followed by a tag",
+      beforeHeading("<!-- hint --> <details>", "- `dump.log`"),
+    ],
+    [
+      "short comment line holding a tag",
+      beforeHeading("<!--> <details> -->", "- `dump.log`"),
+    ],
+    [
+      "tag after a closed fence",
+      beforeHeading(
+        '````sh\ncode\n```\n  ````  \n<menu title="',
+        '- `dump.log`\n">'
+      ),
+    ],
+    // A fence indented by up to three spaces opens a block whose lines a
+    // backtick fence inside it does not reach, so the tag is live.
+    [
+      "indented tilde fence around a backtick fence",
+      beforeHeading('  ~~~\n```\n~~~\n<menu title="', '- `dump.log`\n">\n```'),
+    ],
     // Table cells split at pipes before code spans are parsed.
     [
       "table cell splitting a code span",
@@ -1345,6 +1434,14 @@ test("negative control: an attachment listed only where a reader cannot see it n
     beforeHeading("```sh\nhack up --json\n```", "- `dump.log`"),
     beforeHeading("```&#115;h\nhack up --json\n```", "- `dump.log`"),
     withAttachments("   - `dump.log`"),
+    // Template hints on their own lines render nothing, and a fenced block
+    // shows its tags as text, so placeholders in inline code elsewhere
+    // stay code.
+    beforeHeading(
+      "<!-- Name the code from a `--json` envelope. -->\n<!---->",
+      "- `dump.log`"
+    ),
+    beforeHeading("```html\n<details>\n```\n\n~~~\n<b>\n~~~", "- `dump.log`"),
   ]) {
     const listing = payload.body;
     expect(

@@ -69,6 +69,7 @@ let root: string;
 let projectRoot: string;
 let binary: string;
 let priorPath: string | undefined;
+let pathReplaced = false;
 let fixture: {
   running: boolean;
   failed: boolean;
@@ -167,9 +168,17 @@ else {const source=JSON.parse(await Bun.stdin.text());const {schema_version,...p
 `
   );
   await chmod(binary, 0o700);
+  pathReplaced = true;
   process.env.PATH = root;
 });
 afterEach(async () => {
+  // PATH is restored even when the lifetime is unknown: a PATH left pointing
+  // at this fixture root hides git and bun from every later file in the Bun
+  // process (HACK-1327). The root and spawn spy stay retained.
+  if (pathReplaced) {
+    pathReplaced = false;
+    restoreEnv("PATH", priorPath);
+  }
   if (!lifetime?.canRestore()) {
     uncertain = true;
     throw new Error(
@@ -178,7 +187,6 @@ afterEach(async () => {
   }
   spawnSpy?.mockRestore();
   spawnSpy = undefined;
-  restoreEnv("PATH", priorPath);
   await rm(root, { recursive: true, force: true });
 });
 async function save() {

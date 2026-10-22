@@ -33,6 +33,7 @@ import {
   ensureGitignoreEntry,
   ensureManagedGitignoreBlock,
   pathExists,
+  readAtomicWriteTargetText,
   readTextFile,
   writeTextFile,
   writeTextFileAtomicIfChanged,
@@ -2355,6 +2356,31 @@ function opensToPlaintext(opts: {
   }
 }
 
+/**
+ * Reads the env layer a set or unset rewrites. An existing layer that cannot
+ * be read, or is not a regular file, is refused with the same closed
+ * `AtomicWriteRefusedError` the write itself raises, never treated as empty:
+ * an unset would otherwise report nothing to remove, and a set would build its
+ * result from an empty layer. An invalid layer is refused with a closed,
+ * value-free message. Both refusals happen before anything is written.
+ */
+async function readProjectEnvLayerForMutation(opts: {
+  readonly path: string;
+  readonly environment: string;
+}): Promise<ProjectEnvConfigReadResult> {
+  const read = parseProjectEnvConfigText({
+    path: opts.path,
+    environment: opts.environment,
+    text: await readAtomicWriteTargetText(opts.path),
+  });
+  if (read.parseError) {
+    throw new ClosedCliError(
+      `Failed to parse ${opts.path}: ${read.parseError}`
+    );
+  }
+  return read;
+}
+
 export async function setProjectEnvValue(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -2385,13 +2411,10 @@ export async function setProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
-  const read = await readProjectEnvConfigFile({
+  const read = await readProjectEnvLayerForMutation({
     path: filePath,
     environment: opts.envName ?? "default",
   });
-  if (read.parseError) {
-    throw new Error(`Failed to parse ${filePath}: ${read.parseError}`);
-  }
 
   const nextValues: ProjectEnvValuesByScope = {
     ...read.config.values,
@@ -2466,13 +2489,10 @@ export async function unsetProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
-  const read = await readProjectEnvConfigFile({
+  const read = await readProjectEnvLayerForMutation({
     path: filePath,
     environment: opts.envName ?? "default",
   });
-  if (read.parseError) {
-    throw new Error(`Failed to parse ${filePath}: ${read.parseError}`);
-  }
 
   const scopeValues = { ...(read.config.values[opts.scope] ?? {}) };
   const inheritsLocal =

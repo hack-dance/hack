@@ -12,6 +12,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { ClosedCliError } from "./cli-result.ts";
 
 export async function pathExists(absolutePath: string): Promise<boolean> {
   try {
@@ -102,8 +103,11 @@ export async function writeTextFileIfChanged(
   return { changed: true };
 }
 
-/** A compare-and-swap write found the file changed by another writer. */
-export class AtomicWriteConflictError extends Error {
+/**
+ * A compare-and-swap write found the file changed by another writer. Closed:
+ * the CLI prints its message only, never a stack.
+ */
+export class AtomicWriteConflictError extends ClosedCliError {
   constructor() {
     super("The file changed while it was being replaced; nothing was written.");
     this.name = "AtomicWriteConflictError";
@@ -128,9 +132,18 @@ export class AtomicWriteConflictError extends Error {
  * file exists, and fail with {@link AtomicWriteRefusedError}: an existing target
  * that cannot be read, is not a regular file or is not writable is refused, and
  * so is one whose owner and group the staging file cannot take (for example a
- * root-owned file left by `sudo hack`). A caller that merged a change into what
+ * root-owned file left by `sudo hack`, or a file the caller owns whose group
+ * is not one of the caller's groups). A caller that merged a change into what
  * it read therefore never replaces contents it could not see. These checks are
- * not an atomic fence against a concurrent permission change.
+ * not an atomic fence against a concurrent permission change. Callers that
+ * merge into the current contents read them with
+ * {@link readAtomicWriteTargetText}, which refuses the same unreadable targets
+ * instead of reading them as absent.
+ *
+ * The group is never silently changed: the staging file would otherwise take
+ * the caller's default group (on macOS usually `staff`, which every local
+ * account belongs to), so keeping group-readable mode bits under a different
+ * group could widen who can read the file.
  *
  * An existing target keeps its permission bits, owner and group, and an
  * existing symlink keeps pointing where it did: the replacement lands at the
@@ -218,7 +231,8 @@ export type AtomicWriteRefusal =
   | "unreadable"
   | "not_regular_file"
   | "not_writable"
-  | "owner_not_preserved";
+  | "owner_not_preserved"
+  | "group_not_preserved";
 
 const ATOMIC_WRITE_REFUSAL_MESSAGES: Readonly<
   Record<AtomicWriteRefusal, string>
@@ -227,13 +241,16 @@ const ATOMIC_WRITE_REFUSAL_MESSAGES: Readonly<
   not_regular_file: "it is not a regular file",
   not_writable: "it is not writable",
   owner_not_preserved: "its owner and group cannot be preserved",
+  group_not_preserved:
+    "its group cannot be preserved because you are not a member of that group",
 };
 
 /**
  * Closed refusal from {@link writeTextFileAtomicIfChanged}. The message names
- * the path and a fixed reason only; it never carries file contents or a cause.
+ * the path and a fixed reason only; it never carries file contents or a cause,
+ * and the CLI prints it as one line, never with a stack.
  */
-export class AtomicWriteRefusedError extends Error {
+export class AtomicWriteRefusedError extends ClosedCliError {
   readonly path: string;
   readonly reason: AtomicWriteRefusal;
 
@@ -304,6 +321,19 @@ async function inspectAtomicWriteTarget(
   };
 }
 
+/**
+ * Reads the current text of a file that {@link writeTextFileAtomicIfChanged}
+ * may replace: null when it is absent (a missing path or a dangling symlink),
+ * and an {@link AtomicWriteRefusedError} when it exists but cannot be read or
+ * is not a regular file. Use it instead of `readTextFile`, which reads an
+ * unreadable file as absent, whenever the result decides what to write.
+ */
+export async function readAtomicWriteTargetText(
+  absolutePath: string
+): Promise<string | null> {
+  return targetText(await inspectAtomicWriteTarget(absolutePath));
+}
+
 /** The compare-and-swap view of a target: its text, or null when absent. */
 function targetText(target: AtomicWriteTarget): string | null {
   return target.kind === "existing" ? target.text : null;
@@ -322,9 +352,13 @@ async function preserveOwnership(opts: {
   try {
     await opts.file.chown(opts.existing.uid, opts.existing.gid);
   } catch {
+    // Only the group differs: the caller owns the file but is not in its group.
     throw new AtomicWriteRefusedError({
       path: opts.path,
-      reason: "owner_not_preserved",
+      reason:
+        staged.uid === opts.existing.uid
+          ? "group_not_preserved"
+          : "owner_not_preserved",
     });
   }
 }

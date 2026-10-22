@@ -704,6 +704,65 @@ test(
   30_000
 );
 test(
+  "an unrecorded command whose group never becomes absent refuses as probe-budget on monotonic time",
+  ownedCase(async () => {
+    const f = await fixture(),
+      marker = join(f.root, "effect"),
+      kill = process.kill,
+      monotonic = performance.now.bind(performance),
+      wall = Date.now();
+    let elapsed = 0,
+      polls = 0;
+    // Fake clocks: the wall clock is frozen, so only a monotonic deadline can
+    // expire. Each post-exit poll still sees the exited group and 4 s pass.
+    const frozen = spyOn(Date, "now").mockImplementation(() => wall);
+    const clock = spyOn(performance, "now").mockImplementation(
+      () => monotonic() + elapsed
+    );
+    const observer = spyOn(process, "kill").mockImplementation(
+      (pid, signal) => {
+        if (
+          signal === 0 &&
+          typeof pid === "number" &&
+          pid < 0 &&
+          existsSync(marker)
+        ) {
+          polls += 1;
+          elapsed += 4000;
+          return true;
+        }
+        return kill(pid, signal);
+      }
+    );
+    try {
+      const caught = await runNativeComposeStorageDockerCommand({
+        context: {
+          signal: new AbortController().signal,
+          deadline: wall + 3000,
+        },
+        files: f.files,
+        args: ["/bin/sh", "-c", 'printf complete > "$1"', "owned", marker],
+        timeoutMs: 3000,
+        beforeSpawn: () => {},
+        assertAdmitted: async () => {},
+      }).catch((error: unknown) => error);
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toContain("values omitted");
+      expect(nativeComposeStorageCarrierReason(caught)).toBe("probe-budget");
+      expect(polls).toBe(1);
+      expect(await readFile(marker, "utf8")).toBe("complete");
+      retained.add(f.root);
+    } finally {
+      if (confirmedTestLifetime()) {
+        frozen.mockRestore();
+        clock.mockRestore();
+        observer.mockRestore();
+      }
+    }
+  }),
+  30_000
+);
+test(
   "a recorded child that outlives its command budget refuses as probe-timeout",
   ownedCase(async () => {
     const f = await fixture(),

@@ -264,6 +264,9 @@ ordinary frontend selection yet and does not implement reactive health or hooks.
 The optional feature exposes this bounded consumer through a distinct public CLI:
 `graph native plan --source-file FILE --json`, then
 `graph native run --source-file FILE --expect-review SHA --json`.
+Selection, and so `plan`, `frontend-plan`, `run` and `serve`, refuses a selected
+workload image that is not a `sha256:` content ID (a tag or `repository@sha256:`
+digest) with the lowering's closed `native_graph_admission` code, before any state.
 `graph native inspect|cleanup --run-id RUN --json` use its versioned native journal. On macOS,
 `inspect` refuses `native_graph_unreserved` before guest access only when the run's journal
 directory is exactly absent under private state directories and no foreground owner is

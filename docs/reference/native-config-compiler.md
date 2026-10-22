@@ -496,6 +496,14 @@ not inspected, and no env values are read. Runtime/adoption commands remain fenc
 `--file` validates only that document, ignores local/global policy files and performs
 no project discovery or origin resolution. It cannot be combined with `--path`,
 `--env` or `--domain`.
+
+Image references are backend-neutral: a registry tag or `repository@sha256:` digest
+is valid authored configuration, and the default Compose backend runs it. With an
+explicit `HACK_RUNTIME_BACKEND=native`, both modes also refuse a selected service or
+job image that is not a `sha256:` image content ID. The refusal is the native
+consumer's own closed `native_graph_admission` code and message, so validation
+predicts the refusal that `graph native plan` returns before startup reserves
+anything. Only image identity is checked here, not the rest of the native subset.
 `--json` returns the authored normalized plan, including
 authored public literals and commands. Those values are intentionally visible;
 diagnostic redaction does not turn the plan into a secret-safe storage format.

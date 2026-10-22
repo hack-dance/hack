@@ -204,6 +204,63 @@ fn branch_profile_and_checkout_local_selection_are_compiler_owned() {
     );
 }
 
+/// HACK-1300: plan/frontend-plan refuse what serve's lowering refuses, with its
+/// closed `native_graph_admission` code, before startup can reserve anything.
+#[test]
+fn repository_digest_and_tag_images_refuse_plan_with_the_lowering_code_and_no_state() {
+    let digest = format!("docker.io/library/busybox@sha256:{}", "e".repeat(64));
+    for (field, image) in [
+        ("services", digest.as_str()),
+        ("services", "busybox@sha256:not-a-content-id"),
+        ("services", "busybox:1.37"),
+        ("jobs", digest.as_str()),
+    ] {
+        let fixture = Fixture::new();
+        let mut value = basic();
+        if field == "jobs" {
+            value["jobs"] = json!({"seed":{"image":image,"command":{"exec":["/bin/true"]}}});
+        } else {
+            value["services"]["web"]["image"] = json!(image);
+        }
+        fixture.write_project(value);
+        let mut options = fixture.options();
+        options.metadata = metadata(if field == "jobs" {
+            json!({"web":{},"seed":{}})
+        } else {
+            json!({"web":{}})
+        });
+        let error = select(&fixture.candidate, options).err().unwrap();
+        assert_eq!(error.code, "native_graph_admission");
+        // Byte-identical to the serve-time lowering refusal; never the authored value.
+        assert_eq!(
+            serde_json::to_string(&error).unwrap(),
+            serde_json::to_string(&super::super::refused()).unwrap()
+        );
+        assert!(!serde_json::to_string(&error).unwrap().contains("busybox"));
+        assert!(!fixture.candidate.state_root.exists());
+    }
+    // Control: the same digest on a workload outside the selected profiles is not
+    // lowered by serve, so plan admits it; selecting the profile refuses.
+    let fixture = Fixture::new();
+    let mut value = basic();
+    value["profiles"] = json!(["debug"]);
+    value["jobs"] =
+        json!({"debug":{"image":digest,"profiles":["debug"],"command":{"exec":["/bin/true"]}}});
+    fixture.write_project(value);
+    let mut plain = fixture.options();
+    plain.metadata = metadata(json!({"web":{},"debug":{}}));
+    select(&fixture.candidate, plain).unwrap();
+    let profiles = ["debug".into()];
+    let mut active = fixture.options();
+    active.profiles = &profiles;
+    active.metadata = metadata(json!({"web":{},"debug":{}}));
+    assert_eq!(
+        select(&fixture.candidate, active).err().unwrap().code,
+        "native_graph_admission"
+    );
+    assert!(!fixture.candidate.state_root.exists());
+}
+
 #[test]
 fn inherited_linked_worktree_inputs_refuse_without_interpreting_git_or_primary_paths() {
     let fixture = Fixture::new();

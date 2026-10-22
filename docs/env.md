@@ -56,8 +56,28 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 
 How it is maintained:
 
-- written by `hack init`, and self-healed by `hack up` and whenever hack
-  writes `.hack/.internal/` overrides or `--local` env overrides
+- created by `hack init` for a new project, and refreshed when you write
+  machine-local env overrides (`hack env set --local`, `hack env hydrate`)
+- in an existing project without it (for example one an earlier Hack version
+  initialized), `hack doctor` reports the "hack gitignore" check as a warning,
+  and `hack doctor --fix` creates the file, or restores its managed block,
+  as its own step. Commit the result so fresh clones and worktrees get the
+  rules. `hack init` does not repair an existing project. Hack never writes
+  through a symlinked `.hack/.gitignore` or `.hack/`; doctor reports that case
+  and leaves it alone.
+- runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
+  into your working tree to set up ignores, so they leave `git status`
+  unchanged. Before they write `.hack/.internal/` or `.hack/.branch/` files,
+  they add the same patterns, anchored at the repository root, to a marked
+  block in the repository's `info/exclude` (resolved with
+  `git rev-parse --git-common-dir`, so one block covers every linked
+  worktree). Env commands that write `.hack/.env` (`hack env set` without an
+  env config, `hack env materialize`) do the same. That file is local to your
+  clone and never committed. The update
+  is best-effort: if git is unavailable, or `info/` or `info/exclude` is a
+  symlink or not writable, Hack leaves it alone and the command still runs.
+- never commit `.hack/.internal/`: it holds machine-local generated state that
+  runtime commands rewrite. If it is tracked, `hack doctor --fix` untracks it.
 - the entries live inside a marked, hack-managed block; anything you add
   outside the markers is preserved on every rewrite
 - the root `.gitignore` still gets a `.hack.secret.key` entry when the secret
@@ -276,9 +296,16 @@ does not keep it. `hack doctor` reports such a file in its "compose env at rest"
 A legacy adoption (`hack config adopt`) pins the override's exact bytes and file
 identity for as long as the adoption exists, and adopted commands never rewrite it. So:
 
-- `hack config adopt` and `hack config adopt --dry-run` refuse a literal override. Run
-  `hack up` once so Hack rewrites it with references, then adopt.
-- An adoption made by an earlier version over a literal override keeps that file. Hack
+- `hack config adopt`, `hack config adopt --stop` and `hack config adopt --dry-run`
+  refuse a literal override before they prepare anything. Run `hack up` once so Hack
+  rewrites it with references, then adopt.
+- A preparation that an earlier version made over a literal override is never
+  published. `hack config adopt --recover --stop` (which retries the stop, then
+  publishes) and `hack config adopt --recover` (which completes a pending switch) refuse
+  before any original file moves. The switch stays journaled as pending, and the error
+  names `hack config adopt --recover --rollback` as the step that releases it. After that
+  rollback, run `hack up` and adopt again.
+- An active adoption made by an earlier version over a literal override keeps that file. Hack
   never removes it while a prepared, active or pending adoption exists, because removal
   would make the adoption refuse to load. `hack doctor` reports it with this next step.
   To drop the values, stop the adopted containers (`hack down`), run

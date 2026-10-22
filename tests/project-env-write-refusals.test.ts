@@ -22,8 +22,12 @@ import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
   AtomicWriteConflictError,
   AtomicWriteRefusedError,
+  classifyFileWriteError,
+  closedFileWriteError,
+  FileWriteRefusedError,
   writeTextFileAtomicIfChanged,
 } from "../src/lib/fs.ts";
+import { LEGACY_ADOPTION_SELECTION_MESSAGES } from "../src/lib/native-compose-adoption-marker.ts";
 import {
   assertValidProjectEnvScopeName,
   ENV_KEY_ASSIGNMENT_MESSAGE,
@@ -328,23 +332,31 @@ async function runCli(opts: {
   readonly args: readonly string[];
   readonly stdin: string;
   readonly logger: string;
+  /** A module the child loads before the CLI, e.g. a filesystem fault. */
+  readonly preload?: string;
+  readonly env?: Readonly<Record<string, string>>;
 }): Promise<CliRun> {
-  const proc = Bun.spawn([process.execPath, ENTRYPOINT, ...opts.args], {
-    cwd: opts.repo.projectRoot,
-    env: privateCliEnv({
-      root: opts.repo.root,
-      env: {
-        HACK_GLOBAL_CONFIG_PATH: join(opts.repo.root, "hack-config.json"),
-        HACK_LOGGER: opts.logger,
-        HACK_NO_INTERACTIVE: "1",
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-      },
-    }),
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const preload = opts.preload ? ["--preload", opts.preload] : [];
+  const proc = Bun.spawn(
+    [process.execPath, ...preload, ENTRYPOINT, ...opts.args],
+    {
+      cwd: opts.repo.projectRoot,
+      env: privateCliEnv({
+        root: opts.repo.root,
+        env: {
+          HACK_GLOBAL_CONFIG_PATH: join(opts.repo.root, "hack-config.json"),
+          HACK_LOGGER: opts.logger,
+          HACK_NO_INTERACTIVE: "1",
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          ...opts.env,
+        },
+      }),
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
   proc.stdin.write(opts.stdin);
   await proc.stdin.end();
   const [stdout, stderr, exitCode] = await Promise.all([
@@ -813,7 +825,7 @@ test.skipIf(RUNS_AS_ROOT)(
       expect(refusal).toBeInstanceOf(ClosedCliError);
       expect(refusal.reason).toBe("directory_not_writable");
       expect(refusal.message).toBe(
-        `Refusing to replace ${file}: its directory is not writable.`
+        `Refusing to replace ${file}: its directory is not writable. Make that directory writable by your user, then retry.`
       );
     } finally {
       await chmod(repo.projectDir, 0o755);
@@ -859,4 +871,370 @@ test("an unknown scope in a single-value read is a closed refusal", async () => 
   expect((caught as Error).message).toBe(
     `${ENV_SCOPE_UNKNOWN_MESSAGE} Configured scopes: global, api.`
   );
+});
+
+/**
+ * Filesystem failures the user must fix (HACK-1330 verifier D1-D5): a refused
+ * `env set`, `unset` or `hydrate` prints one closed line that names the file
+ * Hack was writing and the remedy, never the raw errno, the random staging
+ * path or a stack, under every logger and in the `--json` envelope.
+ */
+const STAGING_ERRNO_PRELOAD = resolve(
+  import.meta.dir,
+  "fixtures/staging-errno-preload.ts"
+);
+
+const ERRNO_CODES = [
+  "EACCES",
+  "EPERM",
+  "EROFS",
+  "ENOSPC",
+  "EDQUOT",
+  "ENOTDIR",
+] as const;
+
+function expectNoErrnoOrStaging(run: CliRun): void {
+  const output = `${run.stdout}${run.stderr}`;
+  expect(output).not.toContain(".tmp");
+  for (const code of ERRNO_CODES) {
+    expect(output).not.toContain(code);
+  }
+  expect(output).not.toMatch(/\b(open|mkdir|rename) '/);
+}
+
+type JsonFailure = { readonly code: string; readonly message: string };
+
+function jsonFailure(run: CliRun): JsonFailure {
+  expect(run.exitCode).toBe(1);
+  const envelope: unknown = JSON.parse(run.stdout);
+  expect(envelope).toMatchObject({ ok: false });
+  return (envelope as { readonly error: JsonFailure }).error;
+}
+
+const HYDRATE_INPUT = `NEW_SETTING=${NEW_VALUE}\n`;
+
+function permissionWriteRefusal(path: string): string {
+  return `Could not write ${path}: permission denied. Make the file and its directory writable by your user, then retry.`;
+}
+
+for (const logger of ["console", "clack", "gum"] as const) {
+  // D1: no seeding set first, so the missing `.hack/.gitignore` must be
+  // written (through replacePrivateFileAtomic) in a directory that refuses it.
+  test.skipIf(RUNS_AS_ROOT)(
+    `set --local and hydrate needing .hack/.gitignore in a non-writable .hack print one line with HACK_LOGGER=${logger}`,
+    async () => {
+      const repo = await createRepo();
+      const local = layerPath(repo, "local");
+      await writeFile(local, LAYER);
+      // The hydration lock lives in .hack/.internal; give hydrate one so it
+      // reaches the ignore-file write (D4 covers a missing .internal).
+      await mkdir(resolve(repo.projectDir, ".internal"));
+      const before = (await readdir(repo.projectDir)).sort();
+      const gitignore = resolve(repo.projectDir, ".gitignore");
+      await chmod(repo.projectDir, 0o555);
+      try {
+        const runs: [readonly string[], string][] = [
+          [
+            ["env", "set", "NEW_SETTING", "--value-stdin", "--local"],
+            `${NEW_VALUE}\n`,
+          ],
+          [["env", "hydrate"], HYDRATE_INPUT],
+        ];
+        for (const [args, stdin] of runs) {
+          const run = await runCli({
+            repo,
+            args: [...args, "--path", repo.projectRoot],
+            stdin,
+            logger,
+          });
+          expectOneLineRefusal(run, permissionWriteRefusal(gitignore));
+          expectNoErrnoOrStaging(run);
+        }
+      } finally {
+        await chmod(repo.projectDir, 0o755);
+      }
+      expect((await readdir(repo.projectDir)).sort()).toEqual(before);
+      expect(await readFile(local, "utf8")).toBe(LAYER);
+      expect(await readdir(resolve(repo.projectDir, ".internal"))).toEqual([]);
+    },
+    60_000
+  );
+
+  // D2: the first secret must create .hack.secret.key in a repo root that
+  // refuses new files (publishPrivateFileExclusive's staging open).
+  test.skipIf(RUNS_AS_ROOT)(
+    `set --secret creating the key in a non-writable repo root prints one line with HACK_LOGGER=${logger}`,
+    async () => {
+      const repo = await createRepo();
+      const tracked = layerPath(repo, "tracked");
+      await writeFile(tracked, LAYER);
+      const keyPath = resolve(repo.projectRoot, ".hack.secret.key");
+      await chmod(repo.projectRoot, 0o555);
+      let run: CliRun;
+      try {
+        run = await runCli({
+          repo,
+          args: setSecretArgs(repo, "NEW_SECRET"),
+          stdin: `${NEW_VALUE}\n`,
+          logger,
+        });
+      } finally {
+        await chmod(repo.projectRoot, 0o755);
+      }
+      expectOneLineRefusal(run, permissionWriteRefusal(keyPath));
+      expectNoErrnoOrStaging(run);
+      expect(await readdir(repo.projectRoot)).toEqual([".hack"]);
+      expect(await readFile(tracked, "utf8")).toBe(LAYER);
+    },
+    60_000
+  );
+
+  // D3: an unreadable `.hack/.gitignore` (readReplaceablePrivateFile's open).
+  test.skipIf(RUNS_AS_ROOT)(
+    `set --local with an unreadable .hack/.gitignore prints one line with HACK_LOGGER=${logger}`,
+    async () => {
+      const repo = await createRepo();
+      const local = layerPath(repo, "local");
+      await writeFile(local, LAYER);
+      const gitignore = resolve(repo.projectDir, ".gitignore");
+      await writeFile(gitignore, "# synthetic\n");
+      await chmod(gitignore, 0o000);
+      const run = await runCli({
+        repo,
+        args: [
+          "env",
+          "set",
+          "NEW_SETTING",
+          "--value-stdin",
+          "--local",
+          "--path",
+          repo.projectRoot,
+        ],
+        stdin: `${NEW_VALUE}\n`,
+        logger,
+      });
+      expectOneLineRefusal(
+        run,
+        `Could not read ${gitignore}: permission denied. Make the file readable by your user, then retry.`
+      );
+      expectNoErrnoOrStaging(run);
+      await chmod(gitignore, 0o644);
+      expect(await readFile(gitignore, "utf8")).toBe("# synthetic\n");
+      expect(await readFile(local, "utf8")).toBe(LAYER);
+    },
+    60_000
+  );
+
+  // D4: hydrate must create .hack/.internal for its lock in a non-writable .hack.
+  test.skipIf(RUNS_AS_ROOT)(
+    `hydrate needing .hack/.internal in a non-writable .hack prints one line with HACK_LOGGER=${logger}`,
+    async () => {
+      const repo = await createRepo();
+      const internal = resolve(repo.projectDir, ".internal");
+      const expected = `Could not create directory ${internal}: permission denied. Make its parent directory writable by your user, then retry.`;
+      const before = (await readdir(repo.projectDir)).sort();
+      await chmod(repo.projectDir, 0o555);
+      try {
+        const run = await runCli({
+          repo,
+          args: ["env", "hydrate", "--path", repo.projectRoot],
+          stdin: HYDRATE_INPUT,
+          logger,
+        });
+        expectOneLineRefusal(run, expected);
+        expectNoErrnoOrStaging(run);
+
+        const json = await runCli({
+          repo,
+          args: ["env", "hydrate", "--json", "--path", repo.projectRoot],
+          stdin: HYDRATE_INPUT,
+          logger,
+        });
+        // The same code as the other closed env refusals, and no raw errno.
+        expect(jsonFailure(json)).toEqual({
+          code: "E_UNEXPECTED",
+          message: expected,
+        });
+        expectNoErrnoOrStaging(json);
+        expect(json.stdout).not.toContain(NEW_VALUE);
+      } finally {
+        await chmod(repo.projectDir, 0o755);
+      }
+      expect((await readdir(repo.projectDir)).sort()).toEqual(before);
+    },
+    60_000
+  );
+
+  // D5: a full disk while staging the layer (writeTextFileAtomicIfChanged).
+  test(`set and unset on a full disk print one line with HACK_LOGGER=${logger}`, async () => {
+    const repo = await createRepo();
+    const tracked = layerPath(repo, "tracked");
+    await writeFile(tracked, LAYER);
+    const expected = `Refusing to replace ${tracked}: no space is left on the device or the disk quota is exceeded. Free some disk space or quota, then retry.`;
+    for (const args of [
+      ["env", "set", "NEW_SETTING", "--value-stdin"],
+      ["env", "unset", "KEPT_SETTING"],
+    ]) {
+      const run = await runCli({
+        repo,
+        args: [...args, "--path", repo.projectRoot],
+        stdin: `${NEW_VALUE}\n`,
+        logger,
+        preload: STAGING_ERRNO_PRELOAD,
+        env: { HACK_TEST_STAGING_ERRNO: "ENOSPC" },
+      });
+      expectOneLineRefusal(run, expected);
+      expectNoErrnoOrStaging(run);
+    }
+    expect(await readFile(tracked, "utf8")).toBe(LAYER);
+    expect(await tmpSiblings(repo.projectDir)).toEqual([]);
+  }, 60_000);
+
+  test.skipIf(RUNS_AS_ROOT)(
+    `set and unset in a non-searchable .hack report a permission problem with HACK_LOGGER=${logger}`,
+    async () => {
+      const repo = await createRepo();
+      await writeFile(layerPath(repo, "tracked"), LAYER);
+      await chmod(repo.projectDir, 0o644);
+      try {
+        for (const args of [
+          ["env", "set", "NEW_SETTING", "--value-stdin"],
+          ["env", "unset", "KEPT_SETTING"],
+        ]) {
+          const run = await runCli({
+            repo,
+            args: [...args, "--path", repo.projectRoot],
+            stdin: `${NEW_VALUE}\n`,
+            logger,
+          });
+          expectOneLineRefusal(
+            run,
+            LEGACY_ADOPTION_SELECTION_MESSAGES.permission
+          );
+          expect(`${run.stdout}${run.stderr}`).not.toContain(
+            LEGACY_ADOPTION_SELECTION_MESSAGES.adoption
+          );
+        }
+      } finally {
+        await chmod(repo.projectDir, 0o755);
+      }
+      expect(await readFile(layerPath(repo, "tracked"), "utf8")).toBe(LAYER);
+    },
+    60_000
+  );
+}
+
+test.skipIf(RUNS_AS_ROOT)(
+  "a non-searchable .hack is E_PERMISSION in the --json envelope",
+  async () => {
+    const repo = await createRepo();
+    await writeFile(layerPath(repo, "tracked"), LAYER);
+    await chmod(repo.projectDir, 0o644);
+    try {
+      const run = await runCli({
+        repo,
+        args: ["env", "hydrate", "--json", "--path", repo.projectRoot],
+        stdin: HYDRATE_INPUT,
+        logger: "console",
+      });
+      expect(jsonFailure(run)).toEqual({
+        code: "E_PERMISSION",
+        message: LEGACY_ADOPTION_SELECTION_MESSAGES.permission,
+      });
+    } finally {
+      await chmod(repo.projectDir, 0o755);
+    }
+  },
+  60_000
+);
+
+const NO_SPACE_REASON =
+  "no space is left on the device or the disk quota is exceeded. Free some disk space or quota, then retry.";
+const READ_ONLY_REASON =
+  "the filesystem is read-only. Use a writable checkout or remount the filesystem read-write, then retry.";
+const NOT_A_DIRECTORY_REASON =
+  "a parent of that path is not a directory. Replace that path with a directory, then retry.";
+
+// The rest of the errno class, through both writers: the layer's atomic write
+// (`set`) and the `.hack/.gitignore` private replace (`set --local`).
+for (const [code, layerReason, privateReason] of [
+  ["EDQUOT", NO_SPACE_REASON, NO_SPACE_REASON],
+  ["EROFS", READ_ONLY_REASON, READ_ONLY_REASON],
+  ["ENOTDIR", NOT_A_DIRECTORY_REASON, NOT_A_DIRECTORY_REASON],
+  [
+    "EPERM",
+    "its directory is not writable. Make that directory writable by your user, then retry.",
+    "permission denied. Make the file and its directory writable by your user, then retry.",
+  ],
+] as const) {
+  test(`an injected ${code} while staging is a closed refusal for set and set --local`, async () => {
+    const repo = await createRepo();
+    const tracked = layerPath(repo, "tracked");
+    const local = layerPath(repo, "local");
+    await writeFile(tracked, LAYER);
+    await writeFile(local, LAYER);
+    const gitignore = resolve(repo.projectDir, ".gitignore");
+    const runs: [readonly string[], string][] = [
+      [
+        ["env", "set", "NEW_SETTING", "--value-stdin"],
+        `Refusing to replace ${tracked}: ${layerReason}`,
+      ],
+      [
+        ["env", "set", "NEW_SETTING", "--value-stdin", "--local"],
+        `Could not write ${gitignore}: ${privateReason}`,
+      ],
+    ];
+    for (const [args, expected] of runs) {
+      const run = await runCli({
+        repo,
+        args: [...args, "--path", repo.projectRoot],
+        stdin: `${NEW_VALUE}\n`,
+        logger: "console",
+        preload: STAGING_ERRNO_PRELOAD,
+        env: { HACK_TEST_STAGING_ERRNO: code },
+      });
+      expectOneLineRefusal(run, expected);
+      expectNoErrnoOrStaging(run);
+    }
+    expect(await readFile(tracked, "utf8")).toBe(LAYER);
+    expect(await readFile(local, "utf8")).toBe(LAYER);
+    expect(await readdir(repo.projectDir)).not.toContain(".gitignore");
+    expect(await tmpSiblings(repo.projectDir)).toEqual([]);
+  }, 60_000);
+}
+
+test("the write-failure classifier maps only its fixed errno set", () => {
+  const cases = {
+    EACCES: "permission_denied",
+    EPERM: "permission_denied",
+    EROFS: "read_only_filesystem",
+    ENOSPC: "no_space",
+    EDQUOT: "no_space",
+    ENOTDIR: "not_a_directory",
+  } as const;
+  for (const [code, failure] of Object.entries(cases)) {
+    const raw = Object.assign(new Error(`${code}: raw, open '/x/.y.tmp'`), {
+      code,
+    });
+    expect(classifyFileWriteError(raw)).toBe(failure);
+    const closed = closedFileWriteError({
+      error: raw,
+      path: "/x/y",
+      operation: "write",
+    });
+    expect(closed).toBeInstanceOf(FileWriteRefusedError);
+    expect(closed).toBeInstanceOf(ClosedCliError);
+    expect((closed as Error).message).toStartWith("Could not write /x/y: ");
+    expect((closed as Error).message).not.toContain(code);
+    expect((closed as Error).message).not.toContain(".tmp");
+  }
+  // Anything else is unexpected and passes through untouched.
+  for (const code of ["EEXIST", "ENOENT", "EIO", "ELOOP", "toString"]) {
+    const raw = Object.assign(new Error(code), { code });
+    expect(classifyFileWriteError(raw)).toBeNull();
+    expect(
+      closedFileWriteError({ error: raw, path: "/x/y", operation: "write" })
+    ).toBe(raw);
+  }
+  expect(classifyFileWriteError("EACCES")).toBeNull();
 });

@@ -32,6 +32,149 @@ export async function ensureDir(absoluteDir: string): Promise<void> {
   await mkdir(absoluteDir, { recursive: true });
 }
 
+/**
+ * {@link ensureDir} for a write path whose failure the CLI reports: a
+ * directory that cannot be created for one of the {@link FileWriteFailure}
+ * reasons is refused with a closed {@link FileWriteRefusedError} that names
+ * the directory, never the raw errno text. Other failures propagate as is.
+ */
+export async function ensureDirForWrite(absoluteDir: string): Promise<void> {
+  try {
+    await mkdir(absoluteDir, { recursive: true });
+  } catch (error: unknown) {
+    throw closedFileWriteError({
+      error,
+      path: absoluteDir,
+      operation: "create_directory",
+    });
+  }
+}
+
+/**
+ * Filesystem failures that the user, not Hack, must fix before a write can
+ * succeed. Each maps from a fixed set of errno codes; any other error is
+ * unexpected and is never classified.
+ */
+export type FileWriteFailure =
+  | "permission_denied"
+  | "read_only_filesystem"
+  | "no_space"
+  | "not_a_directory";
+
+const FILE_WRITE_FAILURE_CODES: Readonly<Record<string, FileWriteFailure>> = {
+  EACCES: "permission_denied",
+  EPERM: "permission_denied",
+  EROFS: "read_only_filesystem",
+  ENOSPC: "no_space",
+  EDQUOT: "no_space",
+  ENOTDIR: "not_a_directory",
+};
+
+/** The {@link FileWriteFailure} of a filesystem error, or null for any other error. */
+export function classifyFileWriteError(
+  error: unknown
+): FileWriteFailure | null {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return null;
+  }
+  const code = (error as { readonly code: unknown }).code;
+  return typeof code === "string" &&
+    Object.hasOwn(FILE_WRITE_FAILURE_CODES, code)
+    ? (FILE_WRITE_FAILURE_CODES[code] ?? null)
+    : null;
+}
+
+/** What Hack was doing with the path when a {@link FileWriteFailure} occurred. */
+export type FileWriteOperation = "read" | "write" | "create_directory";
+
+const FILE_WRITE_FAILURE_REASONS: Readonly<Record<FileWriteFailure, string>> = {
+  permission_denied: "permission denied",
+  read_only_filesystem: "the filesystem is read-only",
+  no_space: "no space is left on the device or the disk quota is exceeded",
+  not_a_directory: "a parent of that path is not a directory",
+};
+
+const FILE_WRITE_PERMISSION_REMEDIES: Readonly<
+  Record<FileWriteOperation, string>
+> = {
+  read: "Make the file readable by your user, then retry",
+  write: "Make the file and its directory writable by your user, then retry",
+  create_directory:
+    "Make its parent directory writable by your user, then retry",
+};
+
+const FILE_WRITE_FAILURE_REMEDIES: Readonly<
+  Record<Exclude<FileWriteFailure, "permission_denied">, string>
+> = {
+  read_only_filesystem:
+    "Use a writable checkout or remount the filesystem read-write, then retry",
+  no_space: "Free some disk space or quota, then retry",
+  not_a_directory: "Replace that path with a directory, then retry",
+};
+
+/** The fixed remedy sentence for a failure; never names a path or an errno. */
+function fileWriteRemedy(opts: {
+  readonly failure: FileWriteFailure;
+  readonly operation: FileWriteOperation;
+}): string {
+  return opts.failure === "permission_denied"
+    ? FILE_WRITE_PERMISSION_REMEDIES[opts.operation]
+    : FILE_WRITE_FAILURE_REMEDIES[opts.failure];
+}
+
+const FILE_WRITE_OPERATION_VERBS: Readonly<Record<FileWriteOperation, string>> =
+  {
+    read: "read",
+    write: "write",
+    create_directory: "create directory",
+  };
+
+/**
+ * Closed refusal for a {@link FileWriteFailure}. The message names the file
+ * or directory Hack was working on (never a staging path), a fixed reason and
+ * a fixed remedy; it never carries the errno text, file contents or a cause.
+ * The CLI prints it as one line, never with a stack.
+ */
+export class FileWriteRefusedError extends ClosedCliError {
+  readonly path: string;
+  readonly failure: FileWriteFailure;
+  readonly operation: FileWriteOperation;
+
+  constructor(opts: {
+    readonly path: string;
+    readonly failure: FileWriteFailure;
+    readonly operation: FileWriteOperation;
+  }) {
+    super(
+      `Could not ${FILE_WRITE_OPERATION_VERBS[opts.operation]} ${opts.path}: ${FILE_WRITE_FAILURE_REASONS[opts.failure]}. ${fileWriteRemedy(opts)}.`
+    );
+    this.name = "FileWriteRefusedError";
+    this.path = opts.path;
+    this.failure = opts.failure;
+    this.operation = opts.operation;
+  }
+}
+
+/**
+ * The closed {@link FileWriteRefusedError} for a classified filesystem error,
+ * or `error` unchanged otherwise. For a `catch` that rethrows:
+ * `throw closedFileWriteError({ error, path, operation })`.
+ */
+export function closedFileWriteError(opts: {
+  readonly error: unknown;
+  readonly path: string;
+  readonly operation: FileWriteOperation;
+}): unknown {
+  const failure = classifyFileWriteError(opts.error);
+  return failure === null
+    ? opts.error
+    : new FileWriteRefusedError({
+        path: opts.path,
+        failure,
+        operation: opts.operation,
+      });
+}
+
 export async function readTextFile(
   absolutePath: string
 ): Promise<string | null> {
@@ -210,6 +353,9 @@ export async function writeTextFileAtomicIfChanged(
     }
     await rename(staging, target);
     committed = true;
+  } catch (error: unknown) {
+    // A full disk or a directory revoked mid-write fails here, after the open.
+    throw atomicWriteStagingError({ error, path: absolutePath });
   } finally {
     await file.close();
     if (!committed) {
@@ -222,11 +368,11 @@ export async function writeTextFileAtomicIfChanged(
 
 /**
  * Creates the staging sibling of an atomic write. A directory the caller
- * cannot create files in (for example a `.hack` left at mode 0555, or a
- * read-only mount) is refused with the closed `directory_not_writable`
- * reason, which names the target, never the random staging path. Any other
- * failure is unexpected and propagates as is. Nothing exists to clean up when
- * the open fails.
+ * cannot create files in (for example a `.hack` left at mode 0555), a
+ * read-only mount, a full disk or a non-directory parent is refused with a
+ * closed {@link AtomicWriteRefusedError} that names the target, never the
+ * random staging path. Any other failure is unexpected and propagates as is.
+ * Nothing exists to clean up when the open fails.
  */
 async function openAtomicWriteStaging(opts: {
   readonly staging: string;
@@ -242,22 +388,36 @@ async function openAtomicWriteStaging(opts: {
       0o666
     );
   } catch (error: unknown) {
-    if (isDirectoryNotWritableError(error)) {
-      throw new AtomicWriteRefusedError({
-        path: opts.path,
-        reason: "directory_not_writable",
-      });
-    }
-    throw error;
+    throw atomicWriteStagingError({ error, path: opts.path });
   }
 }
 
-function isDirectoryNotWritableError(error: unknown): boolean {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return false;
-  }
-  const code = (error as { readonly code: unknown }).code;
-  return code === "EACCES" || code === "EPERM" || code === "EROFS";
+/**
+ * Staging-phase refusal reason for each {@link FileWriteFailure}. The target
+ * itself was already checked as writable, so a permission failure here is the
+ * directory's.
+ */
+const ATOMIC_WRITE_STAGING_REFUSALS: Readonly<
+  Record<FileWriteFailure, AtomicWriteRefusal>
+> = {
+  permission_denied: "directory_not_writable",
+  read_only_filesystem: "read_only_filesystem",
+  no_space: "no_space",
+  not_a_directory: "not_a_directory",
+};
+
+/** The closed refusal for a classified staging failure, else `error` as is. */
+function atomicWriteStagingError(opts: {
+  readonly error: unknown;
+  readonly path: string;
+}): unknown {
+  const failure = classifyFileWriteError(opts.error);
+  return failure === null
+    ? opts.error
+    : new AtomicWriteRefusedError({
+        path: opts.path,
+        reason: ATOMIC_WRITE_STAGING_REFUSALS[failure],
+      });
 }
 
 /** Why {@link writeTextFileAtomicIfChanged} refused to replace a file. */
@@ -267,7 +427,10 @@ export type AtomicWriteRefusal =
   | "not_writable"
   | "owner_not_preserved"
   | "group_not_preserved"
-  | "directory_not_writable";
+  | "directory_not_writable"
+  | "read_only_filesystem"
+  | "no_space"
+  | "not_a_directory";
 
 const ATOMIC_WRITE_REFUSAL_MESSAGES: Readonly<
   Record<AtomicWriteRefusal, string>
@@ -278,7 +441,11 @@ const ATOMIC_WRITE_REFUSAL_MESSAGES: Readonly<
   owner_not_preserved: "its owner and group cannot be preserved",
   group_not_preserved:
     "its group cannot be preserved because you are not a member of that group",
-  directory_not_writable: "its directory is not writable",
+  directory_not_writable:
+    "its directory is not writable. Make that directory writable by your user, then retry",
+  read_only_filesystem: `${FILE_WRITE_FAILURE_REASONS.read_only_filesystem}. ${FILE_WRITE_FAILURE_REMEDIES.read_only_filesystem}`,
+  no_space: `${FILE_WRITE_FAILURE_REASONS.no_space}. ${FILE_WRITE_FAILURE_REMEDIES.no_space}`,
+  not_a_directory: `${FILE_WRITE_FAILURE_REASONS.not_a_directory}. ${FILE_WRITE_FAILURE_REMEDIES.not_a_directory}`,
 };
 
 /**

@@ -589,6 +589,16 @@ with another group, for example `/tmp` on macOS, where new files take the direct
 group `wheel`, or from being removed from the file's group. Run `chgrp <your-group>
 <file>` and run the command again.
 
+The other files these commands write fail the same way. These are `.hack/.gitignore`
+(`--local` and `hydrate`), `.hack.secret.key` (the first `--secret` value) and
+`.hack/.internal/` (the `hydrate` lock). If a write is denied, the filesystem is
+read-only, the disk or quota is full, or a parent path is not a directory, Hack prints
+one line. That line names the file or directory Hack was writing, gives the reason and
+says what to fix. It never shows the raw system error or the hidden staging file name,
+and `--json` puts the same message in the envelope. A `.hack` directory you cannot
+search (for example mode `0644`) is reported as a permission problem on `.hack`
+(`E_PERMISSION` under `--json`).
+
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the
 command applies documented defaults or fails fast with `E_INTERACTIVE_REQUIRED` instead of

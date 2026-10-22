@@ -30,7 +30,9 @@ import { ClosedCliError } from "./cli-result.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import {
   AtomicWriteConflictError,
+  closedFileWriteError,
   ensureDir,
+  ensureDirForWrite,
   ensureGitignoreEntry,
   mergeManagedGitignoreBlock,
   pathExists,
@@ -456,7 +458,7 @@ export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
 }): Promise<HackDirGitignoreEnsureResult> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  await ensureDir(opts.projectDir);
+  await ensureDirForWrite(opts.projectDir);
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   const options = hackDirGitignoreFileOptions({ projectDir: opts.projectDir });
   const current = await readReplaceablePrivateFile(options);
@@ -3196,7 +3198,7 @@ async function acquireProjectEnvHydrationLock(opts: {
   readonly lockPath: string;
   readonly refuse: ProjectEnvHydrationRefuse;
 }): Promise<() => Promise<void>> {
-  await ensureDir(dirname(opts.lockPath));
+  await ensureDirForWrite(dirname(opts.lockPath));
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   try {
     await createPrivateFileExclusive({
@@ -3991,11 +3993,20 @@ async function writeProjectEnvKeyWithFallback(opts: {
     keyText: opts.keyText,
   });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
-  await ensureGitignoreEntry({
-    gitignorePath: resolve(opts.projectRoot, ".gitignore"),
-    entry: PROJECT_ENV_KEY_FILENAME,
-    comment: "# project env key",
-  });
+  const rootGitignore = resolve(opts.projectRoot, ".gitignore");
+  try {
+    await ensureGitignoreEntry({
+      gitignorePath: rootGitignore,
+      entry: PROJECT_ENV_KEY_FILENAME,
+      comment: "# project env key",
+    });
+  } catch (error: unknown) {
+    throw closedFileWriteError({
+      error,
+      path: rootGitignore,
+      operation: "write",
+    });
+  }
   emitProjectEnvKeyWarnings({ warnings });
   return { keyPath: opts.localKeyPath, keyText, warnings };
 }
@@ -4013,7 +4024,7 @@ async function writeProjectEnvKeyFile(opts: {
   readonly keyText: string;
 }): Promise<string> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
-  await ensureDir(dirname(opts.path));
+  await ensureDirForWrite(dirname(opts.path));
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const published = await publishPrivateFileExclusive({
     path: opts.path,

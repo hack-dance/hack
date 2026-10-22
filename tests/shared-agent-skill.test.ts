@@ -9,6 +9,7 @@ import {
   installSharedHackSkill,
   removeSharedHackSkill,
 } from "../src/agents/shared-skill.ts";
+import { requireFixtureRoot } from "./helpers/fixture-root.ts";
 
 let tempHome: string | null = null;
 let originalHome: string | undefined;
@@ -37,7 +38,13 @@ test("shared Hack skill installs current ticket-free guidance and detects drift"
   const installed = await installSharedHackSkill();
   expect(installed.status).toBe("created");
   expect(installed.path).toBe(
-    join(tempHome ?? "", ".ai", "skills", "hack-cli", "SKILL.md")
+    join(
+      requireFixtureRoot(tempHome, "shared-agent-skill fixture"),
+      ".ai",
+      "skills",
+      "hack-cli",
+      "SKILL.md"
+    )
   );
 
   const content = await Bun.file(installed.path).text();
@@ -112,7 +119,13 @@ const HACK_CLI_V1_1_0 = [
 ].join("\n");
 
 function sharedSkillPath(): string {
-  return join(tempHome ?? "", ".ai", "skills", "hack-cli", "SKILL.md");
+  return join(
+    requireFixtureRoot(tempHome, "shared-agent-skill fixture"),
+    ".ai",
+    "skills",
+    "hack-cli",
+    "SKILL.md"
+  );
 }
 
 test("a customized shared Hack skill survives remove and install byte-identical", async () => {
@@ -148,7 +161,15 @@ test("removing the shared Hack skill keeps extra files in its directory", async 
 test("an owned shared Hack skill is removed with its empty directory", async () => {
   const installed = await installSharedHackSkill();
   expect((await removeSharedHackSkill()).status).toBe("removed");
-  expect(await readdir(join(tempHome ?? "", ".ai", "skills"))).toEqual([]);
+  expect(
+    await readdir(
+      join(
+        requireFixtureRoot(tempHome, "shared-agent-skill fixture"),
+        ".ai",
+        "skills"
+      )
+    )
+  ).toEqual([]);
   expect((await removeSharedHackSkill()).status).toBe("missing");
   expect(await Bun.file(installed.path).exists()).toBe(false);
 });

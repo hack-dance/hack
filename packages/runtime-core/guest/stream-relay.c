@@ -228,8 +228,22 @@ static int stop_owned(long pid, long start) {
     return 78;
 #endif
 }
+/*
+ * Publisher readiness contract: after the frontend and optional control socket
+ * are bound, the publisher writes exactly one readiness line to stdout and keeps
+ * serving. A Unix frontend or an explicit TCP port (1-65535) writes "ready\n",
+ * unchanged for existing callers. `--publish 0` (exactly "0") asks the kernel for
+ * an ephemeral loopback port while the listener is bound, closing the window in
+ * which a caller-probed free port can be taken by another process; that form
+ * writes "ready <port>\n" with the bound decimal port. Port 0 is accepted only by
+ * `--publish`; the relay and `--publish-unix` forms keep rejecting it with 64.
+ * Exit 73 still means the frontend could not be bound (or a bound Unix frontend
+ * path could not be verified), and no readiness line is written for any refused
+ * startup.
+ */
 int main(int argc, char **argv) {
     char *publish_args[8];
+    int ephemeral_port = 0;
     struct sockaddr_un control = {0};
     struct stat control_owned, receipt_owned, frontend_receipt_owned;
     char receipt_path[PATH_MAX] = {0};
@@ -263,7 +277,9 @@ int main(int argc, char **argv) {
         }
         /* Both publishers share upstream parsing; the Unix frontend has no TCP port. */
         publish_args[0] = argv[0]; publish_args[1] = argv[3];
-        publish_args[2] = "127.0.0.1"; publish_args[3] = publish_unix ? "1" : argv[2];
+        ephemeral_port = !publish_unix && !strcmp(argv[2], "0");
+        publish_args[2] = "127.0.0.1";
+        publish_args[3] = publish_unix || ephemeral_port ? "1" : argv[2];
         publish_args[4] = argv[5]; publish_args[5] = "--reservation";
         publish_args[6] = argv[4]; publish_args[7] = NULL;
         argv = publish_args; argc = 7; publish_mode = 1;
@@ -297,7 +313,7 @@ int main(int argc, char **argv) {
     }
     if (argc != option) return 64;
     target.sin_family = AF_INET;
-    target.sin_port = htons((uint16_t)port);
+    target.sin_port = ephemeral_port ? 0 : htons((uint16_t)port);
     local.sun_family = AF_UNIX;
     memcpy(local.sun_path, argv[1], strlen(argv[1]) + 1);
     if (publish_mode) { upstream = local; if (private_upstream(&current)) return 78; }
@@ -338,7 +354,12 @@ int main(int argc, char **argv) {
                     receipt_path, &receipt_owned, &receipt_bound)) failed = 1;
         }
     }
-    if (!failed) { puts("ready"); fflush(stdout); }
+    struct sockaddr_in bound = {0};
+    socklen_t bound_size = sizeof(bound);
+    if (!failed && ephemeral_port && (getsockname(listener, (struct sockaddr *)&bound, &bound_size) ||
+            bound_size != sizeof(bound) || bound.sin_family != AF_INET || !bound.sin_port)) failed = 1;
+    if (!failed && ephemeral_port) { printf("ready %u\n", (unsigned)ntohs(bound.sin_port)); fflush(stdout); }
+    else if (!failed) { puts("ready"); fflush(stdout); }
     while (!stopping && !failed) {
         struct pollfd descriptors[4 + 2 * CONNECTIONS];
         descriptors[3 + 2 * CONNECTIONS] = (struct pollfd){control_fd, POLLIN, 0};

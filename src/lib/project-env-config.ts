@@ -26,7 +26,6 @@ import {
   HACK_DIR_GITIGNORE_END_MARKER,
   HACK_DIR_GITIGNORE_ENTRIES,
 } from "../templates.ts";
-import { logger } from "../ui/logger.ts";
 import { ClosedCliError } from "./cli-result.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import {
@@ -523,13 +522,17 @@ export const HACK_DIR_GITIGNORE_READ_ONLY_WARNING =
  * --local`, `hack env hydrate`). A read-only file does not fail the command:
  * it is left unchanged and reported once with
  * {@link HACK_DIR_GITIGNORE_READ_ONLY_WARNING}. Refusals still throw.
+ *
+ * The warning is written straight to stderr as `WARN: <message>` (like the
+ * env key warnings), never through the UI logger: its clack backend prints to
+ * stdout, and `hack env hydrate --json` must keep stdout pure JSON.
  */
 async function ensureHackDirGitignoreForLocalEnvWrite(opts: {
   readonly projectDir: string;
 }): Promise<void> {
   const result = await ensureHackDirGitignore({ projectDir: opts.projectDir });
   if (result.readOnly) {
-    logger.warn({ message: HACK_DIR_GITIGNORE_READ_ONLY_WARNING });
+    process.stderr.write(`WARN: ${HACK_DIR_GITIGNORE_READ_ONLY_WARNING}\n`);
   }
 }
 

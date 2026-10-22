@@ -50,7 +50,6 @@ import {
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
-import { logger } from "../src/ui/logger.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 const tempDirs = new Set<string>();
@@ -992,7 +991,10 @@ test("setProjectEnvValue --local keeps a read-only outdated .hack/.gitignore and
   const gitignore = resolve(repo.projectDir, ".gitignore");
   await writeFile(gitignore, "my-own-entry\n");
   await chmod(gitignore, 0o444);
-  const warn = spyOn(logger, "warn").mockImplementation(() => undefined);
+  // Captured from process.stderr, not a logger spy: the warning must bypass
+  // the UI logger (whose clack backend prints to stdout), and another file's
+  // scoped logger mock in the same Bun process would hide a logger spy.
+  const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
   try {
     await setProjectEnvValue({
       projectRoot: repo.projectRoot,
@@ -1015,11 +1017,13 @@ test("setProjectEnvValue --local keeps a read-only outdated .hack/.gitignore and
     expect(localOverlay).toContain('LOCAL_ONLY: "true"');
     expect(await readFile(gitignore, "utf8")).toBe("my-own-entry\n");
     expect((await lstat(gitignore)).mode & 0o777).toBe(0o444);
-    expect(warn.mock.calls).toEqual([
-      [{ message: HACK_DIR_GITIGNORE_READ_ONLY_WARNING }],
-    ]);
+    expect(
+      stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .filter((chunk) => chunk.includes(".hack/.gitignore"))
+    ).toEqual([`WARN: ${HACK_DIR_GITIGNORE_READ_ONLY_WARNING}\n`]);
   } finally {
-    warn.mockRestore();
+    stderr.mockRestore();
     await chmod(gitignore, 0o644);
   }
 });

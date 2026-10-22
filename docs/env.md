@@ -71,8 +71,8 @@ How it is maintained:
   `hack doctor` warns and names the fix (make it writable, then run
   `hack doctor --fix`), and `--fix` leaves it unchanged. `hack env set --local`
   and `hack env hydrate` still write the local layer, print the same warning
-  and leave the file unchanged. A read-only file that already has the block is
-  fine.
+  on stderr (so `--json` output on stdout stays valid JSON), and leave the
+  file unchanged. A read-only file that already has the block is fine.
 - runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
   into your working tree to set up ignores, so they leave `git status`
   unchanged. Before they write `.hack/.internal/` or `.hack/.branch/` files,

@@ -1304,10 +1304,68 @@ function nativeEnvValuesError(): Error {
   );
 }
 
-function nativeEnvMetadataError(): Error {
-  return new Error(
+const NATIVE_ENV_DIAGNOSTIC_PROPERTY = "diagnosticCause";
+const NATIVE_ENV_DIAGNOSTIC_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+const NATIVE_ENV_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const NATIVE_ENV_DIAGNOSTIC =
+  /^[A-Za-z][A-Za-z0-9]{0,63}(?::[A-Z][A-Z0-9_]{0,63})?$/;
+
+/**
+ * Closed metadata refusal. It keeps only a value-free diagnostic of what failed:
+ * the underlying error's class name and identifier-shaped code (for example
+ * `HackCliError:E_CONFIG_INVALID` or `Error:ENOENT`), never its message, paths,
+ * bytes or values. The diagnostic is a non-enumerable own property rather than
+ * `cause`, so serializers, reports and the public message stay unchanged.
+ */
+function nativeEnvMetadataError(diagnostic = "NativeEnvMetadataError"): Error {
+  const refusal = new Error(
     "Cannot resolve native managed env metadata: selected inputs are invalid, unreadable, unstable or oversized; values omitted."
   );
+  Object.defineProperty(refusal, NATIVE_ENV_DIAGNOSTIC_PROPERTY, {
+    value: diagnostic,
+    enumerable: false,
+  });
+  return refusal;
+}
+
+/** Refuse with the cause's value-free diagnostic; a nested refusal keeps its own. */
+function nativeEnvMetadataRefusal(cause: unknown): Error {
+  return nativeEnvMetadataError(
+    nativeEnvMetadataDiagnostic(cause) ?? valueFreeErrorDiagnostic(cause)
+  );
+}
+
+function valueFreeErrorDiagnostic(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return error === null ? "null" : typeof error;
+  }
+  const name = NATIVE_ENV_DIAGNOSTIC_NAME.test(error.name)
+    ? error.name
+    : "Error";
+  const code: unknown = Reflect.get(error, "code");
+  return typeof code === "string" && NATIVE_ENV_DIAGNOSTIC_CODE.test(code)
+    ? `${name}:${code}`
+    : name;
+}
+
+/**
+ * Read the value-free diagnostic of a native metadata refusal, for tests and
+ * debugging. Returns undefined for any other error or a malformed diagnostic.
+ */
+export function nativeEnvMetadataDiagnostic(
+  error: unknown
+): string | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+  const diagnostic: unknown = Reflect.get(
+    error,
+    NATIVE_ENV_DIAGNOSTIC_PROPERTY
+  );
+  return typeof diagnostic === "string" &&
+    NATIVE_ENV_DIAGNOSTIC.test(diagnostic)
+    ? diagnostic
+    : undefined;
 }
 
 function validateNativeHostTargets(
@@ -1647,7 +1705,7 @@ export async function resolveProjectEnvMetadataForNativeSelection(
     ) {
       throw error;
     }
-    throw nativeEnvMetadataError();
+    throw nativeEnvMetadataRefusal(error);
   }
 }
 

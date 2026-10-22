@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireNativeManagedEnvFile } from "../src/lib/native-project-inputs.ts";
 import {
+  nativeEnvMetadataDiagnostic,
   type ProjectEnvValuesByScope,
   resolveProjectEnvMetadataForNativeSelection,
 } from "../src/lib/project-env-config.ts";
@@ -72,30 +73,68 @@ async function layer(
     })
   );
 }
+/**
+ * An unexpected refusal fails with its value-free diagnostic in the message, so a
+ * hosted failure names the underlying error class/code; refuses() unwraps the
+ * original closed refusal and asserts on it unchanged.
+ */
+class MetadataRefused extends Error {
+  readonly refusal: unknown;
+  constructor(refusal: unknown) {
+    super(
+      `native env metadata refused (diagnostic: ${nativeEnvMetadataDiagnostic(refusal) ?? "none"})`
+    );
+    this.name = "MetadataRefused";
+    this.refusal = refusal;
+  }
+}
+async function reportingDiagnostic<T>(resolving: Promise<T>): Promise<T> {
+  try {
+    return await resolving;
+  } catch (error: unknown) {
+    throw new MetadataRefused(error);
+  }
+}
 function metadata(
   projectRoot: string,
   overlay: string | null = null,
   inheritLocal = true,
   declaredWorkloadNames: readonly string[] = ["web", "job", "inactive"]
 ) {
-  return resolveProjectEnvMetadataForNativeSelection({
-    projectRoot,
-    overlay,
-    inheritLocal,
-    declaredWorkloadNames,
-  });
+  return reportingDiagnostic(
+    resolveProjectEnvMetadataForNativeSelection({
+      projectRoot,
+      overlay,
+      inheritLocal,
+      declaredWorkloadNames,
+    })
+  );
 }
+/**
+ * Fixture Git ignores the caller's global/system configuration, so a contributor's
+ * hooks, fsmonitor or signing setup cannot add processes or latency to a test.
+ */
 async function git(projectRoot: string, args: string[]) {
   const child = Bun.spawn(["git", "-C", projectRoot, ...args], {
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+    },
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
   });
   expect(await child.exited).toBe(0);
 }
-async function linked() {
+/** An exact Git root with an empty index: one process, no commit or checkout. */
+async function repository() {
   const primary = await project();
   await git(primary, ["init", "--quiet", "-b", "main"]);
+  return primary;
+}
+async function linked() {
+  const primary = await repository();
   await git(primary, ["add", ".hack/hack.project.json"]);
   await git(primary, [
     "-c",
@@ -104,6 +143,9 @@ async function linked() {
     "user.email=fixture@example.invalid",
     "-c",
     "commit.gpgsign=false",
+    // Never leave a detached background maintenance process behind the fixture.
+    "-c",
+    "maintenance.auto=false",
     "commit",
     "--quiet",
     "-m",
@@ -113,19 +155,32 @@ async function linked() {
   await git(primary, ["worktree", "add", "--quiet", "-b", "fixture", checkout]);
   return { primary, checkout };
 }
-async function refuses(run: () => Promise<unknown>) {
+const VALUE_FREE_DIAGNOSTIC = /^[A-Za-z][A-Za-z0-9]*(?::[A-Z][A-Z0-9_]*)?$/;
+async function refuses(run: () => Promise<unknown>, diagnostic?: string) {
+  let refused: unknown = new Error("Expected refusal");
   try {
     await run();
-    throw new Error("Expected refusal");
   } catch (error: unknown) {
-    expect(error).toBeInstanceOf(Error);
-    if (!(error instanceof Error)) {
-      throw error;
-    }
-    expect(error.message).toContain("values omitted");
-    expect(error.message).not.toContain(SENTINEL);
-    expect(error.message).not.toContain(root);
-    expect(error.cause).toBeUndefined();
+    refused = error instanceof MetadataRefused ? error.refusal : error;
+  }
+  expect(refused).toBeInstanceOf(Error);
+  if (!(refused instanceof Error)) {
+    throw refused;
+  }
+  expect(refused.message).toContain("values omitted");
+  expect(refused.message).not.toContain(SENTINEL);
+  expect(refused.message).not.toContain(root);
+  expect(refused.cause).toBeUndefined();
+  if (
+    refused.message.startsWith("Cannot resolve native managed env metadata")
+  ) {
+    // Closed metadata refusals keep only a class/code diagnostic, never values or paths.
+    expect(nativeEnvMetadataDiagnostic(refused)).toMatch(VALUE_FREE_DIAGNOSTIC);
+    expect(Object.keys(refused)).toEqual([]);
+    expect(JSON.stringify(refused)).toBe("{}");
+  }
+  if (diagnostic !== undefined) {
+    expect(nativeEnvMetadataDiagnostic(refused)).toBe(diagnostic);
   }
 }
 
@@ -280,11 +335,12 @@ test("nested native root never inherits its ancestor checkout's locals", async (
 test("invalid exact-root Git linkage refuses instead of inheriting or falling back", async () => {
   const p = await project();
   await writeFile(join(p, ".git"), `gitdir: ${SENTINEL}`);
-  await refuses(() => metadata(p));
+  await refuses(() => metadata(p), "HackCliError:E_CONFIG_INVALID");
 });
 
 test("tracked local filename compatibility and non-Git environment hint remain supported", async () => {
-  const { primary } = await linked();
+  // Tracking is index state at an exact Git root; a linked checkout adds only fixture cost.
+  const primary = await repository();
   await layer(
     primary,
     "hack.env.local.yaml",
@@ -316,6 +372,15 @@ test("tracked local filename compatibility and non-Git environment hint remain s
   });
 });
 
+const SELECTED_INPUT_DIAGNOSTIC = {
+  symlink: "NativeProjectInputError:E_CONFIG_INVALID",
+  dangling: "NativeProjectInputError:E_CONFIG_INVALID",
+  directory: "NativeProjectInputError:E_CONFIG_INVALID",
+  unreadable: "NativeProjectInputError:E_CONFIG_INVALID",
+  oversized: "NativeProjectInputError:E_CONFIG_INVALID",
+  malformed: "SyntaxError",
+  utf8: "TypeError:ERR_ENCODING_INVALID_ENCODED_DATA",
+} as const;
 for (const kind of [
   "symlink",
   "dangling",
@@ -344,7 +409,7 @@ for (const kind of [
         await chmod(path, 0);
       }
     }
-    await refuses(() => metadata(p, "qa"));
+    await refuses(() => metadata(p, "qa"), SELECTED_INPUT_DIAGNOSTIC[kind]);
   });
 }
 
@@ -521,20 +586,22 @@ function hostMetadata(
     readonly workloadNames?: readonly string[];
   } = {}
 ) {
-  return resolveProjectEnvMetadataForNativeSelection({
-    projectRoot,
-    overlay: opts.overlay ?? null,
-    inheritLocal: opts.inheritLocal ?? true,
-    declaredWorkloadNames: opts.declaredWorkloadNames ?? [
-      "web",
-      "job",
-      "inactive",
-    ],
-    hostTargets: {
-      includeDefault: opts.includeDefault ?? true,
-      workloadNames: opts.workloadNames ?? ["web"],
-    },
-  });
+  return reportingDiagnostic(
+    resolveProjectEnvMetadataForNativeSelection({
+      projectRoot,
+      overlay: opts.overlay ?? null,
+      inheritLocal: opts.inheritLocal ?? true,
+      declaredWorkloadNames: opts.declaredWorkloadNames ?? [
+        "web",
+        "job",
+        "inactive",
+      ],
+      hostTargets: {
+        includeDefault: opts.includeDefault ?? true,
+        workloadNames: opts.workloadNames ?? ["web"],
+      },
+    })
+  );
 }
 
 test("host selection is optional and preserves exact empty/default/requested workload presence", async () => {

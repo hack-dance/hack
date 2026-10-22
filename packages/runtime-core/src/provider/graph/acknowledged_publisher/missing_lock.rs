@@ -816,6 +816,20 @@ pub fn retire(candidate: &Candidate, run: &str, expected: &str) -> Result<Value,
 mod tests {
     use super::*;
 
+    /// Run one ignored dead-publisher fixture of this module alone in a child test process.
+    ///
+    /// [`abandoned`] drops a live publication and requires its listener closed. In the shared
+    /// parallel test process an unrelated test's pre-exec fork (`process::clean_command`) holds
+    /// a copy of every descriptor open at the fork until it execs, so the dropped listener can
+    /// still accept and the dead-publisher proof correctly refuses. Every test here uses it.
+    fn isolated(child: &str) {
+        use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+        run_isolated(
+            &format!("provider::graph::acknowledged_publisher::missing_lock::tests::{child}"),
+            ISOLATED_HANG_GUARD,
+        );
+    }
+
     fn abandoned() -> (
         super::super::super::tests::Fixture,
         Candidate,
@@ -854,6 +868,12 @@ mod tests {
 
     #[test]
     fn missing_lock_intent_blocks_ordinary_publication_until_exact_archival_completion() {
+        isolated("intent_blocks_publication_child");
+    }
+
+    #[test]
+    #[ignore = "isolated dead-publisher fixture launched by missing_lock_intent_blocks_ordinary_publication_until_exact_archival_completion"]
+    fn intent_blocks_publication_child() {
         let (_fixture, candidate, run, root, intent) = abandoned();
         state::write(&intent_path(&root), &intent).unwrap();
         assert!(require_no_pending(&candidate, &run).is_err());
@@ -918,6 +938,12 @@ mod tests {
 
     #[test]
     fn replacement_lock_recovers_exact_temp_and_hardlink_crashes() {
+        isolated("temp_and_hardlink_crashes_child");
+    }
+
+    #[test]
+    #[ignore = "isolated dead-publisher fixture launched by replacement_lock_recovers_exact_temp_and_hardlink_crashes"]
+    fn temp_and_hardlink_crashes_child() {
         for stage in ["temp", "linked", "final"] {
             let (_fixture, candidate, run, root, intent) = abandoned();
             state::write(&intent_path(&root), &intent).unwrap();
@@ -962,6 +988,12 @@ mod tests {
 
     #[test]
     fn replacement_lock_preserves_foreign_names_and_malformed_intent() {
+        isolated("foreign_names_child");
+    }
+
+    #[test]
+    #[ignore = "isolated dead-publisher fixture launched by replacement_lock_preserves_foreign_names_and_malformed_intent"]
+    fn foreign_names_child() {
         let (_fixture, candidate, run, root, mut intent) = abandoned();
         let temp = root.join(temp_name(&intent.selection_sha256));
         std::os::unix::fs::symlink("/tmp/foreign", &temp).unwrap();
@@ -994,6 +1026,12 @@ mod tests {
 
     #[test]
     fn initial_selection_refuses_foreign_completion_pending_without_effects() {
+        isolated("foreign_completion_pending_child");
+    }
+
+    #[test]
+    #[ignore = "isolated dead-publisher fixture launched by initial_selection_refuses_foreign_completion_pending_without_effects"]
+    fn foreign_completion_pending_child() {
         let (_fixture, _candidate, _run, root, _intent) = abandoned();
         let pending = completion_path(&root).with_extension("pending");
         let original_owner = fs::read(root.join("owner.json")).unwrap();
@@ -1019,6 +1057,12 @@ mod tests {
 
     #[test]
     fn replacement_lock_path_substitution_refuses_with_both_inodes_preserved() {
+        isolated("lock_path_substitution_child");
+    }
+
+    #[test]
+    #[ignore = "isolated dead-publisher fixture launched by replacement_lock_path_substitution_refuses_with_both_inodes_preserved"]
+    fn lock_path_substitution_child() {
         let (_fixture, _candidate, _run, root, intent) = abandoned();
         state::write(&intent_path(&root), &intent).unwrap();
         let held = replacement_lock(&root, &intent).unwrap();

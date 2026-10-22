@@ -572,8 +572,27 @@ fn publication_respects_shared_gate_and_existing_native_reservation() {
     assert!(!fixture.owner_root().exists());
 }
 
+/// Run one ignored dropped-publication fixture of this module alone in a child test process.
+///
+/// The test drops a live publication and requires its listener closed. In the shared parallel
+/// test process an unrelated test's pre-exec fork (`process::clean_command`) holds a copy of
+/// every descriptor open at the fork until it execs, so the dropped listener can still accept.
+fn isolated(child: &str) {
+    use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+    run_isolated(
+        &format!("provider::graph::native::foreground::tests::{child}"),
+        ISOLATED_HANG_GUARD,
+    );
+}
+
 #[test]
 fn abandoned_publication_is_evidence_and_never_implicit_recovery_authority() {
+    isolated("abandoned_publication_evidence_child");
+}
+
+#[test]
+#[ignore = "isolated dropped-publication fixture launched by abandoned_publication_is_evidence_and_never_implicit_recovery_authority"]
+fn abandoned_publication_evidence_child() {
     let fixture = Fixture::new();
     let review = fixture.receipt().review;
     let publication = owner::Publication::bind(&fixture.candidate, &review).unwrap();

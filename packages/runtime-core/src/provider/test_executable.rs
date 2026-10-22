@@ -10,6 +10,8 @@ use std::{
 /// Build a finite owned test process instead of copying an Apple platform binary,
 /// which can die before a process-identity or quiescence observation. Callers keep
 /// their original duration arguments and exact child ownership/cleanup checks.
+// Only the macOS-only process-identity tests use it; `run_isolated` is used on every Unix.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn sleeping_executable(binary: &Path) {
     assert!(!binary.try_exists().unwrap());
     let source = binary.with_extension("c");

@@ -6,6 +6,7 @@ import {
   classifyNativeAuthoredSessionFailure,
   isCapturedNativeAuthoredProcess,
   mergeNativeAuthoredProcessCensuses,
+  type NativeAuthoredProcessRow,
   parseNativeAuthoredProcessCensus,
   parseNativeAuthoredProcessIncarnation,
   requireNativeAuthoredProcessQuiescent,
@@ -398,4 +399,90 @@ test("PGID-only drift in an unrelated row still refuses a complete census", () =
       mergeNativeAuthoredProcessCensuses([unrelated], [{ ...unrelated, group }])
     ).toThrow("identity changed");
   }
+});
+
+test("bounded merge ignores foreign same-incarnation drift and keeps every row of interest strict", () => {
+  const value = parseNativeAuthoredProcessIncarnation(original);
+  const merge = (
+    before: readonly NativeAuthoredProcessRow[],
+    after: readonly NativeAuthoredProcessRow[]
+  ) => mergeNativeAuthoredProcessCensuses(before, after, value);
+  const foreign: NativeAuthoredProcessRow = {
+    ...row,
+    pid: 77,
+    group: 77,
+    session: "77",
+  };
+  for (const drift of [
+    { executable: "/private-exec-canary" },
+    { state: "transient" as const },
+    { parent: 1 },
+    { group: 78 },
+    { session: "78" },
+    { uid: 502 },
+  ]) {
+    const after = { ...foreign, ...drift };
+    expect(merge([foreign], [after])).toEqual([after]);
+    expect(merge([after], [foreign])).toEqual([foreign]);
+  }
+  for (const after of [
+    { ...foreign, birth: "Thu Oct 8 12:00:00 2026" },
+    { ...foreign, state: "zombie" as const, session: null },
+  ]) {
+    expect(() => merge([foreign], [after])).toThrow("superseded");
+  }
+  const dead: NativeAuthoredProcessRow = {
+    ...foreign,
+    pid: 79,
+    state: "zombie",
+    session: null,
+  };
+  expect(merge([foreign, dead], [foreign, dead])).toEqual([foreign, dead]);
+  expect(() => merge([foreign, dead], [foreign])).toThrow("superseded");
+  expect(() => merge([foreign], [foreign, dead])).toThrow("superseded");
+  // Each interest key alone makes the PID decide, in either observation.
+  for (const interest of [
+    { pid: value.pid, group: 77, session: "77" },
+    { group: value.group },
+    { session: value.session },
+  ]) {
+    const member = { ...foreign, ...interest };
+    for (const after of [
+      { ...member, executable: "/private-exec-canary" },
+      { ...member, state: "transient" as const },
+      { ...member, birth: "Thu Oct 8 12:00:00 2026" },
+      { ...member, state: "zombie" as const, session: null },
+    ]) {
+      expect(() => merge([member], [after])).toThrow("identity changed");
+      expect(() => merge([after], [member])).toThrow("identity changed");
+    }
+    if (member.pid === foreign.pid) {
+      expect(() => merge([foreign], [member])).toThrow("identity changed");
+      expect(() => merge([member], [foreign])).toThrow("identity changed");
+    }
+  }
+  for (const zombie of [
+    { ...dead, pid: value.pid },
+    { ...dead, group: value.group },
+  ]) {
+    expect(merge([zombie], [zombie])).toEqual([zombie]);
+    expect(() => merge([zombie], [])).toThrow("unknown or occupied");
+    expect(() => merge([], [zombie])).toThrow("unknown or occupied");
+    // A refusal of interest wins over foreign supersession.
+    expect(() =>
+      merge(
+        [foreign, zombie],
+        [{ ...foreign, birth: "Thu Oct 8 12:00:00 2026" }]
+      )
+    ).toThrow("unknown or occupied");
+  }
+  expect(() =>
+    merge(
+      [foreign, { ...foreign, pid: value.pid }],
+      [
+        { ...foreign, birth: "Thu Oct 8 12:00:00 2026" },
+        { ...foreign, pid: value.pid, parent: 1 },
+      ]
+    )
+  ).toThrow("identity changed");
 });

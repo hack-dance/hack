@@ -51,6 +51,7 @@ export type NativeAuthoredProcessIncarnation = NativeAuthoredProcessRow & {
 };
 const issued = new WeakSet<NativeAuthoredProcessIncarnation>();
 const disappearedCensuses = new WeakMap<object, number>();
+const supersededCensuses = new WeakSet<object>();
 export function isCapturedNativeAuthoredProcess(
   value: NativeAuthoredProcessIncarnation
 ): boolean {
@@ -325,37 +326,114 @@ async function readRows(
   }
 }
 
-/** Two complete observations preserve every row. Only irreversibly nonexecuting
- * Z rows may have unavailable SID; they must retain the same identity/state in
- * both snapshots. A disappearance, reuse, new zombie or state change refuses.
- * This is qualified no-live-members evidence, never whole session absence. */
-export function mergeNativeAuthoredProcessCensuses(
-  before: readonly NativeAuthoredProcessRow[],
-  after: readonly NativeAuthoredProcessRow[]
-): readonly NativeAuthoredProcessRow[] {
-  const merged = new Map<number, NativeAuthoredProcessRow>();
-  for (const row of [...before, ...after]) {
+/** The original incarnation a census proves quiescent. A row that carries its
+ * PID, PGID or SID is a row of interest; every other row is foreign. */
+export type NativeAuthoredCensusInterest = Pick<
+  NativeAuthoredProcessIncarnation,
+  "pid" | "group" | "session"
+>;
+function sameRow(
+  left: NativeAuthoredProcessRow,
+  right: NativeAuthoredProcessRow
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+function changedIdentity(): never {
+  throw new Error("Native process census identity changed; values omitted.");
+}
+function observation(
+  rows: readonly NativeAuthoredProcessRow[]
+): ReadonlyMap<number, NativeAuthoredProcessRow> {
+  const result = new Map<number, NativeAuthoredProcessRow>();
+  for (const row of rows) {
     if (row.state !== "zombie" && row.session === null) {
       return refused();
     }
-    const prior = merged.get(row.pid);
-    if (prior && JSON.stringify(prior) !== JSON.stringify(row)) {
-      throw new Error(
-        "Native process census identity changed; values omitted."
-      );
+    const prior = result.get(row.pid);
+    if (prior && !sameRow(prior, row)) {
+      return changedIdentity();
     }
-    merged.set(row.pid, row);
+    result.set(row.pid, row);
   }
-  for (const row of merged.values()) {
-    if (
-      row.state === "zombie" &&
-      !(
-        before.some((item) => JSON.stringify(item) === JSON.stringify(row)) &&
-        after.some((item) => JSON.stringify(item) === JSON.stringify(row))
-      )
-    ) {
-      return refused();
+  return result;
+}
+
+/** Two complete observations preserve every row. Only irreversibly nonexecuting
+ * Z rows may have unavailable SID; they must retain the same identity/state in
+ * both snapshots. This is qualified no-live-members evidence, never whole
+ * session absence.
+ *
+ * Without `interest` every PID decides: reuse, any field or state change, or a
+ * zombie seen in only one observation refuses. With `interest` a PID decides
+ * when any row of it, in either observation, is a row of interest; it keeps
+ * exactly that strict rule, so drift, PID reuse and unstable zombies of interest
+ * still refuse. A foreign PID decides nothing, since only rows of interest can
+ * veto quiescence:
+ * - The same incarnation (PID and birth), live or transient in both: its SID
+ *   was read between two listings of that one process, so exec, reparenting,
+ *   PGID, SID or live/transient drift is ordinary host churn. The later row is
+ *   kept; neither version is of interest, so neither could veto.
+ * - PID reuse, or a zombie that appears, disappears or changes: the earlier SID
+ *   may belong to another incarnation, and an unresolved zombie must be stable
+ *   across an accepted pair. The pair is superseded, never accepted; the census
+ *   discards it and needs two fresh complete observations within its budget.
+ * A refusal of a row of interest always wins over supersession. */
+export function mergeNativeAuthoredProcessCensuses(
+  before: readonly NativeAuthoredProcessRow[],
+  after: readonly NativeAuthoredProcessRow[],
+  interest?: NativeAuthoredCensusInterest
+): readonly NativeAuthoredProcessRow[] {
+  const earlier = observation(before);
+  const later = observation(after);
+  const decides = (pid: number) =>
+    [earlier.get(pid), later.get(pid)].some(
+      (row) =>
+        row !== undefined &&
+        (interest === undefined ||
+          row.pid === interest.pid ||
+          row.group === interest.group ||
+          (row.session !== null && row.session === interest.session))
+    );
+  const merged = new Map<number, NativeAuthoredProcessRow>();
+  const unstable: number[] = [];
+  let superseded = false;
+  for (const pid of new Set([...earlier.keys(), ...later.keys()])) {
+    const first = earlier.get(pid);
+    const second = later.get(pid);
+    if (!(first && second)) {
+      const row = first ?? second ?? refused();
+      if (row.state === "zombie") {
+        unstable.push(pid);
+      }
+      merged.set(pid, row);
+      continue;
     }
+    if (sameRow(first, second)) {
+      merged.set(pid, second);
+      continue;
+    }
+    if (decides(pid)) {
+      return changedIdentity();
+    }
+    if (
+      first.birth === second.birth &&
+      first.state !== "zombie" &&
+      second.state !== "zombie"
+    ) {
+      merged.set(pid, second);
+      continue;
+    }
+    superseded = true;
+  }
+  if (unstable.some(decides)) {
+    return refused();
+  }
+  if (superseded || unstable.length > 0) {
+    const failure = new Error(
+      "Native process census superseded by foreign churn; values omitted."
+    );
+    supersededCensuses.add(failure);
+    throw failure;
   }
   return [...merged.values()];
 }
@@ -473,6 +551,7 @@ async function sessionRows(
 function mergeObservedCensuses(opts: {
   before: readonly NativeAuthoredProcessRow[];
   after: readonly NativeAuthoredProcessRow[];
+  interest: NativeAuthoredCensusInterest | undefined;
   diagnostics: NativeProcessCensusDiagnostics | undefined;
 }): readonly NativeAuthoredProcessRow[] {
   const merge = beginNativeProcessCensusPhase({
@@ -480,7 +559,11 @@ function mergeObservedCensuses(opts: {
     phase: "merge",
   });
   try {
-    const merged = mergeNativeAuthoredProcessCensuses(opts.before, opts.after);
+    const merged = mergeNativeAuthoredProcessCensuses(
+      opts.before,
+      opts.after,
+      opts.interest
+    );
     merge?.({ outcome: "complete", rowCount: merged.length });
     return merged;
   } catch (error) {
@@ -489,15 +572,43 @@ function mergeObservedCensuses(opts: {
   }
 }
 
+/** Within budget, a failed attempt is discarded whole only for a pair superseded
+ * by foreign churn (no denial fact) or a first positive disappearance of a PID,
+ * which becomes a denial fact. Every other failure refuses the census. */
+function discardable(opts: {
+  readonly error: unknown;
+  readonly denied: Set<number>;
+  readonly end: number;
+}): boolean {
+  const { error, denied, end } = opts;
+  if (typeof error !== "object" || error === null || performance.now() >= end) {
+    return false;
+  }
+  if (supersededCensuses.has(error)) {
+    return true;
+  }
+  const disappeared = disappearedCensuses.get(error);
+  if (disappeared === undefined || denied.has(disappeared)) {
+    return false;
+  }
+  denied.add(disappeared);
+  return true;
+}
+
 /** Complete read-only metadata, including explicit unresolved zombie rows. The
  * second observation brackets state/identity across SID lookup. A positively
  * disappeared live row may discard an entire attempt; its successor requires
  * two new complete observations within the original monotonic budget. Only
- * disappeared PIDs survive as denial facts: any reappearance refuses. Unknown
- * or changed membership refuses immediately. No saved PID signals. */
+ * disappeared PIDs survive as denial facts: any reappearance refuses. With
+ * `interest`, a pair superseded by foreign churn is likewise discarded whole,
+ * without a denial fact. Unknown or changed membership refuses immediately.
+ * No saved PID signals. */
 export async function readNativeAuthoredProcessCensus(
   timeoutMs = 3000,
-  opts?: { readonly diagnostics?: NativeProcessCensusDiagnostics }
+  opts?: {
+    readonly diagnostics?: NativeProcessCensusDiagnostics;
+    readonly interest?: NativeAuthoredCensusInterest;
+  }
 ): Promise<readonly NativeAuthoredProcessRow[]> {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3000) {
     return refused();
@@ -520,6 +631,7 @@ export async function readNativeAuthoredProcessCensus(
         const merged = mergeObservedCensuses({
           before,
           after,
+          interest: opts?.interest,
           diagnostics: opts?.diagnostics,
         });
         if (performance.now() >= end) {
@@ -528,18 +640,9 @@ export async function readNativeAuthoredProcessCensus(
         completedRows = merged.length;
         return merged;
       } catch (error) {
-        const disappeared =
-          typeof error === "object" && error !== null
-            ? disappearedCensuses.get(error)
-            : undefined;
-        if (
-          disappeared === undefined ||
-          denied.has(disappeared) ||
-          performance.now() >= end
-        ) {
+        if (!discardable({ error, denied, end })) {
           throw error;
         }
-        denied.add(disappeared);
         // Never carry rows/SIDs from the failed attempt into a successful proof.
       }
     }
@@ -682,7 +785,7 @@ export async function assertNativeAuthoredProcessQuiescent(
   }
   const rows = await readNativeAuthoredProcessCensus(
     Math.min(3000, remaining()),
-    opts
+    { diagnostics: opts?.diagnostics, interest: value }
   );
   requireNativeAuthoredProcessQuiescent(value, rows);
   remaining();

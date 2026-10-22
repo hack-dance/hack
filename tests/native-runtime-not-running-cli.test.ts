@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { NATIVE_RUN_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
@@ -219,7 +220,7 @@ test("HACK_DEBUG=1 adds the stack to a closed native refusal", async () => {
   expect(result.stdout + result.stderr).toMatch(STACK_FRAME);
 });
 
-test("a refused native run prints the refusal and one hint, not the help or Hack's version", async () => {
+test("a native run with a differing profile prints one closed refusal, not the help or Hack's version", async () => {
   const f = await fixture({ nativeCode: "runtime_not_running" });
   const result = await cli({
     fixture: f,
@@ -227,10 +228,8 @@ test("a refused native run prints the refusal and one hint, not the help or Hack
   });
   const output = result.stdout + result.stderr;
   expect(result.code).toBe(1);
-  expect(output).toContain(
-    "Native run uses the started project's environment and profiles; restart with the requested selections first."
-  );
-  expect(output).toContain("See `hack run --help` for usage.");
+  // The saved run started with no profiles; `toolchain` differs (HACK-1276).
+  expect(output.trim()).toBe(`ERROR: E_USAGE: ${NATIVE_RUN_SELECTION_REFUSAL}`);
   expect(output).not.toContain("hack <command> [options]");
   expect(result.stdout).not.toMatch(/^hack v\d/m);
   expect(output).not.toMatch(STACK_FRAME);

@@ -1682,7 +1682,9 @@ lease. They refuse when any of these is true:
 - the graph is active, its journal is incomplete, or interrupted cleanup is pending
 - the path is not exactly a declared entry, or is absolute, traversing or empty
 - the volume is missing, carries foreign ownership labels, or has changed
-  incarnation
+  incarnation (any inspected field other than `CreatedAt` differs, or the guest
+  observes a different `_data` directory, as after the volume was removed and
+  recreated under the same name)
 - any container mounts the volume, including stopped containers
 - a component of the path, or the target itself, is a symbolic link or not a
   directory
@@ -1706,6 +1708,16 @@ undercounts a volume that holds a quarantine. Every `inspect-cache-quarantine`
 result, including `target_absent`, reports `retained_quarantine_records` and
 `retained_quarantine_bytes`: the recorded bytes still held in the current
 incarnation of that volume.
+
+The first quarantine of a volume creates `hack-quarantine` beside `_data`. Docker's
+`local` driver reports a volume's `CreatedAt` from the modification time of that
+directory, so the reported value changes. The selection records `CreatedAt` as
+observed evidence, but it is not volume identity: the move still settles, a pending
+record still resumes, and its bytes are still counted. A digest reviewed before an
+earlier quarantine of the same volume no longer matches; inspect again. If the
+volume changes during the guest effect, the command fails with
+`graph_cache_quarantine_unsettled` and the record stays pending for explicit resume
+or resolution.
 
 A private record under the candidate home's `run/cache-quarantine/` is written
 before the guest effect and marked `quarantined` after the guest syncs the move.

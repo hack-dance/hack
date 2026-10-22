@@ -1561,6 +1561,15 @@ itself is removed. Docker disk usage, and therefore `graph storage-inventory`,
 does not count them. Inspect reports the recorded `retained_quarantine_bytes`
 instead.
 
+Volume incarnation is every inspected field except `CreatedAt`, plus the
+guest-observed `_data` directory identity, which each guest script re-verifies
+and the post-effect recheck observes again. The `local` driver derives
+`CreatedAt` from the volume directory's mtime, which the first quarantine's
+`mkdir hack-quarantine` changes; it is bound into the digest as evidence only.
+A volume replaced under the same name has a new `_data` directory and refuses.
+A change detected after a guest effect fails as
+`graph_cache_quarantine_unsettled` and leaves the record pending.
+
 A private record in `run/cache-quarantine/` is written before the guest effect
 (`pending`) and settled after the synchronized rename (`quarantined`). When the
 receipt and volume are unchanged, repeating `quarantine-cache` resumes it.

@@ -1,5 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalPassThroughEnv": ["HACK_ALLOW_BUN_VERSION_MISMATCH"],
   "tasks": {
     "dev": {
       "cache": false,

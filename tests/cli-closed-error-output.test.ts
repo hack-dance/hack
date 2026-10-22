@@ -4,6 +4,10 @@ import { checkNativeHttpsPort } from "../src/backends/native-https-port.ts";
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
 import { nativeHttpsVerificationError } from "../src/backends/native-project-https.ts";
 import { NativePartialShutdownError } from "../src/backends/native-project-interrupted-cleanup.ts";
+import {
+  NATIVE_RUN_SELECTION_REFUSAL,
+  requireNativeRunSelection,
+} from "../src/backends/native-project-one-off.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { CliUsageError } from "../src/cli/command.ts";
 import { handleRunCliError } from "../src/cli/run.ts";
@@ -167,9 +171,8 @@ test("--json keeps one envelope for a closed refusal", async () => {
 });
 
 test("a handler's usage refusal prints its message and one hint line, not the help", async () => {
-  const error = new CliUsageError(
-    "Native run uses the started project's environment and profiles; restart with the requested selections first."
-  );
+  // The `run` handler's own refusal of a missing service positional.
+  const error = new CliUsageError("Missing required argument: service");
   expect(
     await handleRunCliError({
       error,
@@ -182,6 +185,34 @@ test("a handler's usage refusal prints its message and one hint line, not the he
   );
 });
 
+test("the native run selection refusal prints one coded closed line and no hint", async () => {
+  // The current refusal (#368) replaced the removed "restart with the
+  // requested selections first" usage error; it is a coded E_USAGE error.
+  const error = thrownBy(() =>
+    requireNativeRunSelection({
+      run: {
+        run: "a".repeat(32),
+        owner: "b".repeat(32),
+        namespace: "c".repeat(64),
+        planId: "d".repeat(64),
+        profiles: ["toolchain"],
+        effectiveEnvName: null,
+        aws: null,
+      },
+      selection: { profiles: ["web"] },
+    })
+  );
+  expect(error).toBeInstanceOf(HackCliError);
+  expect(
+    await handleRunCliError({
+      error,
+      jsonRequested: false,
+      handlerPath: ["run"],
+    })
+  ).toBe(1);
+  expect(output).toBe(`ERROR: E_USAGE: ${NATIVE_RUN_SELECTION_REFUSAL}\n`);
+});
+
 test("a usage error found while parsing still prints the help", async () => {
   const error = new CliUsageError("Unknown option(s): --bogus");
   expect(await handleRunCliError({ error, jsonRequested: false })).toBe(1);
@@ -190,7 +221,9 @@ test("a usage error found while parsing still prints the help", async () => {
 });
 
 test("a handler's usage refusal under --json stays one E_USAGE envelope", async () => {
-  const error = new CliUsageError("Native exec does not support --env.");
+  const error = new CliUsageError(
+    "Native exec does not support --env or --profile changes; it uses the running service environment."
+  );
   expect(
     await handleRunCliError({
       error,

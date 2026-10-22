@@ -4,11 +4,20 @@ import { CliUsageError } from "../cli/command.ts";
 export const DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS = 90_000;
 /** Default budget for image build/pull and container creation before start. */
 export const DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS = 1_800_000;
+/**
+ * Default budget of one native storage carrier: its dependency check, target
+ * observation, helper create/policy/start/response/cleanup and closing proof.
+ * It equals the earlier shared start default, so an unset host keeps the same
+ * per-carrier bound.
+ */
+export const DEFAULT_NATIVE_STORAGE_TIMEOUT_MS = 90_000;
 export const COMPOSE_STARTUP_TIMEOUT_ENV = "HACK_COMPOSE_STARTUP_TIMEOUT_MS";
 export const COMPOSE_IMAGE_TIMEOUT_ENV = "HACK_COMPOSE_IMAGE_TIMEOUT_MS";
+export const NATIVE_STORAGE_TIMEOUT_ENV = "HACK_NATIVE_STORAGE_TIMEOUT_MS";
 const MIN_TIMEOUT_MS = 1000;
 const MAX_STARTUP_TIMEOUT_MS = 3_600_000;
 const MAX_IMAGE_TIMEOUT_MS = 14_400_000;
+const MAX_NATIVE_STORAGE_TIMEOUT_MS = 600_000;
 const INTEGER_TEXT = /^[0-9]+$/;
 
 /**
@@ -64,6 +73,137 @@ export function resolveComposeImageTimeoutMs(
         `Compose image build/pull timeout must be an integer from ${MIN_TIMEOUT_MS} to ${MAX_IMAGE_TIMEOUT_MS} milliseconds (${COMPOSE_IMAGE_TIMEOUT_ENV})`
       ),
   });
+}
+
+/**
+ * Budget of one native storage carrier (one fresh helper proof session), from
+ * `HACK_NATIVE_STORAGE_TIMEOUT_MS`. It is separate from the start budget:
+ * storage preparation, enrollment and every storage proof use it, never
+ * `HACK_COMPOSE_STARTUP_TIMEOUT_MS`. Each Docker probe inside a carrier keeps its
+ * own fixed 10-15 s cap, and an exhausted carrier refuses with the closed
+ * `storage-budget` effect reason. It grants nothing and relaxes no check.
+ */
+export function resolveNativeStorageTimeoutMs(
+  opts: {
+    readonly storageTimeoutMs?: number;
+    readonly env?: Readonly<Record<string, string | undefined>>;
+  } = {}
+): number {
+  return resolveBudget({
+    explicit: opts.storageTimeoutMs,
+    configured: (opts.env ?? process.env)[NATIVE_STORAGE_TIMEOUT_ENV],
+    fallback: DEFAULT_NATIVE_STORAGE_TIMEOUT_MS,
+    max: MAX_NATIVE_STORAGE_TIMEOUT_MS,
+    invalid: () =>
+      new CliUsageError(
+        `Native storage timeout must be an integer from ${MIN_TIMEOUT_MS} to ${MAX_NATIVE_STORAGE_TIMEOUT_MS} milliseconds (${NATIVE_STORAGE_TIMEOUT_ENV})`
+      ),
+  });
+}
+
+/**
+ * Whole-phase cap on storage time excluded from one `up`/`restart` start
+ * deadline. Each guard storage proof is bounded per carrier by
+ * `HACK_NATIVE_STORAGE_TIMEOUT_MS` (S), but a phase runs up to (5B+3) guard
+ * proofs for B builds, each over every enrolled volume, so the sum alone is
+ * unbounded in practice. The excluded total may therefore not exceed
+ * {@link NATIVE_STORAGE_EXCLUSION_MULTIPLE} x S or
+ * {@link MAX_NATIVE_STORAGE_EXCLUSION_MS}, whichever is smaller: 24 minutes at
+ * the 90 s default and 1 hour from S = 225 s up. Ordinary proofs take a small
+ * fraction of S, so the cap only stops a phase whose proofs keep running near
+ * their per-proof budget.
+ */
+export const NATIVE_STORAGE_EXCLUSION_MULTIPLE = 16;
+/** Absolute ceiling of excluded storage time in one start phase (1 hour). */
+export const MAX_NATIVE_STORAGE_EXCLUSION_MS = 3_600_000;
+
+/** Excluded storage time one start phase may use for a per-carrier budget S. */
+export function nativeComposeStorageExclusionCapMs(
+  storageTimeoutMs: number
+): number {
+  return Math.min(
+    NATIVE_STORAGE_EXCLUSION_MULTIPLE * storageTimeoutMs,
+    MAX_NATIVE_STORAGE_EXCLUSION_MS
+  );
+}
+
+/**
+ * Closed, value-free refusal once a start phase has spent its whole-phase
+ * storage exclusion cap. Its effect reason is `storage-budget`; it grants
+ * nothing and relaxes no check.
+ */
+export class NativeStorageTotalBudgetError extends Error {
+  constructor() {
+    super(
+      "Native storage proofs exhausted the whole-phase storage budget; values omitted."
+    );
+    this.name = "NativeStorageTotalBudgetError";
+  }
+}
+
+/**
+ * Start deadline of a native `up`/`restart` workload phase (image builds,
+ * container start, readiness and route verification), bounded by
+ * `HACK_COMPOSE_STARTUP_TIMEOUT_MS`. Storage proofs that pre-spawn guards run
+ * inside this phase are bounded by their own `HACK_NATIVE_STORAGE_TIMEOUT_MS`
+ * carriers instead: their monotonic elapsed time extends this deadline rather
+ * than consuming it. Overlapping exclusions count once, a rejected proof still
+ * counts as excluded time, and the deadline never moves earlier.
+ *
+ * The excluded total is capped by
+ * {@link nativeComposeStorageExclusionCapMs}: the deadline moves at most that
+ * far, a proof that would start at or past the cap is refused before it runs,
+ * and a proof that ends past it refuses the phase with
+ * {@link NativeStorageTotalBudgetError} (a failed proof keeps its own error).
+ * The phase therefore ends within the start budget, plus the cap, plus at
+ * most one in-flight guard proof, which is itself bounded per carrier.
+ */
+export function createNativeComposeStartDeadline(opts: {
+  readonly timeoutMs: number;
+  /** Per-carrier storage budget S, from {@link resolveNativeStorageTimeoutMs}. */
+  readonly storageTimeoutMs: number;
+  /** Wall clock that callers compare the deadline with; defaults to `Date.now`. */
+  readonly wallNow?: () => number;
+  /** Monotonic clock that measures excluded storage time. */
+  readonly monotonicNow?: () => number;
+}): {
+  readonly deadline: () => number;
+  readonly excludeStorage: <T>(work: () => Promise<T>) => Promise<T>;
+} {
+  const wallNow = opts.wallNow ?? Date.now;
+  const monotonicNow = opts.monotonicNow ?? (() => performance.now());
+  const capMs = nativeComposeStorageExclusionCapMs(opts.storageTimeoutMs);
+  const base = wallNow() + opts.timeoutMs;
+  let excluded = 0;
+  let active = 0;
+  let since = 0;
+  const spent = () =>
+    excluded + (active > 0 ? Math.max(0, monotonicNow() - since) : 0);
+  return {
+    deadline: () => base + Math.min(capMs, spent()),
+    excludeStorage: async (work) => {
+      if (spent() >= capMs) {
+        throw new NativeStorageTotalBudgetError();
+      }
+      if (active === 0) {
+        since = monotonicNow();
+      }
+      active += 1;
+      let value: Awaited<ReturnType<typeof work>>;
+      try {
+        value = await work();
+      } finally {
+        active -= 1;
+        if (active === 0) {
+          excluded += Math.max(0, monotonicNow() - since);
+        }
+      }
+      if (spent() > capMs) {
+        throw new NativeStorageTotalBudgetError();
+      }
+      return value;
+    },
+  };
 }
 
 function resolveBudget(opts: {

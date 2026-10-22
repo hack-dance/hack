@@ -227,6 +227,8 @@ type FixtureOptions = {
   readonly liveStop?: boolean;
   readonly semanticAfterHook?: boolean;
   readonly planFailure?: boolean;
+  /** Closed native code for `planFailure` (default `native_graph_compile`). */
+  readonly planFailureCode?: string;
   readonly failBeforeReceipt?: boolean;
   /**
    * Like `failBeforeReceipt`, but serve fails the way authored foreground
@@ -510,7 +512,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
   review.review_id=createHash('sha256').update('hack.native-graph-review/v1\\0').update(JSON.stringify(provenance)).digest('hex');
  }
  if(planning){
-  if(${options.planFailure === true}){console.error(JSON.stringify({code:'native_graph_compile',message:'private-rejected-plan-detail'}));process.exit(2)}
+  if(${options.planFailure === true}){console.error(JSON.stringify({code:${JSON.stringify(options.planFailureCode ?? "native_graph_compile")},message:'private-rejected-plan-detail'}));process.exit(2)}
   if(${options.changeDuringPlan === true})await appendFile(${JSON.stringify(envFile)},'\\n');
   console.log(JSON.stringify(review));process.exit(0);
  }
@@ -1053,6 +1055,44 @@ for (const option of [
     }
   );
 }
+
+macTest(
+  "HACK-1300: a planner image refusal retains nothing and never reaches serve",
+  async () => {
+    // The native planner now refuses a repository@digest or tag image with the
+    // lowering's own native_graph_admission code, before any reservation.
+    const selected = await fixture({
+      planFailure: true,
+      planFailureCode: "native_graph_admission",
+    });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+      }),
+      "not-started"
+    );
+    expect(error).toHaveProperty("nativeCode", "native_graph_admission");
+    expect(error).toHaveProperty("stage", "native-plan");
+    expect(String(error)).not.toContain("private-rejected-plan-detail");
+    expect(await artifacts(selected.scope)).toEqual([]);
+    expect(await Bun.file(selected.delivery).exists()).toBe(false);
+    const calls = (await readFile(selected.calls, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line)[4]);
+    expect(calls).toEqual(["plan"]);
+    const status = await nativeAuthoredProjectPs({
+      runtime: selected.runtime,
+      scope: selected.scope,
+      invoke: () => {
+        throw new Error("No runtime request for an absent attempt.");
+      },
+    });
+    expect(status.status).toBe("not_started");
+  }
+);
 
 macTest(
   "unscoped native frontend binds the canonical project namespace",

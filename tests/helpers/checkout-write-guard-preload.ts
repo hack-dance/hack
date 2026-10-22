@@ -1,6 +1,6 @@
 /**
- * `bun test` preload (bunfig.toml): fails the run when a test leaves an
- * untracked file in the repository checkout. See checkout-write-guard.ts.
+ * `bun test` preload (bunfig.toml): fails the run when a test creates or
+ * changes a file in the repository checkout. See checkout-write-guard.ts.
  */
 import { afterAll } from "bun:test";
 import { installCheckoutWriteGuard } from "./checkout-write-guard.ts";

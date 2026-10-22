@@ -4,14 +4,16 @@ import { ClosedCliError } from "../../src/lib/cli-result.ts";
  * Checkout write guard (HACK-1343).
  *
  * Tests must write only inside temp directories. A test that writes into the
- * repository checkout instead (for example a CLI call that outlives its timed
- * out test and resolves an emptied fixture root against the current
- * directory) leaves an untracked file that nothing else reports. The guard
- * records the checkout's untracked files when the test run starts and, after
- * the last test, fails the run naming every untracked file that appeared.
+ * repository checkout instead leaves a change that nothing else reports: a CLI
+ * call that outlives its timed-out test and resolves an emptied fixture root
+ * against the current directory creates an untracked file, and a child
+ * spawned with a `null` cwd rewrites tracked files. The guard records the
+ * checkout's `git status` entries when the test run starts and, after the last
+ * test, fails the run naming every entry that appeared: a new untracked file,
+ * or a tracked file that became modified, deleted or renamed.
  *
- * It sees untracked files that git does not ignore. Writes under an ignored
- * path, edits of tracked files and writes after the run ends are outside it.
+ * Writes under an ignored path, further edits of a file that was already
+ * changed when the run started, and writes after the run ends are outside it.
  */
 
 /** At most this many paths are named in a failure. */
@@ -38,11 +40,13 @@ function runGit(
 }
 
 /**
- * Untracked, non-ignored files under `checkout`, as checkout-relative paths.
- * A failed `git status` is refused, closed: the guard never treats an
- * unreadable checkout as clean.
+ * The `git status` entries of `checkout`: every untracked, non-ignored file
+ * and every changed tracked file, each as its two-letter status and its
+ * checkout-relative path (`?? new.txt`, ` M package.json`). A failed
+ * `git status` is refused, closed: the guard never treats an unreadable
+ * checkout as clean.
  */
-export function untrackedCheckoutFiles(
+export function checkoutStatusEntries(
   runner: GitRunner,
   checkout: string
 ): string[] {
@@ -57,30 +61,34 @@ export function untrackedCheckoutFiles(
       "checkout write guard: git status failed; the checkout could not be checked for files written by tests."
     );
   }
-  const entries = status.stdout.split("\0");
-  const untracked: string[] = [];
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index] ?? "";
-    if (entry.startsWith("?? ")) {
-      untracked.push(entry.slice(3));
-    } else if (entry.startsWith("R") || entry.startsWith("C")) {
-      // A rename or copy is followed by its source path as its own entry.
+  const fields = status.stdout.split("\0");
+  const entries: string[] = [];
+  for (let index = 0; index < fields.length; index += 1) {
+    const entry = fields[index] ?? "";
+    if (entry.length === 0) {
+      continue;
+    }
+    entries.push(entry);
+    if (entry.startsWith("R") || entry.startsWith("C")) {
+      // A rename or copy is followed by its source path as its own field.
       index += 1;
     }
   }
-  return untracked;
+  return entries;
 }
 
-/** Paths in `current` that were not untracked at the baseline, sorted. */
-export function newUntrackedFiles(
+/** Entries in `current` that were not in the baseline, sorted by path. */
+export function newStatusEntries(
   baseline: ReadonlySet<string>,
   current: readonly string[]
 ): string[] {
-  return current.filter((path) => !baseline.has(path)).sort();
+  return current
+    .filter((entry) => !baseline.has(entry))
+    .sort((left, right) => left.slice(3).localeCompare(right.slice(3)));
 }
 
-/** Fails, closed, when `appeared` names any file. */
-export function assertNoNewUntrackedFiles(opts: {
+/** Fails, closed, when `appeared` names any status entry. */
+export function assertNoCheckoutWrites(opts: {
   readonly checkout: string;
   readonly appeared: readonly string[];
 }): void {
@@ -93,8 +101,8 @@ export function assertNoNewUntrackedFiles(opts: {
   }
   throw new ClosedCliError(
     [
-      `checkout write guard: ${opts.appeared.length} untracked file(s) appeared in ${opts.checkout} during the test run.`,
-      "A test wrote outside its temp directory (HACK-1343). Remove the files and fix the test:",
+      `checkout write guard: ${opts.appeared.length} file(s) were created or changed in ${opts.checkout} during the test run.`,
+      "A test wrote outside its temp directory (HACK-1343). Restore or remove these files and fix the test:",
       ...named,
     ].join("\n")
   );
@@ -141,13 +149,13 @@ export function installCheckoutWriteGuard(opts: {
     return;
   }
   const checkout = toplevel.stdout.trim();
-  const baseline = new Set(untrackedCheckoutFiles(runner, checkout));
+  const baseline = new Set(checkoutStatusEntries(runner, checkout));
   opts.afterAll(() => {
-    assertNoNewUntrackedFiles({
+    assertNoCheckoutWrites({
       checkout,
-      appeared: newUntrackedFiles(
+      appeared: newStatusEntries(
         baseline,
-        untrackedCheckoutFiles(runner, checkout)
+        checkoutStatusEntries(runner, checkout)
       ),
     });
   });

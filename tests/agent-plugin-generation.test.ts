@@ -23,15 +23,26 @@ import { renderHackInitSkill } from "../src/agents/hack-init-skill.ts";
 import { renderHackInstallSkill } from "../src/agents/install-skill.ts";
 import { renderHackRemoteSkill } from "../src/agents/remote-bootstrap-skill.ts";
 import { isRecord } from "../src/lib/guards.ts";
+import { fixtureChildren } from "./helpers/fixture-children.ts";
 
 const repoRoot = join(import.meta.dir, "..");
 
 let tempDir: string | null = null;
+/**
+ * The release test's `prepare-release` child. `Bun.spawn` runs a child whose
+ * `cwd` is `null` in the current directory, the checkout, so a call that
+ * outlived its timed-out test once rewrote the repository's release-version
+ * files (HACK-1343). `afterEach` resets `tempDir` first, so a later spawn is
+ * refused, closed, and then kills and awaits a child that is still running.
+ */
+const children = fixtureChildren("agent-plugin-generation release fixture");
 
 afterEach(async () => {
-  if (tempDir) {
-    await rm(tempDir, { recursive: true, force: true });
-    tempDir = null;
+  const removed = tempDir;
+  tempDir = null;
+  await children.stopAll();
+  if (removed) {
+    await rm(removed, { recursive: true, force: true });
   }
 });
 
@@ -513,19 +524,12 @@ test("release preparation updates both manifests and rendered guidance after bum
     join(tempDir, "package.json"),
     JSON.stringify({ version: "0.0.1", workspaces: [] })
   );
-  const child = Bun.spawn(
-    [process.execPath, "scripts/prepare-release.ts", "--version=9.8.7"],
-    {
-      cwd: tempDir,
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  );
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
+  // Read the fixture at spawn time: once afterEach has reset it, this refuses
+  // instead of running prepare-release in the checkout.
+  const { exitCode, stdout, stderr } = await children.run({
+    cmd: [process.execPath, "scripts/prepare-release.ts", "--version=9.8.7"],
+    cwd: tempDir,
+  });
   expect(exitCode, stdout + stderr).toBe(0);
   for (const name of [HACK_PLUGIN_NAME, HACK_MCP_PLUGIN_NAME]) {
     for (const client of ["codex", "claude", "cursor"]) {

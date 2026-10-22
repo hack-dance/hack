@@ -12,6 +12,7 @@ import {
 import {
   createNativeComposeStartDeadline,
   resolveComposeStartupTimeoutMs,
+  resolveNativeStorageTimeoutMs,
 } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
 import { tryNativeAuthoredCommand } from "./native-authored-command.ts";
@@ -1697,9 +1698,11 @@ async function executePreparedGeneration(opts: {
         );
         stage = "workload-execution";
         // The start budget begins after enrollment. Guard storage proofs are
-        // bounded by their own storage carriers and do not consume it.
+        // bounded by their own storage carriers and do not consume it; their
+        // excluded total is capped by a multiple of the storage budget.
         const start = createNativeComposeStartDeadline({
           timeoutMs: resolveComposeStartupTimeoutMs(),
+          storageTimeoutMs: resolveNativeStorageTimeoutMs(),
         });
         return await executePreparedNativeWorkloads({
           options,

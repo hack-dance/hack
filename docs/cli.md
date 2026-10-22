@@ -275,15 +275,31 @@ its own budget, separate from the start budget:
 | --- | --- | --- | --- |
 | One native storage carrier | 90 seconds | `HACK_NATIVE_STORAGE_TIMEOUT_MS` | 1,000–600,000 |
 
-`HACK_COMPOSE_STARTUP_TIMEOUT_MS` never shortens a storage proof. Storage proofs
-that run while a native `up` or `restart` builds and starts workloads do not
-consume the start budget either: their elapsed time extends the start deadline,
-and each proof stays bounded by its own carrier budget. Each Docker command inside
-a carrier keeps its fixed 10–15 second cap. When a carrier budget runs out, the
-command reports the closed effect reason `storage-budget` in
-`error.detail.native_compose_effect_refusal`, and the human summary names
-`HACK_NATIVE_STORAGE_TIMEOUT_MS`. Exhaustion leaves the same retained, uncertain
-state as any other storage refusal; inspect saved state before retrying.
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS` neither shortens nor lengthens a storage proof:
+carriers follow only `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Storage
+proofs that run while a native `up` or `restart` builds and starts workloads do not
+consume the start budget: their elapsed time extends the start deadline, and each
+proof stays bounded by its own carrier budget. Each Docker command inside a carrier
+keeps its fixed 10–15 second cap.
+
+The two variables bound different things:
+
+- Per proof: each storage carrier ends within `HACK_NATIVE_STORAGE_TIMEOUT_MS` (S).
+- Per start phase: the storage time excluded from one `up` or `restart` start
+  deadline may total at most 16 × S or 1 hour, whichever is smaller (24 minutes at
+  the 90-second default; 1 hour from S = 225,000 up). The start deadline moves
+  later by at most that cap. A proof that would start after the cap is spent is
+  refused before it runs, and a proof that ends past the cap refuses the phase.
+- Whole phase: the workload phase therefore ends within
+  `HACK_COMPOSE_STARTUP_TIMEOUT_MS`, plus the cap, plus at most one in-flight
+  guard proof. Raising S raises both the per-proof bound and the cap; raising the
+  start budget never changes either.
+
+When a carrier budget or the whole-phase cap runs out, the command reports the
+closed effect reason `storage-budget` in `error.detail.native_compose_effect_refusal`,
+and the human summary names `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Exhaustion leaves the
+same retained, uncertain state as any other storage refusal; inspect saved state
+before retrying.
 
 To share dependency data only across worktrees with the same lockfile/runtime fingerprint, label
 the bootstrap service with a logical top-level Compose volume:

@@ -1,5 +1,8 @@
 import { createClosedRefusalRegistry } from "./closed-refusal-registry.ts";
-import { NATIVE_STORAGE_TIMEOUT_ENV } from "./compose-startup-budget.ts";
+import {
+  NATIVE_STORAGE_TIMEOUT_ENV,
+  NativeStorageTotalBudgetError,
+} from "./compose-startup-budget.ts";
 import {
   NativeComposeOwnershipError,
   nativeComposeProbeFailure,
@@ -205,7 +208,11 @@ export function retainNativeComposeEffectRefusal(
   registry.retain(error, diagnostic);
 }
 
-/** Refusals issued because a native storage carrier exhausted its named budget. */
+/**
+ * Refusals issued because a native storage carrier exhausted its named budget.
+ * A start phase that spends its whole-phase storage exclusion cap refuses with
+ * `NativeStorageTotalBudgetError`, which maps to the same reason.
+ */
 const storageBudgetRefusals = new WeakSet<object>();
 
 /**
@@ -217,16 +224,21 @@ export function markNativeComposeStorageBudgetRefusal(error: object): void {
   storageBudgetRefusals.add(error);
 }
 
+function storageBudgetRefusal(error: unknown): boolean {
+  return (
+    error instanceof NativeStorageTotalBudgetError ||
+    (typeof error === "object" &&
+      error !== null &&
+      storageBudgetRefusals.has(error))
+  );
+}
+
 /** Classify only a trusted error class's own closed data property; never invoke error getters. */
 export function nativeComposeEffectReason(
   error: unknown
 ): NativeComposeEffectRefusal["reason"] {
   try {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      storageBudgetRefusals.has(error)
-    ) {
+    if (storageBudgetRefusal(error)) {
       return "storage-budget";
     }
     const code =

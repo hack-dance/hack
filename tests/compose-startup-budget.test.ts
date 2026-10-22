@@ -4,10 +4,18 @@ import {
   DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   DEFAULT_NATIVE_STORAGE_TIMEOUT_MS,
+  NativeStorageTotalBudgetError,
+  nativeComposeStorageExclusionCapMs,
   resolveComposeImageTimeoutMs,
   resolveComposeStartupTimeoutMs,
   resolveNativeStorageTimeoutMs,
 } from "../src/lib/compose-startup-budget.ts";
+import {
+  nativeComposeEffectReason,
+  nativeComposeEffectRefusal,
+  nativeComposeEffectRefusalSummary,
+  retainNativeComposeEffectRefusal,
+} from "../src/lib/native-compose-effect-diagnostics.ts";
 
 test("startup budget defaults and explicit numeric precedence", () => {
   expect(resolveComposeStartupTimeoutMs({ env: {} })).toBe(
@@ -158,6 +166,7 @@ test("start deadline is consumed by start work but not by excluded storage proof
   const { advance, options } = fakeClocks();
   const start = createNativeComposeStartDeadline({
     timeoutMs: 15_000,
+    storageTimeoutMs: 90_000,
     ...options,
   });
   expect(start.deadline()).toBe(1_015_000);
@@ -182,6 +191,7 @@ test("rejected and overlapping storage proofs are excluded once and the deadline
   const { advance, options } = fakeClocks();
   const start = createNativeComposeStartDeadline({
     timeoutMs: 15_000,
+    storageTimeoutMs: 90_000,
     ...options,
   });
   const failure = new Error("synthetic storage refusal");
@@ -219,6 +229,7 @@ test("monotonic exclusion ignores wall-clock steps during a storage proof", asyn
   const { clock, options } = fakeClocks();
   const start = createNativeComposeStartDeadline({
     timeoutMs: 15_000,
+    storageTimeoutMs: 90_000,
     ...options,
   });
   await start.excludeStorage(async () => {
@@ -227,4 +238,87 @@ test("monotonic exclusion ignores wall-clock steps during a storage proof", asyn
     clock.monotonic += 7000;
   });
   expect(start.deadline()).toBe(1_022_000);
+});
+
+test("the whole-phase storage exclusion cap is the smaller of 16 x S and one hour", () => {
+  expect(nativeComposeStorageExclusionCapMs(1000)).toBe(16_000);
+  expect(
+    nativeComposeStorageExclusionCapMs(DEFAULT_NATIVE_STORAGE_TIMEOUT_MS)
+  ).toBe(1_440_000);
+  expect(nativeComposeStorageExclusionCapMs(225_000)).toBe(3_600_000);
+  expect(nativeComposeStorageExclusionCapMs(600_000)).toBe(3_600_000);
+});
+
+test("excluded storage time past the whole-phase cap refuses as storage-budget and stops extending the deadline", async () => {
+  const { advance, options } = fakeClocks();
+  // S = 1 s, so the phase may exclude at most 16 s of storage proofs.
+  const start = createNativeComposeStartDeadline({
+    timeoutMs: 15_000,
+    storageTimeoutMs: 1000,
+    ...options,
+  });
+  expect(
+    await start.excludeStorage(async () => {
+      advance(10_000);
+      return "proved";
+    })
+  ).toBe("proved");
+  expect(start.deadline()).toBe(1_025_000);
+  // A proof that ends past the cap refuses even though it succeeded, and the
+  // deadline moves only up to the cap while it runs.
+  const seen: number[] = [];
+  const caught = await start
+    .excludeStorage(async () => {
+      advance(7000);
+      seen.push(start.deadline());
+      return "proved";
+    })
+    .catch((error: unknown) => error);
+  expect(seen).toEqual([1_031_000]);
+  expect(caught).toBeInstanceOf(NativeStorageTotalBudgetError);
+  expect((caught as Error).message).toBe(
+    "Native storage proofs exhausted the whole-phase storage budget; values omitted."
+  );
+  expect(nativeComposeEffectReason(caught)).toBe("storage-budget");
+  retainNativeComposeEffectRefusal(caught, {
+    stage: "guard-storage",
+    reason: nativeComposeEffectReason(caught),
+  });
+  expect(
+    nativeComposeEffectRefusalSummary({
+      native_compose_effect_refusal: nativeComposeEffectRefusal(caught),
+    })
+  ).toBe(
+    "Refusal boundary: guard-storage (storage-budget); the native storage budget HACK_NATIVE_STORAGE_TIMEOUT_MS was exhausted; values omitted."
+  );
+  expect(start.deadline()).toBe(1_031_000);
+  // Once the cap is spent, a further proof is refused before it runs.
+  let ran = false;
+  await expect(
+    start.excludeStorage(async () => {
+      ran = true;
+    })
+  ).rejects.toBeInstanceOf(NativeStorageTotalBudgetError);
+  expect(ran).toBe(false);
+  expect(start.deadline()).toBe(1_031_000);
+});
+
+test("a storage proof that fails past the whole-phase cap keeps its own error", async () => {
+  const { advance, options } = fakeClocks();
+  const start = createNativeComposeStartDeadline({
+    timeoutMs: 15_000,
+    storageTimeoutMs: 1000,
+    ...options,
+  });
+  const failure = new Error("synthetic storage refusal");
+  await expect(
+    start.excludeStorage(async () => {
+      advance(20_000);
+      throw failure;
+    })
+  ).rejects.toBe(failure);
+  expect(start.deadline()).toBe(1_031_000);
+  await expect(
+    start.excludeStorage(async () => undefined)
+  ).rejects.toBeInstanceOf(NativeStorageTotalBudgetError);
 });

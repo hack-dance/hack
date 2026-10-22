@@ -221,6 +221,9 @@ import {
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   buildLogSelector,
+  LOKI_FOLLOW_EMPTY_NOTICE_DELAY_MS,
+  type LogsCommandTarget,
+  renderEmptyLokiFollowNotice,
   resolveShouldTryLoki,
   resolveUseLoki,
   runLokiSnapshotWithFallback,
@@ -8084,6 +8087,8 @@ async function runLogsWithLoki(opts: {
   readonly since: string | undefined;
   readonly until: string | undefined;
   readonly wantsLokiExplicit: boolean;
+  /** Project selection repeated in suggested `hack logs --compose` commands. */
+  readonly target: LogsCommandTarget;
   /** Compose snapshot used when an implicit Loki snapshot comes back empty. */
   readonly runCompose: () => Promise<number>;
 }): Promise<number> {
@@ -8139,13 +8144,29 @@ async function runLogsWithLoki(opts: {
     end: opts.timeRange.end ?? undefined,
   };
   if (opts.follow) {
-    return await lokiLogBackend.run({ ...lokiOptions, follow: true });
+    return await lokiLogBackend.run({
+      ...lokiOptions,
+      follow: true,
+      noEntriesNotice: {
+        afterMs: LOKI_FOLLOW_EMPTY_NOTICE_DELAY_MS,
+        notify: () => {
+          process.stderr.write(
+            `${renderEmptyLokiFollowNotice({
+              query,
+              service: opts.positionalService,
+              target: opts.target,
+            })}\n`
+          );
+        },
+      },
+    });
   }
 
   return await runLokiSnapshotWithFallback({
     wantsLokiExplicit: opts.wantsLokiExplicit,
     query,
     service: opts.positionalService,
+    target: opts.target,
     runLoki: async ({ deferEmpty }) =>
       await lokiLogBackend.snapshot({ ...lokiOptions, deferEmpty }),
     runCompose: opts.runCompose,
@@ -8497,6 +8518,11 @@ async function handleLogs({
       since: args.options.since,
       until: args.options.until,
       wantsLokiExplicit,
+      target: {
+        path: args.options.path,
+        project: args.options.project,
+        branch: args.options.branch,
+      },
       runCompose,
     });
   }

@@ -54,6 +54,7 @@ import {
 import {
   type NativeRunSelection,
   nativeProjectOneOff,
+  requireNonEmptyNativeRunOptions,
 } from "../backends/native-project-one-off.ts";
 import {
   retireNativeRecoveredPublisher,
@@ -4819,11 +4820,18 @@ async function requireProjectContext(startDir: string) {
   return ctx;
 }
 
-class MissingProjectContextError extends Error {
+/**
+ * No project at the selected path. It carries `E_PROJECT_NOT_FOUND`, the code
+ * `up`, `down` and `restart` already reported, so every project command that
+ * resolves its project here (`ps`, `logs`, `run`, ...) reports the same closed
+ * code under `--json` and one closed line without it.
+ */
+class MissingProjectContextError extends HackCliError {
   constructor() {
-    super(
-      `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`
-    );
+    super({
+      code: "E_PROJECT_NOT_FOUND",
+      message: `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`,
+    });
     this.name = "MissingProjectContextError";
   }
 }
@@ -7476,8 +7484,8 @@ async function handlePs({
 /**
  * Compose runs need the Compose operation; a native one-off instead carries its
  * `--env`/`--profile` request. Omitted options inherit the running selection;
- * given options must match it exactly, which the native backend checks before
- * any runtime request (no implicit restart).
+ * an empty value is refused; given options must match it exactly, which the
+ * native backend checks before any runtime request (no implicit restart).
  */
 function runBackendSelection(
   native: boolean,
@@ -7487,6 +7495,10 @@ function runBackendSelection(
     requireComposeOperationAvailable("run");
     return;
   }
+  requireNonEmptyNativeRunOptions({
+    env: args.options.env,
+    profile: args.options.profile,
+  });
   return {
     envName: resolveRequestedEnvName({ envOption: args.options.env }),
     profiles:

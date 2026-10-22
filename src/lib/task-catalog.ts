@@ -865,7 +865,10 @@ async function resolvePinnedFile(input: {
  * `secrets.json`, ...). A tracked file's content is already shared with
  * everyone who has the repository. One read-only `git ls-files` with literal
  * pathspecs runs per recipe; fsmonitor is disabled so no repository-
- * configured hook can run.
+ * configured hook can run. Every inherited `GIT_*` variable is dropped, so
+ * a caller's `GIT_DIR`, `GIT_INDEX_FILE`, `GIT_WORK_TREE` or config
+ * overrides cannot point the query at another repository or index: only
+ * the checkout's own index can make a path tracked.
  */
 async function allTrackedByGit(input: {
   readonly root: string;
@@ -890,7 +893,7 @@ async function allTrackedByGit(input: {
         "--",
         ...input.paths,
       ],
-      { stdin: "ignore" }
+      { stdin: "ignore", unsetEnvKeys: inheritedGitEnvKeys() }
     );
   } catch {
     return false;
@@ -900,6 +903,13 @@ async function allTrackedByGit(input: {
   }
   const tracked = new Set(result.stdout.split("\0"));
   return input.paths.every((path) => tracked.has(path));
+}
+
+/** Names of the current process's `GIT_*` variables, read at call time. */
+function inheritedGitEnvKeys(): string[] {
+  return Object.keys(process.env).filter((key) =>
+    key.toUpperCase().startsWith("GIT_")
+  );
 }
 
 /**

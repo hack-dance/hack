@@ -23,8 +23,21 @@ import {
   pinNativeComposeFixtureVolume,
   runWithOwnedCleanup,
 } from "../native-compose-owned-fixture.ts";
+import {
+  describeNativeComposeStorageTimings,
+  summarizeNativeComposeStorageTimings,
+} from "../native-compose-phase-summary.ts";
 
-const TIMEOUT = 90_000;
+/**
+ * One hack command. The 15 s start budget below bounds container start and
+ * readiness only; each storage proof of an `up` (preparation, entry,
+ * enrollment, guard and finalization carriers) has its own default 90 s storage
+ * carrier budget (HACK-1324). A 90 s command bound could kill a slow but
+ * healthy proof and leave uncertain storage; 240 s keeps margin over several
+ * slow carriers. Each command's duration is logged as evidence.
+ */
+const TIMEOUT = 240_000;
+const LOGGED_VERBS: ReadonlySet<string> = new Set(["up", "down", "exec", "ps"]);
 const HOST_VALUE = "synthetic-down-host-$literal";
 function data(result: CliResult): Record<string, unknown> {
   const value: unknown = JSON.parse(result.stdout);
@@ -171,9 +184,15 @@ if((await Bun.file("mode").text())===phase+"17")process.exit(17);
         HACK_RUNTIME_BACKEND: "compose",
         HACK_COMPOSE_STARTUP_TIMEOUT_MS: "15000",
         HACK_DAEMON_DISABLE_DOCKER_EVENTS: "1",
+        HACK_NATIVE_COMPOSE_PHASE_TRACE: "1",
       },
     });
     noValues(result);
+    // Fixed verb, exit, duration and closed storage phase timings only:
+    // measured budget evidence without values.
+    ctx.log(
+      `hack ${LOGGED_VERBS.has(args[0] ?? "") ? args[0] : "command"}${args.includes("--recover") ? " --recover" : ""} ${result.timedOut ? "timeout" : `exit ${result.exitCode}`} in ${Math.round(result.durationMs)}ms; ${describeNativeComposeStorageTimings(summarizeNativeComposeStorageTimings(result.stderr))}`
+    );
     if (result.timedOut) {
       ctx.retainFixtures(
         "CLI timeout leaves unverified finite down effects; inspect saved owner before cleanup"

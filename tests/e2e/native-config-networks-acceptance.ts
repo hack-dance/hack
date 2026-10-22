@@ -45,9 +45,39 @@ const OUTPUT_LIMIT = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT = 180_000;
 // Witness-bearing exec/up verification runs three fresh helper carriers per proof; on the
 // hosted Linux engine a storage exec (two proofs) takes ~10 s and a warm up (six or seven)
-// ~30 s across three checkouts, about 38 minutes for this scenario.
-const SCENARIO_TIMEOUT = 60 * 60_000;
+// ~30 s across three checkouts. 44 hosted passes (Blacksmith 4 vCPU,
+// 2026-10-19..21) took 2113-3494 s, median ~2650 s; the slowest used 97% of
+// the former 60-minute budget. The named 90-minute budget keeps 1.55x that
+// slowest pass; with cleanup and two command bounds it stays inside the
+// 150-minute shard job.
+export const NATIVE_NETWORK_FIXTURE_SCENARIO_TIMEOUT = 90 * 60_000;
+const SCENARIO_TIMEOUT = NATIVE_NETWORK_FIXTURE_SCENARIO_TIMEOUT;
 const CLEANUP_TIMEOUT = 3 * 60_000;
+/**
+ * Whole-run and cleanup budgets gate only the start of a fixture command. A
+ * started command keeps its full own `COMMAND_TIMEOUT`, so the hard bound is
+ * `SCENARIO_TIMEOUT + CLEANUP_TIMEOUT + 2 * COMMAND_TIMEOUT`. Clipping a started
+ * command to the remaining whole-run budget killed an in-flight storage carrier
+ * command (run 39431629301): its created helper is retained evidence that saved
+ * `down --recover` correctly refuses to repair, so cleanup could not recover.
+ */
+export function nativeNetworkFixtureCommandTimeout(opts: {
+  readonly started: number;
+  readonly cleanupStarted: number | null;
+  readonly now: number;
+}): number {
+  const remaining =
+    opts.cleanupStarted === null
+      ? SCENARIO_TIMEOUT - (opts.now - opts.started)
+      : CLEANUP_TIMEOUT - (opts.now - opts.cleanupStarted);
+  requireValue(
+    remaining > 0,
+    opts.cleanupStarted === null
+      ? "Network scenario exceeded its whole-run budget"
+      : "Network scenario exceeded its cleanup budget"
+  );
+  return COMMAND_TIMEOUT;
+}
 const BUN_TAG = "oven/bun:1.4.2-slim";
 const CADDY_TAG = "lucaslorentz/caddy-docker-proxy:2.10.0-alpine";
 const ROOT_CA = "/data/caddy/pki/authorities/local/root.crt";
@@ -1590,14 +1620,11 @@ export const nativeConfigNetworksScenario: Scenario = {
       cwd = ctx.tempRoot,
       extra: Readonly<Record<string, string>> = {}
     ): Promise<CliResult> => {
-      const remaining =
-        cleanupStarted === null
-          ? SCENARIO_TIMEOUT - (Date.now() - started)
-          : CLEANUP_TIMEOUT - (Date.now() - cleanupStarted);
-      requireValue(
-        remaining > 0,
-        "Network scenario exceeded its whole-run budget"
-      );
+      const timeoutMs = nativeNetworkFixtureCommandTimeout({
+        started,
+        cleanupStarted,
+        now: Date.now(),
+      });
       sequence += 1;
       const command = {
         step: nativeNetworkFixtureStep(argv, stepExecutables),
@@ -1612,7 +1639,7 @@ export const nativeConfigNetworksScenario: Scenario = {
           cwd,
           env: { ...env, ...extra },
           captures,
-          timeoutMs: Math.min(COMMAND_TIMEOUT, remaining),
+          timeoutMs,
         });
       } catch (error: unknown) {
         // A killed or unreturned command has no result for ok(); name it here.

@@ -1,5 +1,9 @@
 import { createClosedRefusalRegistry } from "./closed-refusal-registry.ts";
 import {
+  NATIVE_STORAGE_TIMEOUT_ENV,
+  NativeStorageTotalBudgetError,
+} from "./compose-startup-budget.ts";
+import {
   NativeComposeOwnershipError,
   nativeComposeProbeFailure,
 } from "./native-compose-ownership.ts";
@@ -71,6 +75,7 @@ export type NativeComposeEffectRefusal = {
     | "probe-timeout"
     | "probe-cancel"
     | "probe-budget"
+    | "storage-budget"
     | "probe-capture"
     | "probe-decode"
     | "probe-unclassified"
@@ -152,6 +157,7 @@ const reasons: readonly NativeComposeEffectRefusal["reason"][] = [
   "probe-timeout",
   "probe-cancel",
   "probe-budget",
+  "storage-budget",
   "probe-capture",
   "probe-decode",
   "probe-unclassified",
@@ -202,11 +208,39 @@ export function retainNativeComposeEffectRefusal(
   registry.retain(error, diagnostic);
 }
 
+/**
+ * Refusals issued because a native storage carrier exhausted its named budget.
+ * A start phase that spends its whole-phase storage exclusion cap refuses with
+ * `NativeStorageTotalBudgetError`, which maps to the same reason.
+ */
+const storageBudgetRefusals = new WeakSet<object>();
+
+/**
+ * Mark a refusal whose cause is an exhausted native storage carrier budget
+ * (`HACK_NATIVE_STORAGE_TIMEOUT_MS`), so its effect reason names that budget.
+ * It grants nothing and changes no check, deadline or retention.
+ */
+export function markNativeComposeStorageBudgetRefusal(error: object): void {
+  storageBudgetRefusals.add(error);
+}
+
+function storageBudgetRefusal(error: unknown): boolean {
+  return (
+    error instanceof NativeStorageTotalBudgetError ||
+    (typeof error === "object" &&
+      error !== null &&
+      storageBudgetRefusals.has(error))
+  );
+}
+
 /** Classify only a trusted error class's own closed data property; never invoke error getters. */
 export function nativeComposeEffectReason(
   error: unknown
 ): NativeComposeEffectRefusal["reason"] {
   try {
+    if (storageBudgetRefusal(error)) {
+      return "storage-budget";
+    }
     const code =
       typeof error === "object" && error !== null
         ? Object.getOwnPropertyDescriptor(error, "code")
@@ -279,9 +313,12 @@ export function nativeComposeEffectRefusalSummary(
     const reason = reasons.find(
       (value) => value === ownData(refusal, "reason")
     );
-    return stage && reason
-      ? `Refusal boundary: ${stage} (${reason}); values omitted.`
-      : null;
+    if (!(stage && reason)) {
+      return null;
+    }
+    return reason === "storage-budget"
+      ? `Refusal boundary: ${stage} (${reason}); the native storage budget ${NATIVE_STORAGE_TIMEOUT_ENV} was exhausted; values omitted.`
+      : `Refusal boundary: ${stage} (${reason}); values omitted.`;
   } catch {
     return null;
   }

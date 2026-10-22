@@ -1334,6 +1334,11 @@ describe("recipe grammar", () => {
         ["mariadb", "-e", "select 1"],
         ["duckdb", "-c", "select 1"],
         ["duckdb", "-cmd", "select 1", "data.duckdb"],
+        // The sqlite3 parser DuckDB shares strips one leading dash.
+        ["duckdb", "--c", ".shell id"],
+        ["duckdb", "--s", "select 1"],
+        ["duckdb", "--cmd", "select 1", "data.duckdb"],
+        ["sqlite3", "--cmd", ".shell id", "app.db"],
       ],
       accepted: [
         ["psql", "-f", "scripts/x.sql"],
@@ -1358,6 +1363,9 @@ describe("recipe grammar", () => {
         ["sqlite3", "-csv", "-header", "app.db"],
         ["sqlite3", "-separator", ",", "app.db"],
         ["duckdb", "-f", "scripts/x.sql", "data.duckdb"],
+        // A two-dash value option still consumes its value.
+        ["sqlite3", "--separator", ",", "app.db"],
+        ["duckdb", "--f", "scripts/x.sql", "data.duckdb"],
       ],
     },
     {
@@ -1392,6 +1400,9 @@ describe("recipe grammar", () => {
         ["git", "clone", "-qu", "/tmp/x.sh", "url"],
         ["git", "clone", "-qu/tmp/x.sh", "url"],
         ["git", "--git-dir", "x", "clone", "-u", "id", "url"],
+        ["git", "--attr-source", "HEAD", "clone", "-u", "id", "url"],
+        // A global option this table does not know cannot hide `clone`.
+        ["git", "--future-global", "value", "clone", "-u", "id", "url"],
         ["git", "clone", "--upload-pack=id", "url"],
         ["git", "clone", "--upl=id", "url"],
         ["git", "fetch", "--upload", "id", "origin"],
@@ -1405,6 +1416,8 @@ describe("recipe grammar", () => {
         ["git", "clone", "--quiet", "--depth", "1", "url"],
         ["git", "push", "-u", "origin", "main"],
         ["git", "add", "-u"],
+        // `clone` here is the `--attr-source` tree-ish, not the subcommand.
+        ["git", "--attr-source", "clone", "add", "-u"],
         ["git", "fetch", "--update-shallow", "origin"],
         ["git", "rebase", "--continue"],
       ],
@@ -1449,6 +1462,11 @@ describe("recipe grammar", () => {
     // `-C` matches `-c` (case-folded), so `git -C dir status` is refused;
     // a recipe must set the Compose workdir instead.
     expect(isInlineCommandArgv(["git", "-C", "dir", "status"])).toBe(true);
+    // Any operand named `clone` scopes `-u` to it, so a branch or remote
+    // named `clone` makes `git push -u` refused too.
+    expect(isInlineCommandArgv(["git", "push", "-u", "origin", "clone"])).toBe(
+      true
+    );
   });
 
   test("effects must be covered by required capabilities", () => {

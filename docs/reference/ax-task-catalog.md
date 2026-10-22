@@ -38,9 +38,10 @@ is not implemented here.
    `-um code`) and a `data:` URL module given to Node, Bun, Deno or tsx
    (`node --import data:text/javascript,…`) are refused too. So are SQL
    clients given a statement string (`psql -c`/`--command`,
-   `mysql`/`mariadb -e`/`--execute`/`--init-command`, `duckdb -c`/`-cmd`,
-   `sqlite3 -cmd`, and any `sqlite3` or `duckdb` operand after the
-   database). So are the string-to-shell forms of package runners and
+   `mysql`/`mariadb -e`/`--execute`/`--init-command`,
+   `duckdb -c`/`-s`/`-cmd`, `sqlite3 -cmd`, and any `sqlite3` or `duckdb`
+   operand after the database; both programs strip one leading dash, so
+   `duckdb --c` and `sqlite3 --cmd` count too). So are the string-to-shell forms of package runners and
    wrappers (`npx -c`, `npm exec -c`, `pnpm -c`, `yarn exec`, `bun exec`,
    `nodemon --exec`, `tsx -e`, `ts-node -e`, `julia -e`, `sudo -s`,
    `doas -s`, `git -c`/`--config`/`--exec`/`--upload-pack`/
@@ -53,7 +54,10 @@ is not implemented here.
    `psql`, `mysql` and `mariadb` accept abbreviated long options, so any
    prefix of a refused long option counts (`git clone --upl=cmd`), and so
    does a value attached to a refused one-letter option
-   (`git clone -u/path/cmd`). Accepted forms include `psql -f script.sql`,
+   (`git clone -u/path/cmd`). `clone -u` counts when any operand is
+   `clone`, so a Git global option that takes a value
+   (`git --attr-source HEAD clone -u cmd`) cannot hide the subcommand.
+   Accepted forms include `psql -f script.sql`,
    `mysql --batch db`, `sqlite3 -csv app.db`,
    `duckdb -f script.sql data.duckdb`, `python -m pytest`,
    `git clone url dir`, `git push -u origin main`, `git add -u` and
@@ -290,9 +294,9 @@ until its recipes are re-reviewed.
 | Package-runner, TypeScript-runner, privilege-wrapper, `git -c`, `make --eval`, `deno run -` and editor forms | `inline_command`; `npm run`, `npx tsc`, `tsx script.ts`, `sudo -u`, `git status`, `make test` still pass | domain test |
 | `data:` URL modules (`node --import data:…`, `deno run data:…`), `git bisect run`, `git filter-branch` and `julia -e` | `inline_command`; `node --import ./register.js`, `git log`, `julia -t 4 script.jl` still pass | domain test |
 | `git fetch`/`clone --upload-pack`, `git push --receive-pack` and a dash version suffix (`node-22 -e`) | `inline_command`; `git push -u origin main`, `git fetch origin`, `node-22 script.js` still pass | domain test |
-| SQL statement strings (`psql -c`, `mysql -e`, `mariadb -e`, `duckdb -c`, `sqlite3 app.db 'SQL'`), including abbreviated long options | `inline_command`; `psql -f script.sql`, `sqlite3 -csv app.db`, `duckdb -f script.sql data.duckdb` still pass | domain test |
+| SQL statement strings (`psql -c`, `mysql -e`, `mariadb -e`, `duckdb -c`/`--c`/`--s`/`--cmd`, `sqlite3 --cmd`, `sqlite3 app.db 'SQL'`), including abbreviated long options | `inline_command`; `psql -f script.sql`, `sqlite3 -csv app.db`, `sqlite3 --separator , app.db`, `duckdb --f script.sql data.duckdb` still pass | domain test |
 | Python REPL and eval modules (`python -m code`, `-mcode`, `-m idlelib`, `-m timeit`) | `inline_command`; `python -m pytest`, `python -m codecs` still pass | domain test |
-| `git clone -u`, abbreviated or attached `--upload-pack`/`--receive-pack`/`--exec`, `clone --config`, and `!` alias values (`git config alias.x '!cmd'`, `git -c alias.x=!cmd`) | `inline_command`; `git clone url dir`, `git push -u origin main`, `git add -u`, `git config alias.st status` still pass | domain test |
+| `git clone -u` (also after `--attr-source <tree>` or an unknown global option), abbreviated or attached `--upload-pack`/`--receive-pack`/`--exec`, `clone --config`, and `!` alias values (`git config alias.x '!cmd'`, `git -c alias.x=!cmd`) | `inline_command`; `git clone url dir`, `git push -u origin main`, `git add -u`, `git config alias.st status` still pass | domain test |
 | Caller `GIT_DIR`/`GIT_INDEX_FILE`/`GIT_WORK_TREE` naming another index that tracks a secret | `input_path_invalid` with no digest; a foreign `GIT_DIR` does not hide the checkout's own index | domain test |
 | Pin through a symlinked directory (outside the checkout, or aliasing `.hack`) | `input_path_invalid` | paired fixture |
 | Pointer pin into a gitignored, untracked secrets file | `input_path_invalid` with no digest; the same pin is checked once the file is tracked | paired fixture, domain test |
@@ -333,9 +337,10 @@ until its recipes are re-reviewed.
   reviewer must check argv, and WU26 execution must not rely on this check
   as a sandbox. For a known program it is fail-closed, so it can also refuse
   an ordinary argument that looks like an inline flag (`script.sh -c`,
-  `git clean -x`, `git -C dir status`, `make -e`, `python -I`, `mysql -E`,
-  an attached `mysql -Dname` whose name contains an `e`, a Git argument such as
-  `--grep=!x` that starts a value with `!`). Bare `R` is not refused,
+  `git clean -x`, `git -C dir status`, `git push -u origin clone`,
+  `make -e`, `python -I`, `mysql -E`, an attached `mysql -Dname` whose name
+  contains an `e`, a Git argument such as `--grep=!x` that starts a value
+  with `!`). Bare `R` is not refused,
   because a one-letter word is too common as an ordinary argument. A SQL
   client that reads statements from stdin (`psql db`, `mysql db`,
   `sqlite3 app.db` with no SQL operand) is not refused; only a statement

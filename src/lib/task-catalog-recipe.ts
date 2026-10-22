@@ -303,6 +303,13 @@ type Evaluator = {
    */
   readonly abbreviates: boolean;
   /**
+   * True when the option parser strips one leading dash from a two-dash
+   * option, so `--cmd` is `-cmd` and `--c` is `-c` (the `sqlite3` shell and
+   * DuckDB, which shares its argument parser). Flags and value options are
+   * then listed in their one-dash form and match either spelling.
+   */
+  readonly foldsDoubleDash: boolean;
+  /**
    * Operands after this many are inline code (`sqlite3 db.sqlite 'SQL'`,
    * `duckdb db.duckdb 'SQL'`), or null when operands are never code.
    */
@@ -314,9 +321,12 @@ type Evaluator = {
    */
   readonly replModules: readonly string[];
   /**
-   * Inline flags that count only under one subcommand (the first operand),
-   * because the same letter is harmless elsewhere: `git clone -u <cmd>`
-   * runs a command, while `git push -u` sets an upstream.
+   * Inline flags that count only under one subcommand, because the same
+   * letter is harmless elsewhere: `git clone -u <cmd>` runs a command, while
+   * `git push -u` sets an upstream. They count when any operand names the
+   * subcommand, not only the first, so a global option missing from
+   * `valueOptions` (whose value would be taken as the subcommand) cannot
+   * hide it (fail-closed).
    */
   readonly subcommandInline: Readonly<Record<string, readonly string[]>>;
   /**
@@ -339,6 +349,7 @@ function evaluator(spec: Partial<Evaluator>): Evaluator {
     dataUrlModules: false,
     clusters: true,
     abbreviates: false,
+    foldsDoubleDash: false,
     codeOperandsAfter: null,
     replModules: [],
     subcommandInline: {},
@@ -380,24 +391,19 @@ const MYSQL = evaluator({
   abbreviates: true,
 });
 
-/** `sqlite3` options that consume the next argument (also used by DuckDB). */
+/**
+ * `sqlite3` options that consume the next argument (also used by DuckDB),
+ * in their one-dash form; the two-dash spelling folds onto it.
+ */
 const SQLITE_VALUE_OPTIONS = [
   "-cmd",
-  "--cmd",
   "-init",
-  "--init",
   "-separator",
-  "--separator",
   "-newline",
-  "--newline",
   "-nullvalue",
-  "--nullvalue",
   "-vfs",
-  "--vfs",
   "-mmap",
-  "--mmap",
   "-maxsize",
-  "--maxsize",
   "-lookaside",
   "-pagecache",
   "-heap",
@@ -572,6 +578,7 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
       "--namespace",
       "--config-env",
       "--super-prefix",
+      "--attr-source",
     ],
     abbreviates: true,
     subcommandInline: { clone: ["-u"] },
@@ -584,17 +591,20 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   mariadb: MYSQL,
   // `sqlite3` (`sqlite` once the version suffix is removed) and `duckdb`
   // run any operand after the database as SQL. Their one-dash options are
-  // words, not letter clusters.
+  // words, not letter clusters, and a two-dash spelling is the same option
+  // (`duckdb --c 'SQL'` is `duckdb -c 'SQL'`).
   sqlite: evaluator({
-    inline: ["-cmd", "--cmd"],
+    inline: ["-cmd"],
     valueOptions: SQLITE_VALUE_OPTIONS,
     clusters: false,
+    foldsDoubleDash: true,
     codeOperandsAfter: 1,
   }),
   duckdb: evaluator({
     inline: ["-c", "-cmd", "-s"],
     valueOptions: [...SQLITE_VALUE_OPTIONS, "-c", "-s", "-f"],
     clusters: false,
+    foldsDoubleDash: true,
     codeOperandsAfter: 1,
   }),
   nix: evaluator({
@@ -694,7 +704,7 @@ function matchesFlag(opts: {
   readonly flags: readonly string[];
   readonly spec: Evaluator;
 }): boolean {
-  const arg = opts.arg.toLowerCase();
+  const arg = foldDoubleDash(opts.arg, opts.spec).toLowerCase();
   const longName = arg.split("=", 1)[0] ?? arg;
   return opts.flags.some((raw) => {
     const flag = raw.toLowerCase();
@@ -723,6 +733,16 @@ function matchesFlag(opts: {
       flag.startsWith(longName)
     );
   });
+}
+
+/**
+ * `--x` as `-x` for a program whose parser strips one leading dash
+ * (`foldsDoubleDash`); every other argument, and `--` itself, unchanged.
+ */
+function foldDoubleDash(arg: string, spec: Evaluator): string {
+  return spec.foldsDoubleDash && arg.startsWith("--") && arg.length > 2
+    ? arg.slice(1)
+    : arg;
 }
 
 /** `-u…`, `-qu…`: a letter cluster ending in `letter`, then its value. */
@@ -760,7 +780,7 @@ const PYTHON_MODULE_OPTION = /^-[A-Za-z]*?m(.*)$/;
  */
 function operands(opts: {
   readonly rest: readonly string[];
-  readonly valueOptions: readonly string[];
+  readonly spec: Evaluator;
 }): string[] {
   const out: string[] = [];
   for (let index = 0; index < opts.rest.length; index++) {
@@ -771,7 +791,9 @@ function operands(opts: {
     }
     if (arg === "-" || !(arg.startsWith("-") || arg.startsWith("+"))) {
       out.push(arg);
-    } else if (opts.valueOptions.includes(arg)) {
+    } else if (
+      opts.spec.valueOptions.includes(foldDoubleDash(arg, opts.spec))
+    ) {
       index += 1;
     }
   }
@@ -801,12 +823,13 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
   if (spec.evaluatesOperands) {
     return rest.length > 0;
   }
-  const positional = operands({ rest, valueOptions: spec.valueOptions });
+  const positional = operands({ rest, spec });
   const operand = positional[0] ?? null;
-  const scoped =
-    operand !== null && Object.hasOwn(spec.subcommandInline, operand)
-      ? (spec.subcommandInline[operand] ?? [])
-      : [];
+  const scoped = positional.flatMap((word) =>
+    Object.hasOwn(spec.subcommandInline, word)
+      ? (spec.subcommandInline[word] ?? [])
+      : []
+  );
   const flags = [...spec.inline, ...spec.stdin, ...scoped];
   if (
     rest.some(

@@ -271,12 +271,13 @@ mod tests {
     #[test]
     fn an_interrupted_create_is_recognized_only_by_this_pools_own_record() {
         let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-config-audit-recorded-{}-{}",
+            "hack-config-audit-recorded-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::next_test_scratch()
         ));
         fs::create_dir(&checkout).unwrap();
         let candidate = Candidate::discover(&checkout).unwrap();

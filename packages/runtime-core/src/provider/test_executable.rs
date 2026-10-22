@@ -42,6 +42,10 @@ pub(super) fn sleeping_executable(binary: &Path) {
     fs::set_permissions(binary, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+/// Hang guard for [`run_isolated`]: the child launches the whole test binary on a host that
+/// may be heavily loaded, so this bounds a hang rather than the fixture's own timing.
+pub(super) const ISOLATED_HANG_GUARD: Duration = Duration::from_secs(120);
+
 /// Run one ignored test alone in a child process of this test binary and require its
 /// complete assertion path. Use it when a fixture's descriptors must not be shared with
 /// unrelated parallel tests: their pre-exec forks (`process::clean_command`) hold copies

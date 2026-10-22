@@ -10,12 +10,13 @@ struct Fixture {
 impl Fixture {
     fn new(label: &str) -> Self {
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-prepared-work-{label}-{}-{}",
+            "hack-prepared-work-{label}-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::next_test_scratch()
         ));
         fs::create_dir(&root).unwrap();
         let checkout = root.join("checkout");

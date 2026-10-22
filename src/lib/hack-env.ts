@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import {
   PROJECT_ENV_CONTRACT_FILENAME,
@@ -7,6 +7,7 @@ import {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { readTextFile } from "./fs.ts";
+import { ensureHackGitInfoExclude } from "./git-info-exclude.ts";
 import { getString, isRecord } from "./guards.ts";
 import {
   readPrivateEnvFile,
@@ -501,6 +502,13 @@ export function resolveEnvSecretKey(opts: {
   return envName.length > 0 ? `env.${envName}.${opts.key}` : opts.key;
 }
 
+/**
+ * Sets one key in a project dotenv file (`.hack/.env` or `.hack/.env.<name>`)
+ * with a private atomic write. Before writing, best-effort, it keeps the project dir's
+ * machine-local files out of `git status` through the repository's
+ * `info/exclude` (see `ensureHackGitInfoExclude`); it never writes the
+ * working tree for that.
+ */
 export async function upsertDotEnvValue(opts: {
   readonly envFile: string;
   readonly key: string;
@@ -511,6 +519,8 @@ export async function upsertDotEnvValue(opts: {
   const env = parseDotEnv(existingText);
   const nextEnv: Record<string, string> = { ...env, [opts.key]: opts.value };
   const nextText = serializeDotEnvStable(nextEnv);
+  // After the read, so a refused (for example symlinked) file never spawns git.
+  await ensureHackGitInfoExclude({ projectDir: dirname(opts.envFile) });
   return await writePrivateEnvFileIfChanged({
     envFile: opts.envFile,
     text: nextText,

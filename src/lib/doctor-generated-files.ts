@@ -1,4 +1,8 @@
 import { PROJECT_ENV_KEY_FILENAME } from "../constants.ts";
+import {
+  type HackDirGitignoreState,
+  inspectHackDirGitignore,
+} from "./project-env-config.ts";
 import { exec } from "./shell.ts";
 
 export type TrackedGeneratedFilesInspection = {
@@ -108,4 +112,27 @@ export async function untrackGeneratedFiles(opts: {
     return { ok: false, error: detail };
   }
   return { ok: true, error: null };
+}
+
+/**
+ * State of the committed `<projectDir>/.gitignore` for the doctor check and
+ * its `--fix` step, or null when the project dir is not inside a git work
+ * tree (the file only matters to git). Read-only.
+ */
+export async function inspectHackDirGitignoreForDoctor(opts: {
+  readonly projectDir: string;
+}): Promise<HackDirGitignoreState | null> {
+  let probe: Awaited<ReturnType<typeof exec>>;
+  try {
+    probe = await exec(
+      ["git", "-C", opts.projectDir, "rev-parse", "--is-inside-work-tree"],
+      { stdin: "ignore", timeoutMs: 5000 }
+    );
+  } catch {
+    return null;
+  }
+  if (probe.exitCode !== 0 || probe.stdout.trim() !== "true") {
+    return null;
+  }
+  return await inspectHackDirGitignore({ projectDir: opts.projectDir });
 }

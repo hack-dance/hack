@@ -326,7 +326,11 @@ async function image(
 export async function buildNativeComposeImages(opts: {
   readonly intents: readonly NativeComposeBuildIntent[];
   readonly projectRoot: string;
-  readonly deadline?: number;
+  /**
+   * Start-phase wall deadline, read at every check: storage proof time that
+   * `assertOwned` excludes from the start budget extends it while builds run.
+   */
+  readonly deadline?: () => number;
   readonly signal: AbortSignal;
   readonly env: Record<string, string> | undefined;
   readonly json: boolean;
@@ -334,9 +338,10 @@ export async function buildNativeComposeImages(opts: {
   readonly assertOwned: () => Promise<void>;
   readonly io?: BuildIo;
 }): Promise<number> {
+  const deadline = opts.deadline;
+  const within = () => deadline === undefined || Date.now() < deadline();
   const probe = (args: readonly string[]) => {
-    const remaining =
-      opts.deadline === undefined ? 15_000 : opts.deadline - Date.now();
+    const remaining = deadline === undefined ? 15_000 : deadline() - Date.now();
     requireValue(remaining > 0);
     return createNativeComposeProbe({
       signal: opts.signal,
@@ -366,10 +371,7 @@ export async function buildNativeComposeImages(opts: {
   };
   let engine: string | null = null;
   const fresh = async () => {
-    requireValue(
-      !opts.signal.aborted &&
-        (opts.deadline === undefined || Date.now() < opts.deadline)
-    );
+    requireValue(!opts.signal.aborted && within());
     await opts.assertFresh();
     await opts.assertOwned();
     const observed = await io.engine();
@@ -379,10 +381,7 @@ export async function buildNativeComposeImages(opts: {
         (engine === null || engine === observed)
     );
     engine = observed;
-    requireValue(
-      !opts.signal.aborted &&
-        (opts.deadline === undefined || Date.now() < opts.deadline)
-    );
+    requireValue(!opts.signal.aborted && within());
   };
   const admitted: { intent: NativeComposeBuildIntent; id: string }[] = [];
   // Admit every selected cached tag before any builder is invoked.
@@ -402,7 +401,7 @@ export async function buildNativeComposeImages(opts: {
       // Recheck after it, then admit spawn synchronously with the remaining budget.
       await fresh();
       const timeoutMs =
-        opts.deadline === undefined ? undefined : opts.deadline - Date.now();
+        deadline === undefined ? undefined : deadline() - Date.now();
       requireValue(
         !opts.signal.aborted && (timeoutMs === undefined || timeoutMs > 0)
       );

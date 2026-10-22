@@ -247,7 +247,14 @@ export async function invoke(
    * Without one, the command uses an isolated client config that selects no
    * real engine.
    */
-  extraEnv: Readonly<Record<string, string>> = {}
+  extraEnv: Readonly<Record<string, string>> = {},
+  capture: {
+    /**
+     * Write the CLI's stderr straight to this file instead of a pipe, so the
+     * Docker stand-in can read diagnostics the CLI has already written.
+     */
+    readonly stderrFile?: string;
+  } = {}
 ) {
   const child = Bun.spawn(
     [
@@ -278,16 +285,21 @@ export async function invoke(
       }),
       stdin: "ignore",
       stdout: "pipe",
-      stderr: "pipe",
+      stderr: capture.stderrFile ? Bun.file(capture.stderrFile) : "pipe",
     }
   );
   const timer = setTimeout(() => child.kill("SIGKILL"), commandTimeoutMs);
   try {
-    const [code, stdout, stderr] = await Promise.all([
+    const [code, stdout, piped] = await Promise.all([
       child.exited,
       new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
+      typeof child.stderr === "number" || child.stderr === undefined
+        ? ""
+        : new Response(child.stderr).text(),
     ]);
+    const stderr = capture.stderrFile
+      ? await Bun.file(capture.stderrFile).text()
+      : piped;
     return { code, stdout, stderr };
   } finally {
     clearTimeout(timer);

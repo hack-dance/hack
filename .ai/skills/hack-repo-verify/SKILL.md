@@ -33,8 +33,24 @@ For native setup use root `mise.toml`, the Bun pin in `package.json`, and
 `bun install --frozen-lockfile`. Native gates are `bun run typecheck`, `bun run check`,
 `bun run test`. Focused CLI checks: `bun run --cwd packages/cli typecheck` and
 `bun run --cwd packages/cli check`; lint changed tests/scripts explicitly with
-`bunx ultracite check <paths>`. Rust default gates are `bun run check:local` and
-`bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
+`bunx ultracite check <paths>`. These entry points first run
+`bun run check:bun-version`, which fails when the running Bun differs from the
+`packageManager` pin that CI installs. A Bun ahead of mise's shims on `PATH`
+(for example mise's `latest` install) bypasses the checkout's `mise.toml`; use
+`mise x bun@<pin> -- bun run <script>` instead. `HACK_ALLOW_BUN_VERSION_MISMATCH=1`
+proceeds with a warning for a deliberate experiment; such a result is not CI evidence.
+Raw `bun test <paths>` does not run the guard.
+
+CI's "Config compiler" job also runs compiled-bundle CLI checks
+(`scripts/check-config-compiler-cli.ts`, `scripts/check-native-*-plan-cli.ts`,
+`scripts/check-native-config-import-cli.ts`) that `bun run test` does not. For
+compiler, native planning or config-import changes, run them locally after
+`bun run build` and `bun run build:config-compiler` with
+`bun run check:native-plan-cli`. `tests/native-plan-cli-wiring.test.ts` fails when a
+new `scripts/check-native-*-plan-cli.ts` is missing from that command or from CI.
+CI also lints those scripts and runs their transport tests; lint changed ones explicitly.
+
+Rust default gates are `bun run check:local` and `bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
 changes; the toolchain Rust tasks already enable all features. Keep default coverage.
 
 Before a full CLI suite, explicitly prepare the ignored compiler with

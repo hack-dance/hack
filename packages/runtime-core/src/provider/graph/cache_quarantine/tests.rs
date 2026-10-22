@@ -154,6 +154,62 @@ fn observation_output_is_closed_and_bounded() {
     }
 }
 
+/// HACK-1301: `CreatedAt` is the volume directory's mtime under the local
+/// driver, so it is not identity; a replaced volume still refuses.
+#[test]
+fn volume_incarnation_ignores_created_at_and_refuses_a_replaced_volume() {
+    let admitted = json!({
+        "Name":"hkg-www","Driver":"local","CreatedAt":"2026-10-21T14:51:57Z",
+        "Mountpoint":"/var/lib/docker/volumes/hkg-www/_data",
+        "Labels":{"dev.hack.owner":"owner","dev.hack.run":RUN},
+        "Options":null,"Scope":"local"
+    });
+    // Only the root mtime changed: `mkdir hack-quarantine` beside `_data`.
+    let mut touched = admitted.clone();
+    touched["CreatedAt"] = json!("2026-10-21T14:52:08Z");
+    assert!(same_incarnation(&admitted, "64:12", &touched, "64:12"));
+    assert!(same_incarnation(&admitted, "64:12", &admitted, "64:12"));
+    // A replaced volume: same name, driver, mountpoint and labels, new `_data`,
+    // whether or not the second-precision `CreatedAt` happens to collide.
+    assert!(!same_incarnation(&admitted, "64:12", &touched, "64:99"));
+    assert!(!same_incarnation(&admitted, "64:12", &admitted, "64:99"));
+    assert!(!same_incarnation(&admitted, "64:12", &admitted, "65:12"));
+    // Every other inspected field remains identity.
+    for (field, value) in [
+        ("Name", json!("hkg-other")),
+        ("Driver", json!("other")),
+        (
+            "Mountpoint",
+            json!("/var/lib/docker/volumes/hkg-other/_data"),
+        ),
+        (
+            "Labels",
+            json!({"dev.hack.owner":"other","dev.hack.run":RUN}),
+        ),
+        ("Options", json!({"type":"tmpfs"})),
+        ("Scope", json!("global")),
+    ] {
+        let mut changed = touched.clone();
+        changed[field] = value;
+        assert!(
+            !same_incarnation(&admitted, "64:12", &changed, "64:12"),
+            "{field}"
+        );
+    }
+    let mut added = admitted.clone();
+    added["Status"] = json!({"foreign":true});
+    assert!(!same_incarnation(&admitted, "64:12", &added, "64:12"));
+    let mut removed = admitted.clone();
+    removed.as_object_mut().unwrap().remove("Labels");
+    assert!(!same_incarnation(&admitted, "64:12", &removed, "64:12"));
+    assert!(!same_incarnation(
+        &Value::Null,
+        "64:12",
+        &Value::Null,
+        "64:12"
+    ));
+}
+
 fn selection(target_identity: &str) -> Selection {
     Selection {
         version: 1,
@@ -243,6 +299,14 @@ fn durable_records_are_private_exact_bounded_and_refuse_torn_or_forged_state() {
     // A quarantined selection never re-admits; an abandoned one moved nothing.
     assert!(!done.admits(&second.selection, &second.selection_sha256));
     assert!(done.admits(&pending.selection, &pending.selection_sha256));
+    // The same quarantined directory under a later `CreatedAt` (the quarantine
+    // root changed it) is still the same directory and never re-admits.
+    let mut later = second.selection.clone();
+    later.volume_created = "2026-09-28T19:10:20Z".into();
+    assert!(!done.admits(&later, &later.sha256().unwrap()));
+    // A replaced volume's directory is a different incarnation.
+    later.root_identity = "7:101".into();
+    assert!(done.admits(&later, &later.sha256().unwrap()));
     let mut invalid = pending.clone();
     invalid.selection.target_bytes += 1;
     assert!(records.write(&invalid).is_err());

@@ -10,6 +10,7 @@ import type {
 } from "../../src/lib/native-compose-ownership.ts";
 import { isNativeComposeTopologyPredicate } from "../../src/lib/native-compose-ownership.ts";
 import { exec } from "../../src/lib/shell.ts";
+import { testBudgetMs } from "../helpers/test-budget.ts";
 import {
   type ProcessPolicyInitialTraceQuery,
   readProcessPolicyInitialTrace,
@@ -20,6 +21,15 @@ import {
 } from "./native-process-policy-startup-diagnostic.ts";
 
 const REFUSAL = "Initial process-policy replay unavailable; values omitted";
+/**
+ * Harness budget for one replay child: a fresh Bun process that transpiles the
+ * ownership policy and spawns one stub engine per recorded reply. This bounds
+ * the replay itself; the ownership policy's own probe bounds run unchanged
+ * inside it. A fixed 5 s refused replays on loaded hosts.
+ */
+const REPLAY_CHILD_BUDGET_MS = testBudgetMs(5000);
+/** Harness budget for every replay child of one trace summary together. */
+const REPLAY_SUMMARY_BUDGET_MS = testBudgetMs(30_000);
 const SERVICES = ["forced", "graceful", "reaper", "retry"] as const;
 const CODES = [
   "E_NATIVE_COMPOSE_OWNERSHIP",
@@ -173,7 +183,7 @@ process.stdout.write(JSON.stringify({outcome,code,reason,topologyPredicate,consu
       cwd: opts.directory,
       env: { PATH: opts.directory },
       stdin: "ignore",
-      timeoutMs: opts.timeoutMs ?? 5000,
+      timeoutMs: opts.timeoutMs ?? REPLAY_CHILD_BUDGET_MS,
     }
   );
   if (result.exitCode !== 0 || result.stdout.length > 1024) {
@@ -222,13 +232,13 @@ export async function summarizeProcessPolicyInitialTrace(opts: {
   readonly projectRoot: string;
   readonly replayRoot: string;
 }) {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + REPLAY_SUMMARY_BUDGET_MS;
   const remaining = (): number => {
     const budget = Math.floor(deadline - Date.now());
     if (budget <= 0) {
       throw new Error(REFUSAL);
     }
-    return Math.min(budget, 5000);
+    return Math.min(budget, REPLAY_CHILD_BUDGET_MS);
   };
   const trace = await readProcessPolicyInitialTrace(opts.directory);
   const store = await openNativeComposeGenerationStore({

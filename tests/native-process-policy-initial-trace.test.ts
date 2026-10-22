@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { test as bunTest, expect } from "bun:test";
 import {
   chmod,
   mkdtemp,
@@ -33,6 +33,25 @@ import {
   classifyProcessPolicyMemberKeys,
 } from "./e2e/native-process-policy-startup-diagnostic.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { testBudgetMs } from "./helpers/test-budget.ts";
+
+/**
+ * A case whose last argument is the time its replay children need on an
+ * unloaded host. The Bun timeout is that time scaled by `testBudgetMs`, since
+ * each replay child cold-starts Bun and one stub engine per recorded reply.
+ * Cases without one keep Bun's default.
+ */
+function test(
+  name: string,
+  run: () => void | Promise<void>,
+  unloadedTimeoutMs?: number
+): void {
+  if (unloadedTimeoutMs === undefined) {
+    bunTest(name, run);
+    return;
+  }
+  bunTest(name, run, testBudgetMs(unloadedTimeoutMs));
+}
 
 const CANARY = "synthetic-unknown-docker-stdout-stderr-canary";
 const EMPTY_MEMBER_KEYS = { hex64: 0, epPrefixed: 0, other: 0 } as const;
@@ -114,7 +133,7 @@ const FORWARDED_DOCKER_EXEC_TIMEOUT_MS = 30_000;
 /** Four forwarded commands at their exec bound, plus trace reads and rewrites. */
 const INITIAL_FORWARDING_TEST_TIMEOUT_MS = 150_000;
 
-test(
+bunTest(
   "initial forwarding preserves bytes/exits but records no unknown output, args or stderr",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "process-initial-forwarding-"));

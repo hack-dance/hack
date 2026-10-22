@@ -427,7 +427,8 @@ it does not independently terminate a caller-owned engine callback.
 would refuse the project as native input. It reports the adopted project, the env key,
 tracked generated files and Compose env values at rest. Each other project check
 (runtime and lifecycle hygiene, Compose networks and backend features, `DEV_HOST`, env
-mode, materialization and overlay warnings, worktree keys and instances, Caddy hosts)
+mode, materialization and overlay warnings, worktree keys and instances, the
+`.hack/.gitignore` check, Caddy hosts)
 reads inputs that the adoption owns, so doctor lists it as not checked instead of
 failing. A pending adoption is a warning that asks for explicit recovery. The
 `--fix` plan says that it leaves the adoption's inputs, retained containers and state

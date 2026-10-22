@@ -44,7 +44,7 @@ import {
 export const COMPOSE_ENV_OVERRIDE_FILENAME = "compose.env.override.yml";
 
 const REFUSAL =
-  "Refused the generated Compose env override: it or .hack/.internal is a symlink or not a regular file. Remove it and retry; values omitted.";
+  "Refused the generated Compose env override: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Replace it with a regular file or directory and retry; values omitted.";
 
 /** Absolute path of the generated env override for a project directory. */
 export function composeEnvOverridePath(opts: {
@@ -53,12 +53,78 @@ export function composeEnvOverridePath(opts: {
   return resolve(opts.projectDir, ".internal", COMPOSE_ENV_OVERRIDE_FILENAME);
 }
 
+/**
+ * The project directory (`.hack`) and its `.internal` child. Every read,
+ * write, removal and aside sweep requires both to be real directories, checked
+ * without following a symlink, so no operation here reaches outside the
+ * project through a linked directory.
+ */
+function overrideDirectories(path: string): readonly string[] {
+  const internal = dirname(path);
+  return [dirname(internal), internal];
+}
+
 function fileOptions(path: string): ReplaceablePrivateFileOptions {
   return {
     path,
-    directories: [dirname(path)],
+    directories: overrideDirectories(path),
     refusal: () => new Error(REFUSAL),
   };
+}
+
+type HeldDirectory = {
+  readonly path: string;
+  readonly dev: number;
+  readonly ino: number;
+};
+
+/**
+ * No-follow ownership check of the override's directories, the same one the
+ * writer applies before it writes: `absent` when either is missing, `refused`
+ * when either is a symlink or not a directory, else their identities so a
+ * later step can confirm they were not swapped. Other filesystem errors
+ * propagate.
+ */
+async function holdOverrideDirectories(
+  path: string
+): Promise<
+  | { readonly kind: "absent" | "refused" }
+  | { readonly kind: "real"; readonly directories: readonly HeldDirectory[] }
+> {
+  const directories: HeldDirectory[] = [];
+  for (const directory of overrideDirectories(path)) {
+    let info: Awaited<ReturnType<typeof lstat>>;
+    try {
+      info = await lstat(directory);
+    } catch (error: unknown) {
+      if (isRecord(error) && error.code === "ENOENT") {
+        return { kind: "absent" };
+      }
+      throw error;
+    }
+    if (!info.isDirectory()) {
+      return { kind: "refused" };
+    }
+    directories.push({ path: directory, dev: info.dev, ino: info.ino });
+  }
+  return { kind: "real", directories };
+}
+
+/** True while every held directory is still the same real directory. */
+async function sameDirectories(
+  directories: readonly HeldDirectory[]
+): Promise<boolean> {
+  for (const held of directories) {
+    const current = await lstat(held.path).catch(() => null);
+    if (
+      !current?.isDirectory() ||
+      current.dev !== held.dev ||
+      current.ino !== held.ino
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -79,6 +145,11 @@ export async function writeComposeEnvOverride(opts: {
     );
   }
   const path = composeEnvOverridePath(opts);
+  // Refuse a linked `.hack` or `.internal` before mkdir can create anything
+  // through it; the read and replace below check both again.
+  if ((await holdOverrideDirectories(path)).kind === "refused") {
+    throw new Error(REFUSAL);
+  }
   await mkdir(dirname(path), { recursive: true });
   const options = fileOptions(path);
   const existing = await readReplaceablePrivateFile(options);
@@ -86,21 +157,29 @@ export async function writeComposeEnvOverride(opts: {
     await replacePrivateFileAtomic({ ...options, text: opts.text });
   }
   // An aside left by a crashed removal can hold values, so a rendering command
-  // sweeps stale ones too, once the directory passed the symlink checks above.
-  // Best effort: `hack doctor` reports what remains.
-  await removeStaleAsides({ path, now: opts.now ?? Date.now }).catch(() => 0);
+  // sweeps stale ones too, once the directories passed the symlink checks
+  // above. Best effort: `hack doctor` reports what remains.
+  await removeStaleAsidesIfOwned({ path, now: opts.now ?? Date.now }).catch(
+    () => 0
+  );
   return path;
 }
 
-/** At-rest state of the generated override; counts only, never values. */
+/**
+ * At-rest state of the generated override; counts only, never values.
+ * `refused`: the override, `.hack` or `.hack/.internal` is a symlink or not a
+ * regular file or directory. Nothing behind it is read, and nothing here
+ * removes or replaces it.
+ */
 export type ComposeEnvOverrideAtRest =
   | { readonly kind: "absent"; readonly path: string }
   | { readonly kind: "unreadable"; readonly path: string }
+  | { readonly kind: "refused"; readonly path: string }
   | (ComposeEnvOverrideContent & { readonly path: string });
 
 /**
- * Reports what the generated override holds without following a symlink. A
- * symlink or other non-regular entry is `unverifiable`.
+ * Reports what the generated override holds without following a symlink at
+ * the file, `.hack` or `.hack/.internal`; any of those is `refused`.
  */
 export async function inspectComposeEnvOverrideAtRest(opts: {
   readonly projectDir: string;
@@ -112,17 +191,33 @@ export async function inspectComposeEnvOverrideAtRest(opts: {
 async function inspectEntry(
   path: string
 ): Promise<
-  | { readonly kind: "absent" }
-  | { readonly kind: "unreadable" }
+  | { readonly kind: "absent" | "unreadable" | "refused" }
   | ComposeEnvOverrideContent
 > {
+  const held = await holdOverrideDirectories(path).catch(() => null);
+  if (!held) {
+    return { kind: "unreadable" };
+  }
+  if (held.kind !== "real") {
+    return { kind: held.kind };
+  }
   let current: Awaited<ReturnType<typeof readReplaceablePrivateFile>>;
   try {
     current = await readReplaceablePrivateFile(fileOptions(path));
   } catch (error: unknown) {
     if (error instanceof Error && error.message === REFUSAL) {
+      // Classify only through the directories held above: a swapped one is
+      // refused, never looked through.
+      if (!(await sameDirectories(held.directories))) {
+        return { kind: "refused" };
+      }
       const info = await lstat(path).catch(() => null);
-      return info ? { kind: "unverifiable" } : { kind: "absent" };
+      if (!info) {
+        return { kind: "absent" };
+      }
+      // A regular file that changed during the read may hold values; a
+      // symlink or other entry is refused.
+      return info.isFile() ? { kind: "unverifiable" } : { kind: "refused" };
     }
     return { kind: "unreadable" };
   }
@@ -141,6 +236,11 @@ const STALE_ASIDE_MS = 60_000;
  * Removes the override only while it still holds (or may hold) literal
  * values: `plaintext` always, `unverifiable` when `includeUnverifiable` is set.
  * Returns the state that was acted on.
+ *
+ * Ownership: nothing is swept, moved or removed unless `.hack` and
+ * `.hack/.internal` are real directories (no-follow, as the writer checks),
+ * and they are checked again before each move and unlink. A symlinked or
+ * non-regular override is `refused` and left in place.
  *
  * Race safety: the entry is first moved aside with one atomic rename, and the
  * moved entry itself is classified again. If a concurrent Compose command had
@@ -165,8 +265,18 @@ export async function removePlaintextComposeEnvOverride(opts: {
   readonly asidesRemoved: number;
 }> {
   const path = composeEnvOverridePath(opts);
+  const held = await holdOverrideDirectories(path);
+  if (held.kind !== "real") {
+    return {
+      removed: false,
+      adoptionBound: false,
+      asidesRemoved: 0,
+      state: { kind: held.kind, path },
+    };
+  }
   const asidesRemoved = await removeStaleAsides({
     path,
+    directories: held.directories,
     now: opts.now ?? Date.now,
   });
   const eligible = (state: { readonly kind: string }) =>
@@ -184,6 +294,9 @@ export async function removePlaintextComposeEnvOverride(opts: {
   const info = await lstat(path).catch(() => null);
   if (!info || info.isDirectory()) {
     return { ...kept, state };
+  }
+  if (!(await sameDirectories(held.directories))) {
+    return { ...kept, state: { kind: "refused", path } };
   }
   const aside = join(
     dirname(path),
@@ -263,22 +376,48 @@ async function restoreAside(opts: {
  */
 async function removeStaleAsides(opts: {
   readonly path: string;
+  readonly directories: readonly HeldDirectory[];
   readonly now: () => number;
 }): Promise<number> {
   const asides = await listAsides(opts);
   for (const aside of asides.stale) {
+    if (!(await sameDirectories(opts.directories))) {
+      throw new Error(REFUSAL);
+    }
     await unlinkIfPresent(aside);
   }
   return asides.stale.length;
 }
 
-/** Regular-file asides of crashed or in-flight removals, split by age. */
+/** Sweeps stale asides only while both directories are real; else none. */
+async function removeStaleAsidesIfOwned(opts: {
+  readonly path: string;
+  readonly now: () => number;
+}): Promise<number> {
+  const held = await holdOverrideDirectories(opts.path);
+  return held.kind === "real"
+    ? await removeStaleAsides({ ...opts, directories: held.directories })
+    : 0;
+}
+
+/**
+ * Regular-file asides of crashed or in-flight removals, split by age. Lists
+ * only the held `.internal` directory: a swap before or during the listing is
+ * refused rather than listed through.
+ */
 async function listAsides(opts: {
   readonly path: string;
+  readonly directories: readonly HeldDirectory[];
   readonly now: () => number;
 }): Promise<{ readonly stale: string[]; readonly fresh: string[] }> {
   const directory = dirname(opts.path);
+  if (!(await sameDirectories(opts.directories))) {
+    throw new Error(REFUSAL);
+  }
   const names = await readdir(directory).catch(() => []);
+  if (!(await sameDirectories(opts.directories))) {
+    throw new Error(REFUSAL);
+  }
   const stale: string[] = [];
   const fresh: string[] = [];
   for (const name of names) {
@@ -323,10 +462,16 @@ export async function inspectComposeEnvAtRest(opts: {
   readonly now?: () => number;
 }): Promise<ComposeEnvAtRestReport> {
   const override = await inspectComposeEnvOverrideAtRest(opts);
-  const asides = await listAsides({
-    path: override.path,
-    now: opts.now ?? Date.now,
-  });
+  // Asides are listed only inside real directories, never through a link.
+  const held = await holdOverrideDirectories(override.path).catch(() => null);
+  const asides =
+    held?.kind === "real"
+      ? await listAsides({
+          path: override.path,
+          directories: held.directories,
+          now: opts.now ?? Date.now,
+        })
+      : { stale: [], fresh: [] };
   return {
     override,
     adoptionBound:
@@ -374,6 +519,7 @@ export function describeComposeEnvAtRest(opts: {
   const described = describeOverride({
     state: opts.report.override,
     file,
+    projectDirName: opts.projectDirName,
     adoptionBound: opts.report.adoptionBound,
   });
   const asides = opts.report.asides.stale + opts.report.asides.fresh;
@@ -391,6 +537,7 @@ export function describeComposeEnvAtRest(opts: {
 function describeOverride(opts: {
   readonly state: ComposeEnvOverrideAtRest;
   readonly file: string;
+  readonly projectDirName: string;
   readonly adoptionBound: boolean;
 }): { readonly status: "ok" | "warn"; readonly message: string } {
   const { state, file } = opts;
@@ -419,6 +566,11 @@ function describeOverride(opts: {
       return {
         status: "warn",
         message: `${file} could not be read, so Hack cannot confirm it holds no env values. Check its owner and permissions.`,
+      };
+    case "refused":
+      return {
+        status: "warn",
+        message: `Refused to inspect ${file}: it, ${opts.projectDirName} or ${opts.projectDirName}/.internal is a symlink or not a regular file or directory. Hack does not follow or change it, and 'hack doctor --fix' leaves it in place (values omitted). Replace it with a regular file or directory.`,
       };
     default:
       return state satisfies never;

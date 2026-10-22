@@ -1,10 +1,23 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { ensureManagedGitignoreBlock } from "../src/lib/fs.ts";
-import { ensureHackDirGitignore } from "../src/lib/project-env-config.ts";
+import {
+  ensureHackDirGitignore,
+  HACK_DIR_GITIGNORE_REFUSAL,
+  HackDirGitignoreRefusalError,
+} from "../src/lib/project-env-config.ts";
 import {
   HACK_DIR_GITIGNORE_BEGIN_MARKER,
   HACK_DIR_GITIGNORE_END_MARKER,
@@ -148,6 +161,62 @@ test("ensureHackDirGitignore writes the canonical managed entries", async () => 
 
   const second = await ensureHackDirGitignore({ projectDir });
   expect(second.changed).toBe(false);
+});
+
+test("ensureHackDirGitignore creates a new file with mode 0644", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await ensureHackDirGitignore({ projectDir });
+  expect((await stat(resolve(projectDir, ".gitignore"))).mode & 0o777).toBe(
+    0o644
+  );
+});
+
+test("ensureHackDirGitignore refuses a dangling .gitignore symlink without creating its target", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await mkdir(projectDir);
+  const outside = resolve(dir, "outside-target");
+  await symlink(outside, resolve(projectDir, ".gitignore"));
+
+  const error = await ensureHackDirGitignore({ projectDir }).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(HackDirGitignoreRefusalError);
+  expect((error as Error).message).toBe(HACK_DIR_GITIGNORE_REFUSAL);
+  expect(await lstat(outside).catch(() => null)).toBeNull();
+  expect(
+    (await lstat(resolve(projectDir, ".gitignore"))).isSymbolicLink()
+  ).toBe(true);
+});
+
+test("ensureHackDirGitignore refuses a .gitignore symlink to an outside file and leaves it unchanged", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await mkdir(projectDir);
+  const outside = resolve(dir, "outside-file");
+  await writeFile(outside, "outside\n");
+  await symlink(outside, resolve(projectDir, ".gitignore"));
+
+  await expect(ensureHackDirGitignore({ projectDir })).rejects.toBeInstanceOf(
+    HackDirGitignoreRefusalError
+  );
+  expect(await readFile(outside, "utf8")).toBe("outside\n");
+});
+
+test("ensureHackDirGitignore refuses a symlinked project dir and writes nothing through it", async () => {
+  const dir = await createTempDir();
+  const outsideDir = resolve(dir, "outside-dir");
+  await mkdir(outsideDir);
+  const projectDir = resolve(dir, ".hack");
+  await symlink(outsideDir, projectDir);
+
+  await expect(ensureHackDirGitignore({ projectDir })).rejects.toBeInstanceOf(
+    HackDirGitignoreRefusalError
+  );
+  expect(
+    await lstat(resolve(outsideDir, ".gitignore")).catch(() => null)
+  ).toBeNull();
 });
 
 test("ensureHackDirGitignore keeps user additions across reruns", async () => {

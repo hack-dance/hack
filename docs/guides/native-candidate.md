@@ -117,7 +117,12 @@ selects the native backend and the adjacent executor, even if an inherited
 with your own Hack home and existing global routing services. It needs no
 `HACK_NATIVE_HOME` and removes the native selectors. Other values refuse with exit
 code 64. The [candidate installer guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends)
-describes Compose testing and its shared-state limits. It preserves arguments, exit codes and
+describes Compose testing and its shared-state limits: run stable `hack global up`,
+then stable `hack daemon stop`, confirm `pgrep -fl "hack daemon start"` prints
+nothing, and run no stable `hack` command while the candidate uses your Hack home.
+Stable `hack global up` (v4.2.0) starts a stopped `hackd` again. Do not commit the
+project's generated `.hack/.internal/` directory; newer generators rewrite files
+such as `compose.override.yml`. The entrypoint preserves arguments, exit codes and
 signals through `exec`, and never replaces the installed `hack`. Project-specific
 native adaptation, dependency and routing selections remain explicit; this entrypoint
 does not prepare a provider or migrate existing projects. An unversioned local
@@ -1682,7 +1687,9 @@ lease. They refuse when any of these is true:
 - the graph is active, its journal is incomplete, or interrupted cleanup is pending
 - the path is not exactly a declared entry, or is absolute, traversing or empty
 - the volume is missing, carries foreign ownership labels, or has changed
-  incarnation
+  incarnation (any inspected field other than `CreatedAt` differs, or the guest
+  observes a different `_data` directory, as after the volume was removed and
+  recreated under the same name)
 - any container mounts the volume, including stopped containers
 - a component of the path, or the target itself, is a symbolic link or not a
   directory
@@ -1706,6 +1713,16 @@ undercounts a volume that holds a quarantine. Every `inspect-cache-quarantine`
 result, including `target_absent`, reports `retained_quarantine_records` and
 `retained_quarantine_bytes`: the recorded bytes still held in the current
 incarnation of that volume.
+
+The first quarantine of a volume creates `hack-quarantine` beside `_data`. Docker's
+`local` driver reports a volume's `CreatedAt` from the modification time of that
+directory, so the reported value changes. The selection records `CreatedAt` as
+observed evidence, but it is not volume identity: the move still settles, a pending
+record still resumes, and its bytes are still counted. A digest reviewed before an
+earlier quarantine of the same volume no longer matches; inspect again. If the
+volume changes during the guest effect, the command fails with
+`graph_cache_quarantine_unsettled` and the record stays pending for explicit resume
+or resolution.
 
 A private record under the candidate home's `run/cache-quarantine/` is written
 before the guest effect and marked `quarantined` after the guest syncs the move.

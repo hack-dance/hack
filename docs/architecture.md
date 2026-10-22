@@ -70,8 +70,10 @@ graph LR
     - `.internal/extra-hosts.json` — CLI-managed, not hand-edited (use
       `hack internal extra-hosts set/unset/list`)
     - `.branch/compose.<branch>.override.yml` (branch builds)
-  - Everything under `.hack/.internal` is a hack-managed artifact; do not hand-edit generated files
-    there.
+  - Everything under `.hack/.internal` is a hack-managed, machine-local artifact; do not hand-edit
+    or commit generated files there. Newer Hack versions rewrite them (for example
+    `compose.override.yml`), so a tracked copy leaves the working tree dirty; `hack doctor`
+    reports tracked files and `hack doctor --fix` untracks them.
 
 
 ## Internal DNS + TLS (containers)
@@ -185,6 +187,25 @@ sequenceDiagram
 NDJSON streaming (`hack logs --json`) emits `start`, `log`, `error`, and `end` events for MCP/TUI
 consumers.
 
+Snapshots (`hack logs --no-follow`) use Loki by default (`logs.snapshotBackend`). Without
+`--since`, a Loki snapshot looks back 24 hours and returns the newest `--tail` entries. If Loki
+returns no entries and Loki was not requested explicitly, `hack logs` writes a one-line notice
+to stderr and answers from `docker compose logs` instead. Nothing from Loki is written first,
+so `--json` output still has one `start`/`end` pair. When Loki was requested explicitly
+(`--loki`, `--services`, `--query`, `--since`, `--until`), the empty result stands and the
+notice suggests `hack logs --compose`. Follow mode (`hack logs` without `--no-follow`)
+does not fall back.
+
+Short-lived containers: Alloy finds containers by polling Docker every 5 seconds. It includes
+exited containers, so a one-shot Compose service (a migration or seed job) is shipped after it
+stops, as long as Docker keeps the container. A container that starts, exits and is removed
+between two polls (for example `docker compose run --rm`) never reaches Loki; use
+`hack logs --compose` or the command's own output for those. Existing installs pick up this
+discovery config after `hack global install` rewrites `~/.hack/logging/alloy.alloy` and the
+Alloy container restarts (`hack global down` then `hack global up`). On its first start with
+this config, Alloy also reads the retained logs of exited Compose containers. Loki rejects
+entries older than its sample age limit (one week by default).
+
 Retention:
 - Loki retention is set in the global Loki config (`~/.hack/logging/loki.yaml`), default `168h` in the template.
 - Per-project overrides live in `hack.config.json` under `logs.retention_period` and apply when `hack down` prunes logs.
@@ -222,6 +243,18 @@ Matching a process name is insufficient: a different `HOME` or `HACK_HOME` may
 own another daemon. If socket ownership cannot be established, automatic orphan
 termination is skipped. Scripted/noninteractive commands do not autostart the
 daemon; after an explicit stop, use `hack daemon start` to restore cached queries.
+
+launchd and isolated state roots: on macOS the hackd launchd service is one
+per-user service (`gui/<uid>/dance.hack.hackd`, plist in
+`$HOME/Library/LaunchAgents`). It belongs to the default `$HOME/.hack` root.
+When `HACK_HOME` points anywhere else, the CLI does not read the plist, write
+it, or run `launchctl` for hackd. `hack daemon start` and autostart then start
+hackd directly under `HACK_HOME`, as on Linux. `hack daemon status` reports the
+launchd service as not installed. `hack daemon install` and
+`hack daemon uninstall` refuse with `E_PERMISSION` before they change anything.
+Set `HACK_LAUNCHD_ALLOW_ISOLATED_HOME=1` to manage the service from an isolated
+root anyway. `HACK_LAUNCHD_DISABLE=1` turns all launchd management off, opt-in
+included; the end-to-end harness sets it for every CLI call.
 
 Runtime health:
 - The daemon treats the container runtime as ephemeral; it fingerprints the engine (socket + engine id)
@@ -297,7 +330,9 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
   - `docker-compose.yml`
   - `hack.config.json`
   - `hack.branches.json` (optional)
-  - `.gitignore` (committed, self-healing on `init`/`up`; covers machine-local generated files —
+  - `.gitignore` (committed; created by `init`, and by `doctor --fix` when an existing project
+    lacks it or its managed block; runtime commands put the same
+    rules in the repository's local `info/exclude` instead of writing it; covers machine-local generated files —
     `.internal/`, `.branch/`, `.env`, `.env.state.json`, and `hack.env*.local.yaml`. The retired
     `tickets/` path stays ignored only to contain legacy machine-local caches during upgrades. If
     generated files leaked into git, `hack doctor --fix` untracks them without deleting them from

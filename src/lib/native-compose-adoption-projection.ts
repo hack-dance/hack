@@ -4,6 +4,7 @@ import { lstat, opendir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_PROJECT_TLD } from "../constants.ts";
 import {
+  classifyComposeEnvOverrideText,
   renderComposeEnvReferenceOverride,
   renderManagedComposeEnvOverride,
 } from "./compose-managed-env.ts";
@@ -431,8 +432,17 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
     if (runtime && runtime.text !== runtimeText) {
       refuse();
     }
+    // The bound bytes equal the form preparation matched: references from a
+    // current writer, or an earlier version's literal values. A literal form
+    // holds a value (resolved values never contain `$`), so it never
+    // classifies as references. Private and value-free (HACK-1318).
+    const envText = generated.files[1]?.text;
+    const literalEnvOverride =
+      envText !== undefined &&
+      classifyComposeEnvOverrideText(envText).kind !== "references";
     const result = {
       candidate: projectRuntimeFallbacks(candidate, runtime),
+      literalEnvOverride,
       ...(proof.routingResolution
         ? { routingResolution: proof.routingResolution }
         : {}),
@@ -796,8 +806,10 @@ export class LegacyComposeAdoptionProjection {
       // earlier versions hold the literal projection. Either must match exactly.
       // `hack config adopt` and its preview refuse a literal file before this
       // point (HACK-1273), so a new adoption never pins values on disk. The
-      // literal match remains so tests can model a generation that an earlier
-      // version prepared over such a file.
+      // literal match remains for store-level preparation, which models a
+      // generation an earlier version prepared over such a file. A generation
+      // bound to it loads and rolls back, but its publication and repair
+      // completion refuse (HACK-1318).
       const reference = renderComposeEnvReferenceOverride(projection);
       const referenceText = reference?.text ?? null;
       const literalText = renderManagedComposeEnvOverride(projection);

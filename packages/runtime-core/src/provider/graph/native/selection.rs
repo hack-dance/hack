@@ -537,6 +537,16 @@ fn select_frontend(
     if matches!(git, GitMarker::Linked(_)) && inputs.local_resolution.inherit_local {
         return Err(refused());
     }
+    // The consumer runs only immutable `sha256:` content IDs. A tag or a
+    // `repository@sha256:` digest is not one, so plan/frontend-plan refuse it with
+    // the lowering's own closed code, before startup reserves any intent or source.
+    if inputs
+        .workloads
+        .values()
+        .any(|workload| !super::image_id(&workload.image))
+    {
+        return Err(super::refused());
+    }
     let review = native_input::Review::new(
         native_input::Scope {
             namespace: &workspace.namespace,

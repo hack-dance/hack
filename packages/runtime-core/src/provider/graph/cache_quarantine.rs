@@ -19,6 +19,16 @@
 //! the recorded destination under the volume root lock and the record becomes
 //! `quarantined` (the recorded inode is there) or `abandoned` (nothing was
 //! moved). Resolution never moves bytes. A torn record write refuses replay.
+//!
+//! Volume incarnation: Docker's `local` driver reports `CreatedAt` from the
+//! modification time of the volume directory, the parent of `_data`. The first
+//! quarantine of a volume creates `hack-quarantine` in that directory, which
+//! changes `CreatedAt`. `CreatedAt` is therefore recorded as observed evidence
+//! only and never compared as identity. The incarnation is every other
+//! inspected field (name, driver, mountpoint, labels, options, scope) plus the
+//! guest-observed `_data` directory identity, which each guest script
+//! re-verifies and the post-effect recheck observes again. A volume replaced
+//! under the same name gets a new `_data` directory and is refused.
 use super::*;
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::DirBuilderExt;
@@ -36,6 +46,14 @@ fn refused() -> CandidateError {
     error(
         "graph_cache_quarantine",
         "The disposable cache selection is missing, unsafe, changed or in use; no cache bytes were moved.",
+    )
+}
+/// A changed volume after a guest effect. Bytes may already have moved, so the
+/// pre-effect wording would be false; the durable record stays `pending`.
+fn unsettled() -> CandidateError {
+    error(
+        "graph_cache_quarantine_unsettled",
+        "The volume changed during the cache quarantine; the record stays pending for explicit resume or resolution.",
     )
 }
 fn digest(bytes: &[u8]) -> String {
@@ -63,6 +81,8 @@ struct Selection {
     receipt_sha256: String,
     volume: String,
     volume_name: String,
+    /// Docker `CreatedAt` as observed at selection. Evidence bound into the
+    /// reviewed digest; not incarnation identity (see the module notes).
     volume_created: String,
     root_identity: String,
     path: String,
@@ -174,6 +194,31 @@ fn parse_observation(output: &str) -> Result<Option<(String, u64, u64, u64)>, Ca
     Ok(Some((identity.to_owned(), bytes, allocated, entries)))
 }
 
+/// The inspected fields that identify a volume incarnation: everything except
+/// `CreatedAt`, which the local driver derives from a directory mtime that the
+/// first quarantine's `mkdir hack-quarantine` changes.
+fn stable_volume_fields(inspected: &Value) -> Value {
+    let mut stable = inspected.clone();
+    if let Some(fields) = stable.as_object_mut() {
+        fields.remove("CreatedAt");
+    }
+    stable
+}
+
+/// Whether `current` is the same volume incarnation as the admitted one. A
+/// `CreatedAt` change alone is accepted; any other inspected change, or a
+/// different guest-observed `_data` identity (a replaced volume), refuses.
+fn same_incarnation(
+    admitted: &Value,
+    admitted_root: &str,
+    current: &Value,
+    current_root: &str,
+) -> bool {
+    admitted.is_object()
+        && admitted_root == current_root
+        && stable_volume_fields(admitted) == stable_volume_fields(current)
+}
+
 fn same_device(a: &str, b: &str) -> bool {
     a.split_once(':').map(|v| v.0) == b.split_once(':').map(|v| v.0)
 }
@@ -236,10 +281,20 @@ impl Records {
     /// A new selection never reuses a pending or quarantined record and stays
     /// within the per-volume and global budgets. An abandoned identical
     /// selection moved nothing, so selecting it again replaces that record.
+    /// The same quarantined directory of the same volume incarnation is never
+    /// selected again, even though its digest changes with `CreatedAt`.
     fn admits(&self, selection: &Selection, sha: &str) -> bool {
         let id = Selection::quarantine_id(sha);
         let existing = self.records.iter().find(|r| r.id() == id);
         if existing.is_some_and(|r| r.outcome != Outcome::Abandoned) {
+            return false;
+        }
+        if self.records.iter().any(|r| {
+            r.outcome == Outcome::Quarantined
+                && r.selection.volume_name == selection.volume_name
+                && r.selection.root_identity == selection.root_identity
+                && r.selection.target_identity == selection.target_identity
+        }) {
             return false;
         }
         let added = usize::from(existing.is_none());
@@ -253,7 +308,8 @@ impl Records {
                 <= MAX_VOLUME_RECORDS
     }
     /// Recorded bytes still retained in this volume incarnation, counting
-    /// `replacement` in place of any stored record with the same id.
+    /// `replacement` in place of any stored record with the same id. Records
+    /// written before the first quarantine changed `CreatedAt` still count.
     fn retained(&self, admitted: &Admitted, replacement: Option<&Record>) -> (u64, u64) {
         self.records
             .iter()
@@ -262,7 +318,6 @@ impl Records {
             .filter(|r| {
                 r.outcome == Outcome::Quarantined
                     && r.selection.volume_name == admitted.resource.name
-                    && r.selection.volume_created == admitted.created
                     && r.selection.root_identity == admitted.root_identity
             })
             .fold((0, 0), |(count, bytes), r| {
@@ -435,22 +490,41 @@ impl Admitted {
             entries,
         }))
     }
-    /// A pending record resumes only for the identical receipt and volume incarnation.
+    /// A pending record resumes only for the identical receipt and volume
+    /// incarnation. `volume_created` is not compared: an interrupted first
+    /// quarantine has already changed it by creating the quarantine root.
     fn resumes(&self, selection: &Selection, target: &CacheQuarantineTarget<'_>) -> bool {
         selection.run == self.receipt.run
             && selection.owner == self.receipt.owner
             && selection.receipt_sha256 == self.receipt_sha256
             && selection.volume == self.resource.key
             && selection.volume_name == self.resource.name
-            && selection.volume_created == self.created
             && selection.root_identity == self.root_identity
             && selection.path == target.path
             && same_device(&selection.target_identity, &self.root_identity)
     }
-    /// Volume identity must be unchanged across every guest effect.
+    /// The volume incarnation must be unchanged across every guest effect:
+    /// the same stable inspected fields and a freshly observed, identical
+    /// `_data` identity. Our own quarantine root changes only `CreatedAt`.
     fn recheck(&self, port: &impl Port) -> Result<(), CandidateError> {
-        if port.inspect(&self.receipt, &self.resource)?.as_ref() != Some(&self.inspected) {
-            return Err(refused());
+        let current = port
+            .inspect(&self.receipt, &self.resource)
+            .ok()
+            .flatten()
+            .ok_or_else(unsettled)?;
+        let current_root = volume_subpaths::directory_identity_with(
+            |script, arguments| port.execute(script, arguments),
+            &self.resource,
+            &current,
+        )
+        .map_err(|_| unsettled())?;
+        if !same_incarnation(
+            &self.inspected,
+            &self.root_identity,
+            &current,
+            &current_root,
+        ) {
+            return Err(unsettled());
         }
         Ok(())
     }

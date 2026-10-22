@@ -266,6 +266,41 @@ Services with `pull_policy: always` still pull again in the start phase because
 Compose applies that policy on every `up`; such pulls count against the start
 budget.
 
+Native authored projects with persistent storage also prove their storage with
+short-lived helper containers. Each helper proof (one storage carrier: dependency
+check, target observation, helper create, policy, start, response and cleanup) has
+its own budget, separate from the start budget:
+
+| Budget | Default | Variable | Range (ms) |
+| --- | --- | --- | --- |
+| One native storage carrier | 90 seconds | `HACK_NATIVE_STORAGE_TIMEOUT_MS` | 1,000–600,000 |
+
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS` neither shortens nor lengthens a storage proof:
+carriers follow only `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Storage
+proofs that run while a native `up` or `restart` builds and starts workloads do not
+consume the start budget: their elapsed time extends the start deadline, and each
+proof stays bounded by its own carrier budget. Each Docker command inside a carrier
+keeps its fixed 10–15 second cap.
+
+The two variables bound different things:
+
+- Per proof: each storage carrier ends within `HACK_NATIVE_STORAGE_TIMEOUT_MS` (S).
+- Per start phase: the storage time excluded from one `up` or `restart` start
+  deadline may total at most 16 × S or 1 hour, whichever is smaller (24 minutes at
+  the 90-second default; 1 hour from S = 225,000 up). The start deadline moves
+  later by at most that cap. A proof that would start after the cap is spent is
+  refused before it runs, and a proof that ends past the cap refuses the phase.
+- Whole phase: the workload phase therefore ends within
+  `HACK_COMPOSE_STARTUP_TIMEOUT_MS`, plus the cap, plus at most one in-flight
+  guard proof. Raising S raises both the per-proof bound and the cap; raising the
+  start budget never changes either.
+
+When a carrier budget or the whole-phase cap runs out, the command reports the
+closed effect reason `storage-budget` in `error.detail.native_compose_effect_refusal`,
+and the human summary names `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Exhaustion leaves the
+same retained, uncertain state as any other storage refusal; inspect saved state
+before retrying.
+
 To share dependency data only across worktrees with the same lockfile/runtime fingerprint, label
 the bootstrap service with a logical top-level Compose volume:
 
@@ -484,8 +519,8 @@ container.
 
 With the Compose backend, Hack materializes this contract in generated, machine-local Compose
 overrides. Do not edit or commit `.hack/.internal/compose.runtime.override.yml` or
-`.hack/.branch/compose.<branch>.runtime.override.yml`; runtime commands refresh them and Hack's
-managed `.hack/.gitignore` covers them.
+`.hack/.branch/compose.<branch>.runtime.override.yml`; runtime commands refresh them and keep them
+out of `git status` (see [ignore rules](env.md#ignore-rules-committed-hackgitignore)).
 
 With the native backend, foreground `hack up` and `hack restart` add the same values to the
 normalized Compose input that native review checks. They are public container environment, not
@@ -556,11 +591,14 @@ materialized `.hack/.env` or `.hack/.env.state.json` is stale and should be rege
 
 ## Project files
 
-Hack owns a committed `.hack/.gitignore` (self-healing on `init`/`up`) that ignores machine-local
-generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`). The
-retired `tickets/` path remains ignored only so upgrades cannot recommit legacy machine-local
-caches. Keep `.hack/.gitignore` committed. If generated files ever leak into git, `hack doctor
---fix` untracks them (the files stay on disk). Runtime metadata is written to
+Hack owns a committed `.hack/.gitignore` (created by `init`; for an existing project without it,
+`doctor` warns and `doctor --fix` creates or repairs it) that ignores
+machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`,
+`hack.env*.local.yaml`). The retired `tickets/` path remains ignored only so upgrades cannot
+recommit legacy machine-local caches. Keep `.hack/.gitignore` committed. Runtime commands (`up`,
+`down`, `restart`, `run`, `exec`) do not write it: they add the same patterns to the repository's
+local `info/exclude`, so `git status` stays unchanged. Never commit `.hack/.internal/`. If generated
+files ever leak into git, `hack doctor --fix` untracks them (the files stay on disk). Runtime metadata is written to
 `.internal/compose.runtime.override.yml` for the base instance and
 `.branch/compose.<branch>.runtime.override.yml` for branch instances. See [Architecture](architecture.md)
 for the full file map.

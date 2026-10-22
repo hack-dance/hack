@@ -70,8 +70,10 @@ graph LR
     - `.internal/extra-hosts.json` — CLI-managed, not hand-edited (use
       `hack internal extra-hosts set/unset/list`)
     - `.branch/compose.<branch>.override.yml` (branch builds)
-  - Everything under `.hack/.internal` is a hack-managed artifact; do not hand-edit generated files
-    there.
+  - Everything under `.hack/.internal` is a hack-managed, machine-local artifact; do not hand-edit
+    or commit generated files there. Newer Hack versions rewrite them (for example
+    `compose.override.yml`), so a tracked copy leaves the working tree dirty; `hack doctor`
+    reports tracked files and `hack doctor --fix` untracks them.
 
 
 ## Internal DNS + TLS (containers)
@@ -184,6 +186,25 @@ sequenceDiagram
 
 NDJSON streaming (`hack logs --json`) emits `start`, `log`, `error`, and `end` events for MCP/TUI
 consumers.
+
+Snapshots (`hack logs --no-follow`) use Loki by default (`logs.snapshotBackend`). Without
+`--since`, a Loki snapshot looks back 24 hours and returns the newest `--tail` entries. If Loki
+returns no entries and Loki was not requested explicitly, `hack logs` writes a one-line notice
+to stderr and answers from `docker compose logs` instead. Nothing from Loki is written first,
+so `--json` output still has one `start`/`end` pair. When Loki was requested explicitly
+(`--loki`, `--services`, `--query`, `--since`, `--until`), the empty result stands and the
+notice suggests `hack logs --compose`. Follow mode (`hack logs` without `--no-follow`)
+does not fall back.
+
+Short-lived containers: Alloy finds containers by polling Docker every 5 seconds. It includes
+exited containers, so a one-shot Compose service (a migration or seed job) is shipped after it
+stops, as long as Docker keeps the container. A container that starts, exits and is removed
+between two polls (for example `docker compose run --rm`) never reaches Loki; use
+`hack logs --compose` or the command's own output for those. Existing installs pick up this
+discovery config after `hack global install` rewrites `~/.hack/logging/alloy.alloy` and the
+Alloy container restarts (`hack global down` then `hack global up`). On its first start with
+this config, Alloy also reads the retained logs of exited Compose containers. Loki rejects
+entries older than its sample age limit (one week by default).
 
 Retention:
 - Loki retention is set in the global Loki config (`~/.hack/logging/loki.yaml`), default `168h` in the template.

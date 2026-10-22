@@ -54,6 +54,7 @@ import {
 import {
   type NativeRunSelection,
   nativeProjectOneOff,
+  requireNonEmptyNativeRunOptions,
 } from "../backends/native-project-one-off.ts";
 import {
   retireNativeRecoveredPublisher,
@@ -223,6 +224,7 @@ import {
   buildLogSelector,
   resolveShouldTryLoki,
   resolveUseLoki,
+  runLokiSnapshotWithFallback,
 } from "../lib/logs.ts";
 import { refuseNativeComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
@@ -295,6 +297,7 @@ import {
   resolveSecretStore,
 } from "../lib/secret-store.ts";
 import { exec, findExecutableInPath, run as runShell } from "../lib/shell.ts";
+import { assertComposeSpawnEnvFits } from "../lib/spawn-env-limit.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import {
   buildWorktreeRetargetWarning,
@@ -1331,11 +1334,19 @@ export async function resolveModernComposeEnvOverrides(opts: {
 
   // Values travel only through the Compose process env; the file on disk holds
   // `${NAME}` references (see src/lib/compose-env-at-rest.ts).
+  // Global values share one reference across services (HACK-1317), so the
+  // Compose environment grows with distinct values, not services times keys.
   const override = renderComposeEnvReferenceOverride({
     targetServices: opts.targetServices,
     globalEnv: modern.globalEnv,
     serviceEnv: modern.serviceEnv,
+    effectiveScopes: modern.effectiveMetadata,
   });
+  const composeEnv = override
+    ? { ...modern.globalEnv, ...override.env }
+    : modern.globalEnv;
+  // Fail closed before any write or spawn when Compose could not start.
+  assertComposeSpawnEnvFits({ env: composeEnv });
   if (override === null) {
     await scrubPlaintextComposeEnvOverride({
       projectDir: opts.project.projectDir,
@@ -1356,7 +1367,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
   });
   return {
     composeFiles: [overridePath],
-    env: { ...modern.globalEnv, ...override.env },
+    env: composeEnv,
     lifecycleEnv,
     preflightEnvByService,
     effectiveEnvName: modern.selection.effectiveEnv,
@@ -1500,6 +1511,7 @@ async function resolveComposeEnvOverrides(opts: {
     }
   }
 
+  assertComposeSpawnEnvFits({ env: resolved.envForCompose });
   if (Object.keys(overrideServices).length === 0) {
     await scrubPlaintextComposeEnvOverride({
       projectDir: opts.project.projectDir,
@@ -4818,11 +4830,18 @@ async function requireProjectContext(startDir: string) {
   return ctx;
 }
 
-class MissingProjectContextError extends Error {
+/**
+ * No project at the selected path. It carries `E_PROJECT_NOT_FOUND`, the code
+ * `up`, `down` and `restart` already reported, so every project command that
+ * resolves its project here (`ps`, `logs`, `run`, ...) reports the same closed
+ * code under `--json` and one closed line without it.
+ */
+class MissingProjectContextError extends HackCliError {
   constructor() {
-    super(
-      `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`
-    );
+    super({
+      code: "E_PROJECT_NOT_FOUND",
+      message: `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`,
+    });
     this.name = "MissingProjectContextError";
   }
 }
@@ -7475,8 +7494,8 @@ async function handlePs({
 /**
  * Compose runs need the Compose operation; a native one-off instead carries its
  * `--env`/`--profile` request. Omitted options inherit the running selection;
- * given options must match it exactly, which the native backend checks before
- * any runtime request (no implicit restart).
+ * an empty value is refused; given options must match it exactly, which the
+ * native backend checks before any runtime request (no implicit restart).
  */
 function runBackendSelection(
   native: boolean,
@@ -7486,6 +7505,10 @@ function runBackendSelection(
     requireComposeOperationAvailable("run");
     return;
   }
+  requireNonEmptyNativeRunOptions({
+    env: args.options.env,
+    profile: args.options.profile,
+  });
   return {
     envName: resolveRequestedEnvName({ envOption: args.options.env }),
     profiles:
@@ -8082,6 +8105,9 @@ async function runLogsWithLoki(opts: {
   readonly queryOpt: string | undefined;
   readonly since: string | undefined;
   readonly until: string | undefined;
+  readonly wantsLokiExplicit: boolean;
+  /** Compose snapshot used when an implicit Loki snapshot comes back empty. */
+  readonly runCompose: () => Promise<number>;
 }): Promise<number> {
   if (isSlimExecutionMode()) {
     process.stderr.write(
@@ -8124,16 +8150,30 @@ async function runLogsWithLoki(opts: {
     services,
   });
 
-  return await lokiLogBackend.run({
+  const lokiOptions = {
     baseUrl: opts.baseUrl,
     query,
-    follow: opts.follow,
     tail: opts.tail,
     format: opts.format,
     showProjectPrefix: true,
     streamContext,
     start: opts.timeRange.start ?? undefined,
     end: opts.timeRange.end ?? undefined,
+  };
+  if (opts.follow) {
+    return await lokiLogBackend.run({ ...lokiOptions, follow: true });
+  }
+
+  return await runLokiSnapshotWithFallback({
+    wantsLokiExplicit: opts.wantsLokiExplicit,
+    query,
+    service: opts.positionalService,
+    runLoki: async ({ deferEmpty }) =>
+      await lokiLogBackend.snapshot({ ...lokiOptions, deferEmpty }),
+    runCompose: opts.runCompose,
+    writeNotice: (line) => {
+      process.stderr.write(`${line}\n`);
+    },
   });
 }
 
@@ -8446,6 +8486,22 @@ async function handleLogs({
     lokiReachable,
   });
 
+  const runCompose = async (): Promise<number> =>
+    await runLogsWithCompose({
+      project,
+      projectNameForPrefix,
+      composeProject: branch ? projectNameForPrefix : undefined,
+      branch,
+      json,
+      follow,
+      tail,
+      service: typeof service === "string" ? service : undefined,
+      profiles,
+      format,
+      since: args.options.since,
+      until: args.options.until,
+    });
+
   if (useLoki) {
     return await runLogsWithLoki({
       baseUrl,
@@ -8462,24 +8518,13 @@ async function handleLogs({
       queryOpt: args.options.query,
       since: args.options.since,
       until: args.options.until,
+      wantsLokiExplicit,
+      runCompose,
     });
   }
 
   // Fallback to docker compose logs when Loki isn't available.
-  return await runLogsWithCompose({
-    project,
-    projectNameForPrefix,
-    composeProject: branch ? projectNameForPrefix : undefined,
-    branch,
-    json,
-    follow,
-    tail,
-    service: typeof service === "string" ? service : undefined,
-    profiles,
-    format,
-    since: args.options.since,
-    until: args.options.until,
-  });
+  return await runCompose();
 }
 
 /** An omitted option stays omitted so native dispatch can distinguish it from an explicit empty list. */

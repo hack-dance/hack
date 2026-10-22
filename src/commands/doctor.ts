@@ -154,6 +154,7 @@ import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
   discoverComposeServiceNames,
   ensureHackDirGitignore,
+  HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   HACK_DIR_GITIGNORE_REFUSAL,
   HackDirGitignoreRefusalError,
   inspectLegacyComposeEnvFileReferences,
@@ -3143,9 +3144,11 @@ async function checkTrackedGeneratedFiles({
  * managed block, for example in a project an earlier Hack version
  * initialized. Runtime commands keep `git status` clean through the local
  * `info/exclude` either way, but only the committed file reaches fresh clones.
- * `hack doctor --fix` creates or repairs it.
+ * `hack doctor --fix` creates or repairs it. A read-only file that lacks the
+ * block, or a symlinked file or project dir (even one linking outside the
+ * repository), is reported as a warning and never written.
  */
-async function checkHackDirGitignore({
+export async function checkHackDirGitignore({
   startDir,
 }: {
   readonly startDir: string;
@@ -3179,6 +3182,12 @@ async function checkHackDirGitignore({
         name,
         status: "warn",
         message: `${file} lacks Hack's current managed block. Run 'hack doctor --fix' to update it (your own lines are kept), then commit it.`,
+      };
+    case "read-only":
+      return {
+        name,
+        status: "warn",
+        message: `${file} is read-only and lacks Hack's current managed block; Hack leaves it unchanged. Make it writable (chmod u+w ${file}), then run 'hack doctor --fix' and commit it.`,
       };
     case "unsafe":
       return {
@@ -4002,13 +4011,21 @@ async function maybeEnsureHackDirGitignore(opts: {
 /**
  * Runs `ensureHackDirGitignore` for a doctor repair step. A symlink or
  * non-regular entry (possibly planted after the check) is reported with the
- * fixed refusal and left alone; returns whether the file is now ensured.
+ * fixed refusal and left alone; so is a read-only file that lacks the managed
+ * block (possibly made read-only after the check). Returns whether the file is
+ * now ensured.
  */
 async function ensureHackDirGitignoreForDoctor(opts: {
   readonly project: { readonly projectDir: string };
 }): Promise<boolean> {
   try {
-    await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+    const result = await ensureHackDirGitignore({
+      projectDir: opts.project.projectDir,
+    });
+    if (result.readOnly) {
+      note(HACK_DIR_GITIGNORE_READ_ONLY_WARNING, HACK_GITIGNORE_CHECK);
+      return false;
+    }
     return true;
   } catch (error: unknown) {
     if (error instanceof HackDirGitignoreRefusalError) {

@@ -129,6 +129,9 @@ Historical remote guides are excluded from the supported documentation.
 
 - `--json` on `hack up`/`down`/`restart`/`doctor` emits a `{ok, data | error: {code, message}}`
   envelope with stable `E_*` error codes. `--json` on `hack up` implies `--detach`.
+- A `--path` (or working directory) without a `.hack/` project reports `E_PROJECT_NOT_FOUND`
+  from every project command, for example `hack ps -p <dir> --json` and `hack up -p <dir> --json`.
+  Without `--json` it prints one `E_PROJECT_NOT_FOUND` line and no stack trace.
 - Known Hack errors and closed native runtime refusals print their message only, never a stack
   trace; set `HACK_DEBUG=1` to add the stack. Unexpected exceptions always print their stack.
 - `--no-interactive` (or `HACK_NO_INTERACTIVE=1`) is a global flag: commands never prompt — they
@@ -198,6 +201,26 @@ that Hack also defines: `hack run web bun --version` runs `bun --version` in the
 rather than printing Hack's version, and a child `--json` does not switch Hack's own error output
 to JSON. A `--` before the child command is optional and is not passed on; a later `--` (as in
 `hack run web npm test -- --watch`) reaches the child unchanged.
+
+### Option parsing
+
+Hack parses options with the resolved command's own options plus the global ones, so each command
+keeps its own short flags and option types. `-p` is `--path` for project commands (`init`, `up`,
+`down`, `ps`, `logs`, `env ...`, `config ...`, `setup ...`) and `--port` for `hack ssh`. An option
+that only another command declares is refused as `Option(s) not valid for "<command>"`.
+
+An option placed before the command name, as in `hack -p <dir> up`, is read as that command reads
+it. There is one remaining edge: when a spelling placed before the command name is a flag in one
+command and takes a value in another, Hack reads it as a flag, so it never consumes the command
+name. No spelling in the current CLI has this conflict. Put options after the command name to
+avoid it.
+
+Per-command parsing replaced one parse over every command's options. Comparing the old and new
+parsers on edge cases found one difference, the intended one: `-p <dir>` on a project command (for
+example `up -p /x` or `--no-interactive up -p /x`) now sets `--path`. The old parser set `ssh`'s
+`--port`, which the command then refused. These cases parse the same as before: `--help --all`,
+`help --all`, `-- up`, `--json run web tool --json`, `--path /x up`, `logs --tail`, `up --tail`,
+`ssh --path /x` and `x ext cmd -p 1` (where `-p 1` belongs to the extension command).
 
 `session exec` takes the workspace command as one argument, so quote a command that has its own
 arguments or flags: `hack session exec ws "npm --version"`. Hack options go before it, and an

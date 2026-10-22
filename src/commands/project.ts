@@ -51,7 +51,10 @@ import {
   nativeProjectPs,
   requireComposeOperationAvailable,
 } from "../backends/native-project-observe.ts";
-import { nativeProjectOneOff } from "../backends/native-project-one-off.ts";
+import {
+  type NativeRunSelection,
+  nativeProjectOneOff,
+} from "../backends/native-project-one-off.ts";
 import {
   retireNativeRecoveredPublisher,
   verifyNativeFrontendRecovery,
@@ -220,6 +223,7 @@ import {
   resolveShouldTryLoki,
   resolveUseLoki,
 } from "../lib/logs.ts";
+import { refuseNativeComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
@@ -4970,6 +4974,15 @@ async function handleNativeUp({
     projectOpt: args.options.project,
     touchRegistration: false,
   });
+  // Before branch, config, env, lifecycle, storage or runtime work. `down`
+  // stays available for any graph a project already has.
+  // The explicit adaptation applies first: a network it isolates is not
+  // external here, exactly as native start normalizes it.
+  await refuseNativeComposeBackendFeatures({
+    composeFile: project.composeFile,
+    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
+    restart,
+  });
   const branch = await resolveEffectiveBranchForCommand({
     project,
     branchOption: args.options.branch,
@@ -7456,16 +7469,27 @@ async function handlePs({
   return 0;
 }
 
-function validateRunBackendOptions(native: boolean, args: RunArgs): void {
+/**
+ * Compose runs need the Compose operation; a native one-off instead carries its
+ * `--env`/`--profile` request. Omitted options inherit the running selection;
+ * given options must match it exactly, which the native backend checks before
+ * any runtime request (no implicit restart).
+ */
+function runBackendSelection(
+  native: boolean,
+  args: RunArgs
+): NativeRunSelection | undefined {
   if (!native) {
     requireComposeOperationAvailable("run");
     return;
   }
-  if (args.options.env || args.options.profile) {
-    throw new CliUsageError(
-      "Native run uses the started project's environment and profiles; restart with the requested selections first."
-    );
-  }
+  return {
+    envName: resolveRequestedEnvName({ envOption: args.options.env }),
+    profiles:
+      args.options.profile === undefined
+        ? undefined
+        : parseCsvList(args.options.profile),
+  };
 }
 
 async function handleRun({
@@ -7491,7 +7515,7 @@ async function handleRun({
     return authored;
   }
   const native = resolveNativeRuntimeSelection();
-  validateRunBackendOptions(Boolean(native), args);
+  const selection = runBackendSelection(Boolean(native), args);
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -7518,6 +7542,7 @@ async function handleRun({
       argv: args.positionals.cmd,
       workdir: args.options.workdir,
       composeFile: project.composeFile,
+      selection,
     });
     process.stdout.write(result.stdout);
     process.stderr.write(result.stderr);

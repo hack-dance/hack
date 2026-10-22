@@ -68,7 +68,7 @@ test("starting dispositions match the recorded decisions", () => {
     "HACK-P05": "deferred",
     "HACK-P06": "deferred",
     "HACK-P07": "partial",
-    "HACK-P08": "deferred",
+    "HACK-P08": "partial",
     "HACK-P09": "partial",
     "HACK-P10": "partial",
     "HACK-P11": "partial",
@@ -158,6 +158,26 @@ test("negative control: the banned-recipe scan flags each recipe outside a negat
     expect(bannedRecipeFindings(`${NEGATIVE_EXAMPLE_START}\n${text}`)).toEqual([
       code,
     ]);
+  }
+});
+
+test("the argv-env-value scan skips flags but still flags a value operand", () => {
+  for (const text of [
+    "hack env set API_TOKEN --local --value-stdin --secret",
+    "`hack env set <key> --value-stdin` (pipe the value)",
+    "run `hack env set API_TOKEN` and pipe the value",
+    "hack env set API_TOKEN\nsecond line",
+  ]) {
+    expect(bannedRecipeFindings(text), text).toEqual([]);
+  }
+  for (const text of [
+    "hack env set --local API_TOKEN synthetic-value",
+    "hack env add API_TOKEN --local synthetic-value",
+    "`hack env set API_TOKEN synthetic-value`",
+    "hack env set API_TOKEN `cat synthetic-file`",
+    "hack env set API_TOKEN --env dev",
+  ]) {
+    expect(bannedRecipeFindings(text), text).toEqual(["argv-env-value"]);
   }
 });
 

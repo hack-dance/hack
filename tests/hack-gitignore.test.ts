@@ -1,8 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -217,6 +219,47 @@ test("ensureHackDirGitignore refuses a symlinked project dir and writes nothing 
   expect(
     await lstat(resolve(outsideDir, ".gitignore")).catch(() => null)
   ).toBeNull();
+});
+
+test("ensureHackDirGitignore leaves a read-only outdated .gitignore unchanged instead of replacing it", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await mkdir(projectDir);
+  const path = resolve(projectDir, ".gitignore");
+  await writeFile(path, "my-own-entry\n");
+  await chmod(path, 0o444);
+  const before = await lstat(path);
+  try {
+    expect(await ensureHackDirGitignore({ projectDir })).toEqual({
+      changed: false,
+      readOnly: true,
+    });
+    const after = await lstat(path);
+    expect(await readFile(path, "utf8")).toBe("my-own-entry\n");
+    expect(after.mode & 0o777).toBe(0o444);
+    expect(after.ino).toBe(before.ino);
+    expect(await readdir(projectDir)).toEqual([".gitignore"]);
+  } finally {
+    await chmod(path, 0o644);
+  }
+});
+
+test("ensureHackDirGitignore does not report a read-only .gitignore that is already current", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await ensureHackDirGitignore({ projectDir });
+  const path = resolve(projectDir, ".gitignore");
+  const text = await readFile(path, "utf8");
+  await chmod(path, 0o444);
+  try {
+    expect(await ensureHackDirGitignore({ projectDir })).toEqual({
+      changed: false,
+      readOnly: false,
+    });
+    expect(await readFile(path, "utf8")).toBe(text);
+  } finally {
+    await chmod(path, 0o644);
+  }
 });
 
 test("ensureHackDirGitignore keeps user additions across reruns", async () => {

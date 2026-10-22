@@ -41,23 +41,29 @@ import {
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
 import { writeLifecycleMuxFixture } from "./helpers/lifecycle-mux-fixture.ts";
+import { awaitPidFile } from "./helpers/native-authored-settlement.ts";
 import {
   createNativeFixtureCases,
   type NativeFixtureCase,
 } from "./helpers/native-fixture-cases.ts";
+import { testBudgetMs } from "./helpers/test-budget.ts";
 
 const run = "a".repeat(32);
 const CANARY = "synthetic-private-native-start-canary";
-/** Allowance for a case's owners, groups and stop endpoints to be absent afterwards. */
-const SETTLEMENT_BUDGET_MS = 15_000;
+/**
+ * Allowance for a case's owners, groups and stop endpoints to be absent
+ * afterwards. Harness budget: a passing case settles as soon as they exit.
+ */
+const SETTLEMENT_BUDGET_MS = testBudgetMs(5000);
 /**
  * Caller startup deadline for cases that are not about the deadline itself.
  * Each start spawns several Bun children (compiler, planner, owner, hooks); on
  * a loaded host that takes well over the 10-20 s these cases used to allow.
+ * Cases that test the deadline pass their own literal product deadline.
  */
-const STARTUP_TIMEOUT_MS = 60_000;
+const STARTUP_TIMEOUT_MS = testBudgetMs(15_000);
 /** Caller stop deadline for ordinary `down` in the hook and live-stop cases. */
-const STOP_TIMEOUT_MS = 60_000;
+const STOP_TIMEOUT_MS = testBudgetMs(15_000);
 /**
  * Body budget for every case: a full start plus a stop, with slack. The guard
  * adds the settlement budget on top, so cases never fall back to Bun's 5 s.
@@ -464,6 +470,9 @@ console.log(JSON.stringify(result));
     group: true,
   });
   // A hanging status request must be killed by cancellation, not outlive the case.
+  // The stand-in publishes its PID by rename, so the file is either absent or
+  // complete: a cancel that lands mid-write must not leave an empty record that
+  // settlement reads as a write still in progress.
   const statusPid = join(root, "status.pid");
   owner.settlement.record({
     kind: "pid-file",
@@ -475,11 +484,11 @@ console.log(JSON.stringify(result));
   await writeFile(
     binary,
     `#!${process.execPath}
-import {appendFile,readFile,readdir,unlink,writeFile} from 'node:fs/promises';
+import {appendFile,readFile,readdir,rename,unlink,writeFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';import {join} from 'node:path';
 const args=process.argv.slice(2);const action=args[4];await appendFile(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');
 if(${options.runtimeStopped === true}&&args[2]==='runtime'&&args[3]==='status'){console.log(JSON.stringify({phase:'stopped',process_alive:false}));process.exit(0)}
-if(${options.runtimeStatusHangs === true}&&args[2]==='runtime'&&args[3]==='status'){await appendFile(${JSON.stringify(statusPid)},process.pid+'\\n');await new Promise((resolve)=>setTimeout(resolve,${2 * CASE_TIMEOUT_MS}));process.exit(0)}
+if(${options.runtimeStatusHangs === true}&&args[2]==='runtime'&&args[3]==='status'){const staged=${JSON.stringify(statusPid)}+'.'+process.pid;await writeFile(staged,process.pid+'\\n');await rename(staged,${JSON.stringify(statusPid)});await new Promise((resolve)=>setTimeout(resolve,${2 * CASE_TIMEOUT_MS}));process.exit(0)}
 if(${options.runtimeStatusWrappedStop === true}&&args[2]==='runtime'&&args[3]==='status'){console.error(JSON.stringify({code:'native_graph_foreground',cause_code:'runtime_not_running',message:${JSON.stringify(CANARY)}}));process.exit(2)}
 const journal=${JSON.stringify(journal)};
 const root=${JSON.stringify(join(projectDir, ".internal", "native-authored-runs"))};
@@ -578,6 +587,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
     calls,
     delivery,
     sources,
+    statusPid,
   };
 }
 
@@ -887,22 +897,12 @@ macTest(
       signal: signal.signal,
       startupTimeoutMs: STARTUP_TIMEOUT_MS,
     });
-    // Cancel once the status request is in flight. The check treats the
-    // aborted request as inconclusive; the start must still not reserve.
-    // The stand-in request hangs past the case budget, so this waits on the
-    // request itself rather than racing a shorter fixed window.
-    const deadline = performance.now() + CASE_TIMEOUT_MS;
-    while (
-      !(
-        (await Bun.file(selected.calls).exists()) &&
-        (await Bun.file(selected.calls).text()).includes('"status"')
-      )
-    ) {
-      if (performance.now() > deadline) {
-        throw new Error("runtime status was never requested");
-      }
-      await Bun.sleep(20);
-    }
+    // Cancel once the status request is in flight and has published its PID.
+    // The check treats the aborted request as inconclusive; the start must
+    // still not reserve. The stand-in request hangs past the case budget, so
+    // this waits on the request's own identity rather than a fixed window, and
+    // the cancel cannot land while the stand-in is still recording it.
+    await awaitPidFile(selected.statusPid, { budgetMs: CASE_TIMEOUT_MS });
     signal.abort();
     const error = await failure(started, "not-started");
     expect(error).toHaveProperty("canceled", true);

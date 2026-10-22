@@ -154,6 +154,8 @@ import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
   discoverComposeServiceNames,
   ensureHackDirGitignore,
+  HACK_DIR_GITIGNORE_REFUSAL,
+  HackDirGitignoreRefusalError,
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   type LegacyComposeEnvFileReference,
@@ -3178,6 +3180,12 @@ async function checkHackDirGitignore({
         status: "warn",
         message: `${file} lacks Hack's current managed block. Run 'hack doctor --fix' to update it (your own lines are kept), then commit it.`,
       };
+    case "unsafe":
+      return {
+        name,
+        status: "warn",
+        message: `${file} or its directory is a symlink or not a regular file; Hack will not read or write through it. Replace it with a regular file.`,
+      };
     case "unreadable":
       return {
         name,
@@ -3927,9 +3935,11 @@ async function maybeUntrackGeneratedFiles(opts: {
     return;
   }
 
-  await ensureHackDirGitignore({ projectDir: project.projectDir });
+  const ignoreEnsured = await ensureHackDirGitignoreForDoctor({ project });
   const notes = [
-    `Removed ${inspection.trackedPaths.length} path(s) from the git index and ensured ${project.projectDirName}/.gitignore.`,
+    ignoreEnsured
+      ? `Removed ${inspection.trackedPaths.length} path(s) from the git index and ensured ${project.projectDirName}/.gitignore.`
+      : `Removed ${inspection.trackedPaths.length} path(s) from the git index; ${project.projectDirName}/.gitignore was left alone.`,
     "Commit the removal to stop sharing these files.",
   ];
   if (inspection.secretKeyTracked) {
@@ -3980,11 +3990,33 @@ async function maybeEnsureHackDirGitignore(opts: {
   if (!ok) {
     return;
   }
-  await ensureHackDirGitignore({ projectDir: project.projectDir });
+  if (!(await ensureHackDirGitignoreForDoctor({ project }))) {
+    return;
+  }
   note(
     `${state === "missing" ? "Created" : "Updated"} ${file}. Commit it so fresh clones and worktrees ignore machine-local generated files.`,
     HACK_GITIGNORE_CHECK
   );
+}
+
+/**
+ * Runs `ensureHackDirGitignore` for a doctor repair step. A symlink or
+ * non-regular entry (possibly planted after the check) is reported with the
+ * fixed refusal and left alone; returns whether the file is now ensured.
+ */
+async function ensureHackDirGitignoreForDoctor(opts: {
+  readonly project: { readonly projectDir: string };
+}): Promise<boolean> {
+  try {
+    await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+    return true;
+  } catch (error: unknown) {
+    if (error instanceof HackDirGitignoreRefusalError) {
+      note(HACK_DIR_GITIGNORE_REFUSAL, HACK_GITIGNORE_CHECK);
+      return false;
+    }
+    throw error;
+  }
 }
 
 /**

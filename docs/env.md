@@ -62,7 +62,9 @@ How it is maintained:
   initialized), `hack doctor` reports the "hack gitignore" check as a warning,
   and `hack doctor --fix` creates the file, or restores its managed block,
   as its own step. Commit the result so fresh clones and worktrees get the
-  rules. `hack init` does not repair an existing project.
+  rules. `hack init` does not repair an existing project. Hack never writes
+  through a symlinked `.hack/.gitignore` or `.hack/`; doctor reports that case
+  and leaves it alone.
 - runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
   into your working tree to set up ignores, so they leave `git status`
   unchanged. Before they write `.hack/.internal/` or `.hack/.branch/` files,

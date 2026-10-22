@@ -31,10 +31,8 @@ import {
   AtomicWriteConflictError,
   ensureDir,
   ensureGitignoreEntry,
-  ensureManagedGitignoreBlock,
   mergeManagedGitignoreBlock,
   pathExists,
-  readOptionalTextFile,
   readTextFile,
   writeTextFile,
   writeTextFileAtomicIfChanged,
@@ -65,7 +63,10 @@ import {
   createPrivateFileExclusive,
   decodeCanonicalBase64,
   publishPrivateFileExclusive,
+  type ReplaceablePrivateFileOptions,
   readBoundedPrivateFile,
+  readReplaceablePrivateFile,
+  replacePrivateFileAtomic,
 } from "./private-file.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
 import {
@@ -424,11 +425,18 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
  *
  * The file is meant to be committed, so fresh clones and linked worktrees
  * inherit the ignore rules with zero setup. User lines outside the managed
- * markers are preserved; see `ensureManagedGitignoreBlock` for the merge
+ * markers are preserved; see `mergeManagedGitignoreBlock` for the merge
  * scheme. Called only from explicit commands: `hack init`, `hack doctor
  * --fix`, and machine-local env writes (`hack env set --local`,
  * `hack env hydrate`). Runtime commands never call it; they use
  * `ensureHackGitInfoExclude` so they do not change the working tree.
+ *
+ * No-follow: the file is read with O_NOFOLLOW and replaced through an
+ * exclusive, no-follow temp file and a rename, keeping its mode (0644 when
+ * new). A symlinked or non-regular `.gitignore`, or a symlinked project dir,
+ * throws {@link HackDirGitignoreRefusalError} before anything is written, so a
+ * planted link can never redirect the write outside the project. Ancestors
+ * above the project dir are not inspected.
  */
 export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
@@ -436,8 +444,50 @@ export async function ensureHackDirGitignore(opts: {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await ensureDir(opts.projectDir);
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  return await ensureManagedGitignoreBlock({
-    gitignorePath: resolve(opts.projectDir, ".gitignore"),
+  const options = hackDirGitignoreFileOptions({ projectDir: opts.projectDir });
+  const current = await readReplaceablePrivateFile(options);
+  const next = mergeHackDirGitignore({ existing: current?.text ?? null });
+  if (current?.text === next) {
+    return { changed: false };
+  }
+  await replacePrivateFileAtomic({
+    ...options,
+    text: next,
+    mode: current ? current.mode & 0o777 : 0o644,
+  });
+  return { changed: true };
+}
+
+/** Fixed, value-free message of {@link HackDirGitignoreRefusalError}. */
+export const HACK_DIR_GITIGNORE_REFUSAL =
+  "Refused .hack/.gitignore access: the file or its .hack directory is a symlink or not a regular file. Replace it with a regular file or directory and retry.";
+
+/**
+ * Refusal to read or write `.hack/.gitignore` through a symlink or a
+ * non-regular entry. Names no path or contents.
+ */
+export class HackDirGitignoreRefusalError extends Error {
+  constructor() {
+    super(HACK_DIR_GITIGNORE_REFUSAL);
+    this.name = "HackDirGitignoreRefusalError";
+  }
+}
+
+function hackDirGitignoreFileOptions(opts: {
+  readonly projectDir: string;
+}): ReplaceablePrivateFileOptions {
+  return {
+    path: resolve(opts.projectDir, ".gitignore"),
+    directories: [resolve(opts.projectDir)],
+    refusal: () => new HackDirGitignoreRefusalError(),
+  };
+}
+
+function mergeHackDirGitignore(opts: {
+  readonly existing: string | null;
+}): string {
+  return mergeManagedGitignoreBlock({
+    existing: opts.existing,
     beginMarker: HACK_DIR_GITIGNORE_BEGIN_MARKER,
     endMarker: HACK_DIR_GITIGNORE_END_MARKER,
     entries: HACK_DIR_GITIGNORE_ENTRIES,
@@ -450,35 +500,39 @@ export async function ensureHackDirGitignore(opts: {
  * - `missing`: the file does not exist (for example, a project initialized by
  *   an earlier Hack version)
  * - `outdated`: it exists without the canonical managed block
+ * - `unsafe`: the file is a symlink or not a regular file, or the project dir
+ *   is a symlink; `--fix` never writes through it
  * - `unreadable`: it exists but cannot be read; `--fix` leaves it alone
  *
- * Read-only: never writes. `ensureHackDirGitignore` applies the repair.
+ * Read-only and no-follow: never writes, never reads through a symlink.
+ * `ensureHackDirGitignore` applies the repair.
  */
 export type HackDirGitignoreState =
   | "current"
   | "missing"
   | "outdated"
+  | "unsafe"
   | "unreadable";
 
 export async function inspectHackDirGitignore(opts: {
   readonly projectDir: string;
 }): Promise<HackDirGitignoreState> {
-  const file = await readOptionalTextFile(
-    resolve(opts.projectDir, ".gitignore")
-  );
-  if (file.kind === "absent") {
+  let current: Awaited<ReturnType<typeof readReplaceablePrivateFile>>;
+  try {
+    current = await readReplaceablePrivateFile(
+      hackDirGitignoreFileOptions({ projectDir: opts.projectDir })
+    );
+  } catch (error: unknown) {
+    return error instanceof HackDirGitignoreRefusalError
+      ? "unsafe"
+      : "unreadable";
+  }
+  if (current === null) {
     return "missing";
   }
-  if (file.kind === "unreadable") {
-    return "unreadable";
-  }
-  const merged = mergeManagedGitignoreBlock({
-    existing: file.text,
-    beginMarker: HACK_DIR_GITIGNORE_BEGIN_MARKER,
-    endMarker: HACK_DIR_GITIGNORE_END_MARKER,
-    entries: HACK_DIR_GITIGNORE_ENTRIES,
-  });
-  return merged === file.text ? "current" : "outdated";
+  return mergeHackDirGitignore({ existing: current.text }) === current.text
+    ? "current"
+    : "outdated";
 }
 
 function toGitRelativePath(opts: {

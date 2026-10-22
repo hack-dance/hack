@@ -10,8 +10,11 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
+  readlink,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -289,6 +292,50 @@ test("doctor --fix creates a missing .hack/.gitignore and keeps user lines on a 
   expect(repaired.startsWith("my-own-entry\n")).toBe(true);
   expect(repaired).toContain(".internal/\n");
   expect(noteCalls.join("\n")).toContain("Updated .hack/.gitignore.");
+}, 30_000);
+
+const OUTSIDE_IGNORE_TEXT = "outside-file-must-not-change\n";
+
+test("doctor --fix never writes through a symlinked .hack/.gitignore", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  if (!tempDir) {
+    throw new Error("tempDir not set");
+  }
+  const outside = resolve(tempDir, "outside-ignore");
+  await writeFile(outside, OUTSIDE_IGNORE_TEXT);
+  const gitignore = resolve(projectRoot, ".hack", ".gitignore");
+  await symlink(outside, gitignore);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot])
+  ).toBe(0);
+
+  expect(await readFile(outside, "utf8")).toBe(OUTSIDE_IGNORE_TEXT);
+  expect((await lstat(gitignore)).isSymbolicLink()).toBe(true);
+  expect(await readlink(gitignore)).toBe(outside);
+}, 30_000);
+
+test("doctor --fix never writes .gitignore through a symlinked .hack directory", async () => {
+  if (!tempDir) {
+    throw new Error("tempDir not set");
+  }
+  const projectRoot = resolve(tempDir, "project");
+  const outsideDir = resolve(tempDir, "outside-hack");
+  await mkdir(projectRoot, { recursive: true });
+  await mkdir(outsideDir);
+  await writeFile(
+    resolve(outsideDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.19\n"
+  );
+  await symlink(outsideDir, resolve(projectRoot, ".hack"));
+
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot])
+  ).toBe(0);
+
+  expect(await readdir(outsideDir)).toEqual(["docker-compose.yml"]);
 }, 30_000);
 
 test("doctor --fix removes a literal Compose env override and keeps a reference-only one (HACK-1273)", async () => {

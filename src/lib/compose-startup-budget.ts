@@ -104,9 +104,12 @@ export function resolveNativeStorageTimeoutMs(
 /**
  * Whole-phase cap on storage time excluded from one `up`/`restart` start
  * deadline. Each guard storage proof is bounded per carrier by
- * `HACK_NATIVE_STORAGE_TIMEOUT_MS` (S), but a phase runs up to (5B+3) guard
- * proofs for B builds, each over every enrolled volume, so the sum alone is
- * unbounded in practice. The excluded total may therefore not exceed
+ * `HACK_NATIVE_STORAGE_TIMEOUT_MS` (S), and a phase runs up to (5B+3) guard
+ * proofs for B builds, each with one carrier per enrolled volume (V). Without
+ * a cap the excluded total is finite, at most (5B+3) x V x S, but it grows with
+ * the build and volume counts and can reach hours: 4 builds and 3 volumes
+ * allow 69 carriers, about 1.7 hours at the 90 s default and 11.5 hours at the
+ * 600 s maximum. The excluded total may therefore not exceed
  * {@link NATIVE_STORAGE_EXCLUSION_MULTIPLE} x S or
  * {@link MAX_NATIVE_STORAGE_EXCLUSION_MS}, whichever is smaller: 24 minutes at
  * the 90 s default and 1 hour from S = 225 s up. Ordinary proofs take a small
@@ -147,8 +150,11 @@ export class NativeStorageTotalBudgetError extends Error {
  * `HACK_COMPOSE_STARTUP_TIMEOUT_MS`. Storage proofs that pre-spawn guards run
  * inside this phase are bounded by their own `HACK_NATIVE_STORAGE_TIMEOUT_MS`
  * carriers instead: their monotonic elapsed time extends this deadline rather
- * than consuming it. Overlapping exclusions count once, a rejected proof still
- * counts as excluded time, and the deadline never moves earlier.
+ * than consuming it. Only each carrier proof (carrier creation and witness
+ * verification) is excluded; a guard's freshness checks and saved-state reads
+ * around it consume the start budget. Overlapping exclusions count once, a
+ * rejected proof still counts as excluded time, and the deadline never moves
+ * earlier.
  *
  * The excluded total is capped by
  * {@link nativeComposeStorageExclusionCapMs}: the deadline moves at most that

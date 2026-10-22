@@ -297,7 +297,9 @@ The two variables bound different things:
 
 When a carrier budget or the whole-phase cap runs out, the command reports the
 closed effect reason `storage-budget` in `error.detail.native_compose_effect_refusal`,
-and the human summary names `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Exhaustion leaves the
+and the human summary names `HACK_NATIVE_STORAGE_TIMEOUT_MS`. A refusal with its own
+cause, such as a helper policy refusal, keeps that reason even when it is caught after
+the carrier deadline; raising the storage budget does not address it. Exhaustion leaves the
 same retained, uncertain state as any other storage refusal; inspect saved state
 before retrying.
 

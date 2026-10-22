@@ -1,10 +1,12 @@
-import { ClosedCliError } from "../lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { prepareNativeExecEnvironment } from "./native-exec-environment.ts";
 import { refreshNativeProjectDependencies } from "./native-project-dependency-refresh.ts";
 import {
   loadNativeProjectRun,
+  type NativeProjectRun,
   type NativeProjectRunScope,
+  normalizeNativeProfiles,
 } from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
@@ -29,6 +31,48 @@ function decode(value: unknown): Buffer {
   }
   return bytes;
 }
+/** The closed `E_USAGE` refusal of a run whose selection differs from the running one. */
+export const NATIVE_RUN_SELECTION_REFUSAL =
+  "Native `hack run` uses the running project's environment and profiles, and the requested --env or --profile does not match them. Omit --env and --profile, or pass exactly the selection `hack up` started with. No command ran.";
+
+/**
+ * The selection a native one-off asks for. An omitted field inherits the
+ * running selection; a given field must equal it exactly. Profiles compare as
+ * a set (order and duplicates do not matter), and an explicit base env is
+ * `null`. A run never restarts the project to change its selection.
+ */
+export type NativeRunSelection = {
+  readonly envName?: string | null;
+  readonly profiles?: readonly string[];
+};
+
+/**
+ * Refuse, before any runtime request, a requested selection that differs from
+ * the running one or that a legacy mapping without recorded selectors cannot
+ * confirm.
+ */
+export function requireNativeRunSelection(opts: {
+  readonly run: NativeProjectRun;
+  readonly selection?: NativeRunSelection;
+}): void {
+  const { run, selection } = opts;
+  const envDiffers =
+    selection?.envName !== undefined &&
+    (run.effectiveEnvName === undefined ||
+      selection.envName !== run.effectiveEnvName);
+  const profilesDiffer =
+    selection?.profiles !== undefined &&
+    (run.profiles === undefined ||
+      JSON.stringify(normalizeNativeProfiles(selection.profiles)) !==
+        JSON.stringify(run.profiles));
+  if (envDiffers || profilesDiffer) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: NATIVE_RUN_SELECTION_REFUSAL,
+    });
+  }
+}
+
 /** A separate service container; completion requires confirmed job cleanup. */
 export async function nativeProjectOneOff(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -37,6 +81,8 @@ export async function nativeProjectOneOff(opts: {
   readonly argv: readonly string[];
   readonly workdir?: string;
   readonly composeFile: string;
+  /** Optional `--env`/`--profile` request; it must match the running selection. */
+  readonly selection?: NativeRunSelection;
   readonly invoke?: typeof invokeNativeRuntime;
   readonly environment?: typeof prepareNativeExecEnvironment;
 }) {
@@ -63,6 +109,7 @@ export async function nativeProjectOneOff(opts: {
       "Native run currently requires a started project; run up first."
     );
   }
+  requireNativeRunSelection({ run: mapping, selection: opts.selection });
   const refreshed = await refreshNativeProjectDependencies(opts);
   if (JSON.stringify(refreshed.mapping) !== JSON.stringify(mapping)) {
     throw refused();

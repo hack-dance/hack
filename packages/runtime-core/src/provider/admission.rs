@@ -101,6 +101,10 @@ pub struct Admission {
     pub swapouts: Option<u64>,
     pub admitted: bool,
     pub reasons: Vec<String>,
+    /// For a fresh-budget sample beside a created stopped Development pool: the closed code
+    /// explaining why its retained disks did not qualify for the host reserve.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_reserve_refusal: Option<&'static str>,
 }
 
 pub fn parse_free_memory(text: &str) -> Result<u64, CandidateError> {
@@ -233,36 +237,93 @@ pub fn probe(path: &Path) -> Result<Admission, CandidateError> {
 }
 
 pub fn probe_for(path: &Path, profile: Profile) -> Result<Admission, CandidateError> {
-    probe_with_disk_budget(path, profile, false)
+    probe_with_disk_budget(path, profile, OwnedPool::Fresh)
 }
 
-/// Only the lifecycle's independently verified live development pool may use this budget.
-pub(super) fn probe_owned_development(path: &Path) -> Result<Admission, CandidateError> {
-    probe_with_disk_budget(path, Profile::Development, true)
+/// Which existing Development disk allocation an admission may treat as already paid.
+/// Only the lifecycle's admission-pool selection names an owned pool, after proving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OwnedPool {
+    /// No proven allocation: charge the declared storage, overlay and host reserve.
+    Fresh,
+    /// An independently verified live development pool.
+    Running,
+    /// An exactly clean stopped development pool whose verified retained disks a
+    /// restart reuses without `machine create`.
+    Stopped,
 }
 
-fn disk_budget(profile: Profile, owned_live: bool) -> (u64, &'static str) {
-    if profile == Profile::Development && owned_live {
-        (
+/// Only the lifecycle's independently verified development pool may use this budget.
+pub(super) fn probe_owned_development(
+    path: &Path,
+    owned: OwnedPool,
+) -> Result<Admission, CandidateError> {
+    probe_with_disk_budget(path, Profile::Development, owned)
+}
+
+fn disk_budget(profile: Profile, owned: OwnedPool) -> (u64, &'static str) {
+    match (profile, owned) {
+        (Profile::Research, _) => (disk_floor_bytes(profile), "research-floor"),
+        (Profile::Development, OwnedPool::Fresh) => (
+            disk_floor_bytes(profile),
+            "new-pool-storage-overlay-host-reserve",
+        ),
+        (Profile::Development, OwnedPool::Running) => (
             DEVELOPMENT_HOST_DISK_RESERVE_GIB * 1024 * 1024 * 1024,
             "verified-live-owned-pool-host-reserve",
-        )
-    } else {
-        (
-            disk_floor_bytes(profile),
-            if profile == Profile::Research {
-                "research-floor"
-            } else {
-                "new-pool-storage-overlay-host-reserve"
-            },
-        )
+        ),
+        (Profile::Development, OwnedPool::Stopped) => (
+            DEVELOPMENT_HOST_DISK_RESERVE_GIB * 1024 * 1024 * 1024,
+            "verified-stopped-owned-pool-host-reserve",
+        ),
     }
+}
+
+/// The fixed refusal for free disk below the selected budget, or none when it fits.
+fn disk_shortfall(profile: Profile, owned: OwnedPool, available: u64) -> Option<&'static str> {
+    if available >= disk_budget(profile, owned).0 {
+        return None;
+    }
+    Some(match (profile, owned) {
+        (Profile::Research, _) => "Free disk is below the 100 GiB research floor.",
+        (Profile::Development, OwnedPool::Fresh) => {
+            "Free disk is below the development VM storage and host reserve budget."
+        }
+        (Profile::Development, OwnedPool::Running) => {
+            "Free disk is below the host reserve for the verified running development pool."
+        }
+        (Profile::Development, OwnedPool::Stopped) => {
+            "Free disk is below the host reserve for the verified stopped development pool."
+        }
+    })
+}
+
+/// Whether an admitted Development sample also passes the unchanged fresh-allocation budget.
+/// Free disk is the only predicate that depends on the disk basis, so an admitted sample
+/// whose observed free disk fits the fresh budget is admitted on that budget too.
+pub(super) fn fits_fresh_budget(sample: &Admission) -> bool {
+    sample.profile == Profile::Development
+        && sample.admitted
+        && sample.reasons.is_empty()
+        && sample.disk_free_bytes.is_some_and(|free| {
+            disk_shortfall(Profile::Development, OwnedPool::Fresh, free).is_none()
+        })
+}
+
+/// Record a sample that [`fits_fresh_budget`] on the fresh-allocation budget, exactly as a
+/// start without an owned pool would have recorded the same observation.
+pub(super) fn rebase_fresh(sample: &mut Admission) {
+    debug_assert!(fits_fresh_budget(sample));
+    let (minimum, basis) = disk_budget(Profile::Development, OwnedPool::Fresh);
+    sample.minimum_disk_free_bytes = minimum;
+    sample.disk_budget_basis = basis;
+    sample.retained_reserve_refusal = None;
 }
 
 fn probe_with_disk_budget(
     path: &Path,
     profile: Profile,
-    owned_live: bool,
+    owned: OwnedPool,
 ) -> Result<Admission, CandidateError> {
     let supported = cfg!(all(target_os = "macos", target_arch = "aarch64"));
     let mut result = Admission {
@@ -279,14 +340,15 @@ fn probe_with_disk_budget(
         memory_pressure_normal: false,
         memory_pressure: MemoryPressure::from_level(None),
         disk_free_bytes: None,
-        minimum_disk_free_bytes: disk_budget(profile, owned_live).0,
-        disk_budget_basis: disk_budget(profile, owned_live).1,
+        minimum_disk_free_bytes: disk_budget(profile, owned).0,
+        disk_budget_basis: disk_budget(profile, owned).1,
         one_minute_load: None,
         load_ceiling: None,
         thermal_normal: false,
         swapouts: None,
         admitted: false,
         reasons: Vec::new(),
+        retained_reserve_refusal: None,
     };
     if !supported {
         result
@@ -369,19 +431,8 @@ fn probe_with_disk_budget(
     let available = u64::try_from(available)
         .map_err(|_| CandidateError::new("admission_unavailable", "Invalid disk headroom."))?;
     result.disk_free_bytes = Some(available);
-    if available < result.minimum_disk_free_bytes {
-        result.reasons.push(
-            match profile {
-                Profile::Research => "Free disk is below the 100 GiB research floor.",
-                Profile::Development if owned_live => {
-                    "Free disk is below the host reserve for the verified running development pool."
-                }
-                Profile::Development => {
-                    "Free disk is below the development VM storage and host reserve budget."
-                }
-            }
-            .into(),
-        );
+    if let Some(reason) = disk_shortfall(profile, owned, available) {
+        result.reasons.push(reason.into());
     }
     let thermal = run(
         clean_command(Path::new("/usr/bin/pmset")).args(["-g", "therm"]),
@@ -509,11 +560,117 @@ mod tests {
         const GIB: u64 = 1024 * 1024 * 1024;
         assert_eq!(disk_floor_bytes(Profile::Research), 100 * GIB);
         assert_eq!(disk_floor_bytes(Profile::Development), 58 * GIB);
-        assert_eq!(disk_budget(Profile::Development, true).0, 16 * GIB);
-        assert_eq!(disk_budget(Profile::Research, true).0, 100 * GIB);
-        assert_eq!(disk_budget(Profile::Development, false).0, 58 * GIB);
+        assert_eq!(
+            disk_budget(Profile::Development, OwnedPool::Running).0,
+            16 * GIB
+        );
+        assert_eq!(
+            disk_budget(Profile::Research, OwnedPool::Running).0,
+            100 * GIB
+        );
+        assert_eq!(
+            disk_budget(Profile::Development, OwnedPool::Fresh).0,
+            58 * GIB
+        );
         assert_eq!(load_ceiling(Profile::Research), Some(8.0));
         assert_eq!(load_ceiling(Profile::Development), None);
+    }
+
+    #[test]
+    fn stopped_owned_pool_charges_only_the_host_reserve_and_refuses_below_it() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let stopped = OwnedPool::Stopped;
+        assert_eq!(
+            disk_budget(Profile::Development, stopped),
+            (16 * GIB, "verified-stopped-owned-pool-host-reserve")
+        );
+        // The observed October 2 restart: 58,010,112,000 free bytes with retained disks.
+        assert_eq!(
+            disk_shortfall(Profile::Development, stopped, 58_010_112_000),
+            None
+        );
+        assert_eq!(
+            disk_shortfall(Profile::Development, OwnedPool::Fresh, 58_010_112_000),
+            Some("Free disk is below the development VM storage and host reserve budget.")
+        );
+        // The reserve boundary is inclusive and never waived for a stopped pool.
+        assert_eq!(
+            disk_shortfall(Profile::Development, stopped, 16 * GIB),
+            None
+        );
+        assert_eq!(
+            disk_shortfall(Profile::Development, stopped, 16 * GIB - 1),
+            Some("Free disk is below the host reserve for the verified stopped development pool.")
+        );
+        assert!(disk_shortfall(Profile::Development, stopped, 0).is_some());
+        // Research keeps its frozen floor whatever ownership is claimed.
+        assert_eq!(
+            disk_budget(Profile::Research, stopped),
+            (100 * GIB, "research-floor")
+        );
+        assert!(disk_shortfall(Profile::Research, stopped, 58_010_112_000).is_some());
+        assert_eq!(
+            disk_budget(Profile::Development, OwnedPool::Fresh).1,
+            "new-pool-storage-overlay-host-reserve"
+        );
+        assert_eq!(
+            disk_budget(Profile::Development, OwnedPool::Running).1,
+            "verified-live-owned-pool-host-reserve"
+        );
+    }
+
+    #[test]
+    fn only_an_admitted_development_sample_with_fresh_headroom_rebases_to_the_fresh_budget() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let reserve = |free: u64| Admission {
+            profile: Profile::Development,
+            host_supported: true,
+            free_memory_bytes: Some(10 * GIB),
+            minimum_free_memory_bytes: 10 * GIB,
+            free_plus_file_cache_estimate_bytes: Some(10 * GIB),
+            memory_budget_basis: "free-plus-file-cache-estimate",
+            memory_pressure: MemoryPressure::from_level(Some(1)),
+            memory_pressure_normal: true,
+            disk_free_bytes: Some(free),
+            minimum_disk_free_bytes: 16 * GIB,
+            disk_budget_basis: "verified-stopped-owned-pool-host-reserve",
+            one_minute_load: Some(0.0),
+            load_ceiling: None,
+            thermal_normal: true,
+            swapouts: Some(7),
+            admitted: true,
+            reasons: Vec::new(),
+            retained_reserve_refusal: None,
+        };
+        // The fresh boundary is inclusive, like the probe's own comparison.
+        let mut sample = reserve(58 * GIB);
+        assert!(fits_fresh_budget(&sample));
+        rebase_fresh(&mut sample);
+        assert_eq!(sample.minimum_disk_free_bytes, 58 * GIB);
+        assert_eq!(
+            sample.disk_budget_basis,
+            "new-pool-storage-overlay-host-reserve"
+        );
+        assert!(sample.admitted && sample.reasons.is_empty());
+        assert_eq!(sample.swapouts, Some(7));
+        // The October 2 restart's headroom needs the reserve; it never rebases.
+        assert!(!fits_fresh_budget(&reserve(58 * GIB - 1)));
+        assert!(!fits_fresh_budget(&reserve(58_010_112_000)));
+        let mut unobserved = reserve(100 * GIB);
+        unobserved.disk_free_bytes = None;
+        assert!(!fits_fresh_budget(&unobserved));
+        // A refused sample stays refused whatever its headroom.
+        let mut refused = reserve(100 * GIB);
+        refused.admitted = false;
+        assert!(!fits_fresh_budget(&refused));
+        let mut explained = reserve(100 * GIB);
+        explained
+            .reasons
+            .push("Thermal/performance status is not confirmed normal.".into());
+        assert!(!fits_fresh_budget(&explained));
+        let mut research = reserve(200 * GIB);
+        research.profile = Profile::Research;
+        assert!(!fits_fresh_budget(&research));
     }
 
     #[test]

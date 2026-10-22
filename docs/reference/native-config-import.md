@@ -15,6 +15,14 @@ projects, read managed environment values or keys, or inspect/change engine
 resources. Any refusal discards the private candidate; no partial conversion is
 reported as successful.
 
+An unchanged project that uses an external network (one that the
+`HACK_NATIVE_ADAPTATION` selection does not list in `isolatedNetworks`), a reserved
+ownership label, a build outside the basic form below, or a non-arm64 platform
+stays on the Compose backend in v5. Native `up` refuses those features before any work, and
+`hack doctor` reports them; see
+[Compose projects that stay on the Compose backend](../guides/native-candidate.md#compose-projects-that-stay-on-the-compose-backend).
+That check uses the same basic build mapping as this preview.
+
 ## Supported subset
 
 | Legacy input | Native mapping |

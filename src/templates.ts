@@ -331,6 +331,10 @@ export const HACK_DIR_GITIGNORE_END_MARKER = "# end managed by hack" as const;
  * the `.hack/` directory. Root-level `.hack.secret.key` stays in the root
  * `.gitignore` (see `ensureProjectEnvSecretKey`). The retired `tickets/`
  * entry remains upgrade-safe so existing machine-local caches cannot be staged.
+ * `.hack.env*.tmp` covers the `.<layer>.<uuid>.tmp` staging sibling that
+ * `writeTextFileAtomicIfChanged` leaves behind when an env layer write is
+ * killed before its commit rename; it holds a whole layer, including
+ * machine-local values, so it must never be staged.
  */
 export const HACK_DIR_GITIGNORE_ENTRIES = [
   ".internal/",
@@ -339,6 +343,7 @@ export const HACK_DIR_GITIGNORE_ENTRIES = [
   ".env.state.json",
   "hack.env.local.yaml",
   "hack.env.*.local.yaml",
+  ".hack.env*.tmp",
   "tickets/",
 ] as const;
 

@@ -184,15 +184,50 @@ export function renderGlobalPromtailYaml(): string {
   return renderGlobalAlloyConfig();
 }
 
+/**
+ * Docker discovery poll interval for the global Alloy config. A container that
+ * starts, exits and is removed within one interval can still be missed; one
+ * that exits but is kept (the Compose default) is shipped on the next poll.
+ */
+export const GLOBAL_ALLOY_DOCKER_REFRESH_INTERVAL = "5s";
+
+/**
+ * Container states Alloy discovers. `exited` is what lets short-lived Compose
+ * services reach Loki; the others match Docker's default running-only listing.
+ */
+export const GLOBAL_ALLOY_DOCKER_STATUSES = [
+  "running",
+  "restarting",
+  "paused",
+  "exited",
+] as const;
+
 export function renderGlobalAlloyConfig(): string {
   // Docs:
   // - https://grafana.com/docs/alloy/latest/reference/components/discovery/discovery.docker/
   // - https://grafana.com/docs/alloy/latest/reference/components/discovery/discovery.relabel/
   // - https://grafana.com/docs/alloy/latest/reference/components/loki/loki.source.docker/
   // - https://grafana.com/docs/alloy/latest/reference/components/loki/loki.write/
+  //
+  // Short-lived containers (HACK-1277): discovery.docker polls the Docker API and,
+  // by default, lists only running containers once a minute. A one-shot Compose
+  // service that started and exited between two polls was never tailed, so Loki
+  // had nothing while `docker compose logs` still showed its output. Docker sets
+  // `all=true` when a `status` filter is present, so exited containers are listed
+  // too and loki.source.docker reads their retained logs once (it restarts a
+  // tailer only while the container runs or finished after the last read). The
+  // poll interval is shortened so a container removed soon after it exits (for
+  // example `docker compose run --rm`) has a smaller window to be missed.
   return [
     'discovery.docker "local" {',
-    '  host = "unix:///var/run/docker.sock"',
+    '  host             = "unix:///var/run/docker.sock"',
+    `  refresh_interval = "${GLOBAL_ALLOY_DOCKER_REFRESH_INTERVAL}"`,
+    "",
+    "  // Include exited containers so one-shot services are shipped after they stop.",
+    "  filter {",
+    '    name   = "status"',
+    `    values = [${GLOBAL_ALLOY_DOCKER_STATUSES.map((status) => `"${status}"`).join(", ")}]`,
+    "  }",
     "}",
     "",
     'discovery.relabel "docker_compose" {',
@@ -223,6 +258,22 @@ export function renderGlobalAlloyConfig(): string {
     '    action        = "replace"',
     '    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]',
     '    target_label  = "project"',
+    "  }",
+    "",
+    "  // Keep each container's target identity stable when it stops: an exited",
+    "  // container loses its IP, endpoint and published ports. loki.source.docker",
+    "  // keys tailers and read positions by the full label set, so a changed set",
+    "  // would re-read (duplicate) the container's whole log. Nothing below uses",
+    "  // the network or port metadata.",
+    "  rule {",
+    '    action = "labeldrop"',
+    '    regex  = "__meta_docker_(network|port)_.+"',
+    "  }",
+    "",
+    "  rule {",
+    '    action        = "replace"',
+    '    source_labels = ["__meta_docker_container_id"]',
+    '    target_label  = "__address__"',
     "  }",
     "}",
     "",

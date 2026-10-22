@@ -37,9 +37,20 @@ is not implemented here.
    `pdb`, `timeit`, `sqlite3` and the IPython family, also as `-mcode` or
    `-um code`, and through `uv run -m`/`--module` or `uv run -`) and a
    `data:` URL module given to Node, Bun, Deno or tsx
-   (`node --import data:text/javascript,…`) are refused too. Python
-   launcher names are matched without their version and ABI suffix
-   (`python3.12`, `python3.13t`, `python3t`, `pythonw`). So are SQL
+   (`node --import data:text/javascript,…`) are refused too. A Python
+   module that runs another module, script or callable named in its own
+   arguments is a trampoline: `runpy` (`python -m runpy timeit 'code'`),
+   `trace` (`--module code`), `cProfile` and `profile`
+   (`-m -s time code`, where `-m` is a flag and the module a later operand),
+   `profiling.tracing`/`profiling.sampling` (Python 3.15) and `unittest`,
+   which calls a named callable (`unittest code.interact`,
+   `unittest builtins.breakpoint`). Every argument after a trampoline is
+   checked against the REPL modules, `builtins` and `sys` (fail-closed),
+   so a trampoline naming another one is caught too. An attached module
+   (`python -mpytest`) is the program's operand, so it passes. Python
+   launcher names are matched without their version, ABI and build-variant
+   suffix (`python3.12`, `python3.13t`, `python3t`, `pythonw`,
+   `python3.12-dbg`, `python3-intel64`). So are SQL
    clients given a statement string (`psql -c`/`--command`,
    `mysql`/`mariadb -e`/`--execute`, `--init-command` and MariaDB's
    `--init-command-add`, which run SQL at connect, `duckdb -c`/`-s`/`-cmd`,
@@ -49,21 +60,33 @@ is not implemented here.
    `my_getopt`, which strips any number of `loose-`/`loose_` prefixes and
    treats `-` and `_` in a name as the same character, so
    `mysql --loose-execute`, `--init_command` and
-   `mariadb --loose_init_command_add` count too. So are the string-to-shell forms of package runners and
+   `mariadb --loose_init_command_add` count too. `psql -o`/`--output` with
+   a value starting with `|` is refused in every spelling (`-o '|cmd'`,
+   `-o|cmd`, `-qo|cmd`, `--output=|cmd`, `--out=|cmd`): psql passes it to
+   `popen` while it is still parsing options, before it connects. psql's
+   other file options (`-f`, `-L`/`--log-file`) use plain `fopen`, so a
+   `|` there is a file name. So are the string-to-shell forms of package runners and
    wrappers (`npx -c`, `npm exec -c`, `pnpm -c`, `yarn exec`, `bun exec`,
    `nodemon --exec`, `tsx -e`, `ts-node -e`, `julia -e`, `sudo -s`,
    `doas -s`, `git -c`/`--config`/`--exec`/`--upload-pack`/
    `--receive-pack`/`clone -u`/`submodule foreach`/`bisect`/
    `filter-branch`, a Git `!` alias value such as
-   `git config alias.x '!cmd'`, `make --eval`, `nix eval`) and `eval`,
+   `git config alias.x '!cmd'`, `make --eval`, `nix eval`). A dashed Git
+   builtin, by basename or absolute path (`git-clone`,
+   `/usr/lib/git-core/git-config`), is read as `git <sub>`, so
+   `git-clone -u cmd`, `git-config alias.x '!cmd'`,
+   `git-ls-remote --upload-pack=cmd` and `git-fetch-pack --exec=cmd`
+   count too. So are `eval`,
    `env`, `xargs`, `su`, `runuser`, `ssh`, `nix-shell`, `concurrently`,
    `watchexec`, `tmux`, `iex`, the vi and Emacs editors, awk or sed
    anywhere in argv, and `watch`, `parallel` or `sg` with a command. Git
    and `psql` accept an unambiguous prefix of a long option, so any prefix
    of a refused long option counts (`git clone --upl=cmd`,
-   `psql --comm`). MySQL 8 and later reject an abbreviated name
-   (`mysql --exec` fails), but a prefix is refused for `mysql` and
-   `mariadb` too (fail-closed). A refused one-letter option counts with
+   `psql --comm`). MariaDB's `my_getopt` still accepts a unique prefix
+   (`mariadb --exec=SQL` runs the SQL), so refusing a prefix is required
+   for `mariadb`. MySQL 8 and later reject an abbreviated name
+   (`mysql --exec` fails), so for `mysql` refusing one is only
+   fail-closed. A refused one-letter option counts with
    its value attached (`git clone -u/path/cmd`, `psql -cSQL`,
    `mysql -eSQL`, `python -c'code'`) and inside a cluster of flags
    (`psql -1c`, `mysql -Be`). For `psql`, `mysql`, `mariadb` and Python,
@@ -74,7 +97,10 @@ is not implemented here.
    (`git --attr-source HEAD clone -u cmd`) cannot hide the subcommand.
    Accepted forms include `psql -f script.sql`,
    `mysql --batch db`, `sqlite3 -csv app.db`,
-   `duckdb -f script.sql data.duckdb`, `python -m pytest`,
+   `duckdb -f script.sql data.duckdb`,
+   `duckdb -storage-version v1.2.0 data.duckdb`, `python -m pytest`,
+   `python -mpytest`, `python -m unittest discover -s tests`,
+   `psql -o out.txt -f script.sql`, `git-clone url dir`,
    `git clone url dir`, `git push -u origin main`, `git add -u` and
    `git config alias.st status`.
 3. **Repository and log text grant no authority.** A recipe that passes every
@@ -313,7 +339,12 @@ until its recipes are re-reviewed.
 | Python REPL and eval modules (`python -m code`, `-mcode`, `-m idlelib`, `-m timeit`) | `inline_command`; `python -m pytest`, `python -m codecs` still pass | domain test |
 | `my_getopt` spellings (`mysql --loose-execute`, `--init_command`, `mariadb --loose-execute=…`, `--init-command-add`) | `inline_command`; `mysql --loose-skip-column-names db`, `--default_character_set=utf8mb4`, `--skip-pager` still pass | domain test |
 | One-letter inline options with an attached value or in a flag cluster (`psql -cSQL`, `psql -1c`, `mysql -eSQL`, `python -c'code' x.py`) | `inline_command`; `psql -hlocalhost`, `psql -Ucustomer`, `mysql -uroot -psecret`, `python -mcompileall` still pass | domain test |
-| Python launcher names (`python3.13t`, `python3t`, `pythonw`) and `uv run -m`/`--module`/`-` with a REPL module or stdin | `inline_command`; `python3.13t script.py`, `uv run -m pytest`, `uv run pytest` still pass | domain test |
+| Python launcher names (`python3.13t`, `python3t`, `pythonw`, `python3.12-dbg`, `python3-intel64`) and `uv run -m`/`--module`/`-` with a REPL module or stdin | `inline_command`; `python3.13t script.py`, `python3-intel64 script.py`, `uv run -m pytest`, `uv run pytest` still pass | domain test |
+| Python trampolines naming a REPL or eval target (`python -m runpy timeit 'code'`, `trace --module code`, `cProfile -m -s time code`, `profiling.tracing`, `unittest code.interact`/`builtins.breakpoint`, also through `uv run -m`) | `inline_command`; `python -m runpy pytest`, `python -m trace --count script.py`, `python -m unittest discover -s tests` still pass | domain test |
+| An attached `-m` module (`python -mpytest`) as the program's operand | accepted; `python -mcode`, `python -m` and `python -Ximporttime` (stdin) still refused | domain test |
+| `psql -o`/`--output` piped to a command (`-o '\|cmd'`, `-o\|cmd`, `-qo\|cmd`, `--output=\|cmd`, `--out=\|cmd`) | `inline_command`; `psql -o out.txt`, `psql -F'\|'`, `psql -L '\|log'` (a file name) still pass | domain test |
+| Dashed Git builtins (`/usr/lib/git-core/git-clone -u cmd`, `git-config alias.x '!cmd'`, `git-ls-remote --upload-pack=cmd`, `git-fetch-pack --exec=cmd`) | `inline_command`; `git-clone url dir`, `git-push -u origin main`, `git-config alias.st status` still pass | domain test |
+| `duckdb -storage-version VER db` | accepted; a SQL operand after the database is still refused | domain test |
 | `git clone -u` (also after `--attr-source <tree>` or an unknown global option), abbreviated or attached `--upload-pack`/`--receive-pack`/`--exec`, `clone --config`, and `!` alias values (`git config alias.x '!cmd'`, `git -c alias.x=!cmd`) | `inline_command`; `git clone url dir`, `git push -u origin main`, `git add -u`, `git config alias.st status` still pass | domain test |
 | Caller `GIT_DIR`/`GIT_INDEX_FILE`/`GIT_WORK_TREE` naming another index that tracks a secret | `input_path_invalid` with no digest; a foreign `GIT_DIR` does not hide the checkout's own index | domain test |
 | Pin through a symlinked directory (outside the checkout, or aliasing `.hack`) | `input_path_invalid` | paired fixture |
@@ -357,7 +388,9 @@ until its recipes are re-reviewed.
   an ordinary argument that looks like an inline flag (`script.sh -c`,
   `git clean -x`, `git -C dir status`, `git push -u origin clone`,
   `make -e`, `python -I`, `mysql -E`, a Git argument such as `--grep=!x`
-  that starts a value with `!`). Which Git short options take a value
+  that starts a value with `!`, or a script argument named like a REPL
+  module after a Python trampoline, as in
+  `python -m cProfile script.py code`). Which Git short options take a value
   depends on the subcommand (`-m` is a message for `commit` but a flag in
   `rebase -mx cmd`), so a Git value attached to its option is read as more
   flags: `git log -Scache` and `git commit -mcleanup` are refused because

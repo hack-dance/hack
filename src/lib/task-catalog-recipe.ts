@@ -351,6 +351,22 @@ type Evaluator = {
    */
   readonly replModules: readonly string[];
   /**
+   * Modules that run another module, script or callable named in their own
+   * arguments (`python -m runpy timeit 'code'`). Every argument after one
+   * is checked against `replModules` (fail-closed). Matched like
+   * `replModules`.
+   */
+  readonly trampolineModules: readonly string[];
+  /**
+   * Options whose value is an output file name that, when it starts with
+   * `|`, is run as a shell command (`psql -o '|cmd'`, which `psql` opens
+   * with `popen` while it is still parsing options, before it connects).
+   * Every spelling of the value counts: separate, attached, in a cluster
+   * (`-qo|cmd`) and, for a program that abbreviates, under a prefix of the
+   * long name (`--out=|cmd`).
+   */
+  readonly pipeOptions: readonly string[];
+  /**
    * Inline flags that count only under one subcommand, because the same
    * letter is harmless elsewhere: `git clone -u <cmd>` runs a command, while
    * `git push -u` sets an upstream. They count when any operand names the
@@ -385,6 +401,8 @@ function evaluator(spec: Partial<Evaluator>): Evaluator {
     foldsDoubleDash: false,
     codeOperandsAfter: null,
     replModules: [],
+    trampolineModules: [],
+    pipeOptions: [],
     subcommandInline: {},
     bangCommands: false,
     ...spec,
@@ -403,7 +421,10 @@ const JS_INLINE = ["-e", "--eval", "-p", "--print"] as const;
 /**
  * Python modules that start an interactive or eval REPL (`code`, `idlelib`,
  * `asyncio`, `_pyrepl`, the IPython family, the `sqlite3` shell, the `pdb`
- * debugger) or evaluate a statement argument (`timeit`).
+ * debugger) or evaluate a statement argument (`timeit`). `builtins` and
+ * `sys` are listed for the trampolines below: `unittest` calls a named
+ * callable, so `python -m unittest builtins.breakpoint` (or
+ * `sys.breakpointhook`) starts `pdb`.
  */
 const PYTHON_REPL_MODULES = [
   "code",
@@ -416,15 +437,39 @@ const PYTHON_REPL_MODULES = [
   "ipython",
   "bpython",
   "ptpython",
+  "builtins",
+  "sys",
+] as const;
+
+/**
+ * Python modules that run another module, script or callable named in
+ * their own arguments: `runpy <module>`, `trace --module <module>`,
+ * `cProfile`/`profile -m <module>`, `profiling.tracing`/`profiling.sampling`
+ * (Python 3.15), and `unittest`, which imports a dotted name and calls it
+ * when it is callable (`unittest code.interact` starts a REPL). Their
+ * option grammars are not modeled, so every argument after one is checked
+ * against the REPL modules (fail-closed), which also covers a trampoline
+ * naming another trampoline (`runpy runpy timeit …`). `pdb` takes a target
+ * too and is refused outright. Matched lowercased, like the REPL modules.
+ */
+const PYTHON_TRAMPOLINE_MODULES = [
+  "runpy",
+  "trace",
+  "cprofile",
+  "profile",
+  "profiling",
+  "unittest",
 ] as const;
 
 /**
  * `mysql`/`mariadb` options that run SQL text: `-e`/`--execute`, and
  * `--init-command` and MariaDB's `--init-command-add`, which run at connect
  * and again on every reconnect. Their `my_getopt` parser also accepts
- * `--loose-execute` and `--init_command`. MySQL 8 and later reject an
- * abbreviated name (`--exec`); refusing one is fail-closed for older
- * parsers. The short options that take a value (`-uroot`, `-psecret`,
+ * `--loose-execute` and `--init_command`. MariaDB's `my_getopt` still
+ * accepts a unique prefix of a long name (`mariadb --exec=SQL` is
+ * `--execute`), so refusing a prefix is required there; MySQL 8 and later
+ * reject an abbreviated name, so for `mysql` it is only fail-closed. The
+ * short options that take a value (`-uroot`, `-psecret`,
  * `-Dname`, `-hhost`) end a letter cluster, so `-e` inside their value is
  * not `-e`.
  */
@@ -437,8 +482,10 @@ const MYSQL = evaluator({
 
 /**
  * CPython's interpreter: `-c` code, `-i` and `-` or no script for an
- * interactive session, and the REPL modules. `-m`, `-W` and `-X` take a
- * value attached in a cluster (`-mcompileall`, `-Wdefault`).
+ * interactive session, the REPL modules, and a REPL module named after a
+ * trampoline (`-m runpy code`). `-m`, `-W` and `-X` take a value attached
+ * in a cluster (`-mcompileall`, `-Wdefault`); an attached module is the
+ * operand, so `-mpytest` does not read stdin.
  */
 const PYTHON = evaluator({
   inline: ["-c"],
@@ -447,6 +494,7 @@ const PYTHON = evaluator({
   needsOperand: true,
   shortValueOptions: ["m", "W", "X"],
   replModules: PYTHON_REPL_MODULES,
+  trampolineModules: PYTHON_TRAMPOLINE_MODULES,
 });
 
 /**
@@ -554,6 +602,7 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
     stdin: ["-"],
     moduleFlags: ["-m", "--module"],
     replModules: PYTHON_REPL_MODULES,
+    trampolineModules: PYTHON_TRAMPOLINE_MODULES,
   }),
   perl: evaluator({
     inline: ["-e", "-E"],
@@ -613,7 +662,8 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   // `fetch`/`clone`/`ls-remote --upload-pack` (`clone -u`) and
   // `push --receive-pack`, and `!` alias values (`git config alias.x '!cmd'`).
   // Git accepts abbreviated long options (`--upl=cmd`) and a value attached
-  // to a short option (`-u/path/cmd`).
+  // to a short option (`-u/path/cmd`). A dashed builtin (`git-clone`,
+  // `/usr/lib/git-core/git-config`) is read as `git <sub>`.
   git: evaluator({
     inline: [
       "-c",
@@ -649,9 +699,12 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   // SQL clients given a statement string. A statement can also reach the
   // host shell (`psql` `\!`, `mysql` `system`, the `sqlite3` `.shell`).
   // The options `psql`'s getopt string gives a value, so `-hlocalhost`,
-  // `-Ucustomer` and `-dcustomers` are not `-c` clusters.
+  // `-Ucustomer` and `-dcustomers` are not `-c` clusters. `-o`/`--output`
+  // opens a value starting with `|` with `popen` during option parsing;
+  // psql's other file options (`-f`, `-L`/`--log-file`) use plain `fopen`.
   psql: evaluator({
     inline: ["-c", "--command"],
+    pipeOptions: ["-o", "--output"],
     abbreviates: true,
     shortValueOptions: [
       "d",
@@ -683,7 +736,13 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   }),
   duckdb: evaluator({
     inline: ["-c", "-cmd", "-s"],
-    valueOptions: [...SQLITE_VALUE_OPTIONS, "-c", "-s", "-f"],
+    valueOptions: [
+      ...SQLITE_VALUE_OPTIONS,
+      "-c",
+      "-s",
+      "-f",
+      "-storage-version",
+    ],
     clusters: false,
     foldsDoubleDash: true,
     codeOperandsAfter: 1,
@@ -759,6 +818,12 @@ const SHELL_SYNTAX_TOKENS: ReadonlySet<string> = new Set([
 
 const EXE_SUFFIX = /\.exe$/;
 /**
+ * Build-variant suffixes that come after the version: Debian's debug
+ * interpreter (`python3.12-dbg`, `python3-dbg`) and the python.org macOS
+ * Intel launcher (`python3-intel64`, `python3.13-intel64`).
+ */
+const VARIANT_SUFFIX = /-(?:dbg|intel64)$/;
+/**
  * `python3.12`, `node22` and `node-22` name the same program, and so do
  * CPython's ABI-tagged names: free-threaded `python3.13t` and `python3t`,
  * debug `python3.12d`, and `python3.7m`.
@@ -771,11 +836,37 @@ const MY_GETOPT_LOOSE = /^loose[-_]/i;
 /** A `data:` URL argument or option value (`--import=data:…`). */
 const DATA_URL = /(?:^|=)data:/i;
 
-/** Program basename, lowercased, without `.exe` or a version suffix. */
+/**
+ * Program basename, lowercased, without `.exe`, a build-variant suffix or a
+ * version suffix.
+ */
 function programName(arg: string): string {
   const base = arg.split("/").at(-1) ?? arg;
-  const name = base.toLowerCase().replace(EXE_SUFFIX, "");
+  const name = base
+    .toLowerCase()
+    .replace(EXE_SUFFIX, "")
+    .replace(VARIANT_SUFFIX, "");
   return name.replace(VERSION_SUFFIX, "") || name;
+}
+
+/** A dashed Git builtin (`git-clone`) and its subcommand (`clone`). */
+const DASHED_GIT = /^git-(.+)$/;
+
+/**
+ * The evaluator table key for a program name and the arguments it reads:
+ * a dashed Git builtin (`git-clone -u cmd url`) is `git` given its
+ * subcommand first (`git clone -u cmd url`), so the subcommand-scoped and
+ * `!` alias rules apply to it as well.
+ */
+function programArgs(opts: {
+  readonly name: string;
+  readonly rest: readonly string[];
+}): { readonly key: string; readonly rest: readonly string[] } {
+  const dashed = DASHED_GIT.exec(opts.name);
+  if (dashed === null) {
+    return { key: opts.name, rest: opts.rest };
+  }
+  return { key: "git", rest: [dashed[1] ?? "", ...opts.rest] };
 }
 
 /**
@@ -883,29 +974,150 @@ function normalizeOption(arg: string, spec: Evaluator): string {
   return `--${name}${arg.slice(end)}`;
 }
 
+/** A module named by `-m`, and where the arguments passed to it start. */
+type ModuleSelection = {
+  readonly module: string;
+  /** Index in `rest` of the first argument after the module name. */
+  readonly argsFrom: number;
+};
+
 /**
  * The module each `-m` selects (`-m code`, `-mcode`, `-Im code`), for a
  * program with Python's option grammar: in a one-dash cluster, the first
  * `m` takes the rest of the cluster or, when nothing follows, the next
- * argument. Every position is checked (fail-closed).
+ * argument. Every position is checked, and an `m` inside another option's
+ * value counts too (fail-closed), so use this only to refuse.
  */
-function moduleNames(rest: readonly string[]): string[] {
-  const out: string[] = [];
+function moduleSelections(rest: readonly string[]): ModuleSelection[] {
+  const out: ModuleSelection[] = [];
   for (let index = 0; index < rest.length; index++) {
     const match = PYTHON_MODULE_OPTION.exec(rest[index] ?? "");
     if (match === null) {
       continue;
     }
     const attached = match[1] ?? "";
-    const module = attached === "" ? rest[index + 1] : attached;
+    if (attached !== "") {
+      out.push({ module: attached, argsFrom: index + 1 });
+      continue;
+    }
+    const module = rest[index + 1];
     if (module !== undefined) {
-      out.push(module);
+      out.push({ module, argsFrom: index + 2 });
     }
   }
   return out;
 }
 
 const PYTHON_MODULE_OPTION = /^-[A-Za-z]*?m(.*)$/;
+const LETTER = /^[A-Za-z]$/;
+
+/**
+ * True when an argument certainly selects a module, so the program has
+ * something to run besides stdin: `-mpytest`, `-um pytest`. A cluster is
+ * read only up to an option that takes a value (`-Ximporttime` is `-X`
+ * given `importtime`, not `-m`), so use this only to accept.
+ */
+function selectsModule(opts: {
+  readonly rest: readonly string[];
+  readonly spec: Evaluator;
+}): boolean {
+  return opts.rest.some((arg, index) => {
+    if (!arg.startsWith("-") || arg.startsWith("--")) {
+      return false;
+    }
+    for (let at = 1; at < arg.length; at++) {
+      const char = arg[at] ?? "";
+      if (!LETTER.test(char)) {
+        return false;
+      }
+      if (char === "m") {
+        return at + 1 < arg.length || index + 1 < opts.rest.length;
+      }
+      if (opts.spec.shortValueOptions?.includes(char)) {
+        return false;
+      }
+    }
+    return false;
+  });
+}
+
+/** True when a module's first dotted segment, lowercased, is in `list`. */
+function isListedModule(module: string, list: readonly string[]): boolean {
+  return list.includes((module.split(".", 1)[0] ?? module).toLowerCase());
+}
+
+/**
+ * The value one argument gives to one of `flags`: `null` when it selects
+ * none, `undefined` when the value is the next argument. A short flag is
+ * read in a cluster up to the first option that takes a value, as
+ * `clusterSelects` reads it (`-o|cmd`, `-qo|cmd`); a long flag takes an
+ * `=` value or the next argument, and for a program that abbreviates, a
+ * prefix of its name counts (`--out=|cmd`).
+ */
+function optionValue(opts: {
+  readonly arg: string;
+  readonly flags: readonly string[];
+  readonly spec: Evaluator;
+}): string | undefined | null {
+  const arg = normalizeOption(opts.arg, opts.spec);
+  const flags = opts.flags.map((flag) => flag.toLowerCase());
+  if (arg.startsWith("--")) {
+    const split = arg.indexOf("=");
+    const name = (split === -1 ? arg : arg.slice(0, split)).toLowerCase();
+    const selected =
+      name.length > 2 &&
+      flags.some(
+        (flag) =>
+          flag === name ||
+          (opts.spec.abbreviates &&
+            flag.startsWith("--") &&
+            flag.startsWith(name))
+      );
+    if (!selected) {
+      return null;
+    }
+    return split === -1 ? undefined : arg.slice(split + 1);
+  }
+  if (!arg.startsWith("-")) {
+    return null;
+  }
+  for (let at = 1; at < arg.length; at++) {
+    const char = arg[at] ?? "";
+    if (!LETTER_OR_DIGIT.test(char)) {
+      return null;
+    }
+    if (flags.includes(`-${char.toLowerCase()}`)) {
+      const attached = arg.slice(at + 1);
+      return attached === "" ? undefined : attached;
+    }
+    if (opts.spec.shortValueOptions?.includes(char)) {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** A file name that `popen` runs as a command (`|cmd`). */
+const PIPE_VALUE = /^\|/;
+
+/** True when any of `spec.pipeOptions` is given a `|cmd` value. */
+function pipesToCommand(opts: {
+  readonly rest: readonly string[];
+  readonly spec: Evaluator;
+}): boolean {
+  if (opts.spec.pipeOptions.length === 0) {
+    return false;
+  }
+  return opts.rest.some((arg, index) => {
+    const value = optionValue({
+      arg,
+      flags: opts.spec.pipeOptions,
+      spec: opts.spec,
+    });
+    const resolved = value === undefined ? opts.rest[index + 1] : value;
+    return typeof resolved === "string" && PIPE_VALUE.test(resolved);
+  });
+}
 
 /**
  * Every argument after the first of `spec.moduleFlags` (`uv run -m code`),
@@ -965,11 +1177,11 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
   if (ALWAYS_EVALUATES.has(name)) {
     return true;
   }
-  const spec = Object.hasOwn(EVALUATORS, name) ? EVALUATORS[name] : undefined;
+  const { key, rest } = programArgs({ name, rest: argv.slice(index + 1) });
+  const spec = Object.hasOwn(EVALUATORS, key) ? EVALUATORS[key] : undefined;
   if (spec === undefined) {
     return false;
   }
-  const rest = argv.slice(index + 1);
   if (spec.evaluatesOperands) {
     return rest.length > 0;
   }
@@ -988,17 +1200,21 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
         spec.words.includes(arg.toLowerCase()) ||
         (spec.dataUrlModules && DATA_URL.test(arg)) ||
         (spec.bangCommands && BANG_COMMAND.test(arg))
-    )
+    ) ||
+    pipesToCommand({ rest, spec })
   ) {
     return true;
   }
+  const selections = spec.replModules.length > 0 ? moduleSelections(rest) : [];
+  const trampolined = selections
+    .filter(({ module }) => isListedModule(module, spec.trampolineModules))
+    .flatMap(({ argsFrom }) => rest.slice(argsFrom));
   if (
-    spec.replModules.length > 0 &&
-    [...moduleNames(rest), ...afterModuleFlag({ rest, spec })].some((module) =>
-      spec.replModules.includes(
-        (module.split(".", 1)[0] ?? module).toLowerCase()
-      )
-    )
+    [
+      ...selections.map(({ module }) => module),
+      ...afterModuleFlag({ rest, spec }),
+      ...trampolined,
+    ].some((module) => isListedModule(module, spec.replModules))
   ) {
     return true;
   }
@@ -1009,7 +1225,10 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
     return true;
   }
   if (operand === null) {
-    return spec.needsOperand;
+    return (
+      spec.needsOperand &&
+      !(spec.replModules.length > 0 && selectsModule({ rest, spec }))
+    );
   }
   return operand === "-" || spec.subcommands.includes(operand.toLowerCase());
 }
@@ -1019,9 +1238,11 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
  * parser: a shell or interpreter given an inline-code or stdin flag
  * (anywhere after it, even after an option value or a script path), given
  * `-` or no script operand, or a REPL/eval subcommand or module
- * (`python -m code`); a SQL client given a statement string (`psql -c`,
- * `sqlite3 db 'SQL'`); a package runner, privilege wrapper or tool given
- * its string-to-shell option, word or `!` alias value;
+ * (`python -m code`, also behind a trampoline: `python -m runpy code`); a
+ * SQL client given a statement string (`psql -c`, `sqlite3 db 'SQL'`) or
+ * an output pipe (`psql -o '|cmd'`); a package runner, privilege wrapper
+ * or tool given its string-to-shell option, word or `!` alias value (also
+ * as a dashed Git builtin, `git-clone -u cmd`);
  * `eval`, `env`, `xargs`, `su`, `ssh`, awk, sed or another always-refused
  * program anywhere; or bare shell syntax copied from a log line. Recipes
  * must run a reviewed script file instead; there is no shell endpoint.

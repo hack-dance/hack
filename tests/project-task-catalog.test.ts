@@ -1337,6 +1337,9 @@ describe("recipe grammar", () => {
         ["mysql", "--exec", "select 1"],
         ["mysql", "--init-command=select 1", "db"],
         ["mariadb", "-e", "select 1"],
+        // MariaDB's my_getopt still accepts a unique prefix.
+        ["mariadb", "--exec", "select 1"],
+        ["mariadb", "--exec=select 1"],
         ["duckdb", "-c", "select 1"],
         ["duckdb", "-cmd", "select 1", "data.duckdb"],
         // The sqlite3 parser DuckDB shares strips one leading dash.
@@ -1351,6 +1354,29 @@ describe("recipe grammar", () => {
         ["mysql", "--batch", "app"],
         ["mariadb", "app"],
         ["duckdb", "-csv", "-json", "data.duckdb"],
+      ],
+    },
+    {
+      // psql opens an `-o`/`--output` value starting with `|` with popen
+      // while it parses options, before it connects.
+      rule: "psql -o/--output piped to a command",
+      refused: [
+        ["psql", "-o", "|id", "-f", "scripts/x.sql"],
+        ["psql", "-o|id"],
+        ["psql", "--output=|id"],
+        ["psql", "--output", "|id"],
+        ["psql", "--out=|id"],
+        ["psql", "-qo|id"],
+        ["psql", "-qo", "|id"],
+        ["exec", "psql", "-At", "-o", "|id", "db"],
+      ],
+      accepted: [
+        ["psql", "-o", "out.txt", "-f", "scripts/x.sql"],
+        ["psql", "--output=out.txt", "-f", "scripts/x.sql"],
+        ["psql", "-qo", "out.txt", "-f", "scripts/x.sql"],
+        // `-F` takes the `|`, and `-L`/`-f` open files with plain fopen.
+        ["psql", "-F|", "-f", "scripts/x.sql"],
+        ["psql", "-L", "|log", "-f", "scripts/x.sql"],
       ],
     },
     {
@@ -1420,9 +1446,16 @@ describe("recipe grammar", () => {
         ["uv", "run", "-m", "--with", "ipython", "IPython"],
         ["uv", "run", "-m", "idlelib.idle"],
         ["uv", "run", "-"],
+        // Debian debug and python.org macOS Intel launcher names.
+        ["python3.12-dbg", "-c", "print(1)"],
+        ["python3-dbg", "-m", "code"],
+        ["python3-intel64", "-c", "print(1)"],
+        ["/usr/local/bin/python3.13-intel64", "-m", "code"],
       ],
       accepted: [
         ["python3.13t", "scripts/x.py"],
+        ["python3-intel64", "scripts/x.py"],
+        ["python3.12-dbg", "-m", "pytest"],
         ["pythonw", "scripts/x.py"],
         ["uv", "run", "-m", "pytest"],
         ["uv", "run", "--module", "mypy", "src"],
@@ -1451,6 +1484,13 @@ describe("recipe grammar", () => {
       ],
     },
     {
+      rule: "duckdb -storage-version takes a value",
+      refused: [
+        ["duckdb", "-storage-version", "v1.2.0", "data.duckdb", "select 1"],
+      ],
+      accepted: [["duckdb", "-storage-version", "v1.2.0", "data.duckdb"]],
+    },
+    {
       rule: "Python modules that start a REPL or evaluate an argument",
       refused: [
         ["python3", "-m", "code"],
@@ -1472,6 +1512,60 @@ describe("recipe grammar", () => {
         ["python3", "-m", "codecs"],
         ["python3", "-um", "pytest", "tests"],
         ["python3", "-W", "ignore", "-m", "mypy", "src"],
+      ],
+    },
+    {
+      // An attached `-m<module>` is a module, not a missing script.
+      rule: "an attached -m module is the program's operand",
+      refused: [
+        ["python3", "-mcode"],
+        ["python3", "-m"],
+        // `-X` takes `importtime`; no module or script, so stdin.
+        ["python3", "-Ximporttime"],
+      ],
+      accepted: [
+        ["python3", "-mpytest"],
+        ["python3", "-Bmpytest", "tests"],
+        ["python3", "-mcompileall"],
+      ],
+    },
+    {
+      // runpy, trace, cProfile, profile, profiling and unittest run a
+      // module, script or callable named in their own arguments.
+      rule: "Python trampoline modules and their targets",
+      refused: [
+        ["python3", "-m", "runpy", "timeit", "-n1", "print(1)"],
+        ["python3", "-m", "runpy", "code"],
+        ["python3", "-mrunpy", "asyncio"],
+        ["python3", "-m", "runpy", "runpy", "timeit", "print(1)"],
+        [
+          "python3",
+          "-m",
+          "trace",
+          "--listfuncs",
+          "--module",
+          "timeit",
+          "-n1",
+          "print(1)",
+        ],
+        ["python3", "-m", "trace", "--module", "code"],
+        ["python3", "-m", "trace", "--module", "--count", "timeit"],
+        // `-m` is a flag here; the module is a later operand.
+        ["python3", "-m", "cProfile", "-m", "-s", "time", "timeit", "x"],
+        ["python3", "-m", "profile", "-m", "-s", "time", "code"],
+        ["python3.15", "-m", "profiling.tracing", "-m", "-s", "time", "code"],
+        ["python3", "-m", "unittest", "code.interact"],
+        ["python3", "-m", "unittest", "builtins.breakpoint"],
+        ["python3", "-m", "unittest", "sys.breakpointhook"],
+        ["uv", "run", "-m", "runpy", "timeit", "print(1)"],
+        ["uv", "run", "-m", "unittest", "builtins.breakpoint"],
+      ],
+      accepted: [
+        ["python3", "-m", "runpy", "pytest", "tests"],
+        ["python3", "-m", "trace", "--count", "scripts/x.py"],
+        ["python3", "-m", "cProfile", "-o", "out.prof", "scripts/x.py"],
+        ["python3", "-m", "unittest", "discover", "-s", "tests"],
+        ["python3", "-m", "unittest", "tests.test_codec"],
       ],
     },
     {
@@ -1521,6 +1615,26 @@ describe("recipe grammar", () => {
         ["git", "log", "HEAD^!"],
       ],
     },
+    {
+      // `git-<sub>` (also by an absolute git-core path) is `git <sub>`.
+      rule: "dashed Git builtins",
+      refused: [
+        ["/usr/lib/git-core/git-clone", "-u", "id", "url", "dir"],
+        ["git-clone", "-qu/tmp/x.sh", "url"],
+        ["git-clone.exe", "--upl=id", "url"],
+        ["git-config", "alias.x", "!id"],
+        ["git-ls-remote", "--upload-pack=id", "r"],
+        ["git-fetch-pack", "--exec=id", "r"],
+        ["exec", "git-submodule", "foreach", "id"],
+        ["git-rebase", "-x", "id"],
+      ],
+      accepted: [
+        ["git-clone", "url", "dir"],
+        ["/usr/lib/git-core/git-status", "--short"],
+        ["git-push", "-u", "origin", "main"],
+        ["git-config", "alias.st", "status"],
+      ],
+    },
   ];
 
   for (const gap of gapCases) {
@@ -1558,8 +1672,13 @@ describe("recipe grammar", () => {
     expect(isInlineCommandArgv(["git", "log", "-S", "cache"])).toBe(false);
     expect(isInlineCommandArgv(["git", "commit", "-m", "cleanup"])).toBe(false);
     // An abbreviated name is rejected by MySQL 8 itself; refusing it is
-    // fail-closed for older parsers.
+    // fail-closed for `mysql` (MariaDB still accepts it).
     expect(isInlineCommandArgv(["mysql", "--exec", "select 1"])).toBe(true);
+    // A trampoline's options are not modeled, so a script argument named
+    // like a REPL module is refused.
+    expect(
+      isInlineCommandArgv(["python3", "-m", "cProfile", "scripts/x.py", "code"])
+    ).toBe(true);
   });
 
   test("effects must be covered by required capabilities", () => {

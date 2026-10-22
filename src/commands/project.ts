@@ -295,6 +295,7 @@ import {
   resolveSecretStore,
 } from "../lib/secret-store.ts";
 import { exec, findExecutableInPath, run as runShell } from "../lib/shell.ts";
+import { assertComposeSpawnEnvFits } from "../lib/spawn-env-limit.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import {
   buildWorktreeRetargetWarning,
@@ -1331,11 +1332,19 @@ export async function resolveModernComposeEnvOverrides(opts: {
 
   // Values travel only through the Compose process env; the file on disk holds
   // `${NAME}` references (see src/lib/compose-env-at-rest.ts).
+  // Global values share one reference across services (HACK-1317), so the
+  // Compose environment grows with distinct values, not services times keys.
   const override = renderComposeEnvReferenceOverride({
     targetServices: opts.targetServices,
     globalEnv: modern.globalEnv,
     serviceEnv: modern.serviceEnv,
+    effectiveScopes: modern.effectiveMetadata,
   });
+  const composeEnv = override
+    ? { ...modern.globalEnv, ...override.env }
+    : modern.globalEnv;
+  // Fail closed before any write or spawn when Compose could not start.
+  assertComposeSpawnEnvFits({ env: composeEnv });
   if (override === null) {
     await scrubPlaintextComposeEnvOverride({
       projectDir: opts.project.projectDir,
@@ -1356,7 +1365,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
   });
   return {
     composeFiles: [overridePath],
-    env: { ...modern.globalEnv, ...override.env },
+    env: composeEnv,
     lifecycleEnv,
     preflightEnvByService,
     effectiveEnvName: modern.selection.effectiveEnv,
@@ -1500,6 +1509,7 @@ async function resolveComposeEnvOverrides(opts: {
     }
   }
 
+  assertComposeSpawnEnvFits({ env: resolved.envForCompose });
   if (Object.keys(overrideServices).length === 0) {
     await scrubPlaintextComposeEnvOverride({
       projectDir: opts.project.projectDir,

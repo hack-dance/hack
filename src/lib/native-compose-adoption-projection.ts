@@ -792,19 +792,27 @@ export class LegacyComposeAdoptionProjection {
         globalEnv: values.globalEnv,
         serviceEnv: values.workloadEnv,
       };
-      // Current writers keep only `${NAME}` references at rest; files from
-      // earlier versions hold the literal projection. Either must match exactly.
-      // `hack config adopt` and its preview refuse a literal file before this
-      // point (HACK-1273), so a new adoption never pins values on disk. The
-      // literal match remains so tests can model a generation that an earlier
-      // version prepared over such a file.
-      const reference = renderComposeEnvReferenceOverride(projection);
-      const referenceText = reference?.text ?? null;
+      // Current writers keep only `${NAME}` references at rest, with one
+      // shared reference per global value (HACK-1317); earlier writers gave
+      // every service its own reference, and earlier still held the literal
+      // projection. The file must match one of them exactly. `hack config
+      // adopt` and its preview refuse a literal file before this point
+      // (HACK-1273), so a new adoption never pins values on disk. The literal
+      // match remains so tests can model a generation that an earlier version
+      // prepared over such a file.
+      const shared = renderComposeEnvReferenceOverride({
+        ...projection,
+        effectiveScopes: values.effectiveMetadata,
+      });
+      const perService = renderComposeEnvReferenceOverride(projection);
       const literalText = renderManagedComposeEnvOverride(projection);
       const [runtime, env] = context.generated.files;
       const envText = env?.text ?? null;
+      const reference = [shared, perService].find(
+        (candidate) => (candidate?.text ?? null) === envText
+      );
       if (
-        (envText !== referenceText && envText !== literalText) ||
+        (reference === undefined && envText !== literalText) ||
         (runtime && runtime.text !== context.runtimeText)
       ) {
         refuse();
@@ -812,8 +820,7 @@ export class LegacyComposeAdoptionProjection {
       // A reference-form file resolves only with these values in the Compose
       // environment; the engine computed each container's config hash with
       // them. Private: delivered to the hash probe only, never serialized.
-      const composeEnv: Readonly<Record<string, string>> =
-        reference && envText === reference.text ? reference.env : {};
+      const composeEnv: Readonly<Record<string, string>> = reference?.env ?? {};
       const candidate = projectRuntimeFallbacks(context.candidate, runtime);
       const primary = privatePrimaryProof(
         await context.admission.resolvePrivatePrimaryProof()

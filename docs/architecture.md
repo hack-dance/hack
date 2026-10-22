@@ -70,8 +70,10 @@ graph LR
     - `.internal/extra-hosts.json` — CLI-managed, not hand-edited (use
       `hack internal extra-hosts set/unset/list`)
     - `.branch/compose.<branch>.override.yml` (branch builds)
-  - Everything under `.hack/.internal` is a hack-managed artifact; do not hand-edit generated files
-    there.
+  - Everything under `.hack/.internal` is a hack-managed, machine-local artifact; do not hand-edit
+    or commit generated files there. Newer Hack versions rewrite them (for example
+    `compose.override.yml`), so a tracked copy leaves the working tree dirty; `hack doctor`
+    reports tracked files and `hack doctor --fix` untracks them.
 
 
 ## Internal DNS + TLS (containers)

@@ -40,7 +40,12 @@ These commands do not establish that an arbitrary v4 project can run natively.
    `HACK_RUNTIME_BACKEND=compose hack-next` runs the same candidate on Compose with
    your own Hack home, so global routing, DNS and CA trust are checked too. See
    [Test both backends](candidate-install.md#test-both-backends), including why
-   stable `hack` must not run against the same home at the same time.
+   stable `hack` must not run against the same home at the same time. For a Compose
+   run, use the order in
+   [Stop stable hackd before a Compose run](candidate-install.md#stop-stable-hackd-before-a-compose-run):
+   stable `hack global up`, then `hack daemon stop`, then confirm
+   `pgrep -fl "hack daemon start"` prints nothing. Keep the project's
+   `.hack/.internal/` directory out of Git.
 3. Exercise the project's supported command form: foreground start, readiness,
    status, finite logs, noninteractive exec, retaining stop and restart. Exercise
    one-off run only where admitted. For an authored project, check generated public

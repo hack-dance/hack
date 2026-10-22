@@ -90,7 +90,10 @@ fn synthetic_bad_cache_is_quarantined_and_a_retaining_restore_keeps_application_
         },
     )
     .unwrap();
-    let dependencies_path = fixture.0.join("dependencies.json");
+    // The reviewed project tree must stay unchanged after planning, or `serve`
+    // refuses with `stale_plan`. The selection lives in its own private fixture.
+    let selection_fixture = graph::tests::Fixture::new();
+    let dependencies_path = selection_fixture.0.join("dependencies.json");
     state::write(
         &dependencies_path,
         &json!({"version":1,"plan":review.plan_id,
@@ -239,6 +242,10 @@ fn synthetic_bad_cache_is_quarantined_and_a_retaining_restore_keeps_application_
     assert_eq!(done["quarantined_bytes"], 16 + 7);
     assert_eq!(done["reclaimed_bytes"], 0);
     assert_eq!(done["moved_now"], true);
+    // HACK-1301: creating `hack-quarantine` changes Docker's `CreatedAt`; the
+    // first quarantine still settles and counts its retained bytes.
+    assert_eq!(done["resumed"], false);
+    assert_eq!(done["retained_quarantine_bytes"], 16 + 7);
     // The reviewed selection cannot be replayed.
     refused_cli(
         &binary,

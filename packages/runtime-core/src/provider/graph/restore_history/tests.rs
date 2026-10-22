@@ -221,6 +221,11 @@ fn byte_budget_retires_old_diagnostics_and_refuses_oversized_latest_state() {
     assert_eq!(fs::read(root.join(FILE)).unwrap(), before);
 }
 
+/// Hang guard for a re-executed crash child to publish its fault marker. The child
+/// launches the whole test binary and runs fsync-heavy publication (`F_FULLFSYNC` on
+/// macOS) while parallel tests contend for the same device flushes, so reaching the
+/// point is a liveness property, never a latency expectation.
+const FAULT_POINT_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
 #[test]
 #[ignore = "Subprocess crash-control helper"]
 fn history_crash_child() {
@@ -231,6 +236,7 @@ fn history_crash_child() {
 #[test]
 fn process_death_before_publication_and_during_retirement_is_recoverable() {
     use std::{
+        os::unix::process::ExitStatusExt,
         process::{Child, Command, Stdio},
         time::{Duration, Instant},
     };
@@ -265,17 +271,30 @@ fn process_death_before_publication_and_during_retirement_is_recoverable() {
             .spawn()
             .unwrap();
         let mut child = Guard(child);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !root.join(format!("fault-{point}.json")).exists() {
+        // The marker is the handshake: the child publishes it atomically (rename after
+        // fsync) and then parks forever, so its presence means the fault point was reached.
+        let marker = root.join(format!("fault-{point}.json"));
+        let started = Instant::now();
+        while !marker.exists() {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                panic!(
+                    "helper exited ({status}) before fault point {point} after {:?}",
+                    started.elapsed()
+                );
+            }
             assert!(
-                child.0.try_wait().unwrap().is_none(),
-                "helper exited before fault point"
+                started.elapsed() < FAULT_POINT_BOUND,
+                "fault point {point} not reached after {:?} (bound {FAULT_POINT_BOUND:?})",
+                started.elapsed()
             );
-            assert!(Instant::now() < deadline, "fault point not reached");
             std::thread::sleep(Duration::from_millis(5));
         }
+        let reached: serde_json::Value = state::read(&marker).unwrap();
+        assert_eq!(reached["point"], point);
+        assert_eq!(reached["run"], receipt(9).run);
         child.0.kill().unwrap();
-        child.0.wait().unwrap();
+        // Killed while parked at the point, not exited on its own after passing it.
+        assert_eq!(child.0.wait().unwrap().signal(), Some(libc::SIGKILL));
         if point == "history-before-publication" {
             assert!(!root.join(FILE).exists());
             assert_eq!(legacy_paths(root).unwrap().len(), 8);

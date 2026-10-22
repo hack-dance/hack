@@ -53,7 +53,10 @@ import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
 import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
-import { getLaunchdServiceStatus } from "../daemon/launchd.ts";
+import {
+  getLaunchdServiceStatus,
+  resolveLaunchdAccess,
+} from "../daemon/launchd.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
@@ -1627,6 +1630,11 @@ async function maybeOfferMacDnsRecoveryAuthorization(): Promise<void> {
 }
 
 async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
+  const access = resolveLaunchdAccess();
+  if (!access.allowed) {
+    logger.info({ message: `Skipping hackd launchd setup: ${access.message}` });
+    return;
+  }
   const paths = resolveDaemonPaths({});
   const launchdStatus = await getLaunchdServiceStatus({ paths });
   if (launchdStatus.installed) {

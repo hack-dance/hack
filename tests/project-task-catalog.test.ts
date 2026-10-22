@@ -39,6 +39,7 @@ import {
   buildTaskListArgs,
   createMcpServer,
 } from "../src/mcp/server.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 // ---------------------------------------------------------------------------
@@ -1068,20 +1069,16 @@ describe("catalog domain", () => {
       env: Readonly<Record<string, string>>,
       run: () => Promise<T>
     ): Promise<T> => {
-      const saved = Object.keys(env).map((key) => [key, process.env[key]]);
-      Object.assign(process.env, env);
+      const saved = new Map<string, string | undefined>();
+      for (const [key, value] of Object.entries(env)) {
+        saved.set(key, process.env[key]);
+        process.env[key] = value;
+      }
       try {
         return await run();
       } finally {
         for (const [key, value] of saved) {
-          if (key === undefined) {
-            continue;
-          }
-          if (value === undefined) {
-            Reflect.deleteProperty(process.env, key);
-          } else {
-            process.env[key] = value;
-          }
+          restoreEnv(key, value);
         }
       }
     };

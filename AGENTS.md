@@ -80,7 +80,13 @@ or unresolved concern. Do not skip a required gate or weaken an assertion to get
   unrelated installed version. Use `bun index.ts` for a source invocation.
 - CLI typecheck/lint: `bun run --cwd packages/cli typecheck` and
   `bun run --cwd packages/cli check`. Lint changed scripts/tests explicitly as well.
-- Full gates: `bun run typecheck`, `bun run check`, `bun run test`.
+- Full gates: `bun run typecheck`, `bun run check`, `bun run test`. They fail when
+  the running Bun differs from the `packageManager` pin CI uses; run the pinned Bun
+  (`mise x bun@<pin> -- bun run <script>`), or set
+  `HACK_ALLOW_BUN_VERSION_MISMATCH=1` only for a deliberate mismatch.
+- Config compiler, native plan or config-import changes: after `bun run build` and
+  `bun run build:config-compiler`, run `bun run check:native-plan-cli`. It runs the
+  compiled-bundle CLI checks from CI's macOS "Config compiler" job.
 - CLI interface changes: regenerate `docs/reference/cli.md` with
   `bun run docs:cli-reference`.
 - Consumer agent guidance changes: regenerate the affected repository examples and plugin

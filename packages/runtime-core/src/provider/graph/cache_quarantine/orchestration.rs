@@ -1,8 +1,20 @@
 //! The inspect -> quarantine -> resume/resolve orchestration, exercised as
 //! shipped against a synthetic provider. Engine answers are held in memory;
-//! the production guest scripts run on a fixture volume.
+//! the production guest scripts run on a fixture volume. Volume inspection
+//! derives `CreatedAt` from the volume directory's mtime, as Docker's `local`
+//! driver does, so creating `hack-quarantine` changes it exactly as on a host.
 use super::*;
 use std::cell::{Cell, RefCell};
+use std::time::{Duration, UNIX_EPOCH};
+
+/// A provider change applied after the named guest call.
+enum Change {
+    /// Replace the in-memory volume inspection.
+    Inspect(Value),
+    /// Remove and recreate the volume under the same name and labels, as
+    /// `docker volume rm` followed by `docker volume create` would.
+    Replace,
+}
 
 /// Where a guest effect is interrupted relative to the MOVE script.
 #[derive(Clone, Copy, PartialEq)]
@@ -22,9 +34,11 @@ struct Provider {
     candidate: Candidate,
     volumes: PathBuf,
     name: String,
+    /// Volume inspection without `CreatedAt`, which is derived from the volume
+    /// directory unless this value sets it explicitly. Null means absent.
     inspected: RefCell<Value>,
-    /// Volume inspection that replaces the current one after the named guest call.
-    after: RefCell<Option<(&'static str, Value)>>,
+    /// Provider change applied after the named guest call.
+    after: RefCell<Option<(&'static str, Change)>>,
     containers: RefCell<Value>,
     observe_reply: RefCell<Option<String>>,
     fault: Cell<Fault>,
@@ -45,11 +59,18 @@ impl Provider {
         let redis = volumes.join(format!("hkg-{RUN}-volume-1/_data"));
         fs::create_dir_all(&redis).unwrap();
         fs::write(redis.join("dump.rdb"), b"redis").unwrap();
+        // A volume created well before the operation, so any later entry
+        // change in its directory is visible at Docker's one-second precision.
+        fs::File::open(volumes.join(&name))
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(1_760_000_000))
+            .unwrap();
         let provider = Self {
             candidate,
             inspected: RefCell::new(json!({
-                "Name":name,"Driver":"local","CreatedAt":"2026-10-19T00:00:00Z",
-                "Mountpoint":format!("/var/lib/docker/volumes/{name}/_data")
+                "Name":name,"Driver":"local",
+                "Mountpoint":format!("/var/lib/docker/volumes/{name}/_data"),
+                "Labels":{"dev.hack.owner":"owner"},"Options":null,"Scope":"local"
             })),
             name,
             volumes,
@@ -89,6 +110,30 @@ impl Provider {
     }
     fn root(&self) -> PathBuf {
         self.volumes.join(&self.name).join("_data")
+    }
+    /// Docker `CreatedAt` of the local driver: the volume directory's mtime
+    /// at one-second precision.
+    fn created_at(&self) -> String {
+        let modified = fs::metadata(self.volumes.join(&self.name))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let seconds = modified.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        format!("unix:{seconds}")
+    }
+    fn replaced(&self) -> PathBuf {
+        self.volumes.join(format!("{}.removed", self.name))
+    }
+    /// Remove and recreate the volume: a new directory and `_data` identity
+    /// under the same name, driver, mountpoint and labels.
+    fn replace_volume(&self) {
+        fs::rename(self.volumes.join(&self.name), self.replaced()).unwrap();
+        fs::create_dir_all(self.root()).unwrap();
+    }
+    /// Undo `replace_volume`: the original incarnation is back.
+    fn restore_volume(&self) {
+        fs::remove_dir_all(self.volumes.join(&self.name)).unwrap();
+        fs::rename(self.replaced(), self.volumes.join(&self.name)).unwrap();
     }
     fn destination(&self, sha: &str) -> PathBuf {
         self.volumes
@@ -148,8 +193,14 @@ impl Port for Provider {
     fn inspect(&self, _: &Receipt, resource: &Resource) -> Result<Option<Value>, CandidateError> {
         self.calls.borrow_mut().push("inspect");
         assert_eq!(resource.name, self.name);
-        let value = self.inspected.borrow().clone();
-        Ok((!value.is_null()).then_some(value))
+        let mut value = self.inspected.borrow().clone();
+        if value.is_null() {
+            return Ok(None);
+        }
+        if value.get("CreatedAt").is_none() {
+            value["CreatedAt"] = json!(self.created_at());
+        }
+        Ok(Some(value))
     }
     fn containers(&self) -> Result<Value, CandidateError> {
         self.calls.borrow_mut().push("containers");
@@ -186,8 +237,10 @@ impl Port for Provider {
             ));
         }
         let changed = self.after.borrow_mut().take_if(|(after, _)| *after == call);
-        if let Some((_, changed)) = changed {
-            *self.inspected.borrow_mut() = changed;
+        match changed {
+            Some((_, Change::Inspect(changed))) => *self.inspected.borrow_mut() = changed,
+            Some((_, Change::Replace)) => self.replace_volume(),
+            None => {}
         }
         if call == "move" && self.fault.get() == Fault::After {
             return Err(lost());
@@ -264,11 +317,17 @@ fn inspect_then_quarantine_retains_exact_bytes_and_a_regenerated_cache_is_resele
         b"ok"
     );
 
-    // An identical, already retained selection can never be replayed.
+    // An already retained directory can never be replayed. Its digest differs
+    // now that the quarantine root changed `CreatedAt`; its identity does not.
     fs::remove_dir_all(provider.root().join(PATH)).unwrap();
     fs::rename(&destination, provider.root().join(PATH)).unwrap();
-    assert_eq!(selection_sha(&provider.inspect().unwrap()), sha);
+    let replay = selection_sha(&provider.inspect().unwrap());
+    assert_ne!(replay, sha);
+    provider.calls.borrow_mut().clear();
+    assert!(provider.quarantine(&replay).is_err());
     assert!(provider.quarantine(&sha).is_err());
+    assert!(!provider.guest_calls().contains(&"move"));
+    assert_eq!(provider.records().len(), 1);
     assert_eq!(identity(&provider.root().join(PATH)), identity_before);
     assert!(!destination.exists());
 }
@@ -460,22 +519,100 @@ fn resolution_records_a_rename_that_completed_before_the_restart() {
 }
 
 #[test]
-fn a_volume_changed_during_a_guest_effect_is_never_settled() {
+fn a_volume_replaced_during_a_guest_effect_is_never_settled() {
     let provider = Provider::new();
     let sha = selection_sha(&provider.inspect().unwrap());
-    let original = provider.inspected.borrow().clone();
-    let mut replaced = original.clone();
-    replaced["CreatedAt"] = json!("2026-10-19T00:00:01Z");
-    *provider.after.borrow_mut() = Some(("move", replaced.clone()));
-    assert!(provider.quarantine(&sha).is_err());
+    // Removed and recreated under the same name, driver, mountpoint and labels.
+    *provider.after.borrow_mut() = Some(("move", Change::Replace));
+    let error = provider.quarantine(&sha).unwrap_err();
+    assert_eq!(error.code, "graph_cache_quarantine_unsettled");
     assert_eq!(provider.records()[0].outcome, Outcome::Pending);
     // The changed incarnation cannot resume the reviewed selection.
     assert_eq!(provider.inspect().unwrap()["phase"], "resolve_required");
     assert!(provider.quarantine(&sha).is_err());
     assert_eq!(provider.records()[0].outcome, Outcome::Pending);
     // Resolution observed under one incarnation is not recorded under another.
-    *provider.inspected.borrow_mut() = original;
-    *provider.after.borrow_mut() = Some(("locate", replaced));
+    provider.restore_volume();
+    *provider.after.borrow_mut() = Some(("locate", Change::Replace));
+    assert_eq!(
+        provider.resolve(&sha).unwrap_err().code,
+        "graph_cache_quarantine_unsettled"
+    );
+    assert_eq!(provider.records()[0].outcome, Outcome::Pending);
+    // Any other inspected change across the effect also refuses settlement.
+    provider.restore_volume();
+    let mut relabeled = provider.inspected.borrow().clone();
+    relabeled["Labels"]["dev.hack.owner"] = json!("other");
+    *provider.after.borrow_mut() = Some(("locate", Change::Inspect(relabeled)));
     assert!(provider.resolve(&sha).is_err());
     assert_eq!(provider.records()[0].outcome, Outcome::Pending);
+}
+
+/// HACK-1301: Docker reports `CreatedAt` from the volume directory's mtime, and
+/// the first quarantine creates `hack-quarantine` in that directory.
+#[test]
+fn the_first_quarantine_settles_although_creating_its_root_changes_created_at() {
+    let provider = Provider::new();
+    let before = provider.created_at();
+    let sha = selection_sha(&provider.inspect().unwrap());
+    let quarantine_root = provider
+        .volumes
+        .join(&provider.name)
+        .join("hack-quarantine");
+    assert!(!quarantine_root.exists());
+    let done = provider.quarantine(&sha).unwrap();
+    assert!(quarantine_root.is_dir());
+    assert_ne!(provider.created_at(), before, "fixture models the driver");
+    assert_eq!(done["phase"], "quarantined");
+    assert_eq!(done["moved_now"], true);
+    assert_eq!(done["quarantined_bytes"], 1016);
+    assert_eq!(done["retained_quarantine_records"], 1);
+    assert_eq!(done["retained_quarantine_bytes"], 1016);
+    assert_eq!(provider.records()[0].outcome, Outcome::Quarantined);
+    let absent = provider.inspect().unwrap();
+    assert_eq!(absent["phase"], "target_absent");
+    assert_eq!(absent["retained_quarantine_records"], 1);
+    assert_eq!(absent["retained_quarantine_bytes"], 1016);
+    provider.untouched_application_data();
+}
+
+/// A record left `pending` by the earlier `CreatedAt` recheck (bytes moved,
+/// quarantine root created, `volume_created` from before the `mkdir`) resumes
+/// or resolves to `quarantined` and counts its retained bytes.
+#[test]
+fn a_record_stuck_by_the_created_at_recheck_resumes_or_resolves_with_retained_bytes() {
+    for resolve in [false, true] {
+        let provider = Provider::new();
+        let sha = selection_sha(&provider.inspect().unwrap());
+        let original = identity(&provider.root().join(PATH));
+        // The move completed but settlement did not: the same stored state the
+        // earlier recheck refusal left on the host.
+        provider.fault.set(Fault::After);
+        assert!(provider.quarantine(&sha).is_err());
+        provider.fault.set(Fault::None);
+        let stuck = provider.records().remove(0);
+        assert_eq!(stuck.outcome, Outcome::Pending);
+        assert_ne!(stuck.selection.volume_created, provider.created_at());
+        assert!(!provider.root().join(PATH).exists());
+        let pending = provider.inspect().unwrap();
+        assert_eq!(pending["phase"], "resume_required");
+        assert_eq!(pending["retained_quarantine_bytes"], 0);
+        let settled = if resolve {
+            provider.resolve(&sha).unwrap()
+        } else {
+            let resumed = provider.quarantine(&sha).unwrap();
+            assert_eq!(resumed["resumed"], true);
+            assert_eq!(resumed["moved_now"], false);
+            resumed
+        };
+        assert_eq!(settled["phase"], "quarantined", "resolve={resolve}");
+        assert_eq!(settled["quarantined_bytes"], 1016);
+        assert_eq!(settled["retained_quarantine_bytes"], 1016);
+        assert_eq!(provider.records()[0].outcome, Outcome::Quarantined);
+        assert_eq!(identity(&provider.destination(&sha)), original);
+        let absent = provider.inspect().unwrap();
+        assert_eq!(absent["phase"], "target_absent");
+        assert_eq!(absent["retained_quarantine_bytes"], 1016);
+        provider.untouched_application_data();
+    }
 }

@@ -9,6 +9,11 @@ import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPath } from "../cli/options.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
+  NATIVE_GRAPH_ADMISSION_CODE,
+  NATIVE_GRAPH_ADMISSION_MESSAGE,
+  nativeConsumerAdmitsImages,
+} from "../lib/native-authored-image-admission.ts";
+import {
   compileNativeConfig,
   type NativeConfigCompileResult,
   NativeConfigCompilerError,
@@ -23,7 +28,7 @@ const spec = defineCommand({
     "Validate native configuration and selected local overlays without starting workloads",
   group: "Project",
   description:
-    "Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. Neither mode reads env values, writes state, or starts workloads.",
+    "Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode reads env values, writes state, or starts workloads.",
   options: [
     defineOption({
       name: "file",
@@ -102,6 +107,18 @@ export const configValidateCommand = withHandler(
               profiles,
               signal: controller.signal,
             });
+      // A tag or repository digest is valid authored configuration for Compose,
+      // but the explicitly selected native consumer refuses it at plan and serve.
+      if (
+        result.ok &&
+        process.env.HACK_RUNTIME_BACKEND === "native" &&
+        !nativeConsumerAdmitsImages(result.plan)
+      ) {
+        throw new NativeConfigCompilerError(
+          NATIVE_GRAPH_ADMISSION_CODE,
+          NATIVE_GRAPH_ADMISSION_MESSAGE
+        );
+      }
       renderValidationResult({ result, json: args.options.json === true });
       return result.ok ? 0 : 1;
     } catch (error: unknown) {

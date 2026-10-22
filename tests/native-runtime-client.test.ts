@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, test as bunTest, expect, spyOn } from "bun:test";
 import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +21,53 @@ afterEach(async () => {
     roots.splice(0).map((root) => rm(root, { recursive: true }))
   );
 });
+
+/**
+ * Request deadline for cases that are not about the deadline itself. Spawning
+ * the stand-in runtime (and its descendants) on a loaded host can take seconds.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+/** Budget for a fixture handshake file to appear. */
+const HANDSHAKE_BUDGET_MS = 30_000;
+/**
+ * A keeper its case never releases still exits after this cap. That bounds the
+ * orphan rather than preventing it: the cap outlasts the case's Bun timeout.
+ */
+const KEEPER_RELEASE_CAP_MS = 120_000;
+/** Bun timeout for every case here: most spawn the stand-in runtime. */
+const CASE_TIMEOUT_MS = 2 * HANDSHAKE_BUDGET_MS;
+/**
+ * Upper bound from the stand-in's exit (or the caller's abort) to the request
+ * settling while a descendant still holds stdout/stderr. The client stops
+ * draining 250 ms after exit; this is far above that, so load cannot flake it,
+ * and far below the request timeout, so an unbounded drain still fails.
+ */
+const DRAIN_SETTLE_BOUND_MS = 5000;
+
+/** Every case gets a named budget; none relies on Bun's 5 s default. */
+function test(
+  name: string,
+  body: Parameters<typeof bunTest>[1],
+  timeoutMs = CASE_TIMEOUT_MS
+): void {
+  bunTest(name, body, timeoutMs);
+}
+
+/** Wait for a fixture to write `path`; replaces fixed windows before acting. */
+async function waitForFile(
+  path: string,
+  budgetMs = HANDSHAKE_BUDGET_MS
+): Promise<void> {
+  const deadline = performance.now() + budgetMs;
+  while (!(await Bun.file(path).exists())) {
+    if (performance.now() >= deadline) {
+      throw new Error(
+        `Fixture handshake did not appear within ${budgetMs} ms.`
+      );
+    }
+    await Bun.sleep(10);
+  }
+}
 
 async function fixture() {
   const home = await mkdtemp(join(tmpdir(), "hack-native-client-"));
@@ -280,114 +327,127 @@ test("native recovery draining requires exact independent selectors and refuses 
   }
 });
 
-test.each([
+bunTest.each([
   ["read", "exit"],
   ["read", "abort"],
   ["selection", "exit"],
   ["selection", "abort"],
   ["cleanup", "exit"],
   ["cleanup", "abort"],
-] as const)("authored %s %s finishes while a descendant retains stdout and stderr", async (selection, mode) => {
-  const runtime = await fixture();
-  const holding = join(runtime.home, "holding");
-  const heartbeat = join(runtime.home, "heartbeat");
-  const finished = join(runtime.home, "finished");
-  const keeper = `import {writeFileSync} from 'node:fs';
-writeFileSync(${JSON.stringify(holding)},'holding');
-for(let n=0;n<40;n++){writeFileSync(${JSON.stringify(heartbeat)},String(n));await Bun.sleep(50);}
+] as const)(
+  "authored %s %s finishes while a descendant retains stdout and stderr",
+  async (selection, mode) => {
+    const runtime = await fixture();
+    const holding = join(runtime.home, "holding");
+    const release = join(runtime.home, "release");
+    const finished = join(runtime.home, "finished");
+    const exiting = join(runtime.home, "exiting");
+    // The keeper holds the request's stdout/stderr until the test releases it,
+    // so the request can only finish by bounding its drain. The bound is
+    // measured from the stand-in's own exit (or the abort), never from spawn,
+    // so slow process startup under load cannot decide the outcome.
+    const keeper = `import {existsSync,writeFileSync} from 'node:fs';
+writeFileSync(${JSON.stringify(holding)},String(process.pid));
+const cap=performance.now()+${KEEPER_RELEASE_CAP_MS};
+while(!existsSync(${JSON.stringify(release)})&&performance.now()<cap)await Bun.sleep(10);
 writeFileSync(${JSON.stringify(finished)},'finished');`;
-  await Bun.write(
-    runtime.binary,
-    `#!${process.execPath}
+    await Bun.write(
+      runtime.binary,
+      `#!${process.execPath}
 import {spawn} from 'node:child_process';
 spawn(${JSON.stringify(process.execPath)},['--eval',${JSON.stringify(keeper)}],{detached:true,stdio:['ignore',1,2]}).unref();
-const deadline=performance.now()+1500;
-while(!(await Bun.file(${JSON.stringify(holding)}).exists())&&performance.now()<deadline)await Bun.sleep(10);
+const cap=performance.now()+${KEEPER_RELEASE_CAP_MS};
+while(!(await Bun.file(${JSON.stringify(holding)}).exists())&&performance.now()<cap)await Bun.sleep(10);
 if(!(await Bun.file(${JSON.stringify(holding)}).exists()))process.exit(2);
 console.log(JSON.stringify({ready:true}));
-${mode === "abort" ? "await Bun.sleep(60_000);" : "process.exit(0);"}
+${mode === "abort" ? "await Bun.sleep(60_000);" : `(await import('node:fs')).writeFileSync(${JSON.stringify(exiting)},String(Date.now()));process.exit(0);`}
 `
-  );
-  const controller = new AbortController();
-  const started = performance.now();
-  const run = "a".repeat(32);
-  const args =
-    selection === "read"
-      ? ["graph", "native", "inspect", "--run-id", run, "--json"]
-      : selection === "selection"
-        ? ["graph", "native", "recovery-selection", "--run-id", run, "--json"]
-        : [
-            "graph",
-            "native",
-            "recover-live-owner",
-            "--run-id",
-            run,
-            "--expect-receipt",
-            "b".repeat(64),
-            "--expect-owner",
-            "c".repeat(64),
-            "--json",
-          ];
-  const request = invokeNativeRuntime({
-    runtime,
-    cwd: runtime.home,
-    args,
-    timeoutMs: 5000,
-    signal: controller.signal,
-    boundNativeAuthoredReadDrain: selection === "read",
-    boundNativeAuthoredRecoveryDrain:
-      selection === "read" ? undefined : selection,
-  });
-  void request.catch(() => undefined);
-  let failed: unknown;
-  let completed = false;
-  try {
-    if (mode === "abort") {
-      while (
-        !(await Bun.file(holding).exists()) &&
-        performance.now() - started < 1500
-      ) {
-        await Bun.sleep(10);
-      }
-      expect(await Bun.file(holding).exists()).toBe(true);
-      controller.abort();
-      await expect(request).rejects.toThrow("canceled");
-    } else {
-      expect(await request).toEqual({ ready: true });
-    }
-    expect(performance.now() - started).toBeLessThan(1500);
-    expect(await Bun.file(finished).exists()).toBe(false);
-    const before = Number(await Bun.file(heartbeat).text());
-    await Bun.sleep(150);
-    expect(Number(await Bun.file(heartbeat).text())).toBeGreaterThan(before);
-  } catch (error: unknown) {
-    failed = error;
-  } finally {
-    controller.abort();
-    await request.catch(() => undefined);
-    const deadline = performance.now() + 4000;
-    while (
-      !(await Bun.file(finished).exists()) &&
-      performance.now() < deadline
-    ) {
-      await Bun.sleep(10);
-    }
-    completed = await Bun.file(finished).exists();
-    if (!completed) {
-      roots.splice(roots.indexOf(runtime.home), 1);
-    }
-  }
-  if (!completed) {
-    throw new AggregateError(
-      failed === undefined ? [] : [failed],
-      "owned keeper completion is unconfirmed; fixture retained"
     );
-  }
-  if (failed !== undefined) {
-    throw failed;
-  }
-  expect(await Bun.file(finished).text()).toBe("finished");
-});
+    const controller = new AbortController();
+    const run = "a".repeat(32);
+    const args =
+      selection === "read"
+        ? ["graph", "native", "inspect", "--run-id", run, "--json"]
+        : selection === "selection"
+          ? ["graph", "native", "recovery-selection", "--run-id", run, "--json"]
+          : [
+              "graph",
+              "native",
+              "recover-live-owner",
+              "--run-id",
+              run,
+              "--expect-receipt",
+              "b".repeat(64),
+              "--expect-owner",
+              "c".repeat(64),
+              "--json",
+            ];
+    const request = invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      signal: controller.signal,
+      boundNativeAuthoredReadDrain: selection === "read",
+      boundNativeAuthoredRecoveryDrain:
+        selection === "read" ? undefined : selection,
+    });
+    let settledAt: number | undefined;
+    const stamp = () => {
+      settledAt = Date.now();
+    };
+    request.then(stamp, stamp);
+    void request.catch(() => undefined);
+    let failed: unknown;
+    let completed = false;
+    try {
+      let endedAt: number;
+      if (mode === "abort") {
+        await waitForFile(holding);
+        endedAt = Date.now();
+        controller.abort();
+        await expect(request).rejects.toThrow("canceled");
+      } else {
+        expect(await request).toEqual({ ready: true });
+        endedAt = Number(await Bun.file(exiting).text());
+      }
+      // The drain is bounded: settlement follows the child's end promptly even
+      // though the unreleased keeper still holds both pipes.
+      expect(settledAt).toBeDefined();
+      expect((settledAt ?? Number.POSITIVE_INFINITY) - endedAt).toBeLessThan(
+        DRAIN_SETTLE_BOUND_MS
+      );
+      expect(await Bun.file(finished).exists()).toBe(false);
+      const keeperPid = Number(await Bun.file(holding).text());
+      expect(Number.isSafeInteger(keeperPid) && keeperPid > 1).toBe(true);
+      expect(() => process.kill(keeperPid, 0)).not.toThrow();
+    } catch (error: unknown) {
+      failed = error;
+    } finally {
+      controller.abort();
+      await request.catch(() => undefined);
+      await Bun.write(release, "release");
+      completed = await waitForFile(finished).then(
+        () => true,
+        () => false
+      );
+      if (!completed) {
+        roots.splice(roots.indexOf(runtime.home), 1);
+      }
+    }
+    if (!completed) {
+      throw new AggregateError(
+        failed === undefined ? [] : [failed],
+        "owned keeper completion is unconfirmed; fixture retained"
+      );
+    }
+    if (failed !== undefined) {
+      throw failed;
+    }
+    expect(await Bun.file(finished).text()).toBe("finished");
+  },
+  CASE_TIMEOUT_MS
+);
 
 test("managed input uses stdin with EOF and is absent from argv and inherited env", async () => {
   const runtime = await fixture();
@@ -448,100 +508,99 @@ test("failures omit subprocess diagnostics and timeouts are bounded", async () =
   ).rejects.toThrow("Native runtime request timed out");
 });
 
-test("cancellation starts at most one native request and reaps only its owned child", async () => {
-  for (const mode of ["before", "running", "timeout"]) {
-    const runtime = await fixture();
-    const marker = join(runtime.home, "attempts");
-    const pidFile = join(runtime.home, "pid");
-    await Bun.write(
-      runtime.binary,
-      `#!${process.execPath}
+test(
+  "cancellation starts at most one native request and reaps only its owned child",
+  async () => {
+    for (const mode of ["before", "running", "timeout"]) {
+      const runtime = await fixture();
+      const marker = join(runtime.home, "attempts");
+      const pidFile = join(runtime.home, "pid");
+      await Bun.write(
+        runtime.binary,
+        `#!${process.execPath}
 import { appendFileSync, writeFileSync } from "node:fs";
 ${mode === "timeout" ? "await Bun.sleep(60_000);" : ""}
 appendFileSync(${JSON.stringify(marker)}, "attempt\\n");
 writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
 await Bun.sleep(60_000);
 `
-    );
-    const controller = new AbortController();
-    if (mode === "before") {
-      controller.abort();
-    }
-    // Pass through every real spawn; observe only this unique fixture binary.
-    const spawn = spyOn(Bun, "spawn");
-    let child: ReturnType<typeof Bun.spawn> | undefined;
-    try {
-      const attempt = invokeNativeRuntime({
-        runtime,
-        cwd: runtime.home,
-        args: ["runtime", "up", "--json"],
-        signal: controller.signal,
-        timeoutMs: mode === "timeout" ? 250 : 2000,
-      });
-      void attempt.catch(() => undefined);
-      const ownCalls = () =>
-        spawn.mock.calls.flatMap(([argv], index) =>
-          Array.isArray(argv) && argv[0] === runtime.binary ? [index] : []
-        );
-      let exited = false;
-      if (mode !== "before") {
-        expect(ownCalls()).toHaveLength(1);
-        const result = spawn.mock.results[ownCalls()[0] ?? -1];
-        if (result?.type !== "return") {
-          throw new Error("fixture spawn did not return its owned child");
-        }
-        child = result.value;
-        void child.exited.then(() => {
-          exited = true;
-        });
-      }
-      if (mode === "running") {
-        const deadline = performance.now() + 1500;
-        while (
-          !(await Bun.file(pidFile).exists()) &&
-          performance.now() < deadline
-        ) {
-          await Bun.sleep(10);
-        }
-        expect(await Bun.file(pidFile).exists()).toBe(true);
+      );
+      const controller = new AbortController();
+      if (mode === "before") {
         controller.abort();
       }
-      await expect(attempt).rejects.toThrow(
-        mode === "timeout" ? "timed out" : "canceled"
-      );
-      expect(ownCalls()).toHaveLength(mode === "before" ? 0 : 1);
-      if (mode === "running") {
-        if (!child) {
-          throw new Error("running fixture lost its parent-owned child");
+      // Pass through every real spawn; observe only this unique fixture binary.
+      const spawn = spyOn(Bun, "spawn");
+      let child: ReturnType<typeof Bun.spawn> | undefined;
+      try {
+        const attempt = invokeNativeRuntime({
+          runtime,
+          cwd: runtime.home,
+          args: ["runtime", "up", "--json"],
+          signal: controller.signal,
+          // Only the timeout mode is about the deadline; the others must reach
+          // their cancellation, however slowly the child starts.
+          timeoutMs: mode === "timeout" ? 250 : REQUEST_TIMEOUT_MS,
+        });
+        void attempt.catch(() => undefined);
+        const ownCalls = () =>
+          spawn.mock.calls.flatMap(([argv], index) =>
+            Array.isArray(argv) && argv[0] === runtime.binary ? [index] : []
+          );
+        let exited = false;
+        if (mode !== "before") {
+          expect(ownCalls()).toHaveLength(1);
+          const result = spawn.mock.results[ownCalls()[0] ?? -1];
+          if (result?.type !== "return") {
+            throw new Error("fixture spawn did not return its owned child");
+          }
+          child = result.value;
+          void child.exited.then(() => {
+            exited = true;
+          });
         }
-        expect(await Bun.file(marker).text()).toBe("attempt\n");
-        expect(Number(await Bun.file(pidFile).text())).toBe(child.pid);
-      } else {
-        expect(await Bun.file(marker).exists()).toBe(false);
-        expect(await Bun.file(pidFile).exists()).toBe(false);
-      }
-      // Timeout deliberately precedes the child marker. Parent identity and exit
-      // completion must still prove reaping before the request rejects.
-      if (child) {
-        expect(exited).toBe(true);
-        expect(child.signalCode).toBe("SIGKILL");
-        let probeFailure: unknown;
-        try {
-          process.kill(child.pid, 0);
-        } catch (error) {
-          probeFailure = error;
+        if (mode === "running") {
+          await waitForFile(pidFile);
+          controller.abort();
         }
-        expect(probeFailure).toMatchObject({ code: "ESRCH" });
-      }
-    } finally {
-      spawn.mockRestore();
-      if (child?.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-        await child.exited;
+        await expect(attempt).rejects.toThrow(
+          mode === "timeout" ? "timed out" : "canceled"
+        );
+        expect(ownCalls()).toHaveLength(mode === "before" ? 0 : 1);
+        if (mode === "running") {
+          if (!child) {
+            throw new Error("running fixture lost its parent-owned child");
+          }
+          expect(await Bun.file(marker).text()).toBe("attempt\n");
+          expect(Number(await Bun.file(pidFile).text())).toBe(child.pid);
+        } else {
+          expect(await Bun.file(marker).exists()).toBe(false);
+          expect(await Bun.file(pidFile).exists()).toBe(false);
+        }
+        // Timeout deliberately precedes the child marker. Parent identity and exit
+        // completion must still prove reaping before the request rejects.
+        if (child) {
+          expect(exited).toBe(true);
+          expect(child.signalCode).toBe("SIGKILL");
+          let probeFailure: unknown;
+          try {
+            process.kill(child.pid, 0);
+          } catch (error) {
+            probeFailure = error;
+          }
+          expect(probeFailure).toMatchObject({ code: "ESRCH" });
+        }
+      } finally {
+        spawn.mockRestore();
+        if (child?.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+          await child.exited;
+        }
       }
     }
-  }
-});
+  },
+  CASE_TIMEOUT_MS
+);
 
 test("private-input and response bounds reject instead of truncating", async () => {
   const runtime = await fixture();
@@ -590,42 +649,42 @@ test("structured failures expose only a bounded code, never their message", asyn
   );
 });
 
-test.each([
+bunTest.each([
   {
     argument: "foreground-stopped",
     stopped: true,
     cause: "runtime_not_running",
   },
   { argument: "foreground-other", stopped: false, cause: undefined },
-])("authored control failure preserves only the stopped-runtime cause: $argument", async ({
-  argument,
-  stopped,
-  cause,
-}) => {
-  const runtime = await fixture();
-  const error: unknown = await invokeNativeRuntime({
-    runtime,
-    cwd: runtime.home,
-    args: [argument],
-  }).catch((caught: unknown) => caught);
-  expect(error).toBeInstanceOf(NativeRuntimeRequestError);
-  expect(error).toHaveProperty("nativeCode", "native_graph_foreground");
-  expect(error).toHaveProperty("nativeCauseCode", cause);
-  expect(isNativeRuntimeNotRunning(error)).toBe(stopped);
-  expect(String(error)).not.toContain("synthetic-secret-diagnostic");
-  expect(
-    isNativeRuntimeNotRunning(
-      new NativeRuntimeRequestError({
-        message: "unrelated ownership refusal",
-        nativeCode: "graph_owner_recovery",
-        nativeCauseCode: "runtime_not_running",
-      })
-    )
-  ).toBe(false);
-  expect(isNativeRuntimeNotRunning({ nativeCode: "runtime_not_running" })).toBe(
-    false
-  );
-});
+])(
+  "authored control failure preserves only the stopped-runtime cause: $argument",
+  async ({ argument, stopped, cause }) => {
+    const runtime = await fixture();
+    const error: unknown = await invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: [argument],
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+    expect(error).toHaveProperty("nativeCode", "native_graph_foreground");
+    expect(error).toHaveProperty("nativeCauseCode", cause);
+    expect(isNativeRuntimeNotRunning(error)).toBe(stopped);
+    expect(String(error)).not.toContain("synthetic-secret-diagnostic");
+    expect(
+      isNativeRuntimeNotRunning(
+        new NativeRuntimeRequestError({
+          message: "unrelated ownership refusal",
+          nativeCode: "graph_owner_recovery",
+          nativeCauseCode: "runtime_not_running",
+        })
+      )
+    ).toBe(false);
+    expect(
+      isNativeRuntimeNotRunning({ nativeCode: "runtime_not_running" })
+    ).toBe(false);
+  },
+  CASE_TIMEOUT_MS
+);
 
 test("a carried code pair reports a direct or foreground-wrapped stopped runtime only", () => {
   expect(
@@ -807,12 +866,14 @@ process.exit(23);
   });
 });
 
-test("early structured rejection survives a full private-input pipe without replay", async () => {
-  const runtime = await fixture();
-  const marker = join(runtime.home, "attempts");
-  await Bun.write(
-    runtime.binary,
-    `#!${process.execPath}
+test(
+  "early structured rejection survives a full private-input pipe without replay",
+  async () => {
+    const runtime = await fixture();
+    const marker = join(runtime.home, "attempts");
+    await Bun.write(
+      runtime.binary,
+      `#!${process.execPath}
 import { appendFileSync, closeSync } from "node:fs";
 appendFileSync(${JSON.stringify(marker)}, "attempt\\n");
 closeSync(0);
@@ -820,25 +881,27 @@ await Bun.sleep(20);
 console.error(JSON.stringify({code:"graph_budget",message:"synthetic-private-diagnostic"}));
 process.exit(23);
 `
-  );
-  let failure = "";
-  try {
-    await invokeNativeRuntime({
-      runtime,
-      cwd: runtime.home,
-      args: [],
-      timeoutMs: 2000,
-      privateInput: new TextEncoder().encode(
-        "synthetic-private-payload".repeat(10_000)
-      ),
-    });
-  } catch (error) {
-    failure = String(error);
-  }
-  expect(failure).toContain("Native runtime request failed (graph_budget)");
-  expect(failure).not.toContain("synthetic-private");
-  expect(await Bun.file(marker).text()).toBe("attempt\n");
-});
+    );
+    let failure = "";
+    try {
+      await invokeNativeRuntime({
+        runtime,
+        cwd: runtime.home,
+        args: [],
+        timeoutMs: REQUEST_TIMEOUT_MS,
+        privateInput: new TextEncoder().encode(
+          "synthetic-private-payload".repeat(10_000)
+        ),
+      });
+    } catch (error) {
+      failure = String(error);
+    }
+    expect(failure).toContain("Native runtime request failed (graph_budget)");
+    expect(failure).not.toContain("synthetic-private");
+    expect(await Bun.file(marker).text()).toBe("attempt\n");
+  },
+  CASE_TIMEOUT_MS
+);
 
 test("exec accepts matching nonzero completion only through its explicit transport contract", async () => {
   const runtime = await fixture();

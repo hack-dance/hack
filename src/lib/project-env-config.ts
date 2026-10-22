@@ -3840,8 +3840,20 @@ export async function ensureProjectEnvSecretKey(opts: {
       },
     });
   } catch (error: unknown) {
-    if (started || !isProjectEnvKeyLockUnavailable(error)) {
+    if (started) {
       throw error;
+    }
+    if (!isProjectEnvKeyLockUnavailable(error)) {
+      // Any other filesystem failure the user must fix (a full disk or quota,
+      // a non-directory on the way) is refused as the key it blocked, never
+      // as the lock's random `.owner` staging path or the raw errno.
+      throw closedFileWriteError({
+        error,
+        path: sharedLocation.linkedWorktree
+          ? sharedLocation.path
+          : resolveProjectEnvKeyPath(opts),
+        operation: "write",
+      });
     }
     // The git dir cannot hold a lock (for example it is read-only): create
     // the key unserialized, as before; the writer's own fallbacks apply.

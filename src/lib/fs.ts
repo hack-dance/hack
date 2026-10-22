@@ -12,7 +12,11 @@ import {
   unlink,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { ClosedCliError } from "./cli-result.ts";
+import {
+  ClosedCliError,
+  HackCliError,
+  type HackErrorCode,
+} from "./cli-result.ts";
 
 export async function pathExists(absolutePath: string): Promise<boolean> {
   try {
@@ -59,7 +63,8 @@ export type FileWriteFailure =
   | "permission_denied"
   | "read_only_filesystem"
   | "no_space"
-  | "not_a_directory";
+  | "not_a_directory"
+  | "is_a_directory";
 
 const FILE_WRITE_FAILURE_CODES: Readonly<Record<string, FileWriteFailure>> = {
   EACCES: "permission_denied",
@@ -68,6 +73,22 @@ const FILE_WRITE_FAILURE_CODES: Readonly<Record<string, FileWriteFailure>> = {
   ENOSPC: "no_space",
   EDQUOT: "no_space",
   ENOTDIR: "not_a_directory",
+  EISDIR: "is_a_directory",
+};
+
+/**
+ * The stable `--json` code of each {@link FileWriteFailure}. A read-only
+ * filesystem is reported as a permission problem; a path of the wrong kind
+ * (a file where a directory is needed, or the reverse) as a path conflict.
+ */
+const FILE_WRITE_FAILURE_ERROR_CODES: Readonly<
+  Record<FileWriteFailure, HackErrorCode>
+> = {
+  permission_denied: "E_PERMISSION",
+  read_only_filesystem: "E_PERMISSION",
+  no_space: "E_NO_SPACE",
+  not_a_directory: "E_PATH_CONFLICT",
+  is_a_directory: "E_PATH_CONFLICT",
 };
 
 /** The {@link FileWriteFailure} of a filesystem error, or null for any other error. */
@@ -92,6 +113,7 @@ const FILE_WRITE_FAILURE_REASONS: Readonly<Record<FileWriteFailure, string>> = {
   read_only_filesystem: "the filesystem is read-only",
   no_space: "no space is left on the device or the disk quota is exceeded",
   not_a_directory: "a parent of that path is not a directory",
+  is_a_directory: "that path is a directory",
 };
 
 const FILE_WRITE_PERMISSION_REMEDIES: Readonly<
@@ -110,6 +132,7 @@ const FILE_WRITE_FAILURE_REMEDIES: Readonly<
     "Use a writable checkout or remount the filesystem read-write, then retry",
   no_space: "Free some disk space or quota, then retry",
   not_a_directory: "Replace that path with a directory, then retry",
+  is_a_directory: "Move that directory out of the way, then retry",
 };
 
 /** The fixed remedy sentence for a failure; never names a path or an errno. */
@@ -133,9 +156,11 @@ const FILE_WRITE_OPERATION_VERBS: Readonly<Record<FileWriteOperation, string>> =
  * Closed refusal for a {@link FileWriteFailure}. The message names the file
  * or directory Hack was working on (never a staging path), a fixed reason and
  * a fixed remedy; it never carries the errno text, file contents or a cause.
- * The CLI prints it as one line, never with a stack.
+ * Its `code` classifies the failure (`E_PERMISSION`, `E_NO_SPACE` or
+ * `E_PATH_CONFLICT`), and the CLI prints it as one `CODE: message` line,
+ * never with a stack.
  */
-export class FileWriteRefusedError extends ClosedCliError {
+export class FileWriteRefusedError extends HackCliError {
   readonly path: string;
   readonly failure: FileWriteFailure;
   readonly operation: FileWriteOperation;
@@ -145,9 +170,10 @@ export class FileWriteRefusedError extends ClosedCliError {
     readonly failure: FileWriteFailure;
     readonly operation: FileWriteOperation;
   }) {
-    super(
-      `Could not ${FILE_WRITE_OPERATION_VERBS[opts.operation]} ${opts.path}: ${FILE_WRITE_FAILURE_REASONS[opts.failure]}. ${fileWriteRemedy(opts)}.`
-    );
+    super({
+      code: FILE_WRITE_FAILURE_ERROR_CODES[opts.failure],
+      message: `Could not ${FILE_WRITE_OPERATION_VERBS[opts.operation]} ${opts.path}: ${FILE_WRITE_FAILURE_REASONS[opts.failure]}. ${fileWriteRemedy(opts)}.`,
+    });
     this.name = "FileWriteRefusedError";
     this.path = opts.path;
     this.failure = opts.failure;
@@ -323,10 +349,14 @@ export async function writeTextFileAtomicIfChanged(
   if (existing.kind === "existing") {
     try {
       await access(target, constants.W_OK);
-    } catch {
+    } catch (error: unknown) {
+      // A writable mode on a read-only mount still fails here; name the mount.
       throw new AtomicWriteRefusedError({
         path: absolutePath,
-        reason: "not_writable",
+        reason:
+          classifyFileWriteError(error) === "read_only_filesystem"
+            ? "read_only_filesystem"
+            : "not_writable",
       });
     }
   }
@@ -395,7 +425,8 @@ async function openAtomicWriteStaging(opts: {
 /**
  * Staging-phase refusal reason for each {@link FileWriteFailure}. The target
  * itself was already checked as writable, so a permission failure here is the
- * directory's.
+ * directory's, and a directory found at the target (a rename racing a
+ * replacement) is a target that is not a regular file.
  */
 const ATOMIC_WRITE_STAGING_REFUSALS: Readonly<
   Record<FileWriteFailure, AtomicWriteRefusal>
@@ -404,6 +435,7 @@ const ATOMIC_WRITE_STAGING_REFUSALS: Readonly<
   read_only_filesystem: "read_only_filesystem",
   no_space: "no_space",
   not_a_directory: "not_a_directory",
+  is_a_directory: "not_regular_file",
 };
 
 /** The closed refusal for a classified staging failure, else `error` as is. */
@@ -449,11 +481,32 @@ const ATOMIC_WRITE_REFUSAL_MESSAGES: Readonly<
 };
 
 /**
- * Closed refusal from {@link writeTextFileAtomicIfChanged}. The message names
- * the path and a fixed reason only; it never carries file contents or a cause,
- * and the CLI prints it as one line, never with a stack.
+ * The stable `--json` code of each {@link AtomicWriteRefusal}, consistent with
+ * {@link FileWriteRefusedError}: access, ownership and read-only refusals are
+ * `E_PERMISSION`, a full disk is `E_NO_SPACE`, and a path of the wrong kind is
+ * `E_PATH_CONFLICT`.
  */
-export class AtomicWriteRefusedError extends ClosedCliError {
+const ATOMIC_WRITE_REFUSAL_ERROR_CODES: Readonly<
+  Record<AtomicWriteRefusal, HackErrorCode>
+> = {
+  unreadable: "E_PERMISSION",
+  not_regular_file: "E_PATH_CONFLICT",
+  not_writable: "E_PERMISSION",
+  owner_not_preserved: "E_PERMISSION",
+  group_not_preserved: "E_PERMISSION",
+  directory_not_writable: "E_PERMISSION",
+  read_only_filesystem: "E_PERMISSION",
+  no_space: "E_NO_SPACE",
+  not_a_directory: "E_PATH_CONFLICT",
+};
+
+/**
+ * Closed refusal from {@link writeTextFileAtomicIfChanged}. The message names
+ * the path and a fixed reason only; it never carries file contents or a cause.
+ * Its `code` classifies the reason, and the CLI prints it as one
+ * `CODE: message` line, never with a stack.
+ */
+export class AtomicWriteRefusedError extends HackCliError {
   readonly path: string;
   readonly reason: AtomicWriteRefusal;
 
@@ -461,9 +514,10 @@ export class AtomicWriteRefusedError extends ClosedCliError {
     readonly path: string;
     readonly reason: AtomicWriteRefusal;
   }) {
-    super(
-      `Refusing to replace ${opts.path}: ${ATOMIC_WRITE_REFUSAL_MESSAGES[opts.reason]}.`
-    );
+    super({
+      code: ATOMIC_WRITE_REFUSAL_ERROR_CODES[opts.reason],
+      message: `Refusing to replace ${opts.path}: ${ATOMIC_WRITE_REFUSAL_MESSAGES[opts.reason]}.`,
+    });
     this.name = "AtomicWriteRefusedError";
     this.path = opts.path;
     this.reason = opts.reason;

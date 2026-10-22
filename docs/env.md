@@ -590,14 +590,25 @@ group `wheel`, or from being removed from the file's group. Run `chgrp <your-gro
 <file>` and run the command again.
 
 The other files these commands write fail the same way. These are `.hack/.gitignore`
-(`--local` and `hydrate`), `.hack.secret.key` (the first `--secret` value) and
-`.hack/.internal/` (the `hydrate` lock). If a write is denied, the filesystem is
-read-only, the disk or quota is full, or a parent path is not a directory, Hack prints
-one line. That line names the file or directory Hack was writing, gives the reason and
-says what to fix. It never shows the raw system error or the hidden staging file name,
-and `--json` puts the same message in the envelope. A `.hack` directory you cannot
-search (for example mode `0644`) is reported as a permission problem on `.hack`
-(`E_PERMISSION` under `--json`).
+(`--local` and `hydrate`), `.hack.secret.key` (the first `--secret` value, including
+the key lock Hack takes in the git directory first), the repository root `.gitignore`
+entry for that key, and `.hack/.internal/` (the `hydrate` lock). If a write is denied,
+the filesystem is read-only, the disk or quota is full, a parent path is not a
+directory, or a directory is in the way of a file, Hack prints one line. That line
+names the file or directory Hack was writing, gives the reason and says what to fix. It
+never shows the raw system error, the hidden staging file name or the lock's staging
+file. An env file on a read-only filesystem is reported as a read-only filesystem, not
+as a file that is not writable.
+
+Each of these lines starts with a stable code, and `--json` puts the same code and
+message in the envelope:
+
+- `E_PERMISSION`: permission denied, a read-only filesystem, or an owner or group Hack
+  cannot keep. A `.hack` directory you cannot search (for example mode `0644`) and one
+  you cannot write (for example mode `0555`) both give this code.
+- `E_NO_SPACE`: the disk or the disk quota is full.
+- `E_PATH_CONFLICT`: a path is the wrong kind of entry, such as a file where Hack needs
+  a directory, or a directory where Hack needs a file.
 
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the

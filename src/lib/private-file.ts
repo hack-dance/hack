@@ -328,7 +328,8 @@ export async function readReplaceablePrivateFile(
 }
 
 /**
- * Replaces `path` with `text` atomically and durably, leaving mode 0600.
+ * Replaces `path` with `text` atomically and durably, leaving mode 0600 (or
+ * `mode`, for a non-secret file such as a committed ignore file).
  *
  * A uniquely named sibling is created with O_CREAT|O_EXCL|O_NOFOLLOW and mode
  * 0600, fchmod 0600, written and fsynced, then renamed over `path`; readers see
@@ -340,8 +341,13 @@ export async function readReplaceablePrivateFile(
  * The staging file is removed on every failure path.
  */
 export async function replacePrivateFileAtomic(
-  opts: ReplaceablePrivateFileOptions & { readonly text: string }
+  opts: ReplaceablePrivateFileOptions & {
+    readonly text: string;
+    /** Permission bits for the new file; defaults to 0600. */
+    readonly mode?: number;
+  }
 ): Promise<void> {
+  const mode = (opts.mode ?? 0o600) & 0o777;
   const directories = await captureRealDirectories(opts);
   await observeReplaceableTarget(opts);
   const staging = join(
@@ -358,8 +364,8 @@ export async function replacePrivateFileAtomic(
   );
   let committed = false;
   try {
-    // The umask can only remove bits; restore owner read/write explicitly.
-    await file.chmod(0o600);
+    // The umask can only remove bits; set the requested mode explicitly.
+    await file.chmod(mode);
     await file.writeFile(opts.text, "utf8");
     await file.sync();
     await recheckRealDirectories({ directories, refusal: opts.refusal });

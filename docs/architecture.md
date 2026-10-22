@@ -309,7 +309,9 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
   - `docker-compose.yml`
   - `hack.config.json`
   - `hack.branches.json` (optional)
-  - `.gitignore` (committed, self-healing on `init`/`up`; covers machine-local generated files —
+  - `.gitignore` (committed; created by `init`, and by `doctor --fix` when an existing project
+    lacks it or its managed block; runtime commands put the same
+    rules in the repository's local `info/exclude` instead of writing it; covers machine-local generated files —
     `.internal/`, `.branch/`, `.env`, `.env.state.json`, and `hack.env*.local.yaml`. The retired
     `tickets/` path stays ignored only to contain legacy machine-local caches during upgrades. If
     generated files leaked into git, `hack doctor --fix` untracks them without deleting them from

@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import {
   buildGeneratedFilePathspecs,
+  inspectHackDirGitignoreForDoctor,
   inspectTrackedGeneratedFiles,
   untrackGeneratedFiles,
 } from "../src/lib/doctor-generated-files.ts";
@@ -229,4 +230,31 @@ test("untracked secret key stays ignored once the root gitignore entry is ensure
   expect(await pathExists(resolve(repoRoot, PROJECT_ENV_KEY_FILENAME))).toBe(
     true
   );
+});
+
+test("inspectHackDirGitignoreForDoctor reports missing, outdated and current, and skips non-git dirs", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hack-doctor-gitignore-"));
+  tempDirs.add(dir);
+  const repoRoot = resolve(dir, "repo");
+  const projectDir = resolve(repoRoot, ".hack");
+  await mkdir(projectDir, { recursive: true });
+
+  expect(await inspectHackDirGitignoreForDoctor({ projectDir })).toBeNull();
+
+  await runGit(["init", "-b", "main"], repoRoot);
+  expect(await inspectHackDirGitignoreForDoctor({ projectDir })).toBe(
+    "missing"
+  );
+
+  const gitignore = resolve(projectDir, ".gitignore");
+  await writeFile(gitignore, "custom-entry\n");
+  expect(await inspectHackDirGitignoreForDoctor({ projectDir })).toBe(
+    "outdated"
+  );
+
+  await ensureHackDirGitignore({ projectDir });
+  expect(await inspectHackDirGitignoreForDoctor({ projectDir })).toBe(
+    "current"
+  );
+  expect(await readFile(gitignore, "utf8")).toStartWith("custom-entry\n");
 });

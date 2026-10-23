@@ -479,3 +479,43 @@ test("doctor --fix leaves a file behind a symlinked .hack/.internal untouched (H
   expect(notes).not.toContain(canary);
   expect(notes).not.toContain(outside);
 }, 30_000);
+
+test("doctor --fix leaves an override behind a symlinked .hack untouched (HACK-1316)", async () => {
+  if (!tempDir) {
+    throw new Error("tempDir not set");
+  }
+  // The whole `.hack` is a link to an outside directory that holds a Compose
+  // project and a file named like the override, which Hack cannot verify.
+  const canary = "doctor-fix-outside-hack-canary";
+  const projectRoot = resolve(tempDir, "project");
+  const outside = resolve(tempDir, "outside-hack");
+  await mkdir(projectRoot, { recursive: true });
+  await mkdir(resolve(outside, ".internal"), { recursive: true });
+  await writeFile(
+    resolve(outside, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.19\n"
+  );
+  const override = resolve(outside, ".internal", "compose.env.override.yml");
+  await writeFile(override, `${canary}\n`);
+  const hackDir = resolve(projectRoot, ".hack");
+  await symlink(outside, hackDir);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot])
+  ).toBe(0);
+  expect(await readFile(override, "utf8")).toBe(`${canary}\n`);
+  expect(await readdir(resolve(outside, ".internal"))).toEqual([
+    "compose.env.override.yml",
+  ]);
+  expect((await readdir(outside)).sort()).toEqual([
+    ".internal",
+    "docker-compose.yml",
+  ]);
+  expect((await lstat(hackDir)).isSymbolicLink()).toBe(true);
+  const notes = noteCalls.join("\n");
+  // Neither planned nor performed.
+  expect(notes).not.toContain(".hack/.internal/compose.env.override.yml");
+  expect(notes).not.toContain(canary);
+  expect(notes).not.toContain(outside);
+}, 30_000);

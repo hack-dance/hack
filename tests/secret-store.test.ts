@@ -190,6 +190,8 @@ test("encrypted_file backend reads key material from configured keyPath when env
 });
 
 test("project config resolves encrypted_file paths relative to the repo root", async () => {
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "0";
+
   if (!tempDir) {
     throw new Error("Missing temp dir");
   }

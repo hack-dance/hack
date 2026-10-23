@@ -256,3 +256,65 @@ async function writeGlobalSecretsConfig(input: {
   };
   await writeFile(configPath, `${JSON.stringify(payload, null, 2)}\n`);
 }
+
+test("node keychain auth rejects reads, writes and deletes when disabled", async () => {
+  await writeGlobalSecretsConfig({ backend: "keychain" });
+  const authRef = "node.auth.disabled";
+  await expect(readNodeAuthToken({ authRef })).rejects.toThrow(
+    "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK"
+  );
+  await expect(
+    saveNodeAuthToken({ authRef, token: "blocked" })
+  ).rejects.toThrow("HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK");
+  await expect(deleteNodeAuthToken({ authRef })).rejects.toThrow(
+    "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK"
+  );
+});
+
+test.skipIf(process.platform !== "darwin")(
+  "macOS node auth guards the security CLI before spawning",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    await writeGlobalSecretsConfig({ backend: "keychain" });
+    const binDir = join(tempDir, "bin");
+    await mkdir(binDir);
+    const callsPath = join(binDir, "calls");
+    await writeFile(
+      join(binDir, "security"),
+      "#!/bin/sh\n" +
+        'printf "%s\\n" "$*" >> "${0%/*}/calls"\n' +
+        'printf "fake-token\\n"\n',
+      { mode: 0o700 }
+    );
+    const previousPath = process.env.PATH;
+    const previousFlag = process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK;
+    try {
+      process.env.PATH = binDir;
+      process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "0";
+      const authRef = "node.auth.fake-cli";
+      await saveNodeAuthToken({ authRef, token: "fake-token" });
+      expect(await readNodeAuthToken({ authRef })).toBe("fake-token");
+      expect(await deleteNodeAuthToken({ authRef })).toBe(true);
+      const calls = await readFile(callsPath, "utf8");
+      expect(calls).toContain(
+        "add-generic-password -U -s hack-node-registry -a node.auth.fake-cli -w fake-token"
+      );
+      expect(calls).toContain("find-generic-password -s hack-node-registry");
+      expect(calls).toContain("delete-generic-password -s hack-node-registry");
+      process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+      await expect(readNodeAuthToken({ authRef })).rejects.toThrow("disabled");
+      await expect(
+        saveNodeAuthToken({ authRef, token: "blocked" })
+      ).rejects.toThrow("disabled");
+      await expect(deleteNodeAuthToken({ authRef })).rejects.toThrow(
+        "disabled"
+      );
+      expect(await readFile(callsPath, "utf8")).toBe(calls);
+    } finally {
+      restoreEnv("PATH", previousPath);
+      restoreEnv("HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK", previousFlag);
+    }
+  }
+);

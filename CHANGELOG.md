@@ -1,3 +1,9 @@
+## [4.2.2](https://github.com/hack-dance/hack/compare/v4.2.1...v4.2.2) (2026-10-23)
+
+### Bug Fixes
+
+* make keychain tests hermetic ([#423](https://github.com/hack-dance/hack/issues/423)) ([4c194a1](https://github.com/hack-dance/hack/commit/4c194a124d7baf7273121c4b7d96fb02d53edfcf))
+
 ## [4.2.1](https://github.com/hack-dance/hack/compare/v4.2.0...v4.2.1) (2026-09-17)
 
 ### Bug Fixes

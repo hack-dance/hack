@@ -1,6 +1,6 @@
 {
   "name": "hack-cli",
-  "version": "4.2.1",
+  "version": "4.2.2",
   "packageManager": "bun@1.4.4",
   "engines": {
     "bun": "1.4.4"

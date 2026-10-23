@@ -6,7 +6,6 @@ import {
 } from "node:crypto";
 import { chmod, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { secrets } from "bun";
 import type {
   CloudSecretProvider,
   SecretsBackend,
@@ -15,6 +14,7 @@ import type {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
+import { isKeychainDisabled, keychain } from "./keychain.ts";
 
 const ENCRYPTED_FILE_KEY_ENV = "HACK_SECRETS_FILE_KEY";
 const DISABLE_ENCRYPTED_FILE_KEYCHAIN_FALLBACK_ENV =
@@ -130,19 +130,19 @@ function createKeychainSecretStore(input: {
       mode: "native",
     },
     get: async ({ key }) =>
-      await secrets.get({
+      await keychain.get({
         service,
         name: key,
       }),
     set: async ({ key, value }) => {
-      await secrets.set({
+      await keychain.set({
         service,
         name: key,
         value,
       });
     },
     delete: async ({ key }) =>
-      await secrets.delete({
+      await keychain.delete({
         service,
         name: key,
       }),
@@ -511,19 +511,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     }
   }
 
-  if (
-    isTruthyEnvFlag(process.env[DISABLE_ENCRYPTED_FILE_KEYCHAIN_FALLBACK_ENV])
-  ) {
-    throw new Error(
-      buildEncryptedBackendKeyRecoveryMessage({
-        keyPath: configuredKeyPath,
-        storePath: input?.storePath,
-        reason: "keychain_disabled",
-      })
-    );
-  }
-
-  if (cachedEncryptedFileKey) {
+  if (!isKeychainDisabled() && cachedEncryptedFileKey) {
     if (input?.persistResolvedKey && input.keyPath) {
       await writeEncryptedFileKey({
         keyPath: input.keyPath,
@@ -555,6 +543,16 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     };
   }
 
+  if (isKeychainDisabled()) {
+    throw new Error(
+      buildEncryptedBackendKeyRecoveryMessage({
+        keyPath: configuredKeyPath,
+        storePath: input?.storePath,
+        reason: "keychain_disabled",
+      })
+    );
+  }
+
   const nowMs = Date.now();
   if (nowMs < encryptedFileKeyFailureCooldownUntilMs) {
     throw new Error(
@@ -569,7 +567,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   let existing: string | undefined;
   try {
     existing = (
-      await secrets.get({
+      await keychain.get({
         service: ENCRYPTED_FILE_KEY_SERVICE,
         name: ENCRYPTED_FILE_KEY_NAME,
       })
@@ -612,7 +610,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
 
   const generated = randomBytes(32).toString("base64url");
   try {
-    await secrets.set({
+    await keychain.set({
       service: ENCRYPTED_FILE_KEY_SERVICE,
       name: ENCRYPTED_FILE_KEY_NAME,
       value: generated,
@@ -841,14 +839,4 @@ function buildEncryptedBackendKeyRecoveryMessage(input: {
   }
 
   return `Missing encrypted backend key${location}. ${recovery} Hack will not fall back to plaintext .hack/.env or ambient process env.`;
-}
-
-function isTruthyEnvFlag(value: string | undefined): boolean {
-  const normalized = (value ?? "").trim().toLowerCase();
-  return (
-    normalized === "1" ||
-    normalized === "true" ||
-    normalized === "yes" ||
-    normalized === "on"
-  );
 }

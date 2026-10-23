@@ -249,7 +249,11 @@ entrypoint set `HACK_CANDIDATE_ENTRYPOINT`, and `hack-v5` also sets the opt-out.
 Autostart would start whatever hackd the host resolves (the launchd plist or the
 first `hack` on PATH), which is the stable daemon, not the candidate. Under
 either variable, `hack global up` also skips its `daemon.autoStart` step (the
-`hack daemon start` it runs through the first `hack` on PATH) and logs the skip.
+`hack daemon start` it runs through the first `hack` on PATH), and macOS
+`hack global install` skips its offer to run `hack daemon install`; both log the
+skip. Neither variable covers the interactive `hack doctor --fix` prompts to start
+or restart hackd. They also run the first `hack` on PATH, so answer no to them in
+a candidate run.
 
 launchd and isolated state roots: on macOS the hackd launchd service is one
 per-user service (`gui/<uid>/dance.hack.hackd`, plist in

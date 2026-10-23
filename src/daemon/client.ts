@@ -29,8 +29,11 @@ let lastDaemonAutostartAttemptAtMs = 0;
 /**
  * Opt-out: when set to `1`, CLI commands never start hackd implicitly, on any
  * platform, through launchd or directly. That covers the autostart in
- * {@link requestDaemonJson} and the `daemon.autoStart` step of
- * `hack global up`. An explicit `hack daemon start` still works. The bundled
+ * {@link requestDaemonJson}, the `daemon.autoStart` step of `hack global up`
+ * and the macOS `hack global install` offer to run `hack daemon install`. An
+ * explicit `hack daemon start` or `hack daemon install` still works. The
+ * interactive `hack doctor --fix` prompts to start or restart hackd are not
+ * covered. The bundled
  * `hack-v5` entrypoint sets it; `hack-next` sets only the candidate marker,
  * which denies the same way.
  */

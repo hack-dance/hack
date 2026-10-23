@@ -257,6 +257,85 @@ test.each([
   { timeout: 20_000 }
 );
 
+/**
+ * Runs the macOS `global install` launchd offer non-interactively (which
+ * accepts it) with launchd access allowed: HOME is the temp dir, so no plist
+ * exists and no launchctl runs. `run` is mocked, so nothing is spawned.
+ */
+async function runLaunchdInstallOffer(
+  env: Readonly<Record<string, string>>
+): Promise<string[]> {
+  const keys = [
+    "HACK_NO_INTERACTIVE",
+    "HACK_HOME",
+    "HACK_LAUNCHD_DISABLE",
+    ...Object.keys(env),
+  ];
+  const saved = new Map(keys.map((key) => [key, process.env[key]]));
+  Reflect.deleteProperty(process.env, "HACK_HOME");
+  Reflect.deleteProperty(process.env, "HACK_LAUNCHD_DISABLE");
+  process.env.HACK_NO_INTERACTIVE = "1";
+  Object.assign(process.env, env);
+  const stderrLines: string[] = [];
+  const stderrSpy = spyOn(process.stderr, "write").mockImplementation(
+    (chunk: string | Uint8Array) => {
+      stderrLines.push(String(chunk));
+      return true;
+    }
+  );
+  try {
+    const { maybeOfferMacHackdLaunchdInstall } = await import(
+      "../src/commands/global.ts"
+    );
+    await maybeOfferMacHackdLaunchdInstall();
+  } finally {
+    stderrSpy.mockRestore();
+    for (const [key, value] of saved) {
+      restoreEnv(key, value);
+    }
+  }
+  return stderrLines;
+}
+
+test("global install offers `hack daemon install` when autostart is allowed", async () => {
+  const lines = await runLaunchdInstallOffer({});
+
+  const daemonCalls = runCalls.filter((call) => call.includes("daemon"));
+  expect(daemonCalls).toHaveLength(1);
+  expect(daemonCalls[0]?.slice(-2)).toEqual(["daemon", "install"]);
+  expect(
+    lines.some((line) => line.includes("Skipping hackd launchd setup"))
+  ).toBe(false);
+});
+
+test.each([
+  {
+    label: "a candidate run",
+    key: "HACK_CANDIDATE_ENTRYPOINT",
+    value: "hack-next",
+    reason: "candidate run",
+  },
+  {
+    label: "the autostart opt-out",
+    key: "HACK_DAEMON_AUTOSTART_DISABLE",
+    value: "1",
+    reason: "HACK_DAEMON_AUTOSTART_DISABLE=1",
+  },
+])("global install never runs `hack daemon install` under $label (HACK-1368)", async ({
+  key,
+  value,
+  reason,
+}) => {
+  const lines = await runLaunchdInstallOffer({ [key]: value });
+
+  expect(runCalls.filter((call) => call.includes("daemon"))).toEqual([]);
+  const skip = lines.filter((line) =>
+    line.includes("Skipping hackd launchd setup")
+  );
+  expect(skip).toHaveLength(1);
+  expect(skip[0]).toContain(reason);
+});
+
 test(
   "global up reassigns containers when reserved ingress IPs are occupied",
   async () => {

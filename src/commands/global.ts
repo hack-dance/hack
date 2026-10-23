@@ -1630,7 +1630,26 @@ async function maybeOfferMacDnsRecoveryAuthorization(): Promise<void> {
   }
 }
 
-async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
+/**
+ * The macOS `hack global install` offer to run `hack daemon install`, which
+ * installs the per-user hackd launchd service and starts hackd through it.
+ * Non-interactive runs accept the offer.
+ *
+ * HACK-1368: `hack daemon install` runs through the first `hack` on PATH,
+ * which for a candidate run is the stable CLI, so it would install and start
+ * the stable hackd. A candidate run, or any run with
+ * `HACK_DAEMON_AUTOSTART_DISABLE=1`, skips the offer through
+ * {@link resolveDaemonAutostartAccess} before it reads launchd state or
+ * prompts. Exported for tests.
+ */
+export async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
+  const autostart = resolveDaemonAutostartAccess();
+  if (!autostart.allowed) {
+    logger.info({
+      message: `Skipping hackd launchd setup: ${autostart.message}`,
+    });
+    return;
+  }
   const access = resolveLaunchdAccess();
   if (!access.allowed) {
     logger.info({ message: `Skipping hackd launchd setup: ${access.message}` });

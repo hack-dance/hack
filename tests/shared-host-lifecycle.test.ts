@@ -1365,13 +1365,25 @@ test(
   TIMEOUT
 );
 
+/** A census that fails: `ps` gave no rows (not even this process). */
+const CENSUS_FAILED = "census-failed";
+
 /** A simulated census and signal boundary around one claimed helper. */
 async function simulatedStop(opts: {
   readonly spec: SharedHostHelperSpec;
-  /** The helper's census row for the given poll after TERM, or null if gone. */
+  /**
+   * The helper's census row for the given poll after TERM, null if gone, or
+   * {@link CENSUS_FAILED}. `sinceKillMs` is the time since KILL was
+   * requested, or null before that.
+   */
   readonly afterTerm: (
-    poll: number
-  ) => { readonly birth: string; readonly zombie: boolean } | null;
+    poll: number,
+    sinceKillMs: number | null
+  ) =>
+    | { readonly birth: string; readonly zombie: boolean }
+    | null
+    | typeof CENSUS_FAILED;
+  readonly graceMs?: number;
 }) {
   const birth = "Thu Jan 1 00:00:00 1970";
   const self = {
@@ -1392,27 +1404,90 @@ async function simulatedStop(opts: {
   });
   const signals: [NodeJS.Signals, number[]][] = [];
   let polls = 0;
+  let killedAt: number | null = null;
   const processes: SharedHostProcesses = {
     census: async () => {
       if (signals.length === 0) {
         return [self, { pid: 4242, parentPid: 1, birth, zombie: false }];
       }
       polls += 1;
-      const row = opts.afterTerm(polls);
+      const row = opts.afterTerm(
+        polls,
+        killedAt === null ? null : performance.now() - killedAt
+      );
+      if (row === CENSUS_FAILED) {
+        return [];
+      }
       return row ? [self, { pid: 4242, parentPid: 1, ...row }] : [self];
     },
     signalTree: async (tree, signal) => {
       signals.push([signal, tree.map((row) => row.pid)]);
+      if (signal === "SIGKILL") {
+        killedAt = performance.now();
+      }
     },
   };
   const result = await releaseSharedHostHelper({
     spec: opts.spec,
     holder: "branch-a",
-    graceMs: 2000,
+    graceMs: opts.graceMs ?? 2000,
     processes,
   });
-  return { result, signals, polls: () => polls, birth };
+  return {
+    result,
+    signals,
+    polls: () => polls,
+    birth,
+    /** When release returned, in ms after KILL was requested; null without KILL. */
+    returnedAfterKillMs:
+      killedAt === null ? null : performance.now() - killedAt,
+  };
 }
+
+test(
+  "a census that fails during the TERM wait keeps the wait going instead of escalating to KILL",
+  async () => {
+    // A failed census proves nothing either way, so release keeps polling
+    // within the TERM grace; the next good census shows the helper gone.
+    const root = await scratch();
+    const spec = specFor({ root, port: freePort() });
+    const stop = await simulatedStop({
+      spec,
+      afterTerm: (poll) => (poll <= 3 ? CENSUS_FAILED : null),
+    });
+    expect(stop.result).toEqual({ state: "stopped" });
+    expect(stop.polls()).toBe(4);
+    expect(stop.signals).toEqual([["SIGTERM", [4242]]]);
+    expect(await readClaim(spec)).toBeNull();
+  },
+  TIMEOUT
+);
+
+test(
+  "after KILL, release keeps polling for the whole kill-confirm wait before giving up",
+  async () => {
+    // The helper outlives a short TERM grace, and its exit is observed only
+    // late in the SHARED_HOST_KILL_CONFIRM_MS wait that follows KILL.
+    const root = await scratch();
+    const spec = specFor({ root, port: freePort() });
+    const exitAfterKillMs = SHARED_HOST_KILL_CONFIRM_MS * 0.8;
+    const running = { birth: "Thu Jan 1 00:00:00 1970", zombie: false };
+    const stop = await simulatedStop({
+      spec,
+      graceMs: 100,
+      afterTerm: (_poll, sinceKillMs) =>
+        sinceKillMs !== null && sinceKillMs >= exitAfterKillMs ? null : running,
+    });
+    expect(stop.result).toEqual({ state: "stopped" });
+    expect(stop.signals).toEqual([
+      ["SIGTERM", [4242]],
+      ["SIGKILL", [4242]],
+    ]);
+    expect(stop.returnedAfterKillMs).toBeGreaterThanOrEqual(exitAfterKillMs);
+    expect(await readClaim(spec)).toBeNull();
+  },
+  TIMEOUT
+);
 
 test(
   "release keeps waiting while the helper still runs after TERM and reports stopped once a census shows it a zombie",
@@ -1447,10 +1522,16 @@ test(
       afterTerm: () => ({ birth: "Thu Jan 1 00:00:01 1970", zombie: false }),
     });
     expect(stop.result).toEqual({ state: "stop-unconfirmed" });
+    // The simulated boundary records the KILL request. In production the
+    // signal re-checks the birth, so this PID would not be signalled.
     expect(stop.signals).toEqual([
       ["SIGTERM", [4242]],
       ["SIGKILL", [4242]],
     ]);
+    // Only after the whole kill-confirm wait.
+    expect(stop.returnedAfterKillMs).toBeGreaterThanOrEqual(
+      SHARED_HOST_KILL_CONFIRM_MS
+    );
     expect(await readClaim(spec)).toEqual({
       version: 1,
       helper: spec.name,

@@ -287,8 +287,13 @@ A different or missing value is refused (`artifact_identity_mismatch`,
 frozen correctness check (`workload_correctness_weakened`). A revision may add
 correctness checks. The sample counts are floors at their frozen values: a protocol
 that plans fewer than 10 lifecycle runs or 60 tail samples per lane is refused, even
-where the program floor or the p95 bound would allow fewer. Every number in the protocol or a summary must be
-within ±(2⁵³ − 1), the interoperable JSON range; a larger value is refused as malformed.
+where the program floor or the p95 bound would allow fewer. Every number anywhere in
+the protocol or a summary, including a field the checker does not otherwise read, must
+be finite and within ±(2⁵³ − 1), the interoperable JSON range. Any other number,
+including the `NaN` and `Infinity` that Python's JSON parser accepts, is refused as
+`protocol_number_out_of_range` or `summary_number_out_of_range`, alongside any code
+for the field that holds it. A mean is the correctly rounded sum divided by the
+count, so a mean at an exclusive ceiling gets the same verdict on every Python version.
 
 These are acceptance thresholds, not measured achievements.
 
@@ -315,7 +320,7 @@ record. It exits 1 when any verdict fails or is inconclusive. It exits 2, withou
 judging, when the protocol or summary is invalid: for example a summary for another
 cache class or scale point, a candidate marked `not_applicable`, a `not_applicable`
 record that carries samples, a negative sample, a planned count that is not a positive
-integer, or a value of the wrong type. Diagnostics are closed codes and never repeat
+integer, a number outside ±(2⁵³ − 1), or a value of the wrong type. Diagnostics are closed codes and never repeat
 input values.
 
 A summary has this shape. `samples` lists only admitted samples; `flagged` and `failed`

@@ -147,6 +147,7 @@ fixed text that never repeats caller input, paths or registry values.
 | `path_not_found` | `E_PROJECT_NOT_FOUND` | `project` | `fix_selector` |
 | `no_project_context` | `E_PROJECT_NOT_FOUND` | `project` | `fix_selector` |
 | `project_inputs_unsupported` | `E_CONFIG_INVALID` | `project` | `fix_project` |
+| `adoption_state_unsafe` | `E_CONFIG_INVALID` | `project` | `fix_project` |
 | `config_parse_failed` | `E_CONFIG_PARSE` | `project` | `fix_project` |
 | `compose_parse_failed` | `E_CONFIG_PARSE` | `project` | `fix_project` |
 | `detached_checkout` | `E_USAGE` | `instance` | `fix_selector` |
@@ -162,6 +163,16 @@ read permission, or a directory where a config file belongs) is reported as
 `input_permission_denied` (`EACCES`, `EPERM`) or `input_unreadable` (any other
 filesystem error). The OS message is never surfaced, because it contains the
 absolute path.
+
+The shared project input guards that every project command runs are mapped
+too. Native or conflicting project files are `project_inputs_unsupported`. A
+legacy adoption state that is unparseable, interrupted, or cannot be checked
+(for example a project directory the caller cannot search) is
+`adoption_state_unsafe`. A non-directory where the project directory belongs is
+`input_unreadable`. When the guard cannot check whether a project input exists
+(for example a `.dev` file, or a `.dev` directory the caller cannot search,
+beside a valid `.hack`), the refusal is `input_permission_denied` (`EACCES`,
+`EPERM`) or `input_unreadable` (any other fault), like a read fault.
 
 `retry` is advice for the caller. Like suggested actions and application logs,
 it carries no execution authority.
@@ -208,6 +219,8 @@ WU21). The inspector itself only produces snapshots.
 | Two registrations owning one checkout | `ambiguous_project` | same | paired fixture |
 | Malformed Hack config or Compose file, oversized input | `config_parse_failed`, `compose_parse_failed`, `generation_input_too_large` | same | paired fixture |
 | Unreadable input (directory in place of a file, no read permission) | `input_unreadable`, `input_permission_denied` | same | paired fixture (permission case skipped as root) |
+| Input guard refusals (native/legacy conflict, unsafe adoption state, unsearchable or non-directory project dir) | `project_inputs_unsupported`, `adoption_state_unsafe`, `input_unreadable` | same | paired fixture (unsearchable case skipped as root) |
+| Uncheckable input presence (`.dev` file or unsearchable `.dev` beside a valid `.hack`) | `input_unreadable`, `input_permission_denied` | same | paired fixture and domain test (unsearchable case skipped as root) |
 | Detached linked worktree, no project, missing path | closed refusals | same | paired fixture |
 | Unknown service | `service_not_found` | same | paired fixture |
 | Config changed during read | `generation_changed_during_read` | same code path | domain test |

@@ -28,6 +28,7 @@ import {
   discoverProjectInputs,
   inspectProjectInputsAtRoot,
   NATIVE_PROJECT_FILENAME,
+  ProjectInputAccessError,
 } from "../src/lib/project-input-selection.ts";
 
 const roots: string[] = [];
@@ -196,6 +197,49 @@ test.each([
     "Cannot inspect Hack project inputs"
   );
 });
+
+async function inputAccessFault(root: string): Promise<unknown> {
+  try {
+    await inspectProjectInputsAtRoot({ projectRoot: root });
+  } catch (error: unknown) {
+    return error;
+  }
+  throw new Error("unexpected input selection success");
+}
+
+test("a .dev file beside valid .hack inputs is a typed, value-free access refusal", async () => {
+  const root = await fixture();
+  await file(root, ".hack/docker-compose.yml");
+  await file(root, ".dev", "not a directory");
+  const error = await inputAccessFault(root);
+  expect(error).toBeInstanceOf(ProjectInputAccessError);
+  expect((error as ProjectInputAccessError).access).toBe("unreadable");
+  expect((error as ProjectInputAccessError).code).toBe("E_CONFIG_INVALID");
+  expect((error as Error).cause).toBeUndefined();
+  expect(String(error)).not.toContain(root);
+  expect(String(error)).not.toContain("ENOTDIR");
+});
+
+// Root can search a mode-000 directory, so this fault cannot be produced.
+test.skipIf(process.getuid?.() === 0)(
+  "an unsearchable .dev beside valid .hack inputs is a typed permission refusal",
+  async () => {
+    const root = await fixture();
+    await file(root, ".hack/docker-compose.yml");
+    const dev = join(root, ".dev");
+    await mkdir(dev);
+    await chmod(dev, 0);
+    try {
+      const error = await inputAccessFault(root);
+      expect(error).toBeInstanceOf(ProjectInputAccessError);
+      expect((error as ProjectInputAccessError).access).toBe("permission");
+      expect(String(error)).not.toContain(root);
+      expect(String(error)).not.toContain("EACCES");
+    } finally {
+      await chmod(dev, 0o700);
+    }
+  }
+);
 
 test("supported legacy discovery keeps primary-before-legacy precedence", async () => {
   const outer = await fixture();

@@ -23,6 +23,7 @@ const psJsonByComposeProject = new Map<string, string>();
 const psEnvs: Array<Record<string, string> | undefined> = [];
 const tempDirs = new Set<string>();
 const originalHackHome = process.env.HACK_HOME;
+const originalLogger = process.env.HACK_LOGGER;
 
 const runtimeBackendMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -68,6 +69,10 @@ const { execCommand, resolveModernComposeEnvOverrides } = await import(
 );
 
 beforeAll(() => {
+  // Pin the logger backend: without it the logger picks gum or clack from the
+  // host, and clack writes diagnostics to stdout, which the stdout assertions
+  // below would see. Do not rely on another test file leaking this setting.
+  process.env.HACK_LOGGER = "console";
   runtimeBackendMock.activate();
 });
 
@@ -88,6 +93,11 @@ afterEach(async () => {
 
 afterAll(() => {
   runtimeBackendMock.deactivate();
+  if (originalLogger === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_LOGGER");
+  } else {
+    process.env.HACK_LOGGER = originalLogger;
+  }
 });
 
 test("exec reaches the running service while registry registration is locked", async () => {

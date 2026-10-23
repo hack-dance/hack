@@ -154,8 +154,7 @@ mod tests {
                 net::UnixListener,
             },
         };
-        let root = std::env::temp_dir().join(format!("hack-bridge-sockets-{}", std::process::id()));
-        fs::create_dir(&root).unwrap();
+        let root = crate::unique_test_root(&std::env::temp_dir(), "hack-bridge-sockets");
         let path = root.join("bridge-00.sock");
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();

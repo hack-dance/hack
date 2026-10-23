@@ -12,12 +12,13 @@ impl Fixture {
         let path = fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
-                "witness-enroll-{}-{}",
+                "witness-enroll-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                crate::next_test_scratch()
             ));
         fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
         Self(path)

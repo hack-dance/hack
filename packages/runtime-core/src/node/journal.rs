@@ -622,11 +622,10 @@ mod tests {
     use super::*;
     #[test]
     fn reconciliation_refuses_live_or_foreign_work_and_preserves_uncertainty_on_failure() {
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-reconcile-{}-{}",
-            std::process::id(),
-            now()
-        ));
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-reconcile",
+        );
         private_directory(&root, true).unwrap();
         let candidate = crate::Candidate::discover(&root).unwrap();
         let mut store = Store::open(&super::super::root(&candidate), true).unwrap();
@@ -729,11 +728,10 @@ mod tests {
 
     #[test]
     fn sqlite_full_rolls_back_job_and_operation_together() {
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-node-full-{}-{}",
-            std::process::id(),
-            now()
-        ));
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-node-full",
+        );
         let mut store = Store::open(&root, true).unwrap();
         let pages: i64 = store
             .connection

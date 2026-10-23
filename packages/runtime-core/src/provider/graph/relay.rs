@@ -628,9 +628,7 @@ mod tests {
     #[test]
     fn observer_descriptor_loop_expands_only_its_controlled_glob() {
         use std::os::unix::fs::symlink;
-        let directory =
-            std::env::temp_dir().join(format!("hack-observe-glob-{}", std::process::id()));
-        std::fs::create_dir(&directory).unwrap();
+        let directory = crate::unique_test_root(&std::env::temp_dir(), "hack-observe-glob");
         struct Remove(std::path::PathBuf);
         impl Drop for Remove {
             fn drop(&mut self) {

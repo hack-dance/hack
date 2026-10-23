@@ -10,6 +10,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { closedFileWriteError } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 
 /**
@@ -18,6 +19,12 @@ import { isRecord } from "./guards.ts";
  * Ownership: callers own the path choice and the refusal message. These helpers
  * never follow a symlink at the final path component, never replace an existing
  * entry, and never include file contents in errors.
+ *
+ * Failures the user must fix (permission denied, a read-only filesystem, a full
+ * disk or quota, a non-directory parent) are reported by the create, replace
+ * and replaceable-read helpers as a closed `FileWriteRefusedError` that names
+ * the caller's path, never a staging path or the errno text. EEXIST and every
+ * other error propagate unchanged.
  */
 
 export type BoundedPrivateFileReadOptions = {
@@ -169,14 +176,7 @@ export async function createPrivateFileExclusive(opts: {
   readonly path: string;
   readonly text: string;
 }): Promise<void> {
-  const file = await open(
-    opts.path,
-    constants.O_CREAT |
-      constants.O_EXCL |
-      constants.O_NOFOLLOW |
-      constants.O_WRONLY,
-    0o600
-  );
+  const file = await openForPrivateWrite({ path: opts.path, open: opts.path });
   let created: Stats | null = null;
   let complete = false;
   try {
@@ -186,6 +186,8 @@ export async function createPrivateFileExclusive(opts: {
     await file.writeFile(opts.text, "utf8");
     await file.sync();
     complete = true;
+  } catch (error: unknown) {
+    throw closedFileWriteError({ error, path: opts.path, operation: "write" });
   } finally {
     await file.close();
     if (!complete && created) {
@@ -262,7 +264,7 @@ async function observeReplaceableTarget(opts: {
     if (isMissingEntryError(error)) {
       return null;
     }
-    throw error;
+    throw closedFileWriteError({ error, path: opts.path, operation: "read" });
   });
   if (observed && !observed.isFile()) {
     throw opts.refusal();
@@ -300,7 +302,7 @@ export async function readReplaceablePrivateFile(
     if (isRecord(error) && error.code === "ELOOP") {
       throw opts.refusal();
     }
-    throw error;
+    throw closedFileWriteError({ error, path: opts.path, operation: "read" });
   }
   try {
     const opened = await file.stat();
@@ -354,14 +356,7 @@ export async function replacePrivateFileAtomic(
     dirname(opts.path),
     `.${basename(opts.path)}.${randomUUID()}.tmp`
   );
-  const file = await open(
-    staging,
-    constants.O_CREAT |
-      constants.O_EXCL |
-      constants.O_NOFOLLOW |
-      constants.O_WRONLY,
-    0o600
-  );
+  const file = await openForPrivateWrite({ path: opts.path, open: staging });
   let committed = false;
   try {
     // The umask can only remove bits; set the requested mode explicitly.
@@ -372,6 +367,8 @@ export async function replacePrivateFileAtomic(
     await observeReplaceableTarget(opts);
     await rename(staging, opts.path);
     committed = true;
+  } catch (error: unknown) {
+    throw closedFileWriteError({ error, path: opts.path, operation: "write" });
   } finally {
     await file.close();
     if (!committed) {
@@ -404,14 +401,7 @@ export async function publishPrivateFileExclusive(
     dirname(opts.path),
     `.${basename(opts.path)}.${randomUUID()}.tmp`
   );
-  const file = await open(
-    staging,
-    constants.O_CREAT |
-      constants.O_EXCL |
-      constants.O_NOFOLLOW |
-      constants.O_WRONLY,
-    0o600
-  );
+  const file = await openForPrivateWrite({ path: opts.path, open: staging });
   let published = false;
   try {
     // The umask can only remove bits; restore owner read/write explicitly.
@@ -429,12 +419,39 @@ export async function publishPrivateFileExclusive(
       // Lost the race: classify what is there now (regular file or refusal).
       await observeReplaceableTarget(opts);
     }
+  } catch (error: unknown) {
+    throw closedFileWriteError({ error, path: opts.path, operation: "write" });
   } finally {
     await file.close();
     await unlink(staging).catch(() => undefined);
   }
   await syncDirectory({ path: dirname(opts.path) });
   return published;
+}
+
+/**
+ * Opens `open` (the target itself, or its staging sibling) with
+ * O_CREAT|O_EXCL|O_NOFOLLOW|O_WRONLY and mode 0600. A classified failure is a
+ * closed refusal naming `path`, never the staging name; EEXIST and every other
+ * error propagate unchanged, so an exclusive create still sees an existing
+ * entry as EEXIST.
+ */
+async function openForPrivateWrite(opts: {
+  readonly path: string;
+  readonly open: string;
+}): Promise<FileHandle> {
+  try {
+    return await open(
+      opts.open,
+      constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW |
+        constants.O_WRONLY,
+      0o600
+    );
+  } catch (error: unknown) {
+    throw closedFileWriteError({ error, path: opts.path, operation: "write" });
+  }
 }
 
 /** Best effort: persist the directory entry where the platform allows it. */

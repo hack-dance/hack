@@ -174,7 +174,17 @@ Recover(r) ==
 
 Advance(r) == Begin(r) \/ Starting(r) \/ StartingEvent(r) \/ Spawn(r) \/
               Running(r) \/ Register(r) \/ Finish(r) \/ Return(r)
-Idle == UNCHANGED vars
+\* Stutter only after all invocations settle, including rejected persistence.
+\* Reference deduplication can leave an invocation permanently unstarted.
+\* A rejected terminal write still violates P4; returning is not durable success.
+Idle ==
+    /\ \A r \in Actors :
+        \/ /\ step[r] = "done"
+           /\ write[r] = "done" \/ (write[r] = "rejected" /\ ~RecoverPersistence)
+           /\ claim[r] # "cancelled" \/ write[r] = "rejected" \/ r \in ack
+        \/ /\ step[r] = "idle"
+           /\ DeduplicateAdmission /\ admitted # {}
+    /\ UNCHANGED vars
 Next == (\E r \in Actors : Advance(r) \/ Cancel(r) \/ Exit(r) \/ Drain(r) \/
         PersistStatus(r) \/ AppendEvent(r) \/ PersistEventMeta(r) \/
         Acknowledge(r) \/ RejectStatus(r) \/ Recover(r)) \/ Idle

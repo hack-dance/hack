@@ -16,7 +16,11 @@
   Flags: `-Xmx512m -XX:ActiveProcessorCount=1 -XX:+UseParallelGC -XX:-UsePerfData`,
   TLC `-tool -workers 1 -fp 0 -seed 1`,
   private metadir, 120-second subprocess timeout. Deadlock checking enabled;
-  `Idle` deliberately permits terminal stutter. No generated trace specs requested.
+  `Idle` permits stutter only after every invocation returns (including rejected
+  persistence) and any successful cancellation is acknowledged, or remains unstarted
+  because reference deduplication blocks admission. Active states cannot use `Idle`.
+  P4 still checks durable progress after an error return. No generated trace specs
+  requested.
 - Outputs: jar in ignored `.cache/tlaplus/`; raw TLC output on stdout, disposable
   sources/state directories under the system temporary directory and removed.
   Raw execution logs are not committed. TLC requires a local RMI listener.
@@ -99,6 +103,12 @@ test. A violation requires exit 1, exactly one failing test, the exact property 
 and its `PropertyViolation` error. The outer test/harness explicitly expects the
 known finding. Zero wrapper exit means reproducible evidence, **not product green**.
 All five model and implementation mutations demonstrated their intended failures.
+
+After restricting `Idle` to settled invocations and reference-blocked admissions,
+`bun run check:tla` retained all named violations, passing controls, replays, and
+restored baselines. A disposable model with `Starting` disabled under `P5.cfg`
+reported `Deadlock reached.` with exit 11, confirming that active-state deadlocks
+are detected. The disposable control was removed; product source is unchanged.
 
 ## Findings and limits
 

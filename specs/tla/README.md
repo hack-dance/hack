@@ -24,7 +24,12 @@ TLC is the official `v1.7.4/tla2tools.jar`, pinned to
 The observed banner is `TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)`.
 The checker uses one worker, a 512 MiB heap, fixed seed/fingerprint, and a 120-second
 limit per subprocess. Deadlock checking stays enabled; explicit terminal stuttering
-is intentional. This TLC version generates trace specifications only when requested;
+is limited to returned invocations (including rejected persistence), completed
+cancellation acknowledgements, and unstarted invocations blocked by reference
+deduplication. Active states cannot use `Idle` to hide a deadlock. A returned run
+with rejected persistence still violates P4 `ClaimedTerminal`; a terminal return
+does not imply durable success. This TLC version generates trace specifications
+only when requested;
 the checker does not request them. Temporary models, Java instrumentation, and state
 directories are removed after each run. The jar cache and generated traces are ignored.
 

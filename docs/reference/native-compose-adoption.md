@@ -436,8 +436,15 @@ tracked generated files and Compose env values at rest. Each other project check
 (runtime and lifecycle hygiene, Compose networks and backend features, `DEV_HOST`, env
 mode, materialization and overlay warnings, worktree keys and instances, the
 `.hack/.gitignore` check, Caddy hosts)
-reads inputs that the adoption owns, so doctor lists it as not checked instead of
-failing. A pending adoption is a warning that asks for explicit recovery. The
+reads inputs that the adoption owns, so doctor reports it as skipped instead of
+failing, with status `ok` and the message
+`Skipped (adopted Compose project: its inputs belong to 'hack config adopt')`.
+Doctor uses `warn` for a skip that points at something to fix, such as no `.hack/`
+found. These skips apply to every adopted project by design, so they are not warnings.
+A pending adoption is a warning that asks for explicit recovery, and the `--fix` steps
+treat it like an active one. The adoption search stops after 64 parent directories.
+From a deeper start directory doctor finds no adoption and uses ordinary project
+discovery instead of failing. The
 `--fix` plan says that it leaves the adoption's inputs, retained containers and state
 alone. For the project it only removes tracked generated files from the Git index
 (the files stay on disk) and keeps an env override that the adoption pins. It leaves

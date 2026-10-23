@@ -456,10 +456,13 @@ export async function observeNativeComposeStartupOwned(
 
 /**
  * Startup readiness wait under the caller's readiness deadline. Each observation is a
- * fresh `transient` startup query. If the deadline passes while the last observation was
- * unready only because a `running` on-failure member was missing or placeholdered, one
- * `settled` query follows: it refuses with the unchanged topology predicate when that
- * member is still absent, so a permanently missing member cannot stay unready. The
+ * fresh `transient` startup query. If the deadline passes while the last observation
+ * depended on a shape that only `transient` membership admits, one `settled` query
+ * follows. There are two such shapes: a `running` on-failure member that was missing or
+ * placeholdered, and a `running` or `restarting` member whose `ep-` placeholder first
+ * appeared in the query's recheck scan (see {@link networkMembers}). The settled query
+ * refuses with the unchanged topology predicate when that shape is still present, so a
+ * permanently missing member cannot stay unready. The
  * settled query never turns a timeout into readiness; this returns `null` either way.
  * The settled query runs after the deadline, so it is bounded by the probe timeout.
  * Never use the observation as effect authority.

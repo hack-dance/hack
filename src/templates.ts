@@ -202,6 +202,14 @@ export const GLOBAL_ALLOY_DOCKER_STATUSES = [
   "exited",
 ] as const;
 
+/**
+ * Minimum level of Alloy's own log output. Alloy's container is itself a
+ * Compose service that Alloy ships to Loki, so info-level component logs (a
+ * "finished transferring logs" line per kept exited container every 5 seconds)
+ * would grow Loki without bound.
+ */
+export const GLOBAL_ALLOY_LOG_LEVEL = "warn";
+
 export function renderGlobalAlloyConfig(): string {
   // Docs:
   // - https://grafana.com/docs/alloy/latest/reference/components/discovery/discovery.docker/
@@ -214,11 +222,29 @@ export function renderGlobalAlloyConfig(): string {
   // service that started and exited between two polls was never tailed, so Loki
   // had nothing while `docker compose logs` still showed its output. Docker sets
   // `all=true` when a `status` filter is present, so exited containers are listed
-  // too and loki.source.docker reads their retained logs once (it restarts a
-  // tailer only while the container runs or finished after the last read). The
-  // poll interval is shortened so a container removed soon after it exits (for
-  // example `docker compose run --rm`) has a smaller window to be missed.
+  // too and loki.source.docker ships their retained logs. The poll interval is
+  // shortened so a container removed soon after it exits (for example
+  // `docker compose run --rm`) has a smaller window to be missed.
+  //
+  // Cost (Alloy v1.12.0): loki.source.docker checks every target on a fixed 5s
+  // timer and reopens an exited container's log when the container finished
+  // after the last line it shipped (always true for a container that logged
+  // nothing). Such a container costs two inspect calls and one logs call every
+  // 5s for as long as Docker keeps it. Discovery exposes no container state or
+  // exit time, so the config cannot age these out; removing the containers
+  // (`hack down`, `docker compose down`) ends it. Each reopen also logs an info
+  // line ("finished transferring logs"); Alloy runs as a Compose service, so
+  // that line would be shipped into Loki every 5s per container. The `logging`
+  // block keeps Alloy's own output at warn and above.
+  //
+  // Read positions live in the Alloy container's writable layer (no volume), so
+  // a recreated Alloy container reads every retained log again.
   return [
+    "logging {",
+    `  level  = "${GLOBAL_ALLOY_LOG_LEVEL}"`,
+    '  format = "logfmt"',
+    "}",
+    "",
     'discovery.docker "local" {',
     '  host             = "unix:///var/run/docker.sock"',
     `  refresh_interval = "${GLOBAL_ALLOY_DOCKER_REFRESH_INTERVAL}"`,

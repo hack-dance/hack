@@ -2,15 +2,24 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 
 import {
   DEFAULT_LOKI_SNAPSHOT_LOOKBACK_MS,
+  LOKI_FOLLOW_EMPTY_NOTICE_DELAY_MS,
+  type LogsCommandTarget,
   type LokiSnapshotOutcome,
+  renderComposeLogsCommand,
+  renderEmptyLokiFollowNotice,
   resolveLokiQueryWindow,
   runLokiSnapshotWithFallback,
 } from "../src/lib/logs.ts";
 import {
   GLOBAL_ALLOY_DOCKER_REFRESH_INTERVAL,
+  GLOBAL_ALLOY_LOG_LEVEL,
   renderGlobalAlloyConfig,
 } from "../src/templates.ts";
-import { buildLokiQueryRangeUrl, lokiSnapshot } from "../src/ui/loki-logs.ts";
+import {
+  buildLokiQueryRangeUrl,
+  lokiLogs,
+  lokiSnapshot,
+} from "../src/ui/loki-logs.ts";
 
 // HACK-1277: a one-shot Compose service that exits quickly must not make
 // Loki-backed `hack logs` look empty while `docker compose logs` has output.
@@ -197,7 +206,10 @@ test("lokiSnapshot prints entries and never defers a non-empty result", async ()
 
 // --- empty-snapshot fallback policy ---------------------------------------
 
-function fallbackHarness(outcome: LokiSnapshotOutcome) {
+function fallbackHarness(
+  outcome: LokiSnapshotOutcome,
+  target: LogsCommandTarget = {}
+) {
   const calls = {
     lokiDeferEmpty: [] as boolean[],
     compose: 0,
@@ -208,6 +220,7 @@ function fallbackHarness(outcome: LokiSnapshotOutcome) {
       wantsLokiExplicit,
       query: '{project="demo",service="migrate"}',
       service,
+      target,
       runLoki: async ({ deferEmpty }) => {
         calls.lokiDeferEmpty.push(deferEmpty);
         return outcome;
@@ -258,8 +271,51 @@ test("explicit Loki snapshot with no entries hints at --compose instead of falli
   expect(calls.lokiDeferEmpty).toEqual([false]);
   expect(calls.compose).toBe(0);
   expect(calls.notices).toHaveLength(1);
-  expect(calls.notices[0]).toContain("`hack logs --compose migrate`");
+  // A snapshot hint suggests a snapshot: plain `--compose` would follow.
+  expect(calls.notices[0]).toContain(
+    "try `hack logs --compose --no-follow migrate`."
+  );
   expect(calls.notices[0]).not.toContain("\n");
+});
+
+test("explicit Loki snapshot hint keeps --path, --project and --branch", async () => {
+  const { calls, run } = fallbackHarness(
+    { exitCode: 0, entryCount: 0, deferred: false },
+    { path: "./my app", project: "demo", branch: "feat-x" }
+  );
+  expect(await run(true, "migrate")).toBe(0);
+  expect(calls.notices[0]).toContain(
+    "try `hack logs --compose --no-follow --path './my app' --project demo --branch feat-x migrate`."
+  );
+});
+
+test("renderComposeLogsCommand matches follow mode and quotes unsafe words", () => {
+  expect(
+    renderComposeLogsCommand({ follow: true, service: undefined, target: {} })
+  ).toBe("hack logs --compose");
+  expect(
+    renderComposeLogsCommand({
+      follow: false,
+      service: " web ",
+      target: { path: "  ", branch: "it's" },
+    })
+  ).toBe("hack logs --compose --no-follow --branch 'it'\\''s' web");
+});
+
+test("follow notice suggests a following compose command for the same target", () => {
+  const notice = renderEmptyLokiFollowNotice({
+    query: '{project="demo--feat-x",service="api"}',
+    service: "api",
+    target: { branch: "feat-x" },
+  });
+  expect(notice).toContain(
+    'Loki has sent no log entries for {project="demo--feat-x",service="api"} yet'
+  );
+  expect(notice).toContain("still following");
+  expect(notice).toContain("Try `hack logs --compose --branch feat-x api`.");
+  expect(notice).not.toContain("--no-follow");
+  expect(notice).not.toContain("\n");
+  expect(LOKI_FOLLOW_EMPTY_NOTICE_DELAY_MS).toBe(8000);
 });
 
 test("a failed Loki query keeps its exit code and adds no empty-result notice", async () => {
@@ -313,4 +369,148 @@ test("Alloy keeps a stopped container's target labels stable and still requires 
   for (const label of ["container", "service", "project"]) {
     expect(relabel).toContain(`target_label  = "${label}"`);
   }
+});
+
+test("Alloy keeps its own component logs at warn so per-poll info lines stay out of Loki", () => {
+  // HACK-1364: loki.source.docker logs "finished transferring logs" at info
+  // every 5s for each kept exited container, and Alloy's own container is a
+  // Compose service it ships to Loki.
+  expect(GLOBAL_ALLOY_LOG_LEVEL).toBe("warn");
+  const config = renderGlobalAlloyConfig();
+  expect(config).toMatch(
+    /^logging \{\n {2}level {2}= "warn"\n {2}format = "logfmt"\n\}\n/
+  );
+  // One top-level logging block; Alloy refuses a duplicate.
+  expect(config.match(/^logging \{/gm)).toHaveLength(1);
+});
+
+// --- Loki follow: notice when nothing arrives -------------------------------
+
+type TailSocket = { close: () => void; send: (data: string) => void };
+
+async function withFakeLokiTail(
+  onOpen: (socket: TailSocket) => void,
+  body: (opts: {
+    readonly baseUrl: string;
+    readonly sockets: TailSocket[];
+  }) => Promise<void>
+): Promise<void> {
+  const sockets: TailSocket[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request, srv) {
+      if (
+        new URL(request.url).pathname === "/loki/api/v1/tail" &&
+        srv.upgrade(request, { data: undefined })
+      ) {
+        return;
+      }
+      return new Response("not found", { status: 404 });
+    },
+    websocket: {
+      open(ws) {
+        sockets.push(ws);
+        onOpen(ws);
+      },
+      message() {
+        // The tail endpoint ignores client messages.
+      },
+    },
+  });
+  try {
+    await body({ baseUrl: `http://127.0.0.1:${server.port}`, sockets });
+  } finally {
+    server.stop(true);
+  }
+}
+
+async function waitFor(
+  condition: () => boolean,
+  label: string,
+  timeoutMs = 5000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${label}`);
+    }
+    await Bun.sleep(10);
+  }
+}
+
+test("Loki follow reports once when the tail stays empty and keeps following", async () => {
+  await withFakeLokiTail(
+    () => undefined,
+    async ({ baseUrl, sockets }) => {
+      let notices = 0;
+      captureStdout();
+      const exit = lokiLogs({
+        baseUrl,
+        query: '{project="demo",service="migrate"}',
+        follow: true,
+        tail: 10,
+        pretty: false,
+        showProjectPrefix: true,
+        noEntriesNotice: {
+          afterMs: 30,
+          notify: () => {
+            notices += 1;
+          },
+        },
+      });
+      await waitFor(() => notices > 0, "the empty-follow notice");
+      // Still connected after the notice; the timer does not repeat.
+      await Bun.sleep(120);
+      expect(notices).toBe(1);
+      expect(sockets).toHaveLength(1);
+      for (const socket of sockets) {
+        socket.close();
+      }
+      expect(await exit).toBe(0);
+      restoreStdout();
+      expect(stdout).toBe("");
+    }
+  );
+});
+
+test("Loki follow stays quiet when an entry arrives before the notice delay", async () => {
+  const message = JSON.stringify({
+    streams: [
+      {
+        stream: { project: "demo", service: "api" },
+        values: [[ns(new Date("2026-10-21T11:59:00.000Z")), "hello"]],
+      },
+    ],
+  });
+  await withFakeLokiTail(
+    (socket) => socket.send(message),
+    async ({ baseUrl, sockets }) => {
+      let notices = 0;
+      captureStdout();
+      const exit = lokiLogs({
+        baseUrl,
+        query: '{project="demo",service="api"}',
+        follow: true,
+        tail: 10,
+        pretty: false,
+        showProjectPrefix: true,
+        noEntriesNotice: {
+          afterMs: 60,
+          notify: () => {
+            notices += 1;
+          },
+        },
+      });
+      await waitFor(() => stdout.includes("hello"), "the streamed entry");
+      await Bun.sleep(200);
+      for (const socket of sockets) {
+        socket.close();
+      }
+      expect(await exit).toBe(0);
+      restoreStdout();
+      expect(notices).toBe(0);
+      expect(stdout).toBe("demo/api | 2026-10-21T11:59:00.000Z hello\n");
+    }
+  );
 });

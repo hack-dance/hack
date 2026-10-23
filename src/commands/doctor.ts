@@ -77,6 +77,7 @@ import {
   adoptedProjectNotApplicableResults,
   type DoctorAdoptedProject,
   findDoctorAdoptedProject,
+  preflightDoctorProject,
 } from "../lib/doctor-adopted-project.ts";
 import {
   checkBrowserLocalNetwork,
@@ -175,7 +176,6 @@ import {
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
 } from "../lib/project-env-config.ts";
-import { assertLegacyProjectDiscovery } from "../lib/project-input-selection.ts";
 import {
   inspectProjectLifecycleHygiene,
   repairProjectLifecycleSessions,
@@ -536,22 +536,6 @@ async function maybeRunNativeMappingRecovery(
     });
   }
   return null;
-}
-
-/**
- * The adopted project doctor reports, or null after ordinary discovery's
- * native-input refusal passed. An adopted project's inputs belong to its
- * adoption, so that discovery would refuse it as native input; doctor selects
- * it first (HACK-1311).
- */
-async function preflightDoctorProject(opts: {
-  readonly startDir: string;
-}): Promise<DoctorAdoptedProject | null> {
-  const adopted = await findDoctorAdoptedProject(opts);
-  if (!adopted) {
-    await assertLegacyProjectDiscovery(opts);
-  }
-  return adopted;
 }
 
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({

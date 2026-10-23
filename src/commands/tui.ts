@@ -3,6 +3,7 @@ import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optPath, optProject } from "../cli/options.ts";
 import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import { findProjectContext } from "../lib/project.ts";
 import { upsertProjectRegistration } from "../lib/projects-registry.ts";
@@ -77,7 +78,7 @@ async function requireProjectContext(
 ): Promise<ProjectContext> {
   const ctx = await findProjectContext(startDir);
   if (!ctx) {
-    throw new Error("No .hack/ (or legacy .dev/) found. Run: hack init");
+    throw new MissingProjectContextError();
   }
   return ctx;
 }

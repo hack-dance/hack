@@ -882,7 +882,12 @@ are optional; when given they must equal the selection recorded at startup
 recorded selectors, refuses with `E_USAGE` before any runtime request. An empty
 value (`--env ""`, `--profile ""`, or one that is only spaces or commas) also
 refuses with `E_USAGE`: it does not mean "inherit" or an empty selection. Omit
-the option to inherit. `run` never restarts the project to change its selection.
+the option to inherit. A profile list is empty only when every entry is, so
+`--profile "web,"` asks for `web`. On the native backend the empty check runs
+first, before the project is selected, so an authored `hack.project.json`
+project refuses an empty value with the same `E_USAGE` line rather than its
+`E_NATIVE_PROJECT_UNSUPPORTED` refusal of any `--env` or `--profile`.
+`run` never restarts the project to change its selection.
 Services with no managed environment values also support `run`; they keep the
 admitted image's environment without creating a private environment mount or
 launcher. The one-off request still carries an explicit empty, identity-bound

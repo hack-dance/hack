@@ -45,6 +45,9 @@ export const NATIVE_RUN_EMPTY_SELECTION_REFUSAL =
  * `--profile` means no profiles, but a native run never changes the running
  * selection, so an empty value could only silently mean "inherit" or an
  * explicit empty selection. Whitespace and comma-only values count as empty.
+ * A profile list is empty only when every entry is: an empty entry beside a
+ * real one is dropped, so `--profile "web,"` asks for `web`. On the native
+ * backend `hack run` calls this before any project dispatch.
  */
 export function requireNonEmptyNativeRunOptions(opts: {
   readonly env: string | undefined;

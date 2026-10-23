@@ -22,6 +22,20 @@ const RUN = /^[a-f0-9]{32}$/;
 const MAX_OUTPUT = 16 * 1024 * 1024;
 const MAX_INPUT = 256 * 1024;
 
+/**
+ * Exit-relative bound on draining the owned child's stdout and stderr.
+ *
+ * The native runtime writes its closed error code (and any readiness line)
+ * before it exits, so those bytes are already in the pipes when the exit is
+ * observed; with no other writer, EOF follows immediately and the drain ends
+ * there. This bound only ends a drain that EOF cannot end: a descendant that
+ * inherited a pipe and keeps it open. It is measured from the observed exit,
+ * not from spawn, and is deliberately generous so that a heavily
+ * oversubscribed host still schedules the pipe readers before it expires.
+ * A 250 ms bound lost the closed code under load (HACK-1350).
+ */
+export const NATIVE_EXIT_DRAIN_BOUND_MS = 5000;
+
 export type NativeExitDiagnostic = {
   readonly exitCode: number;
   readonly nativeCode?: string;
@@ -317,14 +331,15 @@ async function serveGraphProcess(
     }
   );
   // Descendants may inherit a pipe after the owned receiver exits. Its exit,
-  // not unrelated writers' EOF, bounds draining; final graph inspection remains
-  // the caller's authority for cleanup, regardless of a successful exit code.
+  // not unrelated writers' EOF, bounds draining (see NATIVE_EXIT_DRAIN_BOUND_MS);
+  // final graph inspection remains the caller's authority for cleanup,
+  // regardless of a successful exit code.
   const drain = new AbortController();
   const owner = new AbortController();
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   void child.exited.then(() => {
     owner.abort();
-    drainTimer = setTimeout(() => drain.abort(), 250);
+    drainTimer = setTimeout(() => drain.abort(), NATIVE_EXIT_DRAIN_BOUND_MS);
   });
   const failureCodes = readNativeFailureCodes(child.stderr, drain.signal);
   const failureCode = failureCodes.then((failure) => failure?.code);

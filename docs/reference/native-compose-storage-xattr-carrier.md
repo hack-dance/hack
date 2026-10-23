@@ -413,11 +413,24 @@ Budgets are layered and all finite:
   the start deadline but capped in total at 16 × the storage budget or 1 hour,
   whichever is smaller. A guard proof that would start after the cap is spent is
   refused before it runs, and one that ends past it refuses as `storage-budget`.
-- Inside a carrier every Docker probe and command keeps a fixed cap, clipped to
-  the carrier's remaining budget: 15 seconds for reads, target observation and
-  helper create/start, and 10 seconds for helper removal and cleanup reads, which
-  are not clipped. A recorded command's 15-second settlement budget follows its
-  exit.
+- Inside a carrier every Docker probe and command is bounded by the carrier's
+  remaining budget (`nativeComposeStorageProbeTimeoutMs`), not by a fixed cap:
+  - Volume create and helper create/start get the whole remaining budget, so a
+    slow but healthy helper start on a loaded host completes while budget
+    remains, and a hung one times out exactly at the carrier's end.
+  - Reads and target observation get the remaining budget, at most 60 seconds
+    (the ownership probe's own ceiling).
+  - Helper removal and cleanup reads run even after the carrier's deadline, so
+    they are never clipped to it. Each has its own bound: the remaining budget
+    clamped to 10–60 seconds. A hung engine therefore cannot stall cleanup.
+
+  Earlier fixed caps (15 seconds for reads, target observation and helper
+  create/start; 10 seconds for cleanup) refused healthy `docker start -ai`
+  helpers on loaded hosted runners as `storage-helper-start`/`probe-timeout`
+  while most of the 90-second budget remained (HACK-1369). A timeout that ends
+  before the carrier's deadline still reports `probe-timeout`; one that reaches
+  it reports `storage-budget`. A recorded command's 15-second settlement budget
+  follows its exit.
 - An unrecorded command (an identity read or a legacy root/seed command) waits
   at most three seconds for its process group to become absent after exit. Like
   the handshake and settlement budgets, this deadline is monotonic

@@ -79,9 +79,11 @@ export function resolveComposeImageTimeoutMs(
  * Budget of one native storage carrier (one fresh helper proof session), from
  * `HACK_NATIVE_STORAGE_TIMEOUT_MS`. It is separate from the start budget:
  * storage preparation, enrollment and every storage proof use it, never
- * `HACK_COMPOSE_STARTUP_TIMEOUT_MS`. Each Docker probe inside a carrier keeps its
- * own fixed 10-15 s cap, and an exhausted carrier refuses with the closed
- * `storage-budget` effect reason. It grants nothing and relaxes no check.
+ * `HACK_COMPOSE_STARTUP_TIMEOUT_MS`. Each Docker probe inside a carrier is
+ * bounded by the carrier's remaining budget (cleanup keeps its own 10-60 s
+ * bound; see `nativeComposeStorageProbeTimeoutMs`), and an exhausted carrier
+ * refuses with the closed `storage-budget` effect reason. It grants nothing and
+ * relaxes no check.
  */
 export function resolveNativeStorageTimeoutMs(
   opts: {

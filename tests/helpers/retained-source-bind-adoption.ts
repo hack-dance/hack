@@ -182,3 +182,34 @@ else if(kind==='network'&&selected===network)console.log(JSON.stringify({id:netw
     },
   };
 }
+
+/**
+ * Leaves the fixture's published adoption pending, as an interrupted
+ * operation would: a retained `start` whose callback reports failure keeps
+ * its journal, so the adoption needs explicit recovery. The callback runs no
+ * engine command.
+ */
+export async function leaveRetainedSourceBindOperationPending(
+  fixture: Awaited<ReturnType<typeof retainedSourceBindFixture>>
+): Promise<void> {
+  const store = await fixture.store();
+  try {
+    const active = await store.loadActive();
+    if (!active) {
+      throw new Error("Synthetic active generation missing; values omitted.");
+    }
+    const outcome = await store.withMutation({
+      generation: active,
+      operation: "start",
+      services: [],
+      binary: fixture.compiler,
+      deadline: Date.now() + 15_000,
+      run: async () => 1,
+    });
+    if (outcome !== 1) {
+      throw new Error("Synthetic failed operation completed; values omitted.");
+    }
+  } finally {
+    await store.close();
+  }
+}

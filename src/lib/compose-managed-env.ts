@@ -154,10 +154,17 @@ export type ComposeEnvEffectiveScopes = Readonly<
  * values instead of services times keys (HACK-1317). A service missing from
  * `serviceEnv` takes the global values and shares the same references. A key a
  * service scope sets keeps its own {@link composeEnvReferenceName} reference.
- * The choice follows the scope metadata, not the values, so the text still
- * does not depend on any value. As a guard, a key the metadata calls global
- * whose value differs from the global value keeps its own reference, so a
- * container always gets its own resolved value.
+ * The choice follows the scope metadata (key names and scope names), with one
+ * guard that compares values: a key the metadata calls global whose value
+ * differs from the global value keeps its own reference, so a container
+ * always gets its own resolved value. The text never holds a value, but when
+ * the guard fires it does disclose one bit per service and key: that the
+ * service's value differs from the global value (not the value, its length,
+ * or any part of it). Metadata and values from one `resolveProjectEnvConfig`
+ * result come from the same traversal, so a key whose winning scope is
+ * `global` there always has the global value; the guard then never fires and
+ * the text depends only on names and scopes. It fires only for inconsistent
+ * inputs, where correctness of the container value wins over hiding that bit.
  *
  * Without `effectiveScopes`, every service gets its own reference for every
  * key: the form Hack wrote before shared references, which adoption still

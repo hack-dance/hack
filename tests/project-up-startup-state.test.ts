@@ -12,6 +12,7 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const psRows: string[] = [];
@@ -143,7 +144,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
-  process.env.HACK_HOME = originalHackHome;
+  restoreEnv("HACK_HOME", originalHackHome);
   if (originalComposeProfiles === undefined) {
     Reflect.deleteProperty(process.env, "COMPOSE_PROFILES");
   } else {

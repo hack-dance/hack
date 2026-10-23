@@ -31,12 +31,12 @@ afterEach(async () => {
   if (previousGlobalConfigPath !== undefined) {
     process.env.HACK_GLOBAL_CONFIG_PATH = previousGlobalConfigPath;
   } else {
-    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   }
   if (previousSecretsKey !== undefined) {
     process.env.HACK_SECRETS_FILE_KEY = previousSecretsKey;
   } else {
-    process.env.HACK_SECRETS_FILE_KEY = undefined;
+    Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
   }
 });
 

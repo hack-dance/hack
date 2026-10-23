@@ -1,0 +1,8 @@
+version: 2
+updates:
+  - package-ecosystem: "bun"
+    directories:
+      - "/"
+      - "/examples/next-app"
+    schedule:
+      interval: "weekly"

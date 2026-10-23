@@ -2933,10 +2933,6 @@ export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
 }
 
 /**
- * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
- * it; each finding suggests the exact command instead.
- */
-/**
  * Reports which Compose features keep the current project on the Compose
  * backend (HACK-1291). Reads only the project's Compose file and, on the native
  * backend, the `HACK_NATIVE_ADAPTATION` selection native up applies. An
@@ -2963,7 +2959,12 @@ async function checkComposeBackendFeatures(opts: {
   });
 }
 
-async function checkProjectEnvKey({
+/**
+ * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
+ * it; each finding suggests the exact command instead. It also catches a key
+ * that a later `git init` left unignored (`env-key-unignored`, HACK-1386).
+ */
+export async function checkProjectEnvKey({
   startDir,
 }: {
   readonly startDir: string;

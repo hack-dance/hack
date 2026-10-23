@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-
+import { checkProjectEnvKey } from "../src/commands/doctor.ts";
 import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
@@ -233,6 +233,11 @@ function unignoredRefusal(repo: Repo): string {
   return `Refusing to use ${PROJECT_ENV_KEY_FILENAME}: git does not ignore it, so it could be committed, and Hack could not add it to ${repo.gitignore}.`;
 }
 
+/** HACK-1386: the entry is present, so the refusal names the re-including rule instead. */
+function reincludedRefusal(repo: Repo): string {
+  return `Refusing to use ${PROJECT_ENV_KEY_FILENAME}: git does not ignore it, so it could be committed. ${repo.gitignore} lists '${PROJECT_ENV_KEY_FILENAME}', but a later rule in that file re-includes the key (for example '!${PROJECT_ENV_KEY_FILENAME}'). Remove that rule, then retry; key contents are never included in this message.`;
+}
+
 /** Creates the key with a first secret, then drops its ignore entry (the pre-fix state). */
 async function createUnignoredKey(repo: Repo): Promise<string> {
   const first = await setSecret(repo, "FIRST_SECRET", FIRST_VALUE);
@@ -352,9 +357,12 @@ test("a rule that re-includes the key is refused both before creating a key and 
   await writeFile(repo.gitignore, reincluding);
 
   const first = await setSecret(repo, "NEW_SECRET", NEXT_VALUE);
-  expectOneLineRefusal(first, unignoredRefusal(repo));
+  expectOneLineRefusal(first, reincludedRefusal(repo));
+  expect(`${first.stdout}${first.stderr}`).not.toContain("could not add it");
   expect(await keyExists(repo)).toBe(false);
   expect(await readFile(repo.layer, "utf8")).toBe(LAYER);
+  // The file already listed the key, so it was not rewritten.
+  expect(await readFile(repo.gitignore, "utf8")).toBe(reincluding);
 
   // An existing key under the same rule is refused before it encrypts.
   await writeFile(repo.gitignore, BASE_GITIGNORE);
@@ -362,7 +370,7 @@ test("a rule that re-includes the key is refused both before creating a key and 
   await writeFile(repo.gitignore, reincluding);
   const layerBefore = await readFile(repo.layer, "utf8");
   const next = await setSecret(repo, "NEXT_SECRET", NEXT_VALUE);
-  expectOneLineRefusal(next, unignoredRefusal(repo));
+  expectOneLineRefusal(next, reincludedRefusal(repo));
   expectNoKeyMaterial(next, keyText);
   expect(await readFile(repo.layer, "utf8")).toBe(layerBefore);
 }, 60_000);
@@ -381,4 +389,91 @@ test("outside git an existing key is used without writing a root .gitignore", as
 
   expect(run.exitCode).toBe(0);
   expect(await lstat(repo.gitignore).catch(() => null)).toBeNull();
+}, 60_000);
+
+/**
+ * Runs `run` in this process with the fixture's private HOME, HACK_HOME and
+ * global config, and git's global, system and XDG configuration (so any
+ * personal excludes file) out of reach; restores the previous environment.
+ */
+async function withPrivateEnvironment<T>(
+  repo: Repo,
+  run: () => Promise<T>
+): Promise<T> {
+  const home = join(repo.root, "user-home");
+  const overrides: Record<string, string> = {
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, ".config"),
+    HACK_HOME: join(repo.root, "hack-home"),
+    HACK_GLOBAL_CONFIG_PATH: join(repo.root, "hack-config.json"),
+    HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+  };
+  const previous = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]])
+  );
+  Object.assign(process.env, overrides);
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        Reflect.deleteProperty(process.env, key);
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+/** The real `hack doctor` env key check for the fixture, in this process. */
+async function doctorEnvKey(repo: Repo): Promise<{
+  readonly status: string;
+  readonly codes: readonly string[];
+  readonly message: string;
+}> {
+  const result = await withPrivateEnvironment(
+    repo,
+    async () => await checkProjectEnvKey({ startDir: repo.projectRoot })
+  );
+  return {
+    status: result.status,
+    codes: (result.envKey?.findings ?? []).map((finding) => finding.code),
+    message: result.message,
+  };
+}
+
+test("a key whose entry was removed before a later git init is flagged by doctor and repaired by the next secret set", async () => {
+  // HACK-1386: outside git an existing key needs no entry, and Hack does not
+  // observe a later `git init`. Doctor's env key check is the backstop, and
+  // the first secret write in the new checkout restores the entry.
+  const repo = await createRepo({ git: false });
+  const first = await setSecret(repo, "FIRST_SECRET", FIRST_VALUE);
+  expect(first.exitCode).toBe(0);
+  const keyText = (await readFile(repo.keyPath, "utf8")).trim();
+  await rm(repo.gitignore);
+  const second = await setSecret(repo, "NEXT_SECRET", NEXT_VALUE);
+  expect(second.exitCode).toBe(0);
+  expect(await lstat(repo.gitignore).catch(() => null)).toBeNull();
+
+  expect((await git(repo, ["init", "-q"])).exitCode).toBe(0);
+  expect(await keyIsCommittable(repo)).toBe(true);
+
+  const flagged = await doctorEnvKey(repo);
+  expect(flagged.status).toBe("warn");
+  expect(flagged.codes).toContain("env-key-unignored");
+  expect(flagged.message).toContain(
+    `env-key-unignored: ${PROJECT_ENV_KEY_FILENAME} is not ignored by git`
+  );
+  expect(flagged.message).not.toContain(keyText);
+  expect(flagged.message).not.toContain(repo.root);
+
+  const repair = await setSecret(repo, "THIRD_SECRET", FIRST_VALUE);
+  expect(repair.exitCode).toBe(0);
+  expectNoKeyMaterial(repair, keyText);
+  expect(await keyIsCommittable(repo)).toBe(false);
+  const repaired = await doctorEnvKey(repo);
+  expect(repaired.codes).not.toContain("env-key-unignored");
+  expect(repaired.status).toBe("ok");
 }, 60_000);

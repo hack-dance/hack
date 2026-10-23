@@ -103,7 +103,17 @@ How it is maintained:
   key is created. Before a `--secret` set or hydrate uses an existing
   checkout-local key that git does not ignore, Hack adds the entry; if it
   cannot, or a later rule re-includes the key, the command is refused and
-  nothing is encrypted with that key
+  nothing is encrypted with that key. The refusal names the cause: either the
+  entry could not be written, or the file already lists the key and a later
+  rule (such as `!.hack.secret.key`) re-includes it, which you need to remove
+- outside git there is nothing to commit, so an existing key does not need the
+  entry and Hack does not recreate a deleted root `.gitignore` for it. Hack
+  does not run when you later turn the directory into a repository with
+  `git init`, so it cannot add the entry at that moment. If the entry is
+  missing then, `hack doctor` reports `env-key-unignored` (see
+  [Key strength and exposure](#secret-key-handling)), and the first `--secret` set or
+  hydrate in the new repository adds the entry before it uses the key, or is
+  refused
 - older repos that added `.hack/.internal/` to the root `.gitignore` keep
   working; the entries are equivalent and nothing is removed
 
@@ -663,9 +673,19 @@ file, change it and replace it while holding that file's write lock,
 The same applies to the legacy `.hack/.env` files. So when several commands change
 different keys of the same file at once, every change is kept. A command
 that finds the lock held waits up to 10 seconds, then stops with a one-line message that
-names the file and says nothing was written; run it again. The lock is released when the
-command ends. If a command is killed while it holds the lock, the next command takes the
-lock over once it confirms that process has exited.
+names the file and its lock and says nothing was written; run it again. The lock is
+released when the command ends. If a command is killed while it holds the lock, the next
+command takes the lock over once it confirms that process has exited.
+
+Hack never removes a lock it cannot prove is abandoned. That includes a lock file that
+is not a complete Hack receipt, one owned by another user or writable by others, and one
+that names a process ID now used by an unrelated live process. In those cases every
+retry would wait and fail the same way, so the message also says what to do: if no
+`hack env` command is running, remove the lock file it names and retry. If a command was
+killed while it was taking over an abandoned lock, it leaves `<lock>.recovery` behind,
+and the message says the recovery guard is busy and names both paths; when no `hack env`
+command is running, remove both and retry. `hack env hydrate` reports the same message
+when it cannot get the env file's lock.
 
 `.hack/.internal/` is ignored by the managed `.hack/.gitignore`, so lock files never show
 in `git status`. If `.hack/.internal` is a symlink or not a directory, these commands
@@ -920,7 +940,7 @@ it cannot spell portably as `<unprintable-path>/.hack.secret.key`.
 | `env-key-wrong-owner` | warn | the file is not owned by the current user |
 | `env-key-wrong-length` | warn | shorter than the 43-character base64url form of a 256-bit key, or empty |
 | `env-key-low-entropy` | warn | long enough but repetitive (estimated under 128 bits) |
-| `env-key-unignored` | warn | the checkout-local key is not ignored by git, so `git status` offers it for commit; suggests adding it to the root `.gitignore` |
+| `env-key-unignored` | warn | the checkout-local key is not ignored by git, so `git status` offers it for commit (for example after `git init` in a directory whose root `.gitignore` entry was removed); suggests adding it to the root `.gitignore` |
 | `env-key-symlink` | error | the key path is a symlink; Hack refuses symlinked keys |
 | `env-key-not-regular` | error | the key path is a directory or another non-file entry |
 | `env-key-unreadable` | error | unreadable, oversized or not UTF-8 |

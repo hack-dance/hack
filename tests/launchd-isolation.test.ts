@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import {
   DAEMON_LAUNCHD_PLIST_FILENAME,
   GLOBAL_DAEMON_DIR_NAME,
@@ -443,6 +443,7 @@ const AUTOSTART_CASES = [
   {
     label: "a hack-next run on the default hack home",
     env: { HACK_CANDIDATE_ENTRYPOINT: "hack-next" },
+    denied: true,
     isolated: false,
     launchctl: [],
     hack: [],
@@ -450,6 +451,7 @@ const AUTOSTART_CASES = [
   {
     label: "a hack-next run on an isolated hack home",
     env: { HACK_CANDIDATE_ENTRYPOINT: "hack-next" },
+    denied: true,
     isolated: true,
     launchctl: [],
     hack: [],
@@ -460,6 +462,7 @@ const AUTOSTART_CASES = [
       HACK_CANDIDATE_ENTRYPOINT: "hack-v5",
       [DAEMON_AUTOSTART_DISABLE_ENV]: "1",
     },
+    denied: true,
     isolated: false,
     launchctl: [],
     hack: [],
@@ -467,6 +470,7 @@ const AUTOSTART_CASES = [
   {
     label: "the opt-out alone",
     env: { [DAEMON_AUTOSTART_DISABLE_ENV]: "1" },
+    denied: true,
     isolated: false,
     launchctl: [],
     hack: [],
@@ -475,6 +479,7 @@ const AUTOSTART_CASES = [
     // Positive control: the same driver does reach launchd without a marker.
     label: "positive control: a stable run on the default hack home",
     env: {},
+    denied: false,
     isolated: false,
     launchctl: ["print", "kickstart"],
     hack: [],
@@ -483,6 +488,7 @@ const AUTOSTART_CASES = [
     // Positive control: and runs the `hack` on PATH when launchd is denied.
     label: "positive control: a stable run on an isolated hack home",
     env: {},
+    denied: false,
     isolated: true,
     launchctl: [],
     hack: ["daemon start"],
@@ -514,7 +520,30 @@ for (const autostartCase of AUTOSTART_CASES) {
     });
     expect(run.stderr).toBe("");
     expect(run.code).toBe(0);
-    expect(JSON.parse(run.stdout)).toEqual({ response: null });
+    const output = JSON.parse(run.stdout) as {
+      readonly response: unknown;
+      readonly configPath: string;
+      readonly observed: {
+        readonly files: readonly string[];
+        readonly which: readonly string[];
+        readonly spawns: readonly string[];
+      };
+    };
+    expect(output.response).toBeNull();
+    expect(output.configPath.startsWith(fixture.root)).toBe(true);
+    const spawned = output.observed.spawns.map((bin) => basename(bin));
+    if (autostartCase.denied) {
+      // The autostart guard runs first: a denied run reads no config, does
+      // no PATH lookup and spawns nothing (no launchctl, no `hack`).
+      expect(output.observed.files).not.toContain(output.configPath);
+      expect(output.observed.which).toEqual([]);
+      expect(spawned).toEqual([]);
+    } else {
+      // Positive control: the same recorder sees the config read and the
+      // launchd or PATH start.
+      expect(output.observed.files).toContain(output.configPath);
+      expect(spawned).toContain(autostartCase.isolated ? "hack" : "launchctl");
+    }
 
     const verbs = (await launchctlCalls(fixture)).map(
       (line) => line.split(" ")[0]

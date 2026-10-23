@@ -251,9 +251,11 @@ first `hack` on PATH), which is the stable daemon, not the candidate. Under
 either variable, `hack global up` also skips its `daemon.autoStart` step (the
 `hack daemon start` it runs through the first `hack` on PATH), and macOS
 `hack global install` skips its offer to run `hack daemon install`; both log the
-skip. Neither variable covers the interactive `hack doctor --fix` prompts to start
-or restart hackd. They also run the first `hack` on PATH, so answer no to them in
-a candidate run.
+skip. `hack doctor --fix` also skips its hackd repair (restart an incompatible
+hackd, clear stale pid/socket files, start hackd), in interactive and
+non-interactive mode alike, because each step runs the first `hack` on PATH. It
+asks nothing, notes the skip with the reason, and names the command to run
+yourself, for example `hack daemon clear && hack daemon start`.
 
 launchd and isolated state roots: on macOS the hackd launchd service is one
 per-user service (`gui/<uid>/dance.hack.hackd`, plist in

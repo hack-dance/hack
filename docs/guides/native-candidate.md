@@ -121,11 +121,12 @@ describes Compose testing and its shared-state limits: run stable `hack global u
 then any stable `hack doctor` or `hack doctor --fix`, then stable `hack daemon stop`,
 confirm `pgrep -fl "hack daemon start"` prints nothing, and run no stable `hack`
 command while the candidate uses your Hack home. Stable `hack global up` (v4.2.0)
-starts a stopped `hackd` again, and stable `hack doctor --fix` offers to. If the
-check lists a process, the guide gives the launchd remedy. The entrypoint turns
-off daemon autostart in newer builds, so the candidate does not start the stable
-`hackd` on its own. Answer no if a candidate `hack doctor --fix` asks to start or
-restart `hackd`: that prompt runs the stable CLI. Do not commit the
+starts a stopped `hackd` again, and so does stable `hack doctor --fix` (it asks
+first only in a terminal). If the check lists a process, the guide gives the
+launchd remedy. The entrypoint turns off daemon autostart in newer builds, so the
+candidate does not start the stable `hackd` on its own: a candidate
+`hack doctor --fix` skips its `hackd` repair without asking and prints the
+command to run yourself, which runs the stable CLI. Do not commit the
 project's generated `.hack/.internal/` directory; newer generators rewrite files
 such as `compose.override.yml`. The entrypoint preserves arguments, exit codes and
 signals through `exec`, and never replaces the installed `hack`. Project-specific

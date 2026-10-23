@@ -129,14 +129,17 @@ A Compose candidate run uses the same `~/.hack` as stable Hack, so the stable
 `hackd` daemon must not run while the candidate does. Stopping it once is not
 enough: stable `hack global up` (v4.2.0) starts `hackd` again whenever it is
 stopped, because the stable `daemon.autoStart` setting is on by default. Stable
-`hack doctor --fix` (v4.2.0) also offers to start a stopped `hackd`. Other
+`hack doctor --fix` (v4.2.0) also starts a stopped `hackd`: it asks first in a
+terminal, and starts it without asking in a non-interactive run. Other
 stable commands that talk to `hackd` can also start it again. Newer candidate
 builds turn off daemon autostart in `hack-next` and the bundled `hack-v5`
 entrypoint, so the candidate does not start the stable `hackd` on its own, not
-even from a candidate `global up` or `global install`. A candidate
-`hack doctor --fix` can still ask to start or restart `hackd`. Those prompts run
-the first `hack` on PATH, which is the stable CLI, so answer no to them. Older
-candidate bundles can start it, so use this order with every bundle.
+even from a candidate `global up`, `global install` or `doctor --fix`. A
+candidate `hack doctor --fix` skips its `hackd` repair without asking, in a
+terminal or not, and prints the reason and the command to run yourself, such as
+`hack daemon start`. That command runs the stable CLI, so do not run it during a
+Compose candidate run. Older candidate bundles can start `hackd`, so use this
+order with every bundle.
 
 Use this order:
 
@@ -150,8 +153,9 @@ HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" up --path /absolut
 
 1. Run stable `hack global up` first, so the global Caddy and CoreDNS services run.
 2. If you want a stable `hack doctor` or `hack doctor --fix` check, run it now,
-   before you stop `hackd`. Do not answer yes to its "Start hackd now?" prompt
-   after you stop `hackd`.
+   before you stop `hackd`. After you stop `hackd`, do not run stable
+   `hack doctor --fix` again: it asks "Start hackd now?" in a terminal and
+   starts `hackd` without asking in a non-interactive run.
 3. Then run stable `hack daemon stop`.
 4. Then check with `pgrep -fl "hack daemon start"`. If it lists a process, a
    stable `hackd` is still running, usually one that its per-user launchd

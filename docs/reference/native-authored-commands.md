@@ -15,9 +15,13 @@ This bounded native consumer requires each service's `image` to be an immutable
 `sha256:` image **content ID**, such as the `image_id` returned by a successful
 [`runtime ensure-image`](../guides/native-candidate.md#public-image-acquisition-without-docker)
 acquisition. Keep that acquisition's pinned-reference and archive evidence. A
-registry tag or `repository@sha256:manifest-digest` is not the content ID: it can
-pass configuration planning while execution refuses `native_graph_admission`.
-Do not substitute a mutable image or bypass the image identity guard.
+registry tag or `repository@sha256:manifest-digest` is not the content ID. The
+native planner (`graph native plan` and `frontend-plan`) refuses it with the same
+closed `native_graph_admission` code that execution uses, so `up` fails at its
+`native-plan` stage before it reserves a startup intent. `config validate` reports the
+same refusal when `HACK_RUNTIME_BACKEND=native` is set; without it, validation stays
+backend-neutral because Compose runs tags and digests. Do not substitute a mutable
+image or bypass the image identity guard.
 
 ```sh
 HACK_RUNTIME_BACKEND=native \
@@ -92,8 +96,9 @@ prove cleanup. Retained bindings and recovery requirements stay in force.
 These diagnostics do not grant retry or cleanup authority.
 
 A native consumer can refuse after the startup intent is reserved but before it
-reserves any runtime journal. For example, a `repository@sha256:` image reaches
-execution and refuses `native_graph_admission`. Such a run has no receipt, so the
+reserves any runtime journal, for example when its review changes, the engine
+cannot be reached or startup is canceled. (A `repository@sha256:` image used to
+reach execution this way; the planner now refuses it first.) Such a run has no receipt, so the
 Removed retirement inspection can never succeed. After the consumer process has
 settled, startup asks the native runtime to inspect the exact run. Startup retires
 the startup intent and its source envelope only when the runtime refuses

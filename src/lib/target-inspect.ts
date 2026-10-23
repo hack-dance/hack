@@ -429,6 +429,9 @@ function projectInputGuardReason(error: unknown): TargetRefusalReason | null {
       : "input_unreadable";
   }
   if (error instanceof LegacyComposeAdoptionSelectionError) {
+    if (error.kind === "permission") {
+      return "input_permission_denied";
+    }
     return error.kind === "input-access"
       ? "input_unreadable"
       : "adoption_state_unsafe";

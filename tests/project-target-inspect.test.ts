@@ -710,7 +710,9 @@ describe("paired CLI/MCP target fixtures", () => {
       const projectDir = join(path, ".hack");
       await chmod(projectDir, 0o000);
       try {
-        expectRefusal(await inspectBoth({ path }), "adoption_state_unsafe");
+        // An unsearchable .hack is a permission fault (#402's `permission`
+        // selection kind), not unsafe adoption state.
+        expectRefusal(await inspectBoth({ path }), "input_permission_denied");
         const cli = await runCli({ path });
         expect(JSON.stringify(cli.envelope)).not.toContain(fixture.root);
         expect(JSON.stringify(cli.envelope)).not.toContain("EACCES");

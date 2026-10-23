@@ -211,7 +211,9 @@ type Code =
   | "E_LEGACY_ADOPTION_BUSY"
   | "E_LEGACY_ADOPTION_CHANGED"
   | "E_LEGACY_ADOPTION_UNSUPPORTED"
-  | "E_LEGACY_ADOPTION_CANCELLED";
+  | "E_LEGACY_ADOPTION_CANCELLED"
+  | "E_LEGACY_ADOPTION_DEADLINE"
+  | "E_LEGACY_ADOPTION_LITERAL_ENV";
 /** Fixed diagnostics never retain source values, resource facts, compiler output or abort reasons. */
 export class LegacyComposeAdoptedGenerationError extends Error {
   readonly code: Code;
@@ -228,6 +230,10 @@ export class LegacyComposeAdoptedGenerationError extends Error {
           "Legacy adoption conversion is unsupported or compiler admission refused; values omitted.",
         E_LEGACY_ADOPTION_CANCELLED:
           "Legacy adoption generation was cancelled; values omitted.",
+        E_LEGACY_ADOPTION_DEADLINE:
+          "Legacy adoption operation reached its caller deadline before it could finish; values omitted.",
+        E_LEGACY_ADOPTION_LITERAL_ENV:
+          "Legacy adoption refused: this generation is bound to a .hack/.internal/compose.env.override.yml that holds literal env values written by an earlier Hack version, and publishing it would keep them on disk. Run 'hack config adopt --recover --rollback' to release it. Values omitted.",
       }[code]
     );
     this.name = "LegacyComposeAdoptedGenerationError";
@@ -251,6 +257,14 @@ function refuseRoutingProofDeadline(
     });
   }
   throw error;
+}
+/**
+ * Caller-deadline expiry of a retained operation (HACK-1340). Kept apart from
+ * E_LEGACY_ADOPTION_CHANGED, which only an observed source or binding drift
+ * issues: an unchanged but slow operation must not report drift.
+ */
+function refuseMutationDeadline(): never {
+  refuse("E_LEGACY_ADOPTION_DEADLINE");
 }
 function cancelled(signal?: AbortSignal) {
   if (signal?.aborted) {
@@ -316,6 +330,12 @@ function recordPublicationRefusal(
           break;
         case "E_LEGACY_ADOPTION_CANCELLED":
           reason = "legacy-cancelled";
+          break;
+        case "E_LEGACY_ADOPTION_DEADLINE":
+          reason = "proof-deadline";
+          break;
+        case "E_LEGACY_ADOPTION_LITERAL_ENV":
+          reason = "literal-env-override";
           break;
         default:
           break;
@@ -1037,6 +1057,7 @@ async function readInputs(
   material: "verify" | "saved" = "verify"
 ): Promise<{
   readonly manifest: Manifest;
+  readonly literalEnvOverride: boolean;
   readonly inputs: Readonly<PrivateInputs>;
 }> {
   const observation = retainedRouteObservations.get(ctx);
@@ -1338,6 +1359,8 @@ async function readInputs(
     freezeImportValue(observed);
     return {
       manifest: { ...meta, binding: observed },
+      /** Bound env override holds an earlier version's literal values. */
+      literalEnvOverride: projection?.literalEnvOverride === true,
       inputs: privateResult({
         configText,
         composeText,
@@ -2192,6 +2215,13 @@ async function completePublication(
       Date.now() + Math.min(ctx.timeoutMs ?? 15_000, 60_000);
     stage = "publication-inputs";
     const loaded = await readInputs(ctx, publication.generation);
+    // Publishing pins the bound override for the adoption's life. An earlier
+    // version could prepare over its literal file; publication and repair
+    // completion both refuse it before any original moves, leaving the
+    // journaled switch for `--recover --rollback` (HACK-1318).
+    if (loaded.literalEnvOverride) {
+      refuse("E_LEGACY_ADOPTION_LITERAL_ENV");
+    }
     stage = "publication-layout";
     await requireFirstSliceLayout(ctx, loaded.inputs);
     stage = "publication-compiler";
@@ -2505,16 +2535,21 @@ function requireMutationDeadline(
   plan: LegacyComposeRetainedPlan
 ) {
   if (
-    (legacyComposeRetainedOrdered(plan) ||
-      captured.generation.report.adoption_generation_version === 8 ||
-      captured.generation.report.adoption_generation_version === 9 ||
-      captured.generation.report.adoption_generation_version === 12 ||
-      captured.generation.report.adoption_generation_version === 14) &&
-    (captured.deadline === undefined ||
-      !Number.isFinite(captured.deadline) ||
-      captured.deadline <= Date.now())
+    legacyComposeRetainedOrdered(plan) ||
+    captured.generation.report.adoption_generation_version === 8 ||
+    captured.generation.report.adoption_generation_version === 9 ||
+    captured.generation.report.adoption_generation_version === 12 ||
+    captured.generation.report.adoption_generation_version === 14
   ) {
-    refuse("E_LEGACY_ADOPTION_CHANGED");
+    if (
+      captured.deadline === undefined ||
+      !Number.isFinite(captured.deadline)
+    ) {
+      refuse("E_LEGACY_ADOPTION_CHANGED");
+    }
+    if (captured.deadline <= Date.now()) {
+      refuseMutationDeadline();
+    }
   }
 }
 
@@ -2524,7 +2559,7 @@ function boundedMutationContext(ctx: Context, deadline: number) {
     cancelled(ctx.signal);
     const time = Math.floor(deadline - Date.now());
     if (time <= 0) {
-      refuse("E_LEGACY_ADOPTION_CHANGED");
+      refuseMutationDeadline();
     }
     return time;
   }
@@ -2703,8 +2738,16 @@ async function mutateRetainedContainers(
     );
   } catch (error: unknown) {
     cancelled(original.signal);
-    if (Date.now() >= deadline) {
-      refuse("E_LEGACY_ADOPTION_CHANGED");
+    // An observed drift keeps its own code. Any other failure once the caller
+    // deadline has passed, including the bounded context's own abort, is expiry.
+    if (
+      Date.now() >= deadline &&
+      !(
+        error instanceof LegacyComposeAdoptedGenerationError &&
+        error.code === "E_LEGACY_ADOPTION_CHANGED"
+      )
+    ) {
+      refuseMutationDeadline();
     }
     throw error;
   } finally {

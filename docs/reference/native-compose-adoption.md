@@ -132,7 +132,11 @@ resource reacquisitions use its remaining clock, including final verification.
 Fresh bounded original-ID observations and the shared process runner use one
 operation deadline and cancellation owner. Failure, drift, cancellation or
 unverified final readiness retains the pending journal; only explicit verified
-stop recovery can clear it. These rechecks do not freeze external editors or
+stop recovery can clear it. A retained operation that reaches its caller deadline
+refuses with its own fixed message ("reached its caller deadline"), not the
+source-or-binding-changed message, which only an observed drift issues
+(HACK-1340). `hack up`, `hack down` and `config adopt --stop` pass the Compose
+startup budget as that deadline. These rechecks do not freeze external editors or
 the engine atomically. Public output remains field/count/status metadata;
 capabilities and authored probe arguments are private. Prior versions 1–4 keep
 their existing execution behavior, and older upgraded owners refuse version 5
@@ -419,6 +423,20 @@ TTY/stdin forwarding, deadlines and process-group cleanup use the existing
 shared runner. The store's AbortSignal is a cooperative admission/recheck control;
 it does not independently terminate a caller-owned engine callback.
 
+`hack doctor` selects an active or pending adoption before ordinary discovery, which
+would refuse the project as native input. It reports the adopted project, the env key,
+tracked generated files and Compose env values at rest. Each other project check
+(runtime and lifecycle hygiene, Compose networks and backend features, `DEV_HOST`, env
+mode, materialization and overlay warnings, worktree keys and instances, the
+`.hack/.gitignore` check, Caddy hosts)
+reads inputs that the adoption owns, so doctor lists it as not checked instead of
+failing. A pending adoption is a warning that asks for explicit recovery. The
+`--fix` plan says that it leaves the adoption's inputs, retained containers and state
+alone. For the project it only removes tracked generated files from the Git index
+(the files stay on disk) and keeps an env override that the adoption pins. It leaves
+`.hack/.gitignore` unchanged; a committed `.hack.secret.key` is also added to the
+root `.gitignore`. Global repairs still run.
+
 ## Rollback and interruption recovery
 
 ### Original file grants: private version 8
@@ -496,6 +514,16 @@ and completes a pending switch. Add `--rollback` to restore a pending switch or
 rollback. Discovery and ordinary operations stay fenced while either transition
 is pending. This is cooperative publication, not an atomic freeze of arbitrary
 editors or Docker mutations.
+
+A new `hack config adopt` (with or without `--stop`) and its preview refuse a
+generated `.hack/.internal/compose.env.override.yml` that holds literal env values,
+because adoption pins its bytes and inode. Recovery acts on an existing
+preparation, so publication itself refuses instead: when the bound override holds
+literal values (a preparation an earlier version made), `--recover --stop`
+publication and `--recover` switch completion refuse at the `publication-inputs`
+boundary with the closed `literal-env-override` reason, before any original moves.
+The switch stays journaled and the fixed message names
+`hack config adopt --recover --rollback`; rollback stays allowed (HACK-1318).
 
 Unmodified v4 clients cannot be universally fenced: they ignore future legacy
 versions and may select ancestor Compose inputs. Adoption requires the upgraded

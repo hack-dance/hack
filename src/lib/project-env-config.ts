@@ -721,6 +721,47 @@ async function isGitTrackedProjectEnvPath(opts: {
 }
 
 /**
+ * Whether git's ignore rules (`.gitignore` files, `.git/info/exclude`,
+ * `core.excludesFile`) match `path`, whether or not it is tracked
+ * (`check-ignore --no-index`). Null when git is unavailable or `projectRoot`
+ * is not inside a work tree, where nothing can be committed.
+ */
+export async function isGitIgnoredProjectEnvPath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<boolean | null> {
+  let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
+  try {
+    proc = Bun.spawn({
+      cmd: [
+        "git",
+        "-C",
+        opts.projectRoot,
+        "check-ignore",
+        "-q",
+        "--no-index",
+        "--",
+        toGitRelativePath(opts),
+      ],
+      stderr: "ignore",
+      stdin: "ignore",
+      stdout: "ignore",
+    });
+  } catch {
+    return null;
+  }
+
+  const exitCode = await proc.exited;
+  if (exitCode === 0) {
+    return true;
+  }
+  if (exitCode === 1) {
+    return false;
+  }
+  return null;
+}
+
+/**
  * Whether `startDir` or an ancestor holds a `.git` entry (directory, linked
  * worktree file or symlink), or `GIT_DIR` points git elsewhere. It does not ask
  * git, so it still answers when git itself refuses to run in the checkout.
@@ -3853,6 +3894,11 @@ export type EnsureProjectEnvSecretKeyResult = {
  * and new key files are created exclusively with mode 0600 (an existing entry,
  * including a dangling symlink, is never replaced or followed).
  *
+ * Ignore invariant: a checkout-local key is returned only once git ignores it.
+ * The root `.gitignore` entry is written before a new local key, so a failed
+ * write leaves no key behind, and an existing local key that git does not
+ * ignore is repaired or refused (see `ensureProjectEnvKeyIgnored`).
+ *
  * Concurrency: when no key exists, creation in a git checkout runs under a
  * cooperative lock at `<git common dir>/.hack.secret.key.lock`, so concurrent
  * first users across primary and linked checkouts converge on one key. Legacy
@@ -3929,6 +3975,13 @@ async function ensureProjectEnvSecretKeyUnlocked(opts: {
   const existing = await readLegacyProjectEnvKeyFile({ path: keyPath });
   if (existing !== null) {
     await assertProjectEnvKeyUntracked({ keyPath });
+    // A key left un-ignored (an older Hack, a failed ignore write, a hand-
+    // copied key) is repaired before it is used, or refused.
+    await ensureProjectEnvKeyIgnored({
+      projectRoot: opts.projectRoot,
+      keyPath,
+      creating: false,
+    });
     return {
       keyPath,
       keyText: existing,
@@ -4047,12 +4100,57 @@ async function writeProjectEnvKeyWithFallback(opts: {
     );
   }
 
+  // The ignore entry comes first: if it cannot be written, no key file exists
+  // for a retry to pick up unignored.
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  await ensureProjectEnvKeyIgnored({
+    projectRoot: opts.projectRoot,
+    keyPath: opts.localKeyPath,
+    creating: true,
+  });
   const keyText = await writeProjectEnvKeyFile({
     projectRoot: opts.projectRoot,
     path: opts.localKeyPath,
     keyText: opts.keyText,
   });
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  emitProjectEnvKeyWarnings({ warnings });
+  return { keyPath: opts.localKeyPath, keyText, warnings };
+}
+
+/** Fixed, value-free refusal for a checkout-local key git would commit. */
+function projectEnvKeyUnignoredError(opts: {
+  readonly rootGitignore: string;
+}): ProjectEnvKeyRefusalError {
+  return new ProjectEnvKeyRefusalError(
+    `Refusing to use ${PROJECT_ENV_KEY_FILENAME}: git does not ignore it, so it could be committed, and Hack could not add it to ${opts.rootGitignore}. Add a '${PROJECT_ENV_KEY_FILENAME}' line to that file (making it writable if needed) and remove any rule that re-includes the key, then retry; key contents are never included in this message.`
+  );
+}
+
+/**
+ * Keeps the checkout-local key file out of commits: makes sure the root
+ * `.gitignore` lists it and that git then ignores it.
+ *
+ * - `creating`: runs before a new key file is written. The entry is always
+ *   ensured (also outside git, so a later `git init` ignores the key); a
+ *   failed write is refused as that `.gitignore` write, and the caller writes
+ *   no key.
+ * - otherwise (an existing key): only a key git positively does not ignore is
+ *   repaired, so an ignored key or a checkout outside git causes no write. A
+ *   failed repair is refused with {@link projectEnvKeyUnignoredError}, and the
+ *   key is not used.
+ *
+ * Either way, a key git still does not ignore after the entry (for example a
+ * later `!.hack.secret.key` rule) is refused.
+ */
+async function ensureProjectEnvKeyIgnored(opts: {
+  readonly projectRoot: string;
+  readonly keyPath: string;
+  readonly creating: boolean;
+}): Promise<void> {
+  const probe = { projectRoot: opts.projectRoot, path: opts.keyPath };
+  if (!opts.creating && (await isGitIgnoredProjectEnvPath(probe)) !== false) {
+    return;
+  }
   const rootGitignore = resolve(opts.projectRoot, ".gitignore");
   try {
     await ensureGitignoreEntry({
@@ -4061,14 +4159,13 @@ async function writeProjectEnvKeyWithFallback(opts: {
       comment: "# project env key",
     });
   } catch (error: unknown) {
-    throw closedFileWriteError({
-      error,
-      path: rootGitignore,
-      operation: "write",
-    });
+    throw opts.creating
+      ? closedFileWriteError({ error, path: rootGitignore, operation: "write" })
+      : projectEnvKeyUnignoredError({ rootGitignore });
   }
-  emitProjectEnvKeyWarnings({ warnings });
-  return { keyPath: opts.localKeyPath, keyText, warnings };
+  if ((await isGitIgnoredProjectEnvPath(probe)) === false) {
+    throw projectEnvKeyUnignoredError({ rootGitignore });
+  }
 }
 
 /**

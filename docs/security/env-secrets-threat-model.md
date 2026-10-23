@@ -92,7 +92,7 @@ refer to `hack-dance/hack`.
 
 | Threat | Mitigation on `next` |
 | --- | --- |
-| The key is committed. | The root `.gitignore` gets a `.hack.secret.key` entry when the key is created. Encryption refuses a git-tracked key, including an inherited primary key, before it is copied (#288). `hack doctor` reports `env-key-tracked` at any depth (#309) and the "generated files" check can untrack a root key with `--fix`. |
+| The key is committed. | The root `.gitignore` gets a `.hack.secret.key` entry before the key is created, so a failed entry write leaves no key; an existing checkout-local key git does not ignore is repaired or refused before a `--secret` write uses it, and `hack doctor` reports it as `env-key-unignored` (HACK-1375). Encryption refuses a git-tracked key, including an inherited primary key, before it is copied (#288). `hack doctor` reports `env-key-tracked` at any depth (#309) and the "generated files" check can untrack a root key with `--fix`. |
 | A key copy ships in build output or a static site. | `hack doctor` reports `env-key-public-path` for copies under `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` and `.output/` (#309). |
 | A weak, short or repetitive key. | `env-key-wrong-length` and `env-key-low-entropy` (#309). Generated keys are 32 random bytes in base64url. |
 | Materialized `.hack/.env` or local overrides are committed. | Hack owns a committed `.hack/.gitignore` block, and `hack doctor` flags tracked generated files (see [ignore rules](../env.md#ignore-rules-committed-hackgitignore)). |

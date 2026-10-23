@@ -91,6 +91,7 @@ import {
 import {
   describeEnvKeyInspection,
   type EnvKeyInspection,
+  gitIsLocalKeyIgnored,
   gitListTrackedKeyPaths,
   inspectProjectEnvKey,
   resolveEnvKeyCandidates,
@@ -2990,6 +2991,7 @@ async function checkEnvKeyAtRoot(opts: {
     env: process.env,
     uid: typeof process.getuid === "function" ? process.getuid() : null,
     listTrackedKeyPaths: gitListTrackedKeyPaths,
+    isLocalKeyIgnored: gitIsLocalKeyIgnored,
   });
   return envKeyCheckResult(inspection);
 }

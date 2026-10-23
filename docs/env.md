@@ -654,6 +654,34 @@ hack env unset SERVICE_TOKEN --service api --env qa
 hack env unset API_BASE_URL --local
 ```
 
+### Concurrent writes to one env file
+
+Hack env commands that change an env file never silently lose another command's change.
+`hack env set`, `hack env add`, `hack env unset` and `hack env hydrate` each read the
+file, change it and replace it while holding that file's write lock,
+`.hack/.internal/<file name>.lock` (for example `.hack/.internal/hack.env.yaml.lock`).
+The same applies to the legacy `.hack/.env` files. So when several commands change
+different keys of the same file at once, every change is kept. A command
+that finds the lock held waits up to 10 seconds, then stops with a one-line message that
+names the file and says nothing was written; run it again. The lock is released when the
+command ends. If a command is killed while it holds the lock, the next command takes the
+lock over once it confirms that process has exited.
+
+`.hack/.internal/` is ignored by the managed `.hack/.gitignore`, so lock files never show
+in `git status`. If `.hack/.internal` is a symlink or not a directory, these commands
+refuse instead of creating the lock through it. If you cannot write the directory that
+holds the env file (for example a read-only checkout), no lock is taken: no command can
+replace the file there, so a command that changes nothing still succeeds and one that
+would change the file is refused as before.
+
+Programs that do not take this lock, such as an editor or Hack v4, are not kept out. For
+`hack.env*.yaml` files, `hack env set`, `add`, `unset` and `hydrate` also check that the
+file still has the contents they read just before replacing it. If it changed, the
+command writes nothing and stops with a retryable conflict ("The file changed while it
+was being replaced; nothing was written."), or, for `hydrate`, a `concurrent_write`
+refusal. That check narrows the window in which such a program's write can be
+overwritten, but cannot close it.
+
 ### Hydrate machine-local values in one step
 
 `hack env hydrate` imports many values into the machine-local layer at once, for example
@@ -721,15 +749,17 @@ Hydration refuses, without changing the layer, when:
   re-run with `--secret`, or remove the key with `hack env unset <key> --local` first
 - another `hack env hydrate` for the same project is running, or an interrupted one left
   a stale lock (see below)
-- the local layer changed between hydration's read and its rename, for example from a
-  concurrent `hack env set --local`
+- the local layer changed between hydration's read and its rename, by a program that
+  does not take the env file's write lock (for example an editor or Hack v4)
+- hydration waited 10 seconds for the env file's write lock without getting it
 
 Concurrent hydrations are serialized by `.hack/.internal/env-hydrate.lock`, which holds
 the owner's process ID. A hydration that is killed (for example with SIGKILL) cannot
 remove it; the next hydration then reports the stale lock and its path instead of taking
 it over. Remove the file once no hydration is running. `hack env set --local` does not
-take this lock. Hydration checks the layer again just before its rename, which narrows
-the window in which such a write could be overwritten but cannot close it.
+take this lock, but hydration also holds the local file's write lock (see
+[Concurrent writes to one env file](#concurrent-writes-to-one-env-file)), so a
+concurrent `hack env set --local` waits for the hydration and both changes are kept.
 
 Materialize a compatibility `.hack/.env`:
 

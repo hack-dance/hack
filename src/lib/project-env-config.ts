@@ -28,6 +28,7 @@ import {
 } from "../templates.ts";
 import { ClosedCliError } from "./cli-result.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
+import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
   AtomicWriteConflictError,
   closedFileWriteError,
@@ -2646,18 +2647,23 @@ function opensToPlaintext(opts: {
 async function readProjectEnvLayerForMutation(opts: {
   readonly path: string;
   readonly environment: string;
-}): Promise<ProjectEnvConfigReadResult> {
+}): Promise<{
+  readonly read: ProjectEnvConfigReadResult;
+  /** The exact bytes read (null when absent), for the compare-and-swap. */
+  readonly text: string | null;
+}> {
+  const text = await readAtomicWriteTargetText(opts.path);
   const read = parseProjectEnvConfigText({
     path: opts.path,
     environment: opts.environment,
-    text: await readAtomicWriteTargetText(opts.path),
+    text,
   });
   if (read.parseError) {
     throw new ClosedCliError(
       `Failed to parse ${opts.path}: ${read.parseError}`
     );
   }
-  return read;
+  return { read, text };
 }
 
 export async function setProjectEnvValue(opts: {
@@ -2669,6 +2675,8 @@ export async function setProjectEnvValue(opts: {
   readonly value: string;
   readonly secret: boolean;
   readonly local?: boolean;
+  /** Bounded wait for the layer lock; tests only. */
+  readonly layerLockTimeoutMs?: number;
 }): Promise<ProjectEnvMutationResult> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
@@ -2690,7 +2698,29 @@ export async function setProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
-  const read = await readProjectEnvLayerForMutation({
+  // The read, the change and the write form one critical section per layer,
+  // so a concurrent set or unset of another key is never lost (HACK-1376).
+  return await withEnvLayerLock({
+    layerPath: filePath,
+    timeoutMs: opts.layerLockTimeoutMs,
+    run: async () =>
+      await setLockedProjectEnvValue({ ...opts, scope, filePath }),
+  });
+}
+
+async function setLockedProjectEnvValue(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName: string | null;
+  readonly scope: string;
+  readonly key: string;
+  readonly value: string;
+  readonly secret: boolean;
+  readonly local?: boolean;
+  readonly filePath: string;
+}): Promise<ProjectEnvMutationResult> {
+  const { filePath, scope } = opts;
+  const { read, text } = await readProjectEnvLayerForMutation({
     path: filePath,
     environment: opts.envName ?? "default",
   });
@@ -2734,9 +2764,12 @@ export async function setProjectEnvValue(opts: {
     secretsprovider: PROJECT_ENV_SECRETS_PROVIDER,
     values: nextValues,
   };
+  // The lock excludes cooperating writers; the compare-and-swap turns a write
+  // by anything else since the read into a closed, retryable conflict.
   const changed = await writeProjectEnvConfigFile({
     path: filePath,
     config: nextConfig,
+    expectedExisting: text,
   });
   return {
     filePath,
@@ -2754,6 +2787,8 @@ export async function unsetProjectEnvValue(opts: {
   readonly scope: string;
   readonly key: string;
   readonly local?: boolean;
+  /** Bounded wait for the layer lock; tests only. */
+  readonly layerLockTimeoutMs?: number;
 }): Promise<{ readonly changed: boolean; readonly filePath: string }> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
@@ -2768,7 +2803,25 @@ export async function unsetProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
-  const read = await readProjectEnvLayerForMutation({
+  // Same per-layer critical section as `setProjectEnvValue` (HACK-1376).
+  return await withEnvLayerLock({
+    layerPath: filePath,
+    timeoutMs: opts.layerLockTimeoutMs,
+    run: async () => await unsetLockedProjectEnvValue({ ...opts, filePath }),
+  });
+}
+
+async function unsetLockedProjectEnvValue(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName: string | null;
+  readonly scope: string;
+  readonly key: string;
+  readonly local?: boolean;
+  readonly filePath: string;
+}): Promise<{ readonly changed: boolean; readonly filePath: string }> {
+  const { filePath } = opts;
+  const { read, text } = await readProjectEnvLayerForMutation({
     path: filePath,
     environment: opts.envName ?? "default",
   });
@@ -2807,6 +2860,7 @@ export async function unsetProjectEnvValue(opts: {
       secretsprovider: PROJECT_ENV_SECRETS_PROVIDER,
       values: nextValues,
     },
+    expectedExisting: text,
   });
   return { changed, filePath };
 }
@@ -2914,10 +2968,12 @@ export type ProjectEnvHydrationResult = {
  *   rename, so the previous layer stays in place.
  * - Concurrency: hydrations of one project are serialized by an exclusive
  *   lock file under `.internal/`; a second hydration refuses instead of
- *   waiting. The write is also a compare-and-swap against the bytes read, so a
- *   different writer that changed the layer meanwhile makes hydration refuse
- *   rather than overwrite it. A lock left by a killed process is reported, not
- *   removed.
+ *   waiting. A lock left by a killed process is reported, not removed. Inside
+ *   it, hydration takes the layer's write lock (`withEnvLayerLock`), the same
+ *   one `hack env set`/`unset` hold, waiting a bounded time for them. The
+ *   write is also a compare-and-swap against the bytes read, so a writer that
+ *   takes no lock and changed the layer meanwhile makes hydration refuse
+ *   rather than overwrite it.
  * - Wrong key: every secret already in the layer must decrypt under the key
  *   readers would use, or hydration refuses. Secret mode encrypts with the key
  *   file `hack env add --secret` uses and refuses to create one while only
@@ -2977,11 +3033,18 @@ export async function hydrateProjectEnvLocalLayer(opts: {
     refuse,
   });
   try {
-    return await hydrateLockedProjectEnvLayer({
-      ...opts,
-      scope,
-      filePath,
-      refuse,
+    // Also take the per-layer lock that `hack env set`/`unset` hold, so a
+    // concurrent set of another key waits instead of making hydration refuse
+    // as `concurrent_write` (or being overwritten).
+    return await withEnvLayerLock({
+      layerPath: filePath,
+      run: async () =>
+        await hydrateLockedProjectEnvLayer({
+          ...opts,
+          scope,
+          filePath,
+          refuse,
+        }),
     });
   } finally {
     await release();

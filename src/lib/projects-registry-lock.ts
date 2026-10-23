@@ -17,6 +17,17 @@ const WAIT_MS = 10_000;
 const OWNER_LIMIT = 128;
 const OWNER_PATTERN = /^([1-9]\d*)\n(?:[a-f0-9-]{36}\n)?$/;
 
+/**
+ * The bounded wait for a cooperative lock ran out while another live writer
+ * (or an interrupted recovery) held it. Nothing guarded by the lock ran.
+ */
+export class ProjectsRegistryLockTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProjectsRegistryLockTimeoutError";
+  }
+}
+
 interface Owner {
   readonly info: Stats;
   readonly bytes: string;
@@ -123,7 +134,7 @@ async function acquire(opts: {
       const recovery = recoveryBusy
         ? "; recovery guard is busy (interrupted recovery requires offline inspection)"
         : "";
-      throw new Error(
+      throw new ProjectsRegistryLockTimeoutError(
         `Timed out waiting for ${opts.label ?? "projects registry"} lock${recovery}`
       );
     }

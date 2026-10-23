@@ -12,8 +12,17 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { DAEMON_LAUNCHD_PLIST_FILENAME } from "../src/constants.ts";
+import { basename, join, resolve } from "node:path";
+import {
+  DAEMON_LAUNCHD_PLIST_FILENAME,
+  GLOBAL_DAEMON_DIR_NAME,
+  GLOBAL_DAEMON_SOCKET_FILENAME,
+  GLOBAL_HACK_DIR_NAME,
+} from "../src/constants.ts";
+import {
+  DAEMON_AUTOSTART_DISABLE_ENV,
+  resolveDaemonAutostartAccess,
+} from "../src/daemon/client.ts";
 import {
   LAUNCHD_ALLOW_ISOLATED_ENV,
   LAUNCHD_DISABLE_ENV,
@@ -56,6 +65,7 @@ type Fixture = {
   readonly isolatedHackHome: string;
   readonly plistPath: string;
   readonly launchctlLog: string;
+  readonly hackLog: string;
   readonly env: (
     extra: Readonly<Record<string, string | undefined>>
   ) => Record<string, string>;
@@ -81,6 +91,12 @@ async function makeFixture(): Promise<Fixture> {
   const tools = join(root, "tools");
   await mkdir(tools);
   const launchctlLog = join(root, "launchctl.log");
+  const hackLog = join(root, "hack.log");
+  // When HACK_TEST_STUB_SOCKET is set, a "started" daemon is a plain file at
+  // that path: it ends the autostart socket wait at once, and the request to
+  // it then fails, as for an incompatible daemon.
+  const touchSocket =
+    'if [ -n "$HACK_TEST_STUB_SOCKET" ]; then mkdir -p "$(dirname "$HACK_TEST_STUB_SOCKET")" && : > "$HACK_TEST_STUB_SOCKET"; fi';
   // Answers `print` as a loaded, running service so the pre-fix code takes
   // its repair/kickstart branches; every call is recorded.
   await writeStub(
@@ -88,11 +104,20 @@ async function makeFixture(): Promise<Fixture> {
     [
       `printf '%s\\n' "$*" >> "${launchctlLog}"`,
       `if [ "$1" = "print" ]; then printf 'state = running\\npid = 4242\\n'; fi`,
+      `if [ "$1" = "kickstart" ]; then ${touchSocket}; fi`,
       "exit 0",
     ].join("\n")
   );
-  // resolveLaunchdHackBinPath needs some `hack` on PATH to render a plist.
-  await writeStub(join(tools, "hack"), "exit 0");
+  // resolveLaunchdHackBinPath needs some `hack` on PATH to render a plist. It
+  // also stands in for the stable `hack` that a direct autostart would run.
+  await writeStub(
+    join(tools, "hack"),
+    [
+      `printf '%s\\n' "$*" >> "${hackLog}"`,
+      `if [ "$*" = "daemon start" ]; then ${touchSocket}; fi`,
+      "exit 0",
+    ].join("\n")
+  );
 
   return {
     root,
@@ -100,6 +125,7 @@ async function makeFixture(): Promise<Fixture> {
     isolatedHackHome,
     plistPath,
     launchctlLog,
+    hackLog,
     env: (extra) =>
       privateCliEnv({
         root,
@@ -115,9 +141,13 @@ async function makeFixture(): Promise<Fixture> {
   };
 }
 
-async function launchctlCalls(fixture: Fixture): Promise<string[]> {
-  const text = await readFile(fixture.launchctlLog, "utf8").catch(() => "");
+async function loggedCalls(path: string): Promise<string[]> {
+  const text = await readFile(path, "utf8").catch(() => "");
   return text.split("\n").filter((line) => line.length > 0);
+}
+
+async function launchctlCalls(fixture: Fixture): Promise<string[]> {
+  return await loggedCalls(fixture.launchctlLog);
 }
 
 async function plistSnapshot(fixture: Fixture): Promise<{
@@ -343,3 +373,191 @@ test("positive control: the opt-in lets daemon status inspect launchd", async ()
   const calls = await launchctlCalls(fixture);
   expect(calls.some((line) => line.startsWith("print "))).toBe(true);
 });
+
+/*
+ * HACK-1368: a candidate run (`hack-next`, or the bundled `hack-v5` launcher)
+ * must never autostart hackd. Autostart starts whatever the host resolves:
+ * the per-user launchd plist (the stable binary) or the first `hack` on PATH
+ * (the stable CLI). The driver's `autostart` mode reports TTYs so the
+ * interactive autostart gate is open, then makes one default daemon request.
+ */
+
+test("daemon autostart access: candidate runs and the opt-out never autostart", () => {
+  const cases: ReadonlyArray<{
+    readonly env: Record<string, string | undefined>;
+    readonly allowed: boolean;
+    readonly reason?: string;
+  }> = [
+    { env: {}, allowed: true },
+    { env: { HACK_CANDIDATE_ENTRYPOINT: "" }, allowed: true },
+    { env: { HACK_CANDIDATE_ENTRYPOINT: "  " }, allowed: true },
+    { env: { [DAEMON_AUTOSTART_DISABLE_ENV]: "0" }, allowed: true },
+    { env: { [DAEMON_AUTOSTART_DISABLE_ENV]: "true" }, allowed: true },
+    {
+      env: { HACK_CANDIDATE_ENTRYPOINT: "hack-next" },
+      allowed: false,
+      reason: "candidate",
+    },
+    {
+      env: { HACK_CANDIDATE_ENTRYPOINT: "hack-v5" },
+      allowed: false,
+      reason: "candidate",
+    },
+    {
+      // An inherited opt-in value cannot re-enable autostart for a candidate.
+      env: {
+        HACK_CANDIDATE_ENTRYPOINT: "hack-next",
+        [DAEMON_AUTOSTART_DISABLE_ENV]: "0",
+      },
+      allowed: false,
+      reason: "candidate",
+    },
+    {
+      env: { [DAEMON_AUTOSTART_DISABLE_ENV]: " 1 " },
+      allowed: false,
+      reason: "disabled",
+    },
+    {
+      env: {
+        HACK_CANDIDATE_ENTRYPOINT: "hack-v5",
+        [DAEMON_AUTOSTART_DISABLE_ENV]: "1",
+      },
+      allowed: false,
+      reason: "disabled",
+    },
+  ];
+  for (const testCase of cases) {
+    const access = resolveDaemonAutostartAccess({ env: testCase.env });
+    expect({ env: testCase.env, allowed: access.allowed }).toEqual({
+      env: testCase.env,
+      allowed: testCase.allowed,
+    });
+    if (!access.allowed) {
+      expect(access.reason).toBe(testCase.reason as typeof access.reason);
+      expect(access.message).not.toContain("\n");
+    }
+  }
+});
+
+const AUTOSTART_CASES = [
+  {
+    label: "a hack-next run on the default hack home",
+    env: { HACK_CANDIDATE_ENTRYPOINT: "hack-next" },
+    denied: true,
+    isolated: false,
+    launchctl: [],
+    hack: [],
+  },
+  {
+    label: "a hack-next run on an isolated hack home",
+    env: { HACK_CANDIDATE_ENTRYPOINT: "hack-next" },
+    denied: true,
+    isolated: true,
+    launchctl: [],
+    hack: [],
+  },
+  {
+    label: "a hack-v5 launcher run (Compose backend, caller's hack home)",
+    env: {
+      HACK_CANDIDATE_ENTRYPOINT: "hack-v5",
+      [DAEMON_AUTOSTART_DISABLE_ENV]: "1",
+    },
+    denied: true,
+    isolated: false,
+    launchctl: [],
+    hack: [],
+  },
+  {
+    label: "the opt-out alone",
+    env: { [DAEMON_AUTOSTART_DISABLE_ENV]: "1" },
+    denied: true,
+    isolated: false,
+    launchctl: [],
+    hack: [],
+  },
+  {
+    // Positive control: the same driver does reach launchd without a marker.
+    label: "positive control: a stable run on the default hack home",
+    env: {},
+    denied: false,
+    isolated: false,
+    launchctl: ["print", "kickstart"],
+    hack: [],
+  },
+  {
+    // Positive control: and runs the `hack` on PATH when launchd is denied.
+    label: "positive control: a stable run on an isolated hack home",
+    env: {},
+    denied: false,
+    isolated: true,
+    launchctl: [],
+    hack: ["daemon start"],
+  },
+] as const;
+
+for (const autostartCase of AUTOSTART_CASES) {
+  test(`daemon request autostart: ${autostartCase.label}`, async () => {
+    const fixture = await makeFixture();
+    const before = await plistSnapshot(fixture);
+    const hackHome = autostartCase.isolated
+      ? fixture.isolatedHackHome
+      : join(fixture.home, GLOBAL_HACK_DIR_NAME);
+    const socketPath = join(
+      hackHome,
+      GLOBAL_DAEMON_DIR_NAME,
+      GLOBAL_DAEMON_SOCKET_FILENAME
+    );
+
+    const run = await runAsDarwin({
+      argv: [DRIVER, "autostart"],
+      cwd: fixture.root,
+      env: fixture.env({
+        HACK_HOME: hackHome,
+        HACK_NO_INTERACTIVE: undefined,
+        HACK_TEST_STUB_SOCKET: socketPath,
+        ...autostartCase.env,
+      }),
+    });
+    expect(run.stderr).toBe("");
+    expect(run.code).toBe(0);
+    const output = JSON.parse(run.stdout) as {
+      readonly response: unknown;
+      readonly configPath: string;
+      readonly observed: {
+        readonly files: readonly string[];
+        readonly which: readonly string[];
+        readonly spawns: readonly string[];
+      };
+    };
+    expect(output.response).toBeNull();
+    expect(output.configPath.startsWith(fixture.root)).toBe(true);
+    const spawned = output.observed.spawns.map((bin) => basename(bin));
+    if (autostartCase.denied) {
+      // The autostart guard runs first: a denied run reads no config, does
+      // no PATH lookup and spawns nothing (no launchctl, no `hack`).
+      expect(output.observed.files).not.toContain(output.configPath);
+      expect(output.observed.which).toEqual([]);
+      expect(spawned).toEqual([]);
+    } else {
+      // Positive control: the same recorder sees the config read and the
+      // launchd or PATH start.
+      expect(output.observed.files).toContain(output.configPath);
+      expect(spawned).toContain(autostartCase.isolated ? "hack" : "launchctl");
+    }
+
+    const verbs = (await launchctlCalls(fixture)).map(
+      (line) => line.split(" ")[0]
+    );
+    expect(verbs).toEqual([...autostartCase.launchctl]);
+    expect(await loggedCalls(fixture.hackLog)).toEqual([...autostartCase.hack]);
+    expect(await plistSnapshot(fixture)).toEqual(before);
+    const started =
+      autostartCase.launchctl.length > 0 || autostartCase.hack.length > 0;
+    expect(
+      await stat(socketPath).then(
+        () => true,
+        () => false
+      )
+    ).toBe(started);
+  });
+}

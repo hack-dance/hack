@@ -480,6 +480,92 @@ test("doctor --fix leaves a file behind a symlinked .hack/.internal untouched (H
   expect(notes).not.toContain(outside);
 }, 30_000);
 
+/*
+ * HACK-1368: a candidate run (`hack-next`, or the bundled `hack-v5` entrypoint,
+ * which also sets HACK_DAEMON_AUTOSTART_DISABLE=1) must not start hackd from
+ * `doctor --fix`. Every hackd repair step runs `hack daemon ...` through the
+ * first `hack` on PATH, which for a candidate is the stable CLI. The mocked
+ * `run` records each step instead of executing it.
+ */
+const HACKD_REPAIR_CASES = [
+  {
+    label: "a hack-v5 entrypoint run",
+    env: {
+      HACK_CANDIDATE_ENTRYPOINT: "hack-v5",
+      HACK_DAEMON_AUTOSTART_DISABLE: "1",
+    },
+    reason: "HACK_DAEMON_AUTOSTART_DISABLE=1",
+  },
+  {
+    label: "a hack-next run",
+    env: { HACK_CANDIDATE_ENTRYPOINT: "hack-next" },
+    reason: "disabled for a candidate run",
+  },
+  {
+    label: "the opt-out alone",
+    env: { HACK_DAEMON_AUTOSTART_DISABLE: "1" },
+    reason: "HACK_DAEMON_AUTOSTART_DISABLE=1",
+  },
+  {
+    // Positive control: the same harness does clear and start hackd.
+    label: "positive control: a stable run",
+    env: {},
+    reason: null,
+  },
+] as const;
+
+const HACKD_REPAIR_ENV_KEYS = [
+  "HACK_CANDIDATE_ENTRYPOINT",
+  "HACK_DAEMON_AUTOSTART_DISABLE",
+] as const;
+
+for (const repairCase of HACKD_REPAIR_CASES) {
+  test(`doctor --fix --no-interactive hackd repair: ${repairCase.label} (HACK-1368)`, async () => {
+    const projectRoot = await createProjectWithStaleDaemonPid();
+    const saved = HACKD_REPAIR_ENV_KEYS.map(
+      (key) => [key, process.env[key]] as const
+    );
+    for (const key of HACKD_REPAIR_ENV_KEYS) {
+      Reflect.deleteProperty(process.env, key);
+    }
+    Object.assign(process.env, repairCase.env);
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      expect(
+        await runCli([
+          "doctor",
+          "--fix",
+          "--no-interactive",
+          "--path",
+          projectRoot,
+        ])
+      ).toBe(0);
+    } finally {
+      for (const [key, value] of saved) {
+        restoreEnv(key, value);
+      }
+    }
+
+    const daemonSteps = runCalls
+      .filter((cmd) => cmd.includes("daemon"))
+      .map((cmd) => cmd.slice(cmd.indexOf("daemon")).join(" "));
+    const skipNote = noteCalls.find((message) =>
+      message.startsWith("Skipped hackd repair")
+    );
+    if (repairCase.reason === null) {
+      expect(daemonSteps).toEqual(["daemon clear", "daemon start"]);
+      expect(skipNote).toBeUndefined();
+      return;
+    }
+    expect(daemonSteps).toEqual([]);
+    expect(skipNote).toContain("(hackd is stale)");
+    expect(skipNote).toContain(repairCase.reason);
+    expect(skipNote).toContain(
+      "To repair it yourself, run: hack daemon clear && hack daemon start"
+    );
+  }, 30_000);
+}
+
 test("doctor --fix leaves an override behind a symlinked .hack untouched (HACK-1316)", async () => {
   if (!tempDir) {
     throw new Error("tempDir not set");

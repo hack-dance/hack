@@ -47,7 +47,10 @@ import {
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
-import { probeDaemonApi } from "../daemon/client.ts";
+import {
+  probeDaemonApi,
+  resolveDaemonAutostartAccess,
+} from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
 import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
@@ -4368,9 +4371,32 @@ async function dockerInfoOk(): Promise<boolean> {
   return dockerOk.exitCode === 0;
 }
 
+/**
+ * The `--fix` hackd repair: restart an incompatible hackd, clear stale
+ * pid/socket files, then start hackd. Each step runs `hack daemon ...` through
+ * the first `hack` on PATH, and non-interactive runs accept every step.
+ *
+ * HACK-1368: for a candidate run that `hack` is the stable CLI, so a candidate
+ * run, or any run with `HACK_DAEMON_AUTOSTART_DISABLE=1`, skips the whole
+ * repair through {@link resolveDaemonAutostartAccess}, in interactive and
+ * non-interactive mode alike, before it prompts or runs anything. It notes the
+ * skip with the reason and the command to run instead.
+ */
 async function maybeRepairHackd(): Promise<void> {
   const report = await resolveDaemonReportForDoctorFix();
   if (report.status === "running") {
+    return;
+  }
+
+  const autostart = resolveDaemonAutostartAccess();
+  if (!autostart.allowed) {
+    note(
+      [
+        `Skipped hackd repair (hackd is ${report.status}): ${autostart.message}`,
+        `To repair it yourself, run: ${hackdRepairCommand(report.status)}`,
+      ].join("\n"),
+      "doctor fix"
+    );
     return;
   }
 
@@ -4402,6 +4428,19 @@ async function maybeRepairHackd(): Promise<void> {
   if (okStart) {
     await runHackSubcommand({ args: ["daemon", "start"] });
   }
+}
+
+/** The explicit commands that perform the {@link maybeRepairHackd} steps. */
+function hackdRepairCommand(
+  status: ReturnType<typeof buildDaemonStatusReport>["status"]
+): string {
+  if (status === "incompatible") {
+    return "hack daemon restart";
+  }
+  if (status === "stale") {
+    return "hack daemon clear && hack daemon start";
+  }
+  return "hack daemon start";
 }
 
 /**

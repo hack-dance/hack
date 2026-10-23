@@ -26,6 +26,10 @@ if [ ! -x "$bundle/hack-cli" ] || [ ! -x "$bundle/hack-native" ]; then
 fi
 # Candidate CLIs refuse self-update on either backend.
 export HACK_CANDIDATE_ENTRYPOINT=hack-v5
+# Candidate runs never start hackd implicitly: autostart would start the
+# stable hackd (launchd plist or the `hack` on PATH), on Compose beside the
+# candidate on the same Hack home (HACK-1368).
+export HACK_DAEMON_AUTOSTART_DISABLE=1
 if [ "$backend" = native ]; then
   export HACK_RUNTIME_BACKEND=native
   export HACK_NATIVE_BINARY="$bundle/hack-native"

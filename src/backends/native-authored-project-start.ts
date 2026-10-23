@@ -451,8 +451,10 @@ async function retireAttempt(opts: {
 
 /**
  * HACK-1272: a consumer that refused before journal reservation (for example
- * `native_graph_admission` for a non-content-ID image) leaves no receipt, so
- * Removed retirement can never succeed. Retire the exact start intent and
+ * a `native_graph_canceled` cancel, a project source or review that changed
+ * after planning, or an unreachable engine) leaves no receipt, so Removed
+ * retirement can never succeed. A non-content-ID image is no longer such an
+ * example: plan refuses it first, before any start intent exists (HACK-1300). Retire the exact start intent and
  * source only when the settled consumer's failure was never observed as a
  * receipt and fresh inspection names the run `native_graph_unreserved` (an
  * absent journal and no published foreground owner). Every other inspection

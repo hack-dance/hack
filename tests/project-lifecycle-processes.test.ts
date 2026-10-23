@@ -15,6 +15,7 @@ import {
   resolveLifecycleStopProcessGroupIds,
   resolvePersistedLifecycleProcessGroupIds,
 } from "../src/lib/project-lifecycle-processes.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const tempDirs = new Set<string>();
 const originalHome = process.env.HOME;
@@ -24,7 +25,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
-  process.env.HOME = originalHome;
+  restoreEnv("HOME", originalHome);
 });
 
 test("readLifecycleState preserves lifecycle pane and process group metadata", async () => {

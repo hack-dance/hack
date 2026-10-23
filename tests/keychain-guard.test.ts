@@ -2,10 +2,11 @@ import { afterEach, expect, test } from "bun:test";
 import { secrets } from "bun";
 import { createKeychainBackend, keychain } from "../src/lib/keychain.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const disableFlag = process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK;
 afterEach(() => {
-  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = disableFlag;
+  restoreEnv("HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK", disableFlag);
 });
 
 test("preload replaces both Bun.secrets entry points and prevents restoration", async () => {
@@ -83,6 +84,6 @@ test("existing keychain stores honor changes to the flag without native calls", 
       await keychain.get({ service: "hack-hermetic-guard", name: "SECRET_TWO" })
     ).toBeNull();
   } finally {
-    process.env.HACK_GLOBAL_CONFIG_PATH = previousConfig;
+    restoreEnv("HACK_GLOBAL_CONFIG_PATH", previousConfig);
   }
 });

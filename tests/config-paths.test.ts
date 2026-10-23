@@ -15,16 +15,13 @@ import {
   GLOBAL_HACK_DIR_NAME,
   GLOBAL_PROJECTS_REGISTRY_FILENAME,
 } from "@/constants.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const originalHome = process.env.HOME;
 const originalHackHome = process.env.HACK_HOME;
 const originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
 
 const tempDirs: string[] = [];
-
-function restoreEnv(key: string, value: string | undefined): void {
-  process.env[key] = value;
-}
 
 afterEach(async () => {
   restoreEnv("HOME", originalHome);
@@ -67,7 +64,7 @@ test("resolveGlobalConfigPath override beats HACK_HOME", () => {
 });
 
 test("resolveGlobalHackDir defaults to HOME/.hack when HACK_HOME is unset", () => {
-  process.env.HACK_HOME = undefined;
+  Reflect.deleteProperty(process.env, "HACK_HOME");
   process.env.HACK_GLOBAL_CONFIG_PATH = "";
   process.env.HOME = "/tmp/hack-home";
 
@@ -129,7 +126,7 @@ test("resolveDaemonPaths explicit home wins over HACK_HOME", () => {
 });
 
 test("resolveDaemonPaths is home-based when HACK_HOME is unset", () => {
-  process.env.HACK_HOME = undefined;
+  Reflect.deleteProperty(process.env, "HACK_HOME");
   process.env.HOME = "/tmp/hack-home";
 
   const paths = resolveDaemonPaths({});
@@ -142,7 +139,7 @@ test("projects registry is read from under HACK_HOME when set", async () => {
   const hackHome = await makeTempDir("hack-home-");
   process.env.HACK_HOME = hackHome;
   process.env.HOME = "/tmp/hack-home";
-  process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+  Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
 
   const registryPath = join(hackHome, GLOBAL_PROJECTS_REGISTRY_FILENAME);
   const record = {

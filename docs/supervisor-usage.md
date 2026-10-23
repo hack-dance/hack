@@ -30,8 +30,12 @@ local handle or a rejected late cancellation.
 A successful cancellation response establishes persisted cancellation metadata and an
 event. It does not establish process exit. A child that ignores the signal can keep
 executing and leave the run promise pending. Terminal persistence errors reject the
-cancel/run promise; the service preserves the claimed outcome instead of replacing it
-with `failed`. No automatic recovery retries the failed persistence operation.
+cancel promise immediately; the run reaches that rejected persistence promise only
+after process exit and stream drain. Until then its service handle may remain live.
+When run rejects, the service preserves the claimed outcome instead of replacing it
+with `failed`. Pre-claim startup errors instead reach the failed fallback directly,
+which can settle without stopping a spawned child. No automatic recovery retries
+the failed terminal persistence operation.
 
 The store reads and rewrites whole metadata files. An event append and its subsequent
 metadata update are separate operations. The model must preserve the status/event
@@ -48,6 +52,11 @@ one per invocation; no configured retry budget or idempotency key exists.
 The daemon client separately retries a failed transmission once after readiness
 recovery. A create response lost after acceptance can cause a second UUID to be
 created; this transport composition is outside the bounded same-ID runner model.
+
+P2 keeps cancellation acknowledgement sticky across both bounded invocations of the
+same job. Its hypothetical reference both waits for exit and prevents re-admission;
+the mutation removes only the exit wait. P3 covers same stored ID re-execution,
+not T15's distinct UUIDs or logical-request deduplication.
 
 Shells use a separate in-memory map and PTY. `createShell` returns running metadata,
 `closeShell` sends a signal and returns a boolean, and the exit handler changes status

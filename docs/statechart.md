@@ -24,6 +24,11 @@ stateDiagram-v2
     Returned --> Starting: T13 caller invokes runJob again
 ```
 
+T13 can also start a **second invocation while the first is active**. The second
+invocation enters T2/T3 against the same metadata; each invocation has its own
+process, terminal claim, and persistence promise. The diagram's returned edge is
+only the sequential case, not a guard on T13.
+
 A terminal **outcome claim** is local to one invocation. There is no durable execution
 claim, lease, queue consumer, attempt counter, or retry policy. `awaiting_input` is
 accepted by the store parser but has no transition in these runner/service paths.
@@ -64,7 +69,7 @@ Paths below are relative to `src/control-plane/extensions/supervisor/`.
 | T9 | Append terminal event, then rewrite metadata with sequence | `job-store.ts :: appendEventInternal` | Append and metadata write are separate; failure may occur between them | Existing |
 | T10 / U3 | Resolve accepted cancellation only after T8/T9 complete | `runner.ts :: cancel`; `service.ts :: cancelJob` | Does not await process exit or pipe drain; repeated accepted requests reuse result | Existing |
 | T11 | Resolve run after exit/drain and terminal persistence; remove service map entry | `runner.ts :: runJob`; `service.ts :: finally` | A process that never exits can keep the run pending after cancellation acknowledgement | Existing |
-| T12 | Persistence rejects; preserve already claimed outcome; otherwise service attempts failed fallback | `service.ts :: catch`; `runner.ts :: finish` | No retry after a claimed terminal write fails; fallback can also reject | Existing |
+| T12 | Persistence rejects; cancellation rejects immediately; run reaches the rejection after exit/drain, then service preserves a claimed outcome | `service.ts :: catch`; `runner.ts :: finish` | Until exit/drain, run and map entry may remain live. Pre-claim startup errors instead reach the service failed fallback directly, which can settle with a child still alive | Existing |
 | T13 | Invoke exported runner on same job again, including terminal jobs | `runner.ts :: runJob` | New independent local variables; no stored status guard | Existing low-level caller composition; not an advertised retry endpoint |
 | T14 | Cancel missing job or missing local handle, or after another terminal outcome claims | `service.ts :: cancelJob` | Store read precedes local map lookup; return `not_found` or `not_running` | Existing |
 | T15 / U4 | Resubmit create request | `service.ts :: createJob` | New UUID each call; no idempotency key | Existing; no transport retry deduplication |
@@ -79,8 +84,8 @@ Hypotheses below are recorded before TLC. Names are stable check identifiers.
 | Check | Promise and harm | Transitions | Promise source / scope | Kind and model property | Bounds / fairness | Sensitivity and real-code replay |
 | --- | --- | --- | --- | --- | --- | --- |
 | P1 | At most one live runner per stored job; duplicate side effects otherwise | T2–T5, T13 | Requested job-wide guarantee; service normally creates fresh UUIDs | Safety `SingleRunner` | One job, two invocations; no fairness needed | Remove reference admission guard; two actual runner calls overlap on one stored job |
-| P2 | After cancellation acknowledgement no process runs; post-cancel side effects otherwise | T6, T8–T11, T13 | Requested stronger guarantee; current documentation promises persisted outcome only | Safety `CancelQuiescent` | One job; signal may be ignored; separate exit transition | Reorder reference acknowledgement before exit; actual process dependency remains live after successful cancel |
-| P3 | Retrying the same logical job does not execute it twice; repeated side effects otherwise | T2–T5, T11, T13, T15 | Requested idempotency; automatic retry and attempt budget are absent | Safety `RetryIdempotent` | One job, two sequential invocations; count executions rather than a set | Remove reference duplicate guard; actual runner executes a terminal job again |
+| P2 | After cancellation acknowledgement no process for that stored job runs; post-cancel side effects otherwise | T6, T8–T11, T13 | Requested job-wide guarantee; current documentation promises persisted outcome only | Safety `CancelQuiescent` | One job, two invocations; signal may be ignored; acknowledgement is sticky | Reference waits for exit and prevents a second admission; mutation removes exit wait while retaining admission protection; actual process stays live after cancel and a later invocation can restart the job |
+| P3 | Retrying the same stored job ID does not execute it twice; repeated side effects otherwise | T2–T5, T11, T13 | Requested same-ID idempotency; automatic retry and attempt budget are absent; T15 logical-request deduplication is separate and excluded | Safety `RetryIdempotent` | One job, two sequential invocations; count executions rather than a set | Remove reference duplicate guard; actual runner executes a terminal job again |
 | P4 | Every locally claimed outcome reaches durable terminal status and event | T6–T12 | Requested progress; current implementation exposes persistence errors without recovery | Liveness `ClaimedTerminal` | One invocation; weak fairness for enabled persistence, exit, and drain; one transient write rejection allowed | Disable reference recovery after rejected persistence; actual service rejects and retains running metadata despite subsequent store availability |
 | P5 | Within one invocation, accepted cancellation preserves one cancelled terminal outcome/event | T6–T10 | Existing documented promise | Safety `CancelWins` | One invocation; successful persistence, no external store writers | Remove local finish memoization; actual cancellation/exit race attempts a second terminal write |
 
@@ -132,9 +137,16 @@ behavioral replay; no known failure may mask another.
   a claim; P4 uses the actual terminal claim; stronger guarantees remain explicit
   hypotheses; separate actual behavior from hypothetical controls. Keep serialized
   store schedules as a stated coverage limit rather than inventing an atomic store.
-- Gate: reviewed; blocking issues: none. Independent review may append corrections
-  before modeling. Commit this review and walkthrough first.
+- Gate: reviewed; blocking issues: none after the corrections below. Commit this
+  review and walkthrough first.
 
 Independent source audit confirmed the transition boundaries and missing ownership
 and retry mechanisms. It also identified the lost-POST composition above and the
 T5 startup failure window; these remain source-derived concerns until replayed.
+
+Independent pre-model documentation review identified four blocking ambiguities:
+the diagram omitted overlapping T13 invocations; T12 conflated immediate cancel
+rejection with eventual run rejection; P2 lacked job-wide reference admission
+protection; P3 conflated same-ID execution with new-UUID resubmission. All four are
+resolved above and in the walkthrough before any TLA+ file is created. Reviewer:
+independent source-review agent; reviewed source revision remains the full SHA above.

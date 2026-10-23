@@ -18,6 +18,7 @@ import {
   PROJECT_ENV_KEY_FILENAME,
 } from "../src/constants.ts";
 import { resolveProjectEnvConfigPath } from "../src/lib/project-env-config.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -413,16 +414,14 @@ async function withPrivateEnvironment<T>(
   const previous = Object.fromEntries(
     Object.keys(overrides).map((key) => [key, process.env[key]])
   );
-  Object.assign(process.env, overrides);
+  for (const [key, value] of Object.entries(overrides)) {
+    process.env[key] = value;
+  }
   try {
     return await run();
   } finally {
     for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) {
-        Reflect.deleteProperty(process.env, key);
-      } else {
-        process.env[key] = value;
-      }
+      restoreEnv(key, value);
     }
   }
 }

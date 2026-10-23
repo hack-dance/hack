@@ -228,6 +228,56 @@ test("explicit --loki snapshot hint repeats --path and --branch", async () => {
   expect(await composeLogsCalls()).toEqual([]);
 }, 60_000);
 
+// HACK-1379: the hint carries every selector the user passed, and names the
+// ones `--compose` cannot apply instead of dropping them.
+test("explicit --loki snapshot hint carries --tail and --profile and names --services and --since", async () => {
+  const result = await runLogs([
+    "--loki",
+    "--no-follow",
+    "--services",
+    "api,migrate",
+    "--tail",
+    "5",
+    "--since",
+    "15m",
+    "--profile",
+    "jobs",
+    "migrate",
+  ]);
+
+  expect(result.exitCode).toBe(0);
+  expect(lokiQueries).toEqual([
+    '{project="oneshot",service=~"^(api|migrate)$"}',
+  ]);
+  expect(result.stderr).toContain(
+    "try `hack logs --compose --no-follow --tail 5 --profile jobs`. The compose backend has no equivalent for --services api,migrate and --since 15m."
+  );
+  expect(await composeLogsCalls()).toEqual([]);
+}, 60_000);
+
+test("explicit --loki snapshot hint turns a single --services value into the positional and keeps --json", async () => {
+  const result = await runLogs([
+    "--loki",
+    "--no-follow",
+    "--services",
+    "migrate",
+    "--json",
+  ]);
+
+  expect(result.exitCode).toBe(0);
+  expect(lokiQueries).toEqual(['{project="oneshot",service="migrate"}']);
+  expect(result.stderr).toContain(
+    "try `hack logs --compose --no-follow --json migrate`."
+  );
+  expect(result.stderr).not.toContain("no equivalent");
+  const types = result.stdout
+    .trim()
+    .split("\n")
+    .map((line) => (JSON.parse(line) as { type: string }).type);
+  expect(types).toEqual(["start", "end"]);
+  expect(await composeLogsCalls()).toEqual([]);
+}, 60_000);
+
 test("Loki follow backend notices an empty tail on stderr and keeps following", async () => {
   await writeFile(
     join(projectRoot, ".hack", "hack.config.json"),
@@ -238,7 +288,8 @@ test("Loki follow backend notices an empty tail on stderr and keeps following", 
       logs: { follow_backend: "loki" },
     })}\n`
   );
-  const child = spawnLogs(["migrate"], { cwd: projectRoot });
+  // `--tail` is a selector the follow hint must carry (HACK-1379).
+  const child = spawnLogs(["--tail", "5", "migrate"], { cwd: projectRoot });
   const stdoutText = new Response(child.stdout).text();
   const reader = child.stderr.getReader();
   const decoder = new TextDecoder();
@@ -276,7 +327,8 @@ test("Loki follow backend notices an empty tail on stderr and keeps following", 
   expect(stderr).toContain(
     'Loki has sent no log entries for {project="oneshot",service="migrate"} yet'
   );
-  expect(stderr).toContain("Try `hack logs --compose migrate`.");
+  expect(stderr).toContain("Try `hack logs --compose --tail 5 migrate`.");
+  expect(stderr).not.toContain("no equivalent");
   expect(stderr.match(/Loki has sent no log entries/g)).toHaveLength(1);
   expect(await stdoutText).toBe("");
   expect(await composeLogsCalls()).toEqual([]);

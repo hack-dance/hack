@@ -144,8 +144,9 @@ export function renderGlobalLoggingCompose(): string {
     "    image: grafana/alloy:v1.12.0",
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock",
+    `      - ${GLOBAL_ALLOY_DATA_VOLUME}:${GLOBAL_ALLOY_STORAGE_PATH}`,
     `      - ./${GLOBAL_ALLOY_FILENAME}:/etc/alloy/config.alloy:ro`,
-    "    command: run /etc/alloy/config.alloy",
+    `    command: run --storage.path=${GLOBAL_ALLOY_STORAGE_PATH} /etc/alloy/config.alloy`,
     "    networks:",
     `      - ${DEFAULT_LOGGING_NETWORK}`,
     "",
@@ -175,9 +176,30 @@ export function renderGlobalLoggingCompose(): string {
     "volumes:",
     "  loki-data:",
     "  grafana-data:",
+    `  ${GLOBAL_ALLOY_DATA_VOLUME}:`,
     "",
   ].join("\n");
 }
+
+/**
+ * Named volume that holds Alloy's component data, above all the
+ * `loki.source.docker` positions file (`positions.yml`). Without it the
+ * positions live in the container's writable layer, so every recreated Alloy
+ * container (`hack global down` then `hack global up`, or an image change)
+ * read every retained container log again and could resend entries Loki
+ * already held. `docker compose down` keeps named volumes;
+ * `hack global logs-reset` (`down -v`) removes it together with Loki's data.
+ */
+export const GLOBAL_ALLOY_DATA_VOLUME = "alloy-data";
+
+/**
+ * Alloy's `--storage.path` inside the container: the directory the official
+ * image creates for it and names in its default command. The image's default
+ * command is replaced to point at the mounted config, so the flag is repeated
+ * explicitly; without it Alloy falls back to `data-alloy/` under its working
+ * directory, outside the volume.
+ */
+export const GLOBAL_ALLOY_STORAGE_PATH = "/var/lib/alloy/data";
 
 // Back-compat alias (internal). Promtail has been replaced by Grafana Alloy.
 export function renderGlobalPromtailYaml(): string {
@@ -226,19 +248,35 @@ export function renderGlobalAlloyConfig(): string {
   // shortened so a container removed soon after it exits (for example
   // `docker compose run --rm`) has a smaller window to be missed.
   //
-  // Cost (Alloy v1.12.0): loki.source.docker checks every target on a fixed 5s
-  // timer and reopens an exited container's log when the container finished
-  // after the last line it shipped (always true for a container that logged
-  // nothing). Such a container costs two inspect calls and one logs call every
-  // 5s for as long as Docker keeps it. Discovery exposes no container state or
-  // exit time, so the config cannot age these out; removing the containers
-  // (`hack down`, `docker compose down`) ends it. Each reopen also logs an info
-  // line ("finished transferring logs"); Alloy runs as a Compose service, so
-  // that line would be shipped into Loki every 5s per container. The `logging`
+  // Cost (Alloy v1.12.0, internal/component/loki/source/docker/runner.go):
+  // loki.source.docker inspects every target on a fixed 5s timer and reopens
+  // the container's log when `State.Running` is true or
+  // `finished.Unix() >= target.Last()`, where `finished` is the container's
+  // `State.FinishedAt` (0 when unparsable) and `Last()` is the wall-clock unix
+  // second at which Alloy last processed a line from that container
+  // (dockertarget/target.go stores `time.Now()` after each line). `Last()`
+  // starts at 0 when the target is created and is not kept in the positions
+  // file, so the comparison is against Alloy's own read time, not the shipped
+  // line's timestamp. An exited container is therefore reopened every 5s when
+  // it finished at or after Alloy's last read of it (the usual case: it logged
+  // its last line and then exited) or when Alloy has read no line from it since
+  // the target was created (a container that logged nothing, or one whose lines
+  // the positions file already covers). It is left alone only after Alloy has
+  // read a line from it and that read came after the container finished. Each
+  // reopen costs two inspect calls and one logs call for as long as Docker
+  // keeps the container. Discovery exposes no container state or exit time, so
+  // the config cannot age these out; removing the containers (`hack down`,
+  // `docker compose down`) ends it. Each reopen also logs an info line
+  // ("finished transferring logs"); Alloy runs as a Compose service, so that
+  // line would be shipped into Loki every 5s per container. The `logging`
   // block keeps Alloy's own output at warn and above.
   //
-  // Read positions live in the Alloy container's writable layer (no volume), so
-  // a recreated Alloy container reads every retained log again.
+  // Read positions are written under `--storage.path`, which the logging
+  // compose maps to the GLOBAL_ALLOY_DATA_VOLUME volume, so a recreated Alloy
+  // container resumes after the last line it shipped instead of reading every
+  // retained log again. A position is a whole second and Docker's `since`
+  // includes that second, so lines from the last second Alloy read can be sent
+  // again.
   return [
     "logging {",
     `  level  = "${GLOBAL_ALLOY_LOG_LEVEL}"`,

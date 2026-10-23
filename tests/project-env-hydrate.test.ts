@@ -704,17 +704,23 @@ test("a layer changed by another writer during an import is not overwritten", as
 
   const worker = spawnWorker(repo, "staging");
   await readUntil(worker.stdout, "prepared\n");
-  // A concurrent `hack env set --local` commits its own change meanwhile.
-  await setProjectEnvValue({
-    projectRoot: repo.projectRoot,
-    projectDir: repo.projectDir,
-    envName: null,
-    scope: "global",
-    key: "OPERATOR_OVERRIDE",
-    value: "operator-value",
-    secret: false,
-    local: true,
-  });
+  // A writer that takes no lock (an editor, Hack v4) changes the layer
+  // meanwhile; only the compare-and-swap can notice it.
+  const edited = layerValues(await readFile(repo.localFile, "utf8"));
+  edited.global = { ...edited.global, OPERATOR_OVERRIDE: "operator-value" };
+  await writeFile(
+    repo.localFile,
+    YAML.stringify(
+      {
+        version: 1,
+        environment: "default",
+        secretsprovider: "project_key",
+        values: edited,
+      },
+      null,
+      2
+    )
+  );
   const concurrent = await readFile(repo.localFile);
   await writeFile(resolve(repo.projectDir, "go"), "");
 
@@ -731,6 +737,47 @@ test("a layer changed by another writer during an import is not overwritten", as
     OPERATOR_OVERRIDE: "operator-value",
   });
   expect((await resolvedGlobal(repo)).DB_PASS).toBeUndefined();
+  expect(await stagingFiles(repo)).toEqual([]);
+  expect(await lockExists(repo)).toBe(false);
+}, 30_000);
+
+test("a `hack env set --local` during an import waits for it, and both changes survive", async () => {
+  const repo = await createRepo();
+  await hydrate(repo, { API_TOKEN: TOKEN });
+
+  const worker = spawnWorker(repo, "staging");
+  await readUntil(worker.stdout, "prepared\n");
+  // The paused import holds the layer lock, so this set must wait for it.
+  let setSettled = false;
+  const pendingSet = setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "OPERATOR_OVERRIDE",
+    value: "operator-value",
+    secret: false,
+    local: true,
+  }).finally(() => {
+    setSettled = true;
+  });
+  await Bun.sleep(300);
+  expect(setSettled).toBe(false);
+  await writeFile(resolve(repo.projectDir, "go"), "");
+
+  const [stdout, exitCode] = await Promise.all([
+    readUntil(worker.stdout, "\n"),
+    worker.exited,
+  ]);
+  expect(exitCode).toBe(0);
+  expect(stdout).toBe("committed\n");
+  expect((await pendingSet).changed).toBe(true);
+  // Neither writer lost the other's update.
+  expect(await resolvedGlobal(repo)).toMatchObject({
+    API_TOKEN: CHANGED,
+    DB_PASS: CHANGED,
+    OPERATOR_OVERRIDE: "operator-value",
+  });
   expect(await stagingFiles(repo)).toEqual([]);
   expect(await lockExists(repo)).toBe(false);
 }, 30_000);

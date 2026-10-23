@@ -28,6 +28,7 @@ import {
 } from "../templates.ts";
 import { ClosedCliError } from "./cli-result.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
+import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
   AtomicWriteConflictError,
   closedFileWriteError,
@@ -701,6 +702,47 @@ async function isGitTrackedProjectEnvPath(opts: {
         "--error-unmatch",
         "--",
         relativePath,
+      ],
+      stderr: "ignore",
+      stdin: "ignore",
+      stdout: "ignore",
+    });
+  } catch {
+    return null;
+  }
+
+  const exitCode = await proc.exited;
+  if (exitCode === 0) {
+    return true;
+  }
+  if (exitCode === 1) {
+    return false;
+  }
+  return null;
+}
+
+/**
+ * Whether git's ignore rules (`.gitignore` files, `.git/info/exclude`,
+ * `core.excludesFile`) match `path`, whether or not it is tracked
+ * (`check-ignore --no-index`). Null when git is unavailable or `projectRoot`
+ * is not inside a work tree, where nothing can be committed.
+ */
+export async function isGitIgnoredProjectEnvPath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<boolean | null> {
+  let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
+  try {
+    proc = Bun.spawn({
+      cmd: [
+        "git",
+        "-C",
+        opts.projectRoot,
+        "check-ignore",
+        "-q",
+        "--no-index",
+        "--",
+        toGitRelativePath(opts),
       ],
       stderr: "ignore",
       stdin: "ignore",
@@ -2605,18 +2647,23 @@ function opensToPlaintext(opts: {
 async function readProjectEnvLayerForMutation(opts: {
   readonly path: string;
   readonly environment: string;
-}): Promise<ProjectEnvConfigReadResult> {
+}): Promise<{
+  readonly read: ProjectEnvConfigReadResult;
+  /** The exact bytes read (null when absent), for the compare-and-swap. */
+  readonly text: string | null;
+}> {
+  const text = await readAtomicWriteTargetText(opts.path);
   const read = parseProjectEnvConfigText({
     path: opts.path,
     environment: opts.environment,
-    text: await readAtomicWriteTargetText(opts.path),
+    text,
   });
   if (read.parseError) {
     throw new ClosedCliError(
       `Failed to parse ${opts.path}: ${read.parseError}`
     );
   }
-  return read;
+  return { read, text };
 }
 
 export async function setProjectEnvValue(opts: {
@@ -2628,6 +2675,8 @@ export async function setProjectEnvValue(opts: {
   readonly value: string;
   readonly secret: boolean;
   readonly local?: boolean;
+  /** Bounded wait for the layer lock; tests only. */
+  readonly layerLockTimeoutMs?: number;
 }): Promise<ProjectEnvMutationResult> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
@@ -2649,7 +2698,29 @@ export async function setProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
-  const read = await readProjectEnvLayerForMutation({
+  // The read, the change and the write form one critical section per layer,
+  // so a concurrent set or unset of another key is never lost (HACK-1376).
+  return await withEnvLayerLock({
+    layerPath: filePath,
+    timeoutMs: opts.layerLockTimeoutMs,
+    run: async () =>
+      await setLockedProjectEnvValue({ ...opts, scope, filePath }),
+  });
+}
+
+async function setLockedProjectEnvValue(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName: string | null;
+  readonly scope: string;
+  readonly key: string;
+  readonly value: string;
+  readonly secret: boolean;
+  readonly local?: boolean;
+  readonly filePath: string;
+}): Promise<ProjectEnvMutationResult> {
+  const { filePath, scope } = opts;
+  const { read, text } = await readProjectEnvLayerForMutation({
     path: filePath,
     environment: opts.envName ?? "default",
   });
@@ -2693,9 +2764,12 @@ export async function setProjectEnvValue(opts: {
     secretsprovider: PROJECT_ENV_SECRETS_PROVIDER,
     values: nextValues,
   };
+  // The lock excludes cooperating writers; the compare-and-swap turns a write
+  // by anything else since the read into a closed, retryable conflict.
   const changed = await writeProjectEnvConfigFile({
     path: filePath,
     config: nextConfig,
+    expectedExisting: text,
   });
   return {
     filePath,
@@ -2713,6 +2787,8 @@ export async function unsetProjectEnvValue(opts: {
   readonly scope: string;
   readonly key: string;
   readonly local?: boolean;
+  /** Bounded wait for the layer lock; tests only. */
+  readonly layerLockTimeoutMs?: number;
 }): Promise<{ readonly changed: boolean; readonly filePath: string }> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
@@ -2727,7 +2803,25 @@ export async function unsetProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
-  const read = await readProjectEnvLayerForMutation({
+  // Same per-layer critical section as `setProjectEnvValue` (HACK-1376).
+  return await withEnvLayerLock({
+    layerPath: filePath,
+    timeoutMs: opts.layerLockTimeoutMs,
+    run: async () => await unsetLockedProjectEnvValue({ ...opts, filePath }),
+  });
+}
+
+async function unsetLockedProjectEnvValue(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName: string | null;
+  readonly scope: string;
+  readonly key: string;
+  readonly local?: boolean;
+  readonly filePath: string;
+}): Promise<{ readonly changed: boolean; readonly filePath: string }> {
+  const { filePath } = opts;
+  const { read, text } = await readProjectEnvLayerForMutation({
     path: filePath,
     environment: opts.envName ?? "default",
   });
@@ -2766,6 +2860,7 @@ export async function unsetProjectEnvValue(opts: {
       secretsprovider: PROJECT_ENV_SECRETS_PROVIDER,
       values: nextValues,
     },
+    expectedExisting: text,
   });
   return { changed, filePath };
 }
@@ -2873,10 +2968,12 @@ export type ProjectEnvHydrationResult = {
  *   rename, so the previous layer stays in place.
  * - Concurrency: hydrations of one project are serialized by an exclusive
  *   lock file under `.internal/`; a second hydration refuses instead of
- *   waiting. The write is also a compare-and-swap against the bytes read, so a
- *   different writer that changed the layer meanwhile makes hydration refuse
- *   rather than overwrite it. A lock left by a killed process is reported, not
- *   removed.
+ *   waiting. A lock left by a killed process is reported, not removed. Inside
+ *   it, hydration takes the layer's write lock (`withEnvLayerLock`), the same
+ *   one `hack env set`/`unset` hold, waiting a bounded time for them. The
+ *   write is also a compare-and-swap against the bytes read, so a writer that
+ *   takes no lock and changed the layer meanwhile makes hydration refuse
+ *   rather than overwrite it.
  * - Wrong key: every secret already in the layer must decrypt under the key
  *   readers would use, or hydration refuses. Secret mode encrypts with the key
  *   file `hack env add --secret` uses and refuses to create one while only
@@ -2936,11 +3033,18 @@ export async function hydrateProjectEnvLocalLayer(opts: {
     refuse,
   });
   try {
-    return await hydrateLockedProjectEnvLayer({
-      ...opts,
-      scope,
-      filePath,
-      refuse,
+    // Also take the per-layer lock that `hack env set`/`unset` hold, so a
+    // concurrent set of another key waits instead of making hydration refuse
+    // as `concurrent_write` (or being overwritten).
+    return await withEnvLayerLock({
+      layerPath: filePath,
+      run: async () =>
+        await hydrateLockedProjectEnvLayer({
+          ...opts,
+          scope,
+          filePath,
+          refuse,
+        }),
     });
   } finally {
     await release();
@@ -3853,6 +3957,11 @@ export type EnsureProjectEnvSecretKeyResult = {
  * and new key files are created exclusively with mode 0600 (an existing entry,
  * including a dangling symlink, is never replaced or followed).
  *
+ * Ignore invariant: a checkout-local key is returned only once git ignores it.
+ * The root `.gitignore` entry is written before a new local key, so a failed
+ * write leaves no key behind, and an existing local key that git does not
+ * ignore is repaired or refused (see `ensureProjectEnvKeyIgnored`).
+ *
  * Concurrency: when no key exists, creation in a git checkout runs under a
  * cooperative lock at `<git common dir>/.hack.secret.key.lock`, so concurrent
  * first users across primary and linked checkouts converge on one key. Legacy
@@ -3929,6 +4038,13 @@ async function ensureProjectEnvSecretKeyUnlocked(opts: {
   const existing = await readLegacyProjectEnvKeyFile({ path: keyPath });
   if (existing !== null) {
     await assertProjectEnvKeyUntracked({ keyPath });
+    // A key left un-ignored (an older Hack, a failed ignore write, a hand-
+    // copied key) is repaired before it is used, or refused.
+    await ensureProjectEnvKeyIgnored({
+      projectRoot: opts.projectRoot,
+      keyPath,
+      creating: false,
+    });
     return {
       keyPath,
       keyText: existing,
@@ -4047,12 +4163,57 @@ async function writeProjectEnvKeyWithFallback(opts: {
     );
   }
 
+  // The ignore entry comes first: if it cannot be written, no key file exists
+  // for a retry to pick up unignored.
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  await ensureProjectEnvKeyIgnored({
+    projectRoot: opts.projectRoot,
+    keyPath: opts.localKeyPath,
+    creating: true,
+  });
   const keyText = await writeProjectEnvKeyFile({
     projectRoot: opts.projectRoot,
     path: opts.localKeyPath,
     keyText: opts.keyText,
   });
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  emitProjectEnvKeyWarnings({ warnings });
+  return { keyPath: opts.localKeyPath, keyText, warnings };
+}
+
+/** Fixed, value-free refusal for a checkout-local key git would commit. */
+function projectEnvKeyUnignoredError(opts: {
+  readonly rootGitignore: string;
+}): ProjectEnvKeyRefusalError {
+  return new ProjectEnvKeyRefusalError(
+    `Refusing to use ${PROJECT_ENV_KEY_FILENAME}: git does not ignore it, so it could be committed, and Hack could not add it to ${opts.rootGitignore}. Add a '${PROJECT_ENV_KEY_FILENAME}' line to that file (making it writable if needed) and remove any rule that re-includes the key, then retry; key contents are never included in this message.`
+  );
+}
+
+/**
+ * Keeps the checkout-local key file out of commits: makes sure the root
+ * `.gitignore` lists it and that git then ignores it.
+ *
+ * - `creating`: runs before a new key file is written. The entry is always
+ *   ensured (also outside git, so a later `git init` ignores the key); a
+ *   failed write is refused as that `.gitignore` write, and the caller writes
+ *   no key.
+ * - otherwise (an existing key): only a key git positively does not ignore is
+ *   repaired, so an ignored key or a checkout outside git causes no write. A
+ *   failed repair is refused with {@link projectEnvKeyUnignoredError}, and the
+ *   key is not used.
+ *
+ * Either way, a key git still does not ignore after the entry (for example a
+ * later `!.hack.secret.key` rule) is refused.
+ */
+async function ensureProjectEnvKeyIgnored(opts: {
+  readonly projectRoot: string;
+  readonly keyPath: string;
+  readonly creating: boolean;
+}): Promise<void> {
+  const probe = { projectRoot: opts.projectRoot, path: opts.keyPath };
+  if (!opts.creating && (await isGitIgnoredProjectEnvPath(probe)) !== false) {
+    return;
+  }
   const rootGitignore = resolve(opts.projectRoot, ".gitignore");
   try {
     await ensureGitignoreEntry({
@@ -4061,14 +4222,13 @@ async function writeProjectEnvKeyWithFallback(opts: {
       comment: "# project env key",
     });
   } catch (error: unknown) {
-    throw closedFileWriteError({
-      error,
-      path: rootGitignore,
-      operation: "write",
-    });
+    throw opts.creating
+      ? closedFileWriteError({ error, path: rootGitignore, operation: "write" })
+      : projectEnvKeyUnignoredError({ rootGitignore });
   }
-  emitProjectEnvKeyWarnings({ warnings });
-  return { keyPath: opts.localKeyPath, keyText, warnings };
+  if ((await isGitIgnoredProjectEnvPath(probe)) === false) {
+    throw projectEnvKeyUnignoredError({ rootGitignore });
+  }
 }
 
 /**

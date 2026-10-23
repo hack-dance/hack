@@ -12,7 +12,8 @@ Revision-1 identities (artifacts, host, lane kinds and backends, candidate capac
 workload pins, rotated lane order) are exact; budgets and sample counts are floors at
 their frozen values, which a revision may tighten.
 Every number anywhere in the protocol or a summary must be finite and lie within
-MAX_JSON_NUMBER, including fields the checker does not otherwise read.
+MAX_JSON_NUMBER, including fields the checker does not otherwise read, and no object
+may repeat a key, so no value is hidden from that scan.
 Diagnostics are closed codes from DIAGNOSTICS; they never echo input values or paths.
 A budget verdict is one of VERDICTS. A statistic is judged only from complete,
 sufficient, admitted samples: missing, short, flagged or unaccounted samples are
@@ -152,6 +153,11 @@ FROZEN_CORRECTNESS = {
 # integer range. Bounding every number keeps each statistic and ratio finite and keeps
 # Python from converting an unbounded JSON integer to a float.
 MAX_JSON_NUMBER = 2 ** 53 - 1
+# Decimal digits in MAX_JSON_NUMBER. An integer literal with more digits is out of range
+# whatever its value, so it is never converted exactly: Python 3.11 and later refuse to
+# convert one of more than 4300 digits, which would turn this range error into an
+# unreadable file on some interpreters and not others.
+MAX_JSON_INTEGER_DIGITS = len(str(MAX_JSON_NUMBER))
 
 DIAGNOSTICS = frozenset({
     "protocol_unreadable",
@@ -199,9 +205,11 @@ DIAGNOSTICS = frozenset({
     "observer_policy_missing",
     "known_limit_malformed",
     "protocol_number_out_of_range",
+    "protocol_key_duplicate",
     "summary_unreadable",
     "summary_not_object",
     "summary_number_out_of_range",
+    "summary_key_duplicate",
     "summary_revision_mismatch",
     "summary_workload_unknown",
     "summary_cache_class_mismatch",
@@ -335,8 +343,15 @@ def _numbers_in_range(value):
 
 
 def _same(value, frozen):
-    """Exact JSON equality: unlike ==, 4.0 is not 4 and true is not 1."""
-    return json.dumps(value, sort_keys=True) == json.dumps(frozen, sort_keys=True)
+    """Exact JSON equality: unlike ==, 4.0 is not 4 and true is not 1.
+
+    Every frozen value serializes, so a value that cannot (an integer beyond Python's
+    conversion limit, or a non-JSON object) is simply different, never an exception.
+    """
+    try:
+        return json.dumps(value, sort_keys=True) == json.dumps(frozen, sort_keys=True)
+    except (TypeError, ValueError, RecursionError):
+        return False
 
 
 def _count(value):
@@ -662,16 +677,18 @@ def validate_summary(protocol, summary):
     """
     if not isinstance(summary, dict):
         return ["summary_not_object"], None
+    # The range scan comes first, so an out-of-range number is reported even when the
+    # revision or workload stops the summary from being checked further.
+    found = set()
+    if not _numbers_in_range(summary):
+        found.add("summary_number_out_of_range")
     if not _count(summary.get("protocol_revision")) or summary["protocol_revision"] != protocol["revision"]:
-        return ["summary_revision_mismatch"], None
+        return sorted(found | {"summary_revision_mismatch"}), None
     workload_id = summary.get("workload")
     workloads = {w["id"]: w for w in protocol["workloads"]}
     workload = workloads.get(workload_id) if isinstance(workload_id, str) else None
     if workload is None:
-        return ["summary_workload_unknown"], None
-    found = set()
-    if not _numbers_in_range(summary):
-        found.add("summary_number_out_of_range")
+        return sorted(found | {"summary_workload_unknown"}), None
     # Budgets are frozen for the warm class only; other classes are reported separately.
     if summary.get("cache_class") != protocol["cache_classes"]["budget_class"]:
         found.add("summary_cache_class_mismatch")
@@ -828,9 +845,35 @@ def accepted(records):
     return bool(records) and all(record["verdict"] in ACCEPTING_VERDICTS for record in records)
 
 
-def _load(path, unreadable):
+class _DuplicateKey(Exception):
+    """An object repeated a key; json.loads would keep only the last value."""
+
+
+def _unique_object(pairs):
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        raise _DuplicateKey
+    return obj
+
+
+def _bounded_int(literal):
+    """Parse a JSON integer literal; one too long to be in range parses as just out of range.
+
+    The sign is kept, and the result is still an int, so every type check treats it as
+    it would treat the exact value, and the range scan refuses it on every interpreter.
+    """
+    if len(literal.lstrip("-")) > MAX_JSON_INTEGER_DIGITS:
+        return -(MAX_JSON_NUMBER + 1) if literal.startswith("-") else MAX_JSON_NUMBER + 1
+    return int(literal)
+
+
+def _load(path, unreadable, duplicate):
+    """Parse a JSON file, or return a closed code: `duplicate` for a repeated object key."""
     try:
-        return json.loads(Path(path).read_text()), None
+        text = Path(path).read_text()
+        return json.loads(text, object_pairs_hook=_unique_object, parse_int=_bounded_int), None
+    except _DuplicateKey:
+        return None, duplicate
     except (OSError, ValueError, UnicodeDecodeError, RecursionError):
         return None, unreadable
 
@@ -843,7 +886,7 @@ def main(argv=None):
     mode.add_argument("--evaluate", metavar="SUMMARY")
     args = parser.parse_args(argv)
 
-    protocol, problem = _load(args.protocol, "protocol_unreadable")
+    protocol, problem = _load(args.protocol, "protocol_unreadable", "protocol_key_duplicate")
     diagnostics = [problem] if problem else validate_protocol(protocol)
     if diagnostics:
         print(json.dumps({"status": "invalid", "diagnostics": diagnostics}))
@@ -853,7 +896,7 @@ def main(argv=None):
                           "orders": protocol["schedule"]["orders"]}, indent=2))
         return 0
     if args.evaluate:
-        summary, problem = _load(args.evaluate, "summary_unreadable")
+        summary, problem = _load(args.evaluate, "summary_unreadable", "summary_key_duplicate")
         diagnostics, records = ([problem], []) if problem else evaluate(protocol, summary)
         if diagnostics:
             print(json.dumps({"status": "invalid", "diagnostics": diagnostics}))

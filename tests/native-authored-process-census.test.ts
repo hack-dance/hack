@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { lstat, realpath } from "node:fs/promises";
 import {
+  assertNativeAuthoredProcessQuiescent,
+  parseNativeAuthoredProcessIncarnation,
   readNativeAuthoredProcessCensus,
   requireNativeAuthoredProcessQuiescent,
 } from "../src/backends/native-authored-process-incarnation.ts";
 import { createNativeProcessCensusDiagnostics } from "../src/backends/native-process-census-diagnostics.ts";
+import { readNativeComposeHostBootId } from "../src/lib/native-compose-private-state.ts";
 import * as sessions from "../src/lib/tty-process-group.ts";
 
 let active = 0;
@@ -47,12 +51,18 @@ async function standin(
       | "after-final-pair"
       | "churn";
     readonly foreignSession?: boolean;
+    /** Successive SID lookup results for a PID; the last one repeats. */
+    readonly lookups?: {
+      readonly [pid: number]: readonly (number | null)[] | undefined;
+    };
   },
   body: (calls: () => number) => Promise<void>
 ) {
   const frames = [...options.frames];
   const expiry = options.expiry;
   const foreignSession = options.foreignSession === true;
+  const lookups = options.lookups ?? {};
+  const looked = new Map<number, number>();
   let calls = 0;
   let inspectors = 0;
   let offset = 0;
@@ -70,6 +80,14 @@ async function standin(
     let failed = false;
     return {
       session: (pid: number) => {
+        const script = lookups[pid];
+        if (script !== undefined) {
+          const index = looked.get(pid) ?? 0;
+          looked.set(pid, index + 1);
+          const sid = script[Math.min(index, script.length - 1)] ?? null;
+          failed ||= sid === null;
+          return sid;
+        }
         if (pid !== process.pid && [88, 89, 90].includes(pid)) {
           failed = true;
           return null;
@@ -344,5 +362,355 @@ censusTest(
     expect(
       diagnostics.snapshot().samples.some((sample) => sample.phase === "merge")
     ).toBe(false);
+  }
+);
+
+/** Rows of interest carry the original PID (123), PGID (123) or SID (123);
+ * every other row is foreign. Real `ps` output on a loaded host shows foreign
+ * exec, reparent, PGID and live/transient drift between the two bracketing
+ * observations in most pairs. */
+const execImage = (text: string) => text.replace("/bin/sleep", "/bin/cat");
+const transient = (text: string) => text.replace(" S ", " ?N ");
+const zombie = (text: string) => text.replace(" S ", " Z ");
+const reborn = "Thu Oct 8 12:00:00 2026";
+censusTest.each([
+  { name: "exec", after: execImage(raw(77)) },
+  { name: "live to transient", after: transient(raw(77)) },
+  { name: "reparent", after: raw(77).replace(" 45 ", " 1 ") },
+  { name: "PGID", after: raw(77, 78) },
+])(
+  "foreign $name drift between bracketing observations cannot refuse quiescence",
+  async ({ after }) => {
+    await standin({ frames: [raw(77), after] }, async (calls) => {
+      const rows = await readNativeAuthoredProcessCensus(3000, {
+        interest: original,
+      });
+      expect(calls()).toBe(2);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.pid).toBe(77);
+      expect(() =>
+        requireNativeAuthoredProcessQuiescent(original, rows)
+      ).not.toThrow();
+    });
+    await standin({ frames: [raw(77), after] }, async (calls) => {
+      await expect(readNativeAuthoredProcessCensus()).rejects.toThrow(
+        "identity changed"
+      );
+      expect(calls()).toBe(2);
+    });
+  }
+);
+censusTest.each([
+  { name: "live to zombie", before: raw(77), after: zombie(raw(77)) },
+  { name: "new zombie", before: raw(77), after: raw(77) + zombie(raw(79)) },
+  { name: "reaped zombie", before: raw(77) + zombie(raw(79)), after: raw(77) },
+  {
+    name: "orphaned zombie",
+    before: zombie(raw(79)),
+    after: zombie(raw(79)).replace(" 45 ", " 1 "),
+  },
+])(
+  "foreign $name churn is kept as an unresolved zombie in one pair",
+  async ({ before, after }) => {
+    await standin({ frames: [before, after] }, async (calls) => {
+      const rows = await readNativeAuthoredProcessCensus(3000, {
+        interest: original,
+      });
+      expect(calls()).toBe(2);
+      expect(rows.filter((row) => row.state === "zombie")).toHaveLength(1);
+      expect(() =>
+        requireNativeAuthoredProcessQuiescent(original, rows)
+      ).not.toThrow();
+    });
+  }
+);
+censusTest.each([
+  { name: "PID reuse", before: raw(77), churn: raw(77, 77, reborn) },
+  { name: "zombie turning live", before: zombie(raw(77)), churn: raw(77) },
+])(
+  "foreign $name supersedes the whole pair and needs a fresh stable pair",
+  async ({ before, churn }) => {
+    await standin(
+      { frames: [before, churn, raw(77), raw(77)] },
+      async (calls) => {
+        const rows = await readNativeAuthoredProcessCensus(3000, {
+          interest: original,
+        });
+        expect(calls()).toBe(4);
+        expect(rows.map((row) => row.pid)).toEqual([77]);
+      }
+    );
+    // Expiry after the superseded pair admits no successor child.
+    await standin(
+      { frames: [before, churn], expiry: "after-final-pair" },
+      async (calls) => {
+        await expect(
+          readNativeAuthoredProcessCensus(3000, { interest: original })
+        ).rejects.toThrow();
+        expect(calls()).toBe(2);
+      }
+    );
+  }
+);
+censusTest.each([
+  { name: "original PID exec", frames: [raw(123), execImage(raw(123))] },
+  {
+    name: "group member exec",
+    frames: [raw(77, 123), execImage(raw(77, 123))],
+  },
+  {
+    name: "group member transient",
+    frames: [raw(77, 123), transient(raw(77, 123))],
+  },
+  { name: "PGID drift into the group", frames: [raw(77), raw(77, 123)] },
+  { name: "PGID drift out of the group", frames: [raw(77, 123), raw(77)] },
+  {
+    name: "group member PID reuse",
+    frames: [raw(77, 123), raw(77, 123, reborn)],
+  },
+  { name: "original PID reuse", frames: [raw(123), raw(123, 123, reborn)] },
+  {
+    name: "group member to zombie",
+    frames: [raw(77, 123), zombie(raw(77, 123))],
+  },
+])(
+  "row of interest $name still refuses as a changed identity",
+  async ({ frames }) => {
+    await standin({ frames }, async (calls) => {
+      await expect(
+        readNativeAuthoredProcessCensus(3000, { interest: original })
+      ).rejects.toThrow("identity changed");
+      expect(calls()).toBe(2);
+    });
+  }
+);
+censusTest(
+  "session member drift and unstable zombies of interest still refuse",
+  async () => {
+    await standin(
+      { frames: [raw(77), execImage(raw(77))], foreignSession: true },
+      async (calls) => {
+        await expect(
+          readNativeAuthoredProcessCensus(3000, { interest: original })
+        ).rejects.toThrow("identity changed");
+        expect(calls()).toBe(2);
+      }
+    );
+    for (const frames of [
+      [raw(77), raw(77) + zombie(raw(123))],
+      [raw(77) + zombie(raw(79, 123)), raw(77)],
+      [raw(77) + zombie(raw(79, 123)), raw(77, 77, reborn)],
+    ]) {
+      await standin({ frames }, async (calls) => {
+        await expect(
+          readNativeAuthoredProcessCensus(3000, { interest: original })
+        ).rejects.toThrow("unknown or occupied");
+        expect(calls()).toBe(2);
+      });
+    }
+  }
+);
+/** The stand-in fails the SID lookup of PIDs 88, 89 and 90, as macOS does for a
+ * process that exits or becomes a zombie between `ps` and `getsid`. Every
+ * other PID leads its own session unless `lookups` scripts it. */
+const child = (pid: number, parent: number, group = pid) =>
+  raw(pid, group).replace(" 45 ", ` ${parent} `);
+censusTest.each([
+  { name: "before", frames: [raw(88), raw(77)] },
+  { name: "after", frames: [raw(77), raw(88)] },
+  { name: "repeatedly for one PID", frames: [raw(88), raw(88)] },
+  {
+    name: "then a live row",
+    frames: [raw(77) + raw(86), raw(77) + raw(86)],
+    lookups: { 86: [null, 86] },
+  },
+  {
+    name: "in a PGID a stable session leader did not lead",
+    frames: [raw(77, 76) + raw(88, 76), raw(77, 76)],
+  },
+  {
+    name: "in a PGID with two known SIDs",
+    frames: [raw(77), raw(77) + raw(76, 77) + raw(88, 77)],
+    lookups: { 77: [70] },
+  },
+  {
+    name: "in a PGID proven only by the original's SID",
+    frames: [raw(77), raw(77) + raw(88, 77)],
+    lookups: { 77: [123] },
+  },
+  {
+    name: "for a child of a session leader",
+    frames: [raw(77), raw(77) + child(88, 77)],
+  },
+  {
+    name: "for a child of launchd",
+    frames: [raw(1), raw(1) + child(88, 1)],
+  },
+  {
+    name: "for a child of an unstable parent",
+    frames: [raw(77), raw(77) + child(88, 77)],
+    lookups: { 77: [70, 71] },
+  },
+])(
+  "unresolved foreign SID lookup failure $name supersedes without re-listing",
+  async ({ frames, lookups }) => {
+    const all = [...frames, raw(77), raw(77)];
+    await standin({ frames: all, lookups }, async (calls) => {
+      const rows = await readNativeAuthoredProcessCensus(3000, {
+        interest: original,
+      });
+      expect(rows.map((row) => row.pid)).toEqual([77]);
+      expect(calls()).toBe(4);
+    });
+  }
+);
+censusTest.each([
+  {
+    name: "its incarnation's earlier SID",
+    frames: [raw(77) + raw(86), raw(77) + raw(86)],
+    lookups: { 86: [60, null] },
+    session: "60",
+  },
+  {
+    name: "its PGID in the later listing",
+    frames: [raw(77), raw(77) + raw(88, 77)],
+    lookups: {},
+    session: "77",
+  },
+  {
+    name: "its PGID in the earlier listing",
+    frames: [raw(77) + raw(88, 77), raw(77)],
+    lookups: { 77: [70] },
+    session: "70",
+  },
+  {
+    name: "the PGID a session leader led in the earlier listing",
+    frames: [raw(77) + raw(88, 77), raw(77)],
+    lookups: {},
+    session: "77",
+  },
+  {
+    name: "a parent that never led a session",
+    frames: [raw(77), raw(77) + child(88, 77)],
+    lookups: { 77: [70] },
+    session: "70",
+  },
+])(
+  "foreign SID lookup failure resolved by $name is accepted in one pair",
+  async ({ frames, lookups, session }) => {
+    await standin({ frames, lookups }, async (calls) => {
+      const rows = await readNativeAuthoredProcessCensus(3000, {
+        interest: original,
+      });
+      expect(calls()).toBe(2);
+      const resolved = rows.filter((row) => row.pid !== 77);
+      expect(resolved.map((row) => row.session)).toEqual([session]);
+      expect(() =>
+        requireNativeAuthoredProcessQuiescent(original, rows)
+      ).not.toThrow();
+    });
+  }
+);
+censusTest.each([
+  {
+    name: "group member, same live",
+    frames: [raw(88, 123), raw(88, 123)],
+    reason: "same-live-SID-unavailable",
+  },
+  {
+    name: "group member, live to zombie",
+    frames: [raw(88, 123), zombie(raw(88, 123))],
+    reason: "changed",
+  },
+  {
+    name: "group member, reappeared PID",
+    frames: [raw(88, 123), raw(77), raw(88, 123)],
+    reason: "PID reappeared",
+  },
+  {
+    name: "original PID, PID reuse",
+    frames: [raw(88), raw(88, 88, reborn)],
+    reason: "changed",
+    pid: 88,
+  },
+])(
+  "row of interest SID lookup failure $name keeps its classified refusal",
+  async ({ frames, reason, pid }) => {
+    await standin({ frames }, async (calls) => {
+      await expect(
+        readNativeAuthoredProcessCensus(3000, {
+          interest: { ...original, pid: pid ?? original.pid },
+        })
+      ).rejects.toThrow(reason);
+      expect(calls()).toBe(frames.length);
+    });
+  }
+);
+censusTest(
+  "a disappeared row of interest still becomes a denial fact before a fresh pair",
+  async () => {
+    await standin(
+      { frames: [raw(88, 123), raw(77), raw(77), raw(77)] },
+      async (calls) => {
+        const rows = await readNativeAuthoredProcessCensus(3000, {
+          interest: original,
+        });
+        expect(rows.map((row) => row.pid)).toEqual([77]);
+        expect(calls()).toBe(4);
+      }
+    );
+  }
+);
+censusTest(
+  "foreign SID lookup churn until expiry confers no census",
+  async () => {
+    const frames = [raw(88), raw(89), raw(90)];
+    await standin({ frames, expiry: "churn" }, async (calls) => {
+      await expect(
+        readNativeAuthoredProcessCensus(3000, { interest: original })
+      ).rejects.toThrow();
+      expect(calls()).toBe(frames.length);
+    });
+  }
+);
+censusTest(
+  "recovery quiescence bounds its census to the original's rows of interest",
+  async () => {
+    // Real read-only boot and image facts; the census itself is synthetic.
+    const boot = await readNativeComposeHostBootId();
+    const path = await realpath("/bin/sleep");
+    const stat = await lstat(path, { bigint: true });
+    const image = { path, dev: String(stat.dev), ino: String(stat.ino) };
+    const value = parseNativeAuthoredProcessIncarnation({
+      ...original,
+      uid: process.getuid?.(),
+      executable: path,
+      boot,
+      image,
+      selected: image,
+    });
+    await standin(
+      { frames: [`${boot}\n`, raw(77), execImage(raw(77))] },
+      async (calls) => {
+        const observation = await assertNativeAuthoredProcessQuiescent(
+          value,
+          () => 3000
+        );
+        expect(observation).toEqual({
+          kind: "no-live-members",
+          unresolvedZombies: 0,
+        });
+        expect(calls()).toBe(3);
+      }
+    );
+    await standin(
+      { frames: [`${boot}\n`, raw(77, 123), execImage(raw(77, 123))] },
+      async (calls) => {
+        await expect(
+          assertNativeAuthoredProcessQuiescent(value, () => 3000)
+        ).rejects.toThrow("identity changed");
+        expect(calls()).toBe(3);
+      }
+    );
   }
 );

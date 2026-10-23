@@ -74,8 +74,11 @@ How it is maintained:
 - a read-only `.hack/.gitignore` is never replaced, the same policy as for
   `info/exclude`. A file with no write permission bit (for example mode 0444)
   is read-only for every user, root included; otherwise Hack asks the
-  operating system whether you may write it. When it lacks the managed block,
-  `hack doctor` warns and names the fix (make it writable, then run
+  operating system whether you may write it. Hack checks the mode bits first,
+  so an access control list (ACL) that grants you write access to a 0444 file
+  does not make it writable for Hack; add a write bit instead. When it lacks
+  the managed block, `hack doctor` warns and names the fix (make it writable,
+  then run
   `hack doctor --fix`), and `--fix` leaves it unchanged. `hack env set --local`
   and `hack env hydrate` still write the local layer, print the same warning
   on stderr (so `--json` output on stdout stays valid JSON), and leave the
@@ -93,6 +96,9 @@ How it is maintained:
   clone and never committed. The update
   is best-effort: if git is unavailable, or `info/` or `info/exclude` is a
   symlink or not writable, Hack leaves it alone and the command still runs.
+  "Not writable" follows the `.hack/.gitignore` rule above: an `info/exclude`
+  with no write permission bit is left alone even for root or when an ACL
+  grants write.
 - never commit `.hack/.internal/`: it holds machine-local generated state that
   runtime commands rewrite. If it is tracked, `hack doctor --fix` untracks it.
 - the entries live inside a marked, hack-managed block; anything you add

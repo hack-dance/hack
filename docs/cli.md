@@ -133,8 +133,11 @@ Historical remote guides are excluded from the supported documentation.
   from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `open`, `tui`, `branch ...`,
   `config get`/`set`, `env ...`, `host exec`/`shell` and `project owner`/`target`/`task`, for
   example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
-  error envelope; without `--json` it is one `ERROR: E_PROJECT_NOT_FOUND: ...` line and no stack
-  trace. `project target` and `project task` use their own message, and `target` adds a
+  error envelope; without `--json` it is one closed error line, `E_PROJECT_NOT_FOUND: <message>`,
+  and no stack trace. The logger adds its own prefix: the console logger (`HACK_LOGGER=console`)
+  prints `ERROR: E_PROJECT_NOT_FOUND: ...` on stderr, gum prints a styled `ERROR` level on
+  stderr, and clack prints a `■` marker on stdout after its `│` guide line. `project target` and
+  `project task` use their own message, and `target` adds a
   `detail`. These commands report something else:
   - `tui` without a terminal refuses for that reason first.
   - `env get` never prints a failure reason, since its output is raw values: it prints one fixed

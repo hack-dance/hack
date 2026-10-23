@@ -56,6 +56,12 @@ const LATE_CODE_DELAY_MS = 1000;
  * bound and prove that it still ends a drain EOF cannot.
  */
 const LATE_WRITER_DRAIN_BOUND_MS = 25_000;
+/**
+ * Gap between creating a stand-in's pid file and writing its digits. It makes
+ * the empty-file window that a loaded host opens by chance happen on every
+ * run, so a reader that only waits for existence fails every time.
+ */
+const TORN_HANDSHAKE_GAP_MS = 50;
 
 /** Every case gets a named budget; none relies on Bun's 5 s default. */
 function test(
@@ -76,6 +82,34 @@ async function waitForFile(
     if (performance.now() >= deadline) {
       throw new Error(
         `Fixture handshake did not appear within ${budgetMs} ms.`
+      );
+    }
+    await Bun.sleep(10);
+  }
+}
+
+/**
+ * Wait until a fixture's pid handshake holds a complete pid. A fixture's
+ * writeFileSync creates the file before it writes the digits, so a read that
+ * only waited for existence can see "": Number("") is 0, and kill(0, 0)
+ * always succeeds, so an absence wait on it would never end.
+ */
+async function waitForPid(
+  path: string,
+  budgetMs = HANDSHAKE_BUDGET_MS
+): Promise<number> {
+  const deadline = performance.now() + budgetMs;
+  for (;;) {
+    const file = Bun.file(path);
+    if (await file.exists()) {
+      const pid = Number(await file.text());
+      if (Number.isSafeInteger(pid) && pid > 1) {
+        return pid;
+      }
+    }
+    if (performance.now() >= deadline) {
+      throw new Error(
+        `Fixture pid handshake did not complete within ${budgetMs} ms.`
       );
     }
     await Bun.sleep(10);
@@ -448,8 +482,7 @@ ${mode === "abort" ? "await Bun.sleep(60_000);" : `(await import('node:fs')).wri
         NATIVE_EXIT_DRAIN_BOUND_MS + DRAIN_SETTLE_MARGIN_MS
       );
       expect(await Bun.file(finished).exists()).toBe(false);
-      const keeperPid = Number(await Bun.file(holding).text());
-      expect(Number.isSafeInteger(keeperPid) && keeperPid > 1).toBe(true);
+      const keeperPid = await waitForPid(holding);
       expect(() => process.kill(keeperPid, 0)).not.toThrow();
     } catch (error: unknown) {
       failed = error;
@@ -543,7 +576,9 @@ bunTest.each(
     // The writer inherits only stderr. It writes the closed code after the
     // test has seen the stand-in reaped, i.e. after the client observed the
     // exit, and then closes the pipe. A fixed post-exit window drops the code;
-    // draining to EOF keeps it.
+    // draining to EOF keeps it. The stand-in publishes its pid as a torn
+    // handshake (an empty file first), so the reader must wait for a complete
+    // pid rather than for the file to exist.
     const writer = `import {existsSync,writeFileSync} from 'node:fs';
 writeFileSync(${JSON.stringify(writerPid)},String(process.pid));
 const cap=performance.now()+${KEEPER_RELEASE_CAP_MS};
@@ -561,6 +596,8 @@ import {existsSync,writeFileSync} from 'node:fs';
 spawn(${JSON.stringify(process.execPath)},['--eval',${JSON.stringify(writer)}],{detached:true,stdio:['ignore','ignore',2]}).unref();
 const cap=performance.now()+${HANDSHAKE_BUDGET_MS};
 while(!existsSync(${JSON.stringify(writerPid)})&&performance.now()<cap)await Bun.sleep(10);
+writeFileSync(${JSON.stringify(childPid)},'');
+await Bun.sleep(${TORN_HANDSHAKE_GAP_MS});
 writeFileSync(${JSON.stringify(childPid)},String(process.pid));
 process.exit(existsSync(${JSON.stringify(writerPid)})?23:3);
 `
@@ -578,9 +615,7 @@ process.exit(existsSync(${JSON.stringify(writerPid)})?23:3);
     let failed: unknown;
     let completed = false;
     try {
-      await waitForFile(childPid);
-      const child = Number(await Bun.file(childPid).text());
-      expect(Number.isSafeInteger(child) && child > 1).toBe(true);
+      const child = await waitForPid(childPid);
       // Absence means the client reaped the stand-in: its exit was reported.
       const deadline = performance.now() + HANDSHAKE_BUDGET_MS;
       while (processPresent(child) && performance.now() < deadline) {

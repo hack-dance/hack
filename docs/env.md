@@ -453,3 +453,17 @@ and group members without a surviving identity are explicitly unverified.
 
 See [runtime performance diagnostics](performance.md) for project-listing timings,
 container details, watcher measurements and read-only cleanup previews.
+
+### Disabling native keychain access
+
+`HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK=1` disables native keychain reads, writes,
+and deletes, including `hack secrets`, project keychain stores, and macOS node
+auth tokens. All three operations throw an explicit disabled error.
+Encrypted-file stores still accept a configured key file or `HACK_SECRETS_FILE_KEY`,
+and can generate a new key file when no encrypted store exists.
+
+`bun test` loads `tests/preload.ts`, which sets this flag and replaces `Bun.secrets`
+with an in-memory backend. Tests that exercise keychain behavior can temporarily
+clear the flag; the preload still prevents native keychain access. Child CLI
+processes inherit the flag, so tests must pass it through when supplying a custom
+process environment. The in-memory backend is cleared after each test.

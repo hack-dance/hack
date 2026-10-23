@@ -21,6 +21,9 @@ mission; do not assume those files or tools exist in ordinary tasks.
 5. Complete required checks and report exact results and remaining uncertainty.
    Known warning-only diagnostics do not become a new blocker unless the change
    worsens them. Failed required checks still need repair.
+   For stateful control-plane changes, use `tlaplus-workbench`, review the saved
+   statechart and usage walkthrough before modeling, and run `bun run check:tla`.
+   Consult `specs/fv/COVERAGE.md` for scope, known bugs, and source sync revisions.
 6. Stop only task-owned temporary processes. Record useful learning and actionable
    follow-up within authorization; skip empty handoff or ticket paperwork.
 

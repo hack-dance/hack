@@ -90,6 +90,22 @@ export interface NativeRuntimeSelection {
 
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_PRIVATE_INPUT_BYTES = 256 * 1024;
+
+/**
+ * Exit-relative bound on draining an owned native child's stdout and stderr.
+ *
+ * The native runtime writes its closed error code (and any response or
+ * readiness line) before it exits, so those bytes are already in the pipes
+ * when the exit is observed; with no other writer, EOF follows immediately
+ * and the drain ends there. This bound only ends a drain that EOF cannot end:
+ * a descendant that inherited a pipe and keeps it open. It is measured from
+ * the observed exit, not from spawn, and is deliberately generous so that a
+ * heavily oversubscribed host still schedules the pipe readers before it
+ * expires. A 250 ms bound lost the closed code under load for the foreground
+ * graph owner (HACK-1350) and for bounded one-shot requests (HACK-1387).
+ * Shared by {@link invokeNativeRuntime} and the foreground graph owner.
+ */
+export const NATIVE_EXIT_DRAIN_BOUND_MS = 5000;
 const REQUEST_BUDGET_REFUSAL =
   "Native runtime request exceeds its input or time budget.";
 const SYSTEM_ENVIRONMENT = ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"];
@@ -137,6 +153,12 @@ export async function invokeNativeRuntime(opts: {
   readonly boundNativeAuthoredReadDrain?: boolean;
   /** Explicit recovery requests have their own closed argv domain and never accept private input. */
   readonly boundNativeAuthoredRecoveryDrain?: "selection" | "cleanup";
+  /**
+   * Test seam for a bound drain: how long after the child's observed exit a
+   * pipe a descendant still holds keeps being read. Production callers leave
+   * it at {@link NATIVE_EXIT_DRAIN_BOUND_MS}; EOF ends the drain earlier.
+   */
+  readonly exitDrainBoundMs?: number;
 }): Promise<unknown> {
   if (opts.signal?.aborted) {
     throw new NativeRuntimeRequestError({
@@ -146,6 +168,7 @@ export async function invokeNativeRuntime(opts: {
   }
   const timeoutMs = opts.timeoutMs ?? 180_000;
   const bound = boundDrainSelection(opts);
+  const exitDrainBoundMs = exitDrainBound(opts.exitDrainBoundMs);
   if (
     !(
       validExecResponseSelection(opts.args, opts.serviceExecResponse) &&
@@ -153,7 +176,9 @@ export async function invokeNativeRuntime(opts: {
         opts.args,
         bound,
         opts.privateInput !== undefined
-      )
+      ) &&
+      Number.isSafeInteger(exitDrainBoundMs) &&
+      exitDrainBoundMs >= 1
     )
   ) {
     // Internal invariant: callers build these argv shapes; no user input selects them.
@@ -188,11 +213,15 @@ export async function invokeNativeRuntime(opts: {
       stderr: "pipe",
     }
   );
+  // A descendant may inherit a pipe after the owned child exits. The child's
+  // exit, not that writer's EOF, bounds draining (see
+  // NATIVE_EXIT_DRAIN_BOUND_MS); its own closed code and response are already
+  // in the pipes at exit, so EOF normally ends the drain long before the bound.
   const drain = bound === undefined ? undefined : new AbortController();
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   if (drain) {
     void child.exited.then(() => {
-      drainTimer = setTimeout(() => drain.abort(), 250);
+      drainTimer = setTimeout(() => drain.abort(), exitDrainBoundMs);
     });
   }
   const failureDetails = readNativeFailure(child.stderr, drain?.signal);
@@ -257,6 +286,11 @@ export async function invokeNativeRuntime(opts: {
       await failureDetails;
     }
   }
+}
+
+/** The exit-relative drain bound in effect: the test seam's value, else the shared constant. */
+function exitDrainBound(selected: number | undefined): number {
+  return selected ?? NATIVE_EXIT_DRAIN_BOUND_MS;
 }
 
 /** One bound output drain per request; the public flags remain the callers' contract. */

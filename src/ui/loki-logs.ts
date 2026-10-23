@@ -32,6 +32,14 @@ export interface LokiLogsParams {
    * from another backend.
    */
   readonly deferEmpty?: boolean;
+  /**
+   * Follow only: call `notify` once when the tail has been open for `afterMs`
+   * without receiving any entry. Following continues either way.
+   */
+  readonly noEntriesNotice?: {
+    readonly afterMs: number;
+    readonly notify: () => void;
+  };
 }
 
 type LokiLabelSet = Record<string, string>;
@@ -379,8 +387,16 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
 
   let closed = false;
   let exitCode = 0;
+  let noEntriesTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearNoEntriesTimer = () => {
+    if (noEntriesTimer !== undefined) {
+      clearTimeout(noEntriesTimer);
+      noEntriesTimer = undefined;
+    }
+  };
 
   const stop = () => {
+    clearNoEntriesTimer();
     if (closed) {
       return;
     }
@@ -409,6 +425,18 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
     stop();
   });
 
+  const noEntriesNotice = opts.noEntriesNotice;
+  if (noEntriesNotice) {
+    ws.addEventListener("open", () => {
+      noEntriesTimer = setTimeout(() => {
+        noEntriesTimer = undefined;
+        if (!closed) {
+          noEntriesNotice.notify();
+        }
+      }, noEntriesNotice.afterMs);
+    });
+  }
+
   if (opts.json && opts.streamContext) {
     writeLogStreamEvent({
       event: buildLogStreamStartEvent({ context: opts.streamContext }),
@@ -433,6 +461,7 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
         showProjectPrefix: opts.showProjectPrefix,
       });
       for (const [tsNs, line] of s.values) {
+        clearNoEntriesTimer();
         if (opts.json) {
           const entry = parseLokiLogLine({
             labels: s.stream,
@@ -459,6 +488,7 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
   await new Promise<void>((resolve) => {
     ws.addEventListener("close", () => {
       closed = true;
+      clearNoEntriesTimer();
       resolve();
     });
   });

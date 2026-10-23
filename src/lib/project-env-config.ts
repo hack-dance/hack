@@ -26,7 +26,7 @@ import {
   HACK_DIR_GITIGNORE_END_MARKER,
   HACK_DIR_GITIGNORE_ENTRIES,
 } from "../templates.ts";
-import { ClosedCliError } from "./cli-result.ts";
+import { ClosedCliError, HackCliError } from "./cli-result.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import {
   AtomicWriteConflictError,
@@ -799,6 +799,59 @@ export async function projectEnvConfigExists(opts: {
   });
 }
 
+/**
+ * Closed refusal for a `.hack/hack.env.*.yaml` entry that is neither a regular
+ * file nor a symlink to one: a dangling symlink, a link to a directory, a
+ * directory or another special file. The message names the path and a fixed
+ * remedy only; the CLI prints it as one `E_PATH_CONFLICT: message` line.
+ */
+export class ProjectEnvLayerPathConflictError extends HackCliError {
+  readonly path: string;
+
+  constructor(opts: { readonly path: string }) {
+    super({
+      code: "E_PATH_CONFLICT",
+      message: `Refusing to choose the env format: ${opts.path} is not a regular file (for example a dangling symlink or a directory). Replace it with a regular env layer file or remove it, then retry.`,
+    });
+    this.name = "ProjectEnvLayerPathConflictError";
+    this.path = opts.path;
+  }
+}
+
+/**
+ * The env-format decision of a command that writes either the env layers or
+ * the legacy `.hack/.env` (`hack env set`, `hack env unset`).
+ *
+ * {@link projectEnvConfigExists} reads a dangling default layer, and any
+ * symlinked overlay, as absent, so such a project would silently fall back to
+ * the legacy file. Here every entry named like an env layer must be a regular
+ * file or a symlink that resolves to one, and either counts as an env layer;
+ * any other entry is refused with {@link ProjectEnvLayerPathConflictError}
+ * before anything is read from stdin or written.
+ */
+export async function projectEnvConfigExistsForMutation(opts: {
+  readonly projectDir: string;
+}): Promise<boolean> {
+  const entries = await readdir(opts.projectDir, { withFileTypes: true });
+  let linkedLayer = false;
+  for (const entry of entries) {
+    if (
+      entry.isFile() ||
+      !entry.name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) ||
+      !entry.name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+    ) {
+      continue;
+    }
+    const path = resolve(opts.projectDir, entry.name);
+    const target = await stat(path).catch(() => null);
+    if (!target?.isFile()) {
+      throw new ProjectEnvLayerPathConflictError({ path });
+    }
+    linkedLayer = true;
+  }
+  return linkedLayer || (await projectEnvConfigExists(opts));
+}
+
 export async function listProjectEnvOverlayNames(opts: {
   readonly projectDir: string;
 }): Promise<readonly string[]> {
@@ -959,7 +1012,10 @@ function parseProjectEnvConfig(opts: {
     if (!isValidProjectEnvScopeName({ scopeName: scope })) {
       return {
         ok: false,
-        error: `Invalid env scope: ${scope}`,
+        // The name is not echoed: it is file content and may hold a pasted
+        // value or a line break, and this error is printed as one line.
+        error:
+          'Invalid env scope name; scopes must be "global" or match ^[a-z0-9][a-z0-9._-]*$.',
       };
     }
     if (!isRecord(scopeRaw)) {
@@ -1166,7 +1222,10 @@ async function readProjectEnvLayers(opts: {
   }
   for (const read of reads) {
     if (read?.parseError) {
-      throw new Error(`Failed to parse ${read.path}: ${read.parseError}`);
+      // The same closed, value-free line as the write path's refusal.
+      throw new ClosedCliError(
+        `Failed to parse ${read.path}: ${read.parseError}`
+      );
     }
   }
   const envLayers = reads.map((read) => (read?.exists ? read.config : null));

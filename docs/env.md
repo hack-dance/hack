@@ -926,6 +926,19 @@ That migrates the repo into:
 For modern env repos, `hack doctor` also warns when materialized compatibility output in
 `.hack/.env` or `.hack/.env.state.json` is stale and points to `hack env materialize`.
 
+The legacy `.hack/.env` holds one value per key, with no per-service values. In a legacy
+project, `hack env set` and `hack env unset` change only that global value, so they refuse
+`--service <service>` with a usage error instead of ignoring it (an invalid scope is refused
+the same way in both formats). `--service global`, or no `--service`, still works. Migrate to
+env layers first to set or unset a service-scoped value.
+
+`hack env set` and `hack env unset` choose between the env layers and the legacy file by
+looking for `.hack/hack.env.*.yaml` entries, `hack.env.default.yaml` included. A regular
+file, or a symlink to one, counts as an env layer. Any other entry with a layer name, such
+as a dangling symlink or a directory, is refused with `E_PATH_CONFLICT` and nothing is
+written; it never silently selects the legacy `.hack/.env`. Replace or remove the entry,
+then retry.
+
 ## Compatibility notes
 
 The modern YAML env model is the canonical repo format today.

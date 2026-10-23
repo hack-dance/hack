@@ -10,6 +10,7 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import {
+  assertLegacyEnvScope,
   parseApplyServiceOption,
   parseEnvGetArguments,
   parseEnvScopeOption,
@@ -71,6 +72,7 @@ import {
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import {
+  assertValidProjectEnvScopeName,
   discoverComposeServiceNames,
   ENV_KEY_INVALID_MESSAGE,
   hydrateProjectEnvLocalLayer,
@@ -78,6 +80,7 @@ import {
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
   projectEnvConfigExists,
+  projectEnvConfigExistsForMutation,
   readMaterializedProjectEnv,
   resolveProjectEnvConfig,
   resolveProjectEnvValue,
@@ -1871,6 +1874,11 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
       hasPositionalValue: valueFromSpec !== null,
     });
   }
+  // Refuse an invalid scope in either env format before the project is read,
+  // with the same closed one-line refusal as `env add`.
+  const scope = assertValidProjectEnvScopeName({
+    scopeName: args.options.service,
+  });
 
   const project = await resolveProjectForEnv({
     ctx,
@@ -1882,7 +1890,9 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     envOption: args.options.env,
   });
 
-  const modernExists = await projectEnvConfigExists({
+  // A layer entry that is not a usable file is refused here instead of
+  // silently selecting the legacy .hack/.env.
+  const modernExists = await projectEnvConfigExistsForMutation({
     projectDir: project.projectDir,
   });
   if (modernExists) {
@@ -1898,6 +1908,9 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     });
   }
 
+  // The legacy .hack/.env has no per-service values: refuse a scope rather
+  // than write the global value, before stdin is read.
+  assertLegacyEnvScope({ scope });
   const storeSecret = args.options.secret === true;
   const runtimeConfig = await readHackEnvRuntimeConfig({
     projectDir: project.projectDir,
@@ -2298,12 +2311,18 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     envOption: args.options.env,
   });
 
-  const modernExists = await projectEnvConfigExists({
+  const modernExists = await projectEnvConfigExistsForMutation({
     projectDir: project.projectDir,
   });
   if (!modernExists) {
-    // Validate the key before resolving a secret store, so a refused key
-    // never reaches a backend.
+    // The legacy .hack/.env has no per-service values: refuse a scope rather
+    // than remove the global value. Validate the scope and key before
+    // resolving a secret store, so a refused argument never reaches a backend.
+    assertLegacyEnvScope({
+      scope: assertValidProjectEnvScopeName({
+        scopeName: args.options.service,
+      }),
+    });
     const key = await resolveEnvKey({
       key: (args.positionals.key ?? "").trim(),
     });

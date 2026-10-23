@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
 
@@ -118,6 +119,40 @@ test.each([
   expect(value.stdout + value.stderr).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
   expect(value.stdout + value.stderr).toContain(
     "whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS"
+  );
+  expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
+    false
+  );
+  expect(await readdir(join(selected.root, ".hack"))).toEqual([
+    "hack.project.json",
+  ]);
+});
+
+/**
+ * HACK-1371: on the native backend an empty `run --env`/`--profile` is the
+ * same closed E_USAGE refusal for an authored project as for a legacy one. It
+ * is checked before authored dispatch, which would otherwise refuse it with
+ * the broader E_NATIVE_PROJECT_UNSUPPORTED.
+ */
+test.each([
+  { args: ["--profile", ""] },
+  { args: ["--profile", " , "] },
+  { args: ["--env", ""] },
+  { args: ["--env=  "] },
+])("source CLI native run %j refuses as an empty selection before authored dispatch", async ({
+  args,
+}) => {
+  const selected = await fixture();
+  const value = await invoke({
+    selected,
+    args: ["run", ...args, "web", "--", "true"],
+    backend: "native",
+    logger: "console",
+  });
+  expect(value.code).toBe(1);
+  expect(value.stdout).toBe("");
+  expect(value.stderr).toBe(
+    `ERROR: E_USAGE: ${NATIVE_RUN_EMPTY_SELECTION_REFUSAL}\n`
   );
   expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
     false

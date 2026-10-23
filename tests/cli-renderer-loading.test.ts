@@ -158,7 +158,12 @@ const controls = [
   { mode: "remote-help", exit: 0, text: "hack remote", loads: false },
   { mode: "tui-help", exit: 0, text: "hack tui", loads: false },
   { mode: "tui-refused", exit: 1, text: "TUI requires a TTY", loads: false },
-  { mode: "tui-missing-project", exit: 1, text: "No .hack/", loads: false },
+  {
+    mode: "tui-missing-project",
+    exit: 1,
+    text: "ERROR: E_PROJECT_NOT_FOUND: No .hack/",
+    loads: false,
+  },
   { mode: "remote-missing-project", exit: 1, text: "No .hack/", loads: false },
   {
     mode: "tui-selected",

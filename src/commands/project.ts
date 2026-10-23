@@ -226,6 +226,7 @@ import {
   resolveUseLoki,
   runLokiSnapshotWithFallback,
 } from "../lib/logs.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import { refuseNativeComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
@@ -4830,22 +4831,6 @@ async function requireProjectContext(startDir: string) {
   return ctx;
 }
 
-/**
- * No project at the selected path. It carries `E_PROJECT_NOT_FOUND`, the code
- * `up`, `down` and `restart` already reported, so every project command that
- * resolves its project here (`ps`, `logs`, `run`, ...) reports the same closed
- * code under `--json` and one closed line without it.
- */
-class MissingProjectContextError extends HackCliError {
-  constructor() {
-    super({
-      code: "E_PROJECT_NOT_FOUND",
-      message: `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`,
-    });
-    this.name = "MissingProjectContextError";
-  }
-}
-
 type RemoteLifecycleAction = "up" | "down" | "restart";
 
 /**
@@ -7494,8 +7479,9 @@ async function handlePs({
 /**
  * Compose runs need the Compose operation; a native one-off instead carries its
  * `--env`/`--profile` request. Omitted options inherit the running selection;
- * an empty value is refused; given options must match it exactly, which the
- * native backend checks before any runtime request (no implicit restart).
+ * an empty value was already refused by {@link refuseEmptyNativeRunSelection};
+ * given options must match it exactly, which the native backend checks before
+ * any runtime request (no implicit restart).
  */
 function runBackendSelection(
   native: boolean,
@@ -7505,10 +7491,6 @@ function runBackendSelection(
     requireComposeOperationAvailable("run");
     return;
   }
-  requireNonEmptyNativeRunOptions({
-    env: args.options.env,
-    profile: args.options.profile,
-  });
   return {
     envName: resolveRequestedEnvName({ envOption: args.options.env }),
     profiles:
@@ -7518,6 +7500,23 @@ function runBackendSelection(
   };
 }
 
+/**
+ * On the native backend an empty `--env` or `--profile` is a usage error before
+ * any dispatch, so authored, adopted and legacy projects all refuse it with the
+ * same E_USAGE line, not the authored path's broader
+ * E_NATIVE_PROJECT_UNSUPPORTED. The Compose backend keeps its meaning: there
+ * an empty `--env` selects the base layers.
+ */
+function refuseEmptyNativeRunSelection(args: RunArgs): void {
+  if (process.env.HACK_RUNTIME_BACKEND !== "native") {
+    return;
+  }
+  requireNonEmptyNativeRunOptions({
+    env: args.options.env,
+    profile: args.options.profile,
+  });
+}
+
 async function handleRun({
   ctx,
   args,
@@ -7525,6 +7524,7 @@ async function handleRun({
   readonly ctx: CliContext;
   readonly args: RunArgs;
 }): Promise<number> {
+  refuseEmptyNativeRunSelection(args);
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,

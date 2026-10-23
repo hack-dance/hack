@@ -468,9 +468,10 @@ test("Alloy keeps a stopped container's target labels stable and still requires 
 });
 
 test("Alloy keeps its own component logs at warn so per-poll info lines stay out of Loki", () => {
-  // HACK-1364: loki.source.docker logs "finished transferring logs" at info
-  // every 5s for each kept exited container, and Alloy's own container is a
-  // Compose service it ships to Loki.
+  // HACK-1364: loki.source.docker logs "finished transferring logs" at info on
+  // every log reopen, every 5s for each kept exited container that never
+  // logged a line, and Alloy's own container is a Compose service it ships to
+  // Loki.
   expect(GLOBAL_ALLOY_LOG_LEVEL).toBe("warn");
   const config = renderGlobalAlloyConfig();
   expect(config).toMatch(

@@ -6,6 +6,7 @@ import { resolveGitPrimaryWorktreeRoot } from "./git-worktree.ts";
 import { isRecord } from "./guards.ts";
 import { readBoundedPrivateFile } from "./private-file.ts";
 import {
+  isGitIgnoredProjectEnvPath,
   resolveProjectEnvKeyPath,
   resolveProjectEnvSharedKeyLocation,
 } from "./project-env-config.ts";
@@ -34,6 +35,7 @@ export type EnvKeyDiagnosticCode =
   | "env-key-weak-permissions"
   | "env-key-wrong-owner"
   | "env-key-tracked"
+  | "env-key-unignored"
   | "env-key-public-path"
   | "env-key-wrong-length"
   | "env-key-low-entropy";
@@ -69,6 +71,14 @@ export type ListTrackedKeyPaths = (opts: {
   readonly projectRoot: string;
 }) => Promise<readonly string[] | null>;
 
+/**
+ * Whether git's ignore rules match the checkout-local key file; null when
+ * unknown (git unavailable, or the project is not in a work tree).
+ */
+export type IsLocalKeyIgnored = (opts: {
+  readonly projectRoot: string;
+}) => Promise<boolean | null>;
+
 export type InspectEnvKeyOptions = {
   readonly projectRoot: string;
   /** Candidate key files in resolution order (local, shared, primary). */
@@ -78,6 +88,7 @@ export type InspectEnvKeyOptions = {
   /** Current user id; null skips the ownership and permission checks (non-POSIX). */
   readonly uid: number | null;
   readonly listTrackedKeyPaths: ListTrackedKeyPaths;
+  readonly isLocalKeyIgnored: IsLocalKeyIgnored;
 };
 
 /** Generated keys are 32 random bytes rendered as unpadded base64url. */
@@ -462,6 +473,46 @@ async function inspectPublicArtifactCopies(opts: {
   return findings;
 }
 
+type CandidatePresence = {
+  readonly role: EnvKeyCandidateRole;
+  readonly present: boolean;
+};
+
+/**
+ * `env-key-unignored` when git positively does not ignore the present
+ * checkout-local key. Only that key can be committed from this checkout: the
+ * shared key lives in the git dir, and the primary's belongs to that checkout.
+ * An absent local key or an unknown answer (no git, probe failure) reports
+ * nothing.
+ */
+async function inspectLocalKeyIgnored(args: {
+  readonly opts: InspectEnvKeyOptions;
+  readonly presence: readonly CandidatePresence[];
+}): Promise<readonly EnvKeyFinding[]> {
+  const { opts } = args;
+  if (
+    !args.presence.some(
+      (entry) => entry.role === "local" && entry.present === true
+    )
+  ) {
+    return [];
+  }
+  const ignored = await opts
+    .isLocalKeyIgnored({ projectRoot: opts.projectRoot })
+    .catch(() => null);
+  if (ignored !== false) {
+    return [];
+  }
+  return [
+    {
+      code: "env-key-unignored",
+      status: "warn",
+      subject: PROJECT_ENV_KEY_FILENAME,
+      remedy: `printf '\\n%s\\n' ${PROJECT_ENV_KEY_FILENAME} >> .gitignore, then confirm 'git status' no longer lists ${PROJECT_ENV_KEY_FILENAME}.`,
+    },
+  ];
+}
+
 function sortFindings(findings: readonly EnvKeyFinding[]): EnvKeyFinding[] {
   return findings
     .map((finding, index) => ({ finding, index }))
@@ -482,6 +533,7 @@ export async function inspectProjectEnvKey(
 ): Promise<EnvKeyInspection> {
   const findings: EnvKeyFinding[] = [];
   let anyPresent = false;
+  const presence: CandidatePresence[] = [];
   const seen = new Set<string>();
   for (const candidate of opts.candidates) {
     if (seen.has(candidate.path)) {
@@ -490,8 +542,11 @@ export async function inspectProjectEnvKey(
     seen.add(candidate.path);
     const inspected = await inspectCandidate({ candidate, uid: opts.uid });
     anyPresent ||= inspected.present;
+    presence.push({ role: candidate.role, present: inspected.present });
     findings.push(...inspected.findings);
   }
+
+  findings.push(...(await inspectLocalKeyIgnored({ opts, presence })));
 
   const tracked = await opts
     .listTrackedKeyPaths({ projectRoot: opts.projectRoot })
@@ -620,6 +675,16 @@ export const gitListTrackedKeyPaths: ListTrackedKeyPaths = async (opts) => {
     );
 };
 
+/**
+ * Default ignore probe: `git check-ignore --no-index` for the checkout-local
+ * key. Null when git is unavailable or the root is not a work tree.
+ */
+export const gitIsLocalKeyIgnored: IsLocalKeyIgnored = async (opts) =>
+  await isGitIgnoredProjectEnvPath({
+    projectRoot: opts.projectRoot,
+    path: resolveProjectEnvKeyPath(opts),
+  });
+
 const SUMMARY: Record<EnvKeyDiagnosticCode, string> = {
   "env-key-ok": "key material is private and in the 256-bit class",
   "env-key-absent": "no project env key provisioned",
@@ -629,6 +694,7 @@ const SUMMARY: Record<EnvKeyDiagnosticCode, string> = {
   "env-key-weak-permissions": "is accessible by group or others (want 0600)",
   "env-key-wrong-owner": "is not owned by the current user",
   "env-key-tracked": "is tracked by git",
+  "env-key-unignored": "is not ignored by git, so it could be committed",
   "env-key-public-path": "is present in a public artifact directory",
   "env-key-wrong-length": "is shorter than a 256-bit key",
   "env-key-low-entropy": "has too little entropy for a 256-bit key",

@@ -58,6 +58,27 @@ export class ProjectInputSelectionError extends HackCliError {
 }
 
 /**
+ * Stable, value-free refusal when a project input's presence cannot be
+ * checked (for example a file where `.dev` belongs, or a project directory the
+ * caller cannot search). Only ENOENT means absence, so the guard refuses
+ * rather than guessing. `access` classifies the fault without its OS message,
+ * which carries the absolute path and is therefore never kept.
+ */
+export class ProjectInputAccessError extends HackCliError {
+  readonly access: "permission" | "unreadable";
+
+  constructor(access: "permission" | "unreadable") {
+    super({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Cannot inspect Hack project inputs. Check filesystem permissions and paths before retrying. Values omitted.",
+    });
+    this.name = "ProjectInputAccessError";
+    this.access = access;
+  }
+}
+
+/**
  * Inspect only the named root, without parsing, following authored-file links,
  * searching ancestors, touching registration, or normalizing configuration.
  * Any native marker is a boundary, including malformed/nonregular input. Only
@@ -188,12 +209,12 @@ async function inputPresent(path: string): Promise<boolean> {
     await lstat(path);
     return true;
   } catch (error: unknown) {
-    if (isRecord(error) && error.code === "ENOENT") {
+    const code = isRecord(error) ? error.code : undefined;
+    if (code === "ENOENT") {
       return false;
     }
-    throw new Error(
-      "Cannot inspect Hack project inputs. Check filesystem permissions and paths before retrying.",
-      { cause: error }
+    throw new ProjectInputAccessError(
+      code === "EACCES" || code === "EPERM" ? "permission" : "unreadable"
     );
   }
 }

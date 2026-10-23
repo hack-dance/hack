@@ -118,10 +118,7 @@ import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
-import {
-  confirmSafe,
-  isExplicitlyNonInteractive,
-} from "../lib/interactivity.ts";
+import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
@@ -4344,7 +4341,7 @@ async function doctorConfirm(opts: {
     initialValue: opts.initialValue,
     nonInteractive: opts.destructive ? "decline" : "accept-default",
   });
-  if (!ok && opts.destructive && isExplicitlyNonInteractive()) {
+  if (!ok && opts.destructive && !canPrompt()) {
     noteSkippedDoctorFixStep({ what: firstLine(opts.message) });
   }
   return ok;

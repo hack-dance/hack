@@ -20,6 +20,7 @@ import {
   type EnvKeyCandidate,
   type EnvKeyInspection,
   findNestedPublicArtifactDirs,
+  gitIsLocalKeyIgnored,
   gitListTrackedKeyPaths,
   type InspectEnvKeyOptions,
   inspectProjectEnvKey,
@@ -68,6 +69,7 @@ async function inspect(
     env: {},
     uid,
     listTrackedKeyPaths: async () => [],
+    isLocalKeyIgnored: async () => true,
     ...overrides,
   });
 }
@@ -256,6 +258,67 @@ describe("env key doctor diagnostic", () => {
       `git rm --cached -- ${KEY_FILE}`
     );
     expect(serialized(inspection)).not.toContain("\u001b");
+  });
+
+  test("a checkout-local key git does not ignore is a warning with a value-free remedy", async () => {
+    const root = await tempProject();
+    const key = generatedKey();
+    await writeKey({ path: join(root, KEY_FILE), text: key, mode: 0o600 });
+
+    const inspection = await inspect(root, {
+      isLocalKeyIgnored: async () => false,
+    });
+
+    expect(inspection.status).toBe("warn");
+    expect(inspection.findings).toEqual([
+      {
+        code: "env-key-unignored",
+        status: "warn",
+        subject: KEY_FILE,
+        remedy: `printf '\\n%s\\n' ${KEY_FILE} >> .gitignore, then confirm 'git status' no longer lists ${KEY_FILE}.`,
+      },
+    ]);
+    expect(serialized(inspection)).toContain(
+      "env-key-unignored: .hack.secret.key is not ignored by git"
+    );
+    expectValueFree({ output: serialized(inspection), root, secrets: [key] });
+  });
+
+  test("negative control: an ignored, unknown or absent local key is not reported as unignored", async () => {
+    const root = await tempProject();
+    // Absent local key: the probe is not consulted at all.
+    expect(
+      codes(await inspect(root, { isLocalKeyIgnored: async () => false }))
+    ).toEqual(["env-key-absent"]);
+
+    await writeKey({
+      path: join(root, KEY_FILE),
+      text: generatedKey(),
+      mode: 0o600,
+    });
+    for (const probe of [
+      async () => true,
+      async () => null,
+      () => Promise.reject(new Error("git exploded")),
+    ]) {
+      expect(codes(await inspect(root, { isLocalKeyIgnored: probe }))).toEqual([
+        "env-key-ok",
+      ]);
+    }
+  });
+
+  test("only the checkout-local key is checked for ignore rules", async () => {
+    const root = await tempProject();
+    const sharedPath = join(root, "git-common", KEY_FILE);
+    await mkdir(join(root, "git-common"));
+    await writeKey({ path: sharedPath, text: generatedKey(), mode: 0o600 });
+
+    const inspection = await inspect(root, {
+      candidates: [localCandidate(root), { role: "shared", path: sharedPath }],
+      isLocalKeyIgnored: async () => false,
+    });
+
+    expect(codes(inspection)).toEqual(["env-key-ok"]);
   });
 
   test("an unavailable git listing is not reported as tracked", async () => {
@@ -673,5 +736,59 @@ describe("gitListTrackedKeyPaths", () => {
   test("returns null outside a git work tree", async () => {
     const root = await tempProject();
     expect(await gitListTrackedKeyPaths({ projectRoot: root })).toBeNull();
+  });
+});
+
+/**
+ * Runs `run` with git's global and system configuration (and so any personal
+ * excludes file) out of reach, restoring the previous environment.
+ */
+async function withPrivateGitEnvironment<T>(
+  home: string,
+  run: () => Promise<T>
+): Promise<T> {
+  const overrides: Record<string, string> = {
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, ".config"),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+  };
+  const previous = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]])
+  );
+  Object.assign(process.env, overrides);
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        Reflect.deleteProperty(process.env, key);
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+describe("gitIsLocalKeyIgnored", () => {
+  test("follows the work tree's ignore rules and is null outside git", async () => {
+    const root = await tempProject();
+    const repo = join(root, "repo");
+    const outside = join(root, "outside");
+    await mkdir(repo);
+    await mkdir(outside);
+    await withPrivateGitEnvironment(join(root, "home"), async () => {
+      expect(await gitIsLocalKeyIgnored({ projectRoot: outside })).toBeNull();
+      const init = Bun.spawn(["git", "-C", repo, "init", "-q"], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      expect(await init.exited).toBe(0);
+      await writeFile(join(repo, KEY_FILE), "x");
+      expect(await gitIsLocalKeyIgnored({ projectRoot: repo })).toBe(false);
+      await writeFile(join(repo, ".gitignore"), `${KEY_FILE}\n`);
+      expect(await gitIsLocalKeyIgnored({ projectRoot: repo })).toBe(true);
+    });
   });
 });

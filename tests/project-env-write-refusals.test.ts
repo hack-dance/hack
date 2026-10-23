@@ -963,14 +963,15 @@ for (const logger of ["console", "clack", "gum"] as const) {
   );
 
   // D2: the first secret must create .hack.secret.key in a repo root that
-  // refuses new files (publishPrivateFileExclusive's staging open).
+  // refuses new files. Its root .gitignore entry is written first
+  // (HACK-1375), so that write is the one refused.
   test.skipIf(RUNS_AS_ROOT)(
     `set --secret creating the key in a non-writable repo root prints one line with HACK_LOGGER=${logger}`,
     async () => {
       const repo = await createRepo();
       const tracked = layerPath(repo, "tracked");
       await writeFile(tracked, LAYER);
-      const keyPath = resolve(repo.projectRoot, ".hack.secret.key");
+      const rootGitignore = resolve(repo.projectRoot, ".gitignore");
       await chmod(repo.projectRoot, 0o555);
       let run: CliRun;
       try {
@@ -983,7 +984,7 @@ for (const logger of ["console", "clack", "gum"] as const) {
       } finally {
         await chmod(repo.projectRoot, 0o755);
       }
-      expectOneLineRefusal(run, permissionWriteRefusal(keyPath));
+      expectOneLineRefusal(run, permissionWriteRefusal(rootGitignore));
       expectNoErrnoOrStaging(run);
       expect(await readdir(repo.projectRoot)).toEqual([".hack"]);
       expect(await readFile(tracked, "utf8")).toBe(LAYER);
@@ -1508,7 +1509,14 @@ for (const [step, code] of [
       `E_NO_SPACE: Could not write ${keyPath}: ${NO_SPACE_REASON}`
     );
     expectNoErrnoOrStaging(run);
-    expect(await readdir(repo.projectRoot)).toEqual([".hack"]);
+    // The ignore entry is written before the key (HACK-1375) and stays.
+    expect((await readdir(repo.projectRoot)).sort()).toEqual([
+      ".gitignore",
+      ".hack",
+    ]);
+    expect(
+      await readFile(resolve(repo.projectRoot, ".gitignore"), "utf8")
+    ).toBe("# project env key\n.hack.secret.key\n");
     expect(await readFile(tracked, "utf8")).toBe(LAYER);
   }, 60_000);
 }
@@ -1544,8 +1552,8 @@ test("an injected EACCES at the .hack/.gitignore lstat is a closed read refusal"
   expect(await readFile(local, "utf8")).toBe(LAYER);
 }, 60_000);
 
-// The root `.gitignore` entry written after a new key. The key itself is
-// left behind unignored when this write fails; that is tracked separately.
+// The root `.gitignore` entry is written before a new key (HACK-1375), so a
+// full disk refuses before any key file exists for a retry to pick up.
 test("an injected ENOSPC writing the root .gitignore is a closed refusal", async () => {
   const repo = await createRepo();
   const tracked = layerPath(repo, "tracked");
@@ -1564,7 +1572,7 @@ test("an injected ENOSPC writing the root .gitignore is a closed refusal", async
     `E_NO_SPACE: Could not write ${rootGitignore}: ${NO_SPACE_REASON}`
   );
   expectNoErrnoOrStaging(run);
-  expect(await readdir(repo.projectRoot)).not.toContain(".gitignore");
+  expect(await readdir(repo.projectRoot)).toEqual([".hack"]);
   expect(await readFile(tracked, "utf8")).toBe(LAYER);
 }, 60_000);
 

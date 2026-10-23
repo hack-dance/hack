@@ -89,7 +89,12 @@ How it is maintained:
 - the entries live inside a marked, hack-managed block; anything you add
   outside the markers is preserved on every rewrite
 - the root `.gitignore` still gets a `.hack.secret.key` entry when the secret
-  key is first generated (the key lives at the repo root, not under `.hack/`)
+  key is first generated (the key lives at the repo root, not under `.hack/`).
+  Hack writes that entry before the key, so if the entry cannot be written, no
+  key is created. Before a `--secret` set or hydrate uses an existing
+  checkout-local key that git does not ignore, Hack adds the entry; if it
+  cannot, or a later rule re-includes the key, the command is refused and
+  nothing is encrypted with that key
 - older repos that added `.hack/.internal/` to the root `.gitignore` keep
   working; the entries are equivalent and nothing is removed
 
@@ -870,6 +875,7 @@ it cannot spell portably as `<unprintable-path>/.hack.secret.key`.
 | `env-key-wrong-owner` | warn | the file is not owned by the current user |
 | `env-key-wrong-length` | warn | shorter than the 43-character base64url form of a 256-bit key, or empty |
 | `env-key-low-entropy` | warn | long enough but repetitive (estimated under 128 bits) |
+| `env-key-unignored` | warn | the checkout-local key is not ignored by git, so `git status` offers it for commit; suggests adding it to the root `.gitignore` |
 | `env-key-symlink` | error | the key path is a symlink; Hack refuses symlinked keys |
 | `env-key-not-regular` | error | the key path is a directory or another non-file entry |
 | `env-key-unreadable` | error | unreadable, oversized or not UTF-8 |

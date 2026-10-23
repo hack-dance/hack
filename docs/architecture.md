@@ -262,6 +262,19 @@ Matching a process name is insufficient: a different `HOME` or `HACK_HOME` may
 own another daemon. If socket ownership cannot be established, automatic orphan
 termination is skipped. Scripted/noninteractive commands do not autostart the
 daemon; after an explicit stop, use `hack daemon start` to restore cached queries.
+`HACK_DAEMON_AUTOSTART_DISABLE=1` turns autostart off for interactive commands
+too. Candidate runs never autostart: `hack-next` and the bundled `hack-v5`
+entrypoint set `HACK_CANDIDATE_ENTRYPOINT`, and `hack-v5` also sets the opt-out.
+Autostart would start whatever hackd the host resolves (the launchd plist or the
+first `hack` on PATH), which is the stable daemon, not the candidate. Under
+either variable, `hack global up` also skips its `daemon.autoStart` step (the
+`hack daemon start` it runs through the first `hack` on PATH), and macOS
+`hack global install` skips its offer to run `hack daemon install`; both log the
+skip. `hack doctor --fix` also skips its hackd repair (restart an incompatible
+hackd, clear stale pid/socket files, start hackd), in interactive and
+non-interactive mode alike, because each step runs the first `hack` on PATH. It
+asks nothing, notes the skip with the reason, and names the command to run
+yourself, for example `hack daemon clear && hack daemon start`.
 
 launchd and isolated state roots: on macOS the hackd launchd service is one
 per-user service (`gui/<uid>/dance.hack.hackd`, plist in

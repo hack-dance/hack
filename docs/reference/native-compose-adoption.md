@@ -406,6 +406,13 @@ publication before it can select ancestor Compose inputs or write legacy files.
 An active adopted receipt remains a selection boundary even if its candidate is
 removed; missing or edited candidates refuse execution.
 
+Project commands look for an adoption before ordinary discovery. The search goes up
+from the start directory to the nearest project root or the filesystem root, as far
+as ordinary discovery goes, with no depth limit. Ordinary discovery reads an active
+adoption as native input, so an adoption the search missed would reach the native
+path. From a directory with no project, however deep, a command gets the ordinary
+missing-project error. Unsafe adoption state is still refused with `E_CONFIG_INVALID`.
+
 The distinct execution owner consumes the saved binding. It never sends these
 resources through ordinary native startup, which allocates a different Compose
 namespace and native volume names. `up --detach`, `restart` and `down` start, restart and
@@ -435,7 +442,9 @@ failing. A pending adoption is a warning that asks for explicit recovery. The
 alone. For the project it only removes tracked generated files from the Git index
 (the files stay on disk) and keeps an env override that the adoption pins. It leaves
 `.hack/.gitignore` unchanged; a committed `.hack.secret.key` is also added to the
-root `.gitignore`. Global repairs still run.
+root `.gitignore`. Global repairs still run. The tracked generated files warning for
+an adopted project says that `--fix` leaves `.hack/.gitignore` unchanged, so the
+files must be kept out of later commits.
 
 ## Rollback and interruption recovery
 

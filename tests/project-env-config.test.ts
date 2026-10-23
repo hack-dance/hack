@@ -2,6 +2,8 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import * as nodeCrypto from "node:crypto";
 import { writeFileSync } from "node:fs";
 import {
+  chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -21,6 +23,7 @@ import {
   PROJECT_ENV_KEY_FILENAME,
   PROJECT_ENV_STATE_FILENAME,
 } from "../src/constants.ts";
+import { resetHackGitInfoExcludeCacheForTests } from "../src/lib/git-info-exclude.ts";
 import { upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { readProjectDefaultEnvConfig } from "../src/lib/project.ts";
 import {
@@ -28,6 +31,7 @@ import {
   ENV_SCOPE_UNKNOWN_MESSAGE,
   ensureHackDirGitignore,
   ensureProjectEnvSecretKey,
+  HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   listProjectEnvOverlayNames,
@@ -979,6 +983,92 @@ test("setProjectEnvValue writes local override ignore rules to the committed .ha
     "utf8"
   );
   expect(excludeText).not.toContain("hack.env");
+});
+
+test("setProjectEnvValue --local keeps a read-only outdated .hack/.gitignore and warns instead of failing (HACK-1363)", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+  const gitignore = resolve(repo.projectDir, ".gitignore");
+  await writeFile(gitignore, "my-own-entry\n");
+  await chmod(gitignore, 0o444);
+  // Captured from process.stderr, not a logger spy: the warning must bypass
+  // the UI logger (whose clack backend prints to stdout), and another file's
+  // scoped logger mock in the same Bun process would hide a logger spy.
+  const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    await setProjectEnvValue({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      scope: "global",
+      key: "LOCAL_ONLY",
+      value: "true",
+      secret: false,
+      local: true,
+    });
+
+    const localOverlay = await readFile(
+      resolveProjectEnvLocalConfigPath({
+        projectDir: repo.projectDir,
+        envName: null,
+      }),
+      "utf8"
+    );
+    expect(localOverlay).toContain('LOCAL_ONLY: "true"');
+    expect(await readFile(gitignore, "utf8")).toBe("my-own-entry\n");
+    expect((await lstat(gitignore)).mode & 0o777).toBe(0o444);
+    expect(
+      stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .filter((chunk) => chunk.includes(".hack/.gitignore"))
+    ).toEqual([`WARN: ${HACK_DIR_GITIGNORE_READ_ONLY_WARNING}\n`]);
+  } finally {
+    stderr.mockRestore();
+    await chmod(gitignore, 0o644);
+  }
+});
+
+test("materializeProjectEnv keeps .hack/.env out of git status through info/exclude", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "GLOBAL_FLAG",
+    value: "1",
+    secret: false,
+  });
+  resetHackGitInfoExcludeCacheForTests();
+  const exclude = resolve(repo.projectRoot, ".git", "info", "exclude");
+  expect(await readFile(exclude, "utf8")).not.toContain("/.hack/.env");
+
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(
+    await Bun.file(resolve(repo.projectDir, PROJECT_ENV_FILENAME)).exists()
+  ).toBe(true);
+  const excludeText = await readFile(exclude, "utf8");
+  expect(excludeText).toContain("/.hack/.env\n");
+  expect(excludeText).toContain("/.hack/.env.state.json\n");
+  expect(await Bun.file(resolve(repo.projectDir, ".gitignore")).exists()).toBe(
+    false
+  );
+  const status = await runGit(
+    ["status", "--porcelain", "--untracked-files=all"],
+    repo.projectRoot
+  );
+  expect(status.split("\n").sort()).toEqual([
+    "?? .hack/docker-compose.yml",
+    "?? .hack/hack.config.json",
+    "?? .hack/hack.env.default.yaml",
+  ]);
 });
 
 test("normal git clones keep generated env keys at the repo root", async () => {

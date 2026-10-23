@@ -152,7 +152,12 @@ test("real canonical legacy writers produce exactly the privately qualified frag
     root,
     ".hack/.internal/compose.runtime.override.yml"
   );
-  // The current writer keeps only `${NAME}` references at rest.
+  // The current writer keeps only `${NAME}` references at rest, one shared
+  // reference per global value (HACK-1317).
+  const fromGlobal = {
+    PRIVATE: { scope: "global" },
+    EMPTY: { scope: "global" },
+  };
   const expectedEnv = renderComposeEnvReferenceOverride({
     targetServices: ["web", "worker"],
     globalEnv: { PRIVATE: CANARY, EMPTY: "" },
@@ -160,6 +165,7 @@ test("real canonical legacy writers produce exactly the privately qualified frag
       web: { PRIVATE: CANARY, EMPTY: "" },
       worker: { PRIVATE: CANARY, EMPTY: "" },
     },
+    effectiveScopes: { web: fromGlobal, worker: fromGlobal },
   })?.text;
   const expectedRuntime = await readFile(runtimePath, "utf8");
   await rm(envPath);

@@ -206,7 +206,11 @@ async function withAuthority(
 
 type Engine = {
   readonly probeTimeouts: number[];
-  readonly commands: { readonly verb: string; readonly timeoutMs: number }[];
+  readonly commands: {
+    readonly verb: string;
+    readonly timeoutMs: number;
+    readonly elapsed: number;
+  }[];
   /** Virtual time the engine has consumed so far. */
   elapsed: number;
 };
@@ -222,11 +226,12 @@ function installEngine(opts: {
   readonly store: NativeComposeGenerationStore;
   readonly input: () => NativeComposeStorageXattrInvocation;
   readonly startMs: number;
+  readonly cleanupInspectMs?: number;
 }): Engine {
   const engine: Engine = { probeTimeouts: [], commands: [], elapsed: 0 };
   const { binding, store } = opts;
-  const realNow = Date.now.bind(Date);
-  spyOn(Date, "now").mockImplementation(() => realNow() + engine.elapsed);
+  const now = Date.now();
+  spyOn(Date, "now").mockImplementation(() => now + engine.elapsed);
   const program = join(
     store.identity.checkoutRoot,
     ".hack",
@@ -238,6 +243,7 @@ function installEngine(opts: {
     "helper.mjs"
   );
   let carrierState: "absent" | "created" | "exited" = "absent";
+  let cleanupInspected = false;
   const carrierValue = () => {
     const input = opts.input();
     return {
@@ -373,6 +379,10 @@ function installEngine(opts: {
       args[4] === carrierId &&
       carrierState !== "absent"
     ) {
+      if (carrierState === "exited" && !cleanupInspected) {
+        cleanupInspected = true;
+        engine.elapsed += opts.cleanupInspectMs ?? 0;
+      }
       return `${JSON.stringify(carrierValue())}\n`;
     }
     throw new Error("Unexpected synthetic Docker request");
@@ -391,7 +401,7 @@ function installEngine(opts: {
     const daemon = argv.slice(5);
     const timeoutMs = options.timeoutMs ?? Number.NaN;
     const verb = daemon[0] === "volume" ? "volume create" : (daemon[0] ?? "");
-    engine.commands.push({ verb, timeoutMs });
+    engine.commands.push({ verb, timeoutMs, elapsed: engine.elapsed });
     const child = (script: string, granted = timeoutMs) =>
       run([...argv.slice(0, 4), "/bin/sh", "-c", script], {
         ...options,
@@ -459,6 +469,7 @@ type Proof = {
 /** One readonly root proof whose helper start takes {@link SLOW_START_MS}. */
 async function proveWithSlowStart(opts: {
   readonly budgetMs: number;
+  readonly cleanupInspectMs?: number;
 }): Promise<Proof> {
   let outcome: Proof | null = null;
   await withAuthority(async ({ store, authority, binding }) => {
@@ -468,6 +479,7 @@ async function proveWithSlowStart(opts: {
       store,
       input: () => input ?? refuseNativeComposeStorageXattr(),
       startMs: SLOW_START_MS,
+      cleanupInspectMs: opts.cleanupInspectMs,
     });
     const handle = await createNativeComposeDockerStorageXattrCarrier({
       authority,
@@ -553,6 +565,35 @@ test("a helper start that outlasts the whole storage budget still refuses at the
   const start = engine.commands[1];
   expect(start?.timeoutMs).toBeGreaterThan(0);
   expect(start?.timeoutMs).toBeLessThanOrEqual(budgetMs);
+  expect(existsSync(tripwire)).toBe(false);
+}, 30_000);
+
+test("cleanup crossing the storage deadline still removes the exited helper and refuses the proof", async () => {
+  const budgetMs = SLOW_START_MS + 1000;
+  const cleanupInspectMs = 2000;
+  const { engine, result, error } = await proveWithSlowStart({
+    budgetMs,
+    cleanupInspectMs,
+  });
+  expect(engine.commands.map(({ verb }) => verb)).toEqual([
+    "create",
+    "start",
+    "rm",
+  ]);
+  const start = engine.commands[1];
+  expect(start?.timeoutMs).toBeGreaterThan(SLOW_START_MS);
+  const remove = engine.commands[2];
+  expect(remove?.elapsed).toBe(SLOW_START_MS + cleanupInspectMs);
+  expect(remove?.elapsed).toBeGreaterThan(budgetMs);
+  expect(remove?.timeoutMs).toBeGreaterThan(0);
+  expect(remove?.timeoutMs).toBe(NATIVE_STORAGE_CLEANUP_FLOOR_MS);
+  expect(remove?.timeoutMs).toBeLessThanOrEqual(
+    NATIVE_STORAGE_PROBE_CEILING_MS
+  );
+  expect(result).toBeNull();
+  expect(nativeComposeEffectRefusal(error)).toMatchObject({
+    reason: "storage-budget",
+  });
   expect(existsSync(tripwire)).toBe(false);
 }, 30_000);
 

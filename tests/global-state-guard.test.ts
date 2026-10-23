@@ -110,6 +110,7 @@ test("a replaced function or listener is reported but left for its owner", () =>
   const before = captureGlobalState();
   const fetchDescriptor = Object.getOwnPropertyDescriptor(globalThis, "fetch");
   const listener = () => undefined;
+  const count = process.listenerCount("SIGUSR2");
   const fake = (() =>
     Promise.reject(new Error("refused"))) as unknown as typeof fetch;
   try {
@@ -117,7 +118,9 @@ test("a replaced function or listener is reported but left for its owner", () =>
     process.on("SIGUSR2", listener);
     const changes = diffGlobalState(before);
     expect(changes).toContain("globalThis.fetch replaced");
-    expect(changes).toContain("process 'SIGUSR2' listeners changed");
+    expect(changes).toContain(
+      `process 'SIGUSR2' listeners changed (${count} -> ${count + 1})`
+    );
     restoreGlobalState(before);
     expect(globalThis.fetch).toBe(fake);
     expect(process.listeners("SIGUSR2")).toContain(listener);

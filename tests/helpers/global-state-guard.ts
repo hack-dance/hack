@@ -201,13 +201,15 @@ function diffProcessHooks(
 ): string[] {
   const changes: string[] = [];
   for (const event of GUARDED_PROCESS_EVENTS) {
-    if (
-      !sameListeners(
-        before.listeners.get(event) ?? [],
-        current.listeners.get(event) ?? []
-      )
-    ) {
-      changes.push(`process '${event}' listeners changed`);
+    const was = before.listeners.get(event) ?? [];
+    const now = current.listeners.get(event) ?? [];
+    if (!sameListeners(was, now)) {
+      // The counts tell a listener left behind (n -> n+1) from one consumed
+      // here that an earlier file left behind (n+1 -> n): a `once` listener
+      // removes itself when the test emits that signal.
+      changes.push(
+        `process '${event}' listeners changed (${was.length} -> ${now.length})`
+      );
     }
   }
   for (const binding of GUARDED_BINDINGS) {

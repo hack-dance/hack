@@ -514,3 +514,62 @@ test("Loki follow stays quiet when an entry arrives before the notice delay", as
     }
   );
 });
+
+// --- Loki follow: SIGINT listener ownership (HACK-1392) ----------------------
+// All test files share one Bun process. A follow that leaves its `once`
+// SIGINT listener behind makes the next SIGINT in the process run a stale
+// stop, and the global-state guard then blames whichever test emits it.
+
+function sameListeners<T>(left: readonly T[], right: readonly T[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((listener, index) => listener === right[index])
+  );
+}
+
+const FOLLOW_PARAMS = {
+  query: '{project="demo",service="api"}',
+  follow: true,
+  tail: 10,
+  pretty: false,
+  showProjectPrefix: true,
+} as const;
+
+test("Loki follow removes its SIGINT listener once the tail closes", async () => {
+  const before = process.listeners("SIGINT");
+  await withFakeLokiTail(
+    () => undefined,
+    async ({ baseUrl, sockets }) => {
+      captureStdout();
+      const exit = lokiLogs({ baseUrl, ...FOLLOW_PARAMS });
+      await waitFor(() => sockets.length === 1, "the tail connection");
+      expect(process.listenerCount("SIGINT")).toBe(before.length + 1);
+      for (const socket of sockets) {
+        socket.close();
+      }
+      expect(await exit).toBe(0);
+      expect(sameListeners(process.listeners("SIGINT"), before)).toBe(true);
+    }
+  );
+});
+
+test("Loki follow stops on SIGINT and leaves no listener behind", async () => {
+  const before = process.listeners("SIGINT");
+  await withFakeLokiTail(
+    () => undefined,
+    async ({ baseUrl, sockets }) => {
+      captureStdout();
+      const exit = lokiLogs({ baseUrl, ...FOLLOW_PARAMS });
+      await waitFor(() => sockets.length === 1, "the tail connection");
+      const added = process
+        .listeners("SIGINT")
+        .filter((listener) => !before.includes(listener));
+      expect(added).toHaveLength(1);
+      // Run the follow's own handler instead of emitting SIGINT, which would
+      // reach every listener in the shared test process.
+      added[0]?.("SIGINT");
+      expect(await exit).toBe(0);
+      expect(sameListeners(process.listeners("SIGINT"), before)).toBe(true);
+    }
+  );
+});

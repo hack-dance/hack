@@ -272,7 +272,11 @@ function applyLaunchdGuard(
   return guarded;
 }
 
-type LaunchctlGuard = { readonly dir: string; readonly logPath: string };
+type LaunchctlGuard = {
+  readonly dir: string;
+  readonly logPath: string;
+  readonly removeOnExit: () => void;
+};
 let launchctlGuard: LaunchctlGuard | null = null;
 
 function ensureLaunchctlGuard(): LaunchctlGuard {
@@ -299,11 +303,29 @@ function ensureLaunchctlGuard(): LaunchctlGuard {
     ].join("\n")
   );
   chmodSync(shim, 0o755);
-  process.once("exit", () => {
+  const removeOnExit = () => {
     rmSync(dir, { recursive: true, force: true });
-  });
-  launchctlGuard = { dir, logPath };
+  };
+  process.once("exit", removeOnExit);
+  launchctlGuard = { dir, logPath, removeOnExit };
   return launchctlGuard;
+}
+
+/**
+ * Removes the launchctl guard shim and its process `exit` listener now. The
+ * e2e runner keeps one shim for its whole process; a `bun test` file that
+ * builds CLI env calls this in `afterEach`, because every test file shares
+ * one Bun process and a leftover listener would leak into later files. The
+ * next `buildCliEnv` call creates a fresh shim.
+ */
+export function releaseLaunchctlGuard(): void {
+  if (!launchctlGuard) {
+    return;
+  }
+  const { removeOnExit } = launchctlGuard;
+  launchctlGuard = null;
+  process.removeListener("exit", removeOnExit);
+  removeOnExit();
 }
 
 /**

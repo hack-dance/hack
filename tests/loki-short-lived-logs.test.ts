@@ -750,52 +750,61 @@ test("Loki follow uses a real timer for the notice when none is injected", async
   );
 });
 
-// --- Loki follow: SIGINT handling --------------------------------------------
+// --- Loki follow: SIGINT listener ownership (HACK-1392) ----------------------
+// All test files share one Bun process. A follow that leaves its `once`
+// SIGINT listener behind makes the next SIGINT in the process run a stale
+// stop, and the global-state guard then blames whichever test emits it.
 
-async function followUntilServerCloses(baseUrl: string): Promise<number> {
-  return await lokiLogs({
-    baseUrl,
-    query: '{project="demo",service="api"}',
-    follow: true,
-    tail: 10,
-    pretty: false,
-    showProjectPrefix: true,
-  });
+function sameListeners<T>(left: readonly T[], right: readonly T[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((listener, index) => listener === right[index])
+  );
 }
 
-test("a Loki follow that closes normally removes its SIGINT listener", async () => {
-  // HACK-1379: `process.once("SIGINT")` per follow was never removed on a
-  // normal close, so repeated follows in one process piled up listeners
-  // (MaxListenersExceededWarning after ten).
-  const before = process.listenerCount("SIGINT");
-  await withFakeLokiTail(
-    (socket) => socket.close(),
-    async ({ baseUrl }) => {
-      for (let i = 0; i < 12; i += 1) {
-        expect(await followUntilServerCloses(baseUrl)).toBe(0);
-        expect(process.listenerCount("SIGINT")).toBe(before);
-      }
-    }
-  );
-});
+const FOLLOW_PARAMS = {
+  query: '{project="demo",service="api"}',
+  follow: true,
+  tail: 10,
+  pretty: false,
+  showProjectPrefix: true,
+} as const;
 
-test("SIGINT closes an open Loki follow and leaves no listener behind", async () => {
-  const before = process.listenerCount("SIGINT");
+test("Loki follow removes its SIGINT listener once the tail closes", async () => {
+  const before = process.listeners("SIGINT");
   await withFakeLokiTail(
     () => undefined,
     async ({ baseUrl, sockets }) => {
       captureStdout();
-      const exit = followUntilServerCloses(baseUrl);
-      const exitState = trackSettled(exit);
-      await waitFor(() => sockets.length === 1, "the tail socket");
-      expect(process.listenerCount("SIGINT")).toBe(before + 1);
-      expect(exitState.settled).toBe(false);
-      // Dispatch the event in-process; no signal is raised.
-      process.emit("SIGINT");
+      const exit = lokiLogs({ baseUrl, ...FOLLOW_PARAMS });
+      await waitFor(() => sockets.length === 1, "the tail connection");
+      expect(process.listenerCount("SIGINT")).toBe(before.length + 1);
+      for (const socket of sockets) {
+        socket.close();
+      }
       expect(await exit).toBe(0);
-      restoreStdout();
-      expect(process.listenerCount("SIGINT")).toBe(before);
-      expect(stdout).toBe("");
+      expect(sameListeners(process.listeners("SIGINT"), before)).toBe(true);
+    }
+  );
+});
+
+test("Loki follow stops on SIGINT and leaves no listener behind", async () => {
+  const before = process.listeners("SIGINT");
+  await withFakeLokiTail(
+    () => undefined,
+    async ({ baseUrl, sockets }) => {
+      captureStdout();
+      const exit = lokiLogs({ baseUrl, ...FOLLOW_PARAMS });
+      await waitFor(() => sockets.length === 1, "the tail connection");
+      const added = process
+        .listeners("SIGINT")
+        .filter((listener) => !before.includes(listener));
+      expect(added).toHaveLength(1);
+      // Run the follow's own handler instead of emitting SIGINT, which would
+      // reach every listener in the shared test process.
+      added[0]?.("SIGINT");
+      expect(await exit).toBe(0);
+      expect(sameListeners(process.listeners("SIGINT"), before)).toBe(true);
     }
   );
 });

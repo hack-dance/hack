@@ -8,6 +8,7 @@ import {
   COMPOSE_BACKEND_CHECK,
   composeBackendCheckResult,
 } from "../src/lib/doctor-compose-backend.ts";
+import { HACK_OWNERSHIP_LABEL_NAMESPACES } from "../src/lib/hack-ownership-labels.ts";
 import {
   composeBackendRefusal,
   findComposeBackendFeatures,
@@ -58,16 +59,49 @@ test("external networks are blocking; owned and isolated replacements are not", 
   }
 });
 
-test("each reserved ownership namespace is blocking in map and list labels", () => {
+test("external volumes are blocking; owned volumes are not", () => {
+  const volume = (definition: unknown) => ({
+    ...services({ image: IMAGE }),
+    volumes: { data: definition },
+  });
+  expect(findComposeBackendFeatures(volume({ external: true }))).toEqual([
+    "external_volume",
+  ]);
+  expect(
+    findComposeBackendFeatures(volume({ external: { name: "data" } }))
+  ).toEqual(["external_volume"]);
+  for (const owned of [
+    null,
+    {},
+    { external: false },
+    { driver: "local" },
+    { external: "true" },
+  ]) {
+    expect(findComposeBackendFeatures(volume(owned))).toEqual([]);
+  }
+  // An external network replacement marker does not apply to volumes.
+  expect(
+    findComposeBackendFeatures(
+      volume({ external: true, "x-hack-isolated": true })
+    )
+  ).toEqual(["external_volume"]);
+});
+
+test("the reserved set is Compose's namespace plus every Hack ownership namespace", () => {
   expect(RESERVED_OWNERSHIP_LABEL_PREFIXES).toEqual([
     "com.docker.compose.",
-    "io.hack-local.",
-    "io.hack.native-config.",
+    ...HACK_OWNERSHIP_LABEL_NAMESPACES,
   ]);
+});
+
+test("each reserved ownership namespace is blocking in map and list labels", () => {
   for (const key of [
     "com.docker.compose.project",
     "io.hack-local.owner",
     "io.hack.native-config.instance",
+    "io.hack.native-file.owner",
+    "io.hack.storage-witness.owner",
+    ...RESERVED_OWNERSHIP_LABEL_PREFIXES.map((prefix) => `${prefix}any`),
   ]) {
     expect(
       findComposeBackendFeatures(
@@ -91,7 +125,13 @@ test("each reserved ownership namespace is blocking in map and list labels", () 
 test("ordinary, routing, cache and one-shot labels are not reserved", () => {
   for (const labels of [
     { "com.example.team": "web" },
-    ["com.docker.composer=x", "io.hack-localx=1", "io.hack.other=1"],
+    [
+      "com.docker.composer=x",
+      "io.hack-localx=1",
+      "io.hack.other=1",
+      "io.hack.storage-witnessx.owner=1",
+      "io.hack.native-file=1",
+    ],
     { caddy: "web.hack", "caddy.reverse_proxy": "{{upstreams 3000}}" },
     { "hack.dependencies.bootstrap": "install" },
     { "hack.service.one-shot": "true" },
@@ -132,12 +172,18 @@ test("only the native linux/arm64 platform passes", () => {
       findComposeBackendFeatures(services({ image: IMAGE, platform }))
     ).toEqual([]);
   }
+  // Compose and native review take a null platform as unset.
+  expect(findComposeBackendFeatures(services({ image: IMAGE }))).toEqual([]);
+  expect(
+    findComposeBackendFeatures(services({ image: IMAGE, platform: null }))
+  ).toEqual([]);
   for (const platform of [
     "linux/amd64",
     "linux/arm/v7",
     "${PLATFORM}",
+    "",
     42,
-    null,
+    false,
   ]) {
     expect(
       findComposeBackendFeatures(services({ image: IMAGE, platform }))
@@ -155,9 +201,11 @@ test("features come back once each in closed order across services", () => {
         d: { image: IMAGE, platform: "linux/amd64", profiles: ["off"] },
       },
       networks: { a: { external: true }, b: { external: true } },
+      volumes: { a: { external: true }, b: { external: { name: "b" } } },
     })
   ).toEqual([
     "external_network",
+    "external_volume",
     "reserved_label",
     "unsupported_build",
     "foreign_platform",
@@ -232,6 +280,16 @@ test("doctor reports the same features value-free for each backend", () => {
     composeBackend: { features: ["external_network"] },
   });
   expect(native.message).toContain("an external Compose network");
+  expect(
+    composeBackendCheckResult({
+      backend: "native",
+      features: ["external_volume"],
+    })
+  ).toMatchObject({
+    status: "warn",
+    message: expect.stringContaining("an external Compose volume"),
+    composeBackend: { features: ["external_volume"] },
+  });
   expect(native.message).toContain("HACK_RUNTIME_BACKEND=compose");
   expect(
     composeBackendCheckResult({ backend: "compose", features })

@@ -87,7 +87,14 @@ else if(kind==='network'&&selected===network)console.log(JSON.stringify({id:netw
   await chmod(binary, 0o700);
   const previousPath = process.env.PATH;
   process.env.PATH = outer;
-  const compiler = await managedEnvCompilerFixture(join(outer, "compiler"));
+  let compiler: string;
+  try {
+    compiler = await managedEnvCompilerFixture(join(outer, "compiler"));
+  } catch (error: unknown) {
+    // No fixture (and so no cleanup) reaches the caller; restore PATH here.
+    restoreEnv("PATH", previousPath);
+    throw error;
+  }
   return {
     root,
     outer,

@@ -133,8 +133,11 @@ Historical remote guides are excluded from the supported documentation.
   from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `open`, `tui`, `branch ...`,
   `config get`/`set`, `env ...`, `host exec`/`shell` and `project owner`/`target`/`task`, for
   example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
-  error envelope; without `--json` it is one `ERROR: E_PROJECT_NOT_FOUND: ...` line and no stack
-  trace. `project target` and `project task` use their own message, and `target` adds a
+  error envelope; without `--json` it is one closed error line, `E_PROJECT_NOT_FOUND: <message>`,
+  and no stack trace. The logger adds its own prefix: the console logger (`HACK_LOGGER=console`)
+  prints `ERROR: E_PROJECT_NOT_FOUND: ...` on stderr, gum prints a styled `ERROR` level on
+  stderr, and clack prints a `■` marker on stdout after its `│` guide line. `project target` and
+  `project task` use their own message, and `target` adds a
   `detail`. These commands report something else:
   - `tui` without a terminal refuses for that reason first.
   - `env get` never prints a failure reason, since its output is raw values: it prints one fixed
@@ -150,6 +153,14 @@ Historical remote guides are excluded from the supported documentation.
   trace; set `HACK_DEBUG=1` to add the stack. Unexpected exceptions always print their stack.
 - `--no-interactive` (or `HACK_NO_INTERACTIVE=1`) is a global flag: commands never prompt — they
   apply documented defaults or fail fast with `E_INTERACTIVE_REQUIRED`.
+- A run whose stdin or stdout is not a TTY (piped input, an agent harness, CI) is treated the same
+  way, with or without the flag: the command resolves every prompt by its documented
+  non-interactive policy within milliseconds and never waits on a prompt. Confirmations that have
+  a safe default apply it (`hack env unset KEY` removes the key; `hack doctor --fix` applies safe
+  remediations and skips destructive ones with a note); prompts that need a real answer fail
+  closed with `E_INTERACTIVE_REQUIRED`, naming the flag or argument that makes the invocation
+  scriptable (for example `hack update --yes`, `hack mcp --all`, `hack session attach <name>`).
+  Set `HACK_NO_INTERACTIVE=1` explicitly in scripts anyway so the intent is visible.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
 
 Generated agent docs, Cursor rules, Codex skills, and the shared `~/.ai/skills/hack-cli` skill carry
@@ -354,7 +365,9 @@ The two variables bound different things:
 
 When a carrier budget or the whole-phase cap runs out, the command reports the
 closed effect reason `storage-budget` in `error.detail.native_compose_effect_refusal`,
-and the human summary names `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Exhaustion leaves the
+and the human summary names `HACK_NATIVE_STORAGE_TIMEOUT_MS`. A refusal with its own
+cause, such as a helper policy refusal, keeps that reason even when it is caught after
+the carrier deadline; raising the storage budget does not address it. Exhaustion leaves the
 same retained, uncertain state as any other storage refusal; inspect saved state
 before retrying.
 

@@ -422,14 +422,6 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
     }
   };
 
-  // Removed again when the socket closes: a follow that ends normally must not
-  // leave its handler behind, or repeated follows in one process pile up
-  // SIGINT listeners (HACK-1379).
-  const onSigint = () => {
-    stop();
-  };
-  process.once("SIGINT", onSigint);
-
   ws.addEventListener("error", () => {
     exitCode = 1;
     if (opts.json && opts.streamContext) {
@@ -504,25 +496,35 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
     }
   });
 
-  await new Promise<void>((resolve) => {
+  const closedSocket = new Promise<void>((resolve) => {
     ws.addEventListener("close", () => {
       closed = true;
       clearNoEntriesTimer();
-      process.off("SIGINT", onSigint);
       resolve();
     });
   });
 
-  if (opts.json && opts.streamContext) {
-    writeLogStreamEvent({
-      event: buildLogStreamEndEvent({
-        context: opts.streamContext,
-        reason: exitCode === 0 ? "closed" : "error",
-      }),
-    });
+  // Installed only while the tail is open and removed on every exit path. A
+  // `once` listener that never fires would otherwise outlive the follow and
+  // the next SIGINT in the process would run a stale stop (HACK-1392).
+  const onSigInt = () => {
+    stop();
+  };
+  process.once("SIGINT", onSigInt);
+  try {
+    await closedSocket;
+    if (opts.json && opts.streamContext) {
+      writeLogStreamEvent({
+        event: buildLogStreamEndEvent({
+          context: opts.streamContext,
+          reason: exitCode === 0 ? "closed" : "error",
+        }),
+      });
+    }
+    return exitCode;
+  } finally {
+    process.off("SIGINT", onSigInt);
   }
-
-  return exitCode;
 }
 
 function safeJsonParse(text: string): unknown {

@@ -1,6 +1,6 @@
-import { test as boundedTest, expect, spyOn } from "bun:test";
+import { test as boundedTest, expect, mock, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS } from "../src/lib/compose-startup-budget.ts";
 import { isRecord } from "../src/lib/guards.ts";
@@ -9,6 +9,7 @@ import { LegacyComposeAdoptedGenerationError } from "../src/lib/native-compose-a
 import { legacyComposePublicationRefusal } from "../src/lib/native-compose-adoption-publication-diagnostics.ts";
 import { runLegacyComposeRetainedRoutingOperation } from "../src/lib/native-compose-adoption-routing-execution.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import {
   type RetainedRoutingStoreTimeoutMs,
   ROUTING_CANARY,
@@ -75,6 +76,11 @@ const test = (
       } finally {
         if (!lifetime.canRestore()) {
           fixtureUncertain = true;
+          // Keep the spies and root for the unsettled work, but never leave
+          // HACK_HOME pointing at this fixture for later files (HACK-1327).
+          if (issued) {
+            h.releaseEnvironment();
+          }
           if (!failed) {
             failed = true;
             failure = new Error(
@@ -508,7 +514,7 @@ test(
         code: "E_LEGACY_ADOPTION_DEADLINE",
         deadlineMs: 15_000,
         deadlineExpired: true,
-        // Nothing in the synthetic binding moved, so HACK-1318 reports the deadline.
+        // Nothing in the synthetic binding moved, so HACK-1340 reports the deadline.
         bindingUnchanged: true,
       });
       expect((await h.receipt()).routingHandoff).toBe("held");
@@ -857,6 +863,29 @@ boundedTest(
     expect(lifetime.canRestore()).toBe(false);
   },
   1000
+);
+boundedTest(
+  "a refused teardown still restores HACK_HOME so later files never inherit the fixture home",
+  async () => {
+    const before = process.env.HACK_HOME;
+    const lifetime = retainedRoutingFixtureLifetime(Date.now() + 5000);
+    const fixture = await retainedRoutingFixture(lifetime);
+    try {
+      expect(process.env.HACK_HOME).toBe(fixture.home);
+      fixture.releaseEnvironment();
+      expect<string | undefined>(process.env.HACK_HOME).toBe(before);
+      process.env.HACK_HOME = fixture.home;
+      lifetime.retain();
+      await expect(fixture.cleanup()).rejects.toThrow();
+      expect<string | undefined>(process.env.HACK_HOME).toBe(before);
+    } finally {
+      restoreEnv("HACK_HOME", before);
+      // The refused teardown kept the fixture spies; nothing else is mocked here.
+      mock.restore();
+      await rm(fixture.outer, { recursive: true, force: true });
+    }
+  },
+  5000
 );
 boundedTest(
   "known callback settlement permits fixture teardown before its unchanged deadline",
@@ -1439,6 +1468,89 @@ test("HACK-1340: a real binding drift within the caller deadline still refuses a
     expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
   } finally {
     h.hooks.afterEffect = undefined;
+    await store.close();
+  }
+});
+// HACK-1391: the two deadline guards of a retained v14 operation, each proven on
+// its own. The caller-deadline catch in `mutateRetainedContainers` keeps an
+// observed drift's code even when the drift is reported after the deadline, and
+// `requireMutationDeadline` issues the deadline code, not a drift, when the
+// callback's revocation fence finds the deadline passed.
+test("HACK-1391: a binding drift reported after the caller deadline keeps its binding-change code", async () => {
+  const { store, generation } = await prepare();
+  const realNow = Date.now;
+  let offset = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+  const before = bindingFacts();
+  let driftedReads = 0;
+  try {
+    h.hooks.afterEffect = async () => {
+      h.model.volumeBirth = "2026-02-02T01:02:03Z";
+    };
+    h.hooks.afterProbe = async (args) => {
+      // The first read of the drifted volume returns the changed birth; the
+      // clock then passes the deadline before the store compares it (the
+      // bracketed scan may reread the volume once more before comparing).
+      if (
+        h.effects.length === 1 &&
+        args[0] === "volume" &&
+        args[1] === "inspect" &&
+        ++driftedReads === 1
+      ) {
+        offset = SLOW_OPERATION_ADVANCE_MS;
+      }
+    };
+    const code = await refusalCode(
+      h.operation(store, generation, "stop", { preparation: true })
+    );
+    expect(driftedReads).toBeGreaterThanOrEqual(1);
+    expect(bindingFacts()).not.toBe(before);
+    expect(h.lastOperation()).toMatchObject({
+      outcome: "refused",
+      deadlineExpired: true,
+      bindingUnchanged: false,
+    });
+    expect(code).toBe("E_LEGACY_ADOPTION_CHANGED");
+    expect(h.effects).toHaveLength(1);
+    expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
+  } finally {
+    h.hooks.afterEffect = undefined;
+    h.hooks.afterProbe = undefined;
+    clock.mockRestore();
+    await store.close();
+  }
+});
+test("HACK-1391: the callback revocation fence past the caller deadline refuses as a deadline, not a binding change", async () => {
+  const { store, generation } = await prepare();
+  const realNow = Date.now;
+  let offset = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+  const before = bindingFacts();
+  let fenced = false;
+  try {
+    const deadline = Date.now() + 15_000;
+    const code = await refusalCode(
+      store.withPreparationStop({
+        generation,
+        binary: h.compiler,
+        deadline,
+        run: async (input) => {
+          // No probe or check runs between the jump and the fence, so only
+          // `requireMutationDeadline` can refuse here.
+          offset = SLOW_OPERATION_ADVANCE_MS;
+          fenced = true;
+          input.assertActive();
+          return 0;
+        },
+      })
+    );
+    expect(fenced).toBe(true);
+    expect(bindingFacts()).toBe(before);
+    expect(code).toBe("E_LEGACY_ADOPTION_DEADLINE");
+    expect(h.effects).toHaveLength(0);
+    expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
+  } finally {
+    clock.mockRestore();
     await store.close();
   }
 });

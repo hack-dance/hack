@@ -15,8 +15,18 @@ import { restoreEnv } from "./env.ts";
 const cleanups: (() => Promise<void>)[] = [];
 /** Register this in each test file; Bun caches imports but scopes test hooks. */
 export async function cleanupVmFileFixtures() {
+  // Run every cleanup even when one fails, so a failed `rm` cannot skip the
+  // environment restore of another fixture.
+  const failures: unknown[] = [];
   for (const cleanup of cleanups.splice(0).reverse()) {
-    await cleanup();
+    try {
+      await cleanup();
+    } catch (error: unknown) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) {
+    throw failures[0];
   }
 }
 const environmentKeys = [
@@ -54,6 +64,14 @@ export async function vmFileFixture() {
   const compiler = resolve(
     process.env.HACK_CONFIG_COMPILER_BINARY ?? "dist/hack-config-compiler"
   );
+  // Register the restore before the first change, so a setup step that fails
+  // below still puts PATH, HOME and the Docker keys back.
+  cleanups.push(async () => {
+    for (const key of environmentKeys) {
+      restoreEnv(key, saved[key]);
+    }
+    await rm(root, { recursive: true, force: true });
+  });
   for (const key of environmentKeys) {
     Reflect.deleteProperty(process.env, key);
   }
@@ -98,10 +116,6 @@ export async function vmFileFixture() {
   });
   cleanups.push(async () => {
     server.stop(true);
-    for (const key of environmentKeys) {
-      restoreEnv(key, saved[key]);
-    }
-    await rm(root, { recursive: true, force: true });
   });
   const docker = join(root, "docker");
   await writeFile(

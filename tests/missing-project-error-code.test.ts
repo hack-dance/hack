@@ -10,8 +10,10 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
 /**
  * HACK-1339, HACK-1371: every project command reports a `--path` without a
  * project with the same closed code, `E_PROJECT_NOT_FOUND`. Under `--json` it
- * is one envelope; without `--json` it is one `ERROR: E_PROJECT_NOT_FOUND:`
- * line and no stack. `docs/cli.md` lists the commands and the exceptions
+ * is one envelope; without `--json` it is one closed `E_PROJECT_NOT_FOUND:`
+ * line and no stack, pinned here in the console logger's form
+ * (`HACK_LOGGER=console`: `ERROR: E_PROJECT_NOT_FOUND: ...` on stderr).
+ * `docs/cli.md` lists the commands, each logger's form and the exceptions
  * pinned below.
  *
  * The table classifies every command that declares `--path`, so a new one

@@ -16,11 +16,14 @@ import { join } from "node:path";
 import { YAML } from "bun";
 import { buildDoctorRemediationPlanLines } from "../src/commands/doctor.ts";
 import {
+  ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+  adoptedComposeEnvOverrideNextStep,
   composeEnvAtRestRepairs,
   composeEnvOverridePath,
   describeComposeEnvAtRest,
   inspectComposeEnvAtRest,
   inspectComposeEnvOverrideAtRest,
+  PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
 } from "../src/lib/compose-env-at-rest.ts";
@@ -372,6 +375,7 @@ test("doctor descriptions are ok for absent and reference-only files", () => {
       report: {
         override,
         adoptionBound: false,
+        adoptionPending: false,
         asides: { stale: 0, fresh: 0 },
       },
       projectDirName: ".hack",
@@ -481,6 +485,9 @@ test("an override that an adoption state may pin is kept by removal and reported
   expect(await readFile(path, "utf8")).toBe(literalText());
   const report = await inspectComposeEnvAtRest({ projectDir });
   expect(report.adoptionBound).toBe(true);
+  // Unreadable state is bound but not known to be pending, so the next step
+  // stays the plain rollback.
+  expect(report.adoptionPending).toBe(false);
   expect(composeEnvAtRestRepairs(report).override).toBe(false);
   const described = describeComposeEnvAtRest({
     report,
@@ -489,6 +496,7 @@ test("an override that an adoption state may pin is kept by removal and reported
   expect(described.status).toBe("warn");
   expect(described.message).toContain("pins this file");
   expect(described.message).toContain("hack config adopt --rollback");
+  expect(described.message).not.toContain("--recover --rollback");
   expect(described.message).not.toContain(CANARY);
 
   // Without the adoption state the same file is removed.
@@ -496,6 +504,52 @@ test("an override that an adoption state may pin is kept by removal and reported
   const removed = await removePlaintextComposeEnvOverride({ projectDir });
   expect(removed).toMatchObject({ removed: true, adoptionBound: false });
   expect(await lstat(path).catch(() => null)).toBeNull();
+});
+
+test("doctor names explicit recovery rollback for an override that a pending adoption pins (HACK-1391)", () => {
+  const path = "/unused";
+  for (const kind of ["plaintext", "unverifiable"] as const) {
+    const override =
+      kind === "plaintext"
+        ? { kind, path, values: 2, services: 1 }
+        : { kind, path };
+    const pending = describeComposeEnvAtRest({
+      report: {
+        override,
+        adoptionBound: true,
+        adoptionPending: true,
+        asides: { stale: 0, fresh: 0 },
+      },
+      projectDirName: ".hack",
+    });
+    expect(pending.status).toBe("warn");
+    expect(pending.message).toContain("pins this file");
+    expect(pending.message).toContain("hack config adopt --recover --rollback");
+    // Plain rollback and `hack down` refuse while the adoption is pending, so
+    // neither is the next step.
+    expect(pending.message).not.toContain("'hack config adopt --rollback'");
+    expect(pending.message).not.toContain("stop the adopted containers");
+    expect(pending.message).toContain(
+      PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+    );
+    expect(adoptedComposeEnvOverrideNextStep({ adoptionPending: true })).toBe(
+      PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+    );
+    expect(adoptedComposeEnvOverrideNextStep({ adoptionPending: false })).toBe(
+      ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+    );
+    const settled = describeComposeEnvAtRest({
+      report: {
+        override,
+        adoptionBound: true,
+        adoptionPending: false,
+        asides: { stale: 0, fresh: 0 },
+      },
+      projectDirName: ".hack",
+    });
+    expect(settled.message).toContain(ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP);
+    expect(settled.message).not.toContain("--recover --rollback");
+  }
 });
 
 /** Names and contents of every entry in a directory outside the project. */
@@ -546,6 +600,7 @@ for (const linked of [".hack", ".hack/.internal"] as const) {
     expect(report).toEqual({
       override: { kind: "refused", path },
       adoptionBound: false,
+      adoptionPending: false,
       asides: { stale: 0, fresh: 0 },
     });
     expect(composeEnvAtRestRepairs(report)).toEqual({

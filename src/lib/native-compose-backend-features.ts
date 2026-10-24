@@ -3,6 +3,7 @@ import { open } from "node:fs/promises";
 import { readNativeSelection } from "../backends/native-project-selection.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
+import { HACK_OWNERSHIP_LABEL_NAMESPACES } from "./hack-ownership-labels.ts";
 import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
 
 /**
@@ -13,10 +14,18 @@ import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
  *
  * The set is closed and ordered; it is part of the refusal and the doctor
  * report contract. Messages and reports name only these features, never a
- * network, label, path, platform or other authored value.
+ * network, volume, label, path, platform or other authored value.
+ *
+ * Only `.hack/docker-compose.yml` itself is classified, after the explicit
+ * `HACK_NATIVE_ADAPTATION` selection. Compose override files, `extends`,
+ * `include` and environment such as `DOCKER_DEFAULT_PLATFORM` are not merged
+ * or read, as native start does not read them either. The native runtime's
+ * own review reports `extends` and `include` as unsupported fields, and a
+ * platform counts only when a service sets the `platform` field.
  */
 export const COMPOSE_BACKEND_FEATURES = [
   "external_network",
+  "external_volume",
   "reserved_label",
   "unsupported_build",
   "foreign_platform",
@@ -31,13 +40,8 @@ export type ComposeBackendFeature = (typeof COMPOSE_BACKEND_FEATURES)[number];
  *
  * - `com.docker.compose.*`: Docker Compose's own project, service and one-off
  *   labels, which the Compose backend reads to find a project's containers.
- * - `io.hack-local.*`: native runtime graph ownership (`owner`, `graph`,
- *   `namespace`, `plan`, `kind`, `resource`, `job` and cache labels), which the
- *   runtime-core provider writes and verifies before cleanup.
- * - `io.hack.native-config.*`: native-config Compose ownership (`version`,
- *   `instance`, `owner`, `generation`, `workload`, `storage`), which the
- *   native-config renderer writes and its generation inventory, route owner
- *   and storage witness verify.
+ * - Every namespace in {@link HACK_OWNERSHIP_LABEL_NAMESPACES}, the single
+ *   source of truth for the ownership labels Hack itself writes.
  *
  * Other labels, including Hack's routing (`caddy*`), dependency cache
  * (`hack.dependencies.*`) and one-shot markers, are not reserved: native `up`
@@ -45,9 +49,14 @@ export type ComposeBackendFeature = (typeof COMPOSE_BACKEND_FEATURES)[number];
  */
 export const RESERVED_OWNERSHIP_LABEL_PREFIXES = [
   "com.docker.compose.",
-  "io.hack-local.",
-  "io.hack.native-config.",
+  ...HACK_OWNERSHIP_LABEL_NAMESPACES,
 ] as const;
+
+/** "a.*, b.* or c.*" for the reserved prefixes, in their declared order. */
+function reservedNamespaceList(): string {
+  const names = RESERVED_OWNERSHIP_LABEL_PREFIXES.map((prefix) => `${prefix}*`);
+  return `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`;
+}
 
 /** The native VM runs Linux arm64; registry admission selects only this platform. */
 const NATIVE_PLATFORMS = new Set(["linux/arm64", "linux/arm64/v8"]);
@@ -57,8 +66,8 @@ const COMPOSE_LIMIT = 256 * 1024;
 
 const FEATURE_PHRASES: Readonly<Record<ComposeBackendFeature, string>> = {
   external_network: "an external Compose network",
-  reserved_label:
-    "a label in a reserved ownership namespace (com.docker.compose.*, io.hack-local.* or io.hack.native-config.*)",
+  external_volume: "an external Compose volume",
+  reserved_label: `a label in a reserved ownership namespace (${reservedNamespaceList()})`,
   unsupported_build:
     "a Compose build outside the basic context, dockerfile and target form",
   foreign_platform: "a service platform other than linux/arm64",
@@ -115,14 +124,29 @@ function isUnsupportedBuild(service: Record<string, unknown>): boolean {
   );
 }
 
+/**
+ * Compose takes an absent or `null` `platform` as unset, and native review
+ * does the same, so only a declared value other than the native platform is
+ * foreign. Environment defaults such as `DOCKER_DEFAULT_PLATFORM` are not read.
+ */
 function isForeignPlatform(service: Record<string, unknown>): boolean {
-  return (
-    Object.hasOwn(service, "platform") &&
-    !(
-      typeof service.platform === "string" &&
-      NATIVE_PLATFORMS.has(service.platform)
-    )
-  );
+  const platform = service.platform;
+  if (platform === undefined || platform === null) {
+    return false;
+  }
+  return !(typeof platform === "string" && NATIVE_PLATFORMS.has(platform));
+}
+
+/**
+ * Compose treats `external: true` and the legacy `external: {name: ...}` form
+ * as a volume the project does not own. Native review refuses it as
+ * `external_volume`; there is no native replacement for it.
+ */
+function isExternalVolume(volume: unknown): boolean {
+  if (!isRecord(volume)) {
+    return false;
+  }
+  return volume.external === true || isRecord(volume.external);
 }
 
 function topLevelEntries(
@@ -167,6 +191,9 @@ export function findComposeBackendFeatures(
     )
   ) {
     found.add("external_network");
+  }
+  if (topLevelEntries(compose, "volumes").some(isExternalVolume)) {
+    found.add("external_volume");
   }
   const resources = [
     ...topLevelEntries(compose, "networks"),

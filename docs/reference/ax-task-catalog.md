@@ -74,7 +74,7 @@ is not implemented here.
    wrappers (`npx -c`, `npm exec -c`, `pnpm -c`, `yarn exec`, `bun exec`,
    `nodemon --exec`, `tsx -e`, `ts-node -e`, `julia -e`, `sudo -s`,
    `doas -s`, `git -c`/`--config`/`--exec`/`--upload-pack`/
-   `--receive-pack`/`clone -u`/`submodule foreach`/`bisect`/
+   `--receive-pack`/`--cmd`/`clone -u`/`submodule foreach`/`bisect`/
    `filter-branch`, a Git `!` alias value such as
    `git config alias.x '!cmd'`, `make --eval`, `nix eval`). A dashed Git
    builtin, by basename or absolute path (`git-clone`,
@@ -97,9 +97,12 @@ is not implemented here.
    (`psql -1c`, `mysql -Be`). For `psql`, `mysql`, `mariadb` and Python,
    a cluster is read only up to the first option that takes a value, so
    `psql -hlocalhost`, `psql -Ucustomer`, `mysql -uroot -psecret` and
-   `python -mcompileall` pass. `clone -u` counts when any operand is
-   `clone`, so a Git global option that takes a value
+   `python -mcompileall` pass. `clone -u` counts after any operand that
+   is `clone`, so a Git global option that takes a value
    (`git --attr-source HEAD clone -u cmd`) cannot hide the subcommand.
+   It does not count before that operand, because Git reads a
+   subcommand's options only after its name, so
+   `git push -u origin clone` (a branch named `clone`) passes.
    Accepted forms include `psql -f script.sql`,
    `mysql --batch db`, `sqlite3 -csv app.db`,
    `duckdb -f script.sql data.duckdb`,
@@ -358,6 +361,8 @@ until its recipes are re-reviewed.
 | `psql -o`/`--output` piped to a command (`-o '\|cmd'`, `-o\|cmd`, `-qo\|cmd`, `--output=\|cmd`, `--out=\|cmd`) | `inline_command`; `psql -o out.txt`, `psql -F'\|'`, `psql -L '\|log'` (a file name) still pass | domain test |
 | Dashed Git builtins (`/usr/lib/git-core/git-clone -u cmd`, `git-config alias.x '!cmd'`, `git-ls-remote --upload-pack=cmd`, `git-fetch-pack --exec=cmd`) | `inline_command`; `git-clone url dir`, `git-push -u origin main`, `git-config alias.st status` still pass | domain test |
 | Git plumbing helpers read as their porcelain (`git-bisect--helper --bisect-run cmd`, `/usr/lib/git-core/git-bisect--helper.exe run cmd`, `git bisect--helper --bisect-run cmd`, `git-submodule--helper foreach cmd`, `git-config alias.x bisect--helper`, older Git's `git rebase--helper --add-exec-commands cmd` in any letter case) | `inline_command`; `git-submodule--helper status`, `git-difftool--helper a b`, `git add bisect--helper.txt`, `git config --add alias.st status` still pass | domain test |
+| Git 2.20-2.33's `rebase--interactive --cmd cmd` (`git rebase--interactive --cmd=cmd`, `git-rebase--interactive --cmd cmd`, `--cm cmd`, a repository alias such as `git ri --cmd cmd`) and its `--add-exec-commands` mode | `inline_command`; `git rebase--interactive --continue`, `git-rebase--interactive --edit-todo` still pass | domain test |
+| A subcommand-scoped Git flag before the subcommand's name (`git push -u origin clone`, `git remote set-branches --add origin rebase`, `git config --add alias.r rebase`) | accepted; the flag after the name (`git clone -u cmd url`, `git --unknown v clone -u cmd url`, `git rebase--helper --add cmd`) is still refused | domain test |
 | Detached linked worktree with no named instance, on CLI `task list`/`task inspect` and MCP `hack.project.task.list`/`inspect` | `detached_checkout`; naming the instance (`--branch`, MCP `branch`) passes | paired fixture, domain test |
 | `duckdb -storage-version VER db` | accepted; a SQL operand after the database is still refused | domain test |
 | `git clone -u` (also after `--attr-source <tree>` or an unknown global option), abbreviated or attached `--upload-pack`/`--receive-pack`/`--exec`, `clone --config`, and `!` alias values (`git config alias.x '!cmd'`, `git -c alias.x=!cmd`) | `inline_command`; `git clone url dir`, `git push -u origin main`, `git add -u`, `git config alias.st status` still pass | domain test |
@@ -401,7 +406,7 @@ until its recipes are re-reviewed.
   reviewer must check argv, and WU26 execution must not rely on this check
   as a sandbox. For a known program it is fail-closed, so it can also refuse
   an ordinary argument that looks like an inline flag (`script.sh -c`,
-  `git clean -x`, `git -C dir status`, `git push -u origin clone`,
+  `git clean -x`, `git -C dir status`, `git log -S clone -u`,
   `make -e`, `python -I`, `mysql -E`, a Git argument such as `--grep=!x`
   that starts a value with `!`, or a script argument named like a REPL
   module after a Python trampoline, as in
@@ -417,16 +422,25 @@ until its recipes are re-reviewed.
   string in argv is. Code a program loads from a file is not inspected
   either: for example, a reviewed script that loads a data file with
   `pickle` or `marshal`, or reads a config file that it evaluates. A Git
-  `<sub>--helper` plumbing command (`git-bisect--helper`,
-  `git submodule--helper`) is read as `git <sub>`, so it meets the rules for
-  that subcommand. A helper's own options are modeled only where they run a
-  command: older Git's `rebase--helper --add-exec-commands` is refused
-  through a flag scoped to `rebase`. Any whole-word `<sub>--helper`
-  argument is read as `<sub>` (fail-closed), so
-  `git push -u origin clone--helper` (a branch of that name) and
-  `git add bisect--helper` (a file of that name) are refused. The `rebase`-scoped flag counts when any
-  operand is `rebase`, and Git abbreviates, so
-  `git config --add alias.r rebase` is refused too. Git config writes other than `!` aliases (for example
+  `<sub>--helper` or `<sub>--interactive` plumbing command
+  (`git-bisect--helper`, `git submodule--helper`, Git 2.20-2.33's
+  `git rebase--interactive`) is read as `git <sub>`, so it meets the rules
+  for that subcommand. A helper's own options are modeled only where they
+  run a command: Git 2.13-2.19's `rebase--helper --add-exec-commands` is
+  refused through a flag scoped to `rebase`, and `rebase--interactive
+  --cmd` through `--cmd`, which is refused under every subcommand because
+  a repository alias can rename the helper. No Git option shares its
+  `--cm` prefix, so only an argument spelled like it, such as
+  `git grep -e --cmd`, is refused with it. Any whole-word `<sub>--helper` or `<sub>--interactive`
+  argument is read as `<sub>` (fail-closed), so `git add bisect--helper`
+  (a file of that name) is refused. A subcommand-scoped flag (`clone -u`,
+  `rebase --add-exec-commands`) counts after any operand that names the
+  subcommand, and Git abbreviates, so an earlier word `clone` or `rebase`
+  scopes it even when that word is another option's value:
+  `git commit -m rebase --add` and `git log -S clone -u` (`-u` is
+  `--patch`) are refused. The same flag before the word passes
+  (`git config --add alias.r rebase`,
+  `git remote set-branches --add origin rebase`). Git config writes other than `!` aliases (for example
   `git config core.pager cmd` or `include.path`) are not detected. Nor are
   `mysql`/`mariadb` option files named in argv (`--defaults-extra-file`,
   which can set `init-command`) or `--pager`, which runs a command only in

@@ -15,6 +15,11 @@
  * because fixtures may hold secret-shaped values.
  */
 
+import {
+  addProcessListener,
+  isProcessOnceListener,
+} from "./process-once-listeners.ts";
+
 /**
  * Process events whose listener lists are compared. A change is reported per
  * test and per file, and restored only at the file boundary (see
@@ -316,15 +321,23 @@ function countListeners(listeners: readonly Listener[]): Map<Listener, number> {
  * (HACK-1416).
  *
  * Only the difference is edited: a listener added since the snapshot is
- * removed and a snapshot listener that went missing is added back with
- * `process.on`. Listeners present in both stay untouched, so a `once`
- * listener there keeps its `once` behavior; Bun does not expose `once`, so a
- * missing listener always comes back as a persistent one, at the end of the
- * list.
+ * removed and a snapshot listener that went missing is added back. Listeners
+ * present in both stay untouched. A missing listener comes back with the
+ * registration kind it last had: a `once` listener as `once`, otherwise
+ * persistent (see `tests/helpers/process-once-listeners.ts`), at the end of
+ * the list.
  *
- * Unlike replaced functions, removing a leftover listener cannot let unsettled
- * work reach the host: it only stops that work from reacting to a signal or
- * exit event of the shared test process.
+ * Removing a leftover listener is not free of effects. A leftover `SIGINT` or
+ * `SIGTERM` handler can be legitimate cleanup, for example one that kills a
+ * child process the file spawned when the run is interrupted. Once it is
+ * removed, an interrupted test run no longer runs that cleanup, and whatever
+ * the handler owned can outlive the run. The guard still removes it rather
+ * than calling it or waiting for what it owns: it cannot know what the handler
+ * owns or whether running it now is safe, and calling another file's handler
+ * at an arbitrary point (or leaving it for a later file's `process.emit`) is
+ * the cross-file interference this restore prevents. The leak is reported
+ * with the file's name and fails the run, so the fix belongs in that file:
+ * remove its handler, and stop what it owns, in its own teardown.
  */
 export function restoreProcessListeners(
   snapshot: GlobalStateSnapshot
@@ -354,7 +367,11 @@ export function restoreProcessListeners(
       if (left > 0) {
         kept.set(listener, left - 1);
       } else {
-        process.on(event, listener);
+        addProcessListener(
+          event,
+          listener,
+          isProcessOnceListener(event, listener)
+        );
       }
     }
   }

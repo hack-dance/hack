@@ -1727,12 +1727,13 @@ async function executePreparedGeneration(opts: {
                 ? () => {
                     const adjacentProof = adjacentGuardProof;
                     adjacentGuardProof = false;
-                    return start.excludeStorage(() =>
-                      storage.verify(
-                        generation,
-                        adjacentProof ? { adjacentProof } : {}
-                      )
-                    );
+                    // Only each carrier proof is excluded; the guard's
+                    // freshness checks and saved-state reads consume the
+                    // start budget like any other start-phase work.
+                    return storage.verify(generation, {
+                      ...(adjacentProof ? { adjacentProof } : {}),
+                      excludeProof: start.excludeStorage,
+                    });
                   }
                 : undefined,
             }),

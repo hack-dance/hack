@@ -16,6 +16,7 @@ import {
   markNativeComposeStorageBudgetRefusal,
   type NativeComposeEffectRefusal,
   nativeComposeEffectReason,
+  nativeComposeEffectRefusal,
   retainNativeComposeEffectRefusal,
 } from "./native-compose-effect-diagnostics.ts";
 import {
@@ -932,14 +933,21 @@ type StorageCommandRefusal = "probe-timeout" | "probe-cancel" | "probe-budget";
 const storageCommandRefusals = new WeakMap<object, StorageCommandRefusal>();
 /** The same fixed refusal, keeping only its closed command cause (a timed-out or
  * cancelled child, or an exhausted publication/settlement budget) for the effect
- * diagnostic. It grants nothing and changes no check, deadline or retention. */
-function refuseCommand(reason: StorageCommandRefusal | undefined): never {
+ * diagnostic. A replaced `source` refusal keeps its issued owner boundary (for
+ * example a helper policy refusal observed during admission), so a later carrier
+ * boundary cannot relabel it. It grants nothing and changes no check, deadline or
+ * retention. */
+function refuseCommand(
+  reason: StorageCommandRefusal | undefined,
+  source?: unknown
+): never {
   const error = new Error(
     "Native storage xattr proof refused; values omitted."
   );
   if (reason) {
     storageCommandRefusals.set(error, reason);
   }
+  copyNativeComposeEffectRefusal(source, error);
   throw error;
 }
 function storageCommandRefusal(
@@ -964,12 +972,24 @@ export function nativeComposeStorageCarrierReason(
   return storageCommandRefusal(error) ?? nativeComposeEffectReason(error);
 }
 /**
- * Effect reason at a carrier boundary of one storage carrier. When its own
- * deadline, the named `HACK_NATIVE_STORAGE_TIMEOUT_MS` storage budget, is
- * exhausted and the carrier was not cancelled, the refusal names that budget:
- * every probe and command inside it is clipped to the remaining budget, so its
- * timeout or budget refusal fires exactly at that end. Otherwise it keeps the
- * classified command cause. Diagnostics only: no check, deadline or retention changes.
+ * Reasons an expired carrier deadline itself can produce: every probe and
+ * command inside a carrier is clipped to the remaining budget (a timeout or
+ * budget refusal), its lifetime check marks `storage-budget`, and a refusal
+ * with no observed cause stays `unclassified`. Any other reason, such as a
+ * helper policy refusal, was observed independently of the deadline.
+ */
+const deadlineReasons: ReadonlySet<NativeComposeEffectRefusal["reason"]> =
+  new Set(["probe-timeout", "probe-budget", "storage-budget", "unclassified"]);
+/**
+ * Effect reason at a carrier boundary of one storage carrier. A refusal that
+ * already carries its own observed reason (an issued boundary such as a helper
+ * policy refusal, or a classified command cause) keeps it even when it is caught
+ * after the deadline, so an operator is not sent to raise the storage budget for
+ * a policy failure. Only a deadline-shaped refusal (timeout, budget, lifetime
+ * mark or no observed cause) whose carrier deadline, the named
+ * `HACK_NATIVE_STORAGE_TIMEOUT_MS` storage budget, has expired and whose carrier
+ * was not cancelled names that budget. Diagnostics only: no check, deadline or
+ * retention changes.
  */
 export function nativeComposeStorageCarrierBudgetReason(opts: {
   readonly error: unknown;
@@ -978,10 +998,19 @@ export function nativeComposeStorageCarrierBudgetReason(opts: {
   readonly now?: () => number;
 }): NativeComposeEffectRefusal["reason"] {
   const now = opts.now ?? Date.now;
-  if (!opts.signal.aborted && now() >= opts.deadline) {
+  const issued = nativeComposeEffectRefusal(opts.error)?.reason;
+  const observed =
+    issued && issued !== "unclassified"
+      ? issued
+      : nativeComposeStorageCarrierReason(opts.error);
+  if (
+    deadlineReasons.has(observed) &&
+    !opts.signal.aborted &&
+    now() >= opts.deadline
+  ) {
     return "storage-budget";
   }
-  return nativeComposeStorageCarrierReason(opts.error);
+  return observed;
 }
 
 export async function runNativeComposeStorageDockerCommand(supplied: {
@@ -1040,6 +1069,8 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
   let armed: NativeComposeStorageArmedCommand | null = null;
   let publicationRefused = false;
   let publicationCause: StorageCommandRefusal | undefined;
+  // The first refusal that stopped publication; only its issued boundary is kept.
+  let publicationSource: unknown;
   const cancellation = new AbortController();
   try {
     await opts.assertAdmitted();
@@ -1058,7 +1089,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
         return refuseCommand("probe-budget");
       }
       if (publicationRefused) {
-        return refuseCommand(publicationCause);
+        return refuseCommand(publicationCause, publicationSource);
       }
       if (
         !(recordingSettlement || opts.cleanup) &&
@@ -1100,11 +1131,12 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
       } catch (error) {
         publicationRefused = true;
         publicationCause ??= storageCommandRefusal(error);
+        publicationSource ??= error;
         if (record) {
           invalidateNativeComposeStorageCommandOwner(record.owner);
         }
         cancellation.abort();
-        return refuseCommand(publicationCause);
+        return refuseCommand(publicationCause, publicationSource);
       } finally {
         if (timer !== undefined) {
           clearTimeout(timer);
@@ -1252,6 +1284,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
           } catch (error) {
             publicationRefused = true;
             publicationCause ??= storageCommandRefusal(error);
+            publicationSource ??= error;
             invalidateNativeComposeStorageCommandOwner(record.owner);
             cancellation.abort();
           }
@@ -1268,7 +1301,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
     settled = true;
     if (record) {
       if (publicationRefused) {
-        return refuseCommand(publicationCause);
+        return refuseCommand(publicationCause, publicationSource);
       }
       if (!(armed && exit)) {
         return refuse();
@@ -1311,7 +1344,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
   } catch (error) {
     if (opts.originalCommand) {
       invalidateNativeComposeStorageCommandOwner(opts.originalCommand.owner);
-      return refuseCommand(storageCommandRefusal(error));
+      return refuseCommand(storageCommandRefusal(error), error);
     }
     throw error;
   } finally {

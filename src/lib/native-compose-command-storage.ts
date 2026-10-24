@@ -130,6 +130,14 @@ async function volumeNames(signal: AbortSignal): Promise<readonly string[]> {
 export type NativeComposeCommandStorageVerifyOptions = {
   /** Only when nothing but read-only checks ran since this lease's previous proof. */
   readonly adjacentProof?: true;
+  /**
+   * Wraps each enrolled volume's carrier proof (fresh carrier creation and its
+   * witness verification), which its `HACK_NATIVE_STORAGE_TIMEOUT_MS` carrier
+   * deadline bounds. The surrounding freshness checks and saved-state reads stay
+   * outside it. A native `up`/`restart` start deadline passes its storage
+   * exclusion here, so only bounded carrier time extends that deadline.
+   */
+  readonly excludeProof?: <T>(proof: () => Promise<T>) => Promise<T>;
 };
 
 /** Command admission owns no helper process. Each proof gets a fresh finite carrier;
@@ -236,6 +244,8 @@ export async function prepareNativeComposeCommandStorage(opts: {
     if (before.storageWitnessesPending) {
       throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
     }
+    const excludeProof =
+      options.excludeProof ?? (<T>(proof: () => Promise<T>) => proof());
     for (const entry of before.storageWitnesses ?? []) {
       if (
         entry.state !== "enrolled" ||
@@ -244,16 +254,18 @@ export async function prepareNativeComposeCommandStorage(opts: {
       ) {
         return refuse();
       }
-      await verifyNativeComposeStorageXattrWitness({
-        authority: mutation.materialAuthority,
-        generation,
-        engineId,
-        reference: entry.reference,
-        carrier: await carrier(),
-        ...(options.adjacentProof === true
-          ? { adjacentProof: true as const }
-          : {}),
-      });
+      await excludeProof(async () =>
+        verifyNativeComposeStorageXattrWitness({
+          authority: mutation.materialAuthority,
+          generation,
+          engineId,
+          reference: entry.reference,
+          carrier: await carrier(),
+          ...(options.adjacentProof === true
+            ? { adjacentProof: true as const }
+            : {}),
+        })
+      );
     }
     const after = await store.loadCurrent();
     if (

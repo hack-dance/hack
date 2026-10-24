@@ -1323,6 +1323,8 @@ describe("recipe grammar", () => {
   // HACK-1331: each refused form names the rule that catches it; the paired
   // accepted forms prove the rule is scoped, not a blanket refusal.
   const gapCases: readonly {
+    /** Issue that added the rule, when it is not HACK-1331. */
+    readonly issue?: string;
     readonly rule: string;
     readonly refused: readonly (readonly string[])[];
     readonly accepted: readonly (readonly string[])[];
@@ -1661,9 +1663,18 @@ describe("recipe grammar", () => {
     {
       // A `<sub>--helper` plumbing command, dashed (also by an absolute
       // git-core path or with `.exe`) or under `git`, is `git <sub>`.
+      issue: "HACK-1373",
       rule: "Git plumbing helpers read as their porcelain",
       refused: [
         ["git-bisect--helper", "--bisect-run", "id"],
+        // HACK-1411: a dashed builtin's trailing arguments are mapped too,
+        // so an alias defined as the helper meets the `bisect` rule.
+        ["git-config", "alias.x", "bisect--helper"],
+        // HACK-1411: older Git's `rebase--helper --add-exec-commands cmd`,
+        // in any letter case, meets the `rebase`-scoped flag.
+        ["git", "rebase--helper", "--add-exec-commands", "id"],
+        ["git-rebase--helper", "--add-exec", "id"],
+        ["git", "Rebase--Helper", "--add-exec-commands", "id"],
         ["/usr/lib/git-core/git-bisect--helper", "run", "id"],
         ["/usr/libexec/git-core/git-bisect--helper.exe", "--bisect-run", "id"],
         ["exec", "Git-Bisect--Helper", "--bisect-run", "id"],
@@ -1681,12 +1692,16 @@ describe("recipe grammar", () => {
         ["git", "log", "--grep=bisect--helper"],
         // Only a whole `<sub>--helper` word is a helper, not a file name.
         ["git", "add", "bisect--helper.txt"],
+        // `--add-exec-commands` is scoped to `rebase`, so `--add` elsewhere
+        // still passes.
+        ["git", "config", "--add", "alias.st", "status"],
+        ["git", "rebase--helper", "--continue"],
       ],
     },
   ];
 
   for (const gap of gapCases) {
-    test(`HACK-1331: ${gap.rule}`, () => {
+    test(`${gap.issue ?? "HACK-1331"}: ${gap.rule}`, () => {
       for (const argv of gap.refused) {
         expect({ argv, inline: isInlineCommandArgv(argv) }).toEqual({
           argv,
@@ -1726,6 +1741,21 @@ describe("recipe grammar", () => {
     // like a REPL module is refused.
     expect(
       isInlineCommandArgv(["python3", "-m", "cProfile", "scripts/x.py", "code"])
+    ).toBe(true);
+  });
+
+  test("HACK-1411: documented Git helper fail-closed collateral stays refused", () => {
+    // Any whole-word `<sub>--helper` argument is read as `<sub>`, so a
+    // branch named `clone--helper` scopes `-u` to `clone` and a file named
+    // `bisect--helper` meets the `bisect` rule.
+    expect(
+      isInlineCommandArgv(["git", "push", "-u", "origin", "clone--helper"])
+    ).toBe(true);
+    expect(isInlineCommandArgv(["git", "add", "bisect--helper"])).toBe(true);
+    // Any operand named `rebase` scopes `--add-exec-commands` to it, and
+    // Git abbreviates, so `--add` before an alias value `rebase` is refused.
+    expect(
+      isInlineCommandArgv(["git", "config", "--add", "alias.r", "rebase"])
     ).toBe(true);
   });
 
@@ -1917,11 +1947,11 @@ async function writeEmptyRegistry(name: string): Promise<string> {
 
 /**
  * A committed one-recipe project plus a detached linked worktree of it, both
- * inside the fixture root. Returns the linked worktree's root.
+ * inside the fixture root under `name`. Returns the linked worktree's root.
  */
-async function writeDetachedWorktree(): Promise<string> {
-  const primary = join(fixture.root, "detached-primary");
-  const linked = join(fixture.root, "detached-linked");
+async function writeDetachedWorktree(name = "detached"): Promise<string> {
+  const primary = join(fixture.root, `${name}-primary`);
+  const linked = join(fixture.root, `${name}-linked`);
   await mkdir(join(primary, ".hack"), { recursive: true });
   await mkdir(join(primary, "scripts"), { recursive: true });
   await writeFile(
@@ -2047,6 +2077,73 @@ describe("repository catalog", () => {
       expect(parsed?.ok && statuses(parsed.data.tasks)).toEqual([
         [0, "lint", "reviewed"],
       ]);
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
+    "HACK-1383: CLI task inspect and the MCP task tools refuse an implicit instance in a detached linked worktree",
+    async () => {
+      const linked = await writeDetachedWorktree("detached-surfaces");
+      const detached = targetRefusalEnvelope({ reason: "detached_checkout" });
+      const implicit = { path: linked, env: "base" };
+      const named = { ...implicit, branch: REVIEW_INSTANCE };
+
+      // Each surface has its own path to the selector, so each refusal is
+      // asserted separately, CLI first: the MCP tools spawn the CLI.
+      const cliInspect = await runCli(
+        buildTaskInspectArgs({ ...implicit, task: "lint" })
+      );
+      expect<unknown>({
+        surface: "cli inspect",
+        exitCode: cliInspect.exitCode,
+        envelope: cliInspect.envelope,
+      }).toEqual({ surface: "cli inspect", exitCode: 1, envelope: detached });
+      const mcpList = await runMcp("hack.project.task.list", implicit);
+      expect<unknown>({
+        surface: "mcp list",
+        exitCode: mcpList.exitCode,
+        spawned: mcpList.spawned,
+        data: mcpList.data,
+      }).toEqual({
+        surface: "mcp list",
+        exitCode: 1,
+        spawned: undefined,
+        data: detached,
+      });
+      const mcpInspect = await runMcp("hack.project.task.inspect", {
+        ...implicit,
+        task: "lint",
+      });
+      expect<unknown>({
+        surface: "mcp inspect",
+        exitCode: mcpInspect.exitCode,
+        spawned: mcpInspect.spawned,
+        data: mcpInspect.data,
+      }).toEqual({
+        surface: "mcp inspect",
+        exitCode: 1,
+        spawned: undefined,
+        data: detached,
+      });
+
+      // Naming the instance passes on every surface.
+      const cliNamed = parseTaskInspectEnvelope(
+        (await runCli(buildTaskInspectArgs({ ...named, task: "lint" })))
+          .envelope
+      );
+      expect(cliNamed?.ok && cliNamed.data.task.id).toBe("lint");
+      const mcpListNamed = parseTaskListEnvelope(
+        (await runMcp("hack.project.task.list", named)).data
+      );
+      expect(mcpListNamed?.ok && statuses(mcpListNamed.data.tasks)).toEqual([
+        [0, "lint", "reviewed"],
+      ]);
+      const mcpInspectNamed = parseTaskInspectEnvelope(
+        (await runMcp("hack.project.task.inspect", { ...named, task: "lint" }))
+          .data
+      );
+      expect(mcpInspectNamed?.ok && mcpInspectNamed.data.task.id).toBe("lint");
     },
     CASE_TIMEOUT_MS
   );

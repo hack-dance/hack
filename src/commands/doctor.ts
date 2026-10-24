@@ -61,7 +61,7 @@ import {
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import {
-  ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+  adoptedComposeEnvOverrideNextStep,
   composeEnvAtRestRepairs,
   describeComposeEnvAtRest,
   inspectComposeEnvAtRest,
@@ -4185,7 +4185,7 @@ async function maybeRemovePlaintextComposeEnvOverride(opts: {
   const repairs = composeEnvAtRestRepairs(report);
   if (report.adoptionBound) {
     note(
-      `Kept ${file}: a saved 'hack config adopt' generation pins it, and removing it would break the adoption (values omitted). ${ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP}`,
+      `Kept ${file}: a saved 'hack config adopt' generation pins it, and removing it would break the adoption (values omitted). ${adoptedComposeEnvOverrideNextStep(report)}`,
       "compose env at rest"
     );
   }

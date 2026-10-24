@@ -33,11 +33,12 @@ export type RetainedRoutingOperationDeadlineMs =
   | 15_000
   | typeof DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
 /** Value-free timing of the most recent `operation()` call. A retained mutation
- * refuses as `E_LEGACY_ADOPTION_CHANGED` both when its observed binding differs
- * from the recorded one and when its caller deadline expires (the product's
- * fail-closed deadline guard). `deadlineExpired` and `bindingUnchanged` (whether
- * every synthetic binding fact except the running state still equals the
- * fixture's original) tell the two apart without exposing any value. */
+ * refuses as `E_LEGACY_ADOPTION_CHANGED` when its observed binding differs from
+ * the recorded one and as `E_LEGACY_ADOPTION_DEADLINE` when only its caller
+ * deadline expires (the product's fail-closed deadline guard, HACK-1340).
+ * `deadlineExpired` and `bindingUnchanged` (whether every synthetic binding fact
+ * except the running state still equals the fixture's original) tell the two
+ * apart without exposing any value. */
 export interface RetainedRoutingOperationTiming {
   readonly operation: "start" | "stop";
   readonly preparation: boolean;

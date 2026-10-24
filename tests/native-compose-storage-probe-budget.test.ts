@@ -4,12 +4,13 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { resolveNativeStorageTimeoutMs } from "../src/lib/compose-startup-budget.ts";
 import { runNativeComposeStorageVerifiedExec } from "../src/lib/native-compose-command-storage.ts";
 import { nativeComposeEffectRefusal } from "../src/lib/native-compose-effect-diagnostics.ts";
@@ -21,6 +22,7 @@ import {
   openNativeComposeGenerationStore,
 } from "../src/lib/native-compose-generation.ts";
 import * as ownership from "../src/lib/native-compose-ownership.ts";
+import { parseNativeComposeStorageCommandRecord } from "../src/lib/native-compose-storage-command-record.ts";
 import {
   createNativeComposeDockerStorageXattrCarrier,
   NATIVE_STORAGE_CLEANUP_FLOOR_MS,
@@ -40,7 +42,10 @@ import {
   nativeComposeStorageXattrCarrierPorts,
 } from "../src/lib/native-compose-storage-witness-xattr-carrier.ts";
 import {
+  createNativeComposeStorageXattrMarker,
   encodeNativeComposeStorageXattrResponse,
+  type NativeComposeStorageXattrRequest,
+  type NativeComposeStorageXattrResponse,
   refuseNativeComposeStorageXattr,
 } from "../src/lib/native-compose-storage-witness-xattr-codec.ts";
 import * as shell from "../src/lib/shell.ts";
@@ -50,10 +55,13 @@ import * as shell from "../src/lib/shell.ts";
 // below is in-process: reads are answered by a stubbed probe, and each daemon
 // command runs as a local /bin/sh child. Nothing reaches a Docker socket, the
 // real HOME or the repository root; elapsed engine time is a virtual clock.
+// Recorded (original-command) proofs also run the host's read-only process
+// identity reads (`/bin/ps`, and `sysctl` on macOS) for their stopped children.
 
 const engineId = "engine-fixture";
 const selection = { name: "owned_data", storage: "data" };
 const createdAt = "2026-10-08T12:00:00Z";
+const helperRoot = { device: "1", inode: "42", uid: 70, gid: 70 };
 const carrierId = "e".repeat(64);
 const invocationId = "a".repeat(32);
 /** Virtual helper start duration: above the former fixed 15 s start cap. */
@@ -226,6 +234,7 @@ function installEngine(opts: {
   readonly store: NativeComposeGenerationStore;
   readonly input: () => NativeComposeStorageXattrInvocation;
   readonly startMs: number;
+  readonly response: NativeComposeStorageXattrResponse;
   readonly cleanupInspectMs?: number;
 }): Engine {
   const engine: Engine = { probeTimeouts: [], commands: [], elapsed: 0 };
@@ -397,40 +406,60 @@ function installEngine(opts: {
   });
   const run = shell.run;
   spyOn(shell, "run").mockImplementation((argv, options = {}) => {
-    // [/bin/sh, -c, wrapper, name, docker, ...daemon arguments]
+    // [/bin/sh, -c, wrapper, name, docker, ...daemon arguments]. A recorded
+    // command's wrapper stops itself before exec; the replacement child keeps
+    // that wrapper, so its publication handshake runs unchanged.
+    if (basename(argv[4] ?? "") !== "docker") {
+      // Host identity reads of recorded commands (`/bin/ps`, `sysctl`).
+      return run(argv, options);
+    }
     const daemon = argv.slice(5);
     const timeoutMs = options.timeoutMs ?? Number.NaN;
     const verb = daemon[0] === "volume" ? "volume create" : (daemon[0] ?? "");
     engine.commands.push({ verb, timeoutMs, elapsed: engine.elapsed });
-    const child = (script: string, granted = timeoutMs) =>
+    // `effect` is the daemon-side change, applied when the child exits: a
+    // recorded command re-checks admission (the helper still `created`) after
+    // its child is spawned and before it resumes.
+    const child = (
+      script: string,
+      step: { readonly granted?: number; readonly effect?: () => void } = {}
+    ) =>
       run([...argv.slice(0, 4), "/bin/sh", "-c", script], {
         ...options,
-        timeoutMs: granted,
+        timeoutMs: step.granted ?? timeoutMs,
+        onExit: (event) => {
+          step.effect?.();
+          return options.onExit?.(event) ?? Promise.resolve();
+        },
       });
     if (daemon[0] === "create") {
-      carrierState = "created";
-      return child(`printf '%s\\n' ${carrierId}`);
+      return child(`printf '%s\\n' ${carrierId}`, {
+        effect: () => {
+          carrierState = "created";
+        },
+      });
     }
     if (daemon[0] === "start" && daemon[2] === carrierId) {
       if (!(timeoutMs >= opts.startMs)) {
         // The granted bound expires first: the engine is still starting the
         // helper when the timeout fires, so the virtual clock reaches it.
         engine.elapsed += Number.isFinite(timeoutMs) ? timeoutMs : 0;
-        return child("sleep 5", 20);
+        return child("sleep 5", { granted: 20 });
       }
-      engine.elapsed += opts.startMs;
-      carrierState = "exited";
-      const response = encodeNativeComposeStorageXattrResponse({
-        kind: "directory-xattr",
-        version: 1,
-        outcome: "root",
-        root: { device: "1", inode: "42", uid: 70, gid: 70 },
+      const response = encodeNativeComposeStorageXattrResponse(opts.response);
+      return child(`printf '%s' '${response.trimEnd()}'; printf '\\n'`, {
+        effect: () => {
+          engine.elapsed += opts.startMs;
+          carrierState = "exited";
+        },
       });
-      return child(`printf '%s' '${response.trimEnd()}'; printf '\\n'`);
     }
     if (daemon[0] === "rm" && daemon[1] === carrierId) {
-      carrierState = "absent";
-      return child(`printf '%s\\n' ${carrierId}`);
+      return child(`printf '%s\\n' ${carrierId}`, {
+        effect: () => {
+          carrierState = "absent";
+        },
+      });
     }
     throw new Error("Unexpected synthetic Docker command");
   });
@@ -440,8 +469,9 @@ function installEngine(opts: {
 function invocation(opts: {
   readonly binding: NativeComposeMaterialBinding;
   readonly target: NativeComposeStorageXattrInvocation["target"];
+  readonly request: NativeComposeStorageXattrRequest;
 }): NativeComposeStorageXattrInvocation {
-  const { binding, target } = opts;
+  const { binding, target, request } = opts;
   return {
     recordCreated: async () => {},
     invocationId,
@@ -450,7 +480,7 @@ function invocation(opts: {
     readonly: true,
     uid: 70,
     gid: 70,
-    request: { kind: "directory-xattr", version: 1, operation: "root" },
+    request,
     scope: {
       generationId: binding.generationId,
       currentGenerationId: binding.currentGenerationId,
@@ -464,21 +494,48 @@ type Proof = {
   readonly engine: Engine;
   readonly result: unknown;
   readonly error: unknown;
+  /** Original-command record of a recorded proof, read after it returned. */
+  readonly record: string | null;
 };
 
-/** One readonly root proof whose helper start takes {@link SLOW_START_MS}. */
+/**
+ * One readonly proof whose helper start takes {@link SLOW_START_MS}. The default
+ * is an unrecorded `root` request. `recorded` builds the carrier exactly as
+ * `exec` and `up` storage proofs do (`prepareNativeComposeCommandStorage`:
+ * `originalCommandRecords: true`) and sends a readonly `verify` request, so every
+ * helper command takes the recorded original-command branch.
+ */
 async function proveWithSlowStart(opts: {
   readonly budgetMs: number;
   readonly cleanupInspectMs?: number;
+  readonly recorded?: true;
 }): Promise<Proof> {
   let outcome: Proof | null = null;
   await withAuthority(async ({ store, authority, binding }) => {
     let input: NativeComposeStorageXattrInvocation | null = null;
+    const marker = createNativeComposeStorageXattrMarker();
+    const request: NativeComposeStorageXattrRequest = opts.recorded
+      ? { ...marker, operation: "verify", root: helperRoot }
+      : { kind: "directory-xattr", version: 1, operation: "root" };
     const engine = installEngine({
       binding,
       store,
       input: () => input ?? refuseNativeComposeStorageXattr(),
       startMs: SLOW_START_MS,
+      response: opts.recorded
+        ? {
+            kind: "directory-xattr",
+            version: 1,
+            outcome: "verified",
+            root: helperRoot,
+            valueHex: marker.valueHex,
+          }
+        : {
+            kind: "directory-xattr",
+            version: 1,
+            outcome: "root",
+            root: helperRoot,
+          },
       cleanupInspectMs: opts.cleanupInspectMs,
     });
     const handle = await createNativeComposeDockerStorageXattrCarrier({
@@ -487,6 +544,7 @@ async function proveWithSlowStart(opts: {
       engineId,
       signal: new AbortController().signal,
       deadline: Date.now() + opts.budgetMs,
+      ...(opts.recorded ? { originalCommandRecords: true as const } : {}),
     });
     const ports = nativeComposeStorageXattrCarrierPorts(handle);
     // Callers pass the carrier's own observed target, as storage proofs do.
@@ -494,6 +552,7 @@ async function proveWithSlowStart(opts: {
     input = invocation({
       binding,
       target: target as NativeComposeStorageXattrInvocation["target"],
+      request,
     });
     let result: unknown = null;
     let error: unknown = null;
@@ -502,7 +561,29 @@ async function proveWithSlowStart(opts: {
     } catch (caught) {
       error = caught;
     }
-    outcome = { engine, result, error };
+    const recordPath = join(
+      store.identity.checkoutRoot,
+      ".hack",
+      ".internal",
+      "native-compose",
+      store.identity.instanceId,
+      "storage-carriers",
+      invocationId,
+      "commands.json"
+    );
+    const record =
+      opts.recorded && existsSync(recordPath)
+        ? await readFile(recordPath, "utf8")
+        : null;
+    if (opts.recorded && result !== null) {
+      // A recorded proof defers file retirement to finish() with the carrier
+      // journal's completion. Only that journal issues one, so a synthetic
+      // completion refuses; finish still closes the held invocation directories.
+      await expect(
+        ports.finish?.({ input, completion: Object.freeze({}) })
+      ).rejects.toThrow("values omitted");
+    }
+    outcome = { engine, result, error, record };
   });
   if (!outcome) {
     throw new Error("Storage proof fixture did not run");
@@ -547,6 +628,61 @@ test("a helper start slower than the former 15 s cap completes within the defaul
       (value) => value >= 1 && value <= NATIVE_STORAGE_PROBE_CEILING_MS
     )
   ).toBe(true);
+  expect(engine.elapsed).toBe(SLOW_START_MS);
+  expect(existsSync(tripwire)).toBe(false);
+}, 30_000);
+
+// The exec/up path: prepareNativeComposeCommandStorage creates every carrier
+// with `originalCommandRecords: true`, so readonly `verify` proofs run each
+// helper command through the recorded original-command branch (publication,
+// boundary deadline and settlement). That branch computes its own child bound,
+// so it needs its own slow-start proof.
+test("a recorded exec/up verify proof completes a helper start slower than the former 15 s cap", async () => {
+  const budgetMs = resolveNativeStorageTimeoutMs({ env: {} });
+  expect(budgetMs).toBe(90_000);
+  const { engine, result, error, record } = await proveWithSlowStart({
+    budgetMs,
+    recorded: true,
+  });
+  expect(nativeComposeEffectRefusal(error)).toBeUndefined();
+  expect(error).toBeNull();
+  expect(result).toMatchObject({
+    outcome: "complete",
+    exitCode: 0,
+    carrierId,
+    containersAfterCleanup: [],
+  });
+  expect(engine.commands.map(({ verb }) => verb)).toEqual([
+    "create",
+    "start",
+    "rm",
+  ]);
+  const [create, start, remove] = engine.commands;
+  // The recorded child bound is the remaining carrier budget, never more.
+  for (const command of [create, start]) {
+    expect(command?.timeoutMs).toBeGreaterThan(SLOW_START_MS);
+    expect(command?.timeoutMs).toBeLessThanOrEqual(budgetMs);
+  }
+  expect(remove?.timeoutMs).toBeGreaterThan(0);
+  expect(remove?.timeoutMs).toBeLessThanOrEqual(
+    NATIVE_STORAGE_PROBE_CEILING_MS
+  );
+  // Every helper command was published and settled as an original command.
+  expect(record).not.toBeNull();
+  const { commands } = parseNativeComposeStorageCommandRecord(record ?? "");
+  expect(commands.map(({ kind }) => kind)).toEqual([
+    "create",
+    "start",
+    "remove",
+  ]);
+  for (const command of commands) {
+    expect(command.child).not.toBeNull();
+    expect(command.settlement).toMatchObject({
+      exitCode: 0,
+      timedOut: false,
+      cancelled: false,
+    });
+  }
   expect(engine.elapsed).toBe(SLOW_START_MS);
   expect(existsSync(tripwire)).toBe(false);
 }, 30_000);

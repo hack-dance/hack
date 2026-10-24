@@ -419,7 +419,10 @@ Budgets are layered and all finite:
   remaining budget (`nativeComposeStorageProbeTimeoutMs`), not by a fixed cap:
   - Volume create and helper create/start get the whole remaining budget, so a
     slow but healthy helper start on a loaded host completes while budget
-    remains, and a hung one times out exactly at the carrier's end.
+    remains, and a hung one times out exactly at the carrier's end. This holds
+    for recorded original commands too (the readonly `verify` proofs that
+    `exec` and `up` run): the child, its publication handshake and its identity
+    reads share that one bound.
   - Reads and target observation get the remaining budget, at most 60 seconds
     (the ownership probe's own ceiling).
   - Helper removal and cleanup reads run even after the carrier's deadline, so

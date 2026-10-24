@@ -81,11 +81,22 @@ const artifact: NativeComposeStorageXattrArtifact = {
 /**
  * Bun timeout for store cases that drive a full durable generation lifecycle
  * (publish, enroll, verify, retire) in process. They wait on no timer: the
- * fake carrier answers at once and its deadline is 60 s away. Their cost is
- * durable store file work (mostly system time), which took 6-8 s per case on
- * a loaded host and timed out under Bun's 5 s default (HACK-1422).
+ * fake carrier answers at once. Their cost is a fixed amount of durable store
+ * file work, mostly system time: the second `up` of the same-birth case alone
+ * makes about 19k lstat, 13k realpath and 4.5k open calls, the same count on
+ * every run. That takes about 5-7 s on hosted CI, but 5-60 s or more on a
+ * host whose load is several times its CPU count, so this budget is a hang
+ * guard, not a speed assertion (HACK-1422).
  */
-const STORE_CASE_BUDGET_MS = 30_000;
+const STORE_CASE_BUDGET_MS = 180_000;
+/**
+ * Wall-clock lifetime of the fake carrier. Every carrier is captured inside a
+ * case, so its deadline is always later than that case's Bun budget: a slow
+ * host fails the case as a clean timeout, never by exhausting the carrier
+ * deadline, which refuses with the storage witness error and would change the
+ * asserted outcome (HACK-1422).
+ */
+const FAKE_CARRIER_LIFETIME_MS = 2 * STORE_CASE_BUDGET_MS;
 const roots: string[] = [];
 const stores: NativeComposeGenerationStore[] = [];
 let commandReaderCases = 0,
@@ -306,7 +317,7 @@ function fake(store: NativeComposeGenerationStore) {
     artifact,
     ports,
     signal: controller.signal,
-    deadline: Date.now() + 60_000,
+    deadline: Date.now() + FAKE_CARRIER_LIFETIME_MS,
   });
   return { state, ports, carrier, calls, attributes, controller };
 }

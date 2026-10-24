@@ -168,7 +168,7 @@ test.skipIf(process.platform !== "darwin")(
     );
     expect(acl.exitCode).toBe(0);
     // The ACL makes access(W_OK) succeed; only the mode bits refuse it.
-    await expect(access(exclude, constants.W_OK)).resolves.toBeNull();
+    await access(exclude, constants.W_OK);
     try {
       await ensureHackGitInfoExclude({ projectDir: join(repo, ".hack") });
       expect(await readFile(exclude, "utf8")).toBe("# user rule\n");
@@ -203,6 +203,36 @@ test("with a write bit set, the access(2) probe decides", async () => {
   const updated = await readFile(exclude, "utf8");
   expect(updated.startsWith("# user rule\n")).toBe(true);
   expect(updated).toContain("\n/.hack/.internal/\n");
+  expect((await lstat(exclude)).mode & 0o777).toBe(0o644);
+});
+
+/**
+ * HACK-1412: the probe errors follow `.hack/.gitignore`. A file that vanished
+ * between the read and the probe (ENOENT) is recreated; any other code skips
+ * the update.
+ */
+test("a probe ENOENT counts as writable and another probe error skips", async () => {
+  const exclude = join(repo, ".git", "info", "exclude");
+  await writeFile(exclude, "# user rule\n");
+  await chmod(exclude, 0o644);
+  const failure = Object.assign(new Error("io"), { code: "EIO" });
+
+  await ensureHackGitInfoExclude({
+    projectDir: join(repo, ".hack"),
+    checkWriteAccess: () => Promise.reject(failure),
+  });
+  expect(await readFile(exclude, "utf8")).toBe("# user rule\n");
+
+  resetHackGitInfoExcludeCacheForTests();
+  await ensureHackGitInfoExclude({
+    projectDir: join(repo, ".hack"),
+    checkWriteAccess: async (path) => {
+      await rm(path);
+      throw Object.assign(new Error("gone"), { code: "ENOENT" });
+    },
+  });
+  const recreated = await readFile(exclude, "utf8");
+  expect(recreated).toContain("\n/.hack/.internal/\n");
   expect((await lstat(exclude)).mode & 0o777).toBe(0o644);
 });
 

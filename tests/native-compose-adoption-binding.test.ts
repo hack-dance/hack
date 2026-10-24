@@ -51,9 +51,11 @@ const FIXTURE_PROBE_DEADLINE_MS = 3 * PROBE_DEADLINE_MS;
 /**
  * Bun's 5 s default would budget host process start-up rather than the
  * product, and an expired test keeps running against the next test's shared
- * root (HACK-1432, as HACK-1367 found for the ownership tests). The heaviest
- * test here owns about eight fixture-deadline probes, so a slow host ends in
- * the product's own closed refusal before this budget expires.
+ * root (HACK-1432, as HACK-1367 found for the ownership tests). Apart from the
+ * moving job snapshot case, which names {@link MOVING_JOB_TEST_TIMEOUT_MS},
+ * each test here creates at most seven probes (counted per test, HACK-1452),
+ * each bounded by at most a fixture probe deadline, so a slow host ends in the
+ * product's own closed refusal before this budget expires.
  */
 const FAKE_DOCKER_TEST_TIMEOUT_MS = 8 * FIXTURE_PROBE_DEADLINE_MS;
 setDefaultTimeout(FAKE_DOCKER_TEST_TIMEOUT_MS);
@@ -66,12 +68,36 @@ setDefaultTimeout(FAKE_DOCKER_TEST_TIMEOUT_MS);
 const CHILD_START_WAIT_MS = PROBE_DEADLINE_MS;
 const CHILD_START_POLL_MS = 10;
 /**
- * The aggregate deadline of the moving job snapshot case's ordered start. It
- * covers about four freshness checks, each one fixture-deadline probe. The
- * maintained job fixture's 20 s bound refused with "did not become ready"
- * under heavy load (HACK-1452).
+ * How many freshness checks the moving job snapshot case's ordered start makes.
+ * Each is one `assertFresh`, one fixture-deadline probe. The V7 job executor
+ * checks once on entry; for `db`, once before its start and twice in its
+ * started wait (one poll, one closing check); for the `seed` job, twice in its
+ * dependency wait, once for its attempt, once before its start and three times
+ * in its completion wait (its first poll still sees the job running); for
+ * `web`, twice in its dependency wait, once before its start and twice in its
+ * started wait; then twice in the final wait, once for the final read and once
+ * on exit. The case asserts that it made no more than this.
  */
-const ORDERED_OPERATION_DEADLINE_MS = 4 * FIXTURE_PROBE_DEADLINE_MS;
+const ORDERED_START_FRESHNESS_CHECKS = 20;
+/**
+ * The aggregate deadline of the moving job snapshot case's ordered start: one
+ * fixture probe deadline for each freshness check, so the start refuses for
+ * its own deadline only after a probe could have refused for its own. The
+ * maintained job fixture's 20 s bound, and then a 180 s bound sized from four
+ * checks, refused with "did not become ready" under heavy load; each check
+ * took 7-17 s at a load average of about 115 (HACK-1452).
+ */
+const ORDERED_OPERATION_DEADLINE_MS =
+  ORDERED_START_FRESHNESS_CHECKS * FIXTURE_PROBE_DEADLINE_MS;
+/**
+ * The moving job snapshot case's own test budget: its ordered start, plus its
+ * acquisition, its first resolve, its closing freshness check and its closing
+ * resolve, each one fixture-deadline probe, plus one more probe deadline for
+ * the fixture's file reads and the readiness polls' sleeps. A slow host
+ * therefore ends in the closed refusal before Bun's timeout.
+ */
+const MOVING_JOB_TEST_TIMEOUT_MS =
+  ORDERED_OPERATION_DEADLINE_MS + 5 * FIXTURE_PROBE_DEADLINE_MS;
 /**
  * The probe deadline of the tests that prove a moving snapshot exhausts it.
  * Each repeated scan is several cold fake Docker processes, so a 3 s deadline
@@ -560,209 +586,225 @@ test("stopped originals retain configured network identity without active endpoi
   expect(JSON.stringify(original)).not.toContain("running");
 });
 
-test("moving job snapshot counterexample retains identity and admits a fresh completed exit", async () => {
-  snapshotCaseActive = true;
-  try {
-    const job = "e".repeat(64);
-    const web = "c".repeat(64);
-    const composeText = JSON.stringify({
-      name: "fixture",
-      services: {
-        db: {
-          image: CANARY,
-          volumes: ["data:/var/lib/database"],
-          healthcheck: {
-            test: ["CMD", "probe"],
-            interval: "1s",
-            timeout: "1s",
-            retries: 2,
+test(
+  "moving job snapshot counterexample retains identity and admits a fresh completed exit",
+  async () => {
+    snapshotCaseActive = true;
+    try {
+      const job = "e".repeat(64);
+      const web = "c".repeat(64);
+      const composeText = JSON.stringify({
+        name: "fixture",
+        services: {
+          db: {
+            image: CANARY,
+            volumes: ["data:/var/lib/database"],
+            healthcheck: {
+              test: ["CMD", "probe"],
+              interval: "1s",
+              timeout: "1s",
+              retries: 2,
+            },
+          },
+          seed: {
+            image: CANARY,
+            command: ["seed-once"],
+            labels: { "hack.service.one-shot": "true" },
+            depends_on: { db: { condition: "service_healthy" } },
+          },
+          web: {
+            image: CANARY,
+            depends_on: {
+              seed: { condition: "service_completed_successfully" },
+            },
           },
         },
-        seed: {
-          image: CANARY,
-          command: ["seed-once"],
-          labels: { "hack.service.one-shot": "true" },
-          depends_on: { db: { condition: "service_healthy" } },
+        volumes: { data: { name: VOLUME } },
+      });
+      await writeFile(
+        join(projectRoot, ".hack/docker-compose.yml"),
+        composeText
+      );
+      fixture.container.push(
+        {
+          ...container(),
+          id: job,
+          name: "/fixture-seed-1",
+          service: "seed",
+          mounts: [],
+          running: false,
         },
-        web: {
-          image: CANARY,
-          depends_on: { seed: { condition: "service_completed_successfully" } },
-        },
-      },
-      volumes: { data: { name: VOLUME } },
-    });
-    await writeFile(join(projectRoot, ".hack/docker-compose.yml"), composeText);
-    fixture.container.push(
-      {
-        ...container(),
-        id: job,
-        name: "/fixture-seed-1",
-        service: "seed",
-        mounts: [],
-        running: false,
-      },
-      {
-        ...container(),
-        id: web,
-        name: "/fixture-web-1",
-        service: "web",
-        mounts: [],
-        running: false,
+        {
+          ...container(),
+          id: web,
+          name: "/fixture-web-1",
+          service: "web",
+          mounts: [],
+          running: false,
+        }
+      );
+      network().containers = [ID];
+      await save();
+      const mapped = mapLegacyNativeStorageAdoption({
+        configText: '{"name":"fixture"}',
+        composeText,
+      });
+      if (!mapped.candidate) {
+        throw new Error("Missing completed-job candidate");
       }
-    );
-    network().containers = [ID];
-    await save();
-    const mapped = mapLegacyNativeStorageAdoption({
-      configText: '{"name":"fixture"}',
-      composeText,
-    });
-    if (!mapped.candidate) {
-      throw new Error("Missing completed-job candidate");
-    }
-    const plan = legacyComposeRetainedPlan(mapped.candidate);
-    expect(plan.requiresV7).toBe(true);
-    expect(plan.ordered.find((item) => item.service === "seed")?.kind).toBe(
-      "job"
-    );
-    const acquired = await acquireFixtureBinding({ projectRoot });
-    const original = await acquired.resolveBinding({ projectRoot });
-    const effects: string[] = [];
-    let jobStarted = false;
-    let jobArmCommandCursor = 0;
-    let bracketTrace: string[][] = [];
-    const priorStartedAt = "2026-10-08T00:00:01Z";
-    async function observed(): Promise<LegacyComposeJobState[]> {
-      const current: Fixture = JSON.parse(
-        await readFile(join(root, "fixture.json"), "utf8")
+      const plan = legacyComposeRetainedPlan(mapped.candidate);
+      expect(plan.requiresV7).toBe(true);
+      expect(plan.ordered.find((item) => item.service === "seed")?.kind).toBe(
+        "job"
       );
-      return current.container.map((row) => ({
-        id: String(row.id),
-        running: row.running === true,
-        paused: false,
-        status: row.running ? "running" : "exited",
-        health: row.id === ID ? "healthy" : "",
-        exitCode: 0,
-        startedAt:
-          row.id === job && jobStarted
-            ? "2026-10-08T00:00:02Z"
-            : priorStartedAt,
-        finishedAt: row.running
-          ? "0001-01-01T00:00:00Z"
-          : "2026-10-08T00:00:03Z",
-        restartPolicy: "no",
-        maximumRetryCount: 0,
-      }));
-    }
-    // The case bound is the file's fake-Docker budget, so a slow host ends in
-    // the operation's own refusal rather than an unconfirmed snapshot lifetime.
-    const deadline = Date.now() + ORDERED_OPERATION_DEADLINE_MS;
-    await executeLegacyComposeRetainedPlan({
-      plan,
-      binding: original,
-      operation: "start",
-      deadline,
-      assertFresh: async () => {
-        await acquired.assertFresh({ projectRoot });
-      },
-      observe: observed,
-      effect: async (action, id) => {
-        effects.push(`${action}:${id}`);
-        if (action !== "start" || ![ID, job, web].includes(id)) {
-          throw new Error("Unexpected synthetic lifecycle call");
-        }
-        if (id === job) {
-          jobStarted = true;
-          const selected = fixture.container.find((row) => row.id === job);
-          if (!selected) {
-            throw new Error("Missing seed fixture");
+      const acquired = await acquireFixtureBinding({ projectRoot });
+      const original = await acquired.resolveBinding({ projectRoot });
+      const effects: string[] = [];
+      let jobStarted = false;
+      let jobArmCommandCursor = 0;
+      let bracketTrace: string[][] = [];
+      const priorStartedAt = "2026-10-08T00:00:01Z";
+      async function observed(): Promise<LegacyComposeJobState[]> {
+        const current: Fixture = JSON.parse(
+          await readFile(join(root, "fixture.json"), "utf8")
+        );
+        return current.container.map((row) => ({
+          id: String(row.id),
+          running: row.running === true,
+          paused: false,
+          status: row.running ? "running" : "exited",
+          health: row.id === ID ? "healthy" : "",
+          exitCode: 0,
+          startedAt:
+            row.id === job && jobStarted
+              ? "2026-10-08T00:00:02Z"
+              : priorStartedAt,
+          finishedAt: row.running
+            ? "0001-01-01T00:00:00Z"
+            : "2026-10-08T00:00:03Z",
+          restartPolicy: "no",
+          maximumRetryCount: 0,
+        }));
+      }
+      // The case bound is sized from the counted freshness checks and stays
+      // inside this case's own test budget, so a slow host ends in the
+      // operation's own refusal rather than an unconfirmed snapshot lifetime.
+      let freshnessChecks = 0;
+      const deadline = Date.now() + ORDERED_OPERATION_DEADLINE_MS;
+      await executeLegacyComposeRetainedPlan({
+        plan,
+        binding: original,
+        operation: "start",
+        deadline,
+        assertFresh: async () => {
+          freshnessChecks += 1;
+          await acquired.assertFresh({ projectRoot });
+        },
+        observe: observed,
+        effect: async (action, id) => {
+          effects.push(`${action}:${id}`);
+          if (action !== "start" || ![ID, job, web].includes(id)) {
+            throw new Error("Unexpected synthetic lifecycle call");
           }
-          selected.running = true;
-          network().containers = [ID, job];
-          fixture.mode = "snapshot-job-exit";
-          await writeFile(join(root, "snapshot-network-ordinal"), "0");
-          jobArmCommandCursor = (await commands()).length;
-          await save();
-        }
-        if (id === web) {
-          bracketTrace = (await commands()).slice(jobArmCommandCursor);
-          // Read the stand-in's persisted terminal seed state before changing
-          // only the newly admitted dependent's own running endpoint.
-          fixture = JSON.parse(
-            await readFile(join(root, "fixture.json"), "utf8")
-          );
-          const selected = fixture.container.find((row) => row.id === web);
-          if (!selected) {
-            throw new Error("Missing web fixture");
+          if (id === job) {
+            jobStarted = true;
+            const selected = fixture.container.find((row) => row.id === job);
+            if (!selected) {
+              throw new Error("Missing seed fixture");
+            }
+            selected.running = true;
+            network().containers = [ID, job];
+            fixture.mode = "snapshot-job-exit";
+            await writeFile(join(root, "snapshot-network-ordinal"), "0");
+            jobArmCommandCursor = (await commands()).length;
+            await save();
           }
-          selected.running = true;
-          network().containers = [ID, web];
-          await save();
-        }
-        return 0;
-      },
-    });
-    expect(Date.now()).toBeLessThan(deadline);
-    expect(effects).toEqual([`start:${ID}`, `start:${job}`, `start:${web}`]);
-    const networkOffsets = bracketTrace.flatMap((args, index) =>
-      args[0] === "network" && args[1] === "inspect" ? [index] : []
-    );
-    expect(networkOffsets.length).toBeGreaterThanOrEqual(3);
-    for (const offset of [0, 1]) {
+          if (id === web) {
+            bracketTrace = (await commands()).slice(jobArmCommandCursor);
+            // Read the stand-in's persisted terminal seed state before changing
+            // only the newly admitted dependent's own running endpoint.
+            fixture = JSON.parse(
+              await readFile(join(root, "fixture.json"), "utf8")
+            );
+            const selected = fixture.container.find((row) => row.id === web);
+            if (!selected) {
+              throw new Error("Missing web fixture");
+            }
+            selected.running = true;
+            network().containers = [ID, web];
+            await save();
+          }
+          return 0;
+        },
+      });
+      expect(Date.now()).toBeLessThan(deadline);
+      // The deadline's sizing holds only while the start makes no more checks.
+      expect(freshnessChecks).toBeLessThanOrEqual(
+        ORDERED_START_FRESHNESS_CHECKS
+      );
+      expect(effects).toEqual([`start:${ID}`, `start:${job}`, `start:${web}`]);
+      const networkOffsets = bracketTrace.flatMap((args, index) =>
+        args[0] === "network" && args[1] === "inspect" ? [index] : []
+      );
+      expect(networkOffsets.length).toBeGreaterThanOrEqual(3);
+      for (const offset of [0, 1]) {
+        expect(
+          bracketTrace
+            .slice(networkOffsets[offset]! + 1, networkOffsets[offset + 1]!)
+            .map((args) => args.slice(0, 2))
+        ).toEqual(Array.from({ length: 3 }, () => ["container", "inspect"]));
+      }
+      const transition: { before: Fixture; after: Fixture; ordinal: number } =
+        JSON.parse(
+          await readFile(join(root, "snapshot-transition.json"), "utf8")
+        );
+      expect(transition.ordinal).toBe(2);
+      const expectedAfter = structuredClone(transition.before);
+      const selected = expectedAfter.container.find((row) => row.id === job);
+      if (!selected) {
+        throw new Error("Missing original seed transition");
+      }
+      selected.running = false;
+      expectedAfter.network[0]!.containers = [ID];
+      const { mode: _mode, ...expectedWithoutMode } = expectedAfter;
+      expect(transition.after).toEqual(expectedWithoutMode);
+      const completed = (await observed()).find((row) => row.id === job);
+      if (!completed) {
+        throw new Error("Missing completed seed observation");
+      }
       expect(
-        bracketTrace
-          .slice(networkOffsets[offset]! + 1, networkOffsets[offset + 1]!)
-          .map((args) => args.slice(0, 2))
-      ).toEqual(Array.from({ length: 3 }, () => ["container", "inspect"]));
+        legacyComposeFreshJobResult({
+          attempt: { id: job, priorStartedAt },
+          observed: completed,
+        })
+      ).toBe("ready");
+      expect(
+        legacyComposeFreshJobResult({
+          attempt: { id: job, priorStartedAt: completed.startedAt },
+          observed: completed,
+        })
+      ).toBe("waiting");
+      expect(
+        legacyComposeFreshJobResult({
+          attempt: { id: "f".repeat(64), priorStartedAt },
+          observed: completed,
+        })
+      ).toBe("refused");
+      expect(
+        legacyComposeFreshJobResult({
+          attempt: { id: job, priorStartedAt },
+          observed: { ...completed, finishedAt: "0001-01-01T00:00:00Z" },
+        })
+      ).toBe("refused");
+      await acquired.assertFresh({ projectRoot });
+      expect(await acquired.resolveBinding({ projectRoot })).toEqual(original);
+      expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+    } finally {
+      snapshotCaseActive = false;
     }
-    const transition: { before: Fixture; after: Fixture; ordinal: number } =
-      JSON.parse(
-        await readFile(join(root, "snapshot-transition.json"), "utf8")
-      );
-    expect(transition.ordinal).toBe(2);
-    const expectedAfter = structuredClone(transition.before);
-    const selected = expectedAfter.container.find((row) => row.id === job);
-    if (!selected) {
-      throw new Error("Missing original seed transition");
-    }
-    selected.running = false;
-    expectedAfter.network[0]!.containers = [ID];
-    const { mode: _mode, ...expectedWithoutMode } = expectedAfter;
-    expect(transition.after).toEqual(expectedWithoutMode);
-    const completed = (await observed()).find((row) => row.id === job);
-    if (!completed) {
-      throw new Error("Missing completed seed observation");
-    }
-    expect(
-      legacyComposeFreshJobResult({
-        attempt: { id: job, priorStartedAt },
-        observed: completed,
-      })
-    ).toBe("ready");
-    expect(
-      legacyComposeFreshJobResult({
-        attempt: { id: job, priorStartedAt: completed.startedAt },
-        observed: completed,
-      })
-    ).toBe("waiting");
-    expect(
-      legacyComposeFreshJobResult({
-        attempt: { id: "f".repeat(64), priorStartedAt },
-        observed: completed,
-      })
-    ).toBe("refused");
-    expect(
-      legacyComposeFreshJobResult({
-        attempt: { id: job, priorStartedAt },
-        observed: { ...completed, finishedAt: "0001-01-01T00:00:00Z" },
-      })
-    ).toBe("refused");
-    await acquired.assertFresh({ projectRoot });
-    expect(await acquired.resolveBinding({ projectRoot })).toEqual(original);
-    expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
-  } finally {
-    snapshotCaseActive = false;
-  }
-});
+  },
+  MOVING_JOB_TEST_TIMEOUT_MS
+);
 
 test.each([
   "foreign",

@@ -73,6 +73,13 @@ fn peer_inspection_requires_one_exact_open_accepted_socket() {
 #[cfg(target_os = "macos")]
 #[test]
 fn discovery_requires_the_exact_executable_and_live_exclusive_listener() {
+    isolated_endpoint_fixture("provider::host_endpoint::tests::exclusive_discovery_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated discovery fixture launched by discovery_requires_the_exact_executable_and_live_exclusive_listener"]
+fn exclusive_discovery_child() {
     let (listener, endpoint) = fixture();
     let port = listener.local_addr().unwrap().port();
     let (pid, fingerprint) = HostEndpoint::discover(&endpoint.process.executable, port).unwrap();
@@ -87,6 +94,15 @@ fn discovery_requires_the_exact_executable_and_live_exclusive_listener() {
 #[cfg(target_os = "macos")]
 #[test]
 fn executable_pinned_discovery_follows_a_new_listener_process() {
+    // Discovery scans every process running this executable, and the listener child must
+    // rebind a port this process reserved and released; keep both away from parallel forks.
+    isolated_endpoint_fixture("provider::host_endpoint::tests::pinned_discovery_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated discovery fixture launched by executable_pinned_discovery_follows_a_new_listener_process"]
+fn pinned_discovery_child() {
     use std::process::{Child, Command, Stdio};
     struct OwnedChild(Child);
     impl Drop for OwnedChild {
@@ -270,7 +286,7 @@ fn pending_accepted_identity_notification_child() {
 
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "owned subprocess fixture for executable_pinned_discovery_follows_a_new_listener_process"]
+#[ignore = "owned subprocess fixture for pinned_discovery_child"]
 fn discovery_listener_child() {
     let port: u16 = std::env::var("HACK_DISCOVERY_LISTENER_PORT")
         .unwrap()
@@ -426,6 +442,13 @@ fn unsupported_host_refuses_identity_capture() {
 #[cfg(target_os = "macos")]
 #[test]
 fn replacement_between_precheck_and_connect_receives_no_payload() {
+    isolated_endpoint_fixture("provider::host_endpoint::tests::precheck_replacement_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated close/rebind fixture launched by replacement_between_precheck_and_connect_receives_no_payload"]
+fn precheck_replacement_child() {
     let (listener, endpoint) = fixture();
     let address = listener.local_addr().unwrap();
     let mut replacement = None;
@@ -590,56 +613,16 @@ fn pending_timeout_and_drop_release_the_socket_without_data() {
 fn pending_replacement_cannot_release_stream() {
     isolated_endpoint_fixture("provider::host_endpoint::tests::pending_replacement_child");
 }
+
+/// Run one ignored fixture alone in a child test process and require its full assertion
+/// path. Unrelated parallel tests' pre-exec forks (`process::clean_command`) hold copies of
+/// every descriptor in this process until they exec. A copied listener keeps a closed port
+/// bound and, because the fork still runs this executable, is a second exclusive holder for
+/// [`HostEndpoint::discover`]. Close/rebind and discovery fixtures therefore run isolated.
 #[cfg(target_os = "macos")]
 fn isolated_endpoint_fixture(test: &str) {
-    // Close/rebind fixtures must not be inherited by unrelated parallel forks.
-    // Keep its sockets in an isolated child and require the complete assertion path.
-    use std::process::{Child, Command, Stdio};
-    struct OwnedChild(Child);
-    impl Drop for OwnedChild {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let mut child = OwnedChild(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--ignored", "--exact", test])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "endpoint fixture child exceeded its watchdog"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    };
-    let mut output = String::new();
-    child
-        .0
-        .stdout
-        .take()
-        .unwrap()
-        .take(4097)
-        .read_to_string(&mut output)
-        .unwrap();
-    assert!(output.len() <= 4096);
-    assert!(
-        status.success(),
-        "owned endpoint fixture {test} failed: {output}"
-    );
-    assert!(
-        output.contains("test result: ok. 1 passed"),
-        "isolated assertion did not run"
-    );
+    use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+    run_isolated(test, ISOLATED_HANG_GUARD);
 }
 #[cfg(target_os = "macos")]
 #[test]
@@ -843,6 +826,13 @@ fn pending_accept_after_backend_fin_preserves_request_direction() {
 #[cfg(target_os = "macos")]
 #[test]
 fn backend_fin_does_not_bypass_listener_replacement() {
+    isolated_endpoint_fixture("provider::host_endpoint::tests::backend_fin_replacement_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated close/rebind fixture launched by backend_fin_does_not_bypass_listener_replacement"]
+fn backend_fin_replacement_child() {
     let (listener, endpoint) = fixture();
     let (_authority, session) = authorization();
     let mut pending = endpoint

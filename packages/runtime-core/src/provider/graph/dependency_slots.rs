@@ -702,8 +702,26 @@ mod tests {
         record.sockets.insert(slot, (m.dev(), m.ino()));
         listener
     }
+    /// Run one ignored socket-recovery fixture of this module alone in a child test process.
+    ///
+    /// Recovery must find a listener this test just dropped closed. In the shared parallel
+    /// test process an unrelated test's pre-exec fork (`process::clean_command`) holds a copy
+    /// of every descriptor open at the fork until it execs, so the dropped listener can still
+    /// accept and recovery correctly refuses it as live.
+    fn isolated(child: &str) {
+        use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+        run_isolated(
+            &format!("provider::graph::dependency_slots::tests::{child}"),
+            ISOLATED_HANG_GUARD,
+        );
+    }
     #[test]
     fn recovery_refuses_live_and_replaced_sockets_without_touching_siblings() {
+        isolated("live_and_replaced_sockets_child");
+    }
+    #[test]
+    #[ignore = "isolated socket-recovery fixture launched by recovery_refuses_live_and_replaced_sockets_without_touching_siblings"]
+    fn live_and_replaced_sockets_child() {
         let fixture = ShortFixture::new();
         let mut a = fixture_record('1', 0);
         let mut b = fixture_record('2', 1);
@@ -723,6 +741,11 @@ mod tests {
     }
     #[test]
     fn recovery_preflights_entire_assignment_before_unlinking() {
+        isolated("preflight_assignment_child");
+    }
+    #[test]
+    #[ignore = "isolated socket-recovery fixture launched by recovery_preflights_entire_assignment_before_unlinking"]
+    fn preflight_assignment_child() {
         let fixture = ShortFixture::new();
         let mut a = fixture_record('1', 0);
         a.slots.insert(1, 1);

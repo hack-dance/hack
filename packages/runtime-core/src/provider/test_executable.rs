@@ -10,6 +10,8 @@ use std::{
 /// Build a finite owned test process instead of copying an Apple platform binary,
 /// which can die before a process-identity or quiescence observation. Callers keep
 /// their original duration arguments and exact child ownership/cleanup checks.
+// Only the macOS-only process-identity tests use it; `run_isolated` is used on every Unix.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn sleeping_executable(binary: &Path) {
     assert!(!binary.try_exists().unwrap());
     let source = binary.with_extension("c");
@@ -41,6 +43,10 @@ pub(super) fn sleeping_executable(binary: &Path) {
     );
     fs::set_permissions(binary, fs::Permissions::from_mode(0o700)).unwrap();
 }
+
+/// Hang guard for [`run_isolated`]: the child launches the whole test binary on a host that
+/// may be heavily loaded, so this bounds a hang rather than the fixture's own timing.
+pub(super) const ISOLATED_HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// Run one ignored test alone in a child process of this test binary and require its
 /// complete assertion path. Use it when a fixture's descriptors must not be shared with

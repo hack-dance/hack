@@ -62,6 +62,22 @@ fn pool_gate_refuses_a_replaced_lock_path() {
     assert!(directory.join("original.lock").exists());
 }
 
+/// Run one ignored abandoned-publisher fixture of this module alone in a child test process.
+///
+/// [`abandoned_publisher`] drops a live publication, and retirement must then find its
+/// listener closed and its operation lock free. In the shared parallel test process an
+/// unrelated test's pre-exec fork (`process::clean_command`) holds a copy of every descriptor
+/// open at the fork until it execs, so the dropped listener can still accept and the `flock`
+/// stays held, and retirement correctly refuses. Every test that expects it to pass runs here.
+#[cfg(target_os = "macos")]
+fn isolated(child: &str) {
+    use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+    run_isolated(
+        &format!("provider::graph::foreground::transport::tests::{child}"),
+        ISOLATED_HANG_GUARD,
+    );
+}
+
 #[cfg(target_os = "macos")]
 fn abandoned_publisher() -> (
     super::super::super::tests::Fixture,
@@ -87,6 +103,13 @@ fn abandoned_publisher() -> (
 #[cfg(target_os = "macos")]
 #[test]
 fn recovered_publisher_retirement_is_exact_and_idempotent() {
+    isolated("recovered_retirement_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated abandoned-publisher fixture launched by recovered_publisher_retirement_is_exact_and_idempotent"]
+fn recovered_retirement_child() {
     let (_fixture, candidate, run, owner, root) = abandoned_publisher();
     let receipt = "f".repeat(64);
     assert!(Retired::acquire(&candidate, &run).unwrap().is_none());
@@ -134,6 +157,13 @@ fn recovered_publisher_retirement_is_exact_and_idempotent() {
 #[cfg(target_os = "macos")]
 #[test]
 fn cleanup_fence_refuses_effects_and_resumes_each_retirement_rename() {
+    isolated("cleanup_fence_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated abandoned-publisher fixture launched by cleanup_fence_refuses_effects_and_resumes_each_retirement_rename"]
+fn cleanup_fence_child() {
     for fail_at in [1, 3, 4, 5, 6] {
         let (_fixture, candidate, run, owner, directory) = abandoned_publisher();
         let receipt = "f".repeat(64);
@@ -255,6 +285,13 @@ fn cleanup_fence_refuses_effects_and_resumes_each_retirement_rename() {
 #[cfg(target_os = "macos")]
 #[test]
 fn retired_recovery_refuses_pending_missing_and_partial_proof_without_mutation() {
+    isolated("retired_pending_proof_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated abandoned-publisher fixture launched by retired_recovery_refuses_pending_missing_and_partial_proof_without_mutation"]
+fn retired_pending_proof_child() {
     let (_fixture, candidate, run, owner, root) = abandoned_publisher();
     let receipt = "f".repeat(64);
     retire_recovered_publisher(&candidate, &run, &owner, &receipt).unwrap();
@@ -292,6 +329,13 @@ fn retired_recovery_refuses_pending_missing_and_partial_proof_without_mutation()
 #[cfg(target_os = "macos")]
 #[test]
 fn retired_recovery_rechecks_archived_record_socket_and_lock_identity() {
+    isolated("retired_identity_recheck_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated abandoned-publisher fixture launched by retired_recovery_rechecks_archived_record_socket_and_lock_identity"]
+fn retired_identity_recheck_child() {
     for changed in ["record", "socket", "lock"] {
         let (_fixture, candidate, run, owner, root) = abandoned_publisher();
         let receipt = "f".repeat(64);
@@ -334,6 +378,13 @@ fn retired_recovery_rechecks_archived_record_socket_and_lock_identity() {
 #[cfg(target_os = "macos")]
 #[test]
 fn interrupted_socket_move_resumes_but_replaced_owner_refuses() {
+    isolated("interrupted_socket_move_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated abandoned-publisher fixture launched by interrupted_socket_move_resumes_but_replaced_owner_refuses"]
+fn interrupted_socket_move_child() {
     let (_fixture, candidate, run, owner, root) = abandoned_publisher();
     let receipt = "f".repeat(64);
     let lock = state::Lock::acquire_existing(&root).unwrap();
@@ -386,6 +437,13 @@ fn interrupted_socket_move_resumes_but_replaced_owner_refuses() {
 #[cfg(target_os = "macos")]
 #[test]
 fn selected_legacy_device_socket_move_resumes_only_exact_retirement() {
+    isolated("legacy_device_socket_move_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated abandoned-publisher fixture launched by selected_legacy_device_socket_move_resumes_only_exact_retirement"]
+fn legacy_device_socket_move_child() {
     let (_fixture, candidate, run, _original_owner, root) = abandoned_publisher();
     let receipt = "f".repeat(64);
     let current = id(&fs::symlink_metadata(&root).unwrap()).0;
@@ -437,6 +495,13 @@ fn selected_legacy_device_socket_move_resumes_only_exact_retirement() {
 #[cfg(target_os = "macos")]
 #[test]
 fn dead_owner_guard_refuses_replaced_foreground_lock_path() {
+    isolated("dead_owner_guard_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated abandoned-publisher fixture launched by dead_owner_guard_refuses_replaced_foreground_lock_path"]
+fn dead_owner_guard_child() {
     let (_fixture, candidate, run, _owner, root) = abandoned_publisher();
     let dead = DeadOwner::acquire(&candidate, &run).unwrap();
     dead.verify().unwrap();

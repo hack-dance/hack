@@ -1037,7 +1037,7 @@ hack global <subcommand> [options]
 | `hack global ca` | Export Caddy Local CA cert (print path or PEM) |
 | `hack global cert <hosts...>` | Generate local TLS certs via mkcert (for non-Caddy services) |
 | `hack global trust` | Trust Caddy Local CA (macOS) so https://*.hack is trusted |
-| `hack global logs-reset` | Wipe Loki/Grafana volumes (fresh logs + dashboards) |
+| `hack global logs-reset` | Wipe Loki, Grafana and Alloy volumes (fresh logs, dashboards and Alloy read positions) |
 | `hack global authorize` | Authorize passwordless DNS recovery commands on macOS |
 
 ### Options
@@ -1242,7 +1242,7 @@ hack global trust [options]
 
 ## `hack global logs-reset`
 
-Wipe Loki/Grafana volumes (fresh logs + dashboards)
+Wipe Loki, Grafana and Alloy volumes (fresh logs, dashboards and Alloy read positions)
 
 ### Usage
 

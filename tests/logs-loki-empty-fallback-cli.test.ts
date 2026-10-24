@@ -278,6 +278,44 @@ test("explicit --loki snapshot hint turns a single --services value into the pos
   expect(await composeLogsCalls()).toEqual([]);
 }, 60_000);
 
+// HACK-1425: `--pretty` reaches the hint through the CLI wiring, not only
+// through the renderer's unit tests.
+test("explicit --loki snapshot hint repeats --pretty", async () => {
+  const result = await runLogs([
+    "--loki",
+    "--no-follow",
+    "--pretty",
+    "migrate",
+  ]);
+
+  expect(result.exitCode).toBe(0);
+  expect(lokiQueries).toEqual(['{project="oneshot",service="migrate"}']);
+  expect(result.stderr).toContain(
+    "try `hack logs --compose --no-follow --pretty migrate`."
+  );
+  expect(await composeLogsCalls()).toEqual([]);
+}, 60_000);
+
+// HACK-1425: a custom `--query` selects the Loki stream and, with `--until`,
+// is named in the hint as a selector `--compose` cannot apply.
+test("explicit --query snapshot hint names --query and --until", async () => {
+  const query = '{project="oneshot",service="migrate"} |= "applied"';
+  const result = await runLogs([
+    "--no-follow",
+    "--query",
+    query,
+    "--until",
+    "1m",
+  ]);
+
+  expect(result.exitCode).toBe(0);
+  expect(lokiQueries).toEqual([query]);
+  expect(result.stderr).toContain(
+    `try \`hack logs --compose --no-follow\`. The compose backend has no equivalent for --query '${query}' and --until 1m.`
+  );
+  expect(await composeLogsCalls()).toEqual([]);
+}, 60_000);
+
 test("Loki follow backend notices an empty tail on stderr and keeps following", async () => {
   await writeFile(
     join(projectRoot, ".hack", "hack.config.json"),

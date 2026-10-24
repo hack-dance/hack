@@ -1,4 +1,4 @@
-use super::{Result, error, now, private_directory, private_file};
+use super::{Result, error, existing_private_file, now, private_directory, private_file};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -164,17 +164,16 @@ impl Store {
     fn open_mode(root: &Path, create: bool, read_only: bool) -> Result<Self> {
         private_directory(root, create)?;
         let root = root.canonicalize().map_err(error)?;
-        // Reject aliases before SQLite opens its journal or main file.
+        // Reject aliases before SQLite opens its journal or main file. A running
+        // supervisor commits through the same database, so its rollback journal can
+        // vanish between a check and an open: absence is decided by the open itself.
         for suffix in [
             "journal.sqlite",
             "journal.sqlite-journal",
             "journal.sqlite-wal",
             "journal.sqlite-shm",
         ] {
-            let path = root.join(suffix);
-            if path.symlink_metadata().is_ok() {
-                private_file(&path, false)?;
-            }
+            existing_private_file(&root.join(suffix))?;
         }
         private_file(&root.join("journal.sqlite"), create)?;
         let flags = if read_only {

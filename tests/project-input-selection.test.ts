@@ -29,6 +29,8 @@ import {
   inspectProjectInputsAtRoot,
   NATIVE_PROJECT_FILENAME,
   ProjectInputAccessError,
+  projectInputAccessDiagnostic,
+  projectInputAccessFault,
 } from "../src/lib/project-input-selection.ts";
 
 const roots: string[] = [];
@@ -207,6 +209,26 @@ async function inputAccessFault(root: string): Promise<unknown> {
   throw new Error("unexpected input selection success");
 }
 
+/**
+ * The access refusal keeps its fault only as a non-enumerable, value-free
+ * class/code diagnostic: never a `cause`, an enumerable field, the path or the
+ * OS message.
+ */
+function expectValueFreeDiagnostic(
+  error: unknown,
+  root: string,
+  diagnostic: string
+): void {
+  expect(projectInputAccessDiagnostic(error)).toBe(diagnostic);
+  expect((error as Error).cause).toBeUndefined();
+  expect(Object.keys(error as object)).not.toContain("diagnosticCause");
+  const code = diagnostic.split(":")[1] ?? diagnostic;
+  for (const rendered of [String(error), JSON.stringify(error)]) {
+    expect(rendered).not.toContain(root);
+    expect(rendered).not.toContain(code);
+  }
+}
+
 test("a .dev file beside valid .hack inputs is a typed, value-free access refusal", async () => {
   const root = await fixture();
   await file(root, ".hack/docker-compose.yml");
@@ -215,9 +237,47 @@ test("a .dev file beside valid .hack inputs is a typed, value-free access refusa
   expect(error).toBeInstanceOf(ProjectInputAccessError);
   expect((error as ProjectInputAccessError).access).toBe("unreadable");
   expect((error as ProjectInputAccessError).code).toBe("E_CONFIG_INVALID");
-  expect((error as Error).cause).toBeUndefined();
-  expect(String(error)).not.toContain(root);
-  expect(String(error)).not.toContain("ENOTDIR");
+  // HACK-1390: the fault's class/code stays attached for tests and debugging.
+  expectValueFreeDiagnostic(error, root, "Error:ENOTDIR");
+});
+
+test("EPERM and EACCES classify as permission; other faults as unreadable", () => {
+  // A fixture cannot produce EPERM (a mode-000 directory gives EACCES), so the
+  // classifier inputPresent() uses is exercised through its seam.
+  const fault = (code: string) =>
+    Object.assign(
+      new Error(`${code}: operation failed, lstat '/private/fixture/.dev'`),
+      { code, syscall: "lstat", path: "/private/fixture/.dev" }
+    );
+  for (const [code, access] of [
+    ["EPERM", "permission"],
+    ["EACCES", "permission"],
+    ["ENOTDIR", "unreadable"],
+    ["EIO", "unreadable"],
+  ] as const) {
+    const error = projectInputAccessFault(fault(code));
+    expect(error).toBeInstanceOf(ProjectInputAccessError);
+    expect({ code, access: error.access }).toEqual({ code, access });
+    expect(error.code).toBe("E_CONFIG_INVALID");
+    expectValueFreeDiagnostic(error, "/private/fixture", `Error:${code}`);
+  }
+  // Anything that is not an identifier-shaped class or code is dropped.
+  expect(
+    projectInputAccessDiagnostic(
+      projectInputAccessFault(
+        Object.assign(new Error("x"), { code: "/private/fixture/.dev" })
+      )
+    )
+  ).toBe("Error");
+  expect(
+    projectInputAccessDiagnostic(projectInputAccessFault("/private/fixture"))
+  ).toBe("string");
+  expect(
+    projectInputAccessDiagnostic(
+      new ProjectInputAccessError("unreadable", "/private/fixture/.dev")
+    )
+  ).toBe("ProjectInputAccessError");
+  expect(projectInputAccessDiagnostic(new Error("other"))).toBeUndefined();
 });
 
 // Root can search a mode-000 directory, so this fault cannot be produced.
@@ -233,8 +293,7 @@ test.skipIf(process.getuid?.() === 0)(
       const error = await inputAccessFault(root);
       expect(error).toBeInstanceOf(ProjectInputAccessError);
       expect((error as ProjectInputAccessError).access).toBe("permission");
-      expect(String(error)).not.toContain(root);
-      expect(String(error)).not.toContain("EACCES");
+      expectValueFreeDiagnostic(error, root, "Error:EACCES");
     } finally {
       await chmod(dev, 0o700);
     }

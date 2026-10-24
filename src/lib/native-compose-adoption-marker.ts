@@ -13,6 +13,11 @@ import {
   sameFile,
 } from "./native-compose-private-state.ts";
 import { parseImportDocument } from "./native-config-import-parser.ts";
+import {
+  attachValueFreeDiagnostic,
+  readValueFreeDiagnostic,
+  valueFreeErrorDiagnostic,
+} from "./value-free-diagnostic.ts";
 
 export type LegacyComposeAdoptionSelection =
   | "prepared"
@@ -32,13 +37,26 @@ export const LEGACY_ADOPTION_SELECTION_MESSAGES = {
   permission:
     "Cannot inspect Hack project inputs: permission denied on .hack or a directory inside it. Make .hack readable and searchable by your user (for example chmod u+rwx .hack), then retry. Values omitted.",
 } as const;
-/** Private owner markers fence upgraded discovery without parsing authored inputs or contacting an engine. */
+const DEFAULT_DIAGNOSTIC = "LegacyComposeAdoptionSelectionError";
+
+/**
+ * Private owner markers fence upgraded discovery without parsing authored
+ * inputs or contacting an engine.
+ *
+ * The `permission` and `input-access` kinds are filesystem faults, so, like
+ * `ProjectInputAccessError`, they keep the fault only as a value-free
+ * diagnostic: its class name and errno code (for example `Error:EACCES`),
+ * never its message or path, as a non-enumerable own property. Read it with
+ * {@link legacyComposeAdoptionSelectionDiagnostic}. The `adoption` kind keeps
+ * none: its causes may come from parsed private state.
+ */
 export class LegacyComposeAdoptionSelectionError extends HackCliError {
   /** Which refusal this is, so readers can classify it without its message. */
   readonly kind: keyof typeof LEGACY_ADOPTION_SELECTION_MESSAGES;
 
   constructor(
-    kind: keyof typeof LEGACY_ADOPTION_SELECTION_MESSAGES = "adoption"
+    kind: keyof typeof LEGACY_ADOPTION_SELECTION_MESSAGES = "adoption",
+    diagnostic: string = DEFAULT_DIAGNOSTIC
   ) {
     super({
       code: kind === "permission" ? "E_PERMISSION" : "E_CONFIG_INVALID",
@@ -46,8 +64,29 @@ export class LegacyComposeAdoptionSelectionError extends HackCliError {
     });
     this.name = "LegacyComposeAdoptionSelectionError";
     this.kind = kind;
+    if (kind !== "adoption") {
+      attachValueFreeDiagnostic({
+        target: this,
+        diagnostic,
+        fallback: DEFAULT_DIAGNOSTIC,
+      });
+    }
   }
 }
+
+/**
+ * The value-free diagnostic of a `permission` or `input-access`
+ * {@link LegacyComposeAdoptionSelectionError} (for example `Error:ENOTDIR`),
+ * for tests and debugging. Undefined for any other value.
+ */
+export function legacyComposeAdoptionSelectionDiagnostic(
+  error: unknown
+): string | undefined {
+  return error instanceof LegacyComposeAdoptionSelectionError
+    ? readValueFreeDiagnostic(error)
+    : undefined;
+}
+
 function refuse(): never {
   throw new LegacyComposeAdoptionSelectionError();
 }
@@ -101,6 +140,7 @@ export async function inspectLegacyComposeAdoptionSelection(opts: {
 }): Promise<LegacyComposeAdoptionSelection | null> {
   const directories: HeldDirectory[] = [];
   let stateRootFailure: StateRootFailure | null = null;
+  let stateRootDiagnostic = DEFAULT_DIAGNOSTIC;
   try {
     if (
       !isRecord(opts) ||
@@ -120,6 +160,7 @@ export async function inspectLegacyComposeAdoptionSelection(opts: {
         return null;
       }
       stateRootFailure = classifyStateRootFailure(error);
+      stateRootDiagnostic = valueFreeErrorDiagnostic(error);
       throw error;
     }
     for (const path of [
@@ -157,7 +198,10 @@ export async function inspectLegacyComposeAdoptionSelection(opts: {
     return status;
   } catch {
     if (stateRootFailure !== null) {
-      throw new LegacyComposeAdoptionSelectionError(stateRootFailure);
+      throw new LegacyComposeAdoptionSelectionError(
+        stateRootFailure,
+        stateRootDiagnostic
+      );
     }
     refuse();
   } finally {

@@ -287,6 +287,21 @@ Hack does not kill a guessed guest PID or automatically stop the application on
 client cancellation. Explicit owned `down` stops the containing instance while
 retaining persistent data.
 
+When the instance has enrolled persistent storage, saved `exec` proves that
+storage before and after the guest command. The opening proof may reuse the
+proof that command storage preparation just made under the same lease; the
+closing proof after the command always runs fresh. Each proof has its own
+`HACK_NATIVE_STORAGE_TIMEOUT_MS` carrier budget. The closing proof is
+fail-closed: if it refuses (including a storage probe timeout, reported as
+`E_COMPOSE_FAILED` with a `storage-*` stage), `exec` fails with that refusal even
+though the guest command already ran and printed its output, and the command's
+exit code is not reported. A storage result that cannot be proven after the
+command must not look like a clean exec. The refusal keeps ownership and saved
+state unchanged, and the next admission proves storage again. Retrying `exec`
+runs the guest command again, so check its effects first when it is not
+idempotent. A cancelled `exec` keeps its known exit code and starts no closing
+proof.
+
 `ps.pending` describes journaled engine mutations, not guest exec sessions. A
 cancelled `exec` can therefore have no pending engine operation even when its guest
 completion is unknown. An interrupted `run` retains its exact one-off and pending

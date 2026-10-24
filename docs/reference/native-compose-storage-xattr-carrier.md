@@ -429,9 +429,12 @@ Budgets are layered and all finite:
 A timeout, budget or otherwise unclassified refusal that finds its carrier's own
 deadline passed (and the carrier not cancelled) reports the closed effect reason
 `storage-budget`; a probe clipped to the remaining budget times out exactly at
-that end. A refusal with its own observed reason, such as a helper policy
-refusal, keeps that reason even when it is caught after the deadline, including
-when a recorded command replaces it with its fixed command refusal. Cancellation
+that end. A refusal with its own observed reason keeps that reason even when it
+is caught after the deadline, including when a recorded command or its command
+record replaces it with a fixed refusal. Such reasons include a helper policy
+refusal, `helper-policy-stability` for a re-inspected carrier whose creation
+time or policy changed, and `private-state` for a saved material binding that
+changed during a carrier step. Cancellation
 keeps `probe-cancel`. The reason changes no check, retention or recovery rule.
 
 Only the original in-memory writer can advance its exact sequence. Publication

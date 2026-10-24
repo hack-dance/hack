@@ -462,6 +462,11 @@ fn dead_witness_rejects_replacement_listener_and_changed_lock() {
             break pin;
         }
         assert!(Instant::now() < deadline);
+        // Fail fast if the owner died before publishing, not at the deadline.
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "E_TEST_PUBLICATION_CHILD_EXITED"
+        );
         std::thread::sleep(Duration::from_millis(1));
     };
     kill_and_reap(&mut child, &pin);

@@ -231,6 +231,11 @@ test("readiness rejection retains identity while observing safe native cleanup c
 /** Slack for host load between the stand-in's recorded exit and settlement. */
 const DRAIN_SETTLE_MARGIN_MS = 5000;
 /**
+ * How much earlier than its delay a timer may appear to fire when measured
+ * with whole-millisecond wall clocks in two processes.
+ */
+const TIMER_CLOCK_TOLERANCE_MS = 50;
+/**
  * Fixed delay before the descendant writes the closed code, measured from the
  * test observing the stand-in reaped: well above the former 250 ms window.
  */
@@ -413,6 +418,11 @@ test.each([
         );
         expect(settledAt - exitedAt).toBeLessThan(
           NATIVE_EXIT_DRAIN_BOUND_MS + DRAIN_SETTLE_MARGIN_MS
+        );
+        // No seam is passed, so the production bound is the one in effect:
+        // the drain kept reading the held pipes for all of it (HACK-1425).
+        expect(settledAt - exitedAt).toBeGreaterThanOrEqual(
+          NATIVE_EXIT_DRAIN_BOUND_MS - TIMER_CLOCK_TOLERANCE_MS
         );
         if (ready) {
           expect(caught).toBeUndefined();

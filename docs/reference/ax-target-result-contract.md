@@ -228,7 +228,7 @@ WU21). The inspector itself only produces snapshots.
 | Malformed Hack config or Compose file, oversized input | `config_parse_failed`, `compose_parse_failed`, `generation_input_too_large` | same | paired fixture |
 | Unreadable input (directory in place of a file, no read permission) | `input_unreadable`, `input_permission_denied` | same | paired fixture (permission case skipped as root) |
 | Input guard refusals (native/legacy conflict, unsafe adoption state, non-directory project dir) | `project_inputs_unsupported`, `adoption_state_unsafe`, `input_unreadable` | same | paired fixture |
-| Unsearchable `.hack` or `.hack/.internal` on a never-adopted project | `input_permission_denied` (permission fix named first) | same | paired fixture and domain test, each at mode `000` and `0644` on both directories (skipped as root; the message is checked unconditionally) |
+| Unsearchable `.hack` or `.hack/.internal` on a never-adopted project | `input_permission_denied` (permission fix named first) | same | paired fixture and domain test, each at mode `000` and `0644` on both directories, plus a paired `.hack` at `000` with no `.hack/.internal` (skipped as root; the message is checked unconditionally) |
 | Uncheckable input presence (`.dev` file or unsearchable `.dev` beside a valid `.hack`) | `input_unreadable`, `input_permission_denied` | same | paired fixture and domain test (unsearchable case skipped as root; `EPERM` through the classifier seam and an injected presence-check fault) |
 | Detached linked worktree, no project, missing path | closed refusals | same | paired fixture |
 | Unknown service | `service_not_found` | same | paired fixture |

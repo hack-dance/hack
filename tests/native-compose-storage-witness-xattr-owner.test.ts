@@ -93,17 +93,18 @@ const artifact: NativeComposeStorageXattrArtifact = {
  * fake carrier answers at once. Their cost is a fixed amount of durable store
  * file work, mostly system time: the second `up` of the same-birth case alone
  * makes about 19k lstat, 13k realpath and 4.5k open calls, the same count on
- * every run. That takes about 5-7 s on hosted CI, but 5-60 s or more on a
- * host whose load is several times its CPU count, so this budget is a hang
- * guard, not a speed assertion (HACK-1422).
+ * every run. That takes about 5-7 s on hosted CI, but the slowest case took
+ * 63 s at a load average of about 90 on an 18-CPU host, and four cases passed
+ * 180 s at a sustained load average of 110-190 (HACK-1422, HACK-1439). The
+ * budget is a hang guard, not a speed assertion.
  *
  * Nearly every case here opens a store and publishes at least one generation,
  * so this is the file's default: no case keeps Bun's 5 s default or a fixed
- * 30 s literal, which 17 or more cases passed at 3-4x the CPU count in load while
- * their assertions held (HACK-1439). `setDefaultTimeout` is scoped to this
- * file, so it changes no other file's budget.
+ * 30 s literal, which 17 or more cases passed under load while their
+ * assertions held (HACK-1439). `setDefaultTimeout` is scoped to this file, so
+ * it changes no other file's budget.
  */
-const STORE_CASE_BUDGET_MS = 180_000;
+const STORE_CASE_BUDGET_MS = 600_000;
 setDefaultTimeout(STORE_CASE_BUDGET_MS);
 /**
  * Wall-clock lifetime of a carrier a case captures for real use. Every such

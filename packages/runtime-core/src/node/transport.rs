@@ -319,4 +319,65 @@ mod tests {
         assert!(read_response(&mut client).is_err());
         assert!(start.elapsed() < Duration::from_secs(2));
     }
+
+    #[test]
+    fn an_upgraded_node_never_signals_a_pre_upgrade_in_flight_job() {
+        use std::os::unix::process::CommandExt;
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hkl-node-upgrade",
+        );
+        let mut store = Store::open(&root, true).unwrap();
+        // The pre-upgrade job's live child, recorded with the retired Darwin boot format.
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "read line; exit 3"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let legacy = crate::node::ProcessIdentity {
+            pid,
+            uid: unsafe { libc::geteuid() },
+            process_group: pid,
+            start: 1,
+            boot: "1700000000:250000".into(),
+        };
+        let id = "b".repeat(64);
+        super::super::test_support::job(&store, &id, "running", 60_000);
+        store
+            .update(&id, |r| {
+                r.supervisor_pid = Some(pid);
+                r.supervisor_identity = Some(legacy.clone());
+                r.child_pid = Some(pid);
+                r.child_identity = Some(legacy.clone());
+                r.starts = 1;
+                Ok(())
+            })
+            .unwrap();
+        let before = serde_json::to_value(store.get(&id).unwrap()).unwrap();
+        let unused = Path::new("/nonexistent");
+        let mut workers = HashMap::new();
+        // The old supervisor still holds the job lock: the new node leaves it alone.
+        let held = try_lock(&store.lock_path(&id).unwrap()).unwrap().unwrap();
+        schedule(&mut store, unused, unused, &mut workers).unwrap();
+        assert_eq!(
+            serde_json::to_value(store.get(&id).unwrap()).unwrap(),
+            before
+        );
+        // Once that supervisor is gone the job is quarantined, still without a signal.
+        drop(held);
+        schedule(&mut store, unused, unused, &mut workers).unwrap();
+        let recovered = store.get(&id).unwrap();
+        assert_eq!(recovered.state, "quarantined", "{recovered:?}");
+        assert_eq!(recovered.child_identity, Some(legacy));
+        assert!(workers.is_empty());
+        // The recorded child was never signalled: it exits with its own status.
+        drop(child.stdin.take());
+        assert_eq!(child.wait().unwrap().code(), Some(3));
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -114,6 +114,7 @@ pub fn supervise(root: &Path, executable: &Path, checkout: &Path, id: &str) -> R
         &mut child,
         receipt.execution_timeout_ms,
         identity.as_ref(),
+        &mut super::ownership::inspect,
         &mut reaped,
     );
     if result.is_err() && !reaped {
@@ -139,12 +140,16 @@ pub fn supervise(root: &Path, executable: &Path, checkout: &Path, id: &str) -> R
     }
     result
 }
+/// Owns `child` until it is reaped. `inspect` is the native identity read taken
+/// before every signal (`ownership::inspect` in production; tests inject kernel
+/// answers such as Darwin's `Gone` window to drive each `Authority`).
 fn run_child(
     store: &mut Store,
     id: &str,
     child: &mut Child,
     timeout_ms: u64,
     identity: std::result::Result<&super::ProcessIdentity, &crate::CandidateError>,
+    inspect: &mut dyn FnMut(i32) -> Result<super::ownership::Observed>,
     reaped: &mut bool,
 ) -> Result<()> {
     let identity = identity.map_err(|e| error(&e.message))?;
@@ -198,11 +203,7 @@ fn run_child(
             } else {
                 "timed_out"
             };
-            match verify_before_signal(
-                child,
-                identity,
-                super::ownership::inspect(child.id() as i32),
-            )? {
+            match verify_before_signal(child, identity, inspect(child.id() as i32))? {
                 Authority::Signal => {
                     signal_group(child, libc::SIGTERM)?;
                     stopping = Some((Instant::now(), reason));
@@ -214,11 +215,7 @@ fn run_child(
         }
         if let Some((since, _)) = stopping {
             if since.elapsed() >= Duration::from_millis(150) {
-                match verify_before_signal(
-                    child,
-                    identity,
-                    super::ownership::inspect(child.id() as i32),
-                )? {
+                match verify_before_signal(child, identity, inspect(child.id() as i32))? {
                     Authority::Signal => signal_group(child, libc::SIGKILL)?,
                     Authority::Exited => break,
                     // Our SIGKILL is settling: Darwin drops the leader's metadata
@@ -548,5 +545,178 @@ mod tests {
         assert_eq!(child.0.wait().unwrap().signal(), Some(libc::SIGKILL));
         assert_eq!(inspect(child.0.id() as i32).unwrap(), Observed::Gone);
         assert!(verify_before_signal(&child.0, &identity, Ok(Observed::Gone)).is_err());
+    }
+
+    /// One owned job for `run_child`: a private journal holding a running receipt, and
+    /// a TERM-ignoring group leader that exits 3 on its own when its stdin closes.
+    struct Job {
+        root: std::path::PathBuf,
+        store: Store,
+        id: String,
+        child: Child,
+        stdin: Option<std::process::ChildStdin>,
+        identity: super::super::ProcessIdentity,
+    }
+    impl Job {
+        fn new(timeout_ms: u64) -> Self {
+            let root = crate::private_test_root(
+                &std::env::temp_dir().canonicalize().unwrap(),
+                "hkl-node-run",
+            );
+            let store = Store::open(&root, true).unwrap();
+            let id = "a".repeat(64);
+            super::super::test_support::job(&store, &id, "running", timeout_ms);
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", "trap '' TERM; read line; exit 3"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let stdin = child.stdin.take();
+            let identity = super::super::ownership::observe(child.id() as i32).unwrap();
+            Self {
+                root,
+                store,
+                id,
+                child,
+                stdin,
+                identity,
+            }
+        }
+        fn pid(&self) -> i32 {
+            self.child.id() as i32
+        }
+        fn run(
+            &mut self,
+            inspect: &mut dyn FnMut(i32) -> Result<super::super::ownership::Observed>,
+        ) -> Result<super::super::Receipt> {
+            let mut reaped = false;
+            let timeout = self.store.get(&self.id)?.execution_timeout_ms;
+            run_child(
+                &mut self.store,
+                &self.id,
+                &mut self.child,
+                timeout,
+                Ok(&self.identity),
+                inspect,
+                &mut reaped,
+            )?;
+            assert!(reaped);
+            self.store.get(&self.id)
+        }
+    }
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // Child caches a reaped status, so this never signals a reused PID.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+    /// Whether the kernel has published this child's exit, observed without reaping.
+    fn exit_published(pid: i32) -> bool {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: WNOWAIT observes this test's own child without reaping it.
+        assert_eq!(
+            unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            },
+            0
+        );
+        #[cfg(target_os = "macos")]
+        return info.si_pid != 0;
+        #[cfg(target_os = "linux")]
+        return unsafe { info.si_pid() } != 0;
+    }
+    fn until_exit_published(pid: i32) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !exit_published(pid) {
+            assert!(Instant::now() < deadline, "child exit was not published");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn run_child_defers_a_gone_live_child_at_timeout_and_keeps_its_own_exit() {
+        use super::super::ownership::Observed;
+        let mut job = Job::new(50);
+        let pid = job.pid();
+        let mut stdin = job.stdin.take();
+        let mut calls = 0;
+        let receipt = job
+            .run(&mut |observed| {
+                assert_eq!(observed, pid);
+                calls += 1;
+                if calls == 1 {
+                    // Darwin's ESRCH window: no live entry, exit not yet published.
+                    // Exiting sends nothing and records no stop reason.
+                    assert!(!exit_published(pid));
+                } else {
+                    // The child then exits on its own before anything signalled it.
+                    drop(stdin.take());
+                    until_exit_published(pid);
+                }
+                Ok(Observed::Gone)
+            })
+            .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(receipt.state, "failed", "{receipt:?}");
+        assert_eq!(receipt.exit_code, Some(3), "{receipt:?}");
+        assert_eq!(receipt.signal, None, "{receipt:?}");
+        assert_eq!(receipt.detail, None, "{receipt:?}");
+    }
+
+    #[test]
+    fn run_child_never_kills_during_a_gone_window_and_keeps_its_stop_reason() {
+        use super::super::ownership::{Observed, inspect};
+        let mut job = Job::new(50);
+        let pid = job.pid();
+        let mut calls = 0;
+        let mut alive_after_gone = None;
+        let receipt = job
+            .run(&mut |observed| {
+                calls += 1;
+                match calls {
+                    // After SIGTERM (ignored), the kill check reads Gone while the
+                    // child is still alive: no SIGKILL yet, and the reason stays.
+                    2 => {
+                        assert!(!exit_published(pid));
+                        Ok(Observed::Gone)
+                    }
+                    3 => {
+                        alive_after_gone =
+                            Some(!exit_published(pid) && unsafe { libc::kill(pid, 0) } == 0);
+                        inspect(observed)
+                    }
+                    _ => inspect(observed),
+                }
+            })
+            .unwrap();
+        assert!(calls >= 3, "observed again after Gone: {calls}");
+        assert_eq!(alive_after_gone, Some(true));
+        assert_eq!(receipt.state, "timed_out", "{receipt:?}");
+        assert_eq!(receipt.signal, Some(libc::SIGKILL), "{receipt:?}");
+        assert_eq!(receipt.detail, None, "{receipt:?}");
+    }
+
+    #[test]
+    fn run_child_bounds_an_endless_gone_window_by_its_deadline_without_signalling() {
+        use super::super::ownership::Observed;
+        let mut job = Job::new(20);
+        let pid = job.pid();
+        let failure = job.run(&mut |_| Ok(Observed::Gone)).unwrap_err();
+        assert_eq!(failure.message, "Child termination deadline exceeded.");
+        // Gone never authorized a signal: the TERM-ignoring child still waits for
+        // input, and exits with its own status once that input closes.
+        assert!(!exit_published(pid));
+        drop(job.stdin.take());
+        assert_eq!(job.child.wait().unwrap().code(), Some(3));
     }
 }

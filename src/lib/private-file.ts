@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import {
   type FileHandle,
-  link,
   lstat,
   open,
   realpath,
@@ -10,6 +9,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { publishFileExclusive } from "./exclusive-publish.ts";
 import { closedFileWriteError } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 
@@ -385,10 +385,17 @@ export async function replacePrivateFileAtomic(
  * The complete contents are staged in a private (0600, fsynced) sibling and
  * published with link(2), which fails with EEXIST instead of replacing an
  * existing entry. Unlike {@link createPrivateFileExclusive}, readers never see
- * an empty or partial file, so a concurrent loser can adopt the winner's file
+ * a partial file, so a concurrent loser can adopt the winner's file
  * immediately. An existing regular file returns false untouched; a symlink
  * (dangling or not), a non-regular entry, or a symlinked or replaced directory
  * from `directories` throws `refusal()`. The staging file is always removed.
+ *
+ * On a filesystem without hard links (ExFAT, FAT) the sibling is renamed over
+ * an exclusive, no-follow empty reservation instead (see
+ * `publishByExclusivePlaceholder`): an existing entry is still never replaced
+ * or followed, and readers see nothing, an empty file or the complete file.
+ * A process killed between the two steps leaves an empty file, which is
+ * refused, never adopted, until it is removed.
  */
 export async function publishPrivateFileExclusive(
   opts: ReplaceablePrivateFileOptions & { readonly text: string }
@@ -409,13 +416,11 @@ export async function publishPrivateFileExclusive(
     await file.writeFile(opts.text, "utf8");
     await file.sync();
     await recheckRealDirectories({ directories, refusal: opts.refusal });
-    try {
-      await link(staging, opts.path);
-      published = true;
-    } catch (error: unknown) {
-      if (!(isRecord(error) && error.code === "EEXIST")) {
-        throw error;
-      }
+    published = await publishFileExclusive({
+      source: staging,
+      target: opts.path,
+    });
+    if (!published) {
       // Lost the race: classify what is there now (regular file or refusal).
       await observeReplaceableTarget(opts);
     }

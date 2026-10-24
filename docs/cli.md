@@ -159,7 +159,9 @@ Historical remote guides are excluded from the supported documentation.
   a safe default apply it (`hack env unset KEY` removes the key; `hack doctor --fix` applies safe
   remediations and skips destructive ones with a note); prompts that need a real answer fail
   closed with `E_INTERACTIVE_REQUIRED`, naming the flag or argument that makes the invocation
-  scriptable (for example `hack update --yes`, `hack mcp --all`, `hack session attach <name>`).
+  scriptable (for example `hack update --yes`, `hack mcp --all`, `hack session attach <name>`,
+  `hack secrets delete <name> --yes`, `hack ssh --host <host>`). Destructive confirmations without
+  such a flag decline or refuse; they never proceed on their own.
   Set `HACK_NO_INTERACTIVE=1` explicitly in scripts anyway so the intent is visible.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
 

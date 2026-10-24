@@ -805,11 +805,14 @@ pub(super) fn compile(
         }
         if routing_invalid
             || labels.keys().any(|key| {
-                !(dependency_cache.is_some() && super::dependency_cache::recognized(key))
-                    && !(routing.is_some() && super::routing::recognized(key))
-                    && ["caddy", "traefik", "hack", "com.docker.compose"]
-                        .iter()
-                        .any(|prefix| key == prefix || key.starts_with(&format!("{prefix}.")))
+                // Hack's ownership namespaces are never exempt: no routing or
+                // dependency cache declaration may carry ownership evidence.
+                super::ownership_labels::is_hack_ownership_label(key)
+                    || (!(dependency_cache.is_some() && super::dependency_cache::recognized(key))
+                        && !(routing.is_some() && super::routing::recognized(key))
+                        && ["caddy", "traefik", "hack", "com.docker.compose"]
+                            .iter()
+                            .any(|prefix| key == prefix || key.starts_with(&format!("{prefix}."))))
             })
         {
             diagnostics.push(Diagnostic::error(

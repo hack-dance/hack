@@ -39,8 +39,22 @@ export interface LokiLogsParams {
   readonly noEntriesNotice?: {
     readonly afterMs: number;
     readonly notify: () => void;
+    /**
+     * Schedules `fn` after `afterMs` and returns a cancel function. Defaults
+     * to `setTimeout`/`clearTimeout`; tests inject a hand-driven timer so the
+     * notice and its cancellation are checked without real delays.
+     */
+    readonly schedule?: NoticeScheduler;
   };
 }
+
+/** Schedules `fn` after `afterMs`; the returned function cancels it. */
+export type NoticeScheduler = (fn: () => void, afterMs: number) => () => void;
+
+const defaultNoticeScheduler: NoticeScheduler = (fn, afterMs) => {
+  const handle = setTimeout(fn, afterMs);
+  return () => clearTimeout(handle);
+};
 
 type LokiLabelSet = Record<string, string>;
 
@@ -387,11 +401,11 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
 
   let closed = false;
   let exitCode = 0;
-  let noEntriesTimer: ReturnType<typeof setTimeout> | undefined;
+  let cancelNoEntriesTimer: (() => void) | undefined;
   const clearNoEntriesTimer = () => {
-    if (noEntriesTimer !== undefined) {
-      clearTimeout(noEntriesTimer);
-      noEntriesTimer = undefined;
+    if (cancelNoEntriesTimer !== undefined) {
+      cancelNoEntriesTimer();
+      cancelNoEntriesTimer = undefined;
     }
   };
 
@@ -423,9 +437,10 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
 
   const noEntriesNotice = opts.noEntriesNotice;
   if (noEntriesNotice) {
+    const schedule = noEntriesNotice.schedule ?? defaultNoticeScheduler;
     ws.addEventListener("open", () => {
-      noEntriesTimer = setTimeout(() => {
-        noEntriesTimer = undefined;
+      cancelNoEntriesTimer = schedule(() => {
+        cancelNoEntriesTimer = undefined;
         if (!closed) {
           noEntriesNotice.notify();
         }

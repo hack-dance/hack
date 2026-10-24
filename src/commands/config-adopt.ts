@@ -14,6 +14,7 @@ import {
   type LegacyComposeAdoptedGenerationStore,
   openLegacyComposeAdoptedGenerationStore,
 } from "../lib/native-compose-adoption-generation.ts";
+import { inspectLegacyComposeAdoptionSelectionDetail } from "../lib/native-compose-adoption-marker.ts";
 import {
   LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE,
   legacyAdoptionEnvOverrideHoldsValues,
@@ -85,6 +86,43 @@ class LiteralEnvOverrideRefusal extends HackCliError {
   constructor() {
     super({ code: "E_CONFIG_INVALID", message: LITERAL_ENV_OVERRIDE_REFUSAL });
     this.name = "LiteralEnvOverrideRefusal";
+  }
+}
+
+/**
+ * Next steps appended to `E_LEGACY_ADOPTION_BUSY` when a publication switch
+ * is journaled. That code's own text names only "explicit interrupted-lock
+ * recovery", and plain `hack config adopt --recover` completes the switch,
+ * which refuses a bound literal override, so the step must name the command
+ * this state accepts (HACK-1414). Fixed text; values omitted.
+ */
+export const PENDING_SWITCH_BUSY_NEXT_STEP =
+  "A publication switch is pending. If no other adoption command is running, run 'hack config adopt --recover' to complete it or 'hack config adopt --recover --rollback' to restore the originals.";
+export const PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP =
+  "A publication switch is pending and the bound .hack/.internal/compose.env.override.yml holds literal env values, so completing it refuses. If no other adoption command is running, run 'hack config adopt --recover --rollback' to release it.";
+
+/** The store refusal's fixed message, plus the pending-switch step for BUSY. */
+async function adoptionRefusalMessage(opts: {
+  readonly error: LegacyComposeAdoptedGenerationError;
+  readonly projectRoot: string;
+}): Promise<string> {
+  if (opts.error.code !== "E_LEGACY_ADOPTION_BUSY") {
+    return opts.error.message;
+  }
+  try {
+    const detail = await inspectLegacyComposeAdoptionSelectionDetail({
+      projectRoot: opts.projectRoot,
+    });
+    if (detail?.pending !== "switch") {
+      return opts.error.message;
+    }
+    const literal = await legacyAdoptionEnvOverrideHoldsValues({
+      projectRoot: opts.projectRoot,
+    });
+    return `${opts.error.message} ${literal ? PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP : PENDING_SWITCH_BUSY_NEXT_STEP}`;
+  } catch {
+    // Unreadable state keeps the store's fixed message alone.
+    return opts.error.message;
   }
 }
 
@@ -299,7 +337,7 @@ export const configAdoptCommand = withHandler(spec, async ({ ctx, args }) => {
       code: "E_CONFIG_INVALID",
       message:
         error instanceof LegacyComposeAdoptedGenerationError
-          ? error.message
+          ? await adoptionRefusalMessage({ error, projectRoot })
           : "Legacy adoption refused; original data and recovery evidence retained. Values omitted.",
       ...(diagnostic
         ? { detail: { legacy_adoption_publication_refusal: diagnostic } }

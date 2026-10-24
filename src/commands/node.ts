@@ -21,6 +21,7 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { createGatewayClient } from "../control-plane/sdk/gateway-client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { pathExists } from "../lib/fs.ts";
+import { canPrompt } from "../lib/interactivity.ts";
 import {
   cancelNodePairingSession,
   consumeNodePairingSession,
@@ -2046,10 +2047,15 @@ async function handleNodePairWalkthrough({
     ],
   });
 
-  const executeNow = await confirm({
-    message: "Execute remote approval and complete pairing now?",
-    initialValue: true,
-  });
+  // Without a TTY the session is left pending: the remote approval runs SSH
+  // commands and needs an explicit answer, and a clack prompt cannot settle on
+  // a piped stdin (HACK-1385).
+  const executeNow = canPrompt()
+    ? await confirm({
+        message: "Execute remote approval and complete pairing now?",
+        initialValue: true,
+      })
+    : false;
   if (isCancel(executeNow)) {
     await cancelNodePairingSession({ sessionId: created.session.id });
     logger.info({
@@ -2165,7 +2171,9 @@ type PairWalkthroughValueResult = PairWalkthroughValue | PairWalkthroughError;
 async function resolvePairWalkthroughInput(input: {
   readonly args: PairWalkthroughArgs;
 }): Promise<PairWalkthroughResult> {
-  const interactive = isTty();
+  // canPrompt(), not isTty(): a TTY stdout with a piped stdin must not reach
+  // the clack prompts below (HACK-1385).
+  const interactive = canPrompt();
   const sourceResult = await resolveRequiredWalkthroughValue({
     currentValue: input.args.options.source,
     interactive,

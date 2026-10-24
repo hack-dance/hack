@@ -193,11 +193,14 @@ returns no entries and Loki was not requested explicitly, `hack logs` writes a o
 to stderr and answers from `docker compose logs` instead. Nothing from Loki is written first,
 so `--json` output still has one `start`/`end` pair. When Loki was requested explicitly
 (`--loki`, `--services`, `--query`, `--since`, `--until`), the empty result stands and the
-notice suggests `hack logs --compose --no-follow`, keeping any `--path`, `--project`,
-`--branch` and service you gave. Follow mode (`hack logs` without `--no-follow`) does not
-fall back. When Loki is the follow backend (`logs.followBackend: loki`, or `--loki`) and no
-entry arrives within 8 seconds, `hack logs` writes a one-line stderr notice that suggests
-`hack logs --compose` and keeps following.
+notice suggests `hack logs --compose --no-follow` with every selector you gave that the
+compose backend accepts: `--path`, `--project`, `--branch`, `--tail`, `--profile`, `--pretty`,
+`--json` and a single service. `--query`, `--since`, `--until` and more than one service have
+no compose equivalent, so the notice names them instead of dropping them. Follow mode
+(`hack logs` without `--no-follow`) does not fall back. When Loki is the follow backend
+(`logs.followBackend: loki`, or `--loki`) and no entry arrives within 8 seconds, `hack logs`
+writes the same kind of one-line stderr notice, suggesting `hack logs --compose`, and keeps
+following.
 
 Short-lived containers: Alloy finds containers by polling Docker every 5 seconds. It includes
 exited containers, so a one-shot Compose service (a migration or seed job) is shipped after it
@@ -207,22 +210,47 @@ between two polls (for example `docker compose run --rm`) never reaches Loki; us
 discovery config after `hack global install` rewrites `~/.hack/logging/alloy.alloy` and the
 Alloy container restarts (`hack global down` then `hack global up`).
 
-Alloy keeps its read positions inside its own container (there is no positions volume). Each
-time the Alloy container is recreated, for example by `hack global down` then
-`hack global up`, it reads the retained logs of all exited Compose
-containers again and can send entries that Loki already holds. Loki rejects entries older than
-its sample age limit (one week by default).
+Alloy keeps its read positions (`positions.yml`) under `--storage.path`, which the logging
+compose maps to the named volume `alloy-data`. `hack global down` then `hack global up`
+recreates the Alloy container but keeps the volume, so Alloy resumes each container's log
+after the last line it shipped instead of reading all retained logs again. A position is a
+whole second and Docker's `since` filter includes that second, so lines from the last second
+Alloy read can be sent again. `hack global logs-reset` removes the volume together with Loki's
+data (`docker compose down -v`); the next start reads the retained logs from the beginning,
+which matches the emptied Loki. Installs made before this volume existed pick it up after
+`hack global install` rewrites `~/.hack/logging/docker-compose.yml` and the stack restarts.
+Loki rejects entries older than its sample age limit (one week by default).
 
-Exited containers have a polling cost. In Alloy v1.12.0, `loki.source.docker` checks each
-discovered container on a fixed 5-second timer. It reopens an exited container's log when the
-container finished after the last log line Alloy shipped from it. That is true for a container
-that never logged anything, and for one whose last line was shipped before it exited, so such
-a container is reopened every 5 seconds (two container inspect calls and one logs call) for as
-long as Docker keeps it. Docker discovery does not expose a container's state or exit time, so
-the config cannot skip old exited containers. Remove them (`hack down` or
-`docker compose down`) to stop the checks. Each reopen also makes Alloy log a
-"finished transferring logs" info line. Alloy runs as a Compose service, so it would ship that
-line into Loki every 5 seconds per container. The Alloy config sets
+Kept containers have a polling cost. In Alloy v1.12.0
+(`internal/component/loki/source/docker/runner.go`), `loki.source.docker` calls container
+inspect on every discovered container every 5 seconds, running or exited, for as long as
+Docker keeps it. After that call it reopens the container's log (one more inspect call and one
+logs call) when the container is running and its log is not already open, or when
+`finished.Unix() >= target.Last()`. `finished` is the container's `State.FinishedAt` in whole
+seconds (0 if it cannot be parsed). `Last()` is the wall-clock second at which Alloy last
+processed a line from that container: `dockertarget/target.go` sets it to the current time
+after each line, it starts at 0 when the target is created, and it is not stored in the
+positions file. A reopen asks Docker for the lines since the container's position, which is a
+whole second, and Docker includes that second. So a reopen of a container that logged
+anything reads at least its last line again, and `Last()` moves past the container's finish
+time. For an exited container this means:
+
+- A container that never logged a line keeps `Last()` at 0, so it is reopened every
+  5 seconds for as long as Docker keeps it.
+- A container whose last line Alloy read in or before the second the container finished (it
+  logged and then exited while Alloy followed it), or one whose lines the positions file
+  already covers (for example after Alloy restarts), is reopened once. That reopen sends the
+  lines from its last logged second again, and then the container is not reopened. If the
+  reopen happens within the second the container finished, there is one more reopen.
+- A container whose last line Alloy read in a later second than the one the container
+  finished in, for example a one-shot service that exited before Alloy discovered it, is not
+  reopened.
+
+Docker discovery does not expose a container's state or exit time, so the config cannot skip
+old exited containers. Remove them (`hack down` or `docker compose down`) to stop the inspect
+calls. Each reopen also makes Alloy log a "finished transferring logs" info line. Alloy runs
+as a Compose service, so it would ship those lines into Loki: one per reopen, and one every
+5 seconds for each kept container that never logged a line. The Alloy config sets
 `logging { level = "warn" }`, so only Alloy's warnings and errors are written and shipped.
 
 Retention:

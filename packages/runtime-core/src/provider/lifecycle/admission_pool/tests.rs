@@ -304,6 +304,24 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Run one ignored release-check fixture of this module alone in a child test process.
+///
+/// A release check must not see this test's provider resources after it let them go. In the
+/// shared parallel test process, an unrelated test's pre-exec fork (`process::clean_command`)
+/// holds a copy of every descriptor open at the fork until it execs: a disk the fixture just
+/// wrote or a handle the test just dropped then shows up in the host-wide `lsof` scan, which
+/// correctly refuses as `retained_reserve_active_owner` before the result under test. So every
+/// test that expects a release check to pass, or to refuse for another reason, runs isolated.
+/// Holding `serial` here keeps the module's whole-host scans one at a time.
+fn isolated(child: &str) {
+    use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+    let _serial = serial();
+    run_isolated(
+        &format!("provider::lifecycle::admission_pool::tests::{child}"),
+        ISOLATED_HANG_GUARD,
+    );
+}
+
 /// A pool `down` left exactly clean: provider proven dead after a quiesced engine stop of
 /// its last boot, clean-stop marker recorded, retained disks identified, provider
 /// configuration audited, VM lock free and no listener or disk handle.
@@ -438,6 +456,12 @@ fn exclusive_lock(path: &Path) -> HeldLock {
 
 #[test]
 fn only_a_clean_stopped_owned_development_pool_selects_the_retained_reserve() {
+    isolated("clean_stopped_selection_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by only_a_clean_stopped_owned_development_pool_selects_the_retained_reserve"]
+fn clean_stopped_selection_child() {
     let _serial = serial();
     let pool = stopped_pool();
     let receipt = fs::read(root(&pool.candidate).join("owner.json")).unwrap();
@@ -513,6 +537,12 @@ fn receipt_checks_take_no_provider_lock() {
 
 #[test]
 fn foreign_stopped_owner_refuses_the_retained_reserve() {
+    isolated("foreign_stopped_owner_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by foreign_stopped_owner_refuses_the_retained_reserve"]
+fn foreign_stopped_owner_child() {
     let _serial = serial();
     let pool = stopped_pool();
     fs::write(pool.data().join("name"), b"hack-foreign0000").unwrap();
@@ -659,6 +689,12 @@ fn dirty_stopped_owner_refuses_the_retained_reserve() {
 /// match, but the stop was never completed, so the pool never qualifies.
 #[test]
 fn an_uncertain_stop_rewritten_to_stopped_never_qualifies() {
+    isolated("uncertain_stop_rewrite_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by an_uncertain_stop_rewritten_to_stopped_never_qualifies"]
+fn uncertain_stop_rewrite_child() {
     let _serial = serial();
     const LATER: &str = "22222222-2222-2222-2222-222222222222";
     let pool = stopped_pool();
@@ -717,6 +753,12 @@ fn a_start_refused_before_boot_keeps_a_clean_stop_clean() {
 
 #[test]
 fn only_a_completed_quiesced_down_records_a_clean_stop() {
+    isolated("quiesced_down_clean_stop_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by only_a_completed_quiesced_down_records_a_clean_stop"]
+fn quiesced_down_clean_stop_child() {
     let _serial = serial();
     // `down` reached `stopping` for the clean boot; the provider has exited.
     let unfinished = || {
@@ -810,6 +852,12 @@ fn stale_or_unknown_stopped_owner_refuses_the_retained_reserve() {
 
 #[test]
 fn selected_stopped_owner_drift_refuses_reverification() {
+    isolated("stopped_owner_drift_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by selected_stopped_owner_drift_refuses_reverification"]
+fn stopped_owner_drift_child() {
     let _serial = serial();
     let mut pool = stopped_pool();
     let selection = select(&pool.candidate, Profile::Development)
@@ -1019,6 +1067,12 @@ fn the_boot_gate_rechecks_the_selection_around_its_sample() {
 
 #[test]
 fn machine_start_needs_a_final_leased_recheck_of_the_selection() {
+    isolated("machine_start_recheck_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by machine_start_needs_a_final_leased_recheck_of_the_selection"]
+fn machine_start_recheck_child() {
     let _serial = serial();
     let pool = stopped_pool();
     let choice = select(&pool.candidate, Profile::Development).unwrap();
@@ -1059,6 +1113,12 @@ fn machine_start_needs_a_final_leased_recheck_of_the_selection() {
 
 #[test]
 fn a_reserve_selection_only_restarts_and_never_creates() {
+    isolated("reserve_restart_only_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by a_reserve_selection_only_restarts_and_never_creates"]
+fn reserve_restart_only_child() {
     let _serial = serial();
     let pool = stopped_pool();
     let choice = select(&pool.candidate, Profile::Development).unwrap();
@@ -1138,19 +1198,8 @@ fn window(owned: admission::OwnedPool, free: &[u64]) -> Vec<admission::Admission
 
 #[test]
 fn a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check() {
-    // The release checks after the lock is dropped must pass: run them where no unrelated
-    // parallel test's pre-exec fork can hold a copy of this pool's VM lock or disk handles
-    // for the host-wide `lsof` scan to report. Holding `serial` keeps the module's whole-host
-    // scans one at a time.
-    let _serial = serial();
-    crate::provider::test_executable::run_isolated(
-        "provider::lifecycle::admission_pool::tests::fresh_headroom_start_child",
-        ISOLATED_TEST_BOUND,
-    );
+    isolated("fresh_headroom_start_child");
 }
-
-/// Hang guard for launching the whole test binary on a loaded host.
-const ISOLATED_TEST_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[test]
 #[ignore = "isolated fixture launched by a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check"]

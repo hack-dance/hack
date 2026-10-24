@@ -21,6 +21,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP } from "../src/commands/config-adopt.ts";
 import { checkComposeEnvOverrideAtRest } from "../src/commands/doctor.ts";
 import {
   resolveModernComposeEnvOverrides,
@@ -2301,6 +2302,39 @@ boundedTest(
       "pending"
     );
     const pinned = await lstat(override);
+    // Interrupted preparation stop, before any switch (HACK-1414): rollback,
+    // explicit or plain, refuses and changes nothing, so doctor must name
+    // `--recover --stop` first, not `--recover --rollback`.
+    const interrupted = await readReceipt();
+    expect(interrupted.pendingOperation).not.toBeNull();
+    expect(interrupted.publication).toBeNull();
+    for (const flags of [
+      ["--recover", "--rollback", "--json"],
+      ["--rollback", "--json"],
+    ]) {
+      const refused = await adoptCli(flags, binary);
+      expect(refused.code).not.toBe(0);
+      expect(refused.output).not.toContain(CANARY);
+      expect(await readReceipt()).toEqual(interrupted);
+    }
+    expect(
+      await inspectComposeEnvAtRest({ projectDir: join(projectRoot, ".hack") })
+    ).toMatchObject({
+      override: { kind: "plaintext" },
+      adoptionBound: true,
+      adoptionPending: "preparation-stop",
+    });
+    const beforeStop = await checkComposeEnvOverrideAtRest({
+      startDir: projectRoot,
+    });
+    expect(beforeStop.status).toBe("warn");
+    expect(beforeStop.message).toContain(
+      "first retry the interrupted adoption stop with 'hack config adopt --recover --stop'"
+    );
+    expect(beforeStop.message).not.toContain(
+      "release the pending adoption switch with"
+    );
+    expect(beforeStop.message).not.toContain(CANARY);
     // `--recover --stop` retries the stop and then publishes; plain
     // `--recover` completes the journaled switch. Both refuse before any
     // original moves and name the release step.
@@ -2339,18 +2373,24 @@ boundedTest(
     // A second `--recover --stop` no longer reaches the publication boundary:
     // the switch is already journaled, so the retried preparation stop refuses
     // it as a pending publication (the generic busy code) without the
-    // literal-env message or a publication diagnostic (HACK-1391).
+    // literal-env message or a publication diagnostic (HACK-1391). Plain
+    // `--recover` (the busy text's "interrupted-lock recovery") completes the
+    // switch, which refuses the literal override, so the message names the
+    // release step instead (HACK-1414).
     const repeated = await adoptCli(["--recover", "--stop", "--json"], binary);
     expect(repeated.code).not.toBe(0);
     expect(JSON.parse(repeated.stdout)).toEqual({
       ok: false,
       error: {
         code: "E_CONFIG_INVALID",
-        message: new LegacyComposeAdoptedGenerationError(
-          "E_LEGACY_ADOPTION_BUSY"
-        ).message,
+        message: `${
+          new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_BUSY")
+            .message
+        } ${PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP}`,
       },
     });
+    expect(repeated.output).toContain("hack config adopt --recover --rollback");
+    expect(repeated.output).not.toContain("'hack config adopt --recover' to");
     expect(repeated.output).not.toContain(CANARY);
     expect((await readReceipt()).publication).toMatchObject({
       phase: "switching",
@@ -2365,7 +2405,7 @@ boundedTest(
     expect(report).toMatchObject({
       override: { kind: "plaintext" },
       adoptionBound: true,
-      adoptionPending: true,
+      adoptionPending: "switch",
     });
     const checked = await checkComposeEnvOverrideAtRest({
       startDir: projectRoot,

@@ -2,8 +2,8 @@ use super::*;
 use std::{
     cell::Cell,
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
-        unix::{ffi::OsStrExt, fs::PermissionsExt, net::UnixListener},
+        fd::OwnedFd,
+        unix::{fs::PermissionsExt, net::UnixListener},
     },
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -48,36 +48,8 @@ impl Fixture {
     fn unlistened(&self, slot: u8) -> OwnedFd {
         // A stale fixture needs a bound stream inode, never a transient listener.
         // It stays unlistened even if a concurrent child inherits a descriptor.
-        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-        assert!(fd >= 0);
-        let socket = unsafe { OwnedFd::from_raw_fd(fd) };
-        assert_eq!(
-            unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) },
-            0
-        );
         let target = path(&self.0, slot);
-        let bytes = target.as_os_str().as_bytes();
-        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        assert!(!bytes.contains(&0) && bytes.len() < address.sun_path.len());
-        for (destination, byte) in address.sun_path.iter_mut().zip(bytes) {
-            *destination = *byte as libc::c_char;
-        }
-        let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
-        #[cfg(target_vendor = "apple")]
-        {
-            address.sun_len = length.try_into().unwrap();
-        }
-        assert_eq!(
-            unsafe {
-                libc::bind(
-                    socket.as_raw_fd(),
-                    (&raw const address).cast(),
-                    length.try_into().unwrap(),
-                )
-            },
-            0
-        );
+        let socket = crate::provider::test_socket::bound_unlistened(&target);
         fs::set_permissions(target, fs::Permissions::from_mode(0o600)).unwrap();
         socket
     }
@@ -115,8 +87,28 @@ fn stale_stream_inode_never_listens_even_while_an_owned_duplicate_survives() {
     assert_eq!(observed(&fixture.0, 0).unwrap(), Some(selected));
 }
 
+/// Run one ignored fixture of this module alone in a child test process.
+///
+/// The selection must find a listener this test just dropped closed. In the shared parallel
+/// test process an unrelated test's pre-exec fork (`process::clean_command`) holds a copy of
+/// every descriptor open at the fork until it execs, so the dropped listener can still accept
+/// and the selection correctly refuses it as live.
+fn isolated(child: &str) {
+    use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+    run_isolated(
+        &format!("provider::dependency_socket::quiescent_recovery::tests::{child}"),
+        ISOLATED_HANG_GUARD,
+    );
+}
+
 #[test]
 fn first_socket_refusal_records_closed_live_listener_facts_without_removal() {
+    isolated("closed_live_listener_facts_child");
+}
+
+#[test]
+#[ignore = "isolated dropped-listener fixture launched by first_socket_refusal_records_closed_live_listener_facts_without_removal"]
+fn closed_live_listener_facts_child() {
     use super::super::recovery::observation_diagnostic as diagnostic;
     let fixture = Fixture::new();
     let listener = fixture.bind(0);
@@ -248,6 +240,12 @@ fn owner_graph_boot_or_volume_proof_drift_refuses_before_any_effect() {
 
 #[test]
 fn live_listener_and_foreign_replacement_are_never_removed() {
+    isolated("live_listener_and_foreign_replacement_child");
+}
+
+#[test]
+#[ignore = "isolated dropped-listener fixture launched by live_listener_and_foreign_replacement_are_never_removed"]
+fn live_listener_and_foreign_replacement_child() {
     let fixture = Fixture::new();
     let listener = fixture.bind(0);
     assert!(current(fixture.scope(), &fixture.0).is_err());

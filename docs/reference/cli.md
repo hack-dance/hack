@@ -2254,6 +2254,9 @@ Delete a stored secret
 hack secrets delete [name] [options]
 ```
 
+Asks for confirmation before deleting. Without a TTY (or with HACK_NO_INTERACTIVE / --no-interactive)
+the deletion is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.
+
 ### Arguments
 
 | Arg | Description |
@@ -2265,6 +2268,7 @@ hack secrets delete [name] [options]
 | Option | Description |
 | --- | --- |
 | `--service <service>` | Override Bun.secrets service name (default: hack-cli) |
+| `--yes` | Confirm the deletion without prompting (required without a TTY or with HACK_NO_INTERACTIVE) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

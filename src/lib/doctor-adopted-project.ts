@@ -1,6 +1,5 @@
 import { join } from "node:path";
 import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
-import { HackCliError } from "./cli-result.ts";
 import { COMPOSE_BACKEND_CHECK } from "./doctor-compose-backend.ts";
 import { selectLegacyComposeAdoptedRoot } from "./native-compose-adoption-command.ts";
 import { inspectLegacyComposeAdoptionSelection } from "./native-compose-adoption-marker.ts";
@@ -26,26 +25,18 @@ export type DoctorAdoptedProject = {
 
 /**
  * The adopted project that owns `startDir`, or null when discovery from there
- * reaches no active or pending adoption (or a nearer legacy project), or when
- * the adoption selector's ancestor bound ends the search first. Unsafe
- * adoption state throws the adoption selector's closed, value-free refusal.
+ * reaches no active or pending adoption (or a nearer legacy project). The
+ * adoption selector walks every ancestor that ordinary discovery walks, so a
+ * deep start directory with no adoption above it is null here, not a throw
+ * (HACK-1380). Unsafe adoption state throws the selector's closed, value-free
+ * refusal (`E_CONFIG_INVALID`).
  */
 export async function findDoctorAdoptedProject(opts: {
   readonly startDir: string;
 }): Promise<DoctorAdoptedProject | null> {
-  let projectRoot: string | null;
-  try {
-    projectRoot = await selectLegacyComposeAdoptedRoot({
-      cwd: opts.startDir,
-    });
-  } catch (error: unknown) {
-    if (isAdoptionSearchBoundRefusal(error)) {
-      // A start directory more than the selector's 64 ancestors deep with no
-      // root on the way: no adoption was found, so ordinary discovery decides.
-      return null;
-    }
-    throw error;
-  }
+  const projectRoot = await selectLegacyComposeAdoptedRoot({
+    cwd: opts.startDir,
+  });
   if (!projectRoot) {
     return null;
   }
@@ -63,25 +54,11 @@ export async function findDoctorAdoptedProject(opts: {
 }
 
 /**
- * Whether `error` is the adoption selector's ancestor-bound refusal. Without
- * `--project` or `--path`, `selectLegacyComposeAdoptedRoot` throws
- * `E_NATIVE_PROJECT_UNSUPPORTED` only when it walked its 64 ancestors without
- * reaching a root; unsafe adoption state is a different code
- * (`E_CONFIG_INVALID`) and still propagates.
- */
-function isAdoptionSearchBoundRefusal(error: unknown): boolean {
-  return (
-    error instanceof HackCliError &&
-    error.code === "E_NATIVE_PROJECT_UNSUPPORTED"
-  );
-}
-
-/**
  * The adopted project doctor reports, or null after ordinary discovery's
  * native-input refusal passed. An adopted project's inputs belong to its
  * adoption, so that discovery would refuse it as native input; doctor selects
- * it first (HACK-1311). A start directory too deep for the adoption selector
- * is not an adoption, so it gets ordinary discovery instead of a throw.
+ * it first (HACK-1311). A start directory with no adoption above it, however
+ * deep, gets ordinary discovery instead of a throw.
  */
 export async function preflightDoctorProject(opts: {
   readonly startDir: string;

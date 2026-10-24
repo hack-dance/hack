@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { restoreEnv } from "./helpers/env.ts";
+import { requireFixtureRoot } from "./helpers/fixture-root.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -80,7 +81,10 @@ test("global default_domain is validated before writing", async () => {
 });
 
 test("project config rejects the global-only default_domain key", async () => {
-  const repoRoot = join(tempDir ?? "", "repo");
+  const repoRoot = join(
+    requireFixtureRoot(tempDir, "config-command fixture"),
+    "repo"
+  );
   const projectDir = join(repoRoot, ".hack");
   await mkdir(projectDir, { recursive: true });
   const { runCli } = await import("../src/cli/run.ts");

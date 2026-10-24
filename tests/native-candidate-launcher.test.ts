@@ -15,6 +15,7 @@ const PRINTED = [
   "HACK_NATIVE_HOME",
   "HACK_HOME",
   "HACK_CANDIDATE_ENTRYPOINT",
+  "HACK_DAEMON_AUTOSTART_DISABLE",
 ] as const;
 const STUB_CLI = `#!/bin/sh\n${PRINTED.map(
   (name) => `printf "%s\\n" "\${${name}-<unset>}"`
@@ -76,6 +77,7 @@ test.each([
       `${root}/private home`,
       `${root}/caller hack home`,
       "hack-v5",
+      "1",
       "exec",
       "a b",
       "--",
@@ -87,7 +89,11 @@ test.each([
 });
 
 test("explicit Compose selection is respected with the caller's Hack home and no native selectors", async () => {
-  const result = await launch({ HACK_RUNTIME_BACKEND: "compose" });
+  // An inherited opt-in cannot re-enable hackd autostart for a candidate run.
+  const result = await launch({
+    HACK_RUNTIME_BACKEND: "compose",
+    HACK_DAEMON_AUTOSTART_DISABLE: "0",
+  });
   expect(result.stdout).toBe(
     [
       "compose",
@@ -95,6 +101,7 @@ test("explicit Compose selection is respected with the caller's Hack home and no
       "<unset>",
       `${root}/caller hack home`,
       "hack-v5",
+      "1",
       "exec",
       "a b",
       "--",

@@ -8,9 +8,10 @@ import {
 } from "../cli/command.ts";
 import { optOpenPreference, optPath, optProject } from "../cli/options.ts";
 import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
-import { DEFAULT_PROJECT_TLD, HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
+import { DEFAULT_PROJECT_TLD } from "../constants.ts";
 import { readBranchesFile, writeBranchesFile } from "../lib/branches.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import {
   parseOpenHostPreference,
   resolvePreferredOpenHost,
@@ -369,9 +370,7 @@ async function requireProjectContext(
 ): Promise<ProjectContext> {
   const ctx = await findProjectContext(startDir);
   if (!ctx) {
-    throw new Error(
-      `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`
-    );
+    throw new MissingProjectContextError();
   }
   return ctx;
 }

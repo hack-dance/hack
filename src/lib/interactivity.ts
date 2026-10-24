@@ -91,16 +91,21 @@ const NON_INTERACTIVE_ANSWERS: Readonly<
 /**
  * Confirm prompt that honors the no-interactive convention.
  *
- * When the run is explicitly non-interactive (`--no-interactive` or
- * `HACK_NO_INTERACTIVE`), the declared policy resolves the answer without
- * prompting:
+ * Whenever prompting is disallowed ({@link canPrompt} is false: stdin or
+ * stdout is not a TTY, `HACK_NO_INTERACTIVE`, or `--no-interactive`), the
+ * declared policy resolves the answer without prompting:
  * - `accept-default`: answer with `initialValue` (the documented default),
  * - `decline`: answer `false` (safe skip for destructive/sudo actions),
  * - `fail`: throw `E_INTERACTIVE_REQUIRED` with the provided hint.
  *
  * Otherwise a normal clack confirm runs (cancel throws, matching existing
- * prompt-site behavior). TTY-less runs without the explicit opt-out keep the
- * legacy clack behavior so wrapper environments stay unchanged.
+ * prompt-site behavior).
+ *
+ * Invariant: the clack prompt is never entered without a TTY on both
+ * streams. Its readline loop cannot settle on a piped stdin and spins at
+ * full CPU forever (HACK-1385), so a TTY-less run must resolve through the
+ * policy within milliseconds. Never call `@clack/prompts` directly from a
+ * command without a `canPrompt()` guard in front of it.
  */
 export async function confirmSafe(opts: {
   readonly message: string;
@@ -108,7 +113,7 @@ export async function confirmSafe(opts: {
   readonly nonInteractive: NonInteractivePolicy;
   readonly hint?: string;
 }): Promise<boolean> {
-  if (!isExplicitlyNonInteractive()) {
+  if (canPrompt()) {
     const ok = await confirm({
       message: opts.message,
       initialValue: opts.initialValue,

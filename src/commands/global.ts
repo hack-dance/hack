@@ -53,6 +53,7 @@ import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
 import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { resolveDaemonAutostartAccess } from "../daemon/client.ts";
 import {
   getLaunchdServiceStatus,
   resolveLaunchdAccess,
@@ -1629,7 +1630,26 @@ async function maybeOfferMacDnsRecoveryAuthorization(): Promise<void> {
   }
 }
 
-async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
+/**
+ * The macOS `hack global install` offer to run `hack daemon install`, which
+ * installs the per-user hackd launchd service and starts hackd through it.
+ * Non-interactive runs accept the offer.
+ *
+ * HACK-1368: `hack daemon install` runs through the first `hack` on PATH,
+ * which for a candidate run is the stable CLI, so it would install and start
+ * the stable hackd. A candidate run, or any run with
+ * `HACK_DAEMON_AUTOSTART_DISABLE=1`, skips the offer through
+ * {@link resolveDaemonAutostartAccess} before it reads launchd state or
+ * prompts. Exported for tests.
+ */
+export async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
+  const autostart = resolveDaemonAutostartAccess();
+  if (!autostart.allowed) {
+    logger.info({
+      message: `Skipping hackd launchd setup: ${autostart.message}`,
+    });
+    return;
+  }
   const access = resolveLaunchdAccess();
   if (!access.allowed) {
     logger.info({ message: `Skipping hackd launchd setup: ${access.message}` });
@@ -1694,6 +1714,38 @@ async function writeWithPromptIfDifferent(
   }
 
   await writeTextFileIfChanged(absolutePath, content);
+}
+
+/**
+ * The `daemon.autoStart` step of `hack global up`: runs `hack daemon start`
+ * through the first `hack` on PATH and only warns when it fails.
+ *
+ * HACK-1368: for a candidate run that `hack` is the stable CLI, so a candidate
+ * run, or any run with `HACK_DAEMON_AUTOSTART_DISABLE=1`, skips the step
+ * through {@link resolveDaemonAutostartAccess}, as the implicit autostart in
+ * `requestDaemonJson` does. A denied run reads no config and spawns nothing.
+ */
+async function ensureHackdForGlobalUp(): Promise<void> {
+  const access = resolveDaemonAutostartAccess();
+  if (!access.allowed) {
+    logger.info({ message: `Skipping hackd start: ${access.message}` });
+    return;
+  }
+  const controlPlane = await readControlPlaneConfig({});
+  if (!controlPlane.config.daemon.autoStart) {
+    return;
+  }
+  logger.step({ message: "Ensuring hackd is running…" });
+  const invocation = await resolveHackInvocation();
+  const daemonExit = await run(
+    [invocation.bin, ...invocation.args, "daemon", "start"],
+    {
+      stdin: "ignore",
+    }
+  );
+  if (daemonExit !== 0) {
+    logger.warn({ message: "Unable to start hackd (continuing)" });
+  }
 }
 
 export async function globalUp(): Promise<number> {
@@ -1764,20 +1816,7 @@ export async function globalUp(): Promise<number> {
     }
   }
 
-  const controlPlane = await readControlPlaneConfig({});
-  if (controlPlane.config.daemon.autoStart) {
-    logger.step({ message: "Ensuring hackd is running…" });
-    const invocation = await resolveHackInvocation();
-    const daemonExit = await run(
-      [invocation.bin, ...invocation.args, "daemon", "start"],
-      {
-        stdin: "ignore",
-      }
-    );
-    if (daemonExit !== 0) {
-      logger.warn({ message: "Unable to start hackd (continuing)" });
-    }
-  }
+  await ensureHackdForGlobalUp();
 
   logger.step({ message: "Starting Caddy…" });
   const caddyExit = await run(

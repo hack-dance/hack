@@ -47,7 +47,10 @@ import {
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
-import { probeDaemonApi } from "../daemon/client.ts";
+import {
+  probeDaemonApi,
+  resolveDaemonAutostartAccess,
+} from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
 import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
@@ -58,7 +61,7 @@ import {
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import {
-  ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+  adoptedComposeEnvOverrideNextStep,
   composeEnvAtRestRepairs,
   describeComposeEnvAtRest,
   inspectComposeEnvAtRest,
@@ -69,6 +72,13 @@ import {
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
 import { resolveDefaultDomain } from "../lib/default-domain.ts";
+import {
+  adoptedProjectCheckResult,
+  adoptedProjectNotApplicableResults,
+  type DoctorAdoptedProject,
+  findDoctorAdoptedProject,
+  preflightDoctorProject,
+} from "../lib/doctor-adopted-project.ts";
 import {
   checkBrowserLocalNetwork,
   parseBrowserNetworkOptions,
@@ -81,6 +91,7 @@ import {
 import {
   describeEnvKeyInspection,
   type EnvKeyInspection,
+  gitIsLocalKeyIgnored,
   gitListTrackedKeyPaths,
   inspectProjectEnvKey,
   resolveEnvKeyCandidates,
@@ -108,10 +119,7 @@ import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
-import {
-  confirmSafe,
-  isExplicitlyNonInteractive,
-} from "../lib/interactivity.ts";
+import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
@@ -154,6 +162,7 @@ import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
   discoverComposeServiceNames,
   ensureHackDirGitignore,
+  HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   HACK_DIR_GITIGNORE_REFUSAL,
   HackDirGitignoreRefusalError,
   inspectLegacyComposeEnvFileReferences,
@@ -165,7 +174,6 @@ import {
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
 } from "../lib/project-env-config.ts";
-import { assertLegacyProjectDiscovery } from "../lib/project-input-selection.ts";
 import {
   inspectProjectLifecycleHygiene,
   repairProjectLifecycleSessions,
@@ -531,7 +539,7 @@ async function maybeRunNativeMappingRecovery(
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
-  await assertLegacyProjectDiscovery({
+  const adopted = await preflightDoctorProject({
     startDir: resolveDoctorStartDir(args.options.path),
   });
   const mappingResult = await maybeRunNativeMappingRecovery(args);
@@ -831,13 +839,13 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     ? resolve(process.cwd(), args.options.path)
     : process.cwd();
   const projectCtx = await runCheck(s, "project", () =>
-    checkProject({ startDir })
+    checkProject({ startDir, adopted })
   );
   results.push(projectCtx);
   const agentIntegrationCheck = await runCheck(
     s,
     "agent integrations",
-    () => checkAgentIntegrations({ startDir }),
+    () => checkAgentIntegrations({ startDir, adopted }),
     { timeoutMs: 5000 }
   );
   results.push(
@@ -852,133 +860,21 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   );
   results.push(
     await runCheck(s, "sessions mux", () =>
-      checkSessionsMuxConfig({ startDir })
+      checkSessionsMuxConfig({ startDir, adopted })
     )
   );
 
-  if (projectCtx.status === "ok") {
-    if (
-      results.some(
+  results.push(
+    ...(await runProjectChecks({
+      progress: s,
+      startDir,
+      adopted,
+      projectFound: projectCtx.status === "ok",
+      dockerOk: results.some(
         (result) => result.name === "docker daemon" && result.status === "ok"
-      )
-    ) {
-      results.push(
-        await runCheck(s, "runtime hygiene", () =>
-          checkProjectRuntimeHygiene({ startDir })
-        )
-      );
-    }
-    results.push(
-      await runCheck(s, "lifecycle hygiene", () =>
-        checkProjectLifecycleHygiene({ startDir })
-      )
-    );
-    results.push(
-      await runCheck(s, "compose networks", () =>
-        checkComposeNetworkHygiene({ startDir })
-      )
-    );
-    results.push(
-      await runCheck(s, COMPOSE_BACKEND_CHECK, () =>
-        checkComposeBackendFeatures({ startDir, backend: "compose" })
-      )
-    );
-    results.push(
-      await runCheck(s, "DEV_HOST", () => checkDevHost({ startDir }))
-    );
-    results.push(
-      await runCheck(s, "env mode", () => checkProjectEnvMode({ startDir }))
-    );
-    results.push(
-      await runCheck(s, "env materialization", () =>
-        checkProjectEnvMaterialization({ startDir })
-      )
-    );
-    results.push(
-      await runCheck(s, "env overlay warnings", () =>
-        checkProjectEnvOverlayWarnings({ startDir })
-      )
-    );
-    results.push(
-      await runCheck(
-        s,
-        "worktree keys",
-        () => checkWorktreeSecretKeys({ startDir }),
-        {
-          timeoutMs: 5000,
-        }
-      )
-    );
-    results.push(
-      await runCheck(s, ENV_KEY_CHECK, () => checkProjectEnvKey({ startDir }), {
-        timeoutMs: 5000,
-      })
-    );
-    results.push(
-      await runCheck(
-        s,
-        "generated files",
-        () => checkTrackedGeneratedFiles({ startDir }),
-        {
-          timeoutMs: 5000,
-        }
-      )
-    );
-    results.push(
-      await runCheck(
-        s,
-        HACK_GITIGNORE_CHECK,
-        () => checkHackDirGitignore({ startDir }),
-        {
-          timeoutMs: 5000,
-        }
-      )
-    );
-    results.push(
-      await runCheck(s, COMPOSE_ENV_AT_REST_CHECK, () =>
-        checkComposeEnvOverrideAtRest({ startDir })
-      )
-    );
-    if (
-      results.some(
-        (result) => result.name === "docker daemon" && result.status === "ok"
-      )
-    ) {
-      results.push(
-        await runCheck(
-          s,
-          "worktree instances",
-          () => checkWorktreeInstanceCollisions({ startDir }),
-          {
-            timeoutMs: 5000,
-          }
-        )
-      );
-    }
-    results.push(
-      await runCheck(
-        s,
-        "caddy hosts",
-        () => checkCaddyHostMapping({ startDir }),
-        {
-          timeoutMs: 2000,
-        }
-      )
-    );
-  } else {
-    results.push({
-      name: "DEV_HOST",
-      status: "warn",
-      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
-      durationMs: 0,
-    });
-    results.push({
-      name: "env mode",
-      status: "warn",
-      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
-      durationMs: 0,
-    });
-  }
+      ),
+    }))
+  );
 
   s.stop(`Doctor checks complete (${results.length} checks)`);
 
@@ -1531,8 +1427,10 @@ function muxInstallCommand(opts: {
 
 async function checkSessionsMuxConfig(opts: {
   readonly startDir: string;
+  readonly adopted?: DoctorAdoptedProject | null;
 }): Promise<CheckResult> {
-  const project = await findProjectContext(opts.startDir);
+  // An adopted project's config belongs to the adoption: global settings only.
+  const project = opts.adopted ? null : await findProjectContext(opts.startDir);
   const mode = await resolveSessionsMuxMode({ project });
   const tmuxPath = findExecutableInPath("tmux");
   const zellijPath = findExecutableInPath("zellij");
@@ -1796,6 +1694,7 @@ async function checkDaemonStatus(): Promise<CheckResult> {
 
 async function checkAgentIntegrations(opts: {
   readonly startDir: string;
+  readonly adopted?: DoctorAdoptedProject | null;
 }): Promise<CheckResult> {
   try {
     return await checkAgentIntegrationsUnsafe(opts);
@@ -1811,8 +1710,9 @@ async function checkAgentIntegrations(opts: {
 
 async function checkAgentIntegrationsUnsafe(opts: {
   readonly startDir: string;
+  readonly adopted?: DoctorAdoptedProject | null;
 }): Promise<CheckResult> {
-  const project = await findProjectContext(opts.startDir);
+  const project = opts.adopted ?? (await findProjectContext(opts.startDir));
   const report = await inspectDoctorAgentIntegrations({
     projectRoot: project?.projectRoot ?? null,
   });
@@ -2548,9 +2448,14 @@ async function checkProxyPortForwarding(): Promise<CheckResult> {
 
 async function checkProject({
   startDir,
+  adopted,
 }: {
   readonly startDir: string;
+  readonly adopted: DoctorAdoptedProject | null;
 }): Promise<CheckResult> {
+  if (adopted) {
+    return adoptedProjectCheckResult(adopted);
+  }
   const ctx = await findProjectContext(startDir);
   if (ctx) {
     return {
@@ -3025,10 +2930,6 @@ export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
 }
 
 /**
- * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
- * it; each finding suggests the exact command instead.
- */
-/**
  * Reports which Compose features keep the current project on the Compose
  * backend (HACK-1291). Reads only the project's Compose file and, on the native
  * backend, the `HACK_NATIVE_ADAPTATION` selection native up applies. An
@@ -3055,6 +2956,10 @@ async function checkComposeBackendFeatures(opts: {
   });
 }
 
+/**
+ * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
+ * it; each finding suggests the exact command instead.
+ */
 async function checkProjectEnvKey({
   startDir,
 }: {
@@ -3068,14 +2973,22 @@ async function checkProjectEnvKey({
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
     };
   }
+  return await checkEnvKeyAtRoot({ projectRoot: ctx.projectRoot });
+}
+
+/** The env key audit for a resolved project root (legacy or adopted). */
+async function checkEnvKeyAtRoot(opts: {
+  readonly projectRoot: string;
+}): Promise<CheckResult> {
   const inspection = await inspectProjectEnvKey({
-    projectRoot: ctx.projectRoot,
+    projectRoot: opts.projectRoot,
     candidates: await resolveEnvKeyCandidates({
-      projectRoot: ctx.projectRoot,
+      projectRoot: opts.projectRoot,
     }),
     env: process.env,
     uid: typeof process.getuid === "function" ? process.getuid() : null,
     listTrackedKeyPaths: gitListTrackedKeyPaths,
+    isLocalKeyIgnored: gitIsLocalKeyIgnored,
   });
   return envKeyCheckResult(inspection);
 }
@@ -3094,16 +3007,23 @@ async function checkTrackedGeneratedFiles({
 }: {
   readonly startDir: string;
 }): Promise<CheckResult> {
-  const name = "generated files";
   const ctx = await findProjectContext(startDir);
   if (!ctx) {
     return {
-      name,
+      name: "generated files",
       status: "warn",
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
     };
   }
+  return await checkTrackedGeneratedFilesAt(ctx);
+}
 
+/** The tracked generated-files check for a resolved project (legacy or adopted). */
+async function checkTrackedGeneratedFilesAt(ctx: {
+  readonly projectRoot: string;
+  readonly projectDirName: string;
+}): Promise<CheckResult> {
+  const name = "generated files";
   const inspection = await inspectTrackedGeneratedFiles({
     projectRoot: ctx.projectRoot,
     projectDirName: ctx.projectDirName,
@@ -3143,9 +3063,11 @@ async function checkTrackedGeneratedFiles({
  * managed block, for example in a project an earlier Hack version
  * initialized. Runtime commands keep `git status` clean through the local
  * `info/exclude` either way, but only the committed file reaches fresh clones.
- * `hack doctor --fix` creates or repairs it.
+ * `hack doctor --fix` creates or repairs it. A read-only file that lacks the
+ * block, or a symlinked file or project dir (even one linking outside the
+ * repository), is reported as a warning and never written.
  */
-async function checkHackDirGitignore({
+export async function checkHackDirGitignore({
   startDir,
 }: {
   readonly startDir: string;
@@ -3179,6 +3101,12 @@ async function checkHackDirGitignore({
         name,
         status: "warn",
         message: `${file} lacks Hack's current managed block. Run 'hack doctor --fix' to update it (your own lines are kept), then commit it.`,
+      };
+    case "read-only":
+      return {
+        name,
+        status: "warn",
+        message: `${file} is read-only and lacks Hack's current managed block; Hack leaves it unchanged. Make it writable (chmod u+w ${file}), then run 'hack doctor --fix' and commit it.`,
       };
     case "unsafe":
       return {
@@ -3259,6 +3187,187 @@ async function findComposeEnvAtRestProject(opts: {
         projectDirName: HACK_PROJECT_DIR_PRIMARY,
       }
     : null;
+}
+
+/**
+ * Project-scoped checks after the project check. An adopted project gets its
+ * own set (HACK-1311); a legacy project the full set; no project two skips.
+ */
+async function runProjectChecks(opts: {
+  readonly progress: DoctorProgress;
+  readonly startDir: string;
+  readonly adopted: DoctorAdoptedProject | null;
+  readonly projectFound: boolean;
+  readonly dockerOk: boolean;
+}): Promise<TimedCheckResult[]> {
+  const { progress: s, startDir, adopted, dockerOk } = opts;
+  if (adopted) {
+    return await runAdoptedProjectChecks({ progress: s, adopted, startDir });
+  }
+  const results: TimedCheckResult[] = [];
+  if (!opts.projectFound) {
+    results.push({
+      name: "DEV_HOST",
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+      durationMs: 0,
+    });
+    results.push({
+      name: "env mode",
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+      durationMs: 0,
+    });
+    return results;
+  }
+  if (dockerOk) {
+    results.push(
+      await runCheck(s, "runtime hygiene", () =>
+        checkProjectRuntimeHygiene({ startDir })
+      )
+    );
+  }
+  results.push(
+    await runCheck(s, "lifecycle hygiene", () =>
+      checkProjectLifecycleHygiene({ startDir })
+    )
+  );
+  results.push(
+    await runCheck(s, "compose networks", () =>
+      checkComposeNetworkHygiene({ startDir })
+    )
+  );
+  results.push(
+    await runCheck(s, COMPOSE_BACKEND_CHECK, () =>
+      checkComposeBackendFeatures({ startDir, backend: "compose" })
+    )
+  );
+  results.push(await runCheck(s, "DEV_HOST", () => checkDevHost({ startDir })));
+  results.push(
+    await runCheck(s, "env mode", () => checkProjectEnvMode({ startDir }))
+  );
+  results.push(
+    await runCheck(s, "env materialization", () =>
+      checkProjectEnvMaterialization({ startDir })
+    )
+  );
+  results.push(
+    await runCheck(s, "env overlay warnings", () =>
+      checkProjectEnvOverlayWarnings({ startDir })
+    )
+  );
+  results.push(
+    await runCheck(
+      s,
+      "worktree keys",
+      () => checkWorktreeSecretKeys({ startDir }),
+      {
+        timeoutMs: 5000,
+      }
+    )
+  );
+  results.push(
+    await runCheck(s, ENV_KEY_CHECK, () => checkProjectEnvKey({ startDir }), {
+      timeoutMs: 5000,
+    })
+  );
+  results.push(
+    await runCheck(
+      s,
+      "generated files",
+      () => checkTrackedGeneratedFiles({ startDir }),
+      {
+        timeoutMs: 5000,
+      }
+    )
+  );
+  results.push(
+    await runCheck(
+      s,
+      HACK_GITIGNORE_CHECK,
+      () => checkHackDirGitignore({ startDir }),
+      {
+        timeoutMs: 5000,
+      }
+    )
+  );
+  results.push(
+    await runCheck(s, COMPOSE_ENV_AT_REST_CHECK, () =>
+      checkComposeEnvOverrideAtRest({ startDir })
+    )
+  );
+  if (dockerOk) {
+    results.push(
+      await runCheck(
+        s,
+        "worktree instances",
+        () => checkWorktreeInstanceCollisions({ startDir }),
+        {
+          timeoutMs: 5000,
+        }
+      )
+    );
+  }
+  results.push(
+    await runCheck(
+      s,
+      "caddy hosts",
+      () => checkCaddyHostMapping({ startDir }),
+      {
+        timeoutMs: 2000,
+      }
+    )
+  );
+  return results;
+}
+
+/**
+ * Project checks for an adopted Compose project: those that do not read the
+ * inputs the adoption owns, then a not-applicable entry for each other
+ * project check (HACK-1311). The env-at-rest check keeps its own adopted-root
+ * selection.
+ */
+async function runAdoptedProjectChecks(opts: {
+  readonly progress: DoctorProgress;
+  readonly adopted: DoctorAdoptedProject;
+  readonly startDir: string;
+}): Promise<TimedCheckResult[]> {
+  const { progress, adopted } = opts;
+  return [
+    await runCheck(
+      progress,
+      ENV_KEY_CHECK,
+      () => checkEnvKeyAtRoot({ projectRoot: adopted.projectRoot }),
+      { timeoutMs: 5000 }
+    ),
+    await runCheck(
+      progress,
+      "generated files",
+      () => checkTrackedGeneratedFilesAt(adopted),
+      { timeoutMs: 5000 }
+    ),
+    await runCheck(progress, COMPOSE_ENV_AT_REST_CHECK, () =>
+      checkComposeEnvOverrideAtRest({ startDir: opts.startDir })
+    ),
+    ...adoptedProjectNotApplicableResults().map((result) => ({
+      ...result,
+      durationMs: 0,
+    })),
+  ];
+}
+
+/**
+ * The legacy project context for a `--fix` step, or null when there is none
+ * or the project is adopted: an adoption owns its project's Compose inputs,
+ * env config and runtime, so those steps leave it alone.
+ */
+async function findDoctorLegacyProjectContext(
+  startDir: string
+): Promise<Awaited<ReturnType<typeof findProjectContext>>> {
+  if (await findDoctorAdoptedProject({ startDir })) {
+    return null;
+  }
+  return await findProjectContext(startDir);
 }
 
 async function checkWorktreeInstanceCollisions({
@@ -3535,7 +3644,7 @@ async function runDoctorFix(opts: {
 async function maybeRepairIncompleteRuntime(opts: {
   readonly startDir: string;
 }): Promise<void> {
-  const project = await findProjectContext(opts.startDir);
+  const project = await findDoctorLegacyProjectContext(opts.startDir);
   if (!project) {
     return;
   }
@@ -3596,7 +3705,7 @@ function renderSkippedDoctorFixSteps(): void {
 async function maybeMigrateProjectEnvConfig(opts: {
   readonly startDir: string;
 }): Promise<void> {
-  const project = await findProjectContext(opts.startDir);
+  const project = await findDoctorLegacyProjectContext(opts.startDir);
   if (!project) {
     return;
   }
@@ -3817,21 +3926,31 @@ export async function buildDoctorRemediationPlanLines(opts: {
     "Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.",
   ];
 
-  const project = await findProjectContext(opts.startDir);
+  const adopted = await findDoctorAdoptedProject({ startDir: opts.startDir });
+  const project = adopted ? null : await findProjectContext(opts.startDir);
+  // Generated files and env values at rest are checked for either kind.
+  const target = adopted ?? project;
+  if (adopted) {
+    steps.push(
+      "Leave the adopted Compose project's inputs, retained containers and adoption state to 'hack config adopt'; --fix changes none of them."
+    );
+  }
   if (project) {
     steps.push(
       "Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent."
     );
   }
-  const trackedGenerated = project
+  const trackedGenerated = target
     ? await inspectTrackedGeneratedFiles({
-        projectRoot: project.projectRoot,
-        projectDirName: project.projectDirName,
+        projectRoot: target.projectRoot,
+        projectDirName: target.projectDirName,
       })
     : null;
   if (trackedGenerated && trackedGenerated.trackedPaths.length > 0) {
     steps.push(
-      `Untrack machine-local generated files from git (git rm --cached; files stay on disk) and ensure the committed ${project?.projectDirName}/.gitignore: ${trackedGenerated.trackedPaths.join(", ")}`
+      adopted
+        ? `Untrack machine-local generated files from git (git rm --cached; files stay on disk) and leave the adopted project's ${adopted.projectDirName}/.gitignore unchanged: ${trackedGenerated.trackedPaths.join(", ")}`
+        : `Untrack machine-local generated files from git (git rm --cached; files stay on disk) and ensure the committed ${target?.projectDirName}/.gitignore: ${trackedGenerated.trackedPaths.join(", ")}`
     );
   }
   const hackGitignore = project
@@ -3845,24 +3964,28 @@ export async function buildDoctorRemediationPlanLines(opts: {
     );
   }
 
-  const composeEnvAtRest = project
+  const composeEnvAtRest = target
     ? composeEnvAtRestRepairs(
-        await inspectComposeEnvAtRest({ projectDir: project.projectDir })
+        await inspectComposeEnvAtRest({ projectDir: target.projectDir })
       )
     : null;
   if (composeEnvAtRest?.override) {
     steps.push(
-      `Remove ${project?.projectDirName}/.internal/compose.env.override.yml, which may hold env values at rest; Compose commands regenerate it with references only.`
+      `Remove ${target?.projectDirName}/.internal/compose.env.override.yml, which may hold env values at rest; Compose commands regenerate it with references only.`
     );
   }
   if (composeEnvAtRest?.asides) {
     steps.push(
-      `Remove leftover ${project?.projectDirName}/.internal/.compose.env.override.yml.<id>.remove files from an interrupted removal, which may hold env values.`
+      `Remove leftover ${target?.projectDirName}/.internal/.compose.env.override.yml.<id>.remove files from an interrupted removal, which may hold env values.`
     );
   }
 
   if (opts.migrateEnvConfig) {
-    steps.push(await buildEnvMigrationPlanStep({ project }));
+    steps.push(
+      adopted
+        ? "Skip env migration because an adopted Compose project's env config belongs to 'hack config adopt'."
+        : await buildEnvMigrationPlanStep({ project })
+    );
   }
 
   return steps.map((step, index) => `${index + 1}. ${step}`);
@@ -3902,7 +4025,11 @@ async function buildEnvMigrationPlanStep(opts: {
 async function maybeUntrackGeneratedFiles(opts: {
   readonly startDir: string;
 }): Promise<void> {
-  const project = await findProjectContext(opts.startDir);
+  // An adopted project gets the git-index change and the root key entry only:
+  // its `.hack/` belongs to the adoption, and the legacy `.hack/.gitignore`
+  // writer refuses it as native input (HACK-1311).
+  const adopted = await findDoctorAdoptedProject({ startDir: opts.startDir });
+  const project = adopted ?? (await findProjectContext(opts.startDir));
   if (!project) {
     return;
   }
@@ -3935,13 +4062,21 @@ async function maybeUntrackGeneratedFiles(opts: {
     return;
   }
 
-  const ignoreEnsured = await ensureHackDirGitignoreForDoctor({ project });
-  const notes = [
-    ignoreEnsured
-      ? `Removed ${inspection.trackedPaths.length} path(s) from the git index and ensured ${project.projectDirName}/.gitignore.`
-      : `Removed ${inspection.trackedPaths.length} path(s) from the git index; ${project.projectDirName}/.gitignore was left alone.`,
-    "Commit the removal to stop sharing these files.",
-  ];
+  const notes: string[] = [];
+  if (adopted) {
+    notes.push(
+      `Removed ${inspection.trackedPaths.length} path(s) from the git index. Left ${project.projectDirName}/.gitignore unchanged: an adopted Compose project's ${project.projectDirName}/ belongs to 'hack config adopt'.`,
+      "Commit the removal to stop sharing these files, and keep them out of later commits."
+    );
+  } else {
+    const ignoreEnsured = await ensureHackDirGitignoreForDoctor({ project });
+    notes.push(
+      ignoreEnsured
+        ? `Removed ${inspection.trackedPaths.length} path(s) from the git index and ensured ${project.projectDirName}/.gitignore.`
+        : `Removed ${inspection.trackedPaths.length} path(s) from the git index; ${project.projectDirName}/.gitignore was left alone.`,
+      "Commit the removal to stop sharing these files."
+    );
+  }
   if (inspection.secretKeyTracked) {
     // The nested .hack/.gitignore cannot cover the repo-root key file; without
     // the root entry the just-untracked key shows up as untracked and gets
@@ -3969,7 +4104,8 @@ async function maybeUntrackGeneratedFiles(opts: {
 async function maybeEnsureHackDirGitignore(opts: {
   readonly startDir: string;
 }): Promise<void> {
-  const project = await findProjectContext(opts.startDir);
+  // An adopted project's .hack/ belongs to `hack config adopt`: leave it alone.
+  const project = await findDoctorLegacyProjectContext(opts.startDir);
   if (!project) {
     return;
   }
@@ -4002,13 +4138,21 @@ async function maybeEnsureHackDirGitignore(opts: {
 /**
  * Runs `ensureHackDirGitignore` for a doctor repair step. A symlink or
  * non-regular entry (possibly planted after the check) is reported with the
- * fixed refusal and left alone; returns whether the file is now ensured.
+ * fixed refusal and left alone; so is a read-only file that lacks the managed
+ * block (possibly made read-only after the check). Returns whether the file is
+ * now ensured.
  */
 async function ensureHackDirGitignoreForDoctor(opts: {
   readonly project: { readonly projectDir: string };
 }): Promise<boolean> {
   try {
-    await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+    const result = await ensureHackDirGitignore({
+      projectDir: opts.project.projectDir,
+    });
+    if (result.readOnly) {
+      note(HACK_DIR_GITIGNORE_READ_ONLY_WARNING, HACK_GITIGNORE_CHECK);
+      return false;
+    }
     return true;
   } catch (error: unknown) {
     if (error instanceof HackDirGitignoreRefusalError) {
@@ -4041,7 +4185,7 @@ async function maybeRemovePlaintextComposeEnvOverride(opts: {
   const repairs = composeEnvAtRestRepairs(report);
   if (report.adoptionBound) {
     note(
-      `Kept ${file}: a saved 'hack config adopt' generation pins it, and removing it would break the adoption (values omitted). ${ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP}`,
+      `Kept ${file}: a saved 'hack config adopt' generation pins it, and removing it would break the adoption (values omitted). ${adoptedComposeEnvOverrideNextStep(report)}`,
       "compose env at rest"
     );
   }
@@ -4108,6 +4252,10 @@ function composeEnvAtRestFixLines(opts: {
     lines.push(
       `Kept ${file}: a saved 'hack config adopt' generation now pins it (values omitted).`
     );
+  } else if (removal.state.kind === "refused") {
+    lines.push(
+      `Left ${file} in place: it or its directory is now a symlink or not a regular file or directory (values omitted).`
+    );
   } else {
     lines.push(`Left ${file} in place: it no longer holds env values.`);
   }
@@ -4117,7 +4265,7 @@ function composeEnvAtRestFixLines(opts: {
 async function maybeRepairProjectLifecycleSessions(opts: {
   readonly startDir: string;
 }): Promise<void> {
-  const project = await findProjectContext(opts.startDir);
+  const project = await findDoctorLegacyProjectContext(opts.startDir);
   if (!project) {
     return;
   }
@@ -4195,7 +4343,7 @@ async function doctorConfirm(opts: {
     initialValue: opts.initialValue,
     nonInteractive: opts.destructive ? "decline" : "accept-default",
   });
-  if (!ok && opts.destructive && isExplicitlyNonInteractive()) {
+  if (!ok && opts.destructive && !canPrompt()) {
     noteSkippedDoctorFixStep({ what: firstLine(opts.message) });
   }
   return ok;
@@ -4222,9 +4370,32 @@ async function dockerInfoOk(): Promise<boolean> {
   return dockerOk.exitCode === 0;
 }
 
+/**
+ * The `--fix` hackd repair: restart an incompatible hackd, clear stale
+ * pid/socket files, then start hackd. Each step runs `hack daemon ...` through
+ * the first `hack` on PATH, and non-interactive runs accept every step.
+ *
+ * HACK-1368: for a candidate run that `hack` is the stable CLI, so a candidate
+ * run, or any run with `HACK_DAEMON_AUTOSTART_DISABLE=1`, skips the whole
+ * repair through {@link resolveDaemonAutostartAccess}, in interactive and
+ * non-interactive mode alike, before it prompts or runs anything. It notes the
+ * skip with the reason and the command to run instead.
+ */
 async function maybeRepairHackd(): Promise<void> {
   const report = await resolveDaemonReportForDoctorFix();
   if (report.status === "running") {
+    return;
+  }
+
+  const autostart = resolveDaemonAutostartAccess();
+  if (!autostart.allowed) {
+    note(
+      [
+        `Skipped hackd repair (hackd is ${report.status}): ${autostart.message}`,
+        `To repair it yourself, run: ${hackdRepairCommand(report.status)}`,
+      ].join("\n"),
+      "doctor fix"
+    );
     return;
   }
 
@@ -4256,6 +4427,19 @@ async function maybeRepairHackd(): Promise<void> {
   if (okStart) {
     await runHackSubcommand({ args: ["daemon", "start"] });
   }
+}
+
+/** The explicit commands that perform the {@link maybeRepairHackd} steps. */
+function hackdRepairCommand(
+  status: ReturnType<typeof buildDaemonStatusReport>["status"]
+): string {
+  if (status === "incompatible") {
+    return "hack daemon restart";
+  }
+  if (status === "stale") {
+    return "hack daemon clear && hack daemon start";
+  }
+  return "hack daemon start";
 }
 
 /**

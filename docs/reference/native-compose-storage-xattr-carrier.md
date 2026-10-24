@@ -409,7 +409,9 @@ Budgets are layered and all finite:
   1,000–600,000 ms). It is never derived from `HACK_COMPOSE_STARTUP_TIMEOUT_MS`,
   so a short start budget cannot starve a helper proof and a long one does not
   lengthen it.
-- In a native `up` or `restart` start phase, guard proof time is excluded from
+- In a native `up` or `restart` start phase, guard proof time (each carrier's
+  creation and witness verification, not the guard's surrounding freshness
+  checks and saved-state reads) is excluded from
   the start deadline but capped in total at 16 × the storage budget or 1 hour,
   whichever is smaller. A guard proof that would start after the cap is spent is
   refused before it runs, and one that ends past it refuses as `storage-budget`.
@@ -424,10 +426,13 @@ Budgets are layered and all finite:
   (`performance.now`), so a wall-clock step cannot shorten or extend it.
   Exhaustion refuses as `probe-budget`.
 
-A refusal that finds its carrier's own deadline passed (and the carrier not
-cancelled) reports the closed effect reason `storage-budget`; a probe clipped to
-the remaining budget times out exactly at that end. Cancellation keeps
-`probe-cancel`. The reason changes no check, retention or recovery rule.
+A timeout, budget or otherwise unclassified refusal that finds its carrier's own
+deadline passed (and the carrier not cancelled) reports the closed effect reason
+`storage-budget`; a probe clipped to the remaining budget times out exactly at
+that end. A refusal with its own observed reason, such as a helper policy
+refusal, keeps that reason even when it is caught after the deadline, including
+when a recorded command replaces it with its fixed command refusal. Cancellation
+keeps `probe-cancel`. The reason changes no check, retention or recovery rule.
 
 Only the original in-memory writer can advance its exact sequence. Publication
 failure or deadline permanently invalidates that writer and retains its private

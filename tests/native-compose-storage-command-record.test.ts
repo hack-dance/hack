@@ -17,7 +17,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { markNativeComposeStorageBudgetRefusal } from "../src/lib/native-compose-effect-diagnostics.ts";
+import {
+  markNativeComposeStorageBudgetRefusal,
+  nativeComposeEffectRefusal,
+  retainNativeComposeEffectRefusal,
+} from "../src/lib/native-compose-effect-diagnostics.ts";
 import { createNativeComposeProbe } from "../src/lib/native-compose-ownership.ts";
 import {
   holdDirectory,
@@ -34,6 +38,7 @@ import {
   settleNativeComposeStorageCommand,
 } from "../src/lib/native-compose-storage-command-record.ts";
 import {
+  nativeComposeStorageCarrierBudgetReason,
   nativeComposeStorageCarrierReason,
   runNativeComposeStorageDockerCommand,
 } from "../src/lib/native-compose-storage-witness-docker.ts";
@@ -587,6 +592,70 @@ test.each([
       );
       expect(nativeComposeStorageCarrierReason(caught)).toBe(reason);
       expect(existsSync(marker)).toBe(false);
+    })(),
+  30_000
+);
+test.each([
+  ["before arming", 1],
+  ["after arming", 2],
+  ["after the stopped child is published", 3],
+] as const)(
+  "a helper policy refusal %s keeps its own reason after the carrier deadline",
+  (_, failingCall) =>
+    ownedCase(async () => {
+      const f = await fixture(),
+        marker = join(f.root, "effect"),
+        signal = new AbortController().signal,
+        deadline = Date.now() + 5000;
+      let calls = 0;
+      try {
+        const caught = await runNativeComposeStorageDockerCommand({
+          context: { signal, deadline },
+          files: f.files,
+          args: ["/bin/sh", "-c", 'printf complete > "$1"', "owned", marker],
+          timeoutMs: 5000,
+          beforeSpawn: () => {},
+          // The carrier's admission re-inspects the helper; the chosen call
+          // observes a policy refusal with its own issued boundary.
+          assertAdmitted: async () => {
+            calls += 1;
+            if (calls === failingCall) {
+              const policy = new Error(
+                "Native storage xattr proof refused; values omitted."
+              );
+              retainNativeComposeEffectRefusal(policy, {
+                stage: "storage-helper-policy",
+                reason: "helper-host-policy",
+              });
+              throw policy;
+            }
+          },
+          originalCommand: { owner: f.owner, kind: "create", carrier: null },
+        }).catch((error: unknown) => error);
+        expect(caught).toBeInstanceOf(Error);
+        expect((caught as Error).message).toContain("values omitted");
+        expect(calls).toBe(failingCall);
+        expect(existsSync(marker)).toBe(false);
+        // The replaced command refusal keeps the first issued boundary.
+        expect(nativeComposeEffectRefusal(caught)).toEqual({
+          stage: "storage-helper-policy",
+          reason: "helper-host-policy",
+        });
+        // Caught after the carrier deadline (fake clock), it still names the
+        // policy failure, never the storage budget.
+        expect(
+          nativeComposeStorageCarrierBudgetReason({
+            error: caught,
+            signal,
+            deadline,
+            now: () => deadline + 1,
+          })
+        ).toBe("helper-host-policy");
+      } finally {
+        if (!nativeComposeStorageCommandOwnerConfirmed(f.owner)) {
+          retained.add(f.root);
+        }
+      }
     })(),
   30_000
 );

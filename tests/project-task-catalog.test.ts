@@ -17,7 +17,10 @@ import { dirname, join, resolve } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { targetRefusalEnvelope } from "../src/lib/target-inspect.ts";
+import {
+  inspectTarget,
+  targetRefusalEnvelope,
+} from "../src/lib/target-inspect.ts";
 import {
   inspectTask,
   listTasks,
@@ -39,6 +42,7 @@ import {
   buildTaskListArgs,
   createMcpServer,
 } from "../src/mcp/server.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 // ---------------------------------------------------------------------------
@@ -358,12 +362,20 @@ async function writeAlpha(alpha: string, canary: string): Promise<void> {
  * Run git in a fixture project with no global or system config, a private
  * HOME and only PATH/TMPDIR inherited.
  */
-async function git(cwd: string, args: readonly string[]): Promise<string> {
+async function git(
+  cwd: string,
+  args: readonly string[],
+  env: Readonly<Record<string, string>> = {}
+): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
     env: privateCliEnv({
       root: dirname(cwd),
-      env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+      env: {
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+        ...env,
+      },
     }),
     stdin: "ignore",
     stdout: "pipe",
@@ -1040,6 +1052,71 @@ describe("catalog domain", () => {
     });
   });
 
+  test(
+    "HACK-1331: the tracked-pin query ignores the caller's GIT_* env",
+    async () => {
+      const { dir, registryPath } = await project("git-env");
+      const inspect = (taskId: string) =>
+        inspectTask({ cwd: dir, selector: {}, registryPath, taskId });
+      // An alternate index that does track the gitignored secrets file.
+      const altIndex = join(fixture.root, "git-env-alt-index");
+      await writeFile(altIndex, await readFile(join(dir, ".git", "index")));
+      await git(dir, ["add", "--force", "config/secrets.json"], {
+        GIT_INDEX_FILE: altIndex,
+      });
+      // Positive control: through that index the file reads as tracked.
+      expect(
+        await git(dir, ["ls-files", "--cached", "--", "config/secrets.json"], {
+          GIT_INDEX_FILE: altIndex,
+        })
+      ).toBe("config/secrets.json\n");
+      const withCallerEnv = async <T>(
+        env: Readonly<Record<string, string>>,
+        run: () => Promise<T>
+      ): Promise<T> => {
+        const saved = new Map<string, string | undefined>();
+        for (const [key, value] of Object.entries(env)) {
+          saved.set(key, process.env[key]);
+          process.env[key] = value;
+        }
+        try {
+          return await run();
+        } finally {
+          for (const [key, value] of saved) {
+            restoreEnv(key, value);
+          }
+        }
+      };
+      // A caller's index override cannot make an untracked file pinnable.
+      const untracked = await withCallerEnv(
+        {
+          GIT_INDEX_FILE: altIndex,
+          GIT_DIR: join(dir, ".git"),
+          GIT_WORK_TREE: dir,
+        },
+        () => inspect("untracked-secret")
+      );
+      expect(untracked).toMatchObject({
+        ok: false,
+        error: { detail: { reason: "input_path_invalid" } },
+      });
+      expect(JSON.stringify(untracked)).not.toContain(
+        sha256(canonical("fixture-value"))
+      );
+      // A caller's GIT_DIR elsewhere does not hide the checkout's own index.
+      const reviewed = await withCallerEnv(
+        {
+          GIT_DIR: join(fixture.root, "git-env-not-a-repository"),
+          GIT_INDEX_FILE: join(fixture.root, "git-env-missing-index"),
+        },
+        () => inspect("lint")
+      );
+      expect(reviewed.ok).toBe(true);
+      // Several Git fixture inspections; close to Bun's 5 s default alone.
+    },
+    CASE_TIMEOUT_MS
+  );
+
   test("a catalog or config edit during the read is refused", async () => {
     const { dir, registryPath } = await project("racing");
     const catalog = join(dir, ".hack", "tasks.json");
@@ -1243,6 +1320,415 @@ describe("recipe grammar", () => {
     }
   });
 
+  // HACK-1331: each refused form names the rule that catches it; the paired
+  // accepted forms prove the rule is scoped, not a blanket refusal.
+  const gapCases: readonly {
+    readonly rule: string;
+    readonly refused: readonly (readonly string[])[];
+    readonly accepted: readonly (readonly string[])[];
+  }[] = [
+    {
+      rule: "SQL clients given a statement string",
+      refused: [
+        ["psql", "-c", "select 1"],
+        ["exec", "psql", "--command=select 1"],
+        ["psql", "-Atc", "\\! id"],
+        ["psql", "--comm", "select 1"],
+        ["mysql", "-e", "system id"],
+        ["mysql", "--execute=select 1"],
+        ["mysql", "-Bse", "select 1"],
+        ["mysql", "--exec", "select 1"],
+        ["mysql", "--init-command=select 1", "db"],
+        ["mariadb", "-e", "select 1"],
+        // MariaDB's my_getopt still accepts a unique prefix.
+        ["mariadb", "--exec", "select 1"],
+        ["mariadb", "--exec=select 1"],
+        ["duckdb", "-c", "select 1"],
+        ["duckdb", "-cmd", "select 1", "data.duckdb"],
+        // The sqlite3 parser DuckDB shares strips one leading dash.
+        ["duckdb", "--c", ".shell id"],
+        ["duckdb", "--s", "select 1"],
+        ["duckdb", "--cmd", "select 1", "data.duckdb"],
+        ["sqlite3", "--cmd", ".shell id", "app.db"],
+      ],
+      accepted: [
+        ["psql", "-f", "scripts/x.sql"],
+        ["psql", "--csv", "-f", "scripts/x.sql"],
+        ["mysql", "--batch", "app"],
+        ["mariadb", "app"],
+        ["duckdb", "-csv", "-json", "data.duckdb"],
+      ],
+    },
+    {
+      // psql opens an `-o`/`--output` value starting with `|` with popen
+      // while it parses options, before it connects.
+      rule: "psql -o/--output piped to a command",
+      refused: [
+        ["psql", "-o", "|id", "-f", "scripts/x.sql"],
+        ["psql", "-o|id"],
+        ["psql", "--output=|id"],
+        ["psql", "--output", "|id"],
+        ["psql", "--out=|id"],
+        ["psql", "-qo|id"],
+        ["psql", "-qo", "|id"],
+        ["exec", "psql", "-At", "-o", "|id", "db"],
+      ],
+      accepted: [
+        ["psql", "-o", "out.txt", "-f", "scripts/x.sql"],
+        ["psql", "--output=out.txt", "-f", "scripts/x.sql"],
+        ["psql", "-qo", "out.txt", "-f", "scripts/x.sql"],
+        // `-F` takes the `|`, and `-L`/`-f` open files with plain fopen.
+        ["psql", "-F|", "-f", "scripts/x.sql"],
+        ["psql", "-L", "|log", "-f", "scripts/x.sql"],
+      ],
+    },
+    {
+      // my_getopt strips `loose-` prefixes (repeatedly) and reads `_` as
+      // `-` before looking an option up; `--init-command` runs at connect.
+      rule: "mysql/mariadb my_getopt spellings of SQL options",
+      refused: [
+        ["mysql", "--loose-execute", "select 1"],
+        ["mysql", "--init_command=select 1"],
+        ["mariadb", "--loose-execute=select 1"],
+        ["mariadb", "--loose_init-command", "select 1", "db"],
+        ["mysql", "--loose-loose-execute=select 1"],
+        ["mysql", "--LOOSE_Execute=select 1"],
+        ["mariadb", "--init-command-add=select 1", "db"],
+        ["mariadb", "--loose-init_command_add=select 1", "db"],
+        ["mysql", "--init-command", "select 1", "db"],
+      ],
+      accepted: [
+        ["mysql", "--loose-skip-column-names", "db"],
+        ["mysql", "--default_character_set=utf8mb4", "db"],
+        ["mariadb", "--skip-pager", "db"],
+        // `skip-`/`enable-` replace the value with 0/1: no SQL reaches it.
+        ["mysql", "--skip-execute", "db"],
+      ],
+    },
+    {
+      // Only the inline letter selects inline code; an attached value of
+      // another option (`-hlocalhost`) is not a cluster that contains it.
+      rule: "attached short values end the cluster scan",
+      refused: [
+        ["psql", "-cselect 1"],
+        ["psql", "-Xcselect 1"],
+        ["psql", "-1c", "select 1"],
+        ["psql", "-Atc", "select 1"],
+        ["mysql", "-eselect 1"],
+        ["mysql", "-BNe", "select 1"],
+        ["mariadb", "-1e", "select 1"],
+        ["python3", "-cprint(1)", "scripts/x.py"],
+        ["python3", "-Ic", "print(1)"],
+        ["python3", "-Bc", "print(1)", "scripts/x.py"],
+      ],
+      accepted: [
+        ["psql", "-hlocalhost", "-f", "scripts/x.sql"],
+        ["psql", "-Ucustomer", "-dcustomers", "-f", "scripts/x.sql"],
+        ["psql", "-Fc", "-f", "scripts/x.sql"],
+        ["psql", "-vcolor=1", "-f", "scripts/x.sql"],
+        ["mysql", "-uroot", "-psecret", "-Dexample", "db"],
+        ["mariadb", "-hexample.com", "-P3306", "db"],
+        ["python3", "-mcompileall", "src"],
+        ["python3", "-Ximporttime", "scripts/x.py"],
+        ["python3", "-Wdefault", "scripts/x.py"],
+      ],
+    },
+    {
+      rule: "Python launcher names and uv run module mode",
+      refused: [
+        ["python3.13t", "-c", "print(1)"],
+        ["python3t", "-c", "print(1)"],
+        ["pythonw", "-c", "print(1)"],
+        ["pythonw3.13t.exe", "-m", "code"],
+        ["python3.12", "-m", "code"],
+        ["python3.13t", "-m", "code"],
+        ["python3.12d", "-c", "print(1)"],
+        ["uv", "run", "-m", "code"],
+        ["uv", "run", "--module", "asyncio"],
+        ["uv", "run", "-qm", "IPython"],
+        ["uv", "run", "-m", "--with", "ipython", "IPython"],
+        ["uv", "run", "-m", "idlelib.idle"],
+        ["uv", "run", "-"],
+        // Debian debug and python.org macOS Intel launcher names.
+        ["python3.12-dbg", "-c", "print(1)"],
+        ["python3-dbg", "-m", "code"],
+        ["python3-intel64", "-c", "print(1)"],
+        ["/usr/local/bin/python3.13-intel64", "-m", "code"],
+      ],
+      accepted: [
+        ["python3.13t", "scripts/x.py"],
+        ["python3-intel64", "scripts/x.py"],
+        ["python3.12-dbg", "-m", "pytest"],
+        ["pythonw", "scripts/x.py"],
+        ["uv", "run", "-m", "pytest"],
+        ["uv", "run", "--module", "mypy", "src"],
+        ["uv", "run", "pytest", "-x"],
+        ["uv", "sync", "--frozen"],
+      ],
+    },
+    {
+      rule: "sqlite3/duckdb SQL operand after the database",
+      refused: [
+        ["sqlite3", "app.db", "select 1"],
+        ["exec", "sqlite3", "-csv", "app.db", ".shell id"],
+        ["sqlite3", "-separator", ",", "app.db", "select 1"],
+        ["sqlite3", "--", "app.db", "select 1"],
+        ["sqlite3", "-cmd", ".shell id", "app.db"],
+        ["duckdb", "data.duckdb", "select 1"],
+      ],
+      accepted: [
+        ["sqlite3", "app.db"],
+        ["sqlite3", "-csv", "-header", "app.db"],
+        ["sqlite3", "-separator", ",", "app.db"],
+        ["duckdb", "-f", "scripts/x.sql", "data.duckdb"],
+        // A two-dash value option still consumes its value.
+        ["sqlite3", "--separator", ",", "app.db"],
+        ["duckdb", "--f", "scripts/x.sql", "data.duckdb"],
+      ],
+    },
+    {
+      rule: "duckdb -storage-version takes a value",
+      refused: [
+        ["duckdb", "-storage-version", "v1.2.0", "data.duckdb", "select 1"],
+      ],
+      accepted: [["duckdb", "-storage-version", "v1.2.0", "data.duckdb"]],
+    },
+    {
+      rule: "Python modules that start a REPL or evaluate an argument",
+      refused: [
+        ["python3", "-m", "code"],
+        ["exec", "python", "-u", "-m", "code"],
+        ["python3", "-um", "code"],
+        ["python3", "-mcode"],
+        // `-mcode` is also a `-c` cluster; `-mpdb` has no inline letter.
+        ["python3", "-mpdb", "scripts/x.py"],
+        ["python3", "-m", "idlelib"],
+        ["python3", "-m", "idlelib.idle"],
+        ["python3", "-m", "asyncio"],
+        ["python3", "-m", "timeit", "__import__('os').system('id')"],
+        ["python3", "-m", "pdb", "scripts/x.py"],
+        ["python3", "-m", "cProfile", "-m", "code"],
+        ["pypy3", "-m", "code"],
+      ],
+      accepted: [
+        ["python3", "-m", "pytest"],
+        ["python3", "-m", "codecs"],
+        ["python3", "-um", "pytest", "tests"],
+        ["python3", "-W", "ignore", "-m", "mypy", "src"],
+      ],
+    },
+    {
+      // An attached `-m<module>` is a module, not a missing script.
+      rule: "an attached -m module is the program's operand",
+      refused: [
+        ["python3", "-mcode"],
+        ["python3", "-m"],
+        // `-X` takes `importtime`; no module or script, so stdin.
+        ["python3", "-Ximporttime"],
+        // A value option's value is never `-m`: each reads stdin.
+        ["python3", "-W", "-m", "--"],
+        ["python3", "-W", "-m", "-X", "dev"],
+        ["python3", "-X", "-m", "-X", "dev"],
+        ["python3", "-X", "-mpytest"],
+        ["python3", "-bW", "-mpytest"],
+        ["python3", "--check-hash-based-pycs", "-m", "-X", "dev"],
+        ["python3", "--check-hash-based-pycs", "-mpytest"],
+        // Attached values: `-W-m` is `-W` given `-m`.
+        ["python3", "-W-m", "--"],
+        ["python3", "-Xdev", "-W-mpytest"],
+        // A separate module name must not look like an option.
+        ["python3", "-Wdefault", "-m", "-X", "dev"],
+        ["python3", "-m", "--"],
+      ],
+      accepted: [
+        ["python3", "-mpytest"],
+        ["python3", "-Bmpytest", "tests"],
+        ["python3", "-mcompileall"],
+        ["python3", "-W", "ignore", "-mpytest"],
+        ["python3", "-Wignore", "-mpytest"],
+        ["python3", "-X", "dev", "-mpytest"],
+        ["python3", "-bW", "ignore", "-mpytest"],
+        ["python3", "--check-hash-based-pycs", "always", "-mpytest"],
+        ["python3", "-X", "dev", "-m", "pytest"],
+      ],
+    },
+    {
+      // runpy, trace, cProfile, profile, profiling and unittest run a
+      // module, script or callable named in their own arguments.
+      rule: "Python trampoline modules and their targets",
+      refused: [
+        ["python3", "-m", "runpy", "timeit", "-n1", "print(1)"],
+        ["python3", "-m", "runpy", "code"],
+        ["python3", "-mrunpy", "asyncio"],
+        ["python3", "-m", "runpy", "runpy", "timeit", "print(1)"],
+        [
+          "python3",
+          "-m",
+          "trace",
+          "--listfuncs",
+          "--module",
+          "timeit",
+          "-n1",
+          "print(1)",
+        ],
+        ["python3", "-m", "trace", "--module", "code"],
+        ["python3", "-m", "trace", "--module", "--count", "timeit"],
+        // `-m` is a flag here; the module is a later operand.
+        ["python3", "-m", "cProfile", "-m", "-s", "time", "timeit", "x"],
+        ["python3", "-m", "profile", "-m", "-s", "time", "code"],
+        ["python3.15", "-m", "profiling.tracing", "-m", "-s", "time", "code"],
+        ["python3", "-m", "unittest", "code.interact"],
+        ["python3", "-m", "unittest", "builtins.breakpoint"],
+        ["python3", "-m", "unittest", "sys.breakpointhook"],
+        ["uv", "run", "-m", "runpy", "timeit", "print(1)"],
+        ["uv", "run", "-m", "unittest", "builtins.breakpoint"],
+      ],
+      accepted: [
+        ["python3", "-m", "runpy", "pytest", "tests"],
+        ["python3", "-m", "trace", "--count", "scripts/x.py"],
+        ["python3", "-m", "cProfile", "-o", "out.prof", "scripts/x.py"],
+        ["python3", "-m", "unittest", "discover", "-s", "tests"],
+        ["python3", "-m", "unittest", "tests.test_codec"],
+      ],
+    },
+    {
+      rule: "git clone -u and every --upload-pack spelling",
+      refused: [
+        ["git", "clone", "-u", "id", "url", "dir"],
+        ["exec", "git", "clone", "-u/tmp/x.sh", "url"],
+        ["git", "clone", "-qu", "/tmp/x.sh", "url"],
+        ["git", "clone", "-qu/tmp/x.sh", "url"],
+        ["git", "--git-dir", "x", "clone", "-u", "id", "url"],
+        ["git", "--attr-source", "HEAD", "clone", "-u", "id", "url"],
+        // A global option this table does not know cannot hide `clone`.
+        ["git", "--future-global", "value", "clone", "-u", "id", "url"],
+        ["git", "clone", "--upload-pack=id", "url"],
+        ["git", "clone", "--upl=id", "url"],
+        ["git", "fetch", "--upload", "id", "origin"],
+        ["git", "ls-remote", "--upload-p=id", "origin"],
+        ["git", "push", "--rec=id", "origin"],
+        ["git", "rebase", "--exe", "id"],
+        ["git", "rebase", "-x/tmp/x.sh"],
+      ],
+      accepted: [
+        ["git", "clone", "url", "dir"],
+        ["git", "clone", "--quiet", "--depth", "1", "url"],
+        ["git", "push", "-u", "origin", "main"],
+        ["git", "add", "-u"],
+        // `clone` here is the `--attr-source` tree-ish, not the subcommand.
+        ["git", "--attr-source", "clone", "add", "-u"],
+        ["git", "fetch", "--update-shallow", "origin"],
+        ["git", "rebase", "--continue"],
+      ],
+    },
+    {
+      rule: "git config and -c with ! alias values",
+      refused: [
+        ["git", "config", "alias.x", "!id"],
+        ["exec", "git", "config", "--global", "alias.x", " !id"],
+        ["git", "config", "set", "alias.x", "!id"],
+        ["git", "config", "alias.x", "-c alias.y=!id y"],
+        ["git", "-c", "alias.x=!id", "x"],
+        ["git", "clone", "--config", "core.fsmonitor=/tmp/x.sh", "url"],
+        ["git", "clone", "--conf=alias.x=x", "url"],
+      ],
+      accepted: [
+        ["git", "config", "alias.st", "status"],
+        ["git", "config", "--get", "user.name"],
+        ["git", "log", "HEAD^!"],
+      ],
+    },
+    {
+      // `git-<sub>` (also by an absolute git-core path) is `git <sub>`.
+      rule: "dashed Git builtins",
+      refused: [
+        ["/usr/lib/git-core/git-clone", "-u", "id", "url", "dir"],
+        ["git-clone", "-qu/tmp/x.sh", "url"],
+        ["git-clone.exe", "--upl=id", "url"],
+        ["git-config", "alias.x", "!id"],
+        ["git-ls-remote", "--upload-pack=id", "r"],
+        ["git-fetch-pack", "--exec=id", "r"],
+        ["exec", "git-submodule", "foreach", "id"],
+        ["git-rebase", "-x", "id"],
+      ],
+      accepted: [
+        ["git-clone", "url", "dir"],
+        ["/usr/lib/git-core/git-status", "--short"],
+        ["git-push", "-u", "origin", "main"],
+        ["git-config", "alias.st", "status"],
+      ],
+    },
+    {
+      // A `<sub>--helper` plumbing command, dashed (also by an absolute
+      // git-core path or with `.exe`) or under `git`, is `git <sub>`.
+      rule: "Git plumbing helpers read as their porcelain",
+      refused: [
+        ["git-bisect--helper", "--bisect-run", "id"],
+        ["/usr/lib/git-core/git-bisect--helper", "run", "id"],
+        ["/usr/libexec/git-core/git-bisect--helper.exe", "--bisect-run", "id"],
+        ["exec", "Git-Bisect--Helper", "--bisect-run", "id"],
+        ["git", "bisect--helper", "--bisect-run", "id"],
+        ["git", "--git-dir", "x", "Bisect--Helper", "run", "id"],
+        ["/usr/lib/git-core/git-submodule--helper", "foreach", "id"],
+        ["git-submodule--helper.exe", "foreach", "--recursive", "id"],
+        ["git", "submodule--helper", "foreach", "id"],
+      ],
+      accepted: [
+        ["git-submodule--helper", "status"],
+        ["/usr/lib/git-core/git-submodule--helper", "list"],
+        ["git", "submodule--helper", "name", "path"],
+        ["git-difftool--helper", "a.txt", "b.txt"],
+        ["git", "log", "--grep=bisect--helper"],
+        // Only a whole `<sub>--helper` word is a helper, not a file name.
+        ["git", "add", "bisect--helper.txt"],
+      ],
+    },
+  ];
+
+  for (const gap of gapCases) {
+    test(`HACK-1331: ${gap.rule}`, () => {
+      for (const argv of gap.refused) {
+        expect({ argv, inline: isInlineCommandArgv(argv) }).toEqual({
+          argv,
+          inline: true,
+        });
+      }
+      for (const argv of gap.accepted) {
+        expect({ argv, inline: isInlineCommandArgv(argv) }).toEqual({
+          argv,
+          inline: false,
+        });
+      }
+    });
+  }
+
+  test("HACK-1331: documented fail-closed collateral stays refused", () => {
+    // `-C` matches `-c` (case-folded), so `git -C dir status` is refused;
+    // a recipe must set the Compose workdir instead.
+    expect(isInlineCommandArgv(["git", "-C", "dir", "status"])).toBe(true);
+    // Any operand named `clone` scopes `-u` to it, so a branch or remote
+    // named `clone` makes `git push -u` refused too.
+    expect(isInlineCommandArgv(["git", "push", "-u", "origin", "clone"])).toBe(
+      true
+    );
+    // Git's value-taking short options depend on the subcommand
+    // (`rebase -mx cmd`), so an attached value containing `c`, `x` or `u`
+    // is refused; the value as its own argument passes.
+    expect(isInlineCommandArgv(["git", "log", "-Scache"])).toBe(true);
+    expect(isInlineCommandArgv(["git", "commit", "-mcleanup"])).toBe(true);
+    expect(isInlineCommandArgv(["git", "rebase", "-mx", "id"])).toBe(true);
+    expect(isInlineCommandArgv(["git", "log", "-S", "cache"])).toBe(false);
+    expect(isInlineCommandArgv(["git", "commit", "-m", "cleanup"])).toBe(false);
+    // An abbreviated name is rejected by MySQL 8 itself; refusing it is
+    // fail-closed for `mysql` (MariaDB still accepts it).
+    expect(isInlineCommandArgv(["mysql", "--exec", "select 1"])).toBe(true);
+    // A trampoline's options are not modeled, so a script argument named
+    // like a REPL module is refused.
+    expect(
+      isInlineCommandArgv(["python3", "-m", "cProfile", "scripts/x.py", "code"])
+    ).toBe(true);
+  });
+
   test("effects must be covered by required capabilities", () => {
     const base = recipe({ id: "ok" });
     const pinAccepted = (path: string): boolean =>
@@ -1397,19 +1883,95 @@ describe("MCP adapter re-validation", () => {
   });
 });
 
+/**
+ * Runtime instance named by the reviewed-recipe check. Recipes are judged
+ * against the checkout's files, Compose services and env selection, never its
+ * instance. But every catalog result embeds one exact `hack.target.v0`
+ * target, and a detached linked worktree (how CI and agent checkouts are often
+ * made, with `git worktree add --detach`) has no implicit instance, so it is
+ * refused as `detached_checkout`. Naming the instance keeps the check
+ * independent of how the checkout was made, without weakening that refusal.
+ */
+const REVIEW_INSTANCE = "task-catalog-review";
+
+/** The reviewed-recipe check for one checkout root, on the base env scope. */
+function reviewCheckoutCatalog(input: {
+  readonly root: string;
+  readonly registryPath: string;
+}): Promise<TaskListEnvelope> {
+  return listTasks({
+    cwd: input.root,
+    selector: { path: input.root, branch: REVIEW_INSTANCE, env: "base" },
+    registryPath: input.registryPath,
+  });
+}
+
+async function writeEmptyRegistry(name: string): Promise<string> {
+  const registryPath = join(fixture.root, name);
+  await writeFile(
+    registryPath,
+    `${JSON.stringify({ version: 1, projects: [] })}\n`
+  );
+  return registryPath;
+}
+
+/**
+ * A committed one-recipe project plus a detached linked worktree of it, both
+ * inside the fixture root. Returns the linked worktree's root.
+ */
+async function writeDetachedWorktree(): Promise<string> {
+  const primary = join(fixture.root, "detached-primary");
+  const linked = join(fixture.root, "detached-linked");
+  await mkdir(join(primary, ".hack"), { recursive: true });
+  await mkdir(join(primary, "scripts"), { recursive: true });
+  await writeFile(
+    join(primary, ".hack", "docker-compose.yml"),
+    [
+      "services:",
+      "  tools:",
+      "    image: busybox",
+      "    working_dir: /work",
+      "    profiles: [tools]",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    join(primary, ".hack", "hack.config.json"),
+    `${JSON.stringify({ name: "detached" })}\n`
+  );
+  await writeFile(join(primary, "scripts", "run-tool.sh"), RUN_TOOL);
+  await writeFile(
+    join(primary, ".hack", "tasks.json"),
+    `${JSON.stringify(
+      { schema: "hack.tasks.v0", tasks: [recipe({ id: "lint" })] },
+      null,
+      2
+    )}\n`
+  );
+  await git(primary, ["init", "--quiet"]);
+  await git(primary, ["add", "--all"]);
+  await git(primary, [
+    "-c",
+    "user.name=fixture",
+    "-c",
+    "user.email=fixture@hack.invalid",
+    "commit",
+    "--quiet",
+    "--no-gpg-sign",
+    "-m",
+    "fixture",
+  ]);
+  await git(primary, ["worktree", "add", "--quiet", "--detach", linked]);
+  return linked;
+}
+
 describe("repository catalog", () => {
   test(
     "the checked-in .hack/tasks.json recipes are all reviewed",
     async () => {
-      const registryPath = join(fixture.root, "repo-registry.json");
-      await writeFile(
-        registryPath,
-        `${JSON.stringify({ version: 1, projects: [] })}\n`
-      );
-      const result = await listTasks({
-        cwd: REPO_ROOT,
-        selector: { path: REPO_ROOT, env: "base" },
-        registryPath,
+      const result = await reviewCheckoutCatalog({
+        root: REPO_ROOT,
+        registryPath: await writeEmptyRegistry("repo-registry.json"),
       });
       if (!result.ok) {
         throw new Error(JSON.stringify(result));
@@ -1420,6 +1982,70 @@ describe("repository catalog", () => {
         [0, "models", "reviewed"],
         [1, "check", "reviewed"],
         [2, "rust-check", "reviewed"],
+      ]);
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
+    "the reviewed-recipe check runs in a detached linked worktree, where implicit instance selection stays refused",
+    async () => {
+      const linked = await writeDetachedWorktree();
+      const registryPath = await writeEmptyRegistry("detached-registry.json");
+      // The fixture really is a detached linked worktree.
+      expect(
+        (await git(linked, ["rev-parse", "--abbrev-ref", "HEAD"])).trim()
+      ).toBe("HEAD");
+
+      const reviewed = await reviewCheckoutCatalog({
+        root: linked,
+        registryPath,
+      });
+      if (!reviewed.ok) {
+        throw new Error(JSON.stringify(reviewed));
+      }
+      expect(statuses(reviewed.data.tasks)).toEqual([[0, "lint", "reviewed"]]);
+      expect(reviewed.data.target.checkout.kind).toBe("linked");
+      expect(reviewed.data.target.checkout.git_branch).toBeNull();
+      expect(reviewed.data.target.instance).toMatchObject({
+        branch: REVIEW_INSTANCE,
+        source: "explicit",
+      });
+
+      // Without a named instance the catalog, the target inspector and the
+      // CLI refuse closed: nothing falls back to the base instance.
+      const detached = targetRefusalEnvelope({ reason: "detached_checkout" });
+      const selector = { path: linked, env: "base" };
+      expect<unknown>(
+        await listTasks({ cwd: linked, selector, registryPath })
+      ).toEqual(detached);
+      expect<unknown>(
+        await inspectTask({
+          cwd: linked,
+          selector,
+          registryPath,
+          taskId: "lint",
+        })
+      ).toEqual(detached);
+      expect(
+        await inspectTarget({ cwd: linked, selector, registryPath })
+      ).toEqual(detached);
+      const implicit = await runCli(
+        buildTaskListArgs({ path: linked, env: "base" })
+      );
+      expect(implicit.exitCode).toBe(1);
+      expect(implicit.envelope).toEqual(detached);
+      const named = await runCli(
+        buildTaskListArgs({
+          path: linked,
+          branch: REVIEW_INSTANCE,
+          env: "base",
+        })
+      );
+      expect(named.exitCode).toBe(0);
+      const parsed = parseTaskListEnvelope(named.envelope);
+      expect(parsed?.ok && statuses(parsed.data.tasks)).toEqual([
+        [0, "lint", "reviewed"],
       ]);
     },
     CASE_TIMEOUT_MS

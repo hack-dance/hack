@@ -67,9 +67,35 @@ export function composeEnvReferenceName(opts: {
     : `${COMPOSE_ENV_REFERENCE_PREFIX}${digest}`;
 }
 
+/**
+ * Deterministic Compose interpolation variable shared by every service whose
+ * value for `key` comes from the global scope.
+ *
+ * Like {@link composeEnvReferenceName}, the name depends only on the key. Its
+ * digest input `\0global\0<key>` differs from every per-service input
+ * `<service>\0<key>`, including a service named `global`: they could only
+ * meet for an empty service name and a key holding a NUL, which neither
+ * Compose nor an environment allows.
+ */
+export function composeEnvGlobalReferenceName(opts: {
+  readonly key: string;
+}): string {
+  const digest = createHash("sha256")
+    .update(`\0global\0${opts.key}`)
+    .digest("hex")
+    .slice(0, 12)
+    .toUpperCase();
+  return ENV_NAME_PATTERN.test(opts.key)
+    ? `${COMPOSE_ENV_REFERENCE_PREFIX}${digest}_${opts.key}`
+    : `${COMPOSE_ENV_REFERENCE_PREFIX}${digest}`;
+}
+
 const COMPOSE_ENV_REFERENCE_NAME = /^HACK_ENV_[0-9A-F]{12}(?:_|$)/;
 
-/** True for a name {@link composeEnvReferenceName} can produce. */
+/**
+ * True for a name {@link composeEnvReferenceName} or
+ * {@link composeEnvGlobalReferenceName} can produce.
+ */
 export function isComposeEnvReferenceName(name: string): boolean {
   return COMPOSE_ENV_REFERENCE_NAME.test(name);
 }
@@ -111,8 +137,38 @@ export type ComposeEnvReferenceOverride = {
 };
 
 /**
+ * Winning scope of each service's keys, as in the resolved env config's
+ * `effectiveMetadata`. Names and scope names only; never a value.
+ */
+export type ComposeEnvEffectiveScopes = Readonly<
+  Record<string, Readonly<Record<string, { readonly scope: string }>>>
+>;
+
+/**
  * Same service/key selection and order as {@link renderManagedComposeEnvOverride},
  * with every value replaced by a Compose interpolation reference. Pure; no I/O.
+ *
+ * With `effectiveScopes`, a key whose winning scope for a service is
+ * `global` uses one {@link composeEnvGlobalReferenceName} reference shared by
+ * every such service, so the Compose process environment grows with distinct
+ * values instead of services times keys (HACK-1317). A service missing from
+ * `serviceEnv` takes the global values and shares the same references. A key a
+ * service scope sets keeps its own {@link composeEnvReferenceName} reference.
+ * The choice follows the scope metadata (key names and scope names), with one
+ * guard that compares values: a key the metadata calls global whose value
+ * differs from the global value keeps its own reference, so a container
+ * always gets its own resolved value. The text never holds a value, but when
+ * the guard fires it does disclose one bit per service and key: that the
+ * service's value differs from the global value (not the value, its length,
+ * or any part of it). Metadata and values from one `resolveProjectEnvConfig`
+ * result come from the same traversal, so a key whose winning scope is
+ * `global` there always has the global value; the guard then never fires and
+ * the text depends only on names and scopes. It fires only for inconsistent
+ * inputs, where correctness of the container value wins over hiding that bit.
+ *
+ * Without `effectiveScopes`, every service gets its own reference for every
+ * key: the form Hack wrote before shared references, which adoption still
+ * recognizes in a saved generation.
  */
 export function renderComposeEnvReferenceOverride(opts: {
   readonly targetServices: readonly string[];
@@ -120,17 +176,36 @@ export function renderComposeEnvReferenceOverride(opts: {
   readonly serviceEnv: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
+  readonly effectiveScopes?: ComposeEnvEffectiveScopes;
 }): ComposeEnvReferenceOverride | null {
   const services: Record<
     string,
     { readonly environment: Readonly<Record<string, string>> }
   > = {};
   const env: Record<string, string> = {};
+  const sharing = opts.effectiveScopes !== undefined;
   for (const service of opts.targetServices) {
-    const values = opts.serviceEnv[service] ?? opts.globalEnv;
+    const scoped = opts.serviceEnv[service];
+    const values = scoped ?? opts.globalEnv;
+    const scopes =
+      scoped !== undefined &&
+      opts.effectiveScopes !== undefined &&
+      Object.hasOwn(opts.effectiveScopes, service)
+        ? opts.effectiveScopes[service]
+        : undefined;
     const environment: Record<string, string> = {};
     for (const [key, value] of Object.entries(values)) {
-      const name = composeEnvReferenceName({ service, key });
+      const fromGlobal =
+        sharing &&
+        Object.hasOwn(opts.globalEnv, key) &&
+        opts.globalEnv[key] === value &&
+        (scoped === undefined ||
+          (scopes !== undefined &&
+            Object.hasOwn(scopes, key) &&
+            scopes[key]?.scope === "global"));
+      const name = fromGlobal
+        ? composeEnvGlobalReferenceName({ key })
+        : composeEnvReferenceName({ service, key });
       environment[key] = `\${${name}}`;
       env[name] = value;
     }

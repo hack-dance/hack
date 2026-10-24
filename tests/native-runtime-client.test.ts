@@ -89,6 +89,31 @@ async function waitForFile(
 }
 
 /**
+ * Wait until a fixture's completion file holds exactly `expected`. A
+ * fixture's writeFileSync creates the file before it writes the bytes, so an
+ * existence wait can return while the file is still "" (HACK-1422).
+ */
+async function waitForFileText(
+  path: string,
+  expected: string,
+  budgetMs = HANDSHAKE_BUDGET_MS
+): Promise<void> {
+  const deadline = performance.now() + budgetMs;
+  for (;;) {
+    const file = Bun.file(path);
+    if ((await file.exists()) && (await file.text()) === expected) {
+      return;
+    }
+    if (performance.now() >= deadline) {
+      throw new Error(
+        `Fixture completion did not write its text within ${budgetMs} ms.`
+      );
+    }
+    await Bun.sleep(10);
+  }
+}
+
+/**
  * Wait until a fixture's pid handshake holds a complete pid. A fixture's
  * writeFileSync creates the file before it writes the digits, so a read that
  * only waited for existence can see "": Number("") is 0, and kill(0, 0)
@@ -409,11 +434,15 @@ bunTest.each([
     // The keeper holds the request's stdout/stderr until the test releases it,
     // so the request can only finish by bounding its drain. The bound is
     // measured from the stand-in's own exit (or the abort), never from spawn,
-    // so slow process startup under load cannot decide the outcome.
+    // so slow process startup under load cannot decide the outcome. Its
+    // completion write opens the empty-file window on every run, so the
+    // completion wait below must wait for the text, not for existence.
     const keeper = `import {existsSync,writeFileSync} from 'node:fs';
 writeFileSync(${JSON.stringify(holding)},String(process.pid));
 const cap=performance.now()+${KEEPER_RELEASE_CAP_MS};
 while(!existsSync(${JSON.stringify(release)})&&performance.now()<cap)await Bun.sleep(10);
+writeFileSync(${JSON.stringify(finished)},'');
+await Bun.sleep(${TORN_HANDSHAKE_GAP_MS});
 writeFileSync(${JSON.stringify(finished)},'finished');`;
     await Bun.write(
       runtime.binary,
@@ -490,7 +519,7 @@ ${mode === "abort" ? "await Bun.sleep(60_000);" : `(await import('node:fs')).wri
       controller.abort();
       await request.catch(() => undefined);
       await Bun.write(release, "release");
-      completed = await waitForFile(finished).then(
+      completed = await waitForFileText(finished, "finished").then(
         () => true,
         () => false
       );

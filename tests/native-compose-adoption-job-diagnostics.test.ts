@@ -4,6 +4,7 @@ import {
   HackCliError,
   renderCliResult,
 } from "../src/lib/cli-result.ts";
+import { LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES } from "../src/lib/native-compose-adoption-command.ts";
 import {
   legacyComposeOrderedError,
   legacyComposeOrderedRefusal,
@@ -277,15 +278,6 @@ test("completed-job CLI diagnostics name a fixed refusal message by closed token
       )
     ).toBe(`refusal=${token}`);
   }
-  expect(
-    refusal(
-      new HackCliError({
-        code: "E_CONFIG_INVALID",
-        message:
-          "Adopted Compose ownership or execution refused; original data is retained. Values omitted.",
-      })
-    )
-  ).toBe("refusal=adopted-refused");
   expect(refusal(new LegacyComposeAdoptionSelectionError())).toBe(
     "refusal=marker-adoption"
   );
@@ -311,4 +303,30 @@ test("completed-job CLI diagnostics name a fixed refusal message by closed token
   expect(messages.join("\n")).not.toContain("canary");
   expect(messages.join("\n")).not.toContain("ENOTDIR");
   expect(messages.join("\n")).not.toContain("values omitted");
+});
+
+// The adopted command's own fixed messages are imported, never copied, so a
+// wording change cannot silently turn either token into `other` (HACK-1432).
+test.each([
+  ["refused", "adopted-refused"],
+  ["cancelled", "adopted-cancelled"],
+] as const)("completed-job CLI diagnostics name the adopted command's %s message by its own token", (kind, token) => {
+  const messages: string[] = [];
+  const diagnostic = diagnostics(messages);
+  diagnostic.cliOutcome({
+    exitCode: 1,
+    timedOut: false,
+    stdout: renderCliResult({
+      result: errorResultFromUnknown({
+        error: new HackCliError({
+          code: "E_CONFIG_INVALID",
+          message: LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES[kind],
+        }),
+      }),
+    }),
+  });
+  expect(messages).toEqual([
+    `start-operation=restart worktree=alpha stage=cli-result exit=nonzero timed-out=no code=E_CONFIG_INVALID ordered-stage=unavailable ordered-reason=unavailable refusal=${token}`,
+  ]);
+  expect(messages.join("\n")).not.toContain("Values omitted");
 });

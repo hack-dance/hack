@@ -674,14 +674,22 @@ else {
         throw error;
       }
     },
+    /**
+     * Restores HACK_HOME only. Safe while the lifetime is unknown: a HACK_HOME
+     * left pointing at this fixture leaks into every later file in the Bun
+     * process (HACK-1327). The spies and root stay until {@link cleanup}.
+     */
+    releaseEnvironment: () => {
+      restoreEnv("HACK_HOME", previousHome);
+    },
     cleanup: async () => {
+      restoreEnv("HACK_HOME", previousHome);
       if (!lifetime.canRestore()) {
         return refuse();
       }
       for (const spy of spies) {
         spy.mockRestore();
       }
-      restoreEnv("HACK_HOME", previousHome);
       await rm(outer, { recursive: true, force: true });
     },
   };

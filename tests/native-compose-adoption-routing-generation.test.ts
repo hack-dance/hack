@@ -1,6 +1,6 @@
-import { test as boundedTest, expect, spyOn } from "bun:test";
+import { test as boundedTest, expect, mock, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS } from "../src/lib/compose-startup-budget.ts";
 import { isRecord } from "../src/lib/guards.ts";
@@ -9,6 +9,7 @@ import { LegacyComposeAdoptedGenerationError } from "../src/lib/native-compose-a
 import { legacyComposePublicationRefusal } from "../src/lib/native-compose-adoption-publication-diagnostics.ts";
 import { runLegacyComposeRetainedRoutingOperation } from "../src/lib/native-compose-adoption-routing-execution.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import {
   type RetainedRoutingStoreTimeoutMs,
   ROUTING_CANARY,
@@ -75,6 +76,11 @@ const test = (
       } finally {
         if (!lifetime.canRestore()) {
           fixtureUncertain = true;
+          // Keep the spies and root for the unsettled work, but never leave
+          // HACK_HOME pointing at this fixture for later files (HACK-1327).
+          if (issued) {
+            h.releaseEnvironment();
+          }
           if (!failed) {
             failed = true;
             failure = new Error(
@@ -857,6 +863,29 @@ boundedTest(
     expect(lifetime.canRestore()).toBe(false);
   },
   1000
+);
+boundedTest(
+  "a refused teardown still restores HACK_HOME so later files never inherit the fixture home",
+  async () => {
+    const before = process.env.HACK_HOME;
+    const lifetime = retainedRoutingFixtureLifetime(Date.now() + 5000);
+    const fixture = await retainedRoutingFixture(lifetime);
+    try {
+      expect(process.env.HACK_HOME).toBe(fixture.home);
+      fixture.releaseEnvironment();
+      expect<string | undefined>(process.env.HACK_HOME).toBe(before);
+      process.env.HACK_HOME = fixture.home;
+      lifetime.retain();
+      await expect(fixture.cleanup()).rejects.toThrow();
+      expect<string | undefined>(process.env.HACK_HOME).toBe(before);
+    } finally {
+      restoreEnv("HACK_HOME", before);
+      // The refused teardown kept the fixture spies; nothing else is mocked here.
+      mock.restore();
+      await rm(fixture.outer, { recursive: true, force: true });
+    }
+  },
+  5000
 );
 boundedTest(
   "known callback settlement permits fixture teardown before its unchanged deadline",

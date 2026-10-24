@@ -53,12 +53,13 @@ setDefaultTimeout(FAKE_DOCKER_TEST_TIMEOUT_MS);
 /**
  * A placeholder acquisition repeats bridge scans under one probe deadline
  * (two extra scans with two owned bridges). The default refused one under
- * heavy host load (HACK-1432), so these acquisitions name a wider deadline.
+ * heavy host load (HACK-1432), so the placeholder tests name a wider deadline
+ * for their clean baseline and their placeholder acquisition alike.
  */
 const PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS = 3 * PROBE_DEADLINE_MS;
 /** A clean acquire and resolve, then a placeholder acquire and resolve. */
 const PLACEHOLDER_RESCAN_TEST_TIMEOUT_MS =
-  2 * PROBE_DEADLINE_MS + 2 * PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS;
+  4 * PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS;
 const CANARY = "synthetic-private-adoption-canary";
 const ID = "a".repeat(64);
 const NETWORK = "b".repeat(64);
@@ -700,7 +701,10 @@ test.each([
 ] as const)(
   "a sandbox-less endpoint placeholder on bridge read %s is re-observed, never admitted or refused (HACK-1421)",
   async (ordinal, extra) => {
-    const clean = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+    const clean = await acquireLegacyComposeAdoptionBinding({
+      projectRoot,
+      timeoutMs: PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS,
+    });
     const original = await clean.resolveBinding({ projectRoot });
     const baseline = networkInspections(await commands());
     await rm(join(root, "commands"));
@@ -723,7 +727,10 @@ test(
   "a placeholder on one of two owned bridges is re-observed with both bridges (HACK-1421)",
   async () => {
     await twoBridges();
-    const clean = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+    const clean = await acquireLegacyComposeAdoptionBinding({
+      projectRoot,
+      timeoutMs: PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS,
+    });
     const original = await clean.resolveBinding({ projectRoot });
     const baseline = networkInspections(await commands());
     await rm(join(root, "commands"));

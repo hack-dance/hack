@@ -57,6 +57,17 @@ const LATE_CODE_DELAY_MS = 1000;
  */
 const LATE_WRITER_DRAIN_BOUND_MS = 25_000;
 /**
+ * The production exit drain bound's documented floor (the doc comment on
+ * NATIVE_EXIT_DRAIN_BOUND_MS). Every other case reads the constant itself, so
+ * without this pin a smaller production bound would pass them all (HACK-1425).
+ */
+const DOCUMENTED_EXIT_DRAIN_BOUND_MS = 5000;
+/**
+ * How much earlier than its delay a timer may appear to fire when measured
+ * with whole-millisecond wall clocks in two processes.
+ */
+const TIMER_CLOCK_TOLERANCE_MS = 50;
+/**
  * Gap between creating a stand-in's pid file and writing its digits. It makes
  * the empty-file window that a loaded host opens by chance happen on every
  * run, so a reader that only waits for existence fails every time.
@@ -416,6 +427,17 @@ test("native recovery draining requires exact independent selectors and refuses 
   }
 });
 
+test("the production exit drain bound keeps its documented floor and outlasts a late writer", () => {
+  expect(NATIVE_EXIT_DRAIN_BOUND_MS).toBeGreaterThanOrEqual(
+    DOCUMENTED_EXIT_DRAIN_BOUND_MS
+  );
+  // A closed code written this long after the exit must still be read under
+  // the production bound, not only under the late-writer cases' wide seam.
+  expect(NATIVE_EXIT_DRAIN_BOUND_MS).toBeGreaterThan(
+    LATE_CODE_DELAY_MS + TIMER_CLOCK_TOLERANCE_MS
+  );
+});
+
 bunTest.each([
   ["read", "exit"],
   ["read", "abort"],
@@ -510,6 +532,13 @@ ${mode === "abort" ? "await Bun.sleep(60_000);" : `(await import('node:fs')).wri
       expect((settledAt ?? Number.POSITIVE_INFINITY) - endedAt).toBeLessThan(
         NATIVE_EXIT_DRAIN_BOUND_MS + DRAIN_SETTLE_MARGIN_MS
       );
+      if (mode === "exit") {
+        // No seam is passed, so the production bound is the one in effect:
+        // the drain kept reading the held pipes for all of it (HACK-1425).
+        expect((settledAt ?? 0) - endedAt).toBeGreaterThanOrEqual(
+          NATIVE_EXIT_DRAIN_BOUND_MS - TIMER_CLOCK_TOLERANCE_MS
+        );
+      }
       expect(await Bun.file(finished).exists()).toBe(false);
       const keeperPid = await waitForPid(holding);
       expect(() => process.kill(keeperPid, 0)).not.toThrow();
@@ -589,6 +618,47 @@ const LATE_WRITER_SELECTIONS = {
       "true",
     ],
     flags: { boundNativeAuthoredExecDrain: true },
+  },
+  "one-off": {
+    args: [
+      "graph",
+      "native",
+      "one-off",
+      "--run-id",
+      RUN_ID,
+      "--service",
+      "web",
+      "--json",
+      "--",
+      "true",
+    ],
+    flags: { boundNativeAuthoredOneOffDrain: true },
+  },
+  selection: {
+    args: [
+      "graph",
+      "native",
+      "recovery-selection",
+      "--run-id",
+      RUN_ID,
+      "--json",
+    ],
+    flags: { boundNativeAuthoredRecoveryDrain: "selection" },
+  },
+  cleanup: {
+    args: [
+      "graph",
+      "native",
+      "recover-live-owner",
+      "--run-id",
+      RUN_ID,
+      "--expect-receipt",
+      "b".repeat(64),
+      "--expect-owner",
+      "c".repeat(64),
+      "--json",
+    ],
+    flags: { boundNativeAuthoredRecoveryDrain: "cleanup" },
   },
 } as const;
 

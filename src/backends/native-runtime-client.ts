@@ -103,7 +103,9 @@ const MAX_PRIVATE_INPUT_BYTES = 256 * 1024;
  * heavily oversubscribed host still schedules the pipe readers before it
  * expires. A 250 ms bound lost the closed code under load for the foreground
  * graph owner (HACK-1350) and for bounded one-shot requests (HACK-1387).
- * Shared by {@link invokeNativeRuntime} and the foreground graph owner.
+ * Shared by {@link invokeNativeRuntime} and the foreground graph owner. The
+ * documented floor is 5 s; `tests/native-runtime-client.test.ts` fails if the
+ * bound drops below it (HACK-1425).
  */
 export const NATIVE_EXIT_DRAIN_BOUND_MS = 5000;
 const REQUEST_BUDGET_REFUSAL =

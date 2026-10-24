@@ -1174,6 +1174,32 @@ async function finalizeNativeComposeStop(opts: {
   }
 }
 
+/**
+ * The pre-spawn guard's storage proof in a native `up`/`restart` start phase.
+ * Only each carrier proof (carrier creation and witness verification) runs in
+ * the start deadline's storage exclusion, passed to `verify` as `excludeProof`.
+ * The proof's freshness checks and saved-state reads around it consume the
+ * start budget like any other start-phase work. `takeAdjacentProof` answers,
+ * once per proof, whether this guard may reuse the immediately preceding proof.
+ */
+export function nativeComposeGuardStorageProof<G>(opts: {
+  readonly verify: (
+    generation: G,
+    options: NativeComposeCommandStorageVerifyOptions
+  ) => Promise<void>;
+  readonly generation: G;
+  readonly excludeStorage: <T>(work: () => Promise<T>) => Promise<T>;
+  readonly takeAdjacentProof: () => boolean;
+}): () => Promise<void> {
+  return () => {
+    const adjacentProof = opts.takeAdjacentProof();
+    return opts.verify(opts.generation, {
+      ...(adjacentProof ? { adjacentProof } : {}),
+      excludeProof: opts.excludeStorage,
+    });
+  };
+}
+
 export async function assertNativeComposeEffectOwned(opts: {
   readonly assertFresh: () => Promise<void>;
   readonly assertOwned: () => Promise<void>;
@@ -1724,17 +1750,16 @@ async function executePreparedGeneration(opts: {
               assertFresh,
               assertOwned: () => ownership.assertOwned(),
               verifyStorage: storage
-                ? () => {
-                    const adjacentProof = adjacentGuardProof;
-                    adjacentGuardProof = false;
-                    // Only each carrier proof is excluded; the guard's
-                    // freshness checks and saved-state reads consume the
-                    // start budget like any other start-phase work.
-                    return storage.verify(generation, {
-                      ...(adjacentProof ? { adjacentProof } : {}),
-                      excludeProof: start.excludeStorage,
-                    });
-                  }
+                ? nativeComposeGuardStorageProof({
+                    verify: storage.verify,
+                    generation,
+                    excludeStorage: start.excludeStorage,
+                    takeAdjacentProof: () => {
+                      const adjacentProof = adjacentGuardProof;
+                      adjacentGuardProof = false;
+                      return adjacentProof;
+                    },
+                  })
                 : undefined,
             }),
         });

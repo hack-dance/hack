@@ -1,4 +1,5 @@
 import { isRecord } from "../../../src/lib/guards.ts";
+import { LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES } from "../../../src/lib/native-compose-adoption-command.ts";
 import type { LegacyComposeOrderedRefusal } from "../../../src/lib/native-compose-adoption-diagnostics.ts";
 import { LegacyComposeAdoptedGenerationError } from "../../../src/lib/native-compose-adoption-generation.ts";
 import { LEGACY_ADOPTION_SELECTION_MESSAGES } from "../../../src/lib/native-compose-adoption-marker.ts";
@@ -82,14 +83,8 @@ const REFUSALS: readonly (readonly [string, string])[] = [
     ([token, code]) =>
       [token, new LegacyComposeAdoptedGenerationError(code).message] as const
   ),
-  [
-    "adopted-refused",
-    "Adopted Compose ownership or execution refused; original data is retained. Values omitted.",
-  ],
-  [
-    "adopted-cancelled",
-    "Adopted Compose operation cancelled; pending ownership is retained. Values omitted.",
-  ],
+  ["adopted-refused", LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES.refused],
+  ["adopted-cancelled", LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES.cancelled],
   ["marker-adoption", LEGACY_ADOPTION_SELECTION_MESSAGES.adoption],
   ["marker-permission", LEGACY_ADOPTION_SELECTION_MESSAGES.permission],
   // The marker's input-access message is the shared project-input guard's.

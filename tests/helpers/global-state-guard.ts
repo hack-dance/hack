@@ -15,7 +15,11 @@
  * because fixtures may hold secret-shaped values.
  */
 
-/** Process events whose listener lists are compared (reported, not restored). */
+/**
+ * Process events whose listener lists are compared. A change is reported per
+ * test and per file, and restored only at the file boundary (see
+ * {@link restoreProcessListeners}).
+ */
 export const GUARDED_PROCESS_EVENTS = [
   "SIGINT",
   "SIGTERM",
@@ -278,11 +282,12 @@ function restoreEnvObject(snapshot: GlobalStateSnapshot): void {
  *
  * Replaced functions (`Bun.spawn`, `process.kill`, `fetch`, timers), process
  * listeners and `process.platform` are reported by {@link diffGlobalState}
- * but deliberately not restored. A leak there usually comes from a test that
- * timed out while its work is still running, and that fake is what keeps the
- * leftover work away from real processes, signals, the network and the
+ * but deliberately not restored here. A leak there usually comes from a test
+ * that timed out while its work is still running, and that fake is what keeps
+ * the leftover work away from real processes, signals, the network and the
  * Docker socket. Restoring the real function under that work could let it
- * reach the host.
+ * reach the host. Listeners are the exception at a file boundary; see
+ * {@link restoreProcessListeners}.
  */
 export function restoreGlobalState(snapshot: GlobalStateSnapshot): void {
   restoreEnvObject(snapshot);
@@ -293,6 +298,67 @@ export function restoreGlobalState(snapshot: GlobalStateSnapshot): void {
     process.umask(snapshot.umask);
   }
   process.exitCode = snapshot.exitCode;
+}
+
+function countListeners(listeners: readonly Listener[]): Map<Listener, number> {
+  const counts = new Map<Listener, number>();
+  for (const listener of listeners) {
+    counts.set(listener, (counts.get(listener) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Puts the guarded process listeners back to `snapshot` and returns the events
+ * it changed. The preload calls this at a file boundary after it has reported
+ * the change, so a listener a finished file left behind cannot run (or be
+ * consumed by) a later file's `process.emit` and get that later test blamed
+ * (HACK-1416).
+ *
+ * Only the difference is edited: a listener added since the snapshot is
+ * removed and a snapshot listener that went missing is added back with
+ * `process.on`. Listeners present in both stay untouched, so a `once`
+ * listener there keeps its `once` behavior; Bun does not expose `once`, so a
+ * missing listener always comes back as a persistent one, at the end of the
+ * list.
+ *
+ * Unlike replaced functions, removing a leftover listener cannot let unsettled
+ * work reach the host: it only stops that work from reacting to a signal or
+ * exit event of the shared test process.
+ */
+export function restoreProcessListeners(
+  snapshot: GlobalStateSnapshot
+): GuardedProcessEvent[] {
+  const restored: GuardedProcessEvent[] = [];
+  for (const event of GUARDED_PROCESS_EVENTS) {
+    const was = snapshot.listeners.get(event) ?? [];
+    const now = process.listeners(event) as Listener[];
+    if (sameListeners(was, now)) {
+      continue;
+    }
+    restored.push(event);
+    const wanted = countListeners(was);
+    const present = countListeners(now);
+    for (const [listener, count] of present) {
+      for (
+        let extra = count - (wanted.get(listener) ?? 0);
+        extra > 0;
+        extra--
+      ) {
+        process.removeListener(event, listener);
+      }
+    }
+    const kept = countListeners(process.listeners(event) as Listener[]);
+    for (const listener of was) {
+      const left = kept.get(listener) ?? 0;
+      if (left > 0) {
+        kept.set(listener, left - 1);
+      } else {
+        process.on(event, listener);
+      }
+    }
+  }
+  return restored;
 }
 
 /**

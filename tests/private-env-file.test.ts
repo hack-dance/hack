@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { randomUUID } from "node:crypto";
+import * as privateFiles from "node:fs/promises";
 import {
   chmod,
   link,
@@ -22,7 +24,10 @@ import {
 } from "../src/constants.ts";
 import { removeDotEnvKey, upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { PRIVATE_ENV_FILE_REFUSAL } from "../src/lib/private-env-file.ts";
-import { replacePrivateFileAtomic } from "../src/lib/private-file.ts";
+import {
+  REPLACEABLE_READ_ATTEMPTS,
+  replacePrivateFileAtomic,
+} from "../src/lib/private-file.ts";
 import {
   materializeProjectEnv,
   setProjectEnvValue,
@@ -398,4 +403,125 @@ test("negative control: replacePrivateFileAtomic itself refuses a symlinked targ
   expect(await readFile(project.outsideFile, "utf8")).toBe(OUTSIDE_TEXT);
   await expect(lstat(danglingTarget)).rejects.toThrow();
   expect(await stagingLeftovers(project.projectDir)).toEqual([]);
+});
+
+/**
+ * HACK-1422: env files are read without the layer lock (the preflight of
+ * `upsertDotEnvValue`/`removeDotEnvKey`, and every resolver). A concurrent
+ * writer's atomic rename landing between the reader's `lstat` and its
+ * no-follow `open` used to fail the reader with the symlink refusal. `open` is
+ * intercepted so the replacement lands exactly in that window.
+ */
+function replaceOnOpen(opts: {
+  readonly envFile: string;
+  readonly replace: (call: number) => Promise<void>;
+}): { readonly calls: () => number; readonly restore: () => void } {
+  const originalOpen = privateFiles.open;
+  let calls = 0;
+  const intercept = spyOn(privateFiles, "open").mockImplementation(
+    async (...args) => {
+      if (args[0] === opts.envFile) {
+        calls += 1;
+        await opts.replace(calls);
+      }
+      return await Reflect.apply(originalOpen, privateFiles, args);
+    }
+  );
+  return { calls: () => calls, restore: () => intercept.mockRestore() };
+}
+
+/** Renames a complete sibling over `path`, as `replacePrivateFileAtomic` does. */
+async function renameOver(path: string, text: string): Promise<void> {
+  const sibling = `${path}.${randomUUID()}.racing`;
+  await writeFile(sibling, text, { mode: 0o600 });
+  await privateFiles.rename(sibling, path);
+}
+
+test("a set whose unlocked read races another writer's atomic replace keeps both keys (HACK-1422)", async () => {
+  const project = await createProject();
+  await writeFile(project.envFile, "PRESET=1\n", { mode: 0o600 });
+  const racing = replaceOnOpen({
+    envFile: project.envFile,
+    replace: async (call) => {
+      if (call === 1) {
+        await renameOver(project.envFile, "OTHER=2\nPRESET=1\n");
+      }
+    },
+  });
+  try {
+    const result = await upsertDotEnvValue({
+      envFile: project.envFile,
+      key: SENTINEL_KEY,
+      value: SENTINEL_VALUE,
+    });
+    expect(result.changed).toBe(true);
+  } finally {
+    racing.restore();
+  }
+  expect(racing.calls()).toBeGreaterThan(1);
+  expect(await readFile(project.envFile, "utf8")).toBe(
+    `OTHER=2\nPRESET=1\n${SENTINEL_KEY}=${SENTINEL_VALUE}\n`
+  );
+  expect((await stat(project.envFile)).mode & 0o777).toBe(0o600);
+});
+
+test("negative control: an env file replaced on every read attempt is refused closed after the bounded retries", async () => {
+  const project = await createProject();
+  await writeFile(project.envFile, `${SENTINEL_KEY}=${SENTINEL_VALUE}\n`, {
+    mode: 0o600,
+  });
+  const racing = replaceOnOpen({
+    envFile: project.envFile,
+    replace: async (call) => {
+      await renameOver(
+        project.envFile,
+        `${SENTINEL_KEY}=${SENTINEL_VALUE}\nCHURN=${call}\n`
+      );
+    },
+  });
+  let error: unknown;
+  try {
+    error = await caught(() =>
+      removeDotEnvKey({ envFile: project.envFile, key: SENTINEL_KEY })
+    );
+  } finally {
+    racing.restore();
+  }
+  expectClosedRefusal(error, [project.envFile]);
+  expect(racing.calls()).toBe(REPLACEABLE_READ_ATTEMPTS);
+  expect(await readFile(project.envFile, "utf8")).toBe(
+    `${SENTINEL_KEY}=${SENTINEL_VALUE}\nCHURN=${REPLACEABLE_READ_ATTEMPTS}\n`
+  );
+  expect(await readdir(project.projectDir)).not.toContain(".internal");
+});
+
+test("negative control: a symlink swapped in between the read's lstat and open is still refused at once", async () => {
+  const project = await createProject();
+  await writeFile(project.envFile, "PRESET=1\n", { mode: 0o600 });
+  const racing = replaceOnOpen({
+    envFile: project.envFile,
+    replace: async (call) => {
+      if (call === 1) {
+        const swapped = `${project.envFile}.swapped`;
+        await symlink(project.outsideFile, swapped);
+        await privateFiles.rename(swapped, project.envFile);
+      }
+    },
+  });
+  let error: unknown;
+  try {
+    error = await caught(() =>
+      upsertDotEnvValue({
+        envFile: project.envFile,
+        key: SENTINEL_KEY,
+        value: SENTINEL_VALUE,
+      })
+    );
+  } finally {
+    racing.restore();
+  }
+  expectClosedRefusal(error, [project.envFile, project.outsideFile]);
+  expect(racing.calls()).toBe(1);
+  expect(await readFile(project.outsideFile, "utf8")).toBe(OUTSIDE_TEXT);
+  expect((await lstat(project.envFile)).isSymbolicLink()).toBe(true);
 });

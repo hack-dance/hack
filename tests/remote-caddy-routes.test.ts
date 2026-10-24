@@ -10,6 +10,7 @@ import {
   resolveProjectHostsForBridge,
   resolveRemoteCaddyUpstream,
 } from "../src/lib/remote-caddy-routes.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempHome: string | null = null;
 // Captured at module scope: afterEach runs after EVERY test, including ones
@@ -26,7 +27,7 @@ afterEach(async () => {
   if (previousHome === undefined) {
     Reflect.deleteProperty(process.env, "HOME");
   } else {
-    process.env.HOME = previousHome;
+    restoreEnv("HOME", previousHome);
   }
 });
 

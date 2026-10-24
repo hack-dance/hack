@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 import { appendPolicyAuditEvent } from "../src/control-plane/policy/audit.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 test("appendPolicyAuditEvent persists JSONL event", async () => {
   const tempRoot = await mkdtemp(resolve(tmpdir(), "hack-policy-audit-"));
@@ -42,7 +43,7 @@ test("appendPolicyAuditEvent persists JSONL event", async () => {
     if (previous === undefined) {
       Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
     } else {
-      process.env.HACK_GLOBAL_CONFIG_PATH = previous;
+      restoreEnv("HACK_GLOBAL_CONFIG_PATH", previous);
     }
     await rm(tempRoot, { recursive: true, force: true });
   }

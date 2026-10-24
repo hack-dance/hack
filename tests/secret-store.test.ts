@@ -13,6 +13,7 @@ import {
   provisionEncryptedFileKey,
   resolveSecretStore,
 } from "../src/lib/secret-store.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let previousHome: string | undefined;
@@ -36,14 +37,14 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = previousHome;
+  restoreEnv("HOME", previousHome);
   if (previousGlobalConfigPath !== undefined) {
-    process.env.HACK_GLOBAL_CONFIG_PATH = previousGlobalConfigPath;
+    restoreEnv("HACK_GLOBAL_CONFIG_PATH", previousGlobalConfigPath);
   } else {
     Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   }
   if (previousSecretsKey !== undefined) {
-    process.env.HACK_SECRETS_FILE_KEY = previousSecretsKey;
+    restoreEnv("HACK_SECRETS_FILE_KEY", previousSecretsKey);
   } else {
     Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
   }

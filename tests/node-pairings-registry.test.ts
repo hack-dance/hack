@@ -10,6 +10,7 @@ import {
   listNodePairingSessions,
   readNodePairingsRegistry,
 } from "../src/lib/node-pairings-registry.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -28,9 +29,9 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
+  restoreEnv("HOME", originalHome);
   if (originalGlobalConfigPath !== undefined) {
-    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
+    restoreEnv("HACK_GLOBAL_CONFIG_PATH", originalGlobalConfigPath);
   } else {
     Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   }

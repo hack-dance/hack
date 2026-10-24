@@ -24,6 +24,7 @@ import {
   GLOBAL_SCHEMAS_DIR_NAME,
 } from "../src/constants.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 let tempDir: string | null = null;
@@ -93,8 +94,8 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
-  process.env.HACK_LOGGER = originalLogger;
+  restoreEnv("HOME", originalHome);
+  restoreEnv("HACK_LOGGER", originalLogger);
   resetGumPathCacheForTests();
 });
 

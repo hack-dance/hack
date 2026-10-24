@@ -2012,9 +2012,17 @@ describe("recipe grammar", () => {
       ["git", "help", "ſend-email", "--to-cmd=id"],
       ["git", "log", "filter​-branch"],
       ["python3", "-m", "ｃｏｄｅ"],
-      // A listed program or a Git subcommand spelled with any non-ASCII
-      // character is refused whatever follows.
+      // U+1E9E CAPITAL SHARP S folds to `ss` on APFS, so `ẞh` runs ssh;
+      // lower case alone gives `ß`.
+      ["ẞh", "host", "id"],
+      ["/usr/bin/ẞh", "-o", "ProxyCommand=id", "x"],
+      // As a later argument it is caught by folding alone, like `cat ssh`.
+      ["cat", "ẞh"],
+      // Any program spelled with a non-ASCII character is refused whatever
+      // follows, listed or not, and so is a Git subcommand with one.
       ["ſh", "scripts/x.sh"],
+      ["./scripts/ünïcode.sh"],
+      ["café", "--version"],
       ["git-ſtatus"],
       ["git", "ſtatus"],
       ["git", "--work-tree", "dir", "pack-refſ"],

@@ -929,8 +929,8 @@ const DEFAULT_IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
  * `git-filter-branch`. Rather than reproduce one filesystem's table, this
  * over-folds (fail-closed): NFKC (`ﬁ` is `fi`, `ſ` is `s`, the Kelvin
  * sign is `K`), default-ignorable code points removed
- * (`send​-email`), then upper case before lower case, which also folds
- * `ß` to `ss` and dotless `ı` to `i`. Folding can only turn more names into
+ * (`send​-email`), then lower, upper and lower case again, which also
+ * folds `ß` and capital `ẞ` (U+1E9E) to `ss` and dotless `ı` to `i`. Folding can only turn more names into
  * listed ones, so it only refuses more. A non-ASCII spelling of a listed
  * program or of a Git subcommand is also refused outright (see
  * `evaluatesCode`), for any folding this does not predict. Option names
@@ -941,6 +941,7 @@ function foldName(name: string): string {
   return name
     .normalize("NFKC")
     .replace(DEFAULT_IGNORABLE, "")
+    .toLowerCase()
     .toUpperCase()
     .toLowerCase();
 }
@@ -1413,11 +1414,11 @@ function isShellSyntax(arg: string): boolean {
 }
 
 /**
- * True when argv[index], taken as a program, could evaluate code. A listed
- * program spelled with a non-ASCII character (`ſh`, `git-ſend-email`) and
- * a Git subcommand with one (`git ſtatus`) are refused whatever follows,
- * because a case-insensitive filesystem may run them as an ASCII name
- * (HACK-1461), even one `foldName` does not predict.
+ * True when argv[index], taken as a program, could evaluate code. Names
+ * are compared through `foldName`, and a listed program with a non-ASCII
+ * spelling (`env ſh`), like a Git subcommand with one (`git ſtatus`), is
+ * refused whatever follows. (`isInlineCommandArgv` also refuses any argv[0]
+ * with a non-ASCII file name, HACK-1461.)
  */
 function evaluatesCode(argv: readonly string[], index: number): boolean {
   const raw = argv[index] ?? "";
@@ -1513,11 +1514,17 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
  * `eval`, `env`, `xargs`, `su`, `ssh`, awk, sed or another always-refused
  * program anywhere; or bare shell syntax copied from a log line. Recipes
  * must run a reviewed script file instead; there is no shell endpoint.
- * Programs missing from the tables are not inspected (a denylist).
+ * Programs missing from the tables are not inspected (a denylist), but a
+ * program run as argv[0] with a non-ASCII file name is refused, listed or
+ * not, since a case-insensitive filesystem may run it as a listed one
+ * (HACK-1461).
  */
 export function isInlineCommandArgv(argv: readonly string[]): boolean {
   return argv.some(
-    (arg, index) => isShellSyntax(arg) || evaluatesCode(argv, index)
+    (arg, index) =>
+      isShellSyntax(arg) ||
+      (index === 0 && NON_ASCII.test(baseName(arg))) ||
+      evaluatesCode(argv, index)
   );
 }
 

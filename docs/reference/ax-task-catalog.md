@@ -96,9 +96,14 @@ is not implemented here.
    `git ﬁlter-branch` (the `fi` ligature) runs `git-filter-branch`. So
    program, subcommand and module names are compared after NFKC
    normalization, removal of invisible (default-ignorable) characters and
-   full case folding (the Kelvin sign is `k`, dotless `ı` is `i`), and a
-   listed program or a Git subcommand spelled with any non-ASCII character
-   (`ſh`, `git-ſend-email`, `git ſtatus`) is refused whatever follows.
+   full case folding (the Kelvin sign is `k`, dotless `ı` is `i`, capital
+   sharp `ẞ` is `ss`, so `ẞh` is `ssh`). The program a recipe runs
+   (argv[0]) is refused when its file name has any non-ASCII character,
+   listed or not (`ſh`, `ẞh`, `./ünïcode.sh`): a folding table this check
+   does not predict could still map it to a listed program, so reviewed
+   scripts must use ASCII file names. A listed program or a Git subcommand
+   spelled with a non-ASCII character later in argv (`git-ſend-email` after
+   a wrapper, `git ſtatus`) is refused whatever follows.
    A dashed Git
    builtin, by basename or absolute path (`git-clone`,
    `/usr/lib/git-core/git-config`), is read as `git <sub>`, so
@@ -387,7 +392,7 @@ until its recipes are re-reviewed.
 | Dashed Git builtins (`/usr/lib/git-core/git-clone -u cmd`, `git-config alias.x '!cmd'`, `git-ls-remote --upload-pack=cmd`, `git-fetch-pack --exec=cmd`) | `inline_command`; `git-clone url dir`, `git-push -u origin main`, `git-config alias.st status` still pass | domain test |
 | Git plumbing helpers read as their porcelain (`git-bisect--helper --bisect-run cmd`, `/usr/lib/git-core/git-bisect--helper.exe run cmd`, `git bisect--helper --bisect-run cmd`, `git-submodule--helper foreach cmd`, `git-config alias.x bisect--helper`, older Git's `git rebase--helper --add-exec-commands cmd` in any letter case) | `inline_command`; `git-submodule--helper status`, `git-difftool--helper a b`, `git add bisect--helper.txt`, `git config --add alias.st status` still pass | domain test |
 | `git send-email --to-cmd`/`--cc-cmd`/`--header-cmd`/`--sendmail-cmd`/`--smtp-server` in every Getopt::Long spelling (`--opt cmd`, `--opt=cmd`, `--cc-cm`, `--CC-CMD`, `-to-cmd`, `+to-cmd`), dashed or mixed-case (`git-send-email`, `git Send-Email`), and `-c sendemail.ccCmd=…`/`toCmd`/`headerCmd`/`sendmailCmd` in any key case | `inline_command`; `git send-email --to=… --cc …`, `--suppress-cc=all`, `--no-header-cmd`, `--smtp-server-port=587`, `git rev-list --header`, `git status -s`, `git format-patch --to=…` still pass | domain test |
-| Names a case-insensitive filesystem folds to a listed one (`git ſend-email --to-cmd=cmd`, `git-ſend-email`, `git inſtaweb --httpd=cmd`, `git ſvn clone --authors-prog=cmd`, `git ﬁlter-branch`, `git log bıſect`, `git log filter<U+200B>-branch`, the Kelvin sign in `ksh -c`, dotless `ı` in `iex`), and any listed program or Git subcommand with a non-ASCII character (`ſh script.sh`, `git-ſtatus`, `git ſtatus`) | `inline_command`; `git status`, `sh scripts/x.sh`, `git commit -m 'café'`, `git log --author=Zoë`, `cat ſend-email` still pass | domain test |
+| Names a case-insensitive filesystem folds to a listed one (`git ſend-email --to-cmd=cmd`, `git-ſend-email`, `git inſtaweb --httpd=cmd`, `git ſvn clone --authors-prog=cmd`, `git ﬁlter-branch`, `git log bıſect`, `git log filter<U+200B>-branch`, the Kelvin sign in `ksh -c`, dotless `ı` in `iex`), capital sharp `ẞ` in `ẞh` (runs `ssh`), any program run as argv[0] with a non-ASCII file name, listed or not (`ſh script.sh`, `./ünïcode.sh`), and any listed program or Git subcommand with a non-ASCII character (`git-ſtatus`, `git ſtatus`) | `inline_command`; `git status`, `sh scripts/x.sh`, `git commit -m 'café'`, `git log --author=Zoë`, `cat ſend-email` still pass | domain test |
 | Other Git porcelain command runners (`git grep -Ocmd`/`--open-files-in-pager=cmd`, `git daemon --access-hook=cmd`, `git instaweb -d`/`--httpd`, `git svn --authors-prog`, `git remote-ext`, `ext::` URLs, `git archimport`) | `inline_command`; `git grep -n`, `git branch -d`, `git svn fetch --authors-file=…`, `git daemon --export-all`, an `https://` remote still pass | domain test |
 | Git 2.20-2.33's `rebase--interactive --cmd cmd` (`git rebase--interactive --cmd=cmd`, `git-rebase--interactive --cmd cmd`, `--cm cmd`, a repository alias such as `git ri --cmd cmd`) and its `--add-exec-commands` mode | `inline_command`; `git rebase--interactive --continue`, `git-rebase--interactive --edit-todo` still pass | domain test |
 | A subcommand-scoped Git flag before the subcommand's name (`git push -u origin clone`, `git remote set-branches --add origin rebase`, `git config --add alias.r rebase`, `git rev-list --header send-email`, `git push -d origin instaweb`, `git log -o -- Grep`) | accepted; the flag after the name (`git clone -u cmd url`, `git --unknown v clone -u cmd url`, `git rebase--helper --add cmd`, `git log -- Grep -o`) is still refused | domain test |

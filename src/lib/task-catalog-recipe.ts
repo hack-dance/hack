@@ -268,7 +268,8 @@ type Evaluator = {
   readonly stdin: readonly string[];
   /**
    * Words that make the program run a string as a command wherever they
-   * appear after it (`git submodule foreach 'cmd'`). Matched lowercased.
+   * appear after it (`git submodule foreach 'cmd'`). Matched folded
+   * (`foldName`), so `git ﬁlter-branch` counts.
    */
   readonly words: readonly string[];
   /**
@@ -375,10 +376,11 @@ type Evaluator = {
    * hide it (fail-closed). They do not count before it: Git reads a
    * subcommand's options only after the subcommand's name and rejects an
    * unknown option before it, so `git push -u origin clone` (a branch named
-   * `clone`) passes. Keys are lowercase and operands are lowercased before
-   * lookup, because Git finds a non-builtin subcommand (`git-send-email`,
-   * `git-instaweb`) as a file in its exec path, and on a case-insensitive
-   * filesystem `git Send-Email` runs it.
+   * `clone`) passes. Keys are lowercase and operands are folded
+   * (`foldName`) before lookup, because Git finds a non-builtin subcommand
+   * (`git-send-email`, `git-instaweb`) as a file in its exec path, and on a
+   * case-insensitive filesystem `git Send-Email` and `git ſend-email` run
+   * it.
    */
   readonly subcommandInline: Readonly<Record<string, readonly string[]>>;
   /**
@@ -913,14 +915,47 @@ const MY_GETOPT_LOOSE = /^loose[-_]/i;
 /** A `data:` URL argument or option value (`--import=data:…`). */
 const DATA_URL = /(?:^|=)data:/i;
 
+/** A character outside ASCII. */
+const NON_ASCII = /[^\u0000-\u007f]/;
+/** Code points that render as nothing, so a name can hide one inside. */
+const DEFAULT_IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
+
 /**
- * Program basename, lowercased, without `.exe`, a build-variant suffix or a
- * version suffix.
+ * A program, subcommand or module name folded for comparison with the
+ * lowercase ASCII tables (HACK-1461). The default macOS filesystem (APFS)
+ * and NTFS look names up case-insensitively with Unicode case folding, not
+ * JavaScript's `toLowerCase()`: on APFS `git ſend-email` (U+017F LONG S)
+ * runs `git-send-email` and `git ﬁlter-branch` (U+FB01 LIGATURE FI) runs
+ * `git-filter-branch`. Rather than reproduce one filesystem's table, this
+ * over-folds (fail-closed): NFKC (`ﬁ` is `fi`, `ſ` is `s`, the Kelvin
+ * sign is `K`), default-ignorable code points removed
+ * (`send​-email`), then upper case before lower case, which also folds
+ * `ß` to `ss` and dotless `ı` to `i`. Folding can only turn more names into
+ * listed ones, so it only refuses more. A non-ASCII spelling of a listed
+ * program or of a Git subcommand is also refused outright (see
+ * `evaluatesCode`), for any folding this does not predict. Option names
+ * are not folded this way: Git's parse-options and Getopt::Long compare
+ * them bytewise apart from ASCII letter case.
+ */
+function foldName(name: string): string {
+  return name
+    .normalize("NFKC")
+    .replace(DEFAULT_IGNORABLE, "")
+    .toUpperCase()
+    .toLowerCase();
+}
+
+/** The last path segment of an argument (a program's file name). */
+function baseName(arg: string): string {
+  return arg.split("/").at(-1) ?? arg;
+}
+
+/**
+ * Program basename, folded (`foldName`), without `.exe`, a build-variant
+ * suffix or a version suffix.
  */
 function programName(arg: string): string {
-  const base = arg.split("/").at(-1) ?? arg;
-  const name = base
-    .toLowerCase()
+  const name = foldName(baseName(arg))
     .replace(EXE_SUFFIX, "")
     .replace(VARIANT_SUFFIX, "");
   return name.replace(VERSION_SUFFIX, "") || name;
@@ -942,14 +977,14 @@ const GIT_HELPER = /^([a-z0-9][a-z0-9-]*?)--(?:helper|interactive)$/i;
  * and `rebase--interactive --add-exec-commands` the `rebase` rule. Any other argument is
  * unchanged. A matching argument starts with a letter or digit and holds no
  * `=` or `!`, so no inline flag, word or `!` value is lost by the rewrite.
- * The porcelain is lowercased, like a program name, so a mixed-case helper
- * (`git Rebase--Helper`) still meets the subcommand-scoped flags, which are
- * keyed by lowercase name. Git itself matches case-sensitively, so this
- * only refuses more (fail-closed).
+ * The porcelain is folded like a program name (`foldName`), so a
+ * mixed-case helper (`git Rebase--Helper`) still meets the
+ * subcommand-scoped flags, which are keyed by lowercase name. Git itself
+ * matches case-sensitively, so this only refuses more (fail-closed).
  */
 function gitSubcommand(arg: string): string {
   const helper = GIT_HELPER.exec(arg);
-  return helper === null ? arg : (helper[1] ?? arg).toLowerCase();
+  return helper === null ? arg : foldName(helper[1] ?? arg);
 }
 
 /**
@@ -1191,9 +1226,9 @@ function pythonClusterEnd(
   return "flags";
 }
 
-/** True when a module's first dotted segment, lowercased, is in `list`. */
+/** True when a module's first dotted segment, folded, is in `list`. */
 function isListedModule(module: string, list: readonly string[]): boolean {
-  return list.includes((module.split(".", 1)[0] ?? module).toLowerCase());
+  return list.includes(foldName(module.split(".", 1)[0] ?? module));
 }
 
 /**
@@ -1352,9 +1387,9 @@ function getoptLongSelects(opts: {
 
 /**
  * The entries of a subcommand-keyed table in force at argument `at`: one
- * for every operand before it that names a subcommand, compared
- * lowercased (`git clone -u`, `git Send-Email --to-cmd`, not
- * `git push -u origin clone`).
+ * for every operand before it that names a subcommand, compared folded
+ * (`git clone -u`, `git Send-Email --to-cmd`, `git ſend-email --to-cmd`,
+ * not `git push -u origin clone`).
  */
 function scopedEntries<T>(opts: {
   readonly table: Readonly<Record<string, T>>;
@@ -1365,7 +1400,7 @@ function scopedEntries<T>(opts: {
     if (index >= opts.at) {
       return [];
     }
-    const key = word.toLowerCase();
+    const key = foldName(word);
     const entry = Object.hasOwn(opts.table, key) ? opts.table[key] : undefined;
     return entry === undefined ? [] : [entry];
   });
@@ -1377,9 +1412,16 @@ function isShellSyntax(arg: string): boolean {
   );
 }
 
-/** True when argv[index], taken as a program, could evaluate code. */
+/**
+ * True when argv[index], taken as a program, could evaluate code. A listed
+ * program spelled with a non-ASCII character (`ſh`, `git-ſend-email`) and
+ * a Git subcommand with one (`git ſtatus`) are refused whatever follows,
+ * because a case-insensitive filesystem may run them as an ASCII name
+ * (HACK-1461), even one `foldName` does not predict.
+ */
 function evaluatesCode(argv: readonly string[], index: number): boolean {
-  const name = programName(argv[index] ?? "");
+  const raw = argv[index] ?? "";
+  const name = programName(raw);
   if (ALWAYS_EVALUATES.has(name)) {
     return true;
   }
@@ -1388,11 +1430,17 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
   if (spec === undefined) {
     return false;
   }
+  if (NON_ASCII.test(baseName(raw))) {
+    return true;
+  }
   if (spec.evaluatesOperands) {
     return rest.length > 0;
   }
   const positional = operands({ rest, spec });
   const operand = positional[0]?.word ?? null;
+  if (key === "git" && operand !== null && NON_ASCII.test(operand)) {
+    return true;
+  }
   const flags = [...spec.inline, ...spec.stdin];
   if (
     rest.some(
@@ -1414,7 +1462,7 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
           positional,
           at,
         }).some((options) => getoptLongSelects({ arg, options })) ||
-        spec.words.includes(arg.toLowerCase()) ||
+        spec.words.includes(foldName(arg)) ||
         (spec.dataUrlModules && DATA_URL.test(arg)) ||
         (spec.bangCommands && BANG_COMMAND.test(arg)) ||
         (spec.extUrls && EXT_URL.test(arg))
@@ -1448,7 +1496,7 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
       !(spec.replModules.length > 0 && selectsModule({ rest, spec }))
     );
   }
-  return operand === "-" || spec.subcommands.includes(operand.toLowerCase());
+  return operand === "-" || spec.subcommands.includes(foldName(operand));
 }
 
 /**

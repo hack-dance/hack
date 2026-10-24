@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  expect,
+  setDefaultTimeout,
+  spyOn,
+  test,
+} from "bun:test";
 import {
   chmod,
   mkdir,
@@ -27,6 +34,32 @@ import { acquireNativeConfigImportInputs } from "../src/lib/native-config-import
 import { mapLegacyNativeStorageAdoption } from "../src/lib/native-config-import-plan.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
+/**
+ * The product's default deadline for one aggregate Docker probe
+ * (`createNativeComposeProbe`). Each acquisition and each freshness check here
+ * owns one such probe unless a test names its own `timeoutMs`.
+ */
+const PROBE_DEADLINE_MS = 15_000;
+/**
+ * Every fake Docker query here is a cold Bun process, and one acquisition runs
+ * a dozen or more. Bun's 5 s default then budgets host process start-up rather
+ * than the product, and an expired test keeps running against the next test's
+ * shared root (HACK-1432, as HACK-1367 found for the ownership tests). The
+ * heaviest test here owns about eight default-deadline probes, so a slow host
+ * ends in the product's own closed refusal before this budget expires.
+ */
+const FAKE_DOCKER_TEST_TIMEOUT_MS = 8 * PROBE_DEADLINE_MS;
+setDefaultTimeout(FAKE_DOCKER_TEST_TIMEOUT_MS);
+/**
+ * A placeholder acquisition repeats bridge scans under one probe deadline
+ * (two extra scans with two owned bridges). The default refused one under
+ * heavy host load (HACK-1432), so the placeholder tests name a wider deadline
+ * for their clean baseline and their placeholder acquisition alike.
+ */
+const PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS = 3 * PROBE_DEADLINE_MS;
+/** A clean acquire and resolve, then a placeholder acquire and resolve. */
+const PLACEHOLDER_RESCAN_TEST_TIMEOUT_MS =
+  4 * PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS;
 const CANARY = "synthetic-private-adoption-canary";
 const ID = "a".repeat(64);
 const NETWORK = "b".repeat(64);
@@ -155,6 +188,12 @@ if (fixture.mode?.startsWith('source-bind-c2-') && kind === 'container' && actio
   if (fixture.mode === 'source-bind-c2-access') bind.rw = false;
   writeFileSync(root+'/fixture.json',JSON.stringify(fixture));
  }
+}
+if (fixture.mode?.startsWith("snapshot-placeholder-") && kind === "network" && action === "inspect") {
+ // Docker keys an endpoint that has no sandbox (mid start/stop) as ep-<endpoint>; this read only.
+ const at = fixture.mode.slice("snapshot-placeholder-".length);
+ const key = at.endsWith("-malformed") ? "ep-not-an-endpoint" : "ep-" + "d".repeat(64);
+ if (at.startsWith("always") || at === String(networkOrdinal)) for (const bridge of fixture.network) bridge.containers = [...bridge.containers, key];
 }
 if (kind === "info") {console.log(JSON.stringify({id: fixture.engine, os: "linux"}));}
 else if (action === "ls") {for (const row of fixture[kind]) console.log(JSON.stringify({id: row.id, name: kind === 'container' ? row.name.slice(1) : row.name, project: row.project ?? ""}));}
@@ -498,7 +537,9 @@ test("moving job snapshot counterexample retains identity and admits a fresh com
         maximumRetryCount: 0,
       }));
     }
-    // The maintained job fixture uses the same 20s operation / 30s case bounds.
+    // The maintained job fixture uses the same 20s operation bound. The case
+    // bound is the file's fake-Docker budget, so a slow host ends in the
+    // operation's own refusal rather than an unconfirmed snapshot lifetime.
     const deadline = Date.now() + 20_000;
     await executeLegacyComposeRetainedPlan({
       plan,
@@ -606,7 +647,7 @@ test("moving job snapshot counterexample retains identity and admits a fresh com
   } finally {
     snapshotCaseActive = false;
   }
-}, 30_000);
+});
 
 test.each([
   "foreign",
@@ -623,7 +664,7 @@ test.each([
       : "E_LEGACY_COMPOSE_BINDING_IDENTITY"
   );
   expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
-}, 20_000);
+});
 
 test("moving snapshot guard exhausts the original shared deadline", async () => {
   fixture.mode = "snapshot-guard-unstable";
@@ -644,7 +685,110 @@ test("moving snapshot guard exhausts the original shared deadline", async () => 
     ).length
   ).toBeGreaterThan(2);
   expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
-}, 10_000);
+});
+
+function networkInspections(observed: readonly string[][]): number {
+  return observed.filter(
+    ([kind, action]) => kind === "network" && action === "inspect"
+  ).length;
+}
+
+test.each([
+  // The identity-only first read is always followed by a fresh loop read.
+  ["1", 0],
+  // A placeholder in the accepted loop read costs exactly one more scan.
+  ["2", 1],
+] as const)(
+  "a sandbox-less endpoint placeholder on bridge read %s is re-observed, never admitted or refused (HACK-1421)",
+  async (ordinal, extra) => {
+    const clean = await acquireLegacyComposeAdoptionBinding({
+      projectRoot,
+      timeoutMs: PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS,
+    });
+    const original = await clean.resolveBinding({ projectRoot });
+    const baseline = networkInspections(await commands());
+    await rm(join(root, "commands"));
+    fixture.mode = `snapshot-placeholder-${ordinal}`;
+    await writeFile(join(root, "snapshot-network-ordinal"), "0");
+    await save();
+    const acquired = await acquireLegacyComposeAdoptionBinding({
+      projectRoot,
+      timeoutMs: PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS,
+    });
+    expect(await acquired.resolveBinding({ projectRoot })).toEqual(original);
+    expect(networkInspections(await commands())).toBe(baseline + extra);
+    expect(JSON.stringify(original)).not.toContain("ep-");
+    expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+  },
+  PLACEHOLDER_RESCAN_TEST_TIMEOUT_MS
+);
+
+test(
+  "a placeholder on one of two owned bridges is re-observed with both bridges (HACK-1421)",
+  async () => {
+    await twoBridges();
+    const clean = await acquireLegacyComposeAdoptionBinding({
+      projectRoot,
+      timeoutMs: PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS,
+    });
+    const original = await clean.resolveBinding({ projectRoot });
+    const baseline = networkInspections(await commands());
+    await rm(join(root, "commands"));
+    // Reads 1-2 fix identity; read 3 is the first bridge of the accepted loop scan.
+    fixture.mode = "snapshot-placeholder-3";
+    await writeFile(join(root, "snapshot-network-ordinal"), "0");
+    await save();
+    const acquired = await acquireLegacyComposeAdoptionBinding({
+      projectRoot,
+      timeoutMs: PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS,
+    });
+    expect(await acquired.resolveBinding({ projectRoot })).toEqual(original);
+    expect(networkInspections(await commands())).toBe(baseline + 2);
+    expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+  },
+  PLACEHOLDER_RESCAN_TEST_TIMEOUT_MS
+);
+
+test("a persistent endpoint placeholder exhausts the original shared deadline", async () => {
+  fixture.mode = "snapshot-placeholder-always";
+  await save();
+  const started = Date.now();
+  await refusal(
+    acquireLegacyComposeAdoptionBinding({ projectRoot, timeoutMs: 6000 }),
+    "E_LEGACY_COMPOSE_BINDING_PROBE"
+  );
+  expect(Date.now() - started).toBeLessThan(9000);
+  // Identity read plus at least two discarded loop reads before the deadline.
+  expect(networkInspections(await commands())).toBeGreaterThan(2);
+});
+
+test("a malformed placeholder-shaped bridge member still refuses identity without retry", async () => {
+  fixture.mode = "snapshot-placeholder-always-malformed";
+  await save();
+  await refusal(
+    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    "E_LEGACY_COMPOSE_BINDING_IDENTITY"
+  );
+  expect(networkInspections(await commands())).toBe(1);
+});
+
+// A duplicate `.Containers` key is never one member or one transient
+// placeholder: the first bridge read refuses identity without a retry.
+test.each([
+  ["container ID", () => [ID, ID]],
+  [
+    "endpoint placeholder",
+    () => [ID, `ep-${"d".repeat(64)}`, `ep-${"d".repeat(64)}`],
+  ],
+] as const)("a duplicate bridge member key (%s) refuses identity without retry", async (_kind, members) => {
+  network().containers = members();
+  await save();
+  await refusal(
+    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    "E_LEGACY_COMPOSE_BINDING_IDENTITY"
+  );
+  expect(networkInspections(await commands())).toBe(1);
+});
 
 test("moving snapshot guard rejects a selected ID on its undeclared bridge before retry", async () => {
   await twoBridges();
@@ -667,7 +811,7 @@ test("moving snapshot guard rejects a selected ID on its undeclared bridge befor
     )
   ).toHaveLength(2);
   expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
-}, 20_000);
+});
 
 test("one authored bridge binds original physical ID, internal policy and exact live aliases", async () => {
   await customBridge();

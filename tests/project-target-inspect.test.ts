@@ -258,6 +258,12 @@ beforeAll(async () => {
   });
   // Never adopted: .hack/.internal exists only so its mode can be dropped.
   await mkdir(join(root, "unsearchable", ".hack", ".internal"));
+  // Never adopted and without .hack/.internal: the most common real layout.
+  await writeProject({
+    repo: join(root, "unsearchable-no-internal"),
+    name: "unsearchable-no-internal",
+    services: ["api"],
+  });
   // Native and legacy inputs side by side (a conflicting project family).
   const nativeConflict = join(root, "native-conflict");
   await writeProject({
@@ -709,21 +715,29 @@ describe("paired CLI/MCP target fixtures", () => {
   test.skipIf(process.getuid?.() === 0)(
     "an unsearchable .hack or .hack/.internal is a closed refusal without the path",
     async () => {
-      const path = join(fixture.root, "unsearchable");
       // HACK-1415: every case the proof matrix names runs on both surfaces,
-      // on a project that never used adoption.
-      for (const [dir, mode] of [
-        [".hack", 0o000],
-        [".hack", 0o644],
-        [".hack/.internal", 0o000],
-        [".hack/.internal", 0o644],
+      // on a project that never used adoption. HACK-1426: the first case is
+      // a .hack at mode 000 with no .hack/.internal at all.
+      for (const [project, dir, mode] of [
+        ["unsearchable-no-internal", ".hack", 0o000],
+        ["unsearchable", ".hack", 0o000],
+        ["unsearchable", ".hack", 0o644],
+        ["unsearchable", ".hack/.internal", 0o000],
+        ["unsearchable", ".hack/.internal", 0o644],
       ] as const) {
+        const path = join(fixture.root, project);
         const locked = join(path, dir);
         await chmod(locked, mode);
         try {
           // An unsearchable project directory is a permission fault (#402's
           // `permission` selection kind), not unsafe adoption state.
-          expect({ dir, mode, result: await inspectBoth({ path }) }).toEqual({
+          expect({
+            project,
+            dir,
+            mode,
+            result: await inspectBoth({ path }),
+          }).toEqual({
+            project,
             dir,
             mode,
             result: targetRefusalEnvelope({

@@ -226,9 +226,10 @@ Progress events are also closed: `lock-waiting`, `lock-acquired`, `claim-stale`,
 
 `bun test tests/shared-host-lifecycle.test.ts` runs portable local fixtures. Each
 fixture is a Bun process on a loopback port with a private HOME. No Docker, real
-HOME, keychain or privileged effect is involved. The file runs in the hosted macOS
-`test` job and is registered in the hosted Linux `linux-process-lifetime` job. A
-Linux pass is a receipt only once that hosted job has run it.
+HOME, keychain or privileged effect is involved. The file runs in one of the hosted
+macOS `test shard i/4` jobs (the required `test` check passes only when every shard
+passes) and is registered in the hosted Linux `linux-process-lifetime` job. A Linux
+pass is a receipt only once that hosted job has run it.
 
 | Scenario | Asserted behavior |
 | --- | --- |

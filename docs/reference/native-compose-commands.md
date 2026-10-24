@@ -347,8 +347,11 @@ expectation admission/write, journal, enrollment read, provision, root discovery
 seed, verification, closing root proof, completion write and publication. Carrier
 transport additionally distinguishes target, create, policy, start, response and
 cleanup; policy reasons identify shape, command, labels, host policy, mount
-cardinality, program/storage mounts and policy stability. A policy refusal keeps
-its policy reason even when it is caught after the carrier's deadline. A timeout,
+cardinality, program/storage mounts and policy stability. A re-inspected carrier
+whose creation time or policy changed reports `helper-policy-stability`, and a
+saved material binding that changed during a carrier step reports
+`private-state`. A policy or state refusal keeps its reason even when it is
+caught after the carrier's deadline. A timeout,
 budget or otherwise unclassified refusal that finds its carrier's storage budget
 exhausted, and not cancelled, reports `storage-budget`, which names
 `HACK_NATIVE_STORAGE_TIMEOUT_MS`; a start phase

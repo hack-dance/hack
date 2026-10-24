@@ -415,11 +415,27 @@ Budgets are layered and all finite:
   the start deadline but capped in total at 16 × the storage budget or 1 hour,
   whichever is smaller. A guard proof that would start after the cap is spent is
   refused before it runs, and one that ends past it refuses as `storage-budget`.
-- Inside a carrier every Docker probe and command keeps a fixed cap, clipped to
-  the carrier's remaining budget: 15 seconds for reads, target observation and
-  helper create/start, and 10 seconds for helper removal and cleanup reads, which
-  are not clipped. A recorded command's 15-second settlement budget follows its
-  exit.
+- Inside a carrier every Docker probe and command is bounded by the carrier's
+  remaining budget (`nativeComposeStorageProbeTimeoutMs`), not by a fixed cap:
+  - Volume create and helper create/start get the whole remaining budget, so a
+    slow but healthy helper start on a loaded host completes while budget
+    remains, and a hung one times out exactly at the carrier's end. This holds
+    for recorded original commands too (the readonly `verify` proofs that
+    `exec` and `up` run): the child, its publication handshake and its identity
+    reads share that one bound.
+  - Reads and target observation get the remaining budget, at most 60 seconds
+    (the ownership probe's own ceiling).
+  - Helper removal and cleanup reads run even after the carrier's deadline, so
+    they are never clipped to it. Each has its own bound: the remaining budget
+    clamped to 10–60 seconds. A hung engine therefore cannot stall cleanup.
+
+  Earlier fixed caps (15 seconds for reads, target observation and helper
+  create/start; 10 seconds for cleanup) refused healthy `docker start -ai`
+  helpers on loaded hosted runners as `storage-helper-start`/`probe-timeout`
+  while most of the 90-second budget remained (HACK-1369). A timeout that ends
+  before the carrier's deadline still reports `probe-timeout`; one that reaches
+  it reports `storage-budget`. A recorded command's 15-second settlement budget
+  follows its exit.
 - An unrecorded command (an identity read or a legacy root/seed command) waits
   at most three seconds for its process group to become absent after exit. Like
   the handshake and settlement budgets, this deadline is monotonic
@@ -429,9 +445,12 @@ Budgets are layered and all finite:
 A timeout, budget or otherwise unclassified refusal that finds its carrier's own
 deadline passed (and the carrier not cancelled) reports the closed effect reason
 `storage-budget`; a probe clipped to the remaining budget times out exactly at
-that end. A refusal with its own observed reason, such as a helper policy
-refusal, keeps that reason even when it is caught after the deadline, including
-when a recorded command replaces it with its fixed command refusal. Cancellation
+that end. A refusal with its own observed reason keeps that reason even when it
+is caught after the deadline, including when a recorded command or its command
+record replaces it with a fixed refusal. Such reasons include a helper policy
+refusal, `helper-policy-stability` for a re-inspected carrier whose creation
+time or policy changed, and `private-state` for a saved material binding that
+changed during a carrier step. Cancellation
 keeps `probe-cancel`. The reason changes no check, retention or recovery rule.
 
 Only the original in-memory writer can advance its exact sequence. Publication

@@ -16,7 +16,9 @@ import {
   diffGlobalState,
   diffNativeEnv,
   restoreGlobalState,
+  restoreProcessListeners,
 } from "./helpers/global-state-guard.ts";
+import { withOwnedProcessListeners } from "./helpers/owned-process-listeners.ts";
 
 const PRELOAD = resolve(
   import.meta.dir,
@@ -133,6 +135,52 @@ test("a replaced function or listener is reported but left for its owner", () =>
   expect(diffGlobalState(before)).toEqual([]);
 });
 
+test("the file-boundary listener restore removes leftovers, adds back missing listeners and keeps a kept once listener", async () => {
+  await withOwnedProcessListeners("SIGUSR2", () => {
+    let keptOnceCalls = 0;
+    const keptOnce = () => {
+      keptOnceCalls += 1;
+    };
+    const removed = () => undefined;
+    const leftover = () => undefined;
+    const secondLeftover = () => undefined;
+    process.once("SIGUSR2", keptOnce);
+    process.on("SIGUSR2", removed);
+    try {
+      const before = captureGlobalState();
+      process.removeListener("SIGUSR2", removed);
+      process.on("SIGUSR2", leftover);
+      process.once("SIGUSR2", secondLeftover);
+      expect(diffGlobalState(before)).toContain(
+        "process 'SIGUSR2' listeners changed (2 -> 3)"
+      );
+
+      expect(restoreProcessListeners(before)).toEqual(["SIGUSR2"]);
+
+      expect(sameItems(process.listeners("SIGUSR2"), [keptOnce, removed])).toBe(
+        true
+      );
+      expect(diffGlobalState(before)).toEqual([]);
+      expect(restoreProcessListeners(before)).toEqual([]);
+      // The kept listener was never re-added, so it is still a `once`.
+      process.emit("SIGUSR2");
+      expect(keptOnceCalls).toBe(1);
+      expect(sameItems(process.listeners("SIGUSR2"), [removed])).toBe(true);
+    } finally {
+      for (const listener of [keptOnce, removed, leftover, secondLeftover]) {
+        process.removeListener("SIGUSR2", listener);
+      }
+    }
+  });
+});
+
+function sameItems(left: readonly unknown[], right: readonly unknown[]) {
+  return (
+    left.length === right.length &&
+    left.every((item, index) => item === right[index])
+  );
+}
+
 const LEAK_IN_TEST = `import { test } from "bun:test";
 test("sets PATH and fails before restoring", () => {
   const saved = process.env.PATH;
@@ -159,7 +207,24 @@ test("sets a proxy and deletes it, which Bun's fetch never sees", () => {
 });
 `;
 
+// A once listener that this file never removes. Without the file-boundary
+// restore, it stays in the process and a later test that emits SIGUSR2
+// consumes it and is blamed for the change (HACK-1416).
+const LEAK_LISTENER = `import { test } from "bun:test";
+process.once("SIGUSR2", () => undefined);
+test("passes but leaves a SIGUSR2 listener installed", () => {});
+`;
+
 const LATER = `import { expect, test } from "bun:test";
+test("a later test that emits SIGUSR2 is not charged with an earlier listener", () => {
+  const own = () => undefined;
+  process.on("SIGUSR2", own);
+  try {
+    process.emit("SIGUSR2");
+  } finally {
+    process.off("SIGUSR2", own);
+  }
+});
 test("a later file still finds executables on PATH", () => {
   const child = Bun.spawnSync(["hack-guard-probe"], { env: { ...process.env } });
   expect(child.exitCode).toBe(0);
@@ -206,6 +271,10 @@ async function runNestedSuite(opts: {
     join(suite, "c-leak-native-proxy.test.ts"),
     LEAK_NATIVE_PROXY
   );
+  await writeFile(
+    join(suite, "c2-leak-signal-listener.test.ts"),
+    LEAK_LISTENER
+  );
   await writeFile(join(suite, "d-later.test.ts"), LATER);
   const child = Bun.spawn(
     [
@@ -214,6 +283,7 @@ async function runNestedSuite(opts: {
       "./a-leak-in-test.test.ts",
       "./b-leak-in-hooks.test.ts",
       "./c-leak-native-proxy.test.ts",
+      "./c2-leak-signal-listener.test.ts",
       "./d-later.test.ts",
     ],
     {
@@ -256,7 +326,16 @@ test("the guard names each leaking file, restores state, and later files pass", 
   expect(run.output).toContain(
     "c-leak-native-proxy.test.ts left Bun's native environment changed after the file finished: native env HTTP_PROXY changed."
   );
-  expect(run.output).toContain("2 test file(s) leaked process state");
+  expect(run.output).toContain(
+    "c2-leak-signal-listener.test.ts left process state changed after the file finished: process 'SIGUSR2' listeners changed (0 -> 1). Restored the environment, cwd and process listeners"
+  );
+  // The leftover listener was removed at the file boundary, so the later
+  // test that emits SIGUSR2 is not blamed for it.
+  expect(run.output).not.toContain("a test in d-later.test.ts");
+  expect(run.output).toContain(
+    "(pass) a later test that emits SIGUSR2 is not charged with an earlier listener"
+  );
+  expect(run.output).toContain("3 test file(s) leaked process state");
   expect(run.output).not.toContain("127.0.0.1:9");
   expect(run.output).not.toContain("Executable not found");
   expect(run.output).toContain("LATER-FILE-PASSED");

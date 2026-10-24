@@ -16,6 +16,8 @@ import {
 } from "../src/lib/native-compose-generation.ts";
 import { NativeComposeOwnershipError } from "../src/lib/native-compose-ownership.ts";
 import {
+  assertNativeComposeStorageBindingUnchanged,
+  assertNativeComposeStorageCarrierStable,
   assertNativeComposeStorageDockerImage,
   nativeComposeStorageCarrierBudgetReason,
 } from "../src/lib/native-compose-storage-witness-docker.ts";
@@ -1190,6 +1192,117 @@ test("a helper policy refusal caught after its carrier deadline keeps its policy
       now: late,
     })
   ).toBe("storage-budget");
+});
+
+function refusalOf(check: () => void): unknown {
+  try {
+    check();
+  } catch (error: unknown) {
+    return error;
+  }
+  return undefined;
+}
+
+test("a re-inspected carrier whose creation time or policy changed keeps a policy stability reason after its deadline", () => {
+  // Fake clock past the carrier deadline; the carrier was not cancelled.
+  const deadline = 5_000_000;
+  const live = new AbortController();
+  const selected = input();
+  const inspect = (
+    change: (value: ReturnType<typeof carrier>["value"]) => void
+  ) => {
+    const fake = carrier(selected);
+    change(fake.value);
+    return checkNativeComposeStorageDockerCarrier({
+      value: fake.value,
+      input: selected,
+      program: fake.program,
+      imageIds: [selected.artifact.imageId],
+    });
+  };
+  const created = inspect(() => {});
+  const known = {
+    createdAt: created.createdAt,
+    policy: nativeComposeStorageDockerCarrierPolicy(created),
+  };
+  // An unchanged carrier passes; its state is checked by each caller.
+  expect(() =>
+    assertNativeComposeStorageCarrierStable(
+      inspect((value) => {
+        value.state = { Status: "exited", Running: false };
+      }),
+      known
+    )
+  ).not.toThrow();
+  for (const changed of [
+    inspect((value) => {
+      value.createdAt = "2026-10-08T12:00:01Z";
+    }),
+    // An admitted equivalent form that still changes the captured policy.
+    inspect((value) => {
+      (value.host as Record<string, unknown>).Devices = null;
+    }),
+  ]) {
+    const caught = refusalOf(() =>
+      assertNativeComposeStorageCarrierStable(changed, known)
+    );
+    expect((caught as Error).message).toBe(
+      "Native storage xattr proof refused; values omitted."
+    );
+    expect(nativeComposeEffectRefusal(caught)).toEqual({
+      stage: "storage-helper-policy",
+      reason: "helper-policy-stability",
+    });
+    expect(
+      nativeComposeStorageCarrierBudgetReason({
+        error: caught,
+        signal: live.signal,
+        deadline,
+        now: () => deadline + 30_000,
+      })
+    ).toBe("helper-policy-stability");
+  }
+});
+
+test("a saved binding that changed across a carrier step keeps a private-state reason after its deadline", () => {
+  const deadline = 5_000_000;
+  const live = new AbortController();
+  const before = {
+    generationId: "d".repeat(32),
+    pendingToken: null,
+  } as unknown as NativeComposeMaterialBinding;
+  expect(() =>
+    assertNativeComposeStorageBindingUnchanged({
+      stage: "storage-helper-start",
+      before,
+      after: structuredClone(before),
+    })
+  ).not.toThrow();
+  const caught = refusalOf(() =>
+    assertNativeComposeStorageBindingUnchanged({
+      stage: "storage-helper-start",
+      before,
+      after: {
+        ...before,
+        pendingToken: "e".repeat(32),
+      } as NativeComposeMaterialBinding,
+    })
+  );
+  expect((caught as Error).message).toBe(
+    "Native storage xattr proof refused; values omitted."
+  );
+  expect(nativeComposeEffectRefusal(caught)).toEqual({
+    stage: "storage-helper-start",
+    reason: "private-state",
+  });
+  expect(
+    nativeComposeStorageCarrierBudgetReason({
+      error: caught,
+      signal: live.signal,
+      deadline,
+      now: () => deadline + 30_000,
+    })
+  ).toBe("private-state");
 });
 
 test("an exhausted xattr carrier lifetime refuses with the storage budget reason", () => {

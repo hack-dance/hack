@@ -116,6 +116,50 @@ const CAPTURE_LIMIT = 4096;
  * uncertainty (HACK-1281). It stays finite and grants nothing.
  */
 const SETTLEMENT_BUDGET_MS = 15_000;
+/**
+ * Floor of every cleanup step of one carrier: cleanup reads after the helper
+ * exits and helper removal. Cleanup runs even after the carrier's own deadline
+ * has passed (it is never clipped to it), so this floor keeps a just-expired
+ * carrier able to remove its helper.
+ */
+export const NATIVE_STORAGE_CLEANUP_FLOOR_MS = 10_000;
+/**
+ * Ceiling of one Docker read probe (`createNativeComposeProbe` accepts at most
+ * 60 s) and of every cleanup step, so a hung engine can stall neither a read
+ * nor cleanup beyond it.
+ */
+export const NATIVE_STORAGE_PROBE_CEILING_MS = 60_000;
+/**
+ * Timeout of one Docker probe or command inside a storage carrier, from the
+ * carrier's remaining `HACK_NATIVE_STORAGE_TIMEOUT_MS` budget (HACK-1369).
+ * Earlier fixed 15 s/10 s caps refused a healthy but slow helper start on
+ * loaded hosts as `probe-timeout` while most of the 90 s budget remained.
+ * - `command` (volume create, helper create/start): the remaining budget, so a
+ *   timeout still fires exactly at the carrier's end.
+ * - `read` (reads and target observation): the remaining budget, at most
+ *   {@link NATIVE_STORAGE_PROBE_CEILING_MS}.
+ * - `cleanup` (post-exit reads and helper removal): its own bound, the remaining
+ *   budget clamped to [{@link NATIVE_STORAGE_CLEANUP_FLOOR_MS},
+ *   {@link NATIVE_STORAGE_PROBE_CEILING_MS}], never clipped to the deadline.
+ * Every value is finite. A non-cleanup value at or below zero is refused by the
+ * probe or command before it spawns; it grants nothing and relaxes no check.
+ */
+export function nativeComposeStorageProbeTimeoutMs(opts: {
+  readonly kind: "read" | "command" | "cleanup";
+  readonly deadline: number;
+  readonly now?: number;
+}): number {
+  const remaining = opts.deadline - (opts.now ?? Date.now());
+  if (opts.kind === "cleanup") {
+    return Math.min(
+      NATIVE_STORAGE_PROBE_CEILING_MS,
+      Math.max(NATIVE_STORAGE_CLEANUP_FLOOR_MS, remaining)
+    );
+  }
+  return opts.kind === "read"
+    ? Math.min(NATIVE_STORAGE_PROBE_CEILING_MS, remaining)
+    : remaining;
+}
 // A late/unconfirmed publication cannot release its original held directory FDs.
 const unsettledCommandFiles = new Set<readonly HeldDirectory[]>();
 type Selection = { readonly name: string; readonly storage: string };
@@ -143,6 +187,56 @@ type Files = {
 };
 function same(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+/**
+ * The same fixed refusal for a mismatch that no carrier deadline can produce,
+ * tagged with its observed reason. Untagged, such a refusal has no observed
+ * cause, so one caught after its carrier deadline would be reported as
+ * `storage-budget`. It grants nothing and changes no check, deadline or retention.
+ */
+function refuseObserved(
+  stage: NativeComposeEffectRefusal["stage"],
+  reason: "private-state" | "helper-policy-stability"
+): never {
+  try {
+    return refuse();
+  } catch (error) {
+    retainNativeComposeEffectRefusal(error, { stage, reason });
+    throw error;
+  }
+}
+/**
+ * Refuse unless the saved material binding is unchanged across a carrier step.
+ * A change is saved private state, so it reports `private-state` at `stage`,
+ * like a binding read that itself refuses.
+ */
+export function assertNativeComposeStorageBindingUnchanged(opts: {
+  readonly stage: NativeComposeEffectRefusal["stage"];
+  readonly before: NativeComposeMaterialBinding;
+  readonly after: NativeComposeMaterialBinding;
+}): void {
+  if (!same(opts.before, opts.after)) {
+    refuseObserved(opts.stage, "private-state");
+  }
+}
+/**
+ * Refuse unless a re-inspected helper carrier keeps the creation time and fixed
+ * policy captured after its creation. A change reports `helper-policy-stability`
+ * at `storage-helper-policy`, the stage of every other carrier policy refusal.
+ * Callers check the carrier's state separately.
+ */
+export function assertNativeComposeStorageCarrierStable(
+  observed: NativeComposeStorageDockerCarrier,
+  known: { readonly createdAt: string; readonly policy: string }
+): void {
+  if (
+    !(
+      observed.createdAt === known.createdAt &&
+      nativeComposeStorageDockerCarrierPolicy(observed) === known.policy
+    )
+  ) {
+    refuseObserved("storage-helper-policy", "helper-policy-stability");
+  }
 }
 function lifetime(context: Context): void {
   if (context.signal.aborted) {
@@ -549,7 +643,10 @@ async function savedCarrierRecovery(opts: {
       await guard();
       const result = await createNativeComposeProbe({
         signal: context.signal,
-        timeoutMs: Math.min(15_000, context.deadline - Date.now()),
+        timeoutMs: nativeComposeStorageProbeTimeoutMs({
+          kind: "read",
+          deadline: context.deadline,
+        }),
       })(args);
       await guard();
       return result;
@@ -1072,6 +1169,23 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
   // The first refusal that stopped publication; only its issued boundary is kept.
   let publicationSource: unknown;
   const cancellation = new AbortController();
+  // Every path that stops publication records it here, and every later refusal
+  // of this command is the same fixed refusal with the first cause and issued
+  // boundary, so no single path can drop the observed reason.
+  const stopPublication = (
+    error: unknown,
+    cause = storageCommandRefusal(error)
+  ): void => {
+    publicationRefused = true;
+    publicationCause ??= cause;
+    publicationSource ??= error;
+    if (opts.originalCommand) {
+      invalidateNativeComposeStorageCommandOwner(opts.originalCommand.owner);
+    }
+    cancellation.abort();
+  };
+  const refusePublication = (): never =>
+    refuseCommand(publicationCause, publicationSource);
   try {
     await opts.assertAdmitted();
     const timeoutMs = opts.cleanup
@@ -1089,7 +1203,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
         return refuseCommand("probe-budget");
       }
       if (publicationRefused) {
-        return refuseCommand(publicationCause, publicationSource);
+        return refusePublication();
       }
       if (
         !(recordingSettlement || opts.cleanup) &&
@@ -1110,12 +1224,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
           new Promise<never>((_, reject) => {
             timer = setTimeout(
               () => {
-                publicationRefused = true;
-                publicationCause ??= "probe-budget";
-                if (record) {
-                  invalidateNativeComposeStorageCommandOwner(record.owner);
-                }
-                cancellation.abort();
+                stopPublication(undefined, "probe-budget");
                 reject(
                   new Error(
                     "Original command publication unavailable; values omitted."
@@ -1129,14 +1238,8 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
         guard();
         return result;
       } catch (error) {
-        publicationRefused = true;
-        publicationCause ??= storageCommandRefusal(error);
-        publicationSource ??= error;
-        if (record) {
-          invalidateNativeComposeStorageCommandOwner(record.owner);
-        }
-        cancellation.abort();
-        return refuseCommand(publicationCause, publicationSource);
+        stopPublication(error);
+        return refusePublication();
       } finally {
         if (timer !== undefined) {
           clearTimeout(timer);
@@ -1282,11 +1385,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
               return refuse();
             }
           } catch (error) {
-            publicationRefused = true;
-            publicationCause ??= storageCommandRefusal(error);
-            publicationSource ??= error;
-            invalidateNativeComposeStorageCommandOwner(record.owner);
-            cancellation.abort();
+            stopPublication(error);
           }
         },
         onExit: (event) => {
@@ -1301,7 +1400,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
     settled = true;
     if (record) {
       if (publicationRefused) {
-        return refuseCommand(publicationCause, publicationSource);
+        return refusePublication();
       }
       if (!(armed && exit)) {
         return refuse();
@@ -1410,9 +1509,10 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       lifetime(context);
     }
     const signal = cleanup ? undefined : context.signal;
-    const timeoutMs = cleanup
-      ? 10_000
-      : Math.min(15_000, context.deadline - Date.now());
+    const timeoutMs = nativeComposeStorageProbeTimeoutMs({
+      kind: cleanup ? "cleanup" : "read",
+      deadline: context.deadline,
+    });
     return nativeComposeStorageIdentityProbe({
       probe: createNativeComposeProbe({ signal, timeoutMs }),
       signal,
@@ -1462,9 +1562,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         stopped: false,
       });
       const after = await current(context, selection);
-      if (!same(before, after)) {
-        return refuse();
-      }
+      assertNativeComposeStorageBindingUnchanged({ stage, before, after });
       lifetime(context);
       return { binding: after, target };
     } catch (error) {
@@ -1607,9 +1705,11 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         tool();
         await recheckDirectories(held);
         const latest = await current(context, selection, true);
-        if (!same(before, latest)) {
-          return refuse();
-        }
+        assertNativeComposeStorageBindingUnchanged({
+          stage,
+          before,
+          after: latest,
+        });
         const result = await runNativeComposeStorageDockerCommand({
           context,
           files,
@@ -1635,7 +1735,10 @@ export async function createNativeComposeDockerStorageXattrCarrier(
             `io.hack.native-config.storage-provision=${nonce}`,
             selection.name,
           ],
-          timeoutMs: 15_000,
+          timeoutMs: nativeComposeStorageProbeTimeoutMs({
+            kind: "command",
+            deadline: context.deadline,
+          }),
           beforeSpawn: () => {
             tool();
             lifetime(context);
@@ -1643,9 +1746,11 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           assertAdmitted: async () => {
             await engine(probe(), context);
             tool();
-            if (!same(before, await current(context, selection, true))) {
-              refuse();
-            }
+            assertNativeComposeStorageBindingUnchanged({
+              stage,
+              before,
+              after: await current(context, selection, true),
+            });
           },
         });
         if (
@@ -1662,9 +1767,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           return refuse();
         }
         const after = await current(context, selection, true);
-        if (!same(before, after)) {
-          return refuse();
-        }
+        assertNativeComposeStorageBindingUnchanged({ stage, before, after });
       } finally {
         await Promise.allSettled(held.map((entry) => entry.file.close()));
       }
@@ -1737,14 +1840,11 @@ export async function createNativeComposeDockerStorageXattrCarrier(
             check: async () => {
               tool();
               await checkFiles(files);
-              if (
-                !same(
-                  before,
-                  await current(context, input.target, !input.readonly)
-                )
-              ) {
-                return refuse();
-              }
+              assertNativeComposeStorageBindingUnchanged({
+                stage,
+                before,
+                after: await current(context, input.target, !input.readonly),
+              });
             },
             published: (info) => {
               files.captures[recordIndex] = { path: recordPath, info };
@@ -1757,9 +1857,11 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         await checkFiles(files);
         tool();
         const admitted = await current(context, input.target, !input.readonly);
-        if (!same(before, admitted)) {
-          return refuse();
-        }
+        assertNativeComposeStorageBindingUnchanged({
+          stage,
+          before,
+          after: admitted,
+        });
         stage = "storage-helper-create";
         const created = await runNativeComposeStorageDockerCommand({
           context,
@@ -1774,7 +1876,10 @@ export async function createNativeComposeDockerStorageXattrCarrier(
               program: files.program,
             }),
           ],
-          timeoutMs: 15_000,
+          timeoutMs: nativeComposeStorageProbeTimeoutMs({
+            kind: "command",
+            deadline: context.deadline,
+          }),
           beforeSpawn: () => {
             tool();
             lifetime(context);
@@ -1782,14 +1887,11 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           assertAdmitted: async () => {
             await engine(probe(), context);
             tool();
-            if (
-              !same(
-                before,
-                await current(context, input.target, !input.readonly)
-              )
-            ) {
-              refuse();
-            }
+            assertNativeComposeStorageBindingUnchanged({
+              stage,
+              before,
+              after: await current(context, input.target, !input.readonly),
+            });
           },
         });
         const id = created.stdout.trim();
@@ -1870,10 +1972,9 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         }
         // The holder observation just closed with the same engine-ID fence.
         const ready = await inspectCarrier(false, true);
+        assertNativeComposeStorageCarrierStable(ready, known);
         if (
           !(
-            ready.createdAt === known.createdAt &&
-            nativeComposeStorageDockerCarrierPolicy(ready) === known.policy &&
             ready.state.Running === false &&
             ready.state.Pid === 0 &&
             ready.state.Status === "created"
@@ -1883,9 +1984,11 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         }
         tool();
         const final = await current(context, input.target, !input.readonly);
-        if (!same(before, final)) {
-          return refuse();
-        }
+        assertNativeComposeStorageBindingUnchanged({
+          stage,
+          before,
+          after: final,
+        });
         stage = "storage-helper-start";
         const result = await runNativeComposeStorageDockerCommand({
           context,
@@ -1898,7 +2001,10 @@ export async function createNativeComposeDockerStorageXattrCarrier(
               }
             : undefined,
           args: [docker, "start", "-ai", id],
-          timeoutMs: 15_000,
+          timeoutMs: nativeComposeStorageProbeTimeoutMs({
+            kind: "command",
+            deadline: context.deadline,
+          }),
           beforeSpawn: () => {
             tool();
             lifetime(context);
@@ -1917,11 +2023,9 @@ export async function createNativeComposeDockerStorageXattrCarrier(
             }
             await checkFiles(files);
             const ready = await inspectCarrier();
+            assertNativeComposeStorageCarrierStable(ready, owned);
             if (
               !(
-                ready.createdAt === owned.createdAt &&
-                nativeComposeStorageDockerCarrierPolicy(ready) ===
-                  owned.policy &&
                 ready.state.Running === false &&
                 ready.state.Pid === 0 &&
                 ready.state.Status === "created"
@@ -1931,14 +2035,11 @@ export async function createNativeComposeDockerStorageXattrCarrier(
             }
             await engine(probe(), context);
             tool();
-            if (
-              !same(
-                before,
-                await current(context, input.target, !input.readonly)
-              )
-            ) {
-              refuse();
-            }
+            assertNativeComposeStorageBindingUnchanged({
+              stage,
+              before,
+              after: await current(context, input.target, !input.readonly),
+            });
           },
         });
         stage = "storage-helper-response";
@@ -1951,10 +2052,9 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         }
         stage = "storage-helper-policy";
         const stopped = await inspectCarrier(true);
+        assertNativeComposeStorageCarrierStable(stopped, known);
         if (
           !(
-            stopped.createdAt === known.createdAt &&
-            nativeComposeStorageDockerCarrierPolicy(stopped) === known.policy &&
             stopped.state.Running === false &&
             stopped.state.Pid === 0 &&
             stopped.state.Status === "exited" &&
@@ -1969,23 +2069,19 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           return refuse();
         }
         const repeated = await inspectCarrier(true);
-        if (
-          !(
-            repeated.createdAt === known.createdAt &&
-            nativeComposeStorageDockerCarrierPolicy(repeated) ===
-              known.policy &&
-            same(repeated.state, stopped.state)
-          )
-        ) {
+        assertNativeComposeStorageCarrierStable(repeated, known);
+        if (!same(repeated.state, stopped.state)) {
           return refuse();
         }
         stage = "storage-helper-cleanup";
         await checkFiles(files);
         tool();
         const cleanupAuthority = await current(context, input.target);
-        if (!same(before, cleanupAuthority)) {
-          return refuse();
-        }
+        assertNativeComposeStorageBindingUnchanged({
+          stage,
+          before,
+          after: cleanupAuthority,
+        });
         const removed = await runNativeComposeStorageDockerCommand({
           context,
           files,
@@ -1998,25 +2094,24 @@ export async function createNativeComposeDockerStorageXattrCarrier(
             : undefined,
           cleanup: true,
           args: [docker, "rm", id],
-          timeoutMs: 10_000,
+          timeoutMs: nativeComposeStorageProbeTimeoutMs({
+            kind: "cleanup",
+            deadline: context.deadline,
+          }),
           beforeSpawn: tool,
           assertAdmitted: async () => {
             const finalCarrier = await inspectCarrier(true);
-            if (
-              !(
-                finalCarrier.createdAt === owned.createdAt &&
-                nativeComposeStorageDockerCarrierPolicy(finalCarrier) ===
-                  owned.policy &&
-                same(finalCarrier.state, stopped.state)
-              )
-            ) {
+            assertNativeComposeStorageCarrierStable(finalCarrier, owned);
+            if (!same(finalCarrier.state, stopped.state)) {
               refuse();
             }
             await engine(probe(true), context);
             tool();
-            if (!same(before, await current(context, input.target))) {
-              refuse();
-            }
+            assertNativeComposeStorageBindingUnchanged({
+              stage,
+              before,
+              after: await current(context, input.target),
+            });
           },
         });
         if (

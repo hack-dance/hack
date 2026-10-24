@@ -523,6 +523,61 @@ fn unsupported_privileged_external_and_unknown_fields_block_enrollment() {
     assert!(fixture.codes().contains(&"external_network".into()));
 }
 
+/// The candidate's own label review rejects Hack's ownership namespaces (the
+/// list `HACK_OWNERSHIP_LABEL_NAMESPACES` declares in TypeScript), so a
+/// project cannot carry ownership evidence even when the TypeScript classifier
+/// is bypassed. Routing and dependency cache declarations never exempt them.
+#[test]
+fn hack_ownership_label_namespaces_block_enrollment() {
+    let owner_label = |fixture: &Fixture| {
+        fixture
+            .codes()
+            .iter()
+            .any(|code| code == "external_route_or_owner_label")
+    };
+    for key in [
+        "io.hack-local.owner",
+        "io.hack.native-config.owner",
+        "io.hack.native-file.token",
+        "io.hack.storage-witness.carrier",
+    ] {
+        for labels in [
+            format!("    labels: {{'{key}': owner-canary}}\n"),
+            format!("    labels: ['{key}=owner-canary']\n"),
+            format!(
+                "    labels:\n      caddy: web.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n      '{key}': owner-canary\n"
+            ),
+        ] {
+            let fixture = Fixture::new(&format!("{BASIC}{labels}"));
+            let plan = fixture.plan();
+            assert!(owner_label(&fixture), "{key}: {labels}");
+            assert!(!plan.plan.enrollment_compatible, "{key}");
+            assert!(
+                !serde_json::to_string(&plan)
+                    .unwrap()
+                    .contains("owner-canary")
+            );
+            assert_eq!(
+                project::enroll(&fixture.candidate, fixture.options(), &plan.plan_id)
+                    .unwrap_err()
+                    .code,
+                "incompatible_compose"
+            );
+            assert!(!fixture.candidate.state_root.exists());
+        }
+    }
+    // Near misses outside every ownership namespace stay reviewable. Closer
+    // misses (a longer first segment, or another segment under the same
+    // reverse-DNS root) are pinned by the `ownership_labels` unit tests; they
+    // stay out of this file because the TypeScript parity scan reads every
+    // such key here as a label Hack writes.
+    let fixture = Fixture::new(&format!(
+        "{BASIC}    labels: {{example.io.hack-local.owner: a, io-hack-local.owner: b, io_hack.native-config.owner: c}}\n"
+    ));
+    assert!(!owner_label(&fixture));
+    assert!(fixture.plan().plan.enrollment_compatible);
+}
+
 #[test]
 fn explicit_external_network_replacement_is_owned_internal_and_review_bound() {
     let original =

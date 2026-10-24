@@ -69,8 +69,12 @@ every `bun test` run: a test or file that leaves the environment, cwd, umask,
 exit code, a guarded global function or a process listener changed fails with a
 `[global-state-guard]` message naming the file. The guard restores the
 environment, cwd, umask and exit code so later files run clean; it keeps
-replaced functions and listeners, which may still protect unsettled work. Fix
-the named file's restore (`try`/`finally` or `afterEach`), not the later failures.
+replaced functions, which may still protect unsettled work. It keeps a test's
+leftover listeners until its file ends, then puts the file's listeners back, so
+a later `process.emit` is not blamed for them. Fix the named file's restore
+(`try`/`finally` or `afterEach`), not the later failures. To emit a real signal
+in a test, use `withOwnedProcessListeners` from
+`tests/helpers/owned-process-listeners.ts`.
 Restore environment keys with `restoreEnv` from `tests/helpers/env.ts`: Bun keeps
 a deleted `HTTP_PROXY`-style key for `fetch` and `Bun.spawn` without `env`, and
 the guard reports that as `native env <KEY> changed`.

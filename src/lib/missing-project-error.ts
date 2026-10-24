@@ -8,8 +8,9 @@ export const MISSING_PROJECT_MESSAGE = `No ${HACK_PROJECT_DIR_PRIMARY}/ (or lega
  * No project at the selected path (`--path` or the working directory). It
  * carries the closed code `E_PROJECT_NOT_FOUND`, so every project command that
  * resolves its project through this error reports the same `--json` envelope
- * and, without `--json`, one `ERROR: E_PROJECT_NOT_FOUND: ...` line and no
- * stack. `docs/cli.md` lists the commands, and
+ * and, without `--json`, one closed `E_PROJECT_NOT_FOUND: ...` error line and
+ * no stack. The logger adds its prefix (`ERROR: ` for the console logger;
+ * gum and clack print their own markers). `docs/cli.md` lists the commands, and
  * `tests/missing-project-error-code.test.ts` pins each one.
  */
 export class MissingProjectContextError extends HackCliError {

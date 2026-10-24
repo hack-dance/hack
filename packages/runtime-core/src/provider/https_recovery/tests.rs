@@ -45,9 +45,12 @@ fn fixture() -> Fixture {
     directory(&root.join("owner.lock"));
     directory(&root.join("shared-owner"));
     directory(&root.join("shared-owner/leases"));
-    let listener = UnixListener::bind(root.join("owner.sock")).unwrap();
+    // A stale owner socket that never listened: a dropped listener could still accept through
+    // an unrelated parallel test's pre-exec fork copy, and recovery would then refuse it as live.
+    drop(crate::provider::test_socket::bound_unlistened(
+        &root.join("owner.sock"),
+    ));
     fs::set_permissions(root.join("owner.sock"), fs::Permissions::from_mode(0o600)).unwrap();
-    drop(listener);
     let socket = inode(&root.join("owner.sock")).unwrap();
     let lock = inode(&root.join("owner.lock")).unwrap();
     let receipt = serde_json::json!({"version":1,"listener":{"pid":999999,"start_micros":1,"uid":unsafe{libc::geteuid()},"executable":"/unused/caddy","port":18443,"fingerprint":"1".repeat(64)},"caddySha256":"2".repeat(64),"caSha256":"3".repeat(64),"authority":{"pid":999998,"socket":"/private/tmp/unused/route.sock","sha256":"4".repeat(64)},"lock":lock,"owner":{"publicKey":"public-key","dev":socket.dev,"ino":socket.ino}});
@@ -103,6 +106,20 @@ fn suffix(f: &Fixture) -> String {
 }
 fn verify_socket(_: &Receipt, _: &Configuration, socket: &Path) -> Result<(), CandidateError> {
     socket_absent(socket)
+}
+/// Run one ignored full-recovery fixture of this module alone in a child test process.
+///
+/// [`complete_fixture`] creates the provider lock with an `flock` it drops at once, and the
+/// full command must then acquire that lock. In the shared parallel test process an unrelated
+/// test's pre-exec fork (`process::clean_command`) holds a copy of every descriptor open at
+/// the fork until it execs, so the dropped `flock` can still be held and recovery correctly
+/// refuses. Every full-command test that expects recovery to pass runs here.
+fn isolated(child: &str) {
+    use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+    run_isolated(
+        &format!("provider::https_recovery::tests::{child}"),
+        ISOLATED_HANG_GUARD,
+    );
 }
 fn all_original(f: &Fixture) {
     for entry in &f.journal.entries {
@@ -418,6 +435,12 @@ fn hashes(f: &Fixture) -> (String, String) {
 }
 #[test]
 fn full_command_preserves_large_public_mode_ca_and_exact_retry() {
+    isolated("full_command_retry_child");
+}
+
+#[test]
+#[ignore = "isolated full-recovery fixture launched by full_command_preserves_large_public_mode_ca_and_exact_retry"]
+fn full_command_retry_child() {
     let (f, candidate, _alias) = complete_fixture();
     let (owner, config) = hashes(&f);
     let ca = f.root.join("data/caddy/pki/authorities/local/root.crt");
@@ -637,6 +660,12 @@ fn full_command_refuses_unconfirmed_legacy_witness_before_publishing_journal() {
 
 #[test]
 fn full_legacy_command_archives_with_real_current_witness_and_exact_retry() {
+    isolated("full_legacy_command_child");
+}
+
+#[test]
+#[ignore = "isolated full-recovery fixture launched by full_legacy_command_archives_with_real_current_witness_and_exact_retry"]
+fn full_legacy_command_child() {
     let (f, candidate, _alias) = complete_fixture();
     fs::write(f.home.join("compose.yaml"), "services: {}\n").unwrap();
     let share = crate::provider::ProjectShareIntent::approve(&f.home, true).unwrap();

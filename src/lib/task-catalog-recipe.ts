@@ -369,10 +369,13 @@ type Evaluator = {
   /**
    * Inline flags that count only under one subcommand, because the same
    * letter is harmless elsewhere: `git clone -u <cmd>` runs a command, while
-   * `git push -u` sets an upstream. They count when any operand names the
-   * subcommand, not only the first, so a global option missing from
+   * `git push -u` sets an upstream. They count after any operand that names
+   * the subcommand, not only the first, so a global option missing from
    * `valueOptions` (whose value would be taken as the subcommand) cannot
-   * hide it (fail-closed).
+   * hide it (fail-closed). They do not count before it: Git reads a
+   * subcommand's options only after the subcommand's name and rejects an
+   * unknown option before it, so `git push -u origin clone` (a branch named
+   * `clone`) passes.
    */
   readonly subcommandInline: Readonly<Record<string, readonly string[]>>;
   /**
@@ -664,7 +667,14 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   // Git accepts abbreviated long options (`--upl=cmd`) and a value attached
   // to a short option (`-u/path/cmd`). A dashed builtin (`git-clone`,
   // `/usr/lib/git-core/git-config`) is read as `git <sub>`, and a plumbing
-  // helper (`git-bisect--helper`, `git submodule--helper`) as its porcelain.
+  // helper (`git-bisect--helper`, `git submodule--helper`, Git 2.20-2.33's
+  // `git rebase--interactive`) as its porcelain, so Git 2.13-2.19's
+  // `rebase--helper --add-exec-commands cmd` meets a `rebase`-scoped flag.
+  // That flag is scoped because, as a `git` inline flag, it would also
+  // match `git config --add` (Git abbreviates options). The
+  // `rebase--interactive --cmd cmd` option is not scoped: no other Git
+  // option starts with `--cm`, and a repository alias for the helper
+  // (`git ri --cmd cmd`) would hide the subcommand.
   git: evaluator({
     inline: [
       "-c",
@@ -675,6 +685,7 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
       "--extcmd",
       "--upload-pack",
       "--receive-pack",
+      "--cmd",
     ],
     words: ["foreach", "bisect", "filter-branch"],
     // Global options before the subcommand that consume the next argument.
@@ -694,7 +705,7 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
     // cluster: `git log -Scache` and `git commit -mcleanup` are refused
     // (fail-closed); pass the value as its own argument instead.
     shortValueOptions: [],
-    subcommandInline: { clone: ["-u"] },
+    subcommandInline: { clone: ["-u"], rebase: ["--add-exec-commands"] },
     bangCommands: true,
   }),
   // SQL clients given a statement string. A statement can also reach the
@@ -853,17 +864,23 @@ function programName(arg: string): string {
 /** A dashed Git builtin (`git-clone`) and its subcommand (`clone`). */
 const DASHED_GIT = /^git-(.+)$/;
 /**
- * A Git plumbing helper subcommand (`bisect--helper`, `submodule--helper`)
- * and the porcelain subcommand it implements (`bisect`, `submodule`).
+ * A Git plumbing helper subcommand (`bisect--helper`, `submodule--helper`,
+ * Git 2.20-2.33's `rebase--interactive`) and the porcelain subcommand it
+ * implements (`bisect`, `submodule`, `rebase`).
  */
-const GIT_HELPER = /^([a-z0-9][a-z0-9-]*?)--helper$/i;
+const GIT_HELPER = /^([a-z0-9][a-z0-9-]*?)--(?:helper|interactive)$/i;
 
 /**
- * A Git argument with a `<sub>--helper` subcommand read as its porcelain
- * `<sub>`, so `git bisect--helper --bisect-run cmd` meets the `bisect` rule
- * and `submodule--helper foreach` the `foreach` rule. Any other argument is
+ * A Git argument with a `<sub>--helper` or `<sub>--interactive` subcommand
+ * read as its porcelain `<sub>`, so `git bisect--helper --bisect-run cmd`
+ * meets the `bisect` rule, `submodule--helper foreach` the `foreach` rule
+ * and `rebase--interactive --add-exec-commands` the `rebase` rule. Any other argument is
  * unchanged. A matching argument starts with a letter or digit and holds no
  * `=` or `!`, so no inline flag, word or `!` value is lost by the rewrite.
+ * The porcelain is lowercased, like a program name, so a mixed-case helper
+ * (`git Rebase--Helper`) still meets the subcommand-scoped flags, which are
+ * keyed by lowercase name. Git itself matches case-sensitively, so this
+ * only refuses more (fail-closed).
  */
 function gitSubcommand(arg: string): string {
   const helper = GIT_HELPER.exec(arg);
@@ -1204,23 +1221,28 @@ function afterModuleFlag(opts: {
   return index === -1 ? [] : opts.rest.slice(index + 1);
 }
 
+/** An operand and its index in the program's arguments. */
+type Operand = { readonly word: string; readonly index: number };
+
 /**
  * Every argument that is neither an option nor a known option's value,
- * in order. Everything after `--` is an operand.
+ * in order, with its index. Everything after `--` is an operand.
  */
 function operands(opts: {
   readonly rest: readonly string[];
   readonly spec: Evaluator;
-}): string[] {
-  const out: string[] = [];
+}): Operand[] {
+  const out: Operand[] = [];
   for (let index = 0; index < opts.rest.length; index++) {
     const arg = opts.rest[index] ?? "";
     if (arg === "--") {
-      out.push(...opts.rest.slice(index + 1));
+      for (let after = index + 1; after < opts.rest.length; after++) {
+        out.push({ word: opts.rest[after] ?? "", index: after });
+      }
       break;
     }
     if (arg === "-" || !(arg.startsWith("-") || arg.startsWith("+"))) {
-      out.push(arg);
+      out.push({ word: arg, index });
     } else if (
       opts.spec.valueOptions.includes(normalizeOption(arg, opts.spec))
     ) {
@@ -1228,6 +1250,23 @@ function operands(opts: {
     }
   }
   return out;
+}
+
+/**
+ * The subcommand-scoped inline flags in force at argument `at`: those of
+ * every subcommand named by an operand before it (`git clone -u`, not
+ * `git push -u origin clone`).
+ */
+function scopedFlags(opts: {
+  readonly positional: readonly Operand[];
+  readonly at: number;
+  readonly spec: Evaluator;
+}): readonly string[] {
+  return opts.positional.flatMap(({ word, index }) =>
+    index < opts.at && Object.hasOwn(opts.spec.subcommandInline, word)
+      ? (opts.spec.subcommandInline[word] ?? [])
+      : []
+  );
 }
 
 /** A value that is a shell command to Git: `!cmd` or `key=!cmd`. */
@@ -1254,17 +1293,16 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
     return rest.length > 0;
   }
   const positional = operands({ rest, spec });
-  const operand = positional[0] ?? null;
-  const scoped = positional.flatMap((word) =>
-    Object.hasOwn(spec.subcommandInline, word)
-      ? (spec.subcommandInline[word] ?? [])
-      : []
-  );
-  const flags = [...spec.inline, ...spec.stdin, ...scoped];
+  const operand = positional[0]?.word ?? null;
+  const flags = [...spec.inline, ...spec.stdin];
   if (
     rest.some(
-      (arg) =>
-        matchesFlag({ arg, flags, spec }) ||
+      (arg, at) =>
+        matchesFlag({
+          arg,
+          flags: [...flags, ...scopedFlags({ positional, at, spec })],
+          spec,
+        }) ||
         spec.words.includes(arg.toLowerCase()) ||
         (spec.dataUrlModules && DATA_URL.test(arg)) ||
         (spec.bangCommands && BANG_COMMAND.test(arg))

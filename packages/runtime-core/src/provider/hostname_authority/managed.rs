@@ -83,12 +83,13 @@ mod tests {
             let root = fs::canonicalize(std::env::temp_dir())
                 .unwrap()
                 .join(format!(
-                    "hkl-authority-admission-{}-{}",
+                    "hkl-authority-admission-{}-{}-{}",
                     std::process::id(),
                     SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
-                        .as_nanos()
+                        .as_nanos(),
+                    crate::next_test_scratch()
                 ));
             state::private_directory(&root).unwrap();
             Self(root)

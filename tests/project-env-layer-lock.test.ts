@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
@@ -31,6 +31,7 @@ import {
 } from "../src/lib/fs.ts";
 import { removeDotEnvKey, upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import {
+  hydrateProjectEnvLocalLayer,
   resolveProjectEnvConfig,
   resolveProjectEnvConfigPath,
   resolveProjectEnvLocalConfigPath,
@@ -38,6 +39,7 @@ import {
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
+import * as worktreeLocalConfig from "../src/lib/worktree-local-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 import { createSecretWorktreeFixture } from "./helpers/secret-fixture.ts";
@@ -470,6 +472,14 @@ test("concurrent legacy dotenv sets and removals of different keys all apply", a
   }
 }, 60_000);
 
+/** HACK-1386: the timeout names the lock and how to clear one Hack cannot reclaim. */
+function heldLockRefusal(opts: {
+  readonly layer: string;
+  readonly lockPath: string;
+}): string {
+  return `Another hack env command is writing ${opts.layer}; gave up after waiting 300ms for its lock at ${opts.lockPath}. Nothing was written. Retry when it finishes. If no hack env command is running, Hack cannot reclaim that lock itself: remove ${opts.lockPath} and retry.`;
+}
+
 /** Publishes a live owner receipt (this test process) at the layer's lock. */
 async function holdLayerLock(layerPath: string): Promise<string> {
   const lockPath = resolveEnvLayerLockPath({ layerPath });
@@ -537,9 +547,10 @@ test("a writer that cannot get the layer lock in time refuses closed and writes 
   ];
   for (const [index, refusal] of refusals.entries()) {
     const layer = index < 2 ? file : envFile;
+    const layerLock = index < 2 ? lockPath : dotEnvLockPath;
     expect(refusal).toBeInstanceOf(EnvLayerLockTimeoutError);
     expect(refusal.message).toBe(
-      `Another hack env command is writing ${layer}; gave up after waiting 300ms for it. Nothing was written. Retry when it finishes.`
+      heldLockRefusal({ layer, lockPath: layerLock })
     );
     expect(refusal.message).not.toContain(synthetic("BLOCKED"));
     expect(refusal.message).not.toContain(synthetic("PRESET"));
@@ -719,4 +730,203 @@ test("a set refuses with a conflict when a writer that takes no lock changed the
   expect(error).toBeInstanceOf(AtomicWriteConflictError);
   // The other writer's layer stands; the set wrote nothing.
   expect(await readFile(file, "utf8")).toBe(edited);
+}, 30_000);
+
+test("an unset refuses with a conflict when a writer that takes no lock changed the layer after its read", async () => {
+  // HACK-1386: only the set's compare-and-swap was covered. A local unset
+  // asks whether a primary checkout's local layer is inherited after it read
+  // the layer and before it writes; pausing that one call opens the window
+  // in which an editor (or Hack v4) rewrites the layer.
+  const project = await createProject();
+  const file = resolveProjectEnvLocalConfigPath({
+    projectDir: project.projectDir,
+    envName: null,
+  });
+  await writeFile(
+    file,
+    layerText({
+      PRESET: synthetic("PRESET"),
+      DOOMED: synthetic("DOOMED"),
+    })
+  );
+  const { promise: reached, resolve: markReached } =
+    Promise.withResolvers<void>();
+  const { promise: release, resolve: resume } = Promise.withResolvers<void>();
+  const paused = spyOn(
+    worktreeLocalConfig,
+    "resolvePrimaryLocalProjectDir"
+  ).mockImplementation(async () => {
+    markReached();
+    await release;
+    return null;
+  });
+  try {
+    const pending = unsetProjectEnvValue({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      envName: null,
+      scope: "global",
+      key: "DOOMED",
+      local: true,
+    }).then(
+      () => null,
+      (error: unknown) => error
+    );
+    await reached;
+    const edited = layerText({
+      PRESET: synthetic("PRESET"),
+      DOOMED: synthetic("DOOMED"),
+      HAND_EDITED: synthetic("HAND_EDITED"),
+    });
+    await writeFile(file, edited);
+    resume();
+
+    const error = await pending;
+    expect(paused).toHaveBeenCalledTimes(1);
+    expect(error).toBeInstanceOf(AtomicWriteConflictError);
+    // The other writer's layer stands, HAND_EDITED included; nothing was removed.
+    expect(await readFile(file, "utf8")).toBe(edited);
+  } finally {
+    resume();
+    paused.mockRestore();
+  }
+});
+
+/** A PID that has exited: a short child that this test waited for. */
+function exitedPid(): number {
+  const child = Bun.spawnSync({ cmd: ["true"], stdout: "ignore" });
+  expect(child.exitCode).toBe(0);
+  return child.pid;
+}
+
+test("a layer lock Hack cannot reclaim makes set and unset refuse with its path and the recovery step", async () => {
+  // HACK-1386: a malformed receipt, a receipt that is not private, and a
+  // live PID that holds no Hack lock (a reused PID) are never reclaimed, so
+  // before the fix every retry failed with only "Retry when it finishes."
+  const project = await createProject();
+  const file = resolveProjectEnvConfigPath({
+    projectDir: project.projectDir,
+    envName: null,
+  });
+  const original = layerText({ PRESET: synthetic("PRESET") });
+  await writeFile(file, original);
+  const lockPath = resolveEnvLayerLockPath({ layerPath: file });
+  await mkdir(dirname(lockPath), { recursive: true });
+  const base = {
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    envName: null,
+    scope: "global",
+    layerLockTimeoutMs: 300,
+  };
+  // A group-writable receipt is not trusted, like one owned by another user,
+  // even though its owner has exited. PID 1 is alive and holds no Hack lock,
+  // standing in for a reused PID.
+  const receipts: readonly { readonly text: string; readonly mode: number }[] =
+    [
+      { text: "not a receipt\n", mode: 0o600 },
+      { text: `${exitedPid()}\n`, mode: 0o620 },
+      { text: "1\n", mode: 0o600 },
+    ];
+  for (const receipt of receipts) {
+    await writeFile(lockPath, receipt.text);
+    await chmod(lockPath, receipt.mode);
+    for (const attempt of [
+      () =>
+        setProjectEnvValue({
+          ...base,
+          key: "BLOCKED",
+          value: synthetic("BLOCKED"),
+          secret: false,
+        }),
+      () => unsetProjectEnvValue({ ...base, key: "PRESET" }),
+    ]) {
+      const refusal = await closedRefusalOf(attempt());
+      expect(refusal).toBeInstanceOf(EnvLayerLockTimeoutError);
+      expect((refusal as EnvLayerLockTimeoutError).reason).toBe("held");
+      expect(refusal.message).toBe(heldLockRefusal({ layer: file, lockPath }));
+      expect(refusal.message).not.toContain("\n");
+      expect(refusal.message).not.toContain(synthetic("BLOCKED"));
+      expect(refusal.message).not.toContain(synthetic("PRESET"));
+    }
+    expect(await readFile(file, "utf8")).toBe(original);
+    // Nothing reclaimed it: the receipt is exactly as it was left.
+    expect(await readFile(lockPath, "utf8")).toBe(receipt.text);
+  }
+
+  // The recovery step the message names works.
+  await rm(lockPath);
+  const done = await unsetProjectEnvValue({ ...base, key: "PRESET" });
+  expect(done.changed).toBe(true);
+  expect(await readdir(dirname(lockPath))).toEqual([]);
+});
+
+test("a dead owner behind an interrupted recovery guard is refused with both paths, also by hydrate", async () => {
+  // HACK-1386: a reclaimer that crashed leaves `<lock>.recovery`; the guard
+  // is never age-reclaimed, so the owner can never be replaced on its own.
+  const project = await createProject();
+  const file = resolveProjectEnvLocalConfigPath({
+    projectDir: project.projectDir,
+    envName: null,
+  });
+  const original = layerText({ PRESET: synthetic("PRESET") });
+  await writeFile(file, original);
+  const lockPath = resolveEnvLayerLockPath({ layerPath: file });
+  const guard = `${lockPath}.recovery`;
+  await mkdir(guard, { recursive: true, mode: 0o700 });
+  await writeFile(lockPath, `${exitedPid()}\n${randomUUID()}\n`, {
+    mode: 0o600,
+  });
+  const expected = `Refused to update ${file}: its lock at ${lockPath} was left by a process that has exited, and the recovery guard is busy (interrupted recovery requires offline inspection) at ${guard}; gave up after waiting 300ms. Nothing was written. If no hack env command is running, remove ${guard} and ${lockPath}, then retry.`;
+
+  const refusal = await closedRefusalOf(
+    setProjectEnvValue({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      envName: null,
+      scope: "global",
+      key: "BLOCKED",
+      value: synthetic("BLOCKED"),
+      secret: false,
+      local: true,
+      layerLockTimeoutMs: 300,
+    })
+  );
+  expect(refusal).toBeInstanceOf(EnvLayerLockTimeoutError);
+  expect((refusal as EnvLayerLockTimeoutError).reason).toBe("recovery_guard");
+  expect(refusal.message).toBe(expected);
+
+  // Hydration waits the default 10 s for the same lock and refuses alike.
+  const hydrated = await closedRefusalOf(
+    hydrateProjectEnvLocalLayer({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      envName: null,
+      scope: "global",
+      entries: new Map([["HYDRATED", synthetic("HYDRATED")]]),
+      secret: false,
+    })
+  );
+  expect(hydrated).toBeInstanceOf(EnvLayerLockTimeoutError);
+  expect(hydrated.message).toBe(expected.replace("300ms", "10s"));
+  expect(hydrated.message).not.toContain(synthetic("HYDRATED"));
+  expect(await readFile(file, "utf8")).toBe(original);
+  // Hydration released its own lock; the layer lock and guard are untouched.
+  expect((await readdir(dirname(lockPath))).sort()).toEqual(
+    [basename(lockPath), basename(guard)].sort()
+  );
+
+  await rm(guard, { recursive: true });
+  await rm(lockPath);
+  const done = await setProjectEnvValue({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    envName: null,
+    scope: "global",
+    key: "BLOCKED",
+    value: synthetic("BLOCKED"),
+    secret: false,
+    local: true,
+  });
+  expect(done.changed).toBe(true);
 }, 30_000);

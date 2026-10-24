@@ -292,8 +292,14 @@ the protocol or a summary, including a field the checker does not otherwise read
 be finite and within ±(2⁵³ − 1), the interoperable JSON range. Any other number,
 including the `NaN` and `Infinity` that Python's JSON parser accepts, is refused as
 `protocol_number_out_of_range` or `summary_number_out_of_range`, alongside any code
-for the field that holds it. A mean is the correctly rounded sum divided by the
-count, so a mean at an exclusive ceiling gets the same verdict on every Python version.
+for the field that holds it. A summary still gets the number code when
+`summary_revision_mismatch` or `summary_workload_unknown` stops the rest of its check.
+An integer of any length gets this code on every Python version, never an
+unreadable-file code. No object may repeat a key, because the parser keeps only the
+last value and the scan would never see the others: a repeated key is refused as
+`protocol_key_duplicate` or `summary_key_duplicate` before any other check. A mean is
+the correctly rounded sum divided by the count, so a mean at an exclusive ceiling gets
+the same verdict on every Python version.
 
 These are acceptance thresholds, not measured achievements.
 
@@ -320,8 +326,8 @@ record. It exits 1 when any verdict fails or is inconclusive. It exits 2, withou
 judging, when the protocol or summary is invalid: for example a summary for another
 cache class or scale point, a candidate marked `not_applicable`, a `not_applicable`
 record that carries samples, a negative sample, a planned count that is not a positive
-integer, a number outside ±(2⁵³ − 1), or a value of the wrong type. Diagnostics are closed codes and never repeat
-input values.
+integer, a number outside ±(2⁵³ − 1), a repeated object key, or a value of the wrong
+type. Diagnostics are closed codes and never repeat input values.
 
 A summary has this shape. `samples` lists only admitted samples; `flagged` and `failed`
 count the planned samples left out, so `samples` plus both counts never exceeds

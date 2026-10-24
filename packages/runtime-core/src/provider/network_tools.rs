@@ -351,11 +351,10 @@ mod tests {
 
     #[test]
     fn archives_reject_corruption_aliases_and_public_files() {
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-network-tools-{}-{}",
-            std::process::id(),
-            crate::node::now()
-        ));
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-network-tools",
+        );
         state::private_directory(&root).unwrap();
         let path = root.join("archive.apk");
         std::fs::write(&path, b"fixture").unwrap();

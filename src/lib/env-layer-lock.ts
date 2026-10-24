@@ -13,18 +13,55 @@ import {
 export const ENV_LAYER_LOCK_WAIT_MS = 10_000;
 
 /**
- * Another `hack env` writer held the layer's lock for the whole bounded wait
- * (or an interrupted lock recovery needs offline inspection). Closed and
- * retryable: nothing was read or written, and the message names only the
- * layer path, never a key or value.
+ * Why {@link EnvLayerLockTimeoutError} gave up:
+ * - `held`: the lock stayed occupied for the whole wait. Either a live Hack
+ *   writer holds it, or Hack can never reclaim it on its own (a malformed
+ *   receipt, one owned by another user, or a PID now used by a live process).
+ * - `recovery_guard`: the owner has exited, but the `<lock>.recovery` guard
+ *   left by an interrupted reclaimer blocks reclamation until it is removed.
+ */
+export type EnvLayerLockTimeoutReason = "held" | "recovery_guard";
+
+/** The projects-registry lock's detail for a dead owner behind a busy guard. */
+const RECOVERY_GUARD_BUSY_DETAIL =
+  "recovery guard is busy (interrupted recovery requires offline inspection)";
+
+/**
+ * The layer's lock stayed held for the whole bounded wait. Closed and
+ * retryable: nothing was read or written. The one-line message names the
+ * layer, its lock path and the recovery step, never a key or value, so a lock
+ * Hack cannot reclaim does not leave the user retrying a command that can
+ * never succeed.
  */
 export class EnvLayerLockTimeoutError extends ClosedCliError {
-  constructor(opts: { readonly path: string; readonly waitMs: number }) {
-    super(
-      `Another hack env command is writing ${opts.path}; gave up after waiting ${formatWait(opts.waitMs)} for it. Nothing was written. Retry when it finishes.`
-    );
+  readonly reason: EnvLayerLockTimeoutReason;
+  readonly lockPath: string;
+
+  constructor(opts: {
+    readonly path: string;
+    readonly lockPath: string;
+    readonly waitMs: number;
+    readonly reason: EnvLayerLockTimeoutReason;
+  }) {
+    super(envLayerLockTimeoutMessage(opts));
     this.name = "EnvLayerLockTimeoutError";
+    this.reason = opts.reason;
+    this.lockPath = opts.lockPath;
   }
+}
+
+function envLayerLockTimeoutMessage(opts: {
+  readonly path: string;
+  readonly lockPath: string;
+  readonly waitMs: number;
+  readonly reason: EnvLayerLockTimeoutReason;
+}): string {
+  const wait = formatWait(opts.waitMs);
+  if (opts.reason === "recovery_guard") {
+    const guard = `${opts.lockPath}.recovery`;
+    return `Refused to update ${opts.path}: its lock at ${opts.lockPath} was left by a process that has exited, and the ${RECOVERY_GUARD_BUSY_DETAIL} at ${guard}; gave up after waiting ${wait}. Nothing was written. If no hack env command is running, remove ${guard} and ${opts.lockPath}, then retry.`;
+  }
+  return `Another hack env command is writing ${opts.path}; gave up after waiting ${wait} for its lock at ${opts.lockPath}. Nothing was written. Retry when it finishes. If no hack env command is running, Hack cannot reclaim that lock itself: remove ${opts.lockPath} and retry.`;
 }
 
 /**
@@ -69,7 +106,10 @@ export function resolveEnvLayerLockPath(opts: {
  *   reclaimed only after `kill(pid, 0)` reports the owner gone (ESRCH).
  * - The wait is bounded (`timeoutMs`, default {@link ENV_LAYER_LOCK_WAIT_MS})
  *   with jittered polling. When it runs out, {@link EnvLayerLockTimeoutError}
- *   is thrown and `run` never starts, so nothing is written.
+ *   is thrown and `run` never starts, so nothing is written. Its message
+ *   names the lock path and how to clear a lock Hack cannot reclaim itself
+ *   (a malformed or foreign receipt, a reused PID, an interrupted recovery's
+ *   guard); this helper never removes such a lock on its own.
  * - A symlinked or non-directory `.internal` beside the layer is refused with
  *   {@link EnvLayerLockRefusedError}; a filesystem failure while taking the
  *   lock (permission, full disk) is refused as the layer it blocked, never as
@@ -109,7 +149,14 @@ export async function withEnvLayerLock<T>(opts: {
       throw error;
     }
     if (error instanceof ProjectsRegistryLockTimeoutError) {
-      throw new EnvLayerLockTimeoutError({ path: opts.layerPath, waitMs });
+      throw new EnvLayerLockTimeoutError({
+        path: opts.layerPath,
+        lockPath,
+        waitMs,
+        reason: error.message.includes(RECOVERY_GUARD_BUSY_DETAIL)
+          ? "recovery_guard"
+          : "held",
+      });
     }
     if (!(await directoryWritable(dirname(opts.layerPath)))) {
       // No Hack writer can replace a layer whose directory it cannot write

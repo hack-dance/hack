@@ -240,6 +240,47 @@ impl Drop for OwnedChild {
         let _ = self.0.wait();
     }
 }
+/// Upper bound for the kernel to finish a SIGKILLed fixture owner. Exceeding it is a
+/// fixture failure, never a reason to continue with a possibly live owner.
+const REAP_BUDGET: Duration = Duration::from_secs(10);
+/// Simulate abrupt owner death and return only once the owner is reaped and the
+/// publication it left behind is still exactly the selected pair.
+///
+/// Stdin EOF is the fixture's clean-exit trigger, and `Child::wait` closes stdin
+/// before it reaps. A loaded child can therefore wake on that EOF before SIGKILL
+/// lands and run its `ControlListener` drop, unlinking the socket and sometimes the
+/// receipt. Holding the write end until the child is reaped leaves the kill as the
+/// only way out, so the dead-owner tests always see an uncleaned publication.
+fn kill_and_reap(child: &mut OwnedChild, pin: &PinnedEndpoint) {
+    let held_stdin = child
+        .0
+        .stdin
+        .take()
+        .expect("E_FIXTURE_STDIN_MISSING: dead-owner child needs its stdin pipe");
+    child.0.kill().unwrap();
+    let deadline = Instant::now() + REAP_BUDGET;
+    let exit = loop {
+        // try_wait reaps without touching stdin; the held write end stays open.
+        if let Some(exit) = child.0.try_wait().unwrap() {
+            break exit;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "E_FIXTURE_REAP_TIMEOUT: killed owner was not reaped within the budget"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    drop(held_stdin);
+    assert_eq!(
+        exit.signal(),
+        Some(libc::SIGKILL),
+        "E_FIXTURE_OWNER_EXIT: owner exited other than by SIGKILL"
+    );
+    assert!(
+        pin.verify_receipt().is_ok() && pin.verify_socket().is_ok(),
+        "E_FIXTURE_OWNER_CLEANED: killed owner changed its publication before reap"
+    );
+}
 #[test]
 #[ignore = "private subprocess fixture for publication recovery and backlog tests"]
 fn publication_child() {
@@ -291,9 +332,7 @@ fn dead_publication_recovery_requires_unchanged_receipt_and_socket() {
         assert!(pin.recover().is_err());
         #[cfg(target_os = "macos")]
         assert!(pin.verify_dead().is_err());
-        child.0.kill().unwrap();
-        let exit = child.0.wait().unwrap();
-        assert_eq!(exit.signal(), Some(libc::SIGKILL));
+        kill_and_reap(&mut child, &pin);
         let mut replacement = None;
         if replace_socket {
             fs::remove_file(&pin.paths.socket).unwrap();
@@ -319,8 +358,7 @@ fn dead_publication_recovery_requires_unchanged_receipt_and_socket() {
                         Err(_) => "unknown",
                     };
                     panic!(
-                        "Dead relay publication refused: receipt_unchanged={receipt_unchanged} socket_unchanged={socket_unchanged} process_absent={process_absent} child_signal={:?}",
-                        exit.signal()
+                        "Dead relay publication refused: receipt_unchanged={receipt_unchanged} socket_unchanged={socket_unchanged} process_absent={process_absent}"
                     );
                 }
             }
@@ -376,8 +414,7 @@ fn dead_witness_requires_lock_dead_exact_process_and_preserves_partial_retiremen
         std::thread::sleep(Duration::from_millis(1));
     };
     assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
-    child.0.kill().unwrap();
-    child.0.wait().unwrap();
+    kill_and_reap(&mut child, &pin);
     let mut foreign = pin.receipt.process.clone();
     foreign.start_micros += 1;
     assert!(dead::Witness::acquire(&root.0, context(), &foreign).is_err());
@@ -427,8 +464,7 @@ fn dead_witness_rejects_replacement_listener_and_changed_lock() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(1));
     };
-    child.0.kill().unwrap();
-    child.0.wait().unwrap();
+    kill_and_reap(&mut child, &pin);
     let witness = dead::Witness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
     let lock = pin.paths.directory.join("operation.lock");
     fs::rename(&lock, pin.paths.directory.join("old.lock")).unwrap();

@@ -223,6 +223,7 @@ import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint
 import {
   buildLogSelector,
   LOKI_FOLLOW_EMPTY_NOTICE_DELAY_MS,
+  type LogsCommandSelectors,
   type LogsCommandTarget,
   renderEmptyLokiFollowNotice,
   resolveShouldTryLoki,
@@ -5334,18 +5335,16 @@ async function runUpCommand({
       projectOpt: args.options.project,
     });
   } catch (error: unknown) {
-    if (error instanceof MissingProjectContextError) {
-      if (json) {
-        return emitLifecycleResult({
-          result: errorResult({
-            code: "E_PROJECT_NOT_FOUND",
-            message: error.message,
-          }),
-          exitCode: 1,
-        });
-      }
-      logger.error({ message: error.message });
-      return 1;
+    // Without --json the error reaches the CLI's closed-error renderer, like
+    // `down` and `restart`: one `E_PROJECT_NOT_FOUND: ...` line, no stack.
+    if (json && error instanceof MissingProjectContextError) {
+      return emitLifecycleResult({
+        result: errorResult({
+          code: "E_PROJECT_NOT_FOUND",
+          message: error.message,
+        }),
+        exitCode: 1,
+      });
     }
     throw error;
   }
@@ -8129,6 +8128,10 @@ async function runLogsWithLoki(opts: {
   readonly wantsLokiExplicit: boolean;
   /** Project selection repeated in suggested `hack logs --compose` commands. */
   readonly target: LogsCommandTarget;
+  /** `--tail` as passed; undefined when the user left the default. */
+  readonly tailOpt: number | undefined;
+  readonly profiles: readonly string[];
+  readonly pretty: boolean;
   /** Compose snapshot used when an implicit Loki snapshot comes back empty. */
   readonly runCompose: () => Promise<number>;
 }): Promise<number> {
@@ -8172,6 +8175,18 @@ async function runLogsWithLoki(opts: {
     projectNameForPrefix: opts.projectNameForPrefix,
     services,
   });
+  // Every selector the user passed, so an empty-result hint suggests the same
+  // selection on the compose backend (HACK-1379).
+  const selectors: LogsCommandSelectors = {
+    services,
+    tail: opts.tailOpt,
+    profiles: opts.profiles,
+    pretty: opts.pretty,
+    json: opts.json,
+    query: opts.queryOpt,
+    since: opts.since,
+    until: opts.until,
+  };
 
   const lokiOptions = {
     baseUrl: opts.baseUrl,
@@ -8193,8 +8208,8 @@ async function runLogsWithLoki(opts: {
           process.stderr.write(
             `${renderEmptyLokiFollowNotice({
               query,
-              service: opts.positionalService,
               target: opts.target,
+              selectors,
             })}\n`
           );
         },
@@ -8205,8 +8220,8 @@ async function runLogsWithLoki(opts: {
   return await runLokiSnapshotWithFallback({
     wantsLokiExplicit: opts.wantsLokiExplicit,
     query,
-    service: opts.positionalService,
     target: opts.target,
+    selectors,
     runLoki: async ({ deferEmpty }) =>
       await lokiLogBackend.snapshot({ ...lokiOptions, deferEmpty }),
     runCompose: opts.runCompose,
@@ -8563,6 +8578,9 @@ async function handleLogs({
         project: args.options.project,
         branch: args.options.branch,
       },
+      tailOpt: args.options.tail,
+      profiles,
+      pretty: args.options.pretty === true,
       runCompose,
     });
   }

@@ -983,12 +983,7 @@ mod tests {
 
     #[test]
     fn live_admission_requires_exact_acknowledged_owner_source_revision_and_inode() {
-        let root = std::env::temp_dir().join(format!(
-            "live-admit-{}-{}",
-            std::process::id(),
-            crate::node::now()
-        ));
-        std::fs::create_dir(&root).unwrap();
+        let root = crate::unique_test_root(&std::env::temp_dir(), "live-admit");
         let root = root.canonicalize().unwrap();
         let source = root.join("source");
         let home = root.join("candidate");
@@ -1089,11 +1084,10 @@ mod tests {
 
     #[test]
     fn sync_status_reads_receipts_without_starting_provider_and_refuses_aliases() {
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-sync-status-{}-{}",
-            std::process::id(),
-            crate::node::now()
-        ));
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-sync-status",
+        );
         state::private_directory(&root).unwrap();
         let candidate = Candidate::discover(&root).unwrap();
         let namespace = "a".repeat(64);

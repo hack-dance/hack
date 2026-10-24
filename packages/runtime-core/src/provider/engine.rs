@@ -715,12 +715,13 @@ mod tests {
     fn bounded_acquisition_cancellation_and_expiry_do_not_initialize_state() {
         use std::os::unix::fs::DirBuilderExt;
         let path = std::env::temp_dir().join(format!(
-            "hack-engine-acquire-{}-{}",
+            "hack-engine-acquire-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::next_test_scratch()
         ));
         std::fs::DirBuilder::new()
             .mode(0o700)

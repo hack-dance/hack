@@ -1,4 +1,4 @@
-import { test as boundedTest, expect, mock, spyOn } from "bun:test";
+import { test as boundedTest, expect, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -37,9 +37,86 @@ const SINGLE_OPERATION_TEST_BUDGET_MS = 180_000;
  * but well inside the product's default caller deadline: a slow but unchanged
  * operation. */
 const SLOW_OPERATION_ADVANCE_MS = 16_000;
-let h: Awaited<ReturnType<typeof retainedRoutingFixture>>;
+type RoutingFixture = Awaited<ReturnType<typeof retainedRoutingFixture>>;
+type RoutingFixtureLifetime = ReturnType<typeof retainedRoutingFixtureLifetime>;
+let h: RoutingFixture;
 let fixtureActive = false;
 let fixtureUncertain = false;
+/**
+ * The file's fixture gate. A case refuses while an earlier case's fixture is
+ * still active or its lifetime is unknown, because that fixture's global
+ * doubles may still be installed. `run` calls `restored()` only once every
+ * global double and root it created is restored; otherwise the gate stays
+ * closed and every later gated case in this file refuses.
+ */
+const gatedTest = (
+  name: string,
+  run: (restored: () => void) => Promise<void>,
+  timeoutMs: number
+) =>
+  boundedTest(
+    name,
+    async () => {
+      if (fixtureActive || fixtureUncertain) {
+        fixtureUncertain = true;
+        throw new Error(
+          "Prior retained routing fixture lifetime is unknown; values omitted."
+        );
+      }
+      fixtureActive = true;
+      let isRestored = false;
+      try {
+        await run(() => {
+          isRestored = true;
+        });
+      } finally {
+        if (isRestored) {
+          fixtureActive = false;
+        } else {
+          fixtureUncertain = true;
+        }
+      }
+    },
+    timeoutMs
+  );
+/**
+ * Ends a gated case's fixture. With a known lifetime it runs the full
+ * teardown. With an unknown lifetime it keeps the spies and root for the
+ * unsettled work but still restores HACK_HOME, so later files never inherit
+ * the fixture home (HACK-1327). `failure` is set whenever not everything was
+ * restored.
+ */
+async function endRoutingFixture(
+  lifetime: RoutingFixtureLifetime,
+  fixture: RoutingFixture | undefined
+): Promise<{ readonly restored: boolean; readonly failure?: unknown }> {
+  if (!lifetime.canRestore()) {
+    fixture?.releaseEnvironment();
+    return {
+      restored: false,
+      failure: new Error(
+        "Retained routing fixture lifetime is unknown; values omitted."
+      ),
+    };
+  }
+  if (fixture === undefined) {
+    // Setup did not issue a complete fixture; do not reuse its global context.
+    lifetime.retain();
+    return {
+      restored: false,
+      failure: new Error(
+        "Retained routing fixture setup is incomplete; values omitted."
+      ),
+    };
+  }
+  try {
+    await fixture.cleanup();
+    return { restored: true };
+  } catch (error: unknown) {
+    lifetime.retain();
+    return { restored: false, failure: error };
+  }
+}
 const test = (
   name: string,
   run: () => Promise<void>,
@@ -52,67 +129,30 @@ const test = (
   } = {}
 ) => {
   const timeoutMs = opts.timeoutMs ?? 30_000;
-  return boundedTest(
+  return gatedTest(
     name,
-    async () => {
-      if (fixtureActive || fixtureUncertain) {
-        fixtureUncertain = true;
-        throw new Error(
-          "Prior retained routing fixture lifetime is unknown; values omitted."
-        );
-      }
-      fixtureActive = true;
+    async (restored) => {
       const lifetime = retainedRoutingFixtureLifetime(Date.now() + timeoutMs);
-      let issued = false;
+      let fixture: RoutingFixture | undefined;
       let failed = false;
       let failure: unknown;
       try {
         h = await retainedRoutingFixture(lifetime);
-        issued = true;
+        fixture = h;
         await run();
       } catch (error: unknown) {
         failed = true;
         failure = error;
-      } finally {
-        if (!lifetime.canRestore()) {
-          fixtureUncertain = true;
-          // Keep the spies and root for the unsettled work, but never leave
-          // HACK_HOME pointing at this fixture for later files (HACK-1327).
-          if (issued) {
-            h.releaseEnvironment();
-          }
-          if (!failed) {
-            failed = true;
-            failure = new Error(
-              "Retained routing fixture lifetime is unknown; values omitted."
-            );
-          }
-        } else if (issued) {
-          try {
-            await h.cleanup();
-            fixtureActive = false;
-          } catch (error: unknown) {
-            lifetime.retain();
-            fixtureUncertain = true;
-            if (!failed) {
-              failed = true;
-              failure = error;
-            }
-          }
-        } else {
-          // Setup did not issue a complete fixture; do not reuse its global context.
-          lifetime.retain();
-          fixtureUncertain = true;
-          if (!failed) {
-            failed = true;
-            failure = new Error(
-              "Retained routing fixture setup is incomplete; values omitted."
-            );
-          }
-        }
+      }
+      const end = await endRoutingFixture(lifetime, fixture);
+      if (end.restored) {
+        restored();
       }
       if (failed) {
         throw failure;
+      }
+      if (!end.restored) {
+        throw end.failure;
       }
     },
     timeoutMs
@@ -864,25 +904,39 @@ boundedTest(
   },
   1000
 );
-boundedTest(
+gatedTest(
   "a refused teardown still restores HACK_HOME so later files never inherit the fixture home",
-  async () => {
+  async (restored) => {
     const before = process.env.HACK_HOME;
-    const lifetime = retainedRoutingFixtureLifetime(Date.now() + 5000);
-    const fixture = await retainedRoutingFixture(lifetime);
+    // Stands in for another fixture's spy that is kept on purpose while its
+    // settlement is unknown: this case must restore only its own spies.
+    const foreign = spyOn(privateState, "readPrivate");
     try {
-      expect(process.env.HACK_HOME).toBe(fixture.home);
-      fixture.releaseEnvironment();
-      expect<string | undefined>(process.env.HACK_HOME).toBe(before);
-      process.env.HACK_HOME = fixture.home;
-      lifetime.retain();
-      await expect(fixture.cleanup()).rejects.toThrow();
-      expect<string | undefined>(process.env.HACK_HOME).toBe(before);
+      const lifetime = retainedRoutingFixtureLifetime(Date.now() + 5000);
+      const fixture = await retainedRoutingFixture(lifetime);
+      try {
+        expect(process.env.HACK_HOME).toBe(fixture.home);
+        lifetime.retain();
+        // The gated runner's own teardown path for an unknown lifetime.
+        const end = await endRoutingFixture(lifetime, fixture);
+        expect(end.restored).toBe(false);
+        expect(end.failure).toBeInstanceOf(Error);
+        expect<string | undefined>(process.env.HACK_HOME).toBe(before);
+        expect(fixture.doublesInstalled()).toBe(true);
+        process.env.HACK_HOME = fixture.home;
+        await expect(fixture.cleanup()).rejects.toThrow();
+        expect<string | undefined>(process.env.HACK_HOME).toBe(before);
+        expect(fixture.doublesInstalled()).toBe(true);
+      } finally {
+        restoreEnv("HACK_HOME", before);
+        fixture.restoreDoubles();
+        await rm(fixture.outer, { recursive: true, force: true });
+        restored();
+      }
+      expect(fixture.doublesInstalled()).toBe(false);
+      expect(privateState.readPrivate).toBe(foreign);
     } finally {
-      restoreEnv("HACK_HOME", before);
-      // The refused teardown kept the fixture spies; nothing else is mocked here.
-      mock.restore();
-      await rm(fixture.outer, { recursive: true, force: true });
+      foreign.mockRestore();
     }
   },
   5000

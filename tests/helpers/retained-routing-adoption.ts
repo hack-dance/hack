@@ -552,6 +552,11 @@ else {
       return originalKill.call(process, pid, signal);
     }),
   ];
+  const restoreDoubles = () => {
+    for (const spy of spies) {
+      spy.mockRestore();
+    }
+  };
   const receiptPath = join(
     root,
     ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
@@ -682,14 +687,20 @@ else {
     releaseEnvironment: () => {
       restoreEnv("HACK_HOME", previousHome);
     },
+    /** Whether this fixture's own global doubles are still installed. */
+    doublesInstalled: () => process.kill !== originalKill,
+    /**
+     * Restores this fixture's own spies, and no other spy in the shared Bun
+     * process, whatever the lifetime says. Only for a case that has proven no
+     * work it started is still running; {@link cleanup} is the gated path.
+     */
+    restoreDoubles,
     cleanup: async () => {
       restoreEnv("HACK_HOME", previousHome);
       if (!lifetime.canRestore()) {
         return refuse();
       }
-      for (const spy of spies) {
-        spy.mockRestore();
-      }
+      restoreDoubles();
       await rm(outer, { recursive: true, force: true });
     },
   };

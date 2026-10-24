@@ -2958,9 +2958,10 @@ async function checkComposeBackendFeatures(opts: {
 
 /**
  * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
- * it; each finding suggests the exact command instead.
+ * it; each finding suggests the exact command instead. It also catches a key
+ * that a later `git init` left unignored (`env-key-unignored`, HACK-1386).
  */
-async function checkProjectEnvKey({
+export async function checkProjectEnvKey({
   startDir,
 }: {
   readonly startDir: string;
@@ -3015,13 +3016,19 @@ async function checkTrackedGeneratedFiles({
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
     };
   }
-  return await checkTrackedGeneratedFilesAt(ctx);
+  return await checkTrackedGeneratedFilesAt({ ...ctx, adopted: false });
 }
 
-/** The tracked generated-files check for a resolved project (legacy or adopted). */
+/**
+ * The tracked generated-files check for a resolved project (legacy or
+ * adopted). For an adopted project `--fix` only untracks the files and leaves
+ * the adoption's `.gitignore` unchanged, so the warning says that instead of
+ * promising to ensure it (HACK-1380).
+ */
 async function checkTrackedGeneratedFilesAt(ctx: {
   readonly projectRoot: string;
   readonly projectDirName: string;
+  readonly adopted: boolean;
 }): Promise<CheckResult> {
   const name = "generated files";
   const inspection = await inspectTrackedGeneratedFiles({
@@ -3054,7 +3061,9 @@ async function checkTrackedGeneratedFilesAt(ctx: {
   return {
     name,
     status: "warn",
-    message: `Machine-local generated files are tracked in git: ${offenders}. Run 'hack doctor --fix' to untrack them (files stay on disk) and ensure the committed ${ctx.projectDirName}/.gitignore.`,
+    message: ctx.adopted
+      ? `Machine-local generated files are tracked in git: ${offenders}. Run 'hack doctor --fix' to untrack them (files stay on disk). It leaves the adopted project's ${ctx.projectDirName}/.gitignore unchanged, so keep these files out of later commits.`
+      : `Machine-local generated files are tracked in git: ${offenders}. Run 'hack doctor --fix' to untrack them (files stay on disk) and ensure the committed ${ctx.projectDirName}/.gitignore.`,
   };
 }
 
@@ -3343,7 +3352,7 @@ async function runAdoptedProjectChecks(opts: {
     await runCheck(
       progress,
       "generated files",
-      () => checkTrackedGeneratedFilesAt(adopted),
+      () => checkTrackedGeneratedFilesAt({ ...adopted, adopted: true }),
       { timeoutMs: 5000 }
     ),
     await runCheck(progress, COMPOSE_ENV_AT_REST_CHECK, () =>

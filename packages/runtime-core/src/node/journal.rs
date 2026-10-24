@@ -1,4 +1,4 @@
-use super::{Result, error, now, private_directory, private_file};
+use super::{Result, error, existing_private_file, now, private_directory, private_file};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -164,17 +164,16 @@ impl Store {
     fn open_mode(root: &Path, create: bool, read_only: bool) -> Result<Self> {
         private_directory(root, create)?;
         let root = root.canonicalize().map_err(error)?;
-        // Reject aliases before SQLite opens its journal or main file.
+        // Reject aliases before SQLite opens its journal or main file. A running
+        // supervisor commits through the same database, so its rollback journal can
+        // vanish between a check and an open: absence is decided by the open itself.
         for suffix in [
             "journal.sqlite",
             "journal.sqlite-journal",
             "journal.sqlite-wal",
             "journal.sqlite-shm",
         ] {
-            let path = root.join(suffix);
-            if path.symlink_metadata().is_ok() {
-                private_file(&path, false)?;
-            }
+            existing_private_file(&root.join(suffix))?;
         }
         private_file(&root.join("journal.sqlite"), create)?;
         let flags = if read_only {
@@ -622,11 +621,10 @@ mod tests {
     use super::*;
     #[test]
     fn reconciliation_refuses_live_or_foreign_work_and_preserves_uncertainty_on_failure() {
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-reconcile-{}-{}",
-            std::process::id(),
-            now()
-        ));
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-reconcile",
+        );
         private_directory(&root, true).unwrap();
         let candidate = crate::Candidate::discover(&root).unwrap();
         let mut store = Store::open(&super::super::root(&candidate), true).unwrap();
@@ -729,11 +727,10 @@ mod tests {
 
     #[test]
     fn sqlite_full_rolls_back_job_and_operation_together() {
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-node-full-{}-{}",
-            std::process::id(),
-            now()
-        ));
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-node-full",
+        );
         let mut store = Store::open(&root, true).unwrap();
         let pages: i64 = store
             .connection

@@ -2,8 +2,9 @@
  * `bun test` preload (see `bunfig.toml`): fails loudly when a test or a test
  * file leaves process-global state changed, names the file, and restores the
  * environment, working directory, umask and exit code so later files do not
- * fail for an unrelated reason. Replaced functions and process listeners are
- * reported but kept; `restoreGlobalState` explains why.
+ * fail for an unrelated reason. Replaced functions are reported but kept;
+ * `restoreGlobalState` explains why. Process listeners are reported and kept
+ * per test, and put back at the file boundary (`restoreProcessListeners`).
  *
  * Two checks run:
  * - Per test: the state before the global `beforeEach` must match the state
@@ -14,8 +15,11 @@
  * - Per file: when Bun loads the next test file, the state must match the
  *   state before the previous file loaded. This catches module-scope and
  *   `beforeAll`/`afterAll` leaks, including an `afterAll` that never ran its
- *   restore. A mismatch is reported at once, the pre-file environment is restored,
- *   and the run fails from the preload `afterAll` with every leaking file.
+ *   restore. A mismatch is reported at once, the pre-file environment and
+ *   process listeners are restored, and the run fails from the preload
+ *   `afterAll` with every leaking file. Restoring the listeners keeps a
+ *   finished file's leftover handler from being run or consumed by a later
+ *   test's `process.emit`, which would blame that later test (HACK-1416).
  *   This check also compares Bun's native environment (one short `/usr/bin/env`
  *   child per file), which keeps a proxy key that a test set and then deleted
  *   although `process.env` no longer shows it.
@@ -37,6 +41,7 @@ import {
   type GlobalStateSnapshot,
   type NativeEnv,
   restoreGlobalState,
+  restoreProcessListeners,
 } from "./global-state-guard.ts";
 
 /**
@@ -92,9 +97,10 @@ function checkFileBoundary(): void {
   if (changes.length > 0) {
     reportFileLeak(
       `${displayPath(currentFile)} left process state changed after the file finished: ${changes.join("; ")}`,
-      "Restored the environment and cwd from before the file so later files run clean."
+      "Restored the environment, cwd and process listeners from before the file so later files run clean."
     );
     restoreGlobalState(fileBaseline);
+    restoreProcessListeners(fileBaseline);
   }
   checkNativeEnv();
   fileBaseline = captureGlobalState();

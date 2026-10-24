@@ -149,14 +149,16 @@ mod tests {
                 sockets: BTreeMap::new(),
             };
             for slot in 0..3 {
+                // Stale sockets that never listened: a dropped listener could still accept
+                // through an unrelated parallel test's pre-exec fork copy.
                 let path = socket(&short_home, slot);
-                let listener = UnixListener::bind(&path).unwrap();
+                let stale = crate::provider::test_socket::bound_unlistened(&path);
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
                 let m = fs::symlink_metadata(&path).unwrap();
                 if slot < 2 {
                     record.sockets.insert(slot, (m.dev(), m.ino()));
                 }
-                drop(listener);
+                drop(stale);
             }
             state::private_directory(&super::super::root(&candidate)).unwrap();
             state::write(

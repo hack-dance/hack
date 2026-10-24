@@ -1006,51 +1006,58 @@ describe("catalog domain", () => {
     });
   });
 
-  test("pins must be Git-tracked files; untracked content is never hashed", async () => {
-    const { dir, registryPath } = await project("tracking");
-    const inspect = (taskId: string) =>
-      inspectTask({ cwd: dir, selector: {}, registryPath, taskId });
-    // Gitignored and untracked: refused without any digest.
-    const untracked = await inspect("untracked-secret");
-    expect(untracked).toMatchObject({
-      ok: false,
-      error: { detail: { reason: "input_path_invalid" } },
-    });
-    expect(JSON.stringify(untracked)).not.toContain(
-      sha256(canonical("fixture-value"))
-    );
-    // Positive control: once the file is tracked the same pin is checked,
-    // so the tracked-file rule was the only reason for the refusal.
-    await git(dir, ["add", "--force", "config/secrets.json"]);
-    expect(await inspect("untracked-secret")).toMatchObject({
-      ok: false,
-      error: {
-        detail: {
-          reason: "stale_recipe",
-          stale: {
-            inputs: [
-              { index: 1, observed_sha256: sha256(canonical("fixture-value")) },
-            ],
+  test(
+    "pins must be Git-tracked files; untracked content is never hashed",
+    async () => {
+      const { dir, registryPath } = await project("tracking");
+      const inspect = (taskId: string) =>
+        inspectTask({ cwd: dir, selector: {}, registryPath, taskId });
+      // Gitignored and untracked: refused without any digest.
+      const untracked = await inspect("untracked-secret");
+      expect(untracked).toMatchObject({
+        ok: false,
+        error: { detail: { reason: "input_path_invalid" } },
+      });
+      expect(JSON.stringify(untracked)).not.toContain(
+        sha256(canonical("fixture-value"))
+      );
+      // Positive control: once the file is tracked the same pin is checked,
+      // so the tracked-file rule was the only reason for the refusal.
+      await git(dir, ["add", "--force", "config/secrets.json"]);
+      expect(await inspect("untracked-secret")).toMatchObject({
+        ok: false,
+        error: {
+          detail: {
+            reason: "stale_recipe",
+            stale: {
+              inputs: [
+                {
+                  index: 1,
+                  observed_sha256: sha256(canonical("fixture-value")),
+                },
+              ],
+            },
           },
         },
-      },
-    });
-    // A reviewed recipe whose script leaves the index is refused.
-    expect((await inspect("lint")).ok).toBe(true);
-    await git(dir, ["rm", "--cached", "--quiet", "scripts/run-tool.sh"]);
-    expect(await inspect("lint")).toMatchObject({
-      ok: false,
-      error: { detail: { reason: "input_path_invalid" } },
-    });
-    // Without Git nothing is tracked, so every pinned recipe is refused.
-    await git(dir, ["add", "scripts/run-tool.sh"]);
-    expect((await inspect("lint")).ok).toBe(true);
-    await rm(join(dir, ".git"), { recursive: true, force: true });
-    expect(await inspect("lint")).toMatchObject({
-      ok: false,
-      error: { detail: { reason: "input_path_invalid" } },
-    });
-  });
+      });
+      // A reviewed recipe whose script leaves the index is refused.
+      expect((await inspect("lint")).ok).toBe(true);
+      await git(dir, ["rm", "--cached", "--quiet", "scripts/run-tool.sh"]);
+      expect(await inspect("lint")).toMatchObject({
+        ok: false,
+        error: { detail: { reason: "input_path_invalid" } },
+      });
+      // Without Git nothing is tracked, so every pinned recipe is refused.
+      await git(dir, ["add", "scripts/run-tool.sh"]);
+      expect((await inspect("lint")).ok).toBe(true);
+      await rm(join(dir, ".git"), { recursive: true, force: true });
+      expect(await inspect("lint")).toMatchObject({
+        ok: false,
+        error: { detail: { reason: "input_path_invalid" } },
+      });
+    },
+    CASE_TIMEOUT_MS
+  );
 
   test(
     "HACK-1331: the tracked-pin query ignores the caller's GIT_* env",
@@ -1323,6 +1330,8 @@ describe("recipe grammar", () => {
   // HACK-1331: each refused form names the rule that catches it; the paired
   // accepted forms prove the rule is scoped, not a blanket refusal.
   const gapCases: readonly {
+    /** Issue that added the rule, when it is not HACK-1331. */
+    readonly issue?: string;
     readonly rule: string;
     readonly refused: readonly (readonly string[])[];
     readonly accepted: readonly (readonly string[])[];
@@ -1661,9 +1670,18 @@ describe("recipe grammar", () => {
     {
       // A `<sub>--helper` plumbing command, dashed (also by an absolute
       // git-core path or with `.exe`) or under `git`, is `git <sub>`.
+      issue: "HACK-1373",
       rule: "Git plumbing helpers read as their porcelain",
       refused: [
         ["git-bisect--helper", "--bisect-run", "id"],
+        // HACK-1411: a dashed builtin's trailing arguments are mapped too,
+        // so an alias defined as the helper meets the `bisect` rule.
+        ["git-config", "alias.x", "bisect--helper"],
+        // HACK-1411: older Git's `rebase--helper --add-exec-commands cmd`,
+        // in any letter case, meets the `rebase`-scoped flag.
+        ["git", "rebase--helper", "--add-exec-commands", "id"],
+        ["git-rebase--helper", "--add-exec", "id"],
+        ["git", "Rebase--Helper", "--add-exec-commands", "id"],
         ["/usr/lib/git-core/git-bisect--helper", "run", "id"],
         ["/usr/libexec/git-core/git-bisect--helper.exe", "--bisect-run", "id"],
         ["exec", "Git-Bisect--Helper", "--bisect-run", "id"],
@@ -1681,12 +1699,72 @@ describe("recipe grammar", () => {
         ["git", "log", "--grep=bisect--helper"],
         // Only a whole `<sub>--helper` word is a helper, not a file name.
         ["git", "add", "bisect--helper.txt"],
+        // `--add-exec-commands` is scoped to `rebase`, so `--add` elsewhere
+        // still passes.
+        ["git", "config", "--add", "alias.st", "status"],
+        ["git", "rebase--helper", "--continue"],
+      ],
+    },
+    {
+      // Git 2.20-2.33 ship `rebase--interactive`, whose `--cmd <cmd>` adds
+      // an `exec <cmd>` line after each pick and runs it.
+      issue: "HACK-1423",
+      rule: "Git rebase--interactive --cmd",
+      refused: [
+        ["git", "rebase--interactive", "--cmd", "id"],
+        ["git", "rebase--interactive", "--cmd=id"],
+        ["git-rebase--interactive", "--cmd", "id"],
+        ["/usr/lib/git-core/git-rebase--interactive", "--cmd=id"],
+        ["git", "Rebase--Interactive", "--cm", "id"],
+        ["git", "--git-dir", "x", "rebase--interactive", "--cmd", "id"],
+        // A repository alias for the helper hides the subcommand, so
+        // `--cmd` is not scoped to `rebase`.
+        ["git", "ri", "--cmd", "id"],
+        // `rebase--interactive` is read as `rebase`, so its
+        // `--add-exec-commands` mode meets the `rebase`-scoped flag.
+        ["git", "rebase--interactive", "--add-exec-commands"],
+        ["git-rebase--interactive", "--add-exec"],
+      ],
+      accepted: [
+        ["git", "rebase--interactive", "--continue"],
+        ["git-rebase--interactive", "--edit-todo"],
+        ["git", "add", "rebase--interactive.txt"],
+      ],
+    },
+    {
+      // A subcommand-scoped flag counts only after the operand that names
+      // the subcommand: Git reads a subcommand's options after its name
+      // and rejects an unknown option before it.
+      issue: "HACK-1423",
+      rule: "subcommand-scoped Git flags count after the subcommand",
+      refused: [
+        ["git", "clone", "-u", "id", "url"],
+        ["git-clone", "-u", "id", "url"],
+        ["git", "--attr-source", "HEAD", "clone", "-u", "id", "url"],
+        // An unknown global option's value is read as an operand, so the
+        // subcommand after it still scopes the flag (fail-closed).
+        ["git", "--unknown", "v", "clone", "-u", "id", "url"],
+        [
+          "git",
+          "--unknown",
+          "v",
+          "rebase--helper",
+          "--add-exec-commands",
+          "id",
+        ],
+        ["git", "--namespace", "n", "rebase--helper", "--add", "id"],
+      ],
+      accepted: [
+        ["git", "push", "-u", "origin", "clone"],
+        ["git", "remote", "set-branches", "--add", "origin", "rebase"],
+        ["git", "config", "--add", "alias.r", "rebase"],
+        ["git", "push", "-u", "origin", "clone--helper"],
       ],
     },
   ];
 
   for (const gap of gapCases) {
-    test(`HACK-1331: ${gap.rule}`, () => {
+    test(`${gap.issue ?? "HACK-1331"}: ${gap.rule}`, () => {
       for (const argv of gap.refused) {
         expect({ argv, inline: isInlineCommandArgv(argv) }).toEqual({
           argv,
@@ -1706,11 +1784,6 @@ describe("recipe grammar", () => {
     // `-C` matches `-c` (case-folded), so `git -C dir status` is refused;
     // a recipe must set the Compose workdir instead.
     expect(isInlineCommandArgv(["git", "-C", "dir", "status"])).toBe(true);
-    // Any operand named `clone` scopes `-u` to it, so a branch or remote
-    // named `clone` makes `git push -u` refused too.
-    expect(isInlineCommandArgv(["git", "push", "-u", "origin", "clone"])).toBe(
-      true
-    );
     // Git's value-taking short options depend on the subcommand
     // (`rebase -mx cmd`), so an attached value containing `c`, `x` or `u`
     // is refused; the value as its own argument passes.
@@ -1727,6 +1800,28 @@ describe("recipe grammar", () => {
     expect(
       isInlineCommandArgv(["python3", "-m", "cProfile", "scripts/x.py", "code"])
     ).toBe(true);
+  });
+
+  test("HACK-1411: documented Git helper fail-closed collateral stays refused", () => {
+    // Any whole-word `<sub>--helper` or `<sub>--interactive` argument is
+    // read as `<sub>`, so a file named `bisect--helper` meets the `bisect`
+    // rule.
+    expect(isInlineCommandArgv(["git", "add", "bisect--helper"])).toBe(true);
+    // HACK-1423: an operand named `clone` or `rebase` scopes its flags to
+    // everything after it, even when it is another option's value (Git's
+    // option values are not modeled), and Git abbreviates, so `--add`
+    // after a message `rebase` and `-u` (`--patch`) after a pickaxe string
+    // `clone` are refused. The same flag before the word passes.
+    expect(
+      isInlineCommandArgv(["git", "commit", "-m", "rebase", "--add"])
+    ).toBe(true);
+    expect(isInlineCommandArgv(["git", "log", "-S", "clone", "-u"])).toBe(true);
+    expect(isInlineCommandArgv(["git", "log", "-u", "-S", "clone"])).toBe(
+      false
+    );
+    // HACK-1423: `--cmd` is refused under every subcommand, so a Git
+    // argument spelled `--cmd` or `--cm` is refused too.
+    expect(isInlineCommandArgv(["git", "grep", "-e", "--cmd"])).toBe(true);
   });
 
   test("effects must be covered by required capabilities", () => {
@@ -1917,11 +2012,11 @@ async function writeEmptyRegistry(name: string): Promise<string> {
 
 /**
  * A committed one-recipe project plus a detached linked worktree of it, both
- * inside the fixture root. Returns the linked worktree's root.
+ * inside the fixture root under `name`. Returns the linked worktree's root.
  */
-async function writeDetachedWorktree(): Promise<string> {
-  const primary = join(fixture.root, "detached-primary");
-  const linked = join(fixture.root, "detached-linked");
+async function writeDetachedWorktree(name = "detached"): Promise<string> {
+  const primary = join(fixture.root, `${name}-primary`);
+  const linked = join(fixture.root, `${name}-linked`);
   await mkdir(join(primary, ".hack"), { recursive: true });
   await mkdir(join(primary, "scripts"), { recursive: true });
   await writeFile(
@@ -2047,6 +2142,73 @@ describe("repository catalog", () => {
       expect(parsed?.ok && statuses(parsed.data.tasks)).toEqual([
         [0, "lint", "reviewed"],
       ]);
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
+    "HACK-1383: CLI task inspect and the MCP task tools refuse an implicit instance in a detached linked worktree",
+    async () => {
+      const linked = await writeDetachedWorktree("detached-surfaces");
+      const detached = targetRefusalEnvelope({ reason: "detached_checkout" });
+      const implicit = { path: linked, env: "base" };
+      const named = { ...implicit, branch: REVIEW_INSTANCE };
+
+      // Each surface has its own path to the selector, so each refusal is
+      // asserted separately, CLI first: the MCP tools spawn the CLI.
+      const cliInspect = await runCli(
+        buildTaskInspectArgs({ ...implicit, task: "lint" })
+      );
+      expect<unknown>({
+        surface: "cli inspect",
+        exitCode: cliInspect.exitCode,
+        envelope: cliInspect.envelope,
+      }).toEqual({ surface: "cli inspect", exitCode: 1, envelope: detached });
+      const mcpList = await runMcp("hack.project.task.list", implicit);
+      expect<unknown>({
+        surface: "mcp list",
+        exitCode: mcpList.exitCode,
+        spawned: mcpList.spawned,
+        data: mcpList.data,
+      }).toEqual({
+        surface: "mcp list",
+        exitCode: 1,
+        spawned: undefined,
+        data: detached,
+      });
+      const mcpInspect = await runMcp("hack.project.task.inspect", {
+        ...implicit,
+        task: "lint",
+      });
+      expect<unknown>({
+        surface: "mcp inspect",
+        exitCode: mcpInspect.exitCode,
+        spawned: mcpInspect.spawned,
+        data: mcpInspect.data,
+      }).toEqual({
+        surface: "mcp inspect",
+        exitCode: 1,
+        spawned: undefined,
+        data: detached,
+      });
+
+      // Naming the instance passes on every surface.
+      const cliNamed = parseTaskInspectEnvelope(
+        (await runCli(buildTaskInspectArgs({ ...named, task: "lint" })))
+          .envelope
+      );
+      expect(cliNamed?.ok && cliNamed.data.task.id).toBe("lint");
+      const mcpListNamed = parseTaskListEnvelope(
+        (await runMcp("hack.project.task.list", named)).data
+      );
+      expect(mcpListNamed?.ok && statuses(mcpListNamed.data.tasks)).toEqual([
+        [0, "lint", "reviewed"],
+      ]);
+      const mcpInspectNamed = parseTaskInspectEnvelope(
+        (await runMcp("hack.project.task.inspect", { ...named, task: "lint" }))
+          .data
+      );
+      expect(mcpInspectNamed?.ok && mcpInspectNamed.data.task.id).toBe("lint");
     },
     CASE_TIMEOUT_MS
   );

@@ -21,6 +21,8 @@ import {
   composeEnvAtRestRepairs,
   composeEnvOverridePath,
   describeComposeEnvAtRest,
+  INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+  INTERRUPTED_PREPARATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
   inspectComposeEnvAtRest,
   inspectComposeEnvOverrideAtRest,
   PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
@@ -517,7 +519,7 @@ test("doctor names explicit recovery rollback for an override that a pending ado
       report: {
         override,
         adoptionBound: true,
-        adoptionPending: true,
+        adoptionPending: "switch",
         asides: { stale: 0, fresh: 0 },
       },
       projectDirName: ".hack",
@@ -532,9 +534,9 @@ test("doctor names explicit recovery rollback for an override that a pending ado
     expect(pending.message).toContain(
       PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
     );
-    expect(adoptedComposeEnvOverrideNextStep({ adoptionPending: true })).toBe(
-      PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
-    );
+    expect(
+      adoptedComposeEnvOverrideNextStep({ adoptionPending: "switch" })
+    ).toBe(PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP);
     expect(adoptedComposeEnvOverrideNextStep({ adoptionPending: false })).toBe(
       ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
     );
@@ -550,6 +552,46 @@ test("doctor names explicit recovery rollback for an override that a pending ado
     expect(settled.message).toContain(ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP);
     expect(settled.message).not.toContain("--recover --rollback");
   }
+});
+
+test("doctor names the recovery each interrupted adoption kind accepts first (HACK-1414)", () => {
+  const path = "/unused";
+  const describe = (
+    adoptionPending: "preparation-stop" | "retained-operation"
+  ) =>
+    describeComposeEnvAtRest({
+      report: {
+        override: { kind: "plaintext", path, values: 2, services: 1 },
+        adoptionBound: true,
+        adoptionPending,
+        asides: { stale: 0, fresh: 0 },
+      },
+      projectDirName: ".hack",
+    }).message;
+  // An interrupted preparation stop has no switch yet: `--recover --rollback`
+  // refuses there, and only `--recover --stop` moves it on.
+  const preparation = describe("preparation-stop");
+  expect(preparation).toContain(
+    INTERRUPTED_PREPARATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+  );
+  expect(preparation).toMatch(
+    /first retry the interrupted adoption stop with 'hack config adopt --recover --stop'.*Release that switch with 'hack config adopt --recover --rollback'/
+  );
+  expect(preparation).not.toContain(
+    PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+  );
+  expect(preparation).not.toContain("'hack config adopt --rollback'");
+  // An interrupted retained command of an active adoption: rollback of either
+  // kind refuses until `hack down --recover` settles it.
+  const operation = describe("retained-operation");
+  expect(operation).toContain(
+    INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+  );
+  expect(operation).toContain(
+    "first settle the interrupted adopted command with 'hack down --recover'"
+  );
+  expect(operation).not.toContain("--recover --rollback");
+  expect(operation).not.toContain("--recover --stop");
 });
 
 /** Names and contents of every entry in a directory outside the project. */

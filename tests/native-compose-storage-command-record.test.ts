@@ -692,6 +692,63 @@ test(
     retained.add(f.root);
   })
 );
+// Owner creation checks the saved binding before writing the record (1) and
+// after reading it back (2). Either refusal is the same fixed refusal and keeps
+// only the check's issued boundary (`refuseFrom`), as `publish()` does.
+test.each([
+  ["before it writes its record", 1, "storage-target"],
+  ["after it reads its record back", 2, "storage-helper-start"],
+] as const)("a command owner whose creation check refuses %s keeps the check's issued boundary", (_, failingCheck, stage) =>
+  ownedCase(async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "native-command-record-"))
+    );
+    roots.push(root);
+    const directory = await holdDirectory(root, true);
+    held.push(directory);
+    let checks = 0;
+    const caught = await createNativeComposeStorageCommandOwner({
+      directory,
+      binding: {
+        invocationId: "b".repeat(32),
+        engineId: "synthetic-engine",
+        materialHash: hash,
+        helperHash: hash,
+        requestHash: hash,
+        invocationHash: hash,
+        sourceHash: hash,
+        fixedInvocationHash: hash,
+        directory: { dev: directory.info.dev, ino: directory.info.ino },
+      },
+      check: async () => {
+        checks += 1;
+        if (checks === failingCheck) {
+          throw issuedRefusal({ stage, reason: "private-state" });
+        }
+      },
+      published: () => {
+        throw new Error("Unexpected owner publication");
+      },
+    }).catch((error: unknown) => error);
+    expect(checks).toBe(failingCheck);
+    expect((caught as Error).message).toBe(
+      "Native storage xattr proof refused; values omitted."
+    );
+    expect(nativeComposeEffectRefusal(caught)).toEqual({
+      stage,
+      reason: "private-state",
+    });
+    expect(
+      nativeComposeStorageCarrierBudgetReason({
+        error: caught,
+        signal: new AbortController().signal,
+        deadline: 5_000_000,
+        now: () => 5_000_001,
+      })
+    ).toBe("private-state");
+    // A record written before the refusal is never promoted to an owner.
+    expect(existsSync(join(root, "commands.json"))).toBe(failingCheck === 2);
+  })());
 test(
   "failed arm directory sync prevents the target spawn rather than proving no-spawn from a record",
   ownedCase(async () => {

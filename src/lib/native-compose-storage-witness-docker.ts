@@ -116,6 +116,50 @@ const CAPTURE_LIMIT = 4096;
  * uncertainty (HACK-1281). It stays finite and grants nothing.
  */
 const SETTLEMENT_BUDGET_MS = 15_000;
+/**
+ * Floor of every cleanup step of one carrier: cleanup reads after the helper
+ * exits and helper removal. Cleanup runs even after the carrier's own deadline
+ * has passed (it is never clipped to it), so this floor keeps a just-expired
+ * carrier able to remove its helper.
+ */
+export const NATIVE_STORAGE_CLEANUP_FLOOR_MS = 10_000;
+/**
+ * Ceiling of one Docker read probe (`createNativeComposeProbe` accepts at most
+ * 60 s) and of every cleanup step, so a hung engine can stall neither a read
+ * nor cleanup beyond it.
+ */
+export const NATIVE_STORAGE_PROBE_CEILING_MS = 60_000;
+/**
+ * Timeout of one Docker probe or command inside a storage carrier, from the
+ * carrier's remaining `HACK_NATIVE_STORAGE_TIMEOUT_MS` budget (HACK-1369).
+ * Earlier fixed 15 s/10 s caps refused a healthy but slow helper start on
+ * loaded hosts as `probe-timeout` while most of the 90 s budget remained.
+ * - `command` (volume create, helper create/start): the remaining budget, so a
+ *   timeout still fires exactly at the carrier's end.
+ * - `read` (reads and target observation): the remaining budget, at most
+ *   {@link NATIVE_STORAGE_PROBE_CEILING_MS}.
+ * - `cleanup` (post-exit reads and helper removal): its own bound, the remaining
+ *   budget clamped to [{@link NATIVE_STORAGE_CLEANUP_FLOOR_MS},
+ *   {@link NATIVE_STORAGE_PROBE_CEILING_MS}], never clipped to the deadline.
+ * Every value is finite. A non-cleanup value at or below zero is refused by the
+ * probe or command before it spawns; it grants nothing and relaxes no check.
+ */
+export function nativeComposeStorageProbeTimeoutMs(opts: {
+  readonly kind: "read" | "command" | "cleanup";
+  readonly deadline: number;
+  readonly now?: number;
+}): number {
+  const remaining = opts.deadline - (opts.now ?? Date.now());
+  if (opts.kind === "cleanup") {
+    return Math.min(
+      NATIVE_STORAGE_PROBE_CEILING_MS,
+      Math.max(NATIVE_STORAGE_CLEANUP_FLOOR_MS, remaining)
+    );
+  }
+  return opts.kind === "read"
+    ? Math.min(NATIVE_STORAGE_PROBE_CEILING_MS, remaining)
+    : remaining;
+}
 // A late/unconfirmed publication cannot release its original held directory FDs.
 const unsettledCommandFiles = new Set<readonly HeldDirectory[]>();
 type Selection = { readonly name: string; readonly storage: string };
@@ -191,6 +235,21 @@ export function assertNativeComposeStorageCarrierStable(
       nativeComposeStorageDockerCarrierPolicy(observed) === known.policy
     )
   ) {
+    refuseObserved("storage-helper-policy", "helper-policy-stability");
+  }
+}
+/**
+ * Refuse unless a stopped helper carrier, inspected again, still shows the
+ * exact stopped state first observed. A change is the same instability as a
+ * changed creation time or policy, so it reports `helper-policy-stability` at
+ * `storage-helper-policy`; untagged, such a refusal caught after the carrier
+ * deadline would read `storage-budget`.
+ */
+export function assertNativeComposeStorageCarrierStateUnchanged(
+  observed: NativeComposeStorageDockerCarrier,
+  stopped: NativeComposeStorageDockerCarrier
+): void {
+  if (!same(observed.state, stopped.state)) {
     refuseObserved("storage-helper-policy", "helper-policy-stability");
   }
 }
@@ -599,7 +658,10 @@ async function savedCarrierRecovery(opts: {
       await guard();
       const result = await createNativeComposeProbe({
         signal: context.signal,
-        timeoutMs: Math.min(15_000, context.deadline - Date.now()),
+        timeoutMs: nativeComposeStorageProbeTimeoutMs({
+          kind: "read",
+          deadline: context.deadline,
+        }),
       })(args);
       await guard();
       return result;
@@ -1462,9 +1524,10 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       lifetime(context);
     }
     const signal = cleanup ? undefined : context.signal;
-    const timeoutMs = cleanup
-      ? 10_000
-      : Math.min(15_000, context.deadline - Date.now());
+    const timeoutMs = nativeComposeStorageProbeTimeoutMs({
+      kind: cleanup ? "cleanup" : "read",
+      deadline: context.deadline,
+    });
     return nativeComposeStorageIdentityProbe({
       probe: createNativeComposeProbe({ signal, timeoutMs }),
       signal,
@@ -1687,7 +1750,10 @@ export async function createNativeComposeDockerStorageXattrCarrier(
             `io.hack.native-config.storage-provision=${nonce}`,
             selection.name,
           ],
-          timeoutMs: 15_000,
+          timeoutMs: nativeComposeStorageProbeTimeoutMs({
+            kind: "command",
+            deadline: context.deadline,
+          }),
           beforeSpawn: () => {
             tool();
             lifetime(context);
@@ -1825,7 +1891,10 @@ export async function createNativeComposeDockerStorageXattrCarrier(
               program: files.program,
             }),
           ],
-          timeoutMs: 15_000,
+          timeoutMs: nativeComposeStorageProbeTimeoutMs({
+            kind: "command",
+            deadline: context.deadline,
+          }),
           beforeSpawn: () => {
             tool();
             lifetime(context);
@@ -1947,7 +2016,10 @@ export async function createNativeComposeDockerStorageXattrCarrier(
               }
             : undefined,
           args: [docker, "start", "-ai", id],
-          timeoutMs: 15_000,
+          timeoutMs: nativeComposeStorageProbeTimeoutMs({
+            kind: "command",
+            deadline: context.deadline,
+          }),
           beforeSpawn: () => {
             tool();
             lifetime(context);
@@ -2013,9 +2085,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         }
         const repeated = await inspectCarrier(true);
         assertNativeComposeStorageCarrierStable(repeated, known);
-        if (!same(repeated.state, stopped.state)) {
-          return refuse();
-        }
+        assertNativeComposeStorageCarrierStateUnchanged(repeated, stopped);
         stage = "storage-helper-cleanup";
         await checkFiles(files);
         tool();
@@ -2037,14 +2107,18 @@ export async function createNativeComposeDockerStorageXattrCarrier(
             : undefined,
           cleanup: true,
           args: [docker, "rm", id],
-          timeoutMs: 10_000,
+          timeoutMs: nativeComposeStorageProbeTimeoutMs({
+            kind: "cleanup",
+            deadline: context.deadline,
+          }),
           beforeSpawn: tool,
           assertAdmitted: async () => {
             const finalCarrier = await inspectCarrier(true);
             assertNativeComposeStorageCarrierStable(finalCarrier, owned);
-            if (!same(finalCarrier.state, stopped.state)) {
-              refuse();
-            }
+            assertNativeComposeStorageCarrierStateUnchanged(
+              finalCarrier,
+              stopped
+            );
             await engine(probe(true), context);
             tool();
             assertNativeComposeStorageBindingUnchanged({
@@ -2117,14 +2191,16 @@ export async function createNativeComposeDockerStorageXattrCarrier(
             const check = async () => {
               await checkCompletion();
               tool();
-              if (
-                !(
-                  nativeComposeStorageCommandOwnerConfirmed(owner) &&
-                  same(before, await current(context, input.target))
-                )
-              ) {
+              if (!nativeComposeStorageCommandOwnerConfirmed(owner)) {
                 return refuse();
               }
+              // Deferred retirement is the carrier's own cleanup: a binding
+              // changed since the invocation began reports `private-state`.
+              assertNativeComposeStorageBindingUnchanged({
+                stage: "storage-helper-cleanup",
+                before,
+                after: await current(context, input.target),
+              });
             };
             try {
               await check();

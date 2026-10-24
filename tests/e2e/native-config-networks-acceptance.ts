@@ -317,7 +317,9 @@ export function humanClosedCode(text: string): string | null {
 /**
  * Closed exit codes of the in-container probe scripts. Every script failure
  * exits with one of them, so a failing `hack exec` that exits 1 is the product
- * (or the runtime), never an uncaught probe error.
+ * (or the runtime), never an uncaught probe error. `rejected` and `timeout`
+ * are the HTTP phase (connect or response); the `dns*` codes are name
+ * resolution, so a probe timeout names which half stalled (HACK-1419).
  */
 export const NATIVE_NETWORK_PROBE_EXIT = {
   environment: 23,
@@ -327,18 +329,212 @@ export const NATIVE_NETWORK_PROBE_EXIT = {
   timeout: 27,
   unreadable: 28,
   unwritable: 29,
+  dnsRejected: 30,
+  dnsTimeout: 31,
 } as const;
 const PROBE = NATIVE_NETWORK_PROBE_EXIT;
+/** The peer probe's per-URL budget: name resolution plus the HTTP exchange share it. */
+export const NATIVE_NETWORK_PEER_PROBE_BUDGET_MS = 4000;
 
-/** Fetches the endpoint origin and its alias; both must answer the exact marker. */
+/**
+ * Resolves, then fetches, the endpoint origin and its alias; both must answer
+ * the exact marker. Each URL has one budget shared by resolution and the HTTP
+ * exchange, and the HTTP request goes to the address just resolved, so a
+ * failure is attributed to exactly one phase. Before a failing exit after the
+ * environment check it writes one closed stderr line (see
+ * `nativeNetworkFixtureProbeEvidence`): URL label, phase, resolution and total
+ * milliseconds, and the resolved address count. Never an address or body.
+ */
 export function nativeNetworkFixturePeerProbe(opts: {
   readonly origin: string;
   readonly alias: string;
   readonly expected: string;
   readonly timeoutMs?: number;
 }): string {
-  const timeout = opts.timeoutMs ?? 4000;
-  return `if(process.env.PEER_ORIGIN!==${JSON.stringify(opts.origin)})process.exit(${PROBE.environment});for(const url of [process.env.PEER_ORIGIN,${JSON.stringify(opts.alias)}]){let ok=false;try{const r=await fetch(url,{signal:AbortSignal.timeout(${timeout})});ok=r.ok&&await r.text()===${JSON.stringify(opts.expected)}}catch(e){process.exit(e?.name==="TimeoutError"?${PROBE.timeout}:${PROBE.rejected})}if(!ok)process.exit(${PROBE.response})}`;
+  const timeout = opts.timeoutMs ?? NATIVE_NETWORK_PEER_PROBE_BUDGET_MS;
+  return [
+    `if(process.env.PEER_ORIGIN!==${JSON.stringify(opts.origin)})process.exit(${PROBE.environment});`,
+    "const ms=(s)=>Math.round(performance.now()-s);",
+    "const fail=(u,p,d,s,n,c)=>{console.error(`probe-evidence ${u} ${p} ${d} ${ms(s)} ${n}`);process.exit(c)};",
+    `for(const [u,url] of [["origin",process.env.PEER_ORIGIN],["alias",${JSON.stringify(opts.alias)}]]){`,
+    "const s=performance.now();const target=new URL(url);let a=[];let t;",
+    `try{a=await Promise.race([Bun.dns.lookup(target.hostname),new Promise((_,j)=>{t=setTimeout(()=>j({name:"TimeoutError"}),${timeout})})])}catch(e){fail(u,"dns",ms(s),s,0,e?.name==="TimeoutError"?${PROBE.dnsTimeout}:${PROBE.dnsRejected})}finally{clearTimeout(t)}`,
+    `const d=ms(s);const x=a.find((r)=>r.family===4)??a[0];if(!x)fail(u,"dns",d,s,0,${PROBE.dnsRejected});`,
+    "target.hostname=x.family===6?`[${x.address}]`:x.address;let ok=false;",
+    `try{const r=await fetch(target,{signal:AbortSignal.timeout(Math.max(1,${timeout}-d))});ok=r.ok&&await r.text()===${JSON.stringify(opts.expected)}}catch(e){fail(u,"http",d,s,a.length,e?.name==="TimeoutError"?${PROBE.timeout}:${PROBE.rejected})}`,
+    `if(!ok)fail(u,"http",d,s,a.length,${PROBE.response})}`,
+  ].join("");
+}
+
+const PROBE_EVIDENCE =
+  /^probe-evidence (origin|alias) (dns|http) (\d{1,7}) (\d{1,7}) (\d{1,3})$/m;
+
+/** The peer probe's closed stderr evidence; null for anything else. */
+export function nativeNetworkFixtureProbeEvidence(stderr: string): {
+  readonly url: "origin" | "alias";
+  readonly phase: "dns" | "http";
+  readonly dnsMs: number;
+  readonly elapsedMs: number;
+  readonly addresses: number;
+} | null {
+  const match = PROBE_EVIDENCE.exec(stderr);
+  if (!match) {
+    return null;
+  }
+  const [, url, phase, dnsMs, elapsedMs, addresses] = match;
+  return {
+    url: url === "alias" ? "alias" : "origin",
+    phase: phase === "dns" ? "dns" : "http",
+    dnsMs: Number(dnsMs),
+    elapsedMs: Number(elapsedMs),
+    addresses: Number(addresses),
+  };
+}
+
+const HEALTH_STATES = ["starting", "healthy", "unhealthy"] as const;
+const IPV4 = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+
+function attachments(
+  value: unknown
+): readonly { readonly id: string; readonly ip: string }[] {
+  const settings = isRecord(value) ? own(value, "NetworkSettings") : undefined;
+  const networks = isRecord(settings) ? own(settings, "Networks") : undefined;
+  if (!isRecord(networks)) {
+    return [];
+  }
+  return Object.values(networks).flatMap((entry) => {
+    const id = isRecord(entry) ? own(entry, "NetworkID") : undefined;
+    const ip = isRecord(entry) ? own(entry, "IPAddress") : undefined;
+    return typeof id === "string" && ID.test(id)
+      ? [{ id, ip: typeof ip === "string" ? ip : "" }]
+      : [];
+  });
+}
+
+function containerState(value: unknown): {
+  readonly state: string;
+  readonly health: string;
+} {
+  const state = isRecord(value) ? own(value, "State") : undefined;
+  if (!isRecord(state)) {
+    return { state: "unknown", health: "unknown" };
+  }
+  const health = own(state, "Health");
+  const status = isRecord(health) ? own(health, "Status") : undefined;
+  return {
+    state:
+      CONTAINER_STATES.find((entry) => entry === own(state, "Status")) ??
+      "unknown",
+    health:
+      health === undefined || health === null
+        ? "none"
+        : (HEALTH_STATES.find((entry) => entry === status) ?? "unknown"),
+  };
+}
+
+/**
+ * Value-free route state behind a failed peer probe, from the two containers'
+ * engine inspections, the source container's `getent ahostsv4` answer for the
+ * probed name (empty when the name does not resolve, null when the lookup
+ * could not run) and the ingress network ID:
+ * closed states, attachment counts, shared bridges, ingress attachment, how
+ * many addresses the name resolved to and whether every one is the target's
+ * address on a bridge both containers share. Never an ID, address or name.
+ */
+export function nativeNetworkFixtureProbeRoute(opts: {
+  readonly source: unknown;
+  readonly target: unknown;
+  readonly resolved: string | null;
+  readonly ingressId: string | null;
+}) {
+  const source = attachments(opts.source);
+  const target = attachments(opts.target);
+  const sourceIds = new Set(source.map((entry) => entry.id));
+  const shared = target.filter((entry) => sourceIds.has(entry.id));
+  const addresses =
+    opts.resolved === null
+      ? null
+      : [
+          ...new Set(
+            opts.resolved
+              .split("\n")
+              .map((line) => line.trim().split(/\s+/)[0] ?? "")
+              .filter((address) => IPV4.test(address))
+          ),
+        ];
+  const reachable = new Set(shared.map((entry) => entry.ip));
+  return {
+    source: containerState(opts.source),
+    target: containerState(opts.target),
+    sourceAttachments: source.length,
+    targetAttachments: target.length,
+    sharedBridges: shared.length,
+    sourceIngress: opts.ingressId !== null && sourceIds.has(opts.ingressId),
+    addresses: addresses === null ? null : addresses.length,
+    resolvesToSharedTarget:
+      addresses === null
+        ? null
+        : addresses.length > 0 &&
+          addresses.every((address) => reachable.has(address)),
+  };
+}
+
+/** Outcome label of a probe exit: pass, a closed probe code name, or other (the product or runtime). */
+function probeOutcome(exitCode: number): string {
+  if (exitCode === 0) {
+    return "pass";
+  }
+  return (
+    Object.entries(PROBE).find(([, code]) => code === exitCode)?.[0] ?? "other"
+  );
+}
+
+/**
+ * Failed peer probe evidence: checkout role, probing service and target
+ * (fixed fixture names), the first attempt's exit, outcome and closed probe
+ * evidence, one diagnostic-only rerun's outcome (it never turns the step
+ * green) and the value-free route state. Never argv, output text or values.
+ */
+export function nativeNetworkFixtureProbeDiagnostic(opts: {
+  readonly role: FixtureRole;
+  readonly service: string;
+  readonly target: string;
+  readonly first: Pick<CliResult, "exitCode" | "timedOut" | "stderr">;
+  readonly rerun: Pick<CliResult, "exitCode" | "timedOut" | "stderr"> | null;
+  readonly route: ReturnType<typeof nativeNetworkFixtureProbeRoute> | null;
+}): string {
+  const attempt = (
+    result: Pick<CliResult, "exitCode" | "timedOut" | "stderr">
+  ) => ({
+    exit: result.exitCode,
+    timedOut: result.timedOut,
+    outcome: probeOutcome(result.exitCode),
+    evidence: nativeNetworkFixtureProbeEvidence(result.stderr),
+  });
+  if (
+    !(
+      NATIVE_NETWORK_FIXTURE_ROLES.includes(opts.role) &&
+      NAMES.includes(opts.service as Name) &&
+      NAMES.includes(opts.target as Name) &&
+      Number.isSafeInteger(opts.first.exitCode) &&
+      typeof opts.first.timedOut === "boolean" &&
+      typeof opts.first.stderr === "string" &&
+      (opts.rerun === null ||
+        (Number.isSafeInteger(opts.rerun.exitCode) &&
+          typeof opts.rerun.timedOut === "boolean" &&
+          typeof opts.rerun.stderr === "string"))
+    )
+  ) {
+    return "Network probe diagnostic unavailable";
+  }
+  return `Network probe diagnostic ${JSON.stringify({
+    role: opts.role,
+    service: opts.service,
+    target: opts.target,
+    ...attempt(opts.first),
+    rerun: opts.rerun ? attempt(opts.rerun) : null,
+    route: opts.route,
+  })}`;
 }
 
 /** Reads the retained marker; a missing or unreadable file has its own code. */
@@ -1849,6 +2045,89 @@ export const nativeConfigNetworksScenario: Scenario = {
     ): Promise<void> => {
       ok(await raw(checkout, ["exec", service, "--", "bun", "-e", script]));
     };
+    // A failed peer probe logs closed probe evidence, the value-free route
+    // state and one diagnostic-only rerun before the step fails (HACK-1419).
+    const probeDiagnostic = async (opts: {
+      readonly checkout: Checkout;
+      readonly service: Name;
+      readonly target: Name;
+      readonly script: string;
+      readonly first: CliResult;
+    }): Promise<void> => {
+      try {
+        const project = (await saved(opts.checkout.root)).identity
+          .composeProject;
+        const container = (service: Name) => `${project}-${service}-1`;
+        const inspected = async (service: Name): Promise<unknown> => {
+          const result = await execute([
+            engine,
+            "container",
+            "inspect",
+            container(service),
+          ]);
+          if (result.exitCode !== 0) {
+            return null;
+          }
+          const value: unknown = JSON.parse(result.stdout);
+          return Array.isArray(value) && value.length === 1 ? value[0] : null;
+        };
+        // The probe writes to stderr; accept the closed line on either stream.
+        const streams = (result: CliResult) => ({
+          ...result,
+          stderr: `${result.stderr}\n${result.stdout}`,
+        });
+        const first = streams(opts.first);
+        const evidence = nativeNetworkFixtureProbeEvidence(first.stderr);
+        const lookup = await execute([
+          engine,
+          "exec",
+          container(opts.service),
+          "getent",
+          "ahostsv4",
+          evidence?.url === "alias" ? `${opts.target}-alias` : opts.target,
+        ]);
+        const ingress = await execute([
+          engine,
+          "network",
+          "inspect",
+          "--format",
+          "{{.Id}}",
+          "hack-dev",
+        ]);
+        const route = nativeNetworkFixtureProbeRoute({
+          source: await inspected(opts.service),
+          target: await inspected(opts.target),
+          // getent exits 2 when the name does not resolve; other failures are unknown.
+          resolved:
+            lookup.exitCode === 0
+              ? lookup.stdout
+              : lookup.exitCode === 2
+                ? ""
+                : null,
+          ingressId: ingress.exitCode === 0 ? ingress.stdout.trim() : null,
+        });
+        const rerun = await raw(opts.checkout, [
+          "exec",
+          opts.service,
+          "--",
+          "bun",
+          "-e",
+          opts.script,
+        ]);
+        ctx.log(
+          nativeNetworkFixtureProbeDiagnostic({
+            role: roles.get(opts.checkout.root) ?? "fixture",
+            service: opts.service,
+            target: opts.target,
+            first,
+            rerun: streams(rerun),
+            route,
+          })
+        );
+      } catch {
+        ctx.log("Network probe diagnostic unavailable");
+      }
+    };
     const markers = async (checkout: Checkout): Promise<void> => {
       for (const [service, target, alias] of [
         ["web", "peer", "peer-alias"],
@@ -1856,15 +2135,23 @@ export const nativeConfigNetworksScenario: Scenario = {
         ["vault", "reader", "reader-alias"],
         ["reader", "vault", "vault-alias"],
       ] as const) {
-        await exec(
-          checkout,
+        const script = nativeNetworkFixturePeerProbe({
+          origin: `http://${target}:3000`,
+          alias: `http://${alias}:3000/`,
+          expected: `${checkout.marker}:${target}`,
+        });
+        const first = await raw(checkout, [
+          "exec",
           service,
-          nativeNetworkFixturePeerProbe({
-            origin: `http://${target}:3000`,
-            alias: `http://${alias}:3000/`,
-            expected: `${checkout.marker}:${target}`,
-          })
-        );
+          "--",
+          "bun",
+          "-e",
+          script,
+        ]);
+        if (first.exitCode !== 0 || first.timedOut) {
+          await probeDiagnostic({ checkout, service, target, script, first });
+        }
+        ok(first);
       }
       await exec(
         checkout,

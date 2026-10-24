@@ -36,20 +36,35 @@ import { restoreEnv } from "./helpers/env.ts";
 
 /**
  * The product's default deadline for one aggregate Docker probe
- * (`createNativeComposeProbe`). Each acquisition and each freshness check here
- * owns one such probe unless a test names its own `timeoutMs`.
+ * (`createNativeComposeProbe`).
  */
 const PROBE_DEADLINE_MS = 15_000;
 /**
- * Every fake Docker query here is a cold Bun process, and one acquisition runs
- * a dozen or more. Bun's 5 s default then budgets host process start-up rather
- * than the product, and an expired test keeps running against the next test's
- * shared root (HACK-1432, as HACK-1367 found for the ownership tests). The
- * heaviest test here owns about eight default-deadline probes, so a slow host
- * ends in the product's own closed refusal before this budget expires.
+ * The probe deadline this file's acquisitions use unless a test names its own
+ * `timeoutMs` (see {@link acquireFixtureBinding}). Each acquisition and each
+ * freshness check owns one probe with this deadline. Every fake Docker query
+ * is a cold Bun process, and one probe runs a dozen or more, so under heavy
+ * host load the product default refused with `E_LEGACY_COMPOSE_BINDING_PROBE`
+ * in tests that do not test deadlines (HACK-1452).
  */
-const FAKE_DOCKER_TEST_TIMEOUT_MS = 8 * PROBE_DEADLINE_MS;
+const FIXTURE_PROBE_DEADLINE_MS = 3 * PROBE_DEADLINE_MS;
+/**
+ * Bun's 5 s default would budget host process start-up rather than the
+ * product, and an expired test keeps running against the next test's shared
+ * root (HACK-1432, as HACK-1367 found for the ownership tests). The heaviest
+ * test here owns about eight fixture-deadline probes, so a slow host ends in
+ * the product's own closed refusal before this budget expires.
+ */
+const FAKE_DOCKER_TEST_TIMEOUT_MS = 8 * FIXTURE_PROBE_DEADLINE_MS;
 setDefaultTimeout(FAKE_DOCKER_TEST_TIMEOUT_MS);
+/**
+ * How long a test waits for the hanging fake Docker child to publish its PID.
+ * It covers acquisition work before the first probe and a cold Bun start under
+ * load, and stays below {@link FIXTURE_PROBE_DEADLINE_MS}, so the child is
+ * still owned by its probe when the test cancels it.
+ */
+const CHILD_START_WAIT_MS = PROBE_DEADLINE_MS;
+const CHILD_START_POLL_MS = 10;
 /**
  * A placeholder acquisition repeats bridge scans under one probe deadline
  * (two extra scans with two owned bridges). The default refused one under
@@ -154,7 +169,7 @@ beforeEach(async () => {
   await writeFile(
     join(root, "docker"),
     `#!${process.execPath}
-import {appendFileSync, existsSync, readFileSync, writeFileSync} from "node:fs";
+import {appendFileSync, existsSync, readFileSync, renameSync, writeFileSync} from "node:fs";
 const root = ${JSON.stringify(root)};
 const args = process.argv.slice(2);
 appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
@@ -163,7 +178,8 @@ const [kind, action] = args;
 if (!(kind === "info" && action === "--format") && (!['container','volume','network'].includes(kind) || !['ls','inspect'].includes(action) || !args.includes('--format'))) {writeFileSync(root + "/mutation", "unauthorized command");process.exit(99);}
 if (fixture.mode === "fail") {console.error(${JSON.stringify(CANARY)});process.exit(29);}
 if (fixture.mode === "malformed") {console.log(${JSON.stringify(CANARY)});process.exit(0);}
-if (fixture.mode === "hang") {writeFileSync(root + "/started", String(process.pid));await Bun.sleep(60_000);}
+// Publish the PID by rename: a child killed mid-write must never leave an empty "started" (HACK-1452).
+if (fixture.mode === "hang") {writeFileSync(root + "/started.tmp", String(process.pid));renameSync(root + "/started.tmp", root + "/started");await Bun.sleep(60_000);}
 if (fixture.mode === "overflow") {await Bun.write(Bun.stdout, "x".repeat(9 * 1024 * 1024));process.exit(0);}
 if (fixture.mode === "stderr-overflow") {await Bun.write(Bun.stderr, "x".repeat(17 * 1024));process.exit(0);}
 let networkOrdinal = 0;
@@ -365,6 +381,89 @@ async function commands(): Promise<string[][]> {
     .split("\n")
     .map((line) => JSON.parse(line));
 }
+/** Acquires with {@link FIXTURE_PROBE_DEADLINE_MS} unless the test names a deadline. */
+function acquireFixtureBinding(opts: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+}) {
+  return acquireLegacyComposeAdoptionBinding({
+    ...opts,
+    timeoutMs: opts.timeoutMs ?? FIXTURE_PROBE_DEADLINE_MS,
+  });
+}
+/**
+ * Waits, at most {@link CHILD_START_WAIT_MS}, for the hanging fake Docker child
+ * to publish its PID, and returns it. The fake publishes by rename, and a PID
+ * must be a positive integer above 1: `Number("")` is 0, and
+ * `process.kill(0, 0)` signals this test's own process group and succeeds.
+ */
+async function startedChild(): Promise<number> {
+  const started = join(root, "started");
+  const deadline = Date.now() + CHILD_START_WAIT_MS;
+  while (!(await Bun.file(started).exists())) {
+    if (Date.now() >= deadline) {
+      throw new Error("Fake Docker child did not start within its budget.");
+    }
+    await Bun.sleep(CHILD_START_POLL_MS);
+  }
+  const pid = Number(await readFile(started, "utf8"));
+  expect(Number.isSafeInteger(pid) && pid > 1).toBe(true);
+  return pid;
+}
+type ObservedChild = {
+  readonly child: ReturnType<typeof Bun.spawn>;
+  exited: boolean;
+};
+/**
+ * Records each fake Docker child the product spawns, and when it exits, without
+ * changing spawn or the product's timers. The exit callback is registered at
+ * spawn, before the probe awaits the same exit, so a refusal that waited for
+ * the reaped child always observes `exited` as true. `release` restores
+ * `Bun.spawn` and kills any child a broken reaping path left alive.
+ */
+function observeDockerChildren() {
+  const binary = join(root, "docker");
+  const children: ObservedChild[] = [];
+  const actualSpawn = Bun.spawn;
+  const spawn = spyOn(Bun, "spawn").mockImplementation((...args) => {
+    const child: ReturnType<typeof Bun.spawn> = Reflect.apply(
+      actualSpawn,
+      Bun,
+      args
+    );
+    const argv = args[0];
+    if (Array.isArray(argv) && argv[0] === binary) {
+      const observed: ObservedChild = { child, exited: false };
+      children.push(observed);
+      void child.exited.then(() => {
+        observed.exited = true;
+      });
+    }
+    return child;
+  });
+  return {
+    children,
+    release: async () => {
+      spawn.mockRestore();
+      for (const { child } of children) {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+          await child.exited;
+        }
+      }
+    },
+  };
+}
+/** The refusal resolved only after every observed child was reaped. */
+function expectReaped(children: readonly ObservedChild[], pid: number) {
+  expect(children.map(({ child }) => child.pid)).toContain(pid);
+  for (const { child, exited } of children) {
+    expect(exited).toBe(true);
+    expect(child.signalCode).toBe("SIGKILL");
+    expect(() => process.kill(child.pid, 0)).toThrow();
+  }
+}
 
 test.each([
   "unchanged",
@@ -408,6 +507,7 @@ test.each([
   const observed = inspectLegacyComposeSourceBindResources({
     root: projectRoot,
     intent: plan.intent,
+    timeoutMs: FIXTURE_PROBE_DEADLINE_MS,
   });
   if (change === "unchanged") {
     expect(await observed).toMatchObject({
@@ -434,7 +534,7 @@ test.each([
 });
 
 test("stopped originals retain configured network identity without active endpoints", async () => {
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   const original = await acquired.resolveBinding({ projectRoot });
   container().running = false;
   network().containers = [];
@@ -508,7 +608,7 @@ test("moving job snapshot counterexample retains identity and admits a fresh com
     expect(plan.ordered.find((item) => item.service === "seed")?.kind).toBe(
       "job"
     );
-    const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+    const acquired = await acquireFixtureBinding({ projectRoot });
     const original = await acquired.resolveBinding({ projectRoot });
     const effects: string[] = [];
     let jobStarted = false;
@@ -658,7 +758,7 @@ test.each([
   fixture.mode = `snapshot-guard-${kind}`;
   await save();
   await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    acquireFixtureBinding({ projectRoot }),
     kind === "container"
       ? "E_LEGACY_COMPOSE_BINDING_PROBE"
       : "E_LEGACY_COMPOSE_BINDING_IDENTITY"
@@ -671,7 +771,7 @@ test("moving snapshot guard exhausts the original shared deadline", async () => 
   await save();
   const started = Date.now();
   await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot, timeoutMs: 3000 }),
+    acquireFixtureBinding({ projectRoot, timeoutMs: 3000 }),
     "E_LEGACY_COMPOSE_BINDING_PROBE"
   );
   expect(Date.now() - started).toBeLessThan(5000);
@@ -701,7 +801,7 @@ test.each([
 ] as const)(
   "a sandbox-less endpoint placeholder on bridge read %s is re-observed, never admitted or refused (HACK-1421)",
   async (ordinal, extra) => {
-    const clean = await acquireLegacyComposeAdoptionBinding({
+    const clean = await acquireFixtureBinding({
       projectRoot,
       timeoutMs: PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS,
     });
@@ -711,7 +811,7 @@ test.each([
     fixture.mode = `snapshot-placeholder-${ordinal}`;
     await writeFile(join(root, "snapshot-network-ordinal"), "0");
     await save();
-    const acquired = await acquireLegacyComposeAdoptionBinding({
+    const acquired = await acquireFixtureBinding({
       projectRoot,
       timeoutMs: PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS,
     });
@@ -727,7 +827,7 @@ test(
   "a placeholder on one of two owned bridges is re-observed with both bridges (HACK-1421)",
   async () => {
     await twoBridges();
-    const clean = await acquireLegacyComposeAdoptionBinding({
+    const clean = await acquireFixtureBinding({
       projectRoot,
       timeoutMs: PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS,
     });
@@ -738,7 +838,7 @@ test(
     fixture.mode = "snapshot-placeholder-3";
     await writeFile(join(root, "snapshot-network-ordinal"), "0");
     await save();
-    const acquired = await acquireLegacyComposeAdoptionBinding({
+    const acquired = await acquireFixtureBinding({
       projectRoot,
       timeoutMs: PLACEHOLDER_RESCAN_PROBE_TIMEOUT_MS,
     });
@@ -754,7 +854,7 @@ test("a persistent endpoint placeholder exhausts the original shared deadline", 
   await save();
   const started = Date.now();
   await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot, timeoutMs: 6000 }),
+    acquireFixtureBinding({ projectRoot, timeoutMs: 6000 }),
     "E_LEGACY_COMPOSE_BINDING_PROBE"
   );
   expect(Date.now() - started).toBeLessThan(9000);
@@ -766,7 +866,7 @@ test("a malformed placeholder-shaped bridge member still refuses identity withou
   fixture.mode = "snapshot-placeholder-always-malformed";
   await save();
   await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    acquireFixtureBinding({ projectRoot }),
     "E_LEGACY_COMPOSE_BINDING_IDENTITY"
   );
   expect(networkInspections(await commands())).toBe(1);
@@ -784,7 +884,7 @@ test.each([
   network().containers = members();
   await save();
   await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    acquireFixtureBinding({ projectRoot }),
     "E_LEGACY_COMPOSE_BINDING_IDENTITY"
   );
   expect(networkInspections(await commands())).toBe(1);
@@ -796,7 +896,7 @@ test("moving snapshot guard rejects a selected ID on its undeclared bridge befor
   await writeFile(join(root, "snapshot-network-ordinal"), "0");
   await save();
   await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    acquireFixtureBinding({ projectRoot }),
     "E_LEGACY_COMPOSE_BINDING_IDENTITY"
   );
   const observed = await commands();
@@ -815,7 +915,7 @@ test("moving snapshot guard rejects a selected ID on its undeclared bridge befor
 
 test("one authored bridge binds original physical ID, internal policy and exact live aliases", async () => {
   await customBridge();
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   expect(acquired.report.binding_version).toBe(3);
   const original = await acquired.resolveBinding({ projectRoot });
   if (original.binding_version !== 3) {
@@ -848,7 +948,7 @@ test("one authored bridge binds original physical ID, internal policy and exact 
 
 test("two owned bridges bind both original IDs, policies, aliases and exact members", async () => {
   await twoBridges();
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   expect(acquired.report.binding_version).toBe(5);
   const original = await acquired.resolveBinding({ projectRoot });
   expect(original.binding_version).toBe(5);
@@ -926,7 +1026,7 @@ test.each([
   ],
 ])("plural binding refuses %s before effect", async (_, change) => {
   await twoBridges();
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   change();
   await save();
   await refusal(acquired.assertFresh({ projectRoot }));
@@ -991,7 +1091,7 @@ test.each([
   ],
 ])("owned bridge refuses %s before adoption effects", async (_, change) => {
   await customBridge();
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   change();
   await save();
   await refusal(acquired.assertFresh({ projectRoot }));
@@ -1001,7 +1101,7 @@ test("running original cannot hide absent aliases behind stopped endpoint allowa
   await customBridge();
   (container().networks as Record<string, unknown>[])[0]!.aliases = null;
   await save();
-  await refusal(acquireLegacyComposeAdoptionBinding({ projectRoot }));
+  await refusal(acquireFixtureBinding({ projectRoot }));
 });
 
 test("mixed stopped and running originals require exactly the running endpoint IDs", async () => {
@@ -1021,7 +1121,7 @@ test("mixed stopped and running originals require exactly the running endpoint I
     running: false,
   });
   await save();
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   expect(
     (await acquired.resolveBinding({ projectRoot })).containers
   ).toHaveLength(2);
@@ -1040,7 +1140,7 @@ test("stopped configured NetworkID drift and malformed running state refuse", as
   container().running = false;
   network().containers = [];
   await save();
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   container().networks = [{ name: "fixture_default", id: "d".repeat(64) }];
   await save();
   await refusal(acquired.assertFresh({ projectRoot }));
@@ -1051,7 +1151,7 @@ test("stopped configured NetworkID drift and malformed running state refuse", as
 });
 test("exact existing identities are private, frozen and repeatedly verified without writes", async () => {
   const before = await readFile(join(projectRoot, ".hack/docker-compose.yml"));
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   expect(acquired.report).toEqual({
     binding_version: 1,
     status: "verified",
@@ -1115,7 +1215,7 @@ test("missing existing database volume refuses instead of allocating an empty re
   fixture.volume = [];
   await save();
   await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    acquireFixtureBinding({ projectRoot }),
     "E_LEGACY_COMPOSE_BINDING_IDENTITY"
   );
 });
@@ -1147,7 +1247,7 @@ test.each([
   }
   row[String(key)] = value;
   await save();
-  await refusal(acquireLegacyComposeAdoptionBinding({ projectRoot }));
+  await refusal(acquireFixtureBinding({ projectRoot }));
 });
 test.each([
   [
@@ -1190,7 +1290,7 @@ test.each([
 ])("mounted identity must exactly match authored path and original data: %j", async (...mounts) => {
   container().mounts = mounts;
   await save();
-  await refusal(acquireLegacyComposeAdoptionBinding({ projectRoot }));
+  await refusal(acquireFixtureBinding({ projectRoot }));
 });
 test.each([
   undefined,
@@ -1202,7 +1302,7 @@ test.each([
   }
   mount[0].name = name;
   await save();
-  await refusal(acquireLegacyComposeAdoptionBinding({ projectRoot }));
+  await refusal(acquireFixtureBinding({ projectRoot }));
 });
 test.each([
   "container",
@@ -1214,7 +1314,7 @@ test.each([
     fixture.network = [];
   }
   await save();
-  await refusal(acquireLegacyComposeAdoptionBinding({ projectRoot }));
+  await refusal(acquireFixtureBinding({ projectRoot }));
 });
 test("the authored default volume name must exist exactly, with no generated native replacement", async () => {
   const path = join(projectRoot, ".hack/docker-compose.yml");
@@ -1222,7 +1322,7 @@ test("the authored default volume name must exist exactly, with no generated nat
     path,
     (await readFile(path, "utf8")).replace(`    name: ${VOLUME}`, "    {}")
   );
-  await refusal(acquireLegacyComposeAdoptionBinding({ projectRoot }));
+  await refusal(acquireFixtureBinding({ projectRoot }));
 });
 test.each([
   "replace-volume",
@@ -1231,7 +1331,7 @@ test.each([
 ])("changes during acquisition cannot return a stale capability: %s", async (mode) => {
   fixture.mode = mode;
   await save();
-  await refusal(acquireLegacyComposeAdoptionBinding({ projectRoot }));
+  await refusal(acquireFixtureBinding({ projectRoot }));
 });
 test.each([
   "volume",
@@ -1239,7 +1339,7 @@ test.each([
   "network",
   "engine",
 ])("captured binding detects later %s replacement", async (kind) => {
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   if (kind === "volume") {
     volume().createdAt = "2026-02-02T01:02:03Z";
   }
@@ -1259,7 +1359,7 @@ test.each([
   ".hack/docker-compose.yml",
   ".hack/hack.config.json",
 ])("raw whitespace-only source change invalidates private binding: %s", async (path) => {
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   const file = join(projectRoot, path);
   await writeFile(file, `${await readFile(file, "utf8")}\n`);
   await refusal(acquired.resolveBinding({ projectRoot }));
@@ -1270,13 +1370,13 @@ test.each([
   ".hack/hack.project.json",
   ".git",
 ])("adding a relevant marker after resolve invalidates binding: %s", async (path) => {
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   await acquired.resolveBinding({ projectRoot });
   await writeFile(join(projectRoot, path), CANARY);
   await refusal(acquired.assertFresh({ projectRoot }));
 });
 test("a different checkout target and changed Docker route refuse before a new probe", async () => {
-  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const acquired = await acquireFixtureBinding({ projectRoot });
   const count = (await commands()).length;
   await refusal(
     acquired.assertFresh({ projectRoot: join(root, "sibling") }),
@@ -1292,7 +1392,7 @@ test("a different checkout target and changed Docker route refuse before a new p
 test("caller option mutation cannot redirect acquisition", async () => {
   const opts = {
     projectRoot,
-    timeoutMs: 15_000,
+    timeoutMs: FIXTURE_PROBE_DEADLINE_MS,
     signal: new AbortController().signal,
   };
   const pending = acquireLegacyComposeAdoptionBinding(opts);
@@ -1312,65 +1412,43 @@ test.each([
 ])("bounded real probe failures stay redacted: %s", async (mode) => {
   fixture.mode = mode;
   await save();
-  await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot, timeoutMs: 1000 })
-  );
+  await refusal(acquireFixtureBinding({ projectRoot, timeoutMs: 1000 }));
 });
 test("cancelled real child is reaped and abort reason stays private", async () => {
   fixture.mode = "hang";
   await save();
+  const observed = observeDockerChildren();
   const controller = new AbortController();
-  const pending = acquireLegacyComposeAdoptionBinding({
+  const pending = acquireFixtureBinding({
     projectRoot,
     signal: controller.signal,
   });
-  const started = join(root, "started");
-  for (
-    let count = 0;
-    count < 100 && !(await Bun.file(started).exists());
-    count++
-  ) {
-    await Bun.sleep(5);
+  try {
+    const pid = await startedChild();
+    controller.abort(CANARY);
+    await refusal(pending, "E_LEGACY_COMPOSE_BINDING_CANCELLED");
+    expectReaped(observed.children, pid);
+  } finally {
+    // A failed start-up wait must not leave this acquisition to reject into a
+    // later test, or leave its child alive (HACK-1452).
+    controller.abort(CANARY);
+    await pending.catch(() => undefined);
+    await observed.release();
   }
-  expect(await Bun.file(started).exists()).toBe(true);
-  const pid = Number(await readFile(started, "utf8"));
-  controller.abort(CANARY);
-  await refusal(pending, "E_LEGACY_COMPOSE_BINDING_CANCELLED");
-  expect(() => process.kill(pid, 0)).toThrow();
 });
 test("timeout reaps real child without authorizing any mutation", async () => {
   const binary = join(root, "docker");
   // A slow startup may be killed before its script can publish a PID. Force that
   // case; observe the actual returned child without changing spawn or the timer.
   await writeFile(binary, `#!${process.execPath}\nawait Bun.sleep(60_000);\n`);
-  const children: {
-    child: ReturnType<typeof Bun.spawn>;
-    exited: boolean;
-  }[] = [];
-  const actualSpawn = Bun.spawn;
-  const spawn = spyOn(Bun, "spawn").mockImplementation((...args) => {
-    const child: ReturnType<typeof Bun.spawn> = Reflect.apply(
-      actualSpawn,
-      Bun,
-      args
-    );
-    const argv = args[0];
-    if (Array.isArray(argv) && argv[0] === binary) {
-      const observed = { child, exited: false };
-      children.push(observed);
-      void child.exited.then(() => {
-        observed.exited = true;
-      });
-    }
-    return child;
-  });
+  const observed = observeDockerChildren();
   try {
     await refusal(
-      acquireLegacyComposeAdoptionBinding({ projectRoot, timeoutMs: 150 }),
+      acquireFixtureBinding({ projectRoot, timeoutMs: 150 }),
       "E_LEGACY_COMPOSE_BINDING_PROBE"
     );
-    expect(children.length).toBeGreaterThan(0);
-    for (const { child, exited } of children) {
+    expect(observed.children.length).toBeGreaterThan(0);
+    for (const { child, exited } of observed.children) {
       expect(exited).toBe(true);
       expect(child.signalCode).toBe("SIGKILL");
       expect(await child.exited).not.toBe(0);
@@ -1378,20 +1456,14 @@ test("timeout reaps real child without authorizing any mutation", async () => {
     }
     expect(await Bun.file(join(root, "started")).exists()).toBe(false);
   } finally {
-    spawn.mockRestore();
     // Preserve the assertion failure while preventing a broken reaping path from
     // leaving this exact synthetic child alive in the rest of the test suite.
-    for (const { child } of children) {
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-        await child.exited;
-      }
-    }
+    await observed.release();
   }
 });
 test("abort before acquisition starts no Docker process", async () => {
   await refusal(
-    acquireLegacyComposeAdoptionBinding({
+    acquireFixtureBinding({
       projectRoot,
       signal: AbortSignal.abort(CANARY),
     }),
@@ -1403,13 +1475,13 @@ test("symlinked source and linked Git marker refuse before any engine probe", as
   const file = join(projectRoot, ".hack/hack.config.json");
   await rm(file);
   await symlink(join(projectRoot, ".hack/docker-compose.yml"), file);
-  await refusal(acquireLegacyComposeAdoptionBinding({ projectRoot }));
+  await refusal(acquireFixtureBinding({ projectRoot }));
   expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
   await rm(file);
   await writeFile(file, '{"name":"fixture"}');
   await writeFile(join(projectRoot, ".git"), "gitdir: ../other");
   await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    acquireFixtureBinding({ projectRoot }),
     "E_LEGACY_COMPOSE_BINDING_UNSUPPORTED"
   );
 });
@@ -1439,7 +1511,7 @@ test("unknown inactive-profile behavior refuses before Docker inspection", async
     )
   );
   await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    acquireFixtureBinding({ projectRoot }),
     "E_LEGACY_COMPOSE_BINDING_UNSUPPORTED"
   );
   expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
@@ -1453,7 +1525,7 @@ test("different checkout containers in one project cannot be mistaken for the se
   });
   await save();
   await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    acquireFixtureBinding({ projectRoot }),
     "E_LEGACY_COMPOSE_BINDING_IDENTITY"
   );
   expect(await Bun.file(join(root, "commands")).exists()).toBe(true);
@@ -1505,8 +1577,8 @@ test("two independently named checkouts retain separate existing data bindings",
     containers: [siblingId],
   });
   await save();
-  const selected = await acquireLegacyComposeAdoptionBinding({ projectRoot });
-  const other = await acquireLegacyComposeAdoptionBinding({
+  const selected = await acquireFixtureBinding({ projectRoot });
+  const other = await acquireFixtureBinding({
     projectRoot: sibling,
   });
   expect(
@@ -1524,29 +1596,31 @@ test("two independently named checkouts retain separate existing data bindings",
 });
 test("captured cancellation cannot be replaced by a later fresh signal", async () => {
   const controller = new AbortController();
-  const acquired = await acquireLegacyComposeAdoptionBinding({
+  const acquired = await acquireFixtureBinding({
     projectRoot,
     signal: controller.signal,
   });
   fixture.mode = "hang";
   await save();
+  const observed = observeDockerChildren();
   const pending = acquired.assertFresh({
     projectRoot,
     signal: new AbortController().signal,
   });
-  const started = join(root, "started");
-  for (
-    let count = 0;
-    count < 100 && !(await Bun.file(started).exists());
-    count++
-  ) {
-    await Bun.sleep(5);
+  try {
+    // Read the PID before the abort. This test once read it afterwards, from a
+    // "started" file a child killed between create and write left empty:
+    // Number("") is 0, and process.kill(0, 0) succeeded (HACK-1452).
+    const pid = await startedChild();
+    controller.abort(CANARY);
+    await refusal(pending, "E_LEGACY_COMPOSE_BINDING_CANCELLED");
+    // The probe joins its child before it refuses, so this holds at once.
+    expectReaped(observed.children, pid);
+  } finally {
+    controller.abort(CANARY);
+    await pending.catch(() => undefined);
+    await observed.release();
   }
-  expect(await Bun.file(started).exists()).toBe(true);
-  controller.abort(CANARY);
-  await refusal(pending, "E_LEGACY_COMPOSE_BINDING_CANCELLED");
-  const pid = Number(await readFile(started, "utf8"));
-  expect(() => process.kill(pid, 0)).toThrow();
 });
 const malformedArguments: readonly {
   readonly label: string;
@@ -1586,7 +1660,7 @@ for (const { label, value } of malformedArguments) {
     expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
   });
   test(`malformed runtime freshness argument remains redacted: ${label}`, async () => {
-    const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+    const acquired = await acquireFixtureBinding({ projectRoot });
     const count = (await commands()).length;
     await refusal(
       Reflect.apply(acquired.assertFresh, undefined, [value]),

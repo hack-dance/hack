@@ -1750,16 +1750,16 @@ async function executePreparedGeneration(opts: {
               assertFresh,
               assertOwned: () => ownership.assertOwned(),
               verifyStorage: storage
-                ? ((guard: () => Promise<void>) => () => start.excludeStorage(guard))(nativeComposeGuardStorageProof({
+                ? nativeComposeGuardStorageProof({
                     verify: storage.verify,
                     generation,
-                    excludeStorage: (work) => work(),
+                    excludeStorage: start.excludeStorage,
                     takeAdjacentProof: () => {
                       const adjacentProof = adjacentGuardProof;
                       adjacentGuardProof = false;
                       return adjacentProof;
                     },
-                  }))
+                  })
                 : undefined,
             }),
         });

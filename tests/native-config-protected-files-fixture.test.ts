@@ -780,6 +780,7 @@ test("closed-pipe survivor refuses completion and permanently vetoes restoration
     `await Bun.write(${JSON.stringify(pidPath)},String(process.pid));await Bun.sleep(1500);`
   );
   const settlement = createCompletedJobFixtureSettlement();
+  const unmockedKill = process.kill;
   const original = process.kill.bind(process),
     groups: number[] = [];
   const signal = spyOn(process, "kill").mockImplementation((pid, kind) => {
@@ -851,4 +852,5 @@ test("closed-pipe survivor refuses completion and permanently vetoes restoration
   // Restore it here: the vetoed teardown would otherwise leave process.kill
   // replaced for every later file in the Bun process (HACK-1327).
   signal.mockRestore();
+  expect(process.kill).toBe(unmockedKill);
 });

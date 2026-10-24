@@ -701,8 +701,28 @@ export function mergeManagedGitignoreBlock(opts: {
   return `${base}${separator}${block}\n`;
 }
 
+/** A line ending's carriage return, which git drops from an ignore line. */
+const GITIGNORE_LINE_CR = /\r$/;
+/** Trailing spaces, which git drops from an ignore line (only spaces). */
+const GITIGNORE_TRAILING_SPACES = / +$/;
+
+/**
+ * The pattern git reads from one `.gitignore` line: a trailing carriage return
+ * and trailing spaces are dropped, while leading whitespace is part of the
+ * pattern (`  .hack.secret.key` names a file that starts with two spaces).
+ * Escaped trailing spaces (`\ `) are not unescaped: no Hack entry ends in one.
+ */
+function gitignoreLinePattern(line: string): string {
+  return line
+    .replace(GITIGNORE_LINE_CR, "")
+    .replace(GITIGNORE_TRAILING_SPACES, "");
+}
+
 /**
  * Ensures an entry exists in .gitignore. Creates the file if it doesn't exist.
+ * A line counts as the entry only when git reads it as the same pattern (see
+ * {@link gitignoreLinePattern}), so an indented copy, which git does not apply
+ * to the entry's path, does not stop the entry from being added.
  * @returns Whether the file was modified
  */
 export async function ensureGitignoreEntry(opts: {
@@ -715,7 +735,9 @@ export async function ensureGitignoreEntry(opts: {
 
   if (existing !== null) {
     const lines = existing.split("\n");
-    const hasEntry = lines.some((line) => line.trim() === entryLine);
+    const hasEntry = lines.some(
+      (line) => gitignoreLinePattern(line) === entryLine
+    );
     if (hasEntry) {
       return { changed: false };
     }

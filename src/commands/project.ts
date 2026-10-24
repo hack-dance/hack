@@ -5335,18 +5335,16 @@ async function runUpCommand({
       projectOpt: args.options.project,
     });
   } catch (error: unknown) {
-    if (error instanceof MissingProjectContextError) {
-      if (json) {
-        return emitLifecycleResult({
-          result: errorResult({
-            code: "E_PROJECT_NOT_FOUND",
-            message: error.message,
-          }),
-          exitCode: 1,
-        });
-      }
-      logger.error({ message: error.message });
-      return 1;
+    // Without --json the error reaches the CLI's closed-error renderer, like
+    // `down` and `restart`: one `E_PROJECT_NOT_FOUND: ...` line, no stack.
+    if (json && error instanceof MissingProjectContextError) {
+      return emitLifecycleResult({
+        result: errorResult({
+          code: "E_PROJECT_NOT_FOUND",
+          message: error.message,
+        }),
+        exitCode: 1,
+      });
     }
     throw error;
   }

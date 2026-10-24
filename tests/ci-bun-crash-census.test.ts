@@ -691,3 +691,142 @@ describe("sharded test suite (HACK-1424)", () => {
     );
   });
 });
+
+describe("workflow reads (HACK-1441)", () => {
+  const WORKFLOW = [
+    "name: CI",
+    "jobs:",
+    "  lint:",
+    "    steps:",
+    "      - with:",
+    '          bun-version: "1.0.0"',
+    "",
+    "# The suite runs in four shards; `test` is their fan-in.",
+    "  test-shard:",
+    "    name: test shard ${{ matrix.shard }}/4",
+    "    steps:",
+    "      - with:",
+    '          bun-version: "1.4.2"',
+    "",
+    "#  retired:",
+    "#    bun-version: 0.9.0",
+    "  test:",
+    "    needs: test-shard",
+    "    steps:",
+    "      - run: exit 0",
+    "env:",
+    "  late:",
+    "    bun-version: 0.1.0",
+  ].join("\n");
+
+  test("blank and column-0 comment lines inside jobs: do not end the job scan", () => {
+    expect(workflowJobBunVersion(WORKFLOW, "test shard 2/4")).toBe("1.4.2");
+    expect(workflowJobBunVersion(WORKFLOW, "lint")).toBe("1.0.0");
+    expect(workflowJobBunVersion(WORKFLOW, "test")).toBeNull();
+    // A commented-out job is not a job.
+    expect(workflowJobBunVersion(WORKFLOW, "retired")).toBeNull();
+    // A column-0 key after `jobs:` still ends the jobs.
+    expect(workflowJobBunVersion(WORKFLOW, "late")).toBeNull();
+  });
+
+  const SHA_SHARED = "d".repeat(40);
+  const SHA_OTHER = "e".repeat(40);
+
+  /** Two runs at one sha and one at another; every job passed, so no log is read. */
+  function countingGh() {
+    const contentReads: string[] = [];
+    const job = (id: number, name: string, attempt = 1): string =>
+      JSON.stringify({
+        id,
+        name,
+        run_attempt: attempt,
+        status: "completed",
+        conclusion: "success",
+      });
+    const reader: GhReader = {
+      json: async (path) => {
+        if (path.includes("/runs?created=")) {
+          return { total_count: 3 };
+        }
+        if (path.includes("/contents/.github/workflows/ci.yml?ref=")) {
+          contentReads.push(path);
+          return { content: Buffer.from(WORKFLOW).toString("base64") };
+        }
+        throw new Error("unexpected path");
+      },
+      lines: async (path) => {
+        if (path.includes("/runs?created=")) {
+          return [
+            JSON.stringify({ id: 500, head_sha: SHA_SHARED }),
+            JSON.stringify({ id: 600, head_sha: SHA_SHARED }),
+            JSON.stringify({ id: 700, head_sha: SHA_OTHER }),
+          ];
+        }
+        // The fan-in is listed first, so the first version resolved at a sha is its null.
+        if (path.includes("/runs/500/jobs?filter=all")) {
+          return [
+            job(50, "test"),
+            job(51, "test shard 1/4"),
+            job(52, "test shard 2/4"),
+            job(53, "test shard 3/4"),
+            job(54, "test shard 4/4"),
+          ];
+        }
+        if (path.includes("/runs/600/jobs?filter=all")) {
+          return [job(61, "test shard 1/4"), job(62, "test shard 1/4", 2)];
+        }
+        // Here a shard is first, so a sha-only key would give the fan-in the pin.
+        if (path.includes("/runs/700/jobs?filter=all")) {
+          return [job(71, "test shard 4/4"), job(70, "test")];
+        }
+        throw new Error("unexpected path");
+      },
+      download: () => Promise.reject(new Error("no log should be read")),
+    };
+    return { reader, contentReads };
+  }
+
+  test("each job at a sha gets its own workflow version under a wildcard selector", async () => {
+    const gh = countingGh();
+    const result = await runCensus(
+      { ...options, job: "test*" },
+      gh.reader,
+      await workDir()
+    );
+    expect(
+      result.records.map((entry) => [
+        entry.jobId,
+        entry.bunVersion,
+        entry.versionSource,
+      ])
+    ).toEqual([
+      [50, "unknown", "unknown"],
+      [51, "1.4.2", "workflow"],
+      [52, "1.4.2", "workflow"],
+      [53, "1.4.2", "workflow"],
+      [54, "1.4.2", "workflow"],
+      [61, "1.4.2", "workflow"],
+      [62, "1.4.2", "workflow"],
+      [71, "1.4.2", "workflow"],
+      [70, "unknown", "unknown"],
+    ]);
+    expect(result.warnings).toEqual([
+      { kind: "no_bun_setup", jobs: 2, selected: 9 },
+    ]);
+  });
+
+  test("one sha costs one workflow fetch however many jobs and runs resolve from it", async () => {
+    for (const concurrency of [1, 3]) {
+      const gh = countingGh();
+      await runCensus(
+        { ...options, job: "test*", concurrency },
+        gh.reader,
+        await workDir()
+      );
+      expect(gh.contentReads.toSorted()).toEqual([
+        `repos/hack-dance/hack/contents/.github/workflows/ci.yml?ref=${SHA_SHARED}`,
+        `repos/hack-dance/hack/contents/.github/workflows/ci.yml?ref=${SHA_OTHER}`,
+      ]);
+    }
+  });
+});

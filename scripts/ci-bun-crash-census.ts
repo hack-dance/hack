@@ -21,7 +21,8 @@
  * counts, closed tokens, versions and numeric run/job ids only, never log bodies.
  *
  * Bun version per job comes from the `Setup Bun` input in the job log when a log
- * is read, and otherwise from the workflow file at the run's head commit. For a
+ * is read, and otherwise from the workflow file at the run's head commit, which
+ * is fetched once per commit and resolved per job name. For a
  * pull-request run the job actually used the merge commit's workflow, so a stale
  * pull-request head can attribute a job to the older pin; `versionSources` shows
  * how many jobs each source covers.
@@ -172,6 +173,8 @@ function workflowJobNamed(opts: {
  * `jobs:` to the next one. Its display name is its `name:` template, or its
  * key when it has none, so `test shard 2/4` finds the `test-shard` matrix job.
  * A job with no `bun-version`, such as the `test` fan-in, returns null.
+ * Blank lines and column-0 `#` comments inside `jobs:` are skipped; any other
+ * column-0 line is the next top-level key and ends the jobs.
  */
 export function workflowJobBunVersion(
   workflow: string,
@@ -184,6 +187,9 @@ export function workflowJobBunVersion(
   }
   const blocks: { readonly key: string; readonly lines: string[] }[] = [];
   for (const line of lines.slice(jobsAt + 1)) {
+    if (line.trim() === "" || line.startsWith("#")) {
+      continue;
+    }
     if (/^\S/.test(line)) {
       break;
     }
@@ -449,6 +455,34 @@ export async function runCensus(
     }
   }
 
+  // One contents GET per head sha: every job of every run at that sha resolves
+  // its Bun version from the same decoded workflow text.
+  const workflowTexts = new Map<string, Promise<string | null>>();
+  const workflowText = (sha: string): Promise<string | null> => {
+    const cached = workflowTexts.get(sha);
+    if (cached) {
+      return cached;
+    }
+    const pending = gh
+      .json(
+        `repos/${repo}/contents/.github/workflows/${options.workflow}?ref=${sha}`
+      )
+      .then((value) =>
+        typeof value === "object" &&
+        value !== null &&
+        "content" in value &&
+        typeof value.content === "string"
+          ? Buffer.from(value.content, "base64").toString("utf8")
+          : null
+      )
+      .catch(() => null);
+    workflowTexts.set(sha, pending);
+    return pending;
+  };
+
+  // Keyed by (sha, job display name), never sha alone: jobs at one sha differ
+  // (the `test` fan-in has no Bun, each shard has the pin), so a sha-only key
+  // would hand the first job's version to every job a wildcard selector reads.
   const workflowVersions = new Map<string, Promise<string | null>>();
   const workflowVersion = (
     sha: string | null,
@@ -462,25 +496,9 @@ export async function runCensus(
     if (cached) {
       return cached;
     }
-    const pending = gh
-      .json(
-        `repos/${repo}/contents/.github/workflows/${options.workflow}?ref=${sha}`
-      )
-      .then((value) => {
-        if (
-          typeof value !== "object" ||
-          value === null ||
-          !("content" in value) ||
-          typeof value.content !== "string"
-        ) {
-          return null;
-        }
-        return workflowJobBunVersion(
-          Buffer.from(value.content, "base64").toString("utf8"),
-          job
-        );
-      })
-      .catch(() => null);
+    const pending = workflowText(sha).then((text) =>
+      text === null ? null : workflowJobBunVersion(text, job)
+    );
     workflowVersions.set(cacheKey, pending);
     return pending;
   };

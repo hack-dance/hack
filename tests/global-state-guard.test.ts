@@ -135,39 +135,58 @@ test("a replaced function or listener is reported but left for its owner", () =>
   expect(diffGlobalState(before)).toEqual([]);
 });
 
-test("the file-boundary listener restore removes leftovers, adds back missing listeners and keeps a kept once listener", async () => {
+test("the file-boundary listener restore removes leftovers, adds back missing listeners with their kind and keeps a kept once listener", async () => {
   await withOwnedProcessListeners("SIGUSR2", () => {
     let keptOnceCalls = 0;
+    let removedOnceCalls = 0;
     const keptOnce = () => {
       keptOnceCalls += 1;
     };
     const removed = () => undefined;
+    const removedOnce = () => {
+      removedOnceCalls += 1;
+    };
     const leftover = () => undefined;
     const secondLeftover = () => undefined;
     process.once("SIGUSR2", keptOnce);
     process.on("SIGUSR2", removed);
+    process.once("SIGUSR2", removedOnce);
     try {
       const before = captureGlobalState();
       process.removeListener("SIGUSR2", removed);
+      process.removeListener("SIGUSR2", removedOnce);
       process.on("SIGUSR2", leftover);
       process.once("SIGUSR2", secondLeftover);
       expect(diffGlobalState(before)).toContain(
-        "process 'SIGUSR2' listeners changed (2 -> 3)"
+        "process 'SIGUSR2' listeners changed (3 -> 3)"
       );
 
       expect(restoreProcessListeners(before)).toEqual(["SIGUSR2"]);
 
-      expect(sameItems(process.listeners("SIGUSR2"), [keptOnce, removed])).toBe(
-        true
-      );
+      expect(
+        sameItems(process.listeners("SIGUSR2"), [
+          keptOnce,
+          removed,
+          removedOnce,
+        ])
+      ).toBe(true);
       expect(diffGlobalState(before)).toEqual([]);
       expect(restoreProcessListeners(before)).toEqual([]);
-      // The kept listener was never re-added, so it is still a `once`.
+      // The kept listener was never re-added, so it is still a `once`; the
+      // re-added `once` listener is a `once` again and the persistent one
+      // stays.
       process.emit("SIGUSR2");
       expect(keptOnceCalls).toBe(1);
+      expect(removedOnceCalls).toBe(1);
       expect(sameItems(process.listeners("SIGUSR2"), [removed])).toBe(true);
     } finally {
-      for (const listener of [keptOnce, removed, leftover, secondLeftover]) {
+      for (const listener of [
+        keptOnce,
+        removed,
+        removedOnce,
+        leftover,
+        secondLeftover,
+      ]) {
         process.removeListener("SIGUSR2", listener);
       }
     }

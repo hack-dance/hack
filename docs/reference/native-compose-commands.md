@@ -363,8 +363,9 @@ seed, verification, closing root proof, completion write and publication. Carrie
 transport additionally distinguishes target, create, policy, start, response and
 cleanup; policy reasons identify shape, command, labels, host policy, mount
 cardinality, program/storage mounts and policy stability. A re-inspected carrier
-whose creation time or policy changed reports `helper-policy-stability`, and a
-saved material binding that changed during a carrier step reports
+whose creation time, policy or stopped state changed reports
+`helper-policy-stability`, and a saved material binding that changed during a
+carrier step, or before a verification's deferred evidence retirement, reports
 `private-state`. A policy or state refusal keeps its reason even when it is
 caught after the carrier's deadline. A timeout,
 budget or otherwise unclassified refusal that finds its carrier's storage budget

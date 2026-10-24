@@ -6,9 +6,15 @@ import { fixture, invoke } from "./helpers/native-compose-command.ts";
 const START_BUDGET_MS = 3000;
 // Longer than the whole start budget, far below the per-carrier storage budget.
 const GUARD_CARRIER_DELAY_MS = 4000;
-// Longer than the whole start budget, far below the storage exclusion cap.
-const GUARD_FRESHNESS_DELAY_MS = 4000;
-const STORAGE_BUDGET_MS = 120_000;
+// The freshness test's start budget is longer, so that the rest of the start
+// phase fits in it even on a slow shared host. Its guard storage proof re-runs
+// the compiler stand-in several times outside every carrier span; each of those
+// runs is delayed below the compiler's own 10 s timeout, and together they
+// outlast that start budget. The per-carrier storage budget is raised so that a
+// slow host cannot exhaust an enrollment carrier first.
+const FRESHNESS_START_BUDGET_MS = 12_000;
+const GUARD_FRESHNESS_DELAY_MS = 5000;
+const FRESHNESS_STORAGE_BUDGET_MS = 300_000;
 
 function phaseRows(text: string) {
   return text
@@ -108,11 +114,12 @@ ${guardStorageOpenSource(stderrFile)}
 }, 300_000);
 
 // The converse wiring check: only carrier proofs are excluded, so the guard
-// storage proof's own freshness check (outside every carrier span) still
-// consumes the start budget. The compiler stand-in, which that freshness check
-// re-runs, is slowed once, only while a `guard.storage` span is open. If the
-// guard's whole storage proof were excluded again, this delay would extend the
-// deadline and the workload would start.
+// storage proof's own freshness checks (outside every carrier span) still
+// consume the start budget. The compiler stand-in, which those freshness checks
+// re-run, is slowed only while a `guard.storage` span is open. If the guard's
+// whole storage proof were excluded again (re-widened at the call site or in
+// the helper), these delays would extend the deadline and the workload would
+// start.
 test("a pre-spawn guard storage freshness check longer than the start budget consumes it", async () => {
   const root = await fixture("", false, {
     noHooks: true,
@@ -124,26 +131,28 @@ test("a pre-spawn guard storage freshness check longer than the start budget con
     file: join(root, "compiler"),
     anchor: 'import {createHash} from "node:crypto";',
     source: `${guardStorageOpenSource(stderrFile)}
-if(guardStorageOpen&&!(await Bun.file(${JSON.stringify(delays)}).exists())){await Bun.write(${JSON.stringify(delays)},"1\\n");await Bun.sleep(${GUARD_FRESHNESS_DELAY_MS});}`,
+if(guardStorageOpen){await import("node:fs/promises").then(m=>m.appendFile(${JSON.stringify(delays)},"1\\n"));await Bun.sleep(${GUARD_FRESHNESS_DELAY_MS});}`,
   });
   const result = await invoke(
     root,
     ["up", "--detach", "--json"],
-    START_BUDGET_MS,
-    240_000,
+    FRESHNESS_START_BUDGET_MS,
+    420_000,
     {
       HACK_NATIVE_COMPOSE_PHASE_TRACE: "1",
-      // A slow shared host must not exhaust enrollment's carrier first.
-      HACK_NATIVE_STORAGE_TIMEOUT_MS: String(STORAGE_BUDGET_MS),
+      HACK_NATIVE_STORAGE_TIMEOUT_MS: String(FRESHNESS_STORAGE_BUDGET_MS),
     },
     { stderrFile }
   );
-  expect(await countLines(delays)).toBe(1);
+  // The delayed compiler runs alone outlast the whole start budget.
+  expect((await countLines(delays)) * GUARD_FRESHNESS_DELAY_MS).toBeGreaterThan(
+    FRESHNESS_START_BUDGET_MS
+  );
   const guard = phaseRows(result.stderr).filter(
     (row) => row.phase === "guard.storage" && row.boundary === "end"
   );
   expect(guard.length).toBeGreaterThanOrEqual(1);
-  expect(guard[0]?.durationMs ?? 0).toBeGreaterThan(START_BUDGET_MS);
+  expect(guard[0]?.durationMs ?? 0).toBeGreaterThan(FRESHNESS_START_BUDGET_MS);
   // The start budget ran out, so the owned child's admission check after the
   // guard refused before the workload was spawned.
   expect(result.code).not.toBe(0);
@@ -161,4 +170,4 @@ if(guardStorageOpen&&!(await Bun.file(${JSON.stringify(delays)}).exists())){awai
   expect(
     (await readFile(join(root, "storage-events"), "utf8")).split("\n")
   ).not.toContain("workload");
-}, 300_000);
+}, 480_000);

@@ -23,6 +23,19 @@ import {
 } from "./projects-registry.ts";
 import { run } from "./shell.ts";
 
+/**
+ * Fixed, value-free messages an adopted command ends with when it cancels or
+ * rewraps an unexpected refusal as `E_CONFIG_INVALID`. Diagnostics map these
+ * exact strings to closed tokens, so they import them instead of copying them
+ * (HACK-1432).
+ */
+export const LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES = Object.freeze({
+  refused:
+    "Adopted Compose ownership or execution refused; original data is retained. Values omitted.",
+  cancelled:
+    "Adopted Compose operation cancelled; pending ownership is retained. Values omitted.",
+});
+
 function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
@@ -34,8 +47,7 @@ function cancelled(signal: AbortSignal) {
   if (signal.aborted) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
-      message:
-        "Adopted Compose operation cancelled; pending ownership is retained. Values omitted.",
+      message: LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES.cancelled,
     });
   }
 }
@@ -371,7 +383,7 @@ export async function tryLegacyComposeAdoptedCommand(
       message:
         error instanceof LegacyComposeAdoptedGenerationError
           ? error.message
-          : "Adopted Compose ownership or execution refused; original data is retained. Values omitted.",
+          : LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES.refused,
       ...(legacyComposeOrderedRefusal(error)
         ? {
             detail: {

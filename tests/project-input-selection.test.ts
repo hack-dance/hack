@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import * as fs from "node:fs/promises";
 import {
   chmod,
   mkdir,
@@ -17,6 +18,7 @@ import {
 import {
   inspectLegacyComposeAdoptionSelection,
   LegacyComposeAdoptionSelectionError,
+  legacyComposeAdoptionSelectionDiagnostic,
 } from "../src/lib/native-compose-adoption-marker.ts";
 import {
   findProjectContext,
@@ -35,6 +37,7 @@ import {
 
 const roots: string[] = [];
 afterEach(async () => {
+  mock.restore();
   for (const root of roots.splice(0)) {
     await rm(root, { recursive: true, force: true });
   }
@@ -217,9 +220,10 @@ async function inputAccessFault(root: string): Promise<unknown> {
 function expectValueFreeDiagnostic(
   error: unknown,
   root: string,
-  diagnostic: string
+  diagnostic: string,
+  read: (error: unknown) => string | undefined = projectInputAccessDiagnostic
 ): void {
-  expect(projectInputAccessDiagnostic(error)).toBe(diagnostic);
+  expect(read(error)).toBe(diagnostic);
   expect((error as Error).cause).toBeUndefined();
   expect(Object.keys(error as object)).not.toContain("diagnosticCause");
   const code = diagnostic.split(":")[1] ?? diagnostic;
@@ -279,6 +283,167 @@ test("EPERM and EACCES classify as permission; other faults as unreadable", () =
   ).toBe("ProjectInputAccessError");
   expect(projectInputAccessDiagnostic(new Error("other"))).toBeUndefined();
 });
+
+/** A synthetic filesystem fault shaped like Bun's, with a path in its message. */
+function fsFault(code: string, path: string): Error {
+  return Object.assign(
+    new Error(`${code}: operation failed, lstat '${path}'`),
+    {
+      code,
+      syscall: "lstat",
+      path,
+    }
+  );
+}
+
+/** Make `lstat` of exactly `path` fail with `code`; other paths are real. */
+function failLstat(path: string, code: string): void {
+  const realLstat = fs.lstat;
+  spyOn(fs, "lstat").mockImplementation(((
+    ...args: Parameters<typeof fs.lstat>
+  ) =>
+    args[0] === path
+      ? Promise.reject(fsFault(code, path))
+      : realLstat(...args)) as typeof fs.lstat);
+}
+
+test("input presence checks classify through the projectInputAccessFault seam", async () => {
+  // HACK-1415: the seam test above proves the classifier, not that
+  // inputPresent() uses it. Fault the real presence check of one input so a
+  // re-inlined classifier that drops EPERM (or the diagnostic) fails here.
+  for (const [code, access] of [
+    ["EPERM", "permission"],
+    ["EACCES", "permission"],
+    ["EIO", "unreadable"],
+  ] as const) {
+    const root = await fixture();
+    await file(root, ".hack/docker-compose.yml");
+    failLstat(join(root, ".dev", "docker-compose.yml"), code);
+    const error = await inputAccessFault(root);
+    mock.restore();
+    expect(error).toBeInstanceOf(ProjectInputAccessError);
+    expect({
+      code,
+      access: (error as ProjectInputAccessError).access,
+    }).toEqual({ code, access });
+    expectValueFreeDiagnostic(error, root, `Error:${code}`);
+  }
+});
+
+async function adoptionSelectionFault(root: string): Promise<unknown> {
+  try {
+    await inspectLegacyComposeAdoptionSelection({ projectRoot: root });
+  } catch (error: unknown) {
+    return error;
+  }
+  throw new Error("unexpected adoption selection success");
+}
+
+test("a file where .hack belongs keeps a value-free adoption marker diagnostic", async () => {
+  // HACK-1415: the adoption marker's filesystem refusals carry the same
+  // class/code diagnostic as ProjectInputAccessError.
+  const root = await fixture();
+  await file(root, ".hack", "not a directory");
+  for (const error of [
+    await adoptionSelectionFault(root),
+    await inputAccessFault(root),
+  ]) {
+    expect(error).toBeInstanceOf(LegacyComposeAdoptionSelectionError);
+    expect((error as LegacyComposeAdoptionSelectionError).kind).toBe(
+      "input-access"
+    );
+    expectValueFreeDiagnostic(
+      error,
+      root,
+      "Error:ENOTDIR",
+      legacyComposeAdoptionSelectionDiagnostic
+    );
+  }
+});
+
+test("EPERM on the adoption state root is a permission refusal with its diagnostic", async () => {
+  // A fixture cannot produce EPERM, so fault the marker's state-root lstat.
+  const root = await fixture();
+  await file(root, ".hack/docker-compose.yml");
+  failLstat(join(root, ".hack/.internal/legacy-compose-adoption-v1"), "EPERM");
+  const error = await adoptionSelectionFault(root);
+  expect(error).toBeInstanceOf(LegacyComposeAdoptionSelectionError);
+  expect((error as LegacyComposeAdoptionSelectionError).kind).toBe(
+    "permission"
+  );
+  expect((error as LegacyComposeAdoptionSelectionError).code).toBe(
+    "E_PERMISSION"
+  );
+  expectValueFreeDiagnostic(
+    error,
+    root,
+    "Error:EPERM",
+    legacyComposeAdoptionSelectionDiagnostic
+  );
+});
+
+test("only filesystem adoption marker refusals carry a diagnostic", () => {
+  expect(
+    legacyComposeAdoptionSelectionDiagnostic(
+      new LegacyComposeAdoptionSelectionError()
+    )
+  ).toBeUndefined();
+  expect(
+    legacyComposeAdoptionSelectionDiagnostic(
+      new LegacyComposeAdoptionSelectionError(
+        "permission",
+        "/private/fixture/.hack"
+      )
+    )
+  ).toBe("LegacyComposeAdoptionSelectionError");
+  expect(
+    legacyComposeAdoptionSelectionDiagnostic(
+      new LegacyComposeAdoptionSelectionError("input-access")
+    )
+  ).toBe("LegacyComposeAdoptionSelectionError");
+  expect(
+    legacyComposeAdoptionSelectionDiagnostic(
+      new ProjectInputAccessError("permission", "Error:EACCES")
+    )
+  ).toBeUndefined();
+});
+
+// Root can search a mode-000 or mode-0644 directory, so this fault cannot be
+// produced.
+test.skipIf(process.getuid?.() === 0)(
+  "an unsearchable .hack or .hack/.internal keeps a value-free adoption marker diagnostic",
+  async () => {
+    for (const [dir, mode] of [
+      [".hack", 0o000],
+      [".hack", 0o644],
+      [".hack/.internal", 0o000],
+      [".hack/.internal", 0o644],
+    ] as const) {
+      const root = await fixture();
+      await file(root, ".hack/docker-compose.yml");
+      await mkdir(join(root, ".hack/.internal"));
+      const locked = join(root, dir);
+      await chmod(locked, mode);
+      try {
+        const error = await inputAccessFault(root);
+        expect(error).toBeInstanceOf(LegacyComposeAdoptionSelectionError);
+        expect({
+          dir,
+          mode,
+          kind: (error as LegacyComposeAdoptionSelectionError).kind,
+        }).toEqual({ dir, mode, kind: "permission" });
+        expectValueFreeDiagnostic(
+          error,
+          root,
+          "Error:EACCES",
+          legacyComposeAdoptionSelectionDiagnostic
+        );
+      } finally {
+        await chmod(locked, 0o755);
+      }
+    }
+  }
+);
 
 // Root can search a mode-000 directory, so this fault cannot be produced.
 test.skipIf(process.getuid?.() === 0)(

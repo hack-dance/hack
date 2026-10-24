@@ -11,6 +11,11 @@ import { HackCliError } from "./cli-result.ts";
 import { pathExists } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import { assertLegacyComposeAdoptionSelectionStable } from "./native-compose-adoption-marker.ts";
+import {
+  attachValueFreeDiagnostic,
+  readValueFreeDiagnostic,
+  valueFreeErrorDiagnostic,
+} from "./value-free-diagnostic.ts";
 
 export const NATIVE_PROJECT_FILENAME = "hack.project.json";
 type ProjectDirName =
@@ -57,11 +62,6 @@ export class ProjectInputSelectionError extends HackCliError {
   }
 }
 
-/** Non-enumerable property holding a {@link ProjectInputAccessError}'s diagnostic. */
-const PROJECT_INPUT_ACCESS_DIAGNOSTIC_PROPERTY = "diagnosticCause";
-const DIAGNOSTIC_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
-const DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
-const DIAGNOSTIC = /^[A-Za-z][A-Za-z0-9]{0,63}(?::[A-Z][A-Z0-9_]{0,63})?$/;
 const DEFAULT_DIAGNOSTIC = "ProjectInputAccessError";
 
 /**
@@ -91,9 +91,10 @@ export class ProjectInputAccessError extends HackCliError {
     });
     this.name = "ProjectInputAccessError";
     this.access = access;
-    Object.defineProperty(this, PROJECT_INPUT_ACCESS_DIAGNOSTIC_PROPERTY, {
-      value: DIAGNOSTIC.test(diagnostic) ? diagnostic : DEFAULT_DIAGNOSTIC,
-      enumerable: false,
+    attachValueFreeDiagnostic({
+      target: this,
+      diagnostic,
+      fallback: DEFAULT_DIAGNOSTIC,
     });
   }
 }
@@ -105,15 +106,8 @@ export class ProjectInputAccessError extends HackCliError {
 export function projectInputAccessDiagnostic(
   error: unknown
 ): string | undefined {
-  if (!(error instanceof ProjectInputAccessError)) {
-    return undefined;
-  }
-  const diagnostic: unknown = Reflect.get(
-    error,
-    PROJECT_INPUT_ACCESS_DIAGNOSTIC_PROPERTY
-  );
-  return typeof diagnostic === "string" && DIAGNOSTIC.test(diagnostic)
-    ? diagnostic
+  return error instanceof ProjectInputAccessError
+    ? readValueFreeDiagnostic(error)
     : undefined;
 }
 
@@ -131,18 +125,6 @@ export function projectInputAccessFault(
     code === "EACCES" || code === "EPERM" ? "permission" : "unreadable",
     valueFreeErrorDiagnostic(error)
   );
-}
-
-/** Class name and identifier-shaped code of `error`; never its message. */
-function valueFreeErrorDiagnostic(error: unknown): string {
-  if (!(error instanceof Error)) {
-    return error === null ? "null" : typeof error;
-  }
-  const name = DIAGNOSTIC_NAME.test(error.name) ? error.name : "Error";
-  const code: unknown = Reflect.get(error, "code");
-  return typeof code === "string" && DIAGNOSTIC_CODE.test(code)
-    ? `${name}:${code}`
-    : name;
 }
 
 /**

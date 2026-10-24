@@ -256,6 +256,8 @@ beforeAll(async () => {
     name: "unsearchable",
     services: ["api"],
   });
+  // Never adopted: .hack/.internal exists only so its mode can be dropped.
+  await mkdir(join(root, "unsearchable", ".hack", ".internal"));
   // Native and legacy inputs side by side (a conflicting project family).
   const nativeConflict = join(root, "native-conflict");
   await writeProject({
@@ -702,22 +704,38 @@ describe("paired CLI/MCP target fixtures", () => {
     CASE_TIMEOUT_MS
   );
 
-  // Root can search a mode-000 directory, so this fault cannot be produced.
+  // Root can search a mode-000 or mode-0644 directory, so this fault cannot be
+  // produced.
   test.skipIf(process.getuid?.() === 0)(
-    "an unsearchable project directory is a closed refusal without the path",
+    "an unsearchable .hack or .hack/.internal is a closed refusal without the path",
     async () => {
       const path = join(fixture.root, "unsearchable");
-      const projectDir = join(path, ".hack");
-      await chmod(projectDir, 0o000);
-      try {
-        // An unsearchable .hack is a permission fault (#402's `permission`
-        // selection kind), not unsafe adoption state.
-        expectRefusal(await inspectBoth({ path }), "input_permission_denied");
-        const cli = await runCli({ path });
-        expect(JSON.stringify(cli.envelope)).not.toContain(fixture.root);
-        expect(JSON.stringify(cli.envelope)).not.toContain("EACCES");
-      } finally {
-        await chmod(projectDir, 0o755);
+      // HACK-1415: every case the proof matrix names runs on both surfaces,
+      // on a project that never used adoption.
+      for (const [dir, mode] of [
+        [".hack", 0o000],
+        [".hack", 0o644],
+        [".hack/.internal", 0o000],
+        [".hack/.internal", 0o644],
+      ] as const) {
+        const locked = join(path, dir);
+        await chmod(locked, mode);
+        try {
+          // An unsearchable project directory is a permission fault (#402's
+          // `permission` selection kind), not unsafe adoption state.
+          expect({ dir, mode, result: await inspectBoth({ path }) }).toEqual({
+            dir,
+            mode,
+            result: targetRefusalEnvelope({
+              reason: "input_permission_denied",
+            }),
+          });
+          const cli = await runCli({ path });
+          expect(JSON.stringify(cli.envelope)).not.toContain(fixture.root);
+          expect(JSON.stringify(cli.envelope)).not.toContain("EACCES");
+        } finally {
+          await chmod(locked, 0o755);
+        }
       }
     },
     CASE_TIMEOUT_MS
@@ -1009,17 +1027,22 @@ describe("target inspector domain", () => {
     );
   });
 
+  test("the permission-denied refusal names the permission fix, not adoption recovery", () => {
+    // HACK-1390: a project that never used adoption must not be told to run
+    // adoption recovery when its project directories cannot be searched. The
+    // message does not depend on the user, so this also runs as root
+    // (HACK-1415).
+    const message = TARGET_REFUSALS.input_permission_denied.message;
+    expect(message).toContain("permission denied. Fix the permissions first");
+    expect(message).toContain("chmod u+rwx .hack");
+    expect(message.toLowerCase()).not.toContain("adoption");
+  });
+
   // Root can search a mode-000 or mode-0644 directory, so this fault cannot be
   // produced.
   test.skipIf(process.getuid?.() === 0)(
-    "an unsearchable .hack or .hack/.internal names the permission fix, not adoption recovery",
+    "an unsearchable .hack or .hack/.internal is a permission refusal, not unsafe adoption state",
     async () => {
-      // HACK-1390: a project that never used adoption must not be told to run
-      // adoption recovery when its project directories cannot be searched.
-      const message = TARGET_REFUSALS.input_permission_denied.message;
-      expect(message).toContain("permission denied. Fix the permissions first");
-      expect(message).toContain("chmod u+rwx .hack");
-      expect(message.toLowerCase()).not.toContain("adoption");
       for (const [dir, mode] of [
         [".hack", 0o000],
         [".hack", 0o644],

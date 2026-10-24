@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -49,6 +49,16 @@ import {
   provisionNativeNetworkFixtureComposePlugin,
   runNativeNetworkFixtureCommand,
 } from "./e2e/native-config-networks-acceptance.ts";
+
+/**
+ * Many tests here start Bun child processes in sequence, and each start can
+ * take a second on a loaded host. Bun's 5 s default then fires mid-command:
+ * bun test SIGTERMs the child and the test fails on that child's exit (143,
+ * or 128 before HACK-1428) instead of on its own assertion. Every fixture
+ * command and probe keeps its own, tighter timeout.
+ */
+const SUBPROCESS_TEST_TIMEOUT_MS = 60_000;
+setDefaultTimeout(SUBPROCESS_TEST_TIMEOUT_MS);
 
 test("whole-run and cleanup budgets gate command starts and never clip an in-flight command", () => {
   const started = 1_000_000;
@@ -506,6 +516,139 @@ test("peer probe attributes a failure to one URL and phase in closed stderr evid
     expect(new Set(Object.values(NATIVE_NETWORK_PROBE_EXIT)).size).toBe(
       Object.values(NATIVE_NETWORK_PROBE_EXIT).length
     );
+  } finally {
+    server.stop(true);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Runs the peer probe with `Bun.dns.lookup` replaced by a stub that answers
+ * every name with 127.0.0.1, after `delayMs` for names starting with `slow`.
+ * The probe names use RFC 6761 `.invalid`, so only the stubbed answer can
+ * reach the local listener: a second, real resolution fails (HACK-1428).
+ */
+async function runStubbedPeerProbe(opts: {
+  readonly root: string;
+  readonly origin: string;
+  readonly alias: string;
+  readonly timeoutMs: number;
+  readonly delayMs: number;
+}): Promise<{ readonly code: number; readonly stderr: string }> {
+  const stub = `Bun.dns.lookup=async(h)=>{if(h.startsWith("slow"))await Bun.sleep(${opts.delayMs});return [{address:"127.0.0.1",family:4}]};`;
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      stub +
+        nativeNetworkFixturePeerProbe({
+          origin: opts.origin,
+          alias: opts.alias,
+          expected: "primary:peer",
+          timeoutMs: opts.timeoutMs,
+        }),
+    ],
+    {
+      cwd: opts.root,
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        PEER_ORIGIN: opts.origin,
+      },
+      stdout: "ignore",
+      stderr: "pipe",
+    }
+  );
+  const [code, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stderr).text(),
+  ]);
+  return { code, stderr };
+}
+
+// HACK-1428: an HTTP-phase failure must not hide a second, uncounted resolution.
+test("peer probe fetches the address it just resolved", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-network-probe-"));
+  const hosts: (string | null)[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      hosts.push(request.headers.get("host"));
+      return new Response("primary:peer");
+    },
+  });
+  try {
+    const origin = `http://probe-1428.invalid:${server.port}`;
+    expect(
+      await runStubbedPeerProbe({
+        root,
+        origin,
+        alias: `http://probe-1428-alias.invalid:${server.port}/a`,
+        timeoutMs: 4000,
+        delayMs: 0,
+      })
+    ).toEqual({ code: 0, stderr: "" });
+    // Both requests went to the stub's address, not to the unresolvable names.
+    expect(hosts).toEqual([
+      `127.0.0.1:${server.port}`,
+      `127.0.0.1:${server.port}`,
+    ]);
+  } finally {
+    server.stop(true);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// HACK-1428: resolution time is charged against the URL's one shared budget.
+test("peer probe charges resolution time against the shared per-URL budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-network-probe-"));
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      return new URL(request.url).pathname === "/hang"
+        ? new Promise<Response>(() => undefined)
+        : new Response("primary:peer");
+    },
+  });
+  try {
+    const origin = `http://probe-1428.invalid:${server.port}`;
+    const alias = `http://slow-1428.invalid:${server.port}/hang`;
+    const budget = 2000;
+    const delay = 1200;
+    const hung = await runStubbedPeerProbe({
+      root,
+      origin,
+      alias,
+      timeoutMs: budget,
+      delayMs: delay,
+    });
+    expect(hung.code).toBe(NATIVE_NETWORK_PROBE_EXIT.timeout);
+    const evidence = nativeNetworkFixtureProbeEvidence(hung.stderr);
+    expect(evidence).toMatchObject({ url: "alias", phase: "http" });
+    expect(evidence?.dnsMs).toBeGreaterThanOrEqual(delay - 50);
+    expect(evidence?.elapsedMs).toBeGreaterThanOrEqual(budget - 50);
+    // The HTTP phase gets only what resolution left: a fresh full budget
+    // would end near budget + delay (3200 ms).
+    expect(evidence?.elapsedMs).toBeLessThan(budget + delay / 2);
+
+    // Resolution alone exceeding the budget is a resolution timeout.
+    const stalled = await runStubbedPeerProbe({
+      root,
+      origin,
+      alias,
+      timeoutMs: 500,
+      delayMs: delay,
+    });
+    expect(stalled.code).toBe(NATIVE_NETWORK_PROBE_EXIT.dnsTimeout);
+    const stalledEvidence = nativeNetworkFixtureProbeEvidence(stalled.stderr);
+    expect(stalledEvidence).toMatchObject({
+      url: "alias",
+      phase: "dns",
+      addresses: 0,
+    });
+    expect(stalledEvidence?.elapsedMs).toBeGreaterThanOrEqual(450);
+    expect(stalledEvidence?.elapsedMs).toBeLessThan(delay);
   } finally {
     server.stop(true);
     await rm(root, { recursive: true, force: true });
@@ -1570,6 +1713,27 @@ test("bounded private capture preserves literal argv, rejects inherited caller c
     } else {
       process.env.CALLER_PRIVATE = previous;
     }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// HACK-1428: a bare 128 hid which signal ended a fixture command.
+test("capture reports a signaled command as 128 plus its signal number", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-network-signal-"));
+  try {
+    for (const [signal, expected] of [
+      ["TERM", 143],
+      ["KILL", 137],
+    ] as const) {
+      const result = await runNativeNetworkFixtureCommand({
+        argv: ["/bin/sh", "-c", `kill -${signal} $$`],
+        cwd: root,
+        env: { PATH: "/usr/bin:/bin" },
+        captures: join(root, "captures"),
+      });
+      expect(result.exitCode).toBe(expected);
+    }
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -209,8 +209,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     #[test]
     fn preservation_is_bounded_idempotent_and_resumes_only_exact_prefixes() {
-        let dir = std::env::temp_dir().join(format!("hk-evidence-{}", std::process::id()));
-        fs::create_dir(&dir).unwrap();
+        let dir = crate::unique_test_root(&std::env::temp_dir(), "hk-evidence");
         let dir = dir.canonicalize().unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         let bytes = b"private bounded evidence";

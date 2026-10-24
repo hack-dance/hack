@@ -35,12 +35,13 @@ fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lea
     let path = std::fs::canonicalize(std::env::temp_dir())
         .unwrap()
         .join(format!(
-            "hkl-pressure-lease-{}-{}",
+            "hkl-pressure-lease-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::next_test_scratch()
         ));
     struct Remove(std::path::PathBuf);
     impl Drop for Remove {

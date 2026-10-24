@@ -7,7 +7,10 @@ import {
   classifyComposeEnvOverrideText,
 } from "./compose-managed-env.ts";
 import { isRecord } from "./guards.ts";
-import { inspectLegacyComposeAdoptionSelection } from "./native-compose-adoption-marker.ts";
+import {
+  inspectLegacyComposeAdoptionSelectionDetail,
+  type LegacyComposeAdoptionPending,
+} from "./native-compose-adoption-marker.ts";
 import {
   type ReplaceablePrivateFileOptions,
   readReplaceablePrivateFile,
@@ -39,9 +42,9 @@ import {
  * such a generation exists (prepared, active or pending), nothing here removes
  * the file, because removal would make the adoption unloadable; the supported
  * way to drop its values is rollback (`hack config adopt --rollback`, or
- * `--recover --rollback` while an adoption operation or switch is pending),
- * `hack up`, then adopting again. New adoptions refuse a literal override
- * (`hack config adopt`).
+ * `--recover --rollback` while a switch is pending, after first settling an
+ * interrupted preparation stop or retained command), `hack up`, then adopting
+ * again. New adoptions refuse a literal override (`hack config adopt`).
  */
 export const COMPOSE_ENV_OVERRIDE_FILENAME = "compose.env.override.yml";
 
@@ -338,26 +341,29 @@ export async function composeEnvOverrideAdoptionBound(opts: {
 
 /**
  * How a saved adoption binds the override: `bound` as in
- * {@link composeEnvOverrideAdoptionBound}, and `pending` when the binding
- * adoption has a pending or interrupted operation or switch. A pending
- * adoption fences `hack down` and plain `hack config adopt --rollback`, so
- * only explicit recovery (`hack config adopt --recover --rollback`) releases
- * the file (HACK-1318). Unreadable adoption state is bound and not pending.
+ * {@link composeEnvOverrideAdoptionBound}, and `pending` naming what a
+ * pending binding adoption waits on (false when it is not pending). A pending
+ * adoption fences `hack down` and plain `hack config adopt --rollback`, and
+ * each pending kind accepts one explicit recovery command first (HACK-1318,
+ * HACK-1414). Unreadable adoption state is bound and not pending.
  */
 export async function composeEnvOverrideAdoptionBinding(opts: {
   readonly projectDir: string;
-}): Promise<{ readonly bound: boolean; readonly pending: boolean }> {
+}): Promise<{
+  readonly bound: boolean;
+  readonly pending: false | LegacyComposeAdoptionPending;
+}> {
   const projectDir = resolve(opts.projectDir);
   if (basename(projectDir) !== HACK_PROJECT_DIR_PRIMARY) {
     return { bound: false, pending: false };
   }
   try {
-    const status = await inspectLegacyComposeAdoptionSelection({
+    const detail = await inspectLegacyComposeAdoptionSelectionDetail({
       projectRoot: dirname(projectDir),
     });
     return {
-      bound: status !== null && status !== "rolled-back",
-      pending: status === "pending",
+      bound: detail !== null && detail.status !== "rolled-back",
+      pending: detail?.pending ?? false,
     };
   } catch {
     return { bound: true, pending: false };
@@ -470,10 +476,11 @@ export type ComposeEnvAtRestReport = {
   readonly override: ComposeEnvOverrideAtRest;
   /** A saved adoption may pin the override; see {@link composeEnvOverrideAdoptionBound}. */
   readonly adoptionBound: boolean;
-  /** The pinning adoption has a pending or interrupted operation or switch,
-   * so only `hack config adopt --recover --rollback` releases the file; see
-   * {@link composeEnvOverrideAdoptionBinding}. False when not bound. */
-  readonly adoptionPending: boolean;
+  /** What the pinning adoption's pending or interrupted operation or switch
+   * waits on, which decides the recovery command that releases the file; see
+   * {@link composeEnvOverrideAdoptionBinding}. False when not pending or not
+   * bound. */
+  readonly adoptionPending: false | LegacyComposeAdoptionPending;
   /** Asides left by interrupted removals; each may hold literal values. */
   readonly asides: { readonly stale: number; readonly fresh: number };
 };
@@ -497,11 +504,11 @@ export async function inspectComposeEnvAtRest(opts: {
       : { stale: [], fresh: [] };
   const binding = composeEnvOverrideMayHoldValues(override)
     ? await composeEnvOverrideAdoptionBinding(opts)
-    : { bound: false, pending: false };
+    : ({ bound: false, pending: false } as const);
   return {
     override,
     adoptionBound: binding.bound,
-    adoptionPending: binding.bound && binding.pending,
+    adoptionPending: binding.bound ? binding.pending : false,
     asides: { stale: asides.stale.length, fresh: asides.fresh.length },
   };
 }
@@ -532,20 +539,43 @@ export function composeEnvAtRestRepairs(report: ComposeEnvAtRestReport): {
 export const ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
   "To drop them, stop the adopted containers ('hack down'), run 'hack config adopt --rollback', run 'hack up' so Hack rewrites the file with references only, then adopt again with 'hack config adopt --stop'.";
 /**
- * The same, while the pinning adoption has a pending or interrupted operation
- * or switch: `hack down` and plain `--rollback` refuse in that state, and only
- * explicit recovery releases the switch (HACK-1318, HACK-1391).
+ * The same, while the pinning adoption has a pending switch: `hack down` and
+ * plain `--rollback` refuse in that state, and only explicit recovery releases
+ * the switch (HACK-1318, HACK-1391).
  */
 export const PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
   "To drop them, release the pending adoption switch with 'hack config adopt --recover --rollback' (plain rollback and 'hack down' refuse while it is pending), run 'hack up' so Hack rewrites the file with references only, then adopt again with 'hack config adopt --stop'.";
+/**
+ * The same, after an interrupted `hack config adopt --stop` before
+ * publication: there is no switch yet, so `--recover --rollback` refuses as
+ * well as plain rollback and `hack down`. Only `--recover --stop` retries the
+ * stop; publication then refuses the bound literal override and journals the
+ * switch that `--recover --rollback` releases (HACK-1318, HACK-1414).
+ */
+export const INTERRUPTED_PREPARATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
+  "To drop them, first retry the interrupted adoption stop with 'hack config adopt --recover --stop' (rollback and 'hack down' refuse until it finishes); it then refuses to publish over this file and leaves the adoption switch pending. Release that switch with 'hack config adopt --recover --rollback', run 'hack up' so Hack rewrites the file with references only, then adopt again with 'hack config adopt --stop'.";
+/**
+ * The same, after an interrupted retained-container command of an active
+ * adoption: rollback (plain or `--recover`) and plain `hack down` refuse until
+ * `hack down --recover` stops the originals and settles it (HACK-1414).
+ */
+export const INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
+  "To drop them, first settle the interrupted adopted command with 'hack down --recover', which stops the adopted containers (rollback and plain 'hack down' refuse until it finishes). Then run 'hack config adopt --rollback', run 'hack up' so Hack rewrites the file with references only, then adopt again with 'hack config adopt --stop'.";
 
 /** The next step for a report whose override a saved adoption pins. */
 export function adoptedComposeEnvOverrideNextStep(
   report: Pick<ComposeEnvAtRestReport, "adoptionPending">
 ): string {
-  return report.adoptionPending
-    ? PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
-    : ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
+  switch (report.adoptionPending) {
+    case "switch":
+      return PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
+    case "preparation-stop":
+      return INTERRUPTED_PREPARATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
+    case "retained-operation":
+      return INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
+    default:
+      return ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
+  }
 }
 
 /**

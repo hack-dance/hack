@@ -273,12 +273,28 @@ async function observeReplaceableTarget(opts: {
 }
 
 /**
+ * How many times {@link readReplaceablePrivateFile} re-observes a path whose
+ * regular file was atomically replaced between its `lstat` and its `open`
+ * before it refuses closed. One concurrent writer's rename costs one retry;
+ * only a path replaced on every attempt exhausts the budget.
+ */
+export const REPLACEABLE_READ_ATTEMPTS = 8;
+
+/**
  * Reads a private file that is later replaced with
  * {@link replacePrivateFileAtomic}. Returns null when the entry is absent. A
  * symlink at the path, a non-regular entry, a symlinked or replaced directory
- * from `directories`, or a file that changes identity during the read throws
+ * from `directories`, or a file that keeps changing identity throws
  * `refusal()`; other filesystem errors (for example EACCES) propagate, so an
  * unreadable file is never mistaken for an empty one and overwritten.
+ *
+ * Concurrency: readers need no lock. When the regular file seen by `lstat`
+ * and the regular file opened (no-follow) differ, a writer renamed a complete
+ * sibling over the path in between, which is the replacement this module's
+ * writer promises readers may observe; the read starts again (at most
+ * {@link REPLACEABLE_READ_ATTEMPTS} times) and returns the previous or the new
+ * contents, never a false symlink refusal (HACK-1422). A symlink or
+ * non-regular entry opened at any attempt is still refused at once.
  */
 export async function readReplaceablePrivateFile(
   opts: ReplaceablePrivateFileOptions & {
@@ -287,9 +303,28 @@ export async function readReplaceablePrivateFile(
   }
 ): Promise<ReplaceablePrivateFile | null> {
   const directories = await captureRealDirectories(opts);
+  for (let attempt = 1; ; attempt += 1) {
+    const read = await readReplaceableTargetOnce(opts);
+    if (read === "replaced") {
+      if (attempt < REPLACEABLE_READ_ATTEMPTS) {
+        continue;
+      }
+      throw opts.refusal();
+    }
+    await recheckRealDirectories({ directories, refusal: opts.refusal });
+    return read;
+  }
+}
+
+/**
+ * One no-follow observe-open-read of `opts.path`: null when absent,
+ * `"replaced"` when the opened regular file is not the one `lstat` observed.
+ */
+async function readReplaceableTargetOnce(
+  opts: ReplaceablePrivateFileOptions & { readonly maxBytes?: number }
+): Promise<ReplaceablePrivateFile | null | "replaced"> {
   const observed = await observeReplaceableTarget(opts);
   if (!observed) {
-    await recheckRealDirectories({ directories, refusal: opts.refusal });
     return null;
   }
   let file: FileHandle;
@@ -308,11 +343,12 @@ export async function readReplaceablePrivateFile(
     const opened = await file.stat();
     if (
       !opened.isFile() ||
-      opened.dev !== observed.dev ||
-      opened.ino !== observed.ino ||
       (opts.maxBytes !== undefined && opened.size > opts.maxBytes)
     ) {
       throw opts.refusal();
+    }
+    if (opened.dev !== observed.dev || opened.ino !== observed.ino) {
+      return "replaced";
     }
     const text = await file.readFile({ encoding: "utf8" });
     if (
@@ -322,7 +358,6 @@ export async function readReplaceablePrivateFile(
       // The file grew in place after the size check.
       throw opts.refusal();
     }
-    await recheckRealDirectories({ directories, refusal: opts.refusal });
     return { text, mode: opened.mode & 0o7777 };
   } finally {
     await file.close();

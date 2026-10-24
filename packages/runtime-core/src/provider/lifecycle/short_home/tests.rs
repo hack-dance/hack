@@ -142,8 +142,30 @@ impl Drop for Pool {
     }
 }
 
+/// Run one ignored recovery fixture of this module alone in a child test process.
+///
+/// Recovery must find the pool's disks, VM lock and sockets released before it changes the
+/// receipt. In the shared parallel test process, an unrelated test's pre-exec fork
+/// (`process::clean_command`) holds a copy of every descriptor open at the fork until it
+/// execs, so a disk this test just read or a listener it just dropped can still show up to
+/// the host-wide `lsof` scan or accept a connection, and recovery correctly refuses as
+/// `stop_uncertain`. Every test that expects those release checks to pass runs isolated.
+fn isolated(child: &str) {
+    use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+    run_isolated(
+        &format!("provider::lifecycle::short_home::tests::{child}"),
+        ISOLATED_HANG_GUARD,
+    );
+}
+
 #[test]
 fn explicit_recovery_restores_only_missing_alias_and_preserves_disk_bytes() {
+    isolated("explicit_recovery_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by explicit_recovery_restores_only_missing_alias_and_preserves_disk_bytes"]
+fn explicit_recovery_child() {
     let pool = Pool::new();
     let storage = fs::read(pool.data().join("storage.raw")).unwrap();
     let overlay = fs::read(pool.data().join("overlay.raw")).unwrap();
@@ -222,6 +244,12 @@ fn changed_disk_held_vm_lock_and_open_disk_refuse_before_alias_creation() {
 
 #[test]
 fn existing_file_directory_and_foreign_symlink_are_never_replaced() {
+    isolated("foreign_alias_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by existing_file_directory_and_foreign_symlink_are_never_replaced"]
+fn foreign_alias_child() {
     for case in 0..3 {
         let pool = Pool::new();
         pool.remove_alias();
@@ -253,6 +281,12 @@ fn existing_file_directory_and_foreign_symlink_are_never_replaced() {
 
 #[test]
 fn active_socket_leaves_explicit_incomplete_recovery_then_retry_finishes() {
+    isolated("active_socket_retry_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by active_socket_leaves_explicit_incomplete_recovery_then_retry_finishes"]
+fn active_socket_retry_child() {
     let pool = Pool::new();
     let listener = UnixListener::bind(pool.owner.data_dir().join("agent.sock")).unwrap();
     pool.remove_alias();
@@ -321,6 +355,12 @@ fn pending_owner_update_is_preserved_and_refuses_alias_repair() {
 
 #[test]
 fn vm_lock_releases_on_success_and_error_even_with_an_inherited_descriptor() {
+    isolated("vm_lock_release_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by vm_lock_releases_on_success_and_error_even_with_an_inherited_descriptor"]
+fn vm_lock_release_child() {
     for fail in [false, true] {
         let pool = Pool::new();
         let listener =

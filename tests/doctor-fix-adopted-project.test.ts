@@ -3,6 +3,11 @@ import { randomBytes } from "node:crypto";
 import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+  INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+} from "../src/lib/compose-env-at-rest.ts";
+import { renderManagedComposeEnvOverride } from "../src/lib/compose-managed-env.ts";
 import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { inspectLegacyComposeAdoptionSelection } from "../src/lib/native-compose-adoption-marker.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -25,6 +30,7 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
  * only against the fixture checkout with no global or system config.
  */
 
+const LITERAL_CANARY = "hack-1414-literal-override-canary";
 const runCalls: string[][] = [];
 const noteCalls: string[] = [];
 
@@ -263,6 +269,51 @@ test("doctor --fix with a pending adoption leaves the pending operation for expl
   for (const call of runCalls) {
     expect(call.join(" ")).not.toContain(h.root);
   }
+}, 120_000);
+
+test("doctor --fix keeps a literal env override that a pending adoption pins and names the recovery that state accepts (HACK-1414)", async () => {
+  const store = await h.store();
+  try {
+    const generation = await store.prepare({ binary: h.compiler });
+    await store.publish({ generation, binary: h.compiler });
+  } finally {
+    await store.close();
+  }
+  // An interrupted retained command of the active adoption: rollback (plain
+  // or `--recover`) refuses until `hack down --recover` settles it.
+  await leaveRetainedSourceBindOperationPending(h);
+  expect(
+    await inspectLegacyComposeAdoptionSelection({ projectRoot: h.root })
+  ).toBe("pending");
+  // An earlier version's literal override. Doctor reads only the adoption
+  // status, so it reports the file as pinned without loading the adoption.
+  const overridePath = join(h.root, ".hack/.internal/compose.env.override.yml");
+  const literal =
+    renderManagedComposeEnvOverride({
+      targetServices: ["web"],
+      globalEnv: {},
+      serviceEnv: { web: { LITERAL_SECRET: LITERAL_CANARY } },
+    }) ?? "";
+  await writeFile(overridePath, literal, { mode: 0o600 });
+  const receipt = await readFile(receiptPath(), "utf8");
+
+  const code = await runDoctorFix();
+
+  const notes = noteCalls.join("\n");
+  expect(code).toBe(0);
+  expect(notes).toContain(
+    `Kept .hack/.internal/compose.env.override.yml: a saved 'hack config adopt' generation pins it, and removing it would break the adoption (values omitted). ${INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP}`
+  );
+  expect(notes).toContain("'hack down --recover'");
+  // The settled and pending-switch steps both name commands this state
+  // refuses.
+  expect(notes).not.toContain(ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP);
+  expect(notes).not.toContain("--recover --rollback");
+  expect(notes).not.toContain(LITERAL_CANARY);
+  expect(notes).not.toContain(SOURCE_BIND_CANARY);
+  // Kept as is, and the adoption is left for explicit recovery.
+  expect(await readFile(overridePath, "utf8")).toBe(literal);
+  expect(await readFile(receiptPath(), "utf8")).toBe(receipt);
 }, 120_000);
 
 /** `runCli doctor --fix` in the fixture with a private HOME and the mocks on. */

@@ -23,6 +23,19 @@ import {
 } from "./projects-registry.ts";
 import { run } from "./shell.ts";
 
+/**
+ * Fixed, value-free messages an adopted command ends with when it cancels or
+ * rewraps an unexpected refusal as `E_CONFIG_INVALID`. Diagnostics map these
+ * exact strings to closed tokens, so they import them instead of copying them
+ * (HACK-1432).
+ */
+export const LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES = Object.freeze({
+  refused:
+    "Adopted Compose ownership or execution refused; original data is retained. Values omitted.",
+  cancelled:
+    "Adopted Compose operation cancelled; pending ownership is retained. Values omitted.",
+});
+
 function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
@@ -34,8 +47,7 @@ function cancelled(signal: AbortSignal) {
   if (signal.aborted) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
-      message:
-        "Adopted Compose operation cancelled; pending ownership is retained. Values omitted.",
+      message: LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES.cancelled,
     });
   }
 }
@@ -58,10 +70,25 @@ async function registeredAdoptedRoot(project: string) {
   return state === "active" || state === "pending" ? registered.repoRoot : null;
 }
 
-/** Check private adoption ownership before ordinary authored discovery can allocate a fresh native namespace. */
+/**
+ * Check private adoption ownership before ordinary authored discovery can
+ * allocate a fresh native namespace. Returns the adopted project root, or null
+ * when there is no active or pending adoption on the way to the nearest
+ * project root or the filesystem root. Unsafe adoption state throws the
+ * marker's closed, value-free refusal (`E_CONFIG_INVALID`).
+ *
+ * Invariant: this walk covers every ancestor that ordinary discovery
+ * (`discoverProjectInputs`) covers. That discovery reads an active adoption as
+ * native input, so an adoption this walk missed would reach the native
+ * authored path. The walk is therefore unbounded, like that discovery: it
+ * ends at a project root or the filesystem root, since `dirname` of an
+ * absolute path always reaches `/`. It once stopped after 64 directories and
+ * then refused every command, even with no project at all, as an unsupported
+ * adopted command (HACK-1380).
+ */
 export async function selectLegacyComposeAdoptedRoot(
   options: Pick<NativeComposeCommandOptions, "cwd" | "path" | "project">
-) {
+): Promise<string | null> {
   if (options.path && options.project !== undefined) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
@@ -70,7 +97,7 @@ export async function selectLegacyComposeAdoptedRoot(
   }
   let current = resolve(options.cwd, options.path ?? ".");
   let nearestLegacy = false;
-  for (let depth = 0; depth < 64; depth++) {
+  while (true) {
     const state = await inspectLegacyComposeAdoptionSelection({
       projectRoot: current,
     });
@@ -92,7 +119,6 @@ export async function selectLegacyComposeAdoptedRoot(
     }
     current = parent;
   }
-  unsupported();
 }
 function validate(options: NativeComposeCommandOptions) {
   if (
@@ -357,7 +383,7 @@ export async function tryLegacyComposeAdoptedCommand(
       message:
         error instanceof LegacyComposeAdoptedGenerationError
           ? error.message
-          : "Adopted Compose ownership or execution refused; original data is retained. Values omitted.",
+          : LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES.refused,
       ...(legacyComposeOrderedRefusal(error)
         ? {
             detail: {

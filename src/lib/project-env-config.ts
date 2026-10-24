@@ -4243,12 +4243,20 @@ async function writeProjectEnvKeyWithFallback(opts: {
   return { keyPath: opts.localKeyPath, keyText, warnings };
 }
 
-/** Fixed, value-free refusal for a checkout-local key git would commit. */
+/**
+ * Fixed, value-free refusal for a checkout-local key git would commit.
+ * `unwritable`: Hack could not add the entry to the root `.gitignore`.
+ * `reincluded`: the entry is there, but a later rule in that file (such as
+ * `!.hack.secret.key`) re-includes the key, so adding it again cannot help.
+ */
 function projectEnvKeyUnignoredError(opts: {
   readonly rootGitignore: string;
+  readonly cause: "unwritable" | "reincluded";
 }): ProjectEnvKeyRefusalError {
   return new ProjectEnvKeyRefusalError(
-    `Refusing to use ${PROJECT_ENV_KEY_FILENAME}: git does not ignore it, so it could be committed, and Hack could not add it to ${opts.rootGitignore}. Add a '${PROJECT_ENV_KEY_FILENAME}' line to that file (making it writable if needed) and remove any rule that re-includes the key, then retry; key contents are never included in this message.`
+    opts.cause === "reincluded"
+      ? `Refusing to use ${PROJECT_ENV_KEY_FILENAME}: git does not ignore it, so it could be committed. ${opts.rootGitignore} lists '${PROJECT_ENV_KEY_FILENAME}', but a later rule in that file re-includes the key (for example '!${PROJECT_ENV_KEY_FILENAME}'). Remove that rule, then retry; key contents are never included in this message.`
+      : `Refusing to use ${PROJECT_ENV_KEY_FILENAME}: git does not ignore it, so it could be committed, and Hack could not add it to ${opts.rootGitignore}. Add a '${PROJECT_ENV_KEY_FILENAME}' line to that file (making it writable if needed) and remove any rule that re-includes the key, then retry; key contents are never included in this message.`
   );
 }
 
@@ -4266,7 +4274,12 @@ function projectEnvKeyUnignoredError(opts: {
  *   key is not used.
  *
  * Either way, a key git still does not ignore after the entry (for example a
- * later `!.hack.secret.key` rule) is refused.
+ * later `!.hack.secret.key` rule) is refused, naming that cause.
+ *
+ * A checkout outside git that later becomes one (`git init`) is not watched:
+ * Hack runs no code at that point. If the entry went missing meanwhile, the
+ * first `--secret` set or hydrate in the new checkout repairs it or refuses
+ * here, and `hack doctor`'s env key check reports `env-key-unignored`.
  */
 async function ensureProjectEnvKeyIgnored(opts: {
   readonly projectRoot: string;
@@ -4287,10 +4300,13 @@ async function ensureProjectEnvKeyIgnored(opts: {
   } catch (error: unknown) {
     throw opts.creating
       ? closedFileWriteError({ error, path: rootGitignore, operation: "write" })
-      : projectEnvKeyUnignoredError({ rootGitignore });
+      : projectEnvKeyUnignoredError({ rootGitignore, cause: "unwritable" });
   }
+  // The entry is in the root `.gitignore` now (written or already there), and
+  // no deeper ignore file applies to a key at the project root, so only a
+  // later rule in that same file can re-include it.
   if ((await isGitIgnoredProjectEnvPath(probe)) === false) {
-    throw projectEnvKeyUnignoredError({ rootGitignore });
+    throw projectEnvKeyUnignoredError({ rootGitignore, cause: "reincluded" });
   }
 }
 

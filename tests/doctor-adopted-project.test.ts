@@ -242,17 +242,16 @@ test("doctor reports a pending adoption as a project warning that asks for recov
   ).toEqual([]);
 }, 120_000);
 
-test("a start directory deeper than the adoption search bound gets ordinary discovery instead of a throw", async () => {
-  // More ancestors than the adoption selector walks (64), with no project root
-  // on the way: the selector's bound ends the search.
+test("a start directory deeper than the old adoption search bound gets ordinary discovery instead of a throw", async () => {
+  // More ancestors than the adoption selector once walked (64), with no
+  // project root on the way. The selector now walks every ancestor (HACK-1380)
+  // and finds no adoption, so doctor needs no catch of its own.
   let deep = join(h.outer, "deep");
   for (let level = 0; level < 70; level++) {
     deep = join(deep, "d");
   }
   await mkdir(deep, { recursive: true });
-  await expect(
-    selectLegacyComposeAdoptedRoot({ cwd: deep })
-  ).rejects.toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
+  expect(await selectLegacyComposeAdoptedRoot({ cwd: deep })).toBeNull();
 
   expect(await findDoctorAdoptedProject({ startDir: deep })).toBeNull();
   expect(await preflightDoctorProject({ startDir: deep })).toBeNull();
@@ -265,8 +264,8 @@ test("a start directory deeper than the adoption search bound gets ordinary disc
 }, 60_000);
 
 test("unsafe adoption state still refuses doctor with the selector's closed error", async () => {
-  // A state root that is not a directory is unsafe adoption state, not the
-  // search bound, so doctor must not read it as "no adoption".
+  // A state root that is not a directory is unsafe adoption state, so doctor
+  // must not read it as "no adoption".
   const root = join(h.outer, "unsafe");
   await mkdir(join(root, ".hack/.internal"), { recursive: true });
   await writeFile(

@@ -86,6 +86,10 @@ const jobNames = [
   "docker-e2e shard 3/4",
   "docker-e2e shard 4/4",
   "docker-e2e",
+  "test shard 1/4",
+  "test shard 2/4",
+  "test shard 3/4",
+  "test shard 4/4",
   "test",
   "linux-process-lifetime",
 ];

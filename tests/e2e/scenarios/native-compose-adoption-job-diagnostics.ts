@@ -1,5 +1,9 @@
 import { isRecord } from "../../../src/lib/guards.ts";
+import { LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES } from "../../../src/lib/native-compose-adoption-command.ts";
 import type { LegacyComposeOrderedRefusal } from "../../../src/lib/native-compose-adoption-diagnostics.ts";
+import { LegacyComposeAdoptedGenerationError } from "../../../src/lib/native-compose-adoption-generation.ts";
+import { LEGACY_ADOPTION_SELECTION_MESSAGES } from "../../../src/lib/native-compose-adoption-marker.ts";
+import { ProjectInputAccessError } from "../../../src/lib/project-input-selection.ts";
 import type { CliResult } from "../harness.ts";
 
 const STAGES = [
@@ -15,6 +19,7 @@ const STAGES = [
 type Stage = (typeof STAGES)[number];
 const CODES = [
   "E_CONFIG_INVALID",
+  "E_PERMISSION",
   "E_LIFECYCLE_FAILED",
   "E_STATE",
   "E_NATIVE_COMPOSE_ADOPTION",
@@ -58,6 +63,40 @@ const SCHEDULER_REASONS: readonly SchedulerReason[] = [
   "completion-authority",
 ];
 const MAX_REPLY_BYTES = 64 * 1024;
+/**
+ * Closed refusal tokens for the fixed, value-free messages an adopted start can
+ * end with (HACK-1421). Only exact matches map to a token; the message itself
+ * is never emitted, and any other text is `other`.
+ */
+const REFUSALS: readonly (readonly [string, string])[] = [
+  ...(
+    [
+      ["legacy-state", "E_LEGACY_ADOPTION_STATE"],
+      ["legacy-busy", "E_LEGACY_ADOPTION_BUSY"],
+      ["legacy-changed", "E_LEGACY_ADOPTION_CHANGED"],
+      ["legacy-unsupported", "E_LEGACY_ADOPTION_UNSUPPORTED"],
+      ["legacy-cancelled", "E_LEGACY_ADOPTION_CANCELLED"],
+      ["legacy-deadline", "E_LEGACY_ADOPTION_DEADLINE"],
+      ["legacy-literal-env", "E_LEGACY_ADOPTION_LITERAL_ENV"],
+    ] as const
+  ).map(
+    ([token, code]) =>
+      [token, new LegacyComposeAdoptedGenerationError(code).message] as const
+  ),
+  ["adopted-refused", LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES.refused],
+  ["adopted-cancelled", LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES.cancelled],
+  ["marker-adoption", LEGACY_ADOPTION_SELECTION_MESSAGES.adoption],
+  ["marker-permission", LEGACY_ADOPTION_SELECTION_MESSAGES.permission],
+  // The marker's input-access message is the shared project-input guard's.
+  ["input-access", new ProjectInputAccessError("unreadable").message],
+];
+
+function refusalToken(message: unknown): string {
+  if (typeof message !== "string") {
+    return "unavailable";
+  }
+  return REFUSALS.find(([, text]) => text === message)?.[0] ?? "other";
+}
 
 function isStage(value: unknown): value is Stage {
   return STAGES.some((stage) => stage === value);
@@ -98,6 +137,7 @@ function cliFacts(stdout: string) {
     code: "unavailable",
     orderedStage: "unavailable",
     orderedReason: "unavailable",
+    refusal: "unavailable",
   } as const;
   if (Buffer.byteLength(stdout) > MAX_REPLY_BYTES) {
     return unavailable;
@@ -108,7 +148,7 @@ function cliFacts(stdout: string) {
       return unavailable;
     }
     if (value.ok === true) {
-      return { ...unavailable, code: "none" };
+      return { ...unavailable, code: "none", refusal: "none" };
     }
     if (value.ok === false && isRecord(value.error)) {
       const error = value.error;
@@ -119,6 +159,7 @@ function cliFacts(stdout: string) {
         code,
         orderedStage: ordered?.stage ?? "unavailable",
         orderedReason: ordered?.reason ?? "unavailable",
+        refusal: refusalToken(error.message),
       };
     }
   } catch {
@@ -128,8 +169,8 @@ function cliFacts(stdout: string) {
 }
 
 /**
- * Record only closed start/restart substages, CLI codes and exact ordered-refusal
- * detail. No reply values, paths, argv, identifiers, arbitrary errors or
+ * Record only closed start/restart substages, CLI codes, exact ordered-refusal
+ * detail and a closed token for a fixed refusal message. No reply values, paths, argv, identifiers, arbitrary errors or
  * elapsed-budget claims are emitted. Logging failure never replaces the result.
  */
 export function createCompletedJobFixtureStartDiagnostics(opts: {
@@ -180,11 +221,11 @@ export function createCompletedJobFixtureStartDiagnostics(opts: {
         const timeout = result.timedOut ? "yes" : "no";
         const facts = cliFacts(result.stdout);
         emit(
-          `stage=cli-result exit=${exit} timed-out=${timeout} code=${facts.code} ordered-stage=${facts.orderedStage} ordered-reason=${facts.orderedReason}`
+          `stage=cli-result exit=${exit} timed-out=${timeout} code=${facts.code} ordered-stage=${facts.orderedStage} ordered-reason=${facts.orderedReason} refusal=${facts.refusal}`
         );
       } catch {
         emit(
-          "stage=cli-result exit=unavailable timed-out=unavailable code=unavailable ordered-stage=unavailable ordered-reason=unavailable"
+          "stage=cli-result exit=unavailable timed-out=unavailable code=unavailable ordered-stage=unavailable ordered-reason=unavailable refusal=unavailable"
         );
       }
     },

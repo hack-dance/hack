@@ -1037,7 +1037,7 @@ hack global <subcommand> [options]
 | `hack global ca` | Export Caddy Local CA cert (print path or PEM) |
 | `hack global cert <hosts...>` | Generate local TLS certs via mkcert (for non-Caddy services) |
 | `hack global trust` | Trust Caddy Local CA (macOS) so https://*.hack is trusted |
-| `hack global logs-reset` | Wipe Loki/Grafana volumes (fresh logs + dashboards) |
+| `hack global logs-reset` | Wipe Loki, Grafana and Alloy volumes (fresh logs, dashboards and Alloy read positions) |
 | `hack global authorize` | Authorize passwordless DNS recovery commands on macOS |
 
 ### Options
@@ -1242,7 +1242,7 @@ hack global trust [options]
 
 ## `hack global logs-reset`
 
-Wipe Loki/Grafana volumes (fresh logs + dashboards)
+Wipe Loki, Grafana and Alloy volumes (fresh logs, dashboards and Alloy read positions)
 
 ### Usage
 
@@ -2254,6 +2254,9 @@ Delete a stored secret
 hack secrets delete [name] [options]
 ```
 
+Asks for confirmation before deleting. Without a TTY (or with HACK_NO_INTERACTIVE / --no-interactive)
+the deletion is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.
+
 ### Arguments
 
 | Arg | Description |
@@ -2265,6 +2268,7 @@ hack secrets delete [name] [options]
 | Option | Description |
 | --- | --- |
 | `--service <service>` | Override Bun.secrets service name (default: hack-cli) |
+| `--yes` | Confirm the deletion without prompting (required without a TTY or with HACK_NO_INTERACTIVE) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

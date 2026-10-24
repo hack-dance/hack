@@ -16,7 +16,8 @@ SPEC = importlib.util.spec_from_file_location("application_benchmark_protocol", 
 protocol_check = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(protocol_check)
 
-PROTOCOL = json.loads((ROOT / "scripts/application-benchmark-protocol.json").read_text())
+PROTOCOL_TEXT = (ROOT / "scripts/application-benchmark-protocol.json").read_text()
+PROTOCOL = json.loads(PROTOCOL_TEXT)
 PROTOCOL_DOC = (ROOT / "docs/reference/application-benchmark-protocol.md").read_text()
 PERFORMANCE_DOC = (ROOT / "docs/performance.md").read_text()
 MARKER = "PRIVATE-MARKER-9f2c"
@@ -97,6 +98,14 @@ def evaluate_file(summary):
         path = Path(directory) / "summary.json"
         path.write_text(json.dumps(summary))
         return run_cli(["--evaluate", str(path)])
+
+
+def run_cli_text(text, flag):
+    """Run the CLI on raw JSON text, as a protocol (`--protocol`) or a summary (`--evaluate`)."""
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "input.json"
+        path.write_text(text)
+        return run_cli([flag, str(path)])
 
 
 def node_paths(node, prefix=(), list_limit=None):
@@ -225,6 +234,20 @@ class FrozenProtocolTest(unittest.TestCase):
                       f"{limit['witness_target_seconds']} s", "HACK-1169"):
             self.assertIn(value, PERFORMANCE_DOC)
         self.assertIn("application-benchmark-protocol.md", PERFORMANCE_DOC)
+
+    def test_document_states_the_number_bound_and_its_codes(self):
+        # The page writes the bound as ±(2ⁿ − 1); every such bound must be MAX_JSON_NUMBER.
+        superscripts = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
+        bounds = re.findall(r"±\(2([⁰¹²³⁴⁵⁶⁷⁸⁹]+) − 1\)", PROTOCOL_DOC)
+        self.assertTrue(bounds)
+        # A bound written any other way would escape the check above.
+        self.assertEqual(PROTOCOL_DOC.count("±("), len(bounds))
+        for exponent in bounds:
+            self.assertEqual(2 ** int(exponent.translate(superscripts)) - 1, protocol_check.MAX_JSON_NUMBER)
+        for code in ("protocol_number_out_of_range", "summary_number_out_of_range", "protocol_key_duplicate",
+                     "summary_key_duplicate", "summary_revision_mismatch", "summary_workload_unknown"):
+            self.assertIn(code, protocol_check.DIAGNOSTICS)
+            self.assertIn(f"`{code}`", PROTOCOL_DOC)
 
 
 def _recast_as_compose(item):
@@ -701,6 +724,82 @@ class BudgetEvaluationTest(unittest.TestCase):
             deep = [deep]
         self.assertEqual(protocol_check.validate_protocol(mutated(lambda d: d.update(notes=deep))),
                          ["protocol_number_out_of_range"])
+
+    def test_an_out_of_range_number_is_reported_with_an_early_refusal(self):
+        # The revision and workload codes stop the check early; the number code still appears.
+        cases = {
+            "summary_revision_mismatch": lambda s: s.update(protocol_revision=2),
+            "summary_workload_unknown": lambda s: s.update(workload=MARKER),
+        }
+        for code, change in cases.items():
+            for value in (float("nan"), 2 ** 53, -HUGE):
+                with self.subTest(code=code, value=repr(value)):
+                    summary = small_summary()
+                    change(summary)
+                    summary["notes"] = value
+                    expected = sorted([code, "summary_number_out_of_range"])
+                    self.assertEqual(protocol_check.evaluate(PROTOCOL, summary), (expected, []))
+                    self.assertEqual(evaluate_file(summary), (2, {"status": "invalid", "diagnostics": expected}))
+        # The number can be the revision itself: both codes describe the same field.
+        self.assertEqual(self.refused({**small_summary(), "protocol_revision": 2 ** 53}),
+                         ["summary_number_out_of_range", "summary_revision_mismatch"])
+
+    def test_a_repeated_key_is_refused_so_no_number_is_shadowed(self):
+        # json.loads keeps the last value of a repeated key, so `NaN` here was never scanned.
+        frozen = PROTOCOL_TEXT.rstrip()
+        self.assertTrue(frozen.endswith("}"))
+        shadowed = frozen[:-1] + ', "notes": NaN, "notes": 1}'
+        self.assertEqual(run_cli_text(shadowed, "--protocol"),
+                         (2, {"status": "invalid", "diagnostics": ["protocol_key_duplicate"]}))
+        self.assertEqual(run_cli_text(frozen[:-1] + ', "notes": 1}', "--protocol")[0], 0)
+        nested = frozen.replace('"id": "candidate",', '"id": "candidate", "id": "candidate",', 1)
+        self.assertNotEqual(nested, frozen)
+        self.assertEqual(run_cli_text(nested, "--protocol"),
+                         (2, {"status": "invalid", "diagnostics": ["protocol_key_duplicate"]}))
+        summary = json.dumps(small_summary())
+        self.assertEqual(run_cli_text(summary, "--evaluate")[0], 0)
+        repeated = summary.replace('"cache_class": "warm"', '"cache_class": NaN, "cache_class": "warm"', 1)
+        self.assertNotEqual(repeated, summary)
+        self.assertEqual(run_cli_text(repeated, "--evaluate"),
+                         (2, {"status": "invalid", "diagnostics": ["summary_key_duplicate"]}))
+
+    def test_integer_literals_of_any_length_get_the_range_code_on_every_interpreter(self):
+        # Python 3.11+ refuses to convert an integer of more than 4300 digits, which made a
+        # 5000-digit literal `protocol_unreadable` there and out of range on 3.9.
+        limit = protocol_check.MAX_JSON_NUMBER
+        frozen = PROTOCOL_TEXT.rstrip()[:-1]
+        for literal in ("9" * 5000, "-" + "9" * 5000, str(limit + 1), str(10 ** 16), str(-(10 ** 16))):
+            with self.subTest(digits=len(literal)):
+                self.assertEqual(run_cli_text(frozen + ', "notes": ' + literal + "}", "--protocol"),
+                                 (2, {"status": "invalid", "diagnostics": ["protocol_number_out_of_range"]}))
+                summary = json.dumps({**small_summary(), "notes": 0}).replace('"notes": 0', '"notes": ' + literal)
+                self.assertEqual(run_cli_text(summary, "--evaluate"),
+                                 (2, {"status": "invalid", "diagnostics": ["summary_number_out_of_range"]}))
+        for literal in (str(limit), str(-limit), "0", "-0"):
+            with self.subTest(literal=literal):
+                self.assertEqual(run_cli_text(frozen + ', "notes": ' + literal + "}", "--protocol")[0], 0)
+        # A long literal in a read field gets the same codes as an exact out-of-range value there.
+        floor = PROTOCOL_TEXT.replace('"p95_min_samples": 60', '"p95_min_samples": ' + "9" * 5000, 1)
+        self.assertNotEqual(floor, PROTOCOL_TEXT)
+        exact = protocol_check.validate_protocol(mutated(lambda d: d["samples"].update(p95_min_samples=10 ** 400)))
+        self.assertEqual(run_cli_text(floor, "--protocol"), (2, {"status": "invalid", "diagnostics": exact}))
+        self.assertEqual(protocol_check._bounded_int("9" * 5000), limit + 1)
+        self.assertEqual(protocol_check._bounded_int("-" + "9" * 5000), -limit - 1)
+        self.assertEqual(protocol_check._bounded_int(str(limit)), limit)
+
+    def test_an_integer_beyond_the_conversion_limit_never_raises_in_process(self):
+        # Exact identity checks serialize values; on Python 3.11+ a 5000-digit integer
+        # cannot be serialized, which must mean "different", not an exception.
+        enormous = 10 ** 5000
+        for path in (("host", "logical_cpus"), ("lanes", 0, "commit"), ("workloads", 0, "pin"),
+                     ("samples", "p95_min_samples"), ("notes",)):
+            with self.subTest(path=path):
+                found = protocol_check.validate_protocol(replace_at(PROTOCOL, path, enormous))
+                self.assertIn("protocol_number_out_of_range", found)
+                self.assertTrue(set(found) <= protocol_check.DIAGNOSTICS)
+        summary = small_summary()
+        summary["notes"] = enormous
+        self.assertEqual(self.refused(summary), ["summary_number_out_of_range"])
 
     def test_an_overflowing_ratio_fails_and_the_report_stays_strict_json(self):
         summary = small_summary()

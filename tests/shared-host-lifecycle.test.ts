@@ -18,8 +18,10 @@ import {
 import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
 import {
   ensureSharedHostHelper,
+  isSharedHostProcessRunning,
   parseSharedHostClaim,
   releaseSharedHostHelper,
+  SHARED_HOST_KILL_CONFIRM_MS,
   type SharedHostEvent,
   type SharedHostHelperSpec,
   type SharedHostProcesses,
@@ -115,6 +117,7 @@ function specFor(opts: {
     | "placeholder"
     | "parent"
     | "stubborn"
+    | "slow-term"
     | "oversized"
     | "exit";
   readonly backoff?: SharedHostHelperSpec["backoff"];
@@ -280,21 +283,41 @@ async function identityOf(pid: number) {
   return row ? { pid: row.pid, birth: row.birth } : null;
 }
 
+/**
+ * Whether the exact process still runs, by the product's own rule: a zombie
+ * (exited, not yet reaped) is not alive. On Linux an orphaned helper is reaped
+ * by init or a subreaper, which may lag behind the stop that observed its exit.
+ */
 async function isAlive(identity: { pid: number; birth: string }) {
+  return isSharedHostProcessRunning(await readProcessIdentities(), identity);
+}
+
+/** Whether the exact process is still in the census at all, zombie or not. */
+async function isPresent(identity: { pid: number; birth: string }) {
   return (await readProcessIdentities()).some(
     (row) => row.pid === identity.pid && row.birth === identity.birth
   );
 }
 
-async function waitGone(identity: { pid: number; birth: string }) {
+async function waitUntil(check: () => Promise<boolean>) {
   const deadline = performance.now() + 5000;
   while (performance.now() < deadline) {
-    if (!(await isAlive(identity))) {
+    if (await check()) {
       return true;
     }
     await Bun.sleep(50);
   }
   return false;
+}
+
+/** Wait until the exact process has exited (a zombie has exited). */
+function waitGone(identity: { pid: number; birth: string }) {
+  return waitUntil(async () => !(await isAlive(identity)));
+}
+
+/** Wait until the exact process is reaped: no row, not even a zombie. */
+function waitReaped(identity: { pid: number; birth: string }) {
+  return waitUntil(async () => !(await isPresent(identity)));
 }
 
 async function readClaim(spec: SharedHostHelperSpec) {
@@ -1309,6 +1332,220 @@ test(
   TIMEOUT
 );
 
+/** Mirrors `SLOW_TERM_MS` in fixtures/shared-host-helper.ts. */
+const SLOW_TERM_MS = 600;
+
+test(
+  "a helper that ignores SIGTERM briefly is reported stopped only after its exit is observed, without SIGKILL",
+  async () => {
+    const root = await scratch();
+    const spec = specFor({ root, port: freePort(), mode: "slow-term" });
+    expect(
+      await ensureSharedHostHelper({ spec, holder: "branch-a" })
+    ).toMatchObject({ state: "ready", ownership: "owned" });
+    const owned = await trackClaimedHelper(spec);
+    const started = performance.now();
+    const released = await releaseSharedHostHelper({
+      spec,
+      holder: "branch-a",
+      graceMs: 10_000,
+    });
+    const elapsed = performance.now() - started;
+    // Checked first: `stopped` must already be true when release returns.
+    expect(await isAlive(owned)).toBe(false);
+    expect(released).toEqual({ state: "stopped" });
+    // The helper left through its own TERM path after its delay, so release
+    // waited for the exit instead of reporting early or escalating to KILL.
+    expect(await readFile(join(root, "term-exited"), "utf8")).toBe(
+      `${owned.pid}\n`
+    );
+    expect(elapsed).toBeGreaterThanOrEqual(SLOW_TERM_MS - 20);
+    expect(await readClaim(spec)).toBeNull();
+  },
+  TIMEOUT
+);
+
+/** A census that fails: `ps` gave no rows (not even this process). */
+const CENSUS_FAILED = "census-failed";
+
+/** A simulated census and signal boundary around one claimed helper. */
+async function simulatedStop(opts: {
+  readonly spec: SharedHostHelperSpec;
+  /**
+   * The helper's census row for the given poll after TERM, null if gone, or
+   * {@link CENSUS_FAILED}. `sinceKillMs` is the time since KILL was
+   * requested, or null before that.
+   */
+  readonly afterTerm: (
+    poll: number,
+    sinceKillMs: number | null
+  ) =>
+    | { readonly birth: string; readonly zombie: boolean }
+    | null
+    | typeof CENSUS_FAILED;
+  readonly graceMs?: number;
+}) {
+  const birth = "Thu Jan 1 00:00:00 1970";
+  const self = {
+    pid: process.pid,
+    parentPid: process.ppid,
+    birth,
+    zombie: false,
+  };
+  await writeClaimFile(opts.spec, {
+    version: 1,
+    helper: opts.spec.name,
+    port: opts.spec.port,
+    ownership: "owned",
+    phase: "ready",
+    pid: 4242,
+    birth,
+    holders: ["branch-a"],
+  });
+  const signals: [NodeJS.Signals, number[]][] = [];
+  let polls = 0;
+  let killedAt: number | null = null;
+  const processes: SharedHostProcesses = {
+    census: async () => {
+      if (signals.length === 0) {
+        return [self, { pid: 4242, parentPid: 1, birth, zombie: false }];
+      }
+      polls += 1;
+      const row = opts.afterTerm(
+        polls,
+        killedAt === null ? null : performance.now() - killedAt
+      );
+      if (row === CENSUS_FAILED) {
+        return [];
+      }
+      return row ? [self, { pid: 4242, parentPid: 1, ...row }] : [self];
+    },
+    signalTree: async (tree, signal) => {
+      signals.push([signal, tree.map((row) => row.pid)]);
+      if (signal === "SIGKILL") {
+        killedAt = performance.now();
+      }
+    },
+  };
+  const result = await releaseSharedHostHelper({
+    spec: opts.spec,
+    holder: "branch-a",
+    graceMs: opts.graceMs ?? 2000,
+    processes,
+  });
+  return {
+    result,
+    signals,
+    polls: () => polls,
+    birth,
+    /** When release returned, in ms after KILL was requested; null without KILL. */
+    returnedAfterKillMs:
+      killedAt === null ? null : performance.now() - killedAt,
+  };
+}
+
+test(
+  "a census that fails during the TERM wait keeps the wait going instead of escalating to KILL",
+  async () => {
+    // A failed census proves nothing either way, so release keeps polling
+    // within the TERM grace; the next good census shows the helper gone.
+    const root = await scratch();
+    const spec = specFor({ root, port: freePort() });
+    const stop = await simulatedStop({
+      spec,
+      afterTerm: (poll) => (poll <= 3 ? CENSUS_FAILED : null),
+    });
+    expect(stop.result).toEqual({ state: "stopped" });
+    expect(stop.polls()).toBe(4);
+    expect(stop.signals).toEqual([["SIGTERM", [4242]]]);
+    expect(await readClaim(spec)).toBeNull();
+  },
+  TIMEOUT
+);
+
+test(
+  "after KILL, release keeps polling for the whole kill-confirm wait before giving up",
+  async () => {
+    // The helper outlives a short TERM grace, and its exit is observed only
+    // late in the SHARED_HOST_KILL_CONFIRM_MS wait that follows KILL.
+    const root = await scratch();
+    const spec = specFor({ root, port: freePort() });
+    const exitAfterKillMs = SHARED_HOST_KILL_CONFIRM_MS * 0.8;
+    const running = { birth: "Thu Jan 1 00:00:00 1970", zombie: false };
+    const stop = await simulatedStop({
+      spec,
+      graceMs: 100,
+      afterTerm: (_poll, sinceKillMs) =>
+        sinceKillMs !== null && sinceKillMs >= exitAfterKillMs ? null : running,
+    });
+    expect(stop.result).toEqual({ state: "stopped" });
+    expect(stop.signals).toEqual([
+      ["SIGTERM", [4242]],
+      ["SIGKILL", [4242]],
+    ]);
+    expect(stop.returnedAfterKillMs).toBeGreaterThanOrEqual(exitAfterKillMs);
+    expect(await readClaim(spec)).toBeNull();
+  },
+  TIMEOUT
+);
+
+test(
+  "release keeps waiting while the helper still runs after TERM and reports stopped once a census shows it a zombie",
+  async () => {
+    const root = await scratch();
+    const spec = specFor({ root, port: freePort() });
+    // Running for three polls after TERM, then an unreaped zombie.
+    const stop = await simulatedStop({
+      spec,
+      afterTerm: (poll) => ({
+        birth: "Thu Jan 1 00:00:00 1970",
+        zombie: poll > 3,
+      }),
+    });
+    expect(stop.result).toEqual({ state: "stopped" });
+    expect(stop.polls()).toBe(4);
+    expect(stop.signals).toEqual([["SIGTERM", [4242]]]);
+    expect(await readClaim(spec)).toBeNull();
+  },
+  TIMEOUT
+);
+
+test(
+  "a PID that keeps running with another birth time after TERM is not an observed exit: stop-unconfirmed, claim kept",
+  async () => {
+    // Linux `lstart` can drift with the wall clock, so the same running
+    // process may report a new birth. That must never read as stopped.
+    const root = await scratch();
+    const spec = specFor({ root, port: freePort() });
+    const stop = await simulatedStop({
+      spec,
+      afterTerm: () => ({ birth: "Thu Jan 1 00:00:01 1970", zombie: false }),
+    });
+    expect(stop.result).toEqual({ state: "stop-unconfirmed" });
+    // The simulated boundary records the KILL request. In production the
+    // signal re-checks the birth, so this PID would not be signalled.
+    expect(stop.signals).toEqual([
+      ["SIGTERM", [4242]],
+      ["SIGKILL", [4242]],
+    ]);
+    // Only after the whole kill-confirm wait.
+    expect(stop.returnedAfterKillMs).toBeGreaterThanOrEqual(
+      SHARED_HOST_KILL_CONFIRM_MS
+    );
+    expect(await readClaim(spec)).toEqual({
+      version: 1,
+      helper: spec.name,
+      port: spec.port,
+      ownership: "owned",
+      phase: "ready",
+      pid: 4242,
+      birth: stop.birth,
+      holders: [],
+    });
+  },
+  TIMEOUT + SHARED_HOST_KILL_CONFIRM_MS
+);
+
 test(
   "an owned helper runs in its own session with only the caller's environment",
   async () => {
@@ -1523,10 +1760,14 @@ test(
         (entry) => entry.pid === owned.pid && entry.birth === owned.birth
       );
       expect(row).toMatchObject({ parentPid: starter.proc.pid, zombie: true });
+      // The fixtures read liveness by the same rule: this zombie is not alive.
+      // A zombie-blind check here is the HACK-1336 Linux false failure.
+      expect(await isAlive(owned)).toBe(false);
+      expect(await isPresent(owned)).toBe(true);
     } finally {
       process.kill(starter.proc.pid, "SIGCONT");
     }
-    expect(await waitGone(owned)).toBe(true);
+    expect(await waitReaped(owned)).toBe(true);
   },
   TIMEOUT
 );

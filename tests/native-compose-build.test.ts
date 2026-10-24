@@ -471,7 +471,7 @@ test.each([
   }
   try {
     await expect(
-      buildNativeComposeImages({ ...state.options, deadline })
+      buildNativeComposeImages({ ...state.options, deadline: () => deadline })
     ).rejects.toBeInstanceOf(NativeComposeBuildError);
     expect(reads).toBe(3);
     expect(state.executed()).toBe(0);
@@ -535,19 +535,62 @@ test("run builds keep the existing unbounded command budget; startup budgets rem
     timeout = value;
     return await builder(args, value);
   };
+  const limit = Date.now() + 30_000;
   expect(
     await buildNativeComposeImages({
       ...startup.options,
-      deadline: Date.now() + 30_000,
+      deadline: () => limit,
     })
   ).toBe(0);
   expect(timeout).toBeGreaterThan(0);
   expect(timeout).toBeLessThanOrEqual(30_000);
+  const past = Date.now() - 1;
   const expired = harness();
   await expect(
-    buildNativeComposeImages({ ...expired.options, deadline: Date.now() - 1 })
+    buildNativeComposeImages({ ...expired.options, deadline: () => past })
   ).rejects.toBeInstanceOf(NativeComposeBuildError);
   expect(expired.executed()).toBe(0);
+});
+
+test("guard storage time that extends the start deadline is re-read at every build check", async () => {
+  // Fake wall clock: each owned guard spends 20 s of storage proof time that
+  // the start budget excludes, so the live deadline moves by the same amount.
+  let now = 1_000_000;
+  let deadline = now + 30_000;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const state = harness();
+    let timeout: number | undefined;
+    const execute = state.options.io.execute;
+    state.options.io.execute = async (args, value) => {
+      timeout = value;
+      return await execute(args, value);
+    };
+    state.options.assertOwned = async () => {
+      now += 20_000;
+      deadline += 20_000;
+    };
+    expect(
+      await buildNativeComposeImages({
+        ...state.options,
+        deadline: () => deadline,
+      })
+    ).toBe(0);
+    expect(state.executed()).toBe(1);
+    // Every guard was excluded: the builder still receives the full budget.
+    expect(timeout).toBe(30_000);
+    const fixed = harness();
+    fixed.options.assertOwned = async () => {
+      now += 20_000;
+    };
+    const frozen = now + 30_000;
+    await expect(
+      buildNativeComposeImages({ ...fixed.options, deadline: () => frozen })
+    ).rejects.toBeInstanceOf(NativeComposeBuildError);
+    expect(fixed.executed()).toBe(0);
+  } finally {
+    clock.mockRestore();
+  }
 });
 
 test("malformed or replaced daemon identity refuses before builder effects", async () => {

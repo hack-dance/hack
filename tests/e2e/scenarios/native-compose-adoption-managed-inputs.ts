@@ -10,6 +10,7 @@ import {
   findProjectContextAtRoot,
 } from "../../../src/lib/project.ts";
 import {
+  resolveProjectEnvConfig,
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../../../src/lib/project-env-config.ts";
@@ -259,11 +260,24 @@ async function writeGenerated(instance: Checkout) {
     refuse();
   }
   const expectedRuntime = buildRuntimeHostMetadataOverride(runtimeOpts);
-  // The writer keeps only `${NAME}` references at rest (HACK-1273).
+  // The writer chooses shared or per-service references from the winning
+  // scope of each key (HACK-1317), so the oracle reads the same metadata.
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    envName: "qa",
+    serviceNames: ["db", "worker"],
+  });
+  if (!resolved) {
+    refuse();
+  }
+  // The writer keeps only `${NAME}` references at rest (HACK-1273), with one
+  // shared reference per global value (HACK-1317).
   const expectedEnv = renderComposeEnvReferenceOverride({
     targetServices: ["db", "worker"],
-    globalEnv: managed.env,
+    globalEnv: resolved.globalEnv,
     serviceEnv: managed.preflightEnvByService,
+    effectiveScopes: resolved.effectiveMetadata,
   });
   if (
     !expectedEnv ||

@@ -38,6 +38,11 @@ export interface LokiLogOptions {
   readonly start?: Date;
   readonly end?: Date;
   readonly streamContext?: LogStreamContext;
+  /** Follow only; see `LokiLogsParams.noEntriesNotice`. */
+  readonly noEntriesNotice?: {
+    readonly afterMs: number;
+    readonly notify: () => void;
+  };
 }
 
 export interface LogBackend<Options> {
@@ -124,6 +129,7 @@ export const lokiLogBackend: LokiLogBackend = {
       streamContext: opts.streamContext,
       start: opts.start,
       end: opts.end,
+      noEntriesNotice: opts.noEntriesNotice,
     });
   },
   async snapshot(opts) {

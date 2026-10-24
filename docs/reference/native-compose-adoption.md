@@ -423,6 +423,27 @@ TTY/stdin forwarding, deadlines and process-group cleanup use the existing
 shared runner. The store's AbortSignal is a cooperative admission/recheck control;
 it does not independently terminate a caller-owned engine callback.
 
+`hack doctor` selects an active or pending adoption before ordinary discovery, which
+would refuse the project as native input. It reports the adopted project, the env key,
+tracked generated files and Compose env values at rest. Each other project check
+(runtime and lifecycle hygiene, Compose networks and backend features, `DEV_HOST`, env
+mode, materialization and overlay warnings, worktree keys and instances, the
+`.hack/.gitignore` check, Caddy hosts)
+reads inputs that the adoption owns, so doctor reports it as skipped instead of
+failing, with status `ok` and the message
+`Skipped (adopted Compose project: its inputs belong to 'hack config adopt')`.
+Doctor uses `warn` for a skip that points at something to fix, such as no `.hack/`
+found. These skips apply to every adopted project by design, so they are not warnings.
+A pending adoption is a warning that asks for explicit recovery, and the `--fix` steps
+treat it like an active one. The adoption search stops after 64 parent directories.
+From a deeper start directory doctor finds no adoption and uses ordinary project
+discovery instead of failing. The
+`--fix` plan says that it leaves the adoption's inputs, retained containers and state
+alone. For the project it only removes tracked generated files from the Git index
+(the files stay on disk) and keeps an env override that the adoption pins. It leaves
+`.hack/.gitignore` unchanged; a committed `.hack.secret.key` is also added to the
+root `.gitignore`. Global repairs still run.
+
 ## Rollback and interruption recovery
 
 ### Original file grants: private version 8
@@ -510,6 +531,14 @@ publication and `--recover` switch completion refuse at the `publication-inputs`
 boundary with the closed `literal-env-override` reason, before any original moves.
 The switch stays journaled and the fixed message names
 `hack config adopt --recover --rollback`; rollback stays allowed (HACK-1318).
+A repeated `--recover --stop` after that refusal does not reach the publication
+boundary again: the switch is already journaled, so the retried preparation stop
+refuses it as a pending publication with the generic `E_LEGACY_ADOPTION_BUSY`
+code ("busy or requires explicit interrupted-lock recovery") and no publication
+diagnostic; the literal-env message appears only on the first refusal.
+`hack doctor` reports the pinned literal override and names
+`hack config adopt --recover --rollback` as the next step while the switch is
+pending, since `hack down` and plain `--rollback` refuse in that state (HACK-1391).
 
 Unmodified v4 clients cannot be universally fenced: they ignore future legacy
 versions and may select ancestor Compose inputs. Adoption requires the upgraded

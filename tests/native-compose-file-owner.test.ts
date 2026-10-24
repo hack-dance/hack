@@ -299,6 +299,7 @@ for (const operation of ["up", "down"] as const) {
         const owner = initial ? ownerFor(mutation) : selected.owner;
         const controller = new AbortController();
         const marker = join(parent, "unexpected-child");
+        const admittedUntil = Date.now() + 10_000;
         await expect(
           mutation.runEffect({
             generation: selected.generation,
@@ -313,7 +314,7 @@ for (const operation of ["up", "down"] as const) {
                   `await Bun.write(${JSON.stringify(marker)}, "effect")`,
                 ],
                 signal: controller.signal,
-                deadline: Date.now() + 10_000,
+                deadline: () => admittedUntil,
                 options: {
                   stdin: "ignore" as const,
                   stdout: "ignore" as const,
@@ -334,7 +335,7 @@ for (const operation of ["up", "down"] as const) {
                   controller.abort();
                   Object.assign(input, {
                     signal: new AbortController().signal,
-                    deadline: Date.now() + 60_000,
+                    deadline: () => admittedUntil + 50_000,
                   });
                 },
               };

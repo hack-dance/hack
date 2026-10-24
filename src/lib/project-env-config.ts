@@ -4,7 +4,8 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { lstat, readdir, rm, stat, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, lstat, readdir, rm, stat, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
@@ -27,12 +28,16 @@ import {
 } from "../templates.ts";
 import { ClosedCliError } from "./cli-result.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
+import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
   AtomicWriteConflictError,
+  closedFileWriteError,
   ensureDir,
+  ensureDirForWrite,
   ensureGitignoreEntry,
   mergeManagedGitignoreBlock,
   pathExists,
+  readAtomicWriteTargetText,
   readTextFile,
   writeTextFile,
   writeTextFileAtomicIfChanged,
@@ -202,7 +207,7 @@ export function selectProjectEnvValues(opts: {
     ? opts.resolved.serviceEnv[scopeName]
     : undefined;
   if (!scoped) {
-    throw new Error(
+    throw new ClosedCliError(
       unknownProjectEnvScopeMessage({
         configuredScopes: Object.keys(opts.resolved.serviceEnv),
       })
@@ -271,6 +276,10 @@ export function normalizeProjectEnvScopeName(opts: {
   return scopeName.length === 0 ? "global" : scopeName;
 }
 
+/**
+ * Returns the normalized scope (`global` when empty), or refuses with the
+ * fixed, value-free `ENV_SCOPE_INVALID_MESSAGE` as a `ClosedCliError`.
+ */
 export function assertValidProjectEnvScopeName(opts: {
   readonly scopeName?: string | null;
 }): string {
@@ -278,7 +287,7 @@ export function assertValidProjectEnvScopeName(opts: {
     scopeName: opts.scopeName,
   });
   if (!isValidProjectEnvScopeName({ scopeName })) {
-    throw new Error(ENV_SCOPE_INVALID_MESSAGE);
+    throw new ClosedCliError(ENV_SCOPE_INVALID_MESSAGE);
   }
   return scopeName;
 }
@@ -437,25 +446,144 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
  * throws {@link HackDirGitignoreRefusalError} before anything is written, so a
  * planted link can never redirect the write outside the project. Ancestors
  * above the project dir are not inspected.
+ *
+ * Read-only is respected (the same policy as `ensureHackGitInfoExclude` for
+ * `info/exclude`): an existing file that needs an update but that the user
+ * cannot write (for example mode 0444) is left unchanged instead of being
+ * replaced through the rename, which would only need a writable directory.
+ * The result then has `readOnly: true` and `changed: false`; nothing throws,
+ * so callers decide how to report it. A file that is already current is
+ * never probed. See {@link isHackDirGitignoreWritable} for how read-only is
+ * decided, including for root.
  */
 export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
-}): Promise<{ readonly changed: boolean }> {
+  /** Test seam; see {@link HackDirGitignoreWriteAccess}. */
+  readonly checkWriteAccess?: HackDirGitignoreWriteAccess;
+}): Promise<HackDirGitignoreEnsureResult> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  await ensureDir(opts.projectDir);
+  await ensureDirForWrite(opts.projectDir);
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   const options = hackDirGitignoreFileOptions({ projectDir: opts.projectDir });
   const current = await readReplaceablePrivateFile(options);
   const next = mergeHackDirGitignore({ existing: current?.text ?? null });
   if (current?.text === next) {
-    return { changed: false };
+    return { changed: false, readOnly: false };
+  }
+  if (
+    current &&
+    !(await isHackDirGitignoreWritable({
+      path: options.path,
+      mode: current.mode,
+      checkWriteAccess: opts.checkWriteAccess,
+    }))
+  ) {
+    return { changed: false, readOnly: true };
   }
   await replacePrivateFileAtomic({
     ...options,
     text: next,
     mode: current ? current.mode & 0o777 : 0o644,
   });
-  return { changed: true };
+  return { changed: true, readOnly: false };
+}
+
+/**
+ * Outcome of {@link ensureHackDirGitignore}. `readOnly` is true only when an
+ * existing file lacked the managed block and was left unchanged because the
+ * user cannot write it.
+ */
+export type HackDirGitignoreEnsureResult = {
+  readonly changed: boolean;
+  readonly readOnly: boolean;
+};
+
+/** Error codes that mean the user may not write the file. */
+const HACK_DIR_GITIGNORE_READ_ONLY_CODES: ReadonlySet<string> = new Set([
+  "EACCES",
+  "EPERM",
+  "EROFS",
+]);
+
+/**
+ * Write-permission probe for an existing `.hack/.gitignore`: resolves when the
+ * user may write the path, rejects with the `access(2)` error otherwise.
+ * Production uses `access(path, W_OK)`. Tests inject a probe that always
+ * resolves to model root, whose `access(2)` ignores mode bits.
+ */
+export type HackDirGitignoreWriteAccess = (path: string) => Promise<void>;
+
+const accessHackDirGitignoreForWrite: HackDirGitignoreWriteAccess = (path) =>
+  access(path, constants.W_OK);
+
+/** Permission bits that grant write access to owner, group or others. */
+const ANY_WRITE_PERMISSION_BITS = 0o222;
+
+/**
+ * Whether the user may write the existing `.hack/.gitignore`.
+ *
+ * Policy: a file with no write permission bit at all (for example mode 0444)
+ * is read-only for every user, root included. `access(2)` alone cannot decide
+ * this, because it grants root write access whatever the mode, so a 0444 file
+ * would be replaced under `sudo` or in a root container. `mode` is the one the
+ * caller read with the file. When some write bit is set, `access(2)` decides,
+ * so a file that only another user or group may write stays read-only for
+ * this user.
+ *
+ * Only a permission check: `access(2)` resolves a final symlink, but the
+ * caller has just read the path as a regular file without following links,
+ * and the write that this gates refuses a symlink again on its own. So a link
+ * swapped in between can only skip the write, never redirect it. A file that
+ * vanished counts as writable (the replace recreates it).
+ */
+async function isHackDirGitignoreWritable(opts: {
+  readonly path: string;
+  readonly mode: number;
+  readonly checkWriteAccess?: HackDirGitignoreWriteAccess;
+}): Promise<boolean> {
+  if ((opts.mode & ANY_WRITE_PERMISSION_BITS) === 0) {
+    return false;
+  }
+  const checkWriteAccess =
+    opts.checkWriteAccess ?? accessHackDirGitignoreForWrite;
+  try {
+    await checkWriteAccess(opts.path);
+    return true;
+  } catch (error: unknown) {
+    if (!(isRecord(error) && typeof error.code === "string")) {
+      throw error;
+    }
+    if (error.code === "ENOENT") {
+      return true;
+    }
+    if (HACK_DIR_GITIGNORE_READ_ONLY_CODES.has(error.code)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/** Fixed, value-free warning for a read-only, outdated `.hack/.gitignore`. */
+export const HACK_DIR_GITIGNORE_READ_ONLY_WARNING =
+  ".hack/.gitignore is read-only and lacks Hack's current managed block, so Hack left it unchanged. Make it writable (chmod u+w .hack/.gitignore), then run 'hack doctor --fix' and commit it.";
+
+/**
+ * {@link ensureHackDirGitignore} for machine-local env writes (`hack env set
+ * --local`, `hack env hydrate`). A read-only file does not fail the command:
+ * it is left unchanged and reported once with
+ * {@link HACK_DIR_GITIGNORE_READ_ONLY_WARNING}. Refusals still throw.
+ *
+ * The warning is written straight to stderr as `WARN: <message>` (like the
+ * env key warnings), never through the UI logger: its clack backend prints to
+ * stdout, and `hack env hydrate --json` must keep stdout pure JSON.
+ */
+async function ensureHackDirGitignoreForLocalEnvWrite(opts: {
+  readonly projectDir: string;
+}): Promise<void> {
+  const result = await ensureHackDirGitignore({ projectDir: opts.projectDir });
+  if (result.readOnly) {
+    process.stderr.write(`WARN: ${HACK_DIR_GITIGNORE_READ_ONLY_WARNING}\n`);
+  }
 }
 
 /** Fixed, value-free message of {@link HackDirGitignoreRefusalError}. */
@@ -464,9 +592,10 @@ export const HACK_DIR_GITIGNORE_REFUSAL =
 
 /**
  * Refusal to read or write `.hack/.gitignore` through a symlink or a
- * non-regular entry. Names no path or contents.
+ * non-regular entry. Names no path or contents. Closed: the CLI prints its
+ * message as one line, never with a stack.
  */
-export class HackDirGitignoreRefusalError extends Error {
+export class HackDirGitignoreRefusalError extends ClosedCliError {
   constructor() {
     super(HACK_DIR_GITIGNORE_REFUSAL);
     this.name = "HackDirGitignoreRefusalError";
@@ -502,6 +631,8 @@ function mergeHackDirGitignore(opts: {
  * - `outdated`: it exists without the canonical managed block
  * - `unsafe`: the file is a symlink or not a regular file, or the project dir
  *   is a symlink; `--fix` never writes through it
+ * - `read-only`: it exists without the canonical managed block and the user
+ *   cannot write it (for example mode 0444); `--fix` leaves it alone
  * - `unreadable`: it exists but cannot be read; `--fix` leaves it alone
  *
  * Read-only and no-follow: never writes, never reads through a symlink.
@@ -511,17 +642,19 @@ export type HackDirGitignoreState =
   | "current"
   | "missing"
   | "outdated"
+  | "read-only"
   | "unsafe"
   | "unreadable";
 
 export async function inspectHackDirGitignore(opts: {
   readonly projectDir: string;
+  /** Test seam; see {@link HackDirGitignoreWriteAccess}. */
+  readonly checkWriteAccess?: HackDirGitignoreWriteAccess;
 }): Promise<HackDirGitignoreState> {
+  const options = hackDirGitignoreFileOptions({ projectDir: opts.projectDir });
   let current: Awaited<ReturnType<typeof readReplaceablePrivateFile>>;
   try {
-    current = await readReplaceablePrivateFile(
-      hackDirGitignoreFileOptions({ projectDir: opts.projectDir })
-    );
+    current = await readReplaceablePrivateFile(options);
   } catch (error: unknown) {
     return error instanceof HackDirGitignoreRefusalError
       ? "unsafe"
@@ -530,9 +663,20 @@ export async function inspectHackDirGitignore(opts: {
   if (current === null) {
     return "missing";
   }
-  return mergeHackDirGitignore({ existing: current.text }) === current.text
-    ? "current"
-    : "outdated";
+  if (mergeHackDirGitignore({ existing: current.text }) === current.text) {
+    return "current";
+  }
+  try {
+    return (await isHackDirGitignoreWritable({
+      path: options.path,
+      mode: current.mode,
+      checkWriteAccess: opts.checkWriteAccess,
+    }))
+      ? "outdated"
+      : "read-only";
+  } catch {
+    return "unreadable";
+  }
 }
 
 function toGitRelativePath(opts: {
@@ -558,6 +702,47 @@ async function isGitTrackedProjectEnvPath(opts: {
         "--error-unmatch",
         "--",
         relativePath,
+      ],
+      stderr: "ignore",
+      stdin: "ignore",
+      stdout: "ignore",
+    });
+  } catch {
+    return null;
+  }
+
+  const exitCode = await proc.exited;
+  if (exitCode === 0) {
+    return true;
+  }
+  if (exitCode === 1) {
+    return false;
+  }
+  return null;
+}
+
+/**
+ * Whether git's ignore rules (`.gitignore` files, `.git/info/exclude`,
+ * `core.excludesFile`) match `path`, whether or not it is tracked
+ * (`check-ignore --no-index`). Null when git is unavailable or `projectRoot`
+ * is not inside a work tree, where nothing can be committed.
+ */
+export async function isGitIgnoredProjectEnvPath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<boolean | null> {
+  let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
+  try {
+    proc = Bun.spawn({
+      cmd: [
+        "git",
+        "-C",
+        opts.projectRoot,
+        "check-ignore",
+        "-q",
+        "--no-index",
+        "--",
+        toGitRelativePath(opts),
       ],
       stderr: "ignore",
       stdin: "ignore",
@@ -1121,7 +1306,7 @@ export async function resolveProjectEnvValue(opts: {
     !opts.serviceNames.includes(scope) &&
     !Object.hasOwn(layers.merged.values, scope)
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       unknownProjectEnvScopeMessage({
         configuredScopes: [
           ...opts.serviceNames,
@@ -2509,6 +2694,36 @@ function opensToPlaintext(opts: {
   }
 }
 
+/**
+ * Reads the env layer a set or unset rewrites. An existing layer that cannot
+ * be read, or is not a regular file, is refused with the same closed
+ * `AtomicWriteRefusedError` the write itself raises, never treated as empty:
+ * an unset would otherwise report nothing to remove, and a set would build its
+ * result from an empty layer. An invalid layer is refused with a closed,
+ * value-free message. Both refusals happen before anything is written.
+ */
+async function readProjectEnvLayerForMutation(opts: {
+  readonly path: string;
+  readonly environment: string;
+}): Promise<{
+  readonly read: ProjectEnvConfigReadResult;
+  /** The exact bytes read (null when absent), for the compare-and-swap. */
+  readonly text: string | null;
+}> {
+  const text = await readAtomicWriteTargetText(opts.path);
+  const read = parseProjectEnvConfigText({
+    path: opts.path,
+    environment: opts.environment,
+    text,
+  });
+  if (read.parseError) {
+    throw new ClosedCliError(
+      `Failed to parse ${opts.path}: ${read.parseError}`
+    );
+  }
+  return { read, text };
+}
+
 export async function setProjectEnvValue(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -2518,11 +2733,13 @@ export async function setProjectEnvValue(opts: {
   readonly value: string;
   readonly secret: boolean;
   readonly local?: boolean;
+  /** Bounded wait for the layer lock; tests only. */
+  readonly layerLockTimeoutMs?: number;
 }): Promise<ProjectEnvMutationResult> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   if (!PROJECT_ENV_KEY_PATTERN.test(opts.key)) {
-    throw new Error(ENV_KEY_INVALID_MESSAGE);
+    throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
   }
   const scope = assertValidProjectEnvScopeName({
     scopeName: opts.scope,
@@ -2539,13 +2756,32 @@ export async function setProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
-  const read = await readProjectEnvConfigFile({
+  // The read, the change and the write form one critical section per layer,
+  // so a concurrent set or unset of another key is never lost (HACK-1376).
+  return await withEnvLayerLock({
+    layerPath: filePath,
+    timeoutMs: opts.layerLockTimeoutMs,
+    run: async () =>
+      await setLockedProjectEnvValue({ ...opts, scope, filePath }),
+  });
+}
+
+async function setLockedProjectEnvValue(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName: string | null;
+  readonly scope: string;
+  readonly key: string;
+  readonly value: string;
+  readonly secret: boolean;
+  readonly local?: boolean;
+  readonly filePath: string;
+}): Promise<ProjectEnvMutationResult> {
+  const { filePath, scope } = opts;
+  const { read, text } = await readProjectEnvLayerForMutation({
     path: filePath,
     environment: opts.envName ?? "default",
   });
-  if (read.parseError) {
-    throw new Error(`Failed to parse ${filePath}: ${read.parseError}`);
-  }
 
   const nextValues: ProjectEnvValuesByScope = {
     ...read.config.values,
@@ -2568,7 +2804,7 @@ export async function setProjectEnvValue(opts: {
     });
   }
   if (opts.local === true) {
-    await ensureHackDirGitignore({
+    await ensureHackDirGitignoreForLocalEnvWrite({
       projectDir: opts.projectDir,
     });
   }
@@ -2586,9 +2822,12 @@ export async function setProjectEnvValue(opts: {
     secretsprovider: PROJECT_ENV_SECRETS_PROVIDER,
     values: nextValues,
   };
+  // The lock excludes cooperating writers; the compare-and-swap turns a write
+  // by anything else since the read into a closed, retryable conflict.
   const changed = await writeProjectEnvConfigFile({
     path: filePath,
     config: nextConfig,
+    expectedExisting: text,
   });
   return {
     filePath,
@@ -2606,6 +2845,8 @@ export async function unsetProjectEnvValue(opts: {
   readonly scope: string;
   readonly key: string;
   readonly local?: boolean;
+  /** Bounded wait for the layer lock; tests only. */
+  readonly layerLockTimeoutMs?: number;
 }): Promise<{ readonly changed: boolean; readonly filePath: string }> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
@@ -2620,13 +2861,28 @@ export async function unsetProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
-  const read = await readProjectEnvConfigFile({
+  // Same per-layer critical section as `setProjectEnvValue` (HACK-1376).
+  return await withEnvLayerLock({
+    layerPath: filePath,
+    timeoutMs: opts.layerLockTimeoutMs,
+    run: async () => await unsetLockedProjectEnvValue({ ...opts, filePath }),
+  });
+}
+
+async function unsetLockedProjectEnvValue(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName: string | null;
+  readonly scope: string;
+  readonly key: string;
+  readonly local?: boolean;
+  readonly filePath: string;
+}): Promise<{ readonly changed: boolean; readonly filePath: string }> {
+  const { filePath } = opts;
+  const { read, text } = await readProjectEnvLayerForMutation({
     path: filePath,
     environment: opts.envName ?? "default",
   });
-  if (read.parseError) {
-    throw new Error(`Failed to parse ${filePath}: ${read.parseError}`);
-  }
 
   const scopeValues = { ...(read.config.values[opts.scope] ?? {}) };
   const inheritsLocal =
@@ -2662,6 +2918,7 @@ export async function unsetProjectEnvValue(opts: {
       secretsprovider: PROJECT_ENV_SECRETS_PROVIDER,
       values: nextValues,
     },
+    expectedExisting: text,
   });
   return { changed, filePath };
 }
@@ -2769,10 +3026,12 @@ export type ProjectEnvHydrationResult = {
  *   rename, so the previous layer stays in place.
  * - Concurrency: hydrations of one project are serialized by an exclusive
  *   lock file under `.internal/`; a second hydration refuses instead of
- *   waiting. The write is also a compare-and-swap against the bytes read, so a
- *   different writer that changed the layer meanwhile makes hydration refuse
- *   rather than overwrite it. A lock left by a killed process is reported, not
- *   removed.
+ *   waiting. A lock left by a killed process is reported, not removed. Inside
+ *   it, hydration takes the layer's write lock (`withEnvLayerLock`), the same
+ *   one `hack env set`/`unset` hold, waiting a bounded time for them. The
+ *   write is also a compare-and-swap against the bytes read, so a writer that
+ *   takes no lock and changed the layer meanwhile makes hydration refuse
+ *   rather than overwrite it.
  * - Wrong key: every secret already in the layer must decrypt under the key
  *   readers would use, or hydration refuses. Secret mode encrypts with the key
  *   file `hack env add --secret` uses and refuses to create one while only
@@ -2793,7 +3052,7 @@ export async function hydrateProjectEnvLocalLayer(opts: {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   for (const key of opts.entries.keys()) {
     if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
-      throw new Error(ENV_KEY_INVALID_MESSAGE);
+      throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
     }
   }
   const scope = assertValidProjectEnvScopeName({ scopeName: opts.scope });
@@ -2832,11 +3091,18 @@ export async function hydrateProjectEnvLocalLayer(opts: {
     refuse,
   });
   try {
-    return await hydrateLockedProjectEnvLayer({
-      ...opts,
-      scope,
-      filePath,
-      refuse,
+    // Also take the per-layer lock that `hack env set`/`unset` hold, so a
+    // concurrent set of another key waits instead of making hydration refuse
+    // as `concurrent_write` (or being overwritten).
+    return await withEnvLayerLock({
+      layerPath: filePath,
+      run: async () =>
+        await hydrateLockedProjectEnvLayer({
+          ...opts,
+          scope,
+          filePath,
+          refuse,
+        }),
     });
   } finally {
     await release();
@@ -2911,7 +3177,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
   if (!("global" in nextValues)) {
     nextValues.global = {};
   }
-  await ensureHackDirGitignore({ projectDir: opts.projectDir });
+  await ensureHackDirGitignoreForLocalEnvWrite({ projectDir: opts.projectDir });
   try {
     await writeProjectEnvConfigFile({
       path: opts.filePath,
@@ -3142,7 +3408,7 @@ async function acquireProjectEnvHydrationLock(opts: {
   readonly lockPath: string;
   readonly refuse: ProjectEnvHydrationRefuse;
 }): Promise<() => Promise<void>> {
-  await ensureDir(dirname(opts.lockPath));
+  await ensureDirForWrite(dirname(opts.lockPath));
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   try {
     await createPrivateFileExclusive({
@@ -3681,8 +3947,11 @@ async function readLegacyProjectEnvKeyFile(opts: {
   }
 }
 
-/** Fixed, value-free refusal for legacy key selection, creation and encryption. */
-export class ProjectEnvKeyRefusalError extends Error {
+/**
+ * Fixed, value-free refusal for legacy key selection, creation and encryption.
+ * Closed: the CLI prints its message as one line, never with a stack.
+ */
+export class ProjectEnvKeyRefusalError extends ClosedCliError {
   constructor(message: string) {
     super(message);
     this.name = "ProjectEnvKeyRefusalError";
@@ -3746,6 +4015,11 @@ export type EnsureProjectEnvSecretKeyResult = {
  * and new key files are created exclusively with mode 0600 (an existing entry,
  * including a dangling symlink, is never replaced or followed).
  *
+ * Ignore invariant: a checkout-local key is returned only once git ignores it.
+ * The root `.gitignore` entry is written before a new local key, so a failed
+ * write leaves no key behind, and an existing local key that git does not
+ * ignore is repaired or refused (see `ensureProjectEnvKeyIgnored`).
+ *
  * Concurrency: when no key exists, creation in a git checkout runs under a
  * cooperative lock at `<git common dir>/.hack.secret.key.lock`, so concurrent
  * first users across primary and linked checkouts converge on one key. Legacy
@@ -3781,8 +4055,20 @@ export async function ensureProjectEnvSecretKey(opts: {
       },
     });
   } catch (error: unknown) {
-    if (started || !isProjectEnvKeyLockUnavailable(error)) {
+    if (started) {
       throw error;
+    }
+    if (!isProjectEnvKeyLockUnavailable(error)) {
+      // Any other filesystem failure the user must fix (a full disk or quota,
+      // a non-directory on the way) is refused as the key it blocked, never
+      // as the lock's random `.owner` staging path or the raw errno.
+      throw closedFileWriteError({
+        error,
+        path: sharedLocation.linkedWorktree
+          ? sharedLocation.path
+          : resolveProjectEnvKeyPath(opts),
+        operation: "write",
+      });
     }
     // The git dir cannot hold a lock (for example it is read-only): create
     // the key unserialized, as before; the writer's own fallbacks apply.
@@ -3810,6 +4096,13 @@ async function ensureProjectEnvSecretKeyUnlocked(opts: {
   const existing = await readLegacyProjectEnvKeyFile({ path: keyPath });
   if (existing !== null) {
     await assertProjectEnvKeyUntracked({ keyPath });
+    // A key left un-ignored (an older Hack, a failed ignore write, a hand-
+    // copied key) is repaired before it is used, or refused.
+    await ensureProjectEnvKeyIgnored({
+      projectRoot: opts.projectRoot,
+      keyPath,
+      creating: false,
+    });
     return {
       keyPath,
       keyText: existing,
@@ -3928,19 +4221,72 @@ async function writeProjectEnvKeyWithFallback(opts: {
     );
   }
 
+  // The ignore entry comes first: if it cannot be written, no key file exists
+  // for a retry to pick up unignored.
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  await ensureProjectEnvKeyIgnored({
+    projectRoot: opts.projectRoot,
+    keyPath: opts.localKeyPath,
+    creating: true,
+  });
   const keyText = await writeProjectEnvKeyFile({
     projectRoot: opts.projectRoot,
     path: opts.localKeyPath,
     keyText: opts.keyText,
   });
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
-  await ensureGitignoreEntry({
-    gitignorePath: resolve(opts.projectRoot, ".gitignore"),
-    entry: PROJECT_ENV_KEY_FILENAME,
-    comment: "# project env key",
-  });
   emitProjectEnvKeyWarnings({ warnings });
   return { keyPath: opts.localKeyPath, keyText, warnings };
+}
+
+/** Fixed, value-free refusal for a checkout-local key git would commit. */
+function projectEnvKeyUnignoredError(opts: {
+  readonly rootGitignore: string;
+}): ProjectEnvKeyRefusalError {
+  return new ProjectEnvKeyRefusalError(
+    `Refusing to use ${PROJECT_ENV_KEY_FILENAME}: git does not ignore it, so it could be committed, and Hack could not add it to ${opts.rootGitignore}. Add a '${PROJECT_ENV_KEY_FILENAME}' line to that file (making it writable if needed) and remove any rule that re-includes the key, then retry; key contents are never included in this message.`
+  );
+}
+
+/**
+ * Keeps the checkout-local key file out of commits: makes sure the root
+ * `.gitignore` lists it and that git then ignores it.
+ *
+ * - `creating`: runs before a new key file is written. The entry is always
+ *   ensured (also outside git, so a later `git init` ignores the key); a
+ *   failed write is refused as that `.gitignore` write, and the caller writes
+ *   no key.
+ * - otherwise (an existing key): only a key git positively does not ignore is
+ *   repaired, so an ignored key or a checkout outside git causes no write. A
+ *   failed repair is refused with {@link projectEnvKeyUnignoredError}, and the
+ *   key is not used.
+ *
+ * Either way, a key git still does not ignore after the entry (for example a
+ * later `!.hack.secret.key` rule) is refused.
+ */
+async function ensureProjectEnvKeyIgnored(opts: {
+  readonly projectRoot: string;
+  readonly keyPath: string;
+  readonly creating: boolean;
+}): Promise<void> {
+  const probe = { projectRoot: opts.projectRoot, path: opts.keyPath };
+  if (!opts.creating && (await isGitIgnoredProjectEnvPath(probe)) !== false) {
+    return;
+  }
+  const rootGitignore = resolve(opts.projectRoot, ".gitignore");
+  try {
+    await ensureGitignoreEntry({
+      gitignorePath: rootGitignore,
+      entry: PROJECT_ENV_KEY_FILENAME,
+      comment: "# project env key",
+    });
+  } catch (error: unknown) {
+    throw opts.creating
+      ? closedFileWriteError({ error, path: rootGitignore, operation: "write" })
+      : projectEnvKeyUnignoredError({ rootGitignore });
+  }
+  if ((await isGitIgnoredProjectEnvPath(probe)) === false) {
+    throw projectEnvKeyUnignoredError({ rootGitignore });
+  }
 }
 
 /**
@@ -3956,7 +4302,7 @@ async function writeProjectEnvKeyFile(opts: {
   readonly keyText: string;
 }): Promise<string> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
-  await ensureDir(dirname(opts.path));
+  await ensureDirForWrite(dirname(opts.path));
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const published = await publishPrivateFileExclusive({
     path: opts.path,
@@ -4971,6 +5317,11 @@ function addProjectLocalCleanupCandidate(opts: {
   }
 }
 
+/**
+ * Splits a `KEY` or `scope.KEY` argument for `hack env set`, `unset` and
+ * `explain`. Every refusal is a fixed, value-free `ClosedCliError`, so the CLI
+ * prints it as one line under every logger and never echoes the argument.
+ */
 export function parseProjectEnvTarget(input: {
   readonly keyOrPath: string;
   readonly scopeOverride?: string | undefined;
@@ -4980,30 +5331,32 @@ export function parseProjectEnvTarget(input: {
 } {
   const trimmed = input.keyOrPath.trim();
   if (trimmed.length === 0) {
-    throw new Error("Env key is required.");
+    throw new ClosedCliError("Env key is required.");
   }
   // Refuse `KEY=value` before any dotted-scope split, so no fragment of the
   // value can reach a scope or key error. Every refusal below is fixed text.
   if (trimmed.includes("=")) {
-    throw new Error(ENV_KEY_ASSIGNMENT_MESSAGE);
+    throw new ClosedCliError(ENV_KEY_ASSIGNMENT_MESSAGE);
   }
 
   const dotIndex = trimmed.lastIndexOf(".");
   if (dotIndex > 0) {
     if (input.scopeOverride) {
-      throw new Error("Do not combine dotted scope syntax with --service.");
+      throw new ClosedCliError(
+        "Do not combine dotted scope syntax with --service."
+      );
     }
     const scope = trimmed.slice(0, dotIndex).trim();
     const key = trimmed.slice(dotIndex + 1).trim();
     assertValidProjectEnvScopeName({ scopeName: scope });
     if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
-      throw new Error(ENV_KEY_INVALID_MESSAGE);
+      throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
     }
     return { scope, key };
   }
 
   if (!PROJECT_ENV_KEY_PATTERN.test(trimmed)) {
-    throw new Error(ENV_KEY_INVALID_MESSAGE);
+    throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
   }
   return {
     scope: assertValidProjectEnvScopeName({

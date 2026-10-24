@@ -35,7 +35,17 @@ fallback.
 
 The first command slice supports whole-project detached `up`, `restart`, `run`,
 `down`, `ps`, plain `logs`, and `exec`. Startup uses the existing configurable
-Compose startup budget. Compose owns dependency startup, restart, and exec
+Compose startup budget (`HACK_COMPOSE_STARTUP_TIMEOUT_MS`) for builds, container
+start, readiness and route verification. Storage preparation, enrollment and
+every storage proof use the separate per-carrier storage budget
+(`HACK_NATIVE_STORAGE_TIMEOUT_MS`, default 90 seconds); proofs in the build and
+pre-spawn guards extend the start deadline by their own elapsed time instead of
+consuming it. That excluded time is capped per start phase at 16 × the storage
+budget or 1 hour, whichever is smaller: the deadline moves at most that far, a
+guard proof that would start after the cap is refused before it runs, and one
+that ends past it refuses the phase as `storage-budget`. The phase thus ends
+within the start budget, plus the cap, plus at most one in-flight guard proof.
+Compose owns dependency startup, restart, and exec
 health checks. Hack checks the exact proposed generation: each service must be
 running, healthy when it declares a health check, and each initializer job must
 have exited successfully. An older healthy container does not satisfy a new
@@ -337,8 +347,14 @@ expectation admission/write, journal, enrollment read, provision, root discovery
 seed, verification, closing root proof, completion write and publication. Carrier
 transport additionally distinguishes target, create, policy, start, response and
 cleanup; policy reasons identify shape, command, labels, host policy, mount
-cardinality, program/storage mounts and policy stability. Unknown errors remain
-`unclassified`. Diagnostics contain no paths, resource names, helper replies,
+cardinality, program/storage mounts and policy stability. A policy refusal keeps
+its policy reason even when it is caught after the carrier's deadline. A timeout,
+budget or otherwise unclassified refusal that finds its carrier's storage budget
+exhausted, and not cancelled, reports `storage-budget`, which names
+`HACK_NATIVE_STORAGE_TIMEOUT_MS`; a start phase
+that spends its whole-phase storage cap reports the same reason at
+`guard-storage`. Unknown errors
+remain `unclassified`. Diagnostics contain no paths, resource names, helper replies,
 error messages or causes. They add no observation, retry, repair or cleanup and
 do not change pending-state, deadline or effect admission rules. A stage names
 the first captured boundary; it does not establish the cause of older failures

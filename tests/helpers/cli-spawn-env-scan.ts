@@ -42,8 +42,7 @@ import ts from "typescript";
  * - `shell-runner-env`: a CLI spawn through src/lib/shell.ts must also pass
  *   `unsetEnvKeys`, or spread an options object such as
  *   `privateCliRunEnv(...)`, because shell `run` and `exec` lay `env` over the
- *   runner's whole `process.env`. Shell `exec` cannot unset keys, so it cannot
- *   run the CLI privately.
+ *   runner's whole `process.env`.
  *
  * Shell wrappers. At a wrapper call that names the CLI, each shell call inside
  * the wrapper is checked: against the wrapper call's own arguments when the

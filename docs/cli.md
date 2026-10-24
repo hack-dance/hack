@@ -129,10 +129,38 @@ Historical remote guides are excluded from the supported documentation.
 
 - `--json` on `hack up`/`down`/`restart`/`doctor` emits a `{ok, data | error: {code, message}}`
   envelope with stable `E_*` error codes. `--json` on `hack up` implies `--detach`.
+- A `--path` (or working directory) without a `.hack/` project reports `E_PROJECT_NOT_FOUND`
+  from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `open`, `tui`, `branch ...`,
+  `config get`/`set`, `env ...`, `host exec`/`shell` and `project owner`/`target`/`task`, for
+  example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
+  error envelope; without `--json` it is one closed error line, `E_PROJECT_NOT_FOUND: <message>`,
+  and no stack trace. The logger adds its own prefix: the console logger (`HACK_LOGGER=console`)
+  prints `ERROR: E_PROJECT_NOT_FOUND: ...` on stderr, gum prints a styled `ERROR` level on
+  stderr, and clack prints a `■` marker on stdout after its `│` guide line. `project target` and
+  `project task` use their own message, and `target` adds a
+  `detail`. These commands report something else:
+  - `tui` without a terminal refuses for that reason first.
+  - `env get` never prints a failure reason, since its output is raw values: it prints one fixed
+    line on stderr, with or without `--json`.
+  - `config validate`, `plan`, `import` and `adopt` read native configuration and keep their own
+    refusals: `E_NATIVE_PROJECT_UNSUPPORTED` for `validate`/`plan`, a refused preview for
+    `import --dry-run`, and `E_CONFIG_INVALID` for `adopt`.
+  - `init`, `doctor`, `crash-capture`, and the `setup`, `mcp` and `agent` commands do not need a
+    project.
+
+  `tests/missing-project-error-code.test.ts` pins each command that takes `--path`.
 - Known Hack errors and closed native runtime refusals print their message only, never a stack
   trace; set `HACK_DEBUG=1` to add the stack. Unexpected exceptions always print their stack.
 - `--no-interactive` (or `HACK_NO_INTERACTIVE=1`) is a global flag: commands never prompt — they
   apply documented defaults or fail fast with `E_INTERACTIVE_REQUIRED`.
+- A run whose stdin or stdout is not a TTY (piped input, an agent harness, CI) is treated the same
+  way, with or without the flag: the command resolves every prompt by its documented
+  non-interactive policy within milliseconds and never waits on a prompt. Confirmations that have
+  a safe default apply it (`hack env unset KEY` removes the key; `hack doctor --fix` applies safe
+  remediations and skips destructive ones with a note); prompts that need a real answer fail
+  closed with `E_INTERACTIVE_REQUIRED`, naming the flag or argument that makes the invocation
+  scriptable (for example `hack update --yes`, `hack mcp --all`, `hack session attach <name>`).
+  Set `HACK_NO_INTERACTIVE=1` explicitly in scripts anyway so the intent is visible.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
 
 Generated agent docs, Cursor rules, Codex skills, and the shared `~/.ai/skills/hack-cli` skill carry
@@ -198,6 +226,46 @@ that Hack also defines: `hack run web bun --version` runs `bun --version` in the
 rather than printing Hack's version, and a child `--json` does not switch Hack's own error output
 to JSON. A `--` before the child command is optional and is not passed on; a later `--` (as in
 `hack run web npm test -- --watch`) reaches the child unchanged.
+
+### Option parsing
+
+Hack parses options with the resolved command's own options plus the global ones, so each command
+keeps its own short flags and option types. `-p` is `--path` for project commands (`init`, `up`,
+`down`, `ps`, `logs`, `env ...`, `config ...`, `setup ...`) and `--port` for `hack ssh`. Both
+refusals below are `E_USAGE`:
+
+- A long option that only another command declares is refused as
+  `Option(s) not valid for "<command>": --<option>`, for example `hack doctor --follow`.
+- A short spelling the command does not declare is unknown to it, even when another command
+  declares it. `hack doctor -f` refuses as `Unknown option '-f'. To specify a positional argument
+  starting with a '-', ...`, the same refusal as a spelling no command declares, such as `-x`.
+  (`-f` is `--follow` for `logs` and `global logs`.) In a group of short flags, such as `-fd`, the refusal
+  names the first unknown letter without its dash (`Unknown option 'f'`).
+
+An option placed before the command name, as in `hack -p <dir> up`, is read as that command reads
+it. There is one remaining edge: when a spelling placed before the command name is a flag in one
+command and takes a value in another, Hack reads it as a flag, so it never consumes the command
+name. No spelling in the current CLI has this conflict. Put options after the command name to
+avoid it.
+
+Per-command parsing replaced one parse over every command's options. Comparing the old and new
+parsers on edge cases found two differences:
+
+- The intended one: `-p <dir>` on a project command (for example `up -p /x` or
+  `--no-interactive up -p /x`) now sets `--path`. The old parser set `ssh`'s `--port`, which the
+  command then refused.
+- A short spelling only another command declares is still refused, with different text. The old
+  parser read it as that command's long option and refused it as not valid: `doctor -f` and
+  `doctor -d` gave `Option(s) not valid for "doctor": --follow` and `--detach`, `ps -fd` gave
+  `--follow, --detach`, and `doctor -c --json` (`-c` takes a value for `agent init`) gave an
+  "argument is ambiguous" error. Each now gives `Unknown option '<spelling>'`, and `ps -fd` gives
+  `Unknown option 'f'`.
+
+These cases parse the same as before: `--help --all`, `help --all`, `-- up`,
+`--json run web tool --json`, `--path /x up`, `logs --tail`, `up --tail`, `ssh --path /x` and
+`x ext cmd -p 1` (where `-p 1` belongs to the extension command).
+`tests/cli-per-command-options.test.ts` pins the short-spelling refusal for every short spelling
+that `doctor` does not declare.
 
 `session exec` takes the workspace command as one argument, so quote a command that has its own
 arguments or flags: `hack session exec ws "npm --version"`. Hack options go before it, and an
@@ -265,6 +333,43 @@ fix a failed installer or prove readiness.
 Services with `pull_policy: always` still pull again in the start phase because
 Compose applies that policy on every `up`; such pulls count against the start
 budget.
+
+Native authored projects with persistent storage also prove their storage with
+short-lived helper containers. Each helper proof (one storage carrier: dependency
+check, target observation, helper create, policy, start, response and cleanup) has
+its own budget, separate from the start budget:
+
+| Budget | Default | Variable | Range (ms) |
+| --- | --- | --- | --- |
+| One native storage carrier | 90 seconds | `HACK_NATIVE_STORAGE_TIMEOUT_MS` | 1,000–600,000 |
+
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS` neither shortens nor lengthens a storage proof:
+carriers follow only `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Storage
+proofs that run while a native `up` or `restart` builds and starts workloads do not
+consume the start budget: their elapsed time extends the start deadline, and each
+proof stays bounded by its own carrier budget. Each Docker command inside a carrier
+keeps its fixed 10–15 second cap.
+
+The two variables bound different things:
+
+- Per proof: each storage carrier ends within `HACK_NATIVE_STORAGE_TIMEOUT_MS` (S).
+- Per start phase: the storage time excluded from one `up` or `restart` start
+  deadline may total at most 16 × S or 1 hour, whichever is smaller (24 minutes at
+  the 90-second default; 1 hour from S = 225,000 up). The start deadline moves
+  later by at most that cap. A proof that would start after the cap is spent is
+  refused before it runs, and a proof that ends past the cap refuses the phase.
+- Whole phase: the workload phase therefore ends within
+  `HACK_COMPOSE_STARTUP_TIMEOUT_MS`, plus the cap, plus at most one in-flight
+  guard proof. Raising S raises both the per-proof bound and the cap; raising the
+  start budget never changes either.
+
+When a carrier budget or the whole-phase cap runs out, the command reports the
+closed effect reason `storage-budget` in `error.detail.native_compose_effect_refusal`,
+and the human summary names `HACK_NATIVE_STORAGE_TIMEOUT_MS`. A refusal with its own
+cause, such as a helper policy refusal, keeps that reason even when it is caught after
+the carrier deadline; raising the storage budget does not address it. Exhaustion leaves the
+same retained, uncertain state as any other storage refusal; inspect saved state
+before retrying.
 
 To share dependency data only across worktrees with the same lockfile/runtime fingerprint, label
 the bootstrap service with a logical top-level Compose volume:
@@ -557,7 +662,8 @@ materialized `.hack/.env` or `.hack/.env.state.json` is stale and should be rege
 ## Project files
 
 Hack owns a committed `.hack/.gitignore` (created by `init`; for an existing project without it,
-`doctor` warns and `doctor --fix` creates or repairs it) that ignores
+`doctor` warns and `doctor --fix` creates or repairs it; a read-only or symlinked file is reported
+and never replaced) that ignores
 machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`,
 `hack.env*.local.yaml`). The retired `tickets/` path remains ignored only so upgrades cannot
 recommit legacy machine-local caches. Keep `.hack/.gitignore` committed. Runtime commands (`up`,

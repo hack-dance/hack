@@ -17,6 +17,7 @@ import {
   renderAgentIntegrationFreshnessNotice,
 } from "../cli/integration-sync.ts";
 import { optPath } from "../cli/options.ts";
+import { canPrompt } from "../lib/interactivity.ts";
 import { openUrl } from "../lib/os.ts";
 import { findProjectContext, findRepoRootForInit } from "../lib/project.ts";
 import { findExecutableInPath, run } from "../lib/shell.ts";
@@ -215,7 +216,9 @@ async function resolveInitClient(opts: {
     );
   }
 
-  if (!(process.stdin.isTTY && process.stdout.isTTY)) {
+  // No TTY, HACK_NO_INTERACTIVE, or --no-interactive: print the prompt
+  // instead of opening a picker that cannot settle on a piped stdin.
+  if (!canPrompt()) {
     return null;
   }
 

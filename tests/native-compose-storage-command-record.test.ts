@@ -18,6 +18,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  nativeComposeEffectRefusal,
+  retainNativeComposeEffectRefusal,
+} from "../src/lib/native-compose-effect-diagnostics.ts";
+import {
   holdDirectory,
   writeExclusive,
 } from "../src/lib/native-compose-private-state.ts";
@@ -32,6 +36,7 @@ import {
   settleNativeComposeStorageCommand,
 } from "../src/lib/native-compose-storage-command-record.ts";
 import {
+  nativeComposeStorageCarrierBudgetReason,
   nativeComposeStorageCarrierReason,
   runNativeComposeStorageDockerCommand,
 } from "../src/lib/native-compose-storage-witness-docker.ts";
@@ -529,6 +534,70 @@ test(
   }),
   30_000
 );
+test.each([
+  ["before arming", 1],
+  ["after arming", 2],
+  ["after the stopped child is published", 3],
+] as const)(
+  "a helper policy refusal %s keeps its own reason after the carrier deadline",
+  (_, failingCall) =>
+    ownedCase(async () => {
+      const f = await fixture(),
+        marker = join(f.root, "effect"),
+        signal = new AbortController().signal,
+        deadline = Date.now() + 5000;
+      let calls = 0;
+      try {
+        const caught = await runNativeComposeStorageDockerCommand({
+          context: { signal, deadline },
+          files: f.files,
+          args: ["/bin/sh", "-c", 'printf complete > "$1"', "owned", marker],
+          timeoutMs: 5000,
+          beforeSpawn: () => {},
+          // The carrier's admission re-inspects the helper; the chosen call
+          // observes a policy refusal with its own issued boundary.
+          assertAdmitted: async () => {
+            calls += 1;
+            if (calls === failingCall) {
+              const policy = new Error(
+                "Native storage xattr proof refused; values omitted."
+              );
+              retainNativeComposeEffectRefusal(policy, {
+                stage: "storage-helper-policy",
+                reason: "helper-host-policy",
+              });
+              throw policy;
+            }
+          },
+          originalCommand: { owner: f.owner, kind: "create", carrier: null },
+        }).catch((error: unknown) => error);
+        expect(caught).toBeInstanceOf(Error);
+        expect((caught as Error).message).toContain("values omitted");
+        expect(calls).toBe(failingCall);
+        expect(existsSync(marker)).toBe(false);
+        // The replaced command refusal keeps the first issued boundary.
+        expect(nativeComposeEffectRefusal(caught)).toEqual({
+          stage: "storage-helper-policy",
+          reason: "helper-host-policy",
+        });
+        // Caught after the carrier deadline (fake clock), it still names the
+        // policy failure, never the storage budget.
+        expect(
+          nativeComposeStorageCarrierBudgetReason({
+            error: caught,
+            signal,
+            deadline,
+            now: () => deadline + 1,
+          })
+        ).toBe("helper-host-policy");
+      } finally {
+        if (!nativeComposeStorageCommandOwnerConfirmed(f.owner)) {
+          retained.add(f.root);
+        }
+      }
+    })(),
+  30_000
+);
 test(
   "failed arm directory sync prevents the target spawn rather than proving no-spawn from a record",
   ownedCase(async () => {
@@ -696,6 +765,65 @@ test(
       retained.add(f.root);
     } finally {
       if (confirmedTestLifetime()) {
+        clock.mockRestore();
+        observer.mockRestore();
+      }
+    }
+  }),
+  30_000
+);
+test(
+  "an unrecorded command whose group never becomes absent refuses as probe-budget on monotonic time",
+  ownedCase(async () => {
+    const f = await fixture(),
+      marker = join(f.root, "effect"),
+      kill = process.kill,
+      monotonic = performance.now.bind(performance),
+      wall = Date.now();
+    let elapsed = 0,
+      polls = 0;
+    // Fake clocks: the wall clock is frozen, so only a monotonic deadline can
+    // expire. Each post-exit poll still sees the exited group and 4 s pass.
+    const frozen = spyOn(Date, "now").mockImplementation(() => wall);
+    const clock = spyOn(performance, "now").mockImplementation(
+      () => monotonic() + elapsed
+    );
+    const observer = spyOn(process, "kill").mockImplementation(
+      (pid, signal) => {
+        if (
+          signal === 0 &&
+          typeof pid === "number" &&
+          pid < 0 &&
+          existsSync(marker)
+        ) {
+          polls += 1;
+          elapsed += 4000;
+          return true;
+        }
+        return kill(pid, signal);
+      }
+    );
+    try {
+      const caught = await runNativeComposeStorageDockerCommand({
+        context: {
+          signal: new AbortController().signal,
+          deadline: wall + 3000,
+        },
+        files: f.files,
+        args: ["/bin/sh", "-c", 'printf complete > "$1"', "owned", marker],
+        timeoutMs: 3000,
+        beforeSpawn: () => {},
+        assertAdmitted: async () => {},
+      }).catch((error: unknown) => error);
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toContain("values omitted");
+      expect(nativeComposeStorageCarrierReason(caught)).toBe("probe-budget");
+      expect(polls).toBe(1);
+      expect(await readFile(marker, "utf8")).toBe("complete");
+      retained.add(f.root);
+    } finally {
+      if (confirmedTestLifetime()) {
+        frozen.mockRestore();
         clock.mockRestore();
         observer.mockRestore();
       }

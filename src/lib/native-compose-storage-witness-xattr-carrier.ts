@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isRecord } from "./guards.ts";
+import { markNativeComposeStorageBudgetRefusal } from "./native-compose-effect-diagnostics.ts";
 import type { NativeComposeMaterialBinding } from "./native-compose-generation.ts";
 import { keys } from "./native-compose-private-state.ts";
 import {
@@ -205,8 +206,16 @@ export function checkNativeComposeStorageXattrCarrierLifetime(
   handle: NativeComposeStorageXattrCarrier
 ): void {
   const { signal, deadline } = parts(handle);
-  if (signal.aborted || deadline <= Date.now()) {
+  if (signal.aborted) {
     refuse();
+  }
+  if (deadline <= Date.now()) {
+    // Same refusal; only its effect reason names the exhausted storage budget.
+    const error = new Error(
+      "Native storage xattr proof refused; values omitted."
+    );
+    markNativeComposeStorageBudgetRefusal(error);
+    throw error;
   }
 }
 export function checkNativeComposeStorageXattrTarget(opts: {

@@ -27,6 +27,7 @@ import {
   HACK_PLUGIN_ID,
   type MigrationClient,
 } from "../src/agents/plugin-replacement.ts";
+import { requireFixtureRoot } from "./helpers/fixture-root.ts";
 
 /**
  * Plugin migration engine (HACK-1132). Every path is under a per-test temp
@@ -45,13 +46,18 @@ beforeEach(async () => {
 afterEach(async () => {
   if (root) {
     await rm(root, { recursive: true, force: true });
+    // A call that outlives its test reads "" and is refused, closed, by
+    // requireFixtureRoot instead of writing into the checkout (HACK-1343).
     root = "";
   }
 });
 
-const repo = (): string => join(root, "repo");
-const home = (): string => join(root, "home");
-const backupDir = (): string => join(root, "hack-home", "agent-migrations");
+const fixture = (): string =>
+  requireFixtureRoot(root, "plugin-migration fixture");
+const repo = (): string => join(fixture(), "repo");
+const home = (): string => join(fixture(), "home");
+const backupDir = (): string =>
+  join(fixture(), "hack-home", "agent-migrations");
 
 const CUSTOM_SKILL =
   "---\nname: hack-init\n---\nTeam-edited hack-init skill. Keep me.\n";
@@ -84,7 +90,7 @@ async function enableClaude(opts?: {
   readonly settingsFile?: string;
   readonly enabled?: boolean;
 }): Promise<void> {
-  const installPath = join(root, "claude-plugin-copy");
+  const installPath = join(fixture(), "claude-plugin-copy");
   for (const skill of opts?.skills ?? ["hack-cli", "hack-init"]) {
     await put(
       join(installPath, "skills", skill, "SKILL.md"),
@@ -151,7 +157,7 @@ async function snapshotTree(): Promise<Map<string, string>> {
           .digest("hex");
     out.set(path, `${body}:${(info.mode & 0o777).toString(8)}`);
   }
-  await visit(root);
+  await visit(fixture());
   return out;
 }
 
@@ -383,7 +389,7 @@ test("client selection limits targets; shared skill follows Claude or Codex", as
 });
 
 test("an owned file reached through a symlinked directory is preserved", async () => {
-  const real = join(root, "elsewhere", "hack-cli");
+  const real = join(fixture(), "elsewhere", "hack-cli");
   await put(join(real, "SKILL.md"), renderCodexSkill());
   await mkdir(join(repo(), ".codex/skills"), { recursive: true });
   await symlink(real, join(repo(), ".codex/skills/hack-cli"));
@@ -510,13 +516,13 @@ test("rollback refuses a tampered manifest and restores nothing", async () => {
     const copy = structuredClone(original);
     mutate(copy.entries[0]);
     count += 1;
-    const path = join(root, `tampered-${count}.json`);
+    const path = join(fixture(), `tampered-${count}.json`);
     await writeFile(path, JSON.stringify(copy));
     return path;
   };
   const cases = [
     await tamper((entry) => {
-      entry.path = join(root, "outside", "SKILL.md");
+      entry.path = join(fixture(), "outside", "SKILL.md");
     }),
     await tamper((entry) => {
       entry.contentBase64 = Buffer.from("other bytes").toString("base64");
@@ -542,8 +548,11 @@ test("rollback refuses a tampered manifest and restores nothing", async () => {
     expect(rollback.status).toBe("invalid-manifest");
   }
   expect(
-    (await rollbackPluginMigration({ manifestPath: join(root, "absent.json") }))
-      .status
+    (
+      await rollbackPluginMigration({
+        manifestPath: join(fixture(), "absent.json"),
+      })
+    ).status
   ).toBe("invalid-manifest");
   expect(await snapshotTree()).toEqual(before);
 });

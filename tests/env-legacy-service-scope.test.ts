@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { YAML } from "bun";
 
 import { LEGACY_ENV_SERVICE_SCOPE_MESSAGE } from "../src/cli/env-arguments.ts";
 import {
@@ -21,6 +22,8 @@ import {
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   ENV_SCOPE_INVALID_MESSAGE,
+  type LegacyProjectEnvMigration,
+  migrateLegacyProjectEnv,
   ProjectEnvLayerPathConflictError,
   projectEnvConfigExistsForMutation,
   resolveProjectEnvConfig,
@@ -457,4 +460,135 @@ test("an invalid layer read is a closed error with a value-free scope reason", a
   expect(message).toContain("Invalid env scope name");
   expect(message).not.toContain("synthetic-91fa");
   expect(message.split("\n")).toHaveLength(1);
+});
+
+const BASE_ONLY_VALUE = ["synthetic", "base", "5b19"].join("-");
+const STAGING_VALUE = ["synthetic", "staging", "a3e7"].join("-");
+
+/** Parsed `values` of one env layer file. */
+async function readLayerValues(
+  repo: Repo,
+  name: string
+): Promise<Record<string, Record<string, unknown>>> {
+  const parsed = YAML.parse(
+    await readFile(resolve(repo.projectDir, name), "utf8")
+  ) as { values: Record<string, Record<string, unknown>> };
+  return parsed.values;
+}
+
+/** The migration `hack doctor --migrate-env-config` runs (HACK-1370). */
+async function migrateLegacyRepo(
+  repo: Repo,
+  opts: { readonly migrateUndeclaredDotenv?: boolean }
+): Promise<LegacyProjectEnvMigration> {
+  return await migrateLegacyProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    projectName: "env-legacy-scope",
+    serviceNames: ["api"],
+    materialize: false,
+    ...opts,
+  });
+}
+
+async function serviceScopedSet(repo: Repo): Promise<CliRun> {
+  return await runCli({
+    repo,
+    args: [
+      "env",
+      "set",
+      "NEW_SETTING",
+      "--service",
+      "api",
+      "--value-stdin",
+      "--path",
+      repo.projectRoot,
+    ],
+    stdin: `${NEW_VALUE}\n`,
+  });
+}
+
+test("the migration the refusal names converts a project with only .hack/.env, and a service-scoped set then works", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\nSHARED_SETTING=${BASE_ONLY_VALUE}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `KEPT_SETTING=${KEPT_VALUE}\nSHARED_SETTING=${STAGING_VALUE}\n`
+  );
+  const configPath = resolve(repo.projectDir, PROJECT_CONFIG_FILENAME);
+  const configBefore = await readFile(configPath, "utf8");
+  expectRefusal(
+    await serviceScopedSet(repo),
+    LEGACY_ENV_SERVICE_SCOPE_MESSAGE,
+    { lines: 2 }
+  );
+
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+  expect(migrated.wroteFiles).toEqual([
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+  ]);
+  // Every base entry is a global value; the overlay keeps only what differs.
+  expect(await readLayerValues(repo, "hack.env.default.yaml")).toEqual({
+    global: { KEPT_SETTING: KEPT_VALUE, SHARED_SETTING: BASE_ONLY_VALUE },
+  });
+  expect(await readLayerValues(repo, "hack.env.staging.yaml")).toEqual({
+    global: { SHARED_SETTING: STAGING_VALUE },
+  });
+  // Without a contract nothing names secret-backend values: the project config
+  // and its secret backend store are left alone and never offered for cleanup.
+  expect(migrated.updatedProjectConfig).toBe(false);
+  expect(await readFile(configPath, "utf8")).toBe(configBefore);
+  expect(migrated.cleanupCandidates).toEqual([
+    resolve(repo.projectDir, ".env"),
+    resolve(repo.projectDir, ".env.staging"),
+  ]);
+  expect(migrated.blockedCleanupCandidates).toEqual([]);
+
+  // The refusal no longer applies: the set lands in the api scope.
+  const run = await serviceScopedSet(repo);
+  expect(run.exitCode).toBe(0);
+  expect(`${run.stdout}${run.stderr}`).not.toContain(NEW_VALUE);
+  const values = await readLayerValues(repo, "hack.env.default.yaml");
+  expect(values.global).toEqual({
+    KEPT_SETTING: KEPT_VALUE,
+    SHARED_SETTING: BASE_ONLY_VALUE,
+  });
+  expect(Object.keys(values.api ?? {})).toEqual(["NEW_SETTING"]);
+  expect(await lstat(repo.storePath).catch(() => null)).toBeNull();
+}, 60_000);
+
+test("an explicit migration of a project with no legacy env file switches it to an empty default layer", async () => {
+  const repo = await createLegacyRepo();
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+  expect(migrated.cleanupCandidates).toEqual([]);
+  expect(await readLayerValues(repo, "hack.env.default.yaml")).toEqual({
+    global: {},
+  });
+  const run = await serviceScopedSet(repo);
+  expect(run.exitCode).toBe(0);
+  const values = await readLayerValues(repo, "hack.env.default.yaml");
+  expect(Object.keys(values.api ?? {})).toEqual(["NEW_SETTING"]);
+}, 60_000);
+
+test("the implicit migrations other commands run still need the hack.env.json contract", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const before = await hackDirEntries(repo);
+  const migrated = await migrateLegacyRepo(repo, {});
+  expect(migrated.legacyDetected).toBe(false);
+  expect(migrated.wroteFiles).toEqual([]);
+  expect(await hackDirEntries(repo)).toEqual(before);
 });

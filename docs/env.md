@@ -979,6 +979,19 @@ That migrates the repo into:
 - `.hack/hack.env.<overlay>.yaml`
 - `.hack.secret.key` when needed
 
+A repo that has no `.hack/hack.env.json` is migrated as well. Its values live only in
+`.hack/.env` and `.hack/.env.<overlay>`, so each `.hack/.env` entry becomes a plaintext
+global value in `hack.env.default.yaml`, and each overlay entry that differs from
+`.hack/.env` becomes a global value in `hack.env.<overlay>.yaml`. A repo with no legacy env
+file gets an empty `hack.env.default.yaml`. Without `hack.env.json`, nothing lists values
+kept in a secret backend, so none are migrated: set them again with
+`hack env set --secret` after the migration. In that case `.hack/hack.config.json`, and
+any secret backend it configures, is left unchanged. The migration changes project files
+only, so it runs even when Docker is not reachable; the other `--migrate-env-config`
+repairs still need Docker. As with any migration, `hack doctor` then offers to remove the
+legacy `.hack/.env*` files that Compose no longer references (a non-interactive run
+accepts).
+
 `hack doctor` also warns when a repo still depends on the old format.
 For modern env repos, `hack doctor` also warns when materialized compatibility output in
 `.hack/.env` or `.hack/.env.state.json` is stale and points to `hack env materialize`.
@@ -987,7 +1000,8 @@ The legacy `.hack/.env` holds one value per key, with no per-service values. In 
 project, `hack env set` and `hack env unset` change only that global value, so they refuse
 `--service <service>` with a usage error instead of ignoring it (an invalid scope is refused
 the same way in both formats). `--service global`, or no `--service`, still works. Migrate to
-env layers first to set or unset a service-scoped value.
+env layers first with `hack doctor --migrate-env-config`, which also converts a project that
+has only `.hack/.env` (see above), then set or unset the service-scoped value.
 
 `hack env set` and `hack env unset` choose between the env layers and the legacy file by
 looking for `.hack/hack.env.*.yaml` entries, `hack.env.default.yaml` included. A regular

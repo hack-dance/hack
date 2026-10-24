@@ -50,7 +50,11 @@ import {
   resolveGitWorktreeDir,
 } from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
-import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
+import {
+  readHackEnvContract,
+  resolveEnvFilePath,
+  resolveHackEnv,
+} from "./hack-env.ts";
 import {
   isOwnedLegacyAdoptionManagedEnvAdmission,
   type LegacyAdoptionManagedEnvAdmission,
@@ -4735,9 +4739,24 @@ function removeLegacyComposeEnvFileEntries(opts: {
   return kept.length > 0 ? kept : undefined;
 }
 
+/** Outcome of {@link migrateLegacyProjectEnv}. */
+export type LegacyProjectEnvMigration = {
+  readonly wroteFiles: readonly string[];
+  readonly migratedOverlays: readonly string[];
+  readonly legacyDetected: boolean;
+  readonly updatedProjectConfig: boolean;
+  readonly cleanupCandidates: readonly string[];
+  readonly blockedCleanupCandidates: readonly string[];
+  readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
+};
+
 /**
  * Migrates a legacy v2 `.env`-based project env layout to the v3
  * `hack.env.*.yaml` config system.
+ *
+ * Without a `.hack/hack.env.json` contract nothing is migrated
+ * (`legacyDetected: false`) unless `migrateUndeclaredDotenv` is set; see
+ * {@link migrateUndeclaredLegacyDotenv} for that explicit-request path.
  *
  * @deprecated v2→v3 migration path. TODO(remove: v3.2) together with its
  * callers in commands/project.ts, commands/doctor.ts, commands/session.ts,
@@ -4749,19 +4768,21 @@ export async function migrateLegacyProjectEnv(opts: {
   readonly projectName: string;
   readonly serviceNames: readonly string[];
   readonly materialize: boolean;
-}): Promise<{
-  readonly wroteFiles: readonly string[];
-  readonly migratedOverlays: readonly string[];
-  readonly legacyDetected: boolean;
-  readonly updatedProjectConfig: boolean;
-  readonly cleanupCandidates: readonly string[];
-  readonly blockedCleanupCandidates: readonly string[];
-  readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
-}> {
+  /**
+   * Also migrate a project that has no contract: the legacy `.hack/.env`
+   * and `.hack/.env.<overlay>` files become plaintext global values. Only an
+   * explicit migration request (`hack doctor --migrate-env-config`) sets it;
+   * the implicit migrations run by other commands keep requiring a contract.
+   */
+  readonly migrateUndeclaredDotenv?: boolean;
+}): Promise<LegacyProjectEnvMigration> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const contract = await readHackEnvContract({ projectDir: opts.projectDir });
   if (!contract.exists) {
+    if (opts.migrateUndeclaredDotenv === true) {
+      return await migrateUndeclaredLegacyDotenv(opts);
+    }
     return {
       wroteFiles: [],
       migratedOverlays: [],
@@ -4882,6 +4903,123 @@ export async function migrateLegacyProjectEnv(opts: {
     blockedCleanupCandidates: cleanupCandidates.blocked,
     composeEnvFileReferences,
   };
+}
+
+/**
+ * Migrates a legacy project that has no `.hack/hack.env.json` contract, so
+ * its values live only in `.hack/.env` and `.hack/.env.<overlay>`: every
+ * base entry becomes a plaintext global value in `hack.env.default.yaml`, and
+ * every overlay entry that differs from the base becomes a global value in
+ * `hack.env.<overlay>.yaml`. With no legacy file at all it still writes an
+ * empty default layer, so the project switches to env layers.
+ *
+ * Without a contract nothing names secret-backend values, so none are read or
+ * migrated, and `hack.config.json` (including any secret backend it
+ * configures, and that backend's store) is left unchanged and never offered
+ * for cleanup. Values are written to the layer files only, never returned or
+ * printed.
+ */
+async function migrateUndeclaredLegacyDotenv(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly materialize: boolean;
+}): Promise<LegacyProjectEnvMigration> {
+  const overlayNames = await discoverLegacyOverlayNames({
+    projectDir: opts.projectDir,
+  });
+  const baseValues = await readLegacyDotenvFile({
+    path: resolveEnvFilePath({ projectDir: opts.projectDir, envName: null }),
+  });
+
+  const wroteFiles: string[] = [];
+  const defaultPath = resolveProjectEnvConfigPath({
+    projectDir: opts.projectDir,
+    envName: null,
+  });
+  if (
+    await writeProjectEnvConfigFile({
+      path: defaultPath,
+      config: buildMigratedProjectEnvConfig({
+        environment: "default",
+        values: { global: { ...baseValues } },
+      }),
+    })
+  ) {
+    wroteFiles.push(defaultPath);
+  }
+
+  for (const overlayName of overlayNames) {
+    const overlayValues = await readLegacyDotenvFile({
+      path: resolveEnvFilePath({
+        projectDir: opts.projectDir,
+        envName: overlayName,
+      }),
+    });
+    const changedValues = Object.fromEntries(
+      Object.entries(overlayValues).filter(
+        ([key, value]) => baseValues[key] !== value
+      )
+    );
+    if (Object.keys(changedValues).length === 0) {
+      continue;
+    }
+    const overlayPath = resolveProjectEnvConfigPath({
+      projectDir: opts.projectDir,
+      envName: overlayName,
+    });
+    if (
+      await writeProjectEnvConfigFile({
+        path: overlayPath,
+        config: buildMigratedProjectEnvConfig({
+          environment: overlayName,
+          values: { global: changedValues },
+        }),
+      })
+    ) {
+      wroteFiles.push(overlayPath);
+    }
+  }
+
+  if (opts.materialize) {
+    await materializeProjectEnv({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      envName: undefined,
+      serviceNames: opts.serviceNames,
+    });
+  }
+
+  const composeEnvFileReferences = await inspectLegacyComposeEnvFileReferences({
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+    projectDir: opts.projectDir,
+  });
+  const cleanupCandidates = await collectLegacyProjectEnvCleanupCandidates({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    overlayNames,
+    materialize: opts.materialize,
+    configCleanupCandidates: [],
+    composeEnvFileReferences,
+  });
+
+  return {
+    wroteFiles,
+    migratedOverlays: overlayNames,
+    legacyDetected: true,
+    updatedProjectConfig: false,
+    cleanupCandidates: cleanupCandidates.allowed,
+    blockedCleanupCandidates: cleanupCandidates.blocked,
+    composeEnvFileReferences,
+  };
+}
+
+/** Entries of a legacy dotenv file; an absent file has none. */
+async function readLegacyDotenvFile(opts: {
+  readonly path: string;
+}): Promise<Record<string, string>> {
+  const text = await readTextFile(opts.path);
+  return text === null ? {} : parseDotEnv(text);
 }
 
 export async function removeLegacyProjectEnvArtifacts(opts: {

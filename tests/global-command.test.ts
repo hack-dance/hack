@@ -505,6 +505,57 @@ test("global down runs docker compose down when files exist", async () => {
   ).toBe(true);
 });
 
+test("global down keeps the logging stack's named volumes", async () => {
+  // HACK-1379: Alloy's read positions live in the `alloy-data` volume (next to
+  // `loki-data` and `grafana-data`). A plain `docker compose down` keeps named
+  // volumes; only `hack global logs-reset` passes `-v`. A `down` here that
+  // removed volumes would make every `global down`/`up` re-read all retained
+  // container logs into a wiped Loki.
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  const loggingCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_LOGGING_DIR_NAME,
+    GLOBAL_LOGGING_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+  await writeComposeFile(loggingCompose);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(await runCli(["global", "down"])).toBe(0);
+  const loggingDown = runCalls.filter(
+    (call) => call.includes(loggingCompose) && call.includes("down")
+  );
+  expect(loggingDown).toHaveLength(1);
+  expect(loggingDown[0]).toEqual([
+    "docker",
+    "compose",
+    "-f",
+    loggingCompose,
+    "down",
+  ]);
+  for (const call of loggingDown) {
+    expect(call).not.toContain("-v");
+    expect(call).not.toContain("--volumes");
+  }
+
+  runCalls.length = 0;
+  expect(await runCli(["global", "up"])).toBe(0);
+  const loggingUp = runCalls.filter(
+    (call) => call.includes(loggingCompose) && call.includes("up")
+  );
+  expect(loggingUp).toHaveLength(1);
+  for (const call of loggingUp) {
+    expect(call).not.toContain("-V");
+    expect(call).not.toContain("--renew-anon-volumes");
+  }
+});
+
 test("global up fails when compose files are missing", async () => {
   const { runCli } = await import("../src/cli/run.ts");
   const code = await runCli(["global", "up"]);

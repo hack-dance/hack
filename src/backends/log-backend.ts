@@ -5,7 +5,12 @@ import {
   dockerComposeLogsPretty,
 } from "../ui/docker-logs.ts";
 import type { LogStreamContext } from "../ui/log-stream.ts";
-import { canReachLoki, lokiLogs, lokiSnapshot } from "../ui/loki-logs.ts";
+import {
+  canReachLoki,
+  type LokiLogsParams,
+  lokiLogs,
+  lokiSnapshot,
+} from "../ui/loki-logs.ts";
 
 export type LogBackendName = "compose" | "loki";
 export type LogOutputFormat = "plain" | "pretty" | "json";
@@ -38,11 +43,8 @@ export interface LokiLogOptions {
   readonly start?: Date;
   readonly end?: Date;
   readonly streamContext?: LogStreamContext;
-  /** Follow only; see `LokiLogsParams.noEntriesNotice`. */
-  readonly noEntriesNotice?: {
-    readonly afterMs: number;
-    readonly notify: () => void;
-  };
+  /** Follow only; see {@link LokiLogsParams.noEntriesNotice}. */
+  readonly noEntriesNotice?: LokiLogsParams["noEntriesNotice"];
 }
 
 export interface LogBackend<Options> {

@@ -85,10 +85,10 @@ const artifact: NativeComposeStorageXattrArtifact = {
  * (publish, enroll, verify, retire) in process. They wait on no timer: the
  * fake carrier answers at once. Their cost is a fixed amount of durable store
  * file work, mostly system time: the second `up` of the same-birth case alone
- * makes about 19k lstat, 13k realpath and 4.5k open calls, the same count on
- * every run. That takes about 5-7 s on hosted CI, but 5-60 s or more on a
- * host whose load is several times its CPU count, so this budget is a hang
- * guard, not a speed assertion (HACK-1422).
+ * makes about 13.5k lstat, 3.7k realpath and 3.9k open calls, the same count
+ * on every run (19k, 13k and 4.5k before HACK-1440). It can still take tens
+ * of seconds on a host whose load is several times its CPU count, so this
+ * budget is a hang guard, not a speed assertion (HACK-1422).
  */
 const STORE_CASE_BUDGET_MS = 180_000;
 /**

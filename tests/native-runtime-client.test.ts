@@ -83,73 +83,71 @@ function test(
   bunTest(name, body, timeoutMs);
 }
 
-/** Wait for a fixture to write `path`; replaces fixed windows before acting. */
-async function waitForFile(
-  path: string,
-  budgetMs = HANDSHAKE_BUDGET_MS
-): Promise<void> {
+/**
+ * Wait, bounded, until a fixture file at `path` holds complete content, and
+ * return what `complete` makes of it. A fixture's writeFileSync creates the
+ * file before it writes the bytes, so a wait for existence alone can return
+ * while the file is still "" (HACK-1422, HACK-1439). Every handshake here is
+ * read through this helper; no case waits for existence and then reads.
+ * `complete` returns undefined for content that is not complete yet.
+ */
+async function waitForFileContent<T>(opts: {
+  readonly path: string;
+  readonly complete: (text: string) => T | undefined;
+  readonly what: string;
+  readonly budgetMs?: number;
+}): Promise<T> {
+  const budgetMs = opts.budgetMs ?? HANDSHAKE_BUDGET_MS;
   const deadline = performance.now() + budgetMs;
-  while (!(await Bun.file(path).exists())) {
+  for (;;) {
+    const file = Bun.file(opts.path);
+    if (await file.exists()) {
+      const value = opts.complete(await file.text());
+      if (value !== undefined) {
+        return value;
+      }
+    }
     if (performance.now() >= deadline) {
       throw new Error(
-        `Fixture handshake did not appear within ${budgetMs} ms.`
+        `Fixture ${opts.what} did not complete within ${budgetMs} ms.`
       );
     }
     await Bun.sleep(10);
   }
 }
 
-/**
- * Wait until a fixture's completion file holds exactly `expected`. A
- * fixture's writeFileSync creates the file before it writes the bytes, so an
- * existence wait can return while the file is still "" (HACK-1422).
- */
+/** Wait until a fixture's completion file holds exactly `expected`. */
 async function waitForFileText(
   path: string,
   expected: string,
   budgetMs = HANDSHAKE_BUDGET_MS
 ): Promise<void> {
-  const deadline = performance.now() + budgetMs;
-  for (;;) {
-    const file = Bun.file(path);
-    if ((await file.exists()) && (await file.text()) === expected) {
-      return;
-    }
-    if (performance.now() >= deadline) {
-      throw new Error(
-        `Fixture completion did not write its text within ${budgetMs} ms.`
-      );
-    }
-    await Bun.sleep(10);
-  }
+  await waitForFileContent({
+    path,
+    budgetMs,
+    what: "completion text",
+    complete: (text) => (text === expected ? true : undefined),
+  });
 }
 
 /**
- * Wait until a fixture's pid handshake holds a complete pid. A fixture's
- * writeFileSync creates the file before it writes the digits, so a read that
- * only waited for existence can see "": Number("") is 0, and kill(0, 0)
- * always succeeds, so an absence wait on it would never end.
+ * Wait until a fixture's pid handshake holds a complete pid. Read early, the
+ * file can hold "": Number("") is 0, and kill(0, 0) always succeeds, so an
+ * absence wait on it would never end.
  */
 async function waitForPid(
   path: string,
   budgetMs = HANDSHAKE_BUDGET_MS
 ): Promise<number> {
-  const deadline = performance.now() + budgetMs;
-  for (;;) {
-    const file = Bun.file(path);
-    if (await file.exists()) {
-      const pid = Number(await file.text());
-      if (Number.isSafeInteger(pid) && pid > 1) {
-        return pid;
-      }
-    }
-    if (performance.now() >= deadline) {
-      throw new Error(
-        `Fixture pid handshake did not complete within ${budgetMs} ms.`
-      );
-    }
-    await Bun.sleep(10);
-  }
+  return await waitForFileContent({
+    path,
+    budgetMs,
+    what: "pid handshake",
+    complete: (text) => {
+      const pid = Number(text);
+      return Number.isSafeInteger(pid) && pid > 1 ? pid : undefined;
+    },
+  });
 }
 
 function processPresent(pid: number): boolean {
@@ -518,7 +516,7 @@ ${mode === "abort" ? "await Bun.sleep(60_000);" : `(await import('node:fs')).wri
     try {
       let endedAt: number;
       if (mode === "abort") {
-        await waitForFile(holding);
+        await waitForPid(holding);
         endedAt = Date.now();
         controller.abort();
         await expect(request).rejects.toThrow("canceled");
@@ -734,7 +732,7 @@ process.exit(existsSync(${JSON.stringify(writerPid)})?23:3);
     } finally {
       await Bun.write(exitObserved, "observed");
       await request.catch(() => undefined);
-      completed = await waitForFile(finished).then(
+      completed = await waitForFileText(finished, "finished").then(
         () => true,
         () => false
       );
@@ -821,12 +819,17 @@ test(
       const runtime = await fixture();
       const marker = join(runtime.home, "attempts");
       const pidFile = join(runtime.home, "pid");
+      // The pid is published as a torn handshake (an empty file first), so a
+      // cancel that only waited for the file to exist would kill the child
+      // before its digits and leave "" behind on every run (HACK-1439).
       await Bun.write(
         runtime.binary,
         `#!${process.execPath}
 import { appendFileSync, writeFileSync } from "node:fs";
 ${mode === "timeout" ? "await Bun.sleep(60_000);" : ""}
 appendFileSync(${JSON.stringify(marker)}, "attempt\\n");
+writeFileSync(${JSON.stringify(pidFile)}, "");
+await Bun.sleep(${TORN_HANDSHAKE_GAP_MS});
 writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
 await Bun.sleep(60_000);
 `
@@ -866,7 +869,7 @@ await Bun.sleep(60_000);
           });
         }
         if (mode === "running") {
-          await waitForFile(pidFile);
+          await waitForPid(pidFile);
           controller.abort();
         }
         await expect(attempt).rejects.toThrow(

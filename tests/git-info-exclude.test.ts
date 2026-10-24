@@ -161,15 +161,17 @@ test.skipIf(process.platform !== "darwin")(
   async () => {
     const exclude = join(repo, ".git", "info", "exclude");
     await writeFile(exclude, "# user rule\n");
-    await chmod(exclude, 0o444);
-    const acl = Bun.spawnSync(
-      ["/bin/chmod", "+a", `${userInfo().username} allow write`, exclude],
-      { stdin: "ignore", stdout: "ignore", stderr: "ignore" }
-    );
-    expect(acl.exitCode).toBe(0);
-    // The ACL makes access(W_OK) succeed; only the mode bits refuse it.
-    await access(exclude, constants.W_OK);
+    // Every step after the mode change runs inside the try, so a failed ACL
+    // grant or probe still restores mode 0644 for the cleanup.
     try {
+      await chmod(exclude, 0o444);
+      const acl = Bun.spawnSync(
+        ["/bin/chmod", "+a", `${userInfo().username} allow write`, exclude],
+        { stdin: "ignore", stdout: "ignore", stderr: "ignore" }
+      );
+      expect(acl.exitCode).toBe(0);
+      // The ACL makes access(W_OK) succeed; only the mode bits refuse it.
+      await access(exclude, constants.W_OK);
       await ensureHackGitInfoExclude({ projectDir: join(repo, ".hack") });
       expect(await readFile(exclude, "utf8")).toBe("# user rule\n");
       expect((await lstat(exclude)).mode & 0o777).toBe(0o444);

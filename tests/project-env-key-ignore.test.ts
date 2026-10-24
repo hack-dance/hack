@@ -17,6 +17,7 @@ import {
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
 } from "../src/constants.ts";
+import { ensureGitignoreEntry } from "../src/lib/fs.ts";
 import { resolveProjectEnvConfigPath } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -375,6 +376,48 @@ test("a rule that re-includes the key is refused both before creating a key and 
   expectNoKeyMaterial(next, keyText);
   expect(await readFile(repo.layer, "utf8")).toBe(layerBefore);
 }, 60_000);
+
+test("an indented entry, which git does not apply, is completed by an exact entry instead of being refused as re-included", async () => {
+  // HACK-1426: git keeps leading whitespace in a pattern, so this line does
+  // not ignore the key; Hack must not count it as the entry.
+  const repo = await createRepo({ git: true });
+  const indented = `${BASE_GITIGNORE}  ${PROJECT_ENV_KEY_FILENAME}\n`;
+  await writeFile(repo.gitignore, indented);
+
+  const run = await setSecret(repo, "NEW_SECRET", NEXT_VALUE);
+
+  expect(run.exitCode).toBe(0);
+  expect(`${run.stdout}${run.stderr}`).not.toContain("re-includes the key");
+  expect(await keyExists(repo)).toBe(true);
+  expectNoKeyMaterial(run, (await readFile(repo.keyPath, "utf8")).trim());
+  expect(await readFile(repo.gitignore, "utf8")).toBe(
+    `${indented}\n# project env key\n${PROJECT_ENV_KEY_FILENAME}\n`
+  );
+  expect(await keyIsCommittable(repo)).toBe(false);
+}, 60_000);
+
+test("ensureGitignoreEntry reads each line as git does: trailing spaces and CR dropped, leading whitespace kept", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-gitignore-entry-"));
+  tempDirs.add(root);
+  const path = join(root, ".gitignore");
+  const entry = PROJECT_ENV_KEY_FILENAME;
+
+  for (const present of [`${entry}  \n`, `${entry}\r\n`, `a\n${entry} \r\n`]) {
+    await writeFile(path, present);
+    expect(await ensureGitignoreEntry({ gitignorePath: path, entry })).toEqual({
+      changed: false,
+    });
+    expect(await readFile(path, "utf8")).toBe(present);
+  }
+
+  for (const absent of [`  ${entry}\n`, `\t${entry}\n`, `${entry}\t\n`]) {
+    await writeFile(path, absent);
+    expect(await ensureGitignoreEntry({ gitignorePath: path, entry })).toEqual({
+      changed: true,
+    });
+    expect(await readFile(path, "utf8")).toBe(`${absent}\n${entry}\n`);
+  }
+});
 
 test("outside git an existing key is used without writing a root .gitignore", async () => {
   const repo = await createRepo({ git: false });

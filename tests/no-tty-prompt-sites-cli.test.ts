@@ -33,7 +33,9 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
  * and `HACK_SESSIONS_MUX=none` (no tmux or zellij is run). `secrets` children
  * preload a `Bun.secrets` stub, so no case reaches the OS keychain even when a
  * guard is mutated away. `update` children preload a fetch stub, so nothing
- * reaches the network. No Docker socket, launchd or keychain is touched.
+ * reaches the network. The `ssh --tailscale` child finds a logging
+ * `tailscale` stand-in first on PATH, never the real CLI. No Docker socket,
+ * launchd or keychain is touched.
  */
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
@@ -51,8 +53,17 @@ const ATTACHED_PROMPT_WORKER = join(
  * shared Bun cache is warm; the regressed prompt loop never exits.
  */
 const KILL_AFTER_MS = 10_000;
-/** Overall bound for each test, covering a cold first start. */
+/** Overall bound for each test. */
 const TEST_TIMEOUT_MS = 30_000;
+/**
+ * Bound for the one warm-up child in `beforeAll`. Each file run starts with a
+ * fresh private HOME, so Bun's runtime transpiler cache (kept under HOME) is
+ * cold, and a cold start of the CLI took 6.3 s on a loaded host (HACK-1426).
+ * The warm-up pays that cost once, outside every case's {@link KILL_AFTER_MS}.
+ */
+const WARM_UP_KILL_AFTER_MS = 90_000;
+/** `beforeAll` bound: the warm-up child plus margin. */
+const WARM_UP_HOOK_TIMEOUT_MS = WARM_UP_KILL_AFTER_MS + 10_000;
 /** Clack's active-prompt marker: no case may render a live prompt. */
 const ACTIVE_PROMPT_MARKER = "◆";
 
@@ -67,10 +78,47 @@ type RunResult = {
 let fileRoot: string | null = null;
 let caseRoot: string | null = null;
 
-beforeAll(async () => {
-  // One HOME per file keeps Bun's transpiler cache warm across cases.
-  fileRoot = await mkdtemp(join(tmpdir(), "hack-no-tty-prompt-sites-"));
-});
+beforeAll(
+  async () => {
+    // One HOME per file keeps Bun's transpiler cache warm across cases.
+    fileRoot = await mkdtemp(join(tmpdir(), "hack-no-tty-prompt-sites-"));
+    await warmTranspilerCache(fileRoot);
+  },
+  { timeout: WARM_UP_HOOK_TIMEOUT_MS }
+);
+
+/**
+ * Loads the CLI's module graph once under the file's private HOME, so no case
+ * pays the cold transpile inside its {@link KILL_AFTER_MS} bound. `--help`
+ * needs no project, prompt, network or keychain. Only a kill fails the file:
+ * the cases themselves pin every exit code and message.
+ */
+async function warmTranspilerCache(root: string): Promise<void> {
+  const proc = Bun.spawn([process.execPath, ENTRYPOINT, "--help"], {
+    cwd: root,
+    env: privateCliEnv({
+      root,
+      env: {
+        HACK_HOME: join(root, "warm-up-hack-home"),
+        HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
+        HACK_SESSIONS_MUX: "none",
+        HACK_NO_INTERACTIVE: "1",
+        NO_COLOR: "1",
+      },
+    }),
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+    timeout: WARM_UP_KILL_AFTER_MS,
+    killSignal: "SIGKILL",
+  });
+  await proc.exited;
+  if (proc.signalCode !== null) {
+    throw new Error(
+      `CLI warm-up was killed (${proc.signalCode}) after ${WARM_UP_KILL_AFTER_MS} ms`
+    );
+  }
+}
 
 afterAll(async () => {
   if (fileRoot) {
@@ -365,6 +413,45 @@ test(
   async () => {
     const result = await runPiped({ args: ["ssh"] });
     expectInteractiveRequired(result, ["--tailscale", "--direct", "--host"]);
+  },
+  { timeout: TEST_TIMEOUT_MS }
+);
+
+test(
+  "ssh --tailscale does not offer to turn on a stopped Tailscale without a TTY",
+  async () => {
+    // A `tailscale` stand-in on PATH reports a stopped backend and logs each
+    // call, so the test sees whether `tailscale up` would have run.
+    const bin = join(requireCaseRoot(), "bin");
+    await mkdir(bin, { recursive: true });
+    const callLog = join(requireCaseRoot(), "tailscale.log");
+    const stub = join(bin, "tailscale");
+    await writeFile(
+      stub,
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$*" >> '${callLog}'`,
+        'if [ "$1" = status ]; then',
+        `  printf '%s\\n' '{"BackendState":"Stopped"}'`,
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n")
+    );
+    await chmod(stub, 0o755);
+    const result = await runPiped({
+      args: ["ssh", "--tailscale"],
+      env: { PATH: `${bin}:/usr/bin:/bin` },
+    });
+    expectSettled(result);
+    expect(result.exitCode).toBe(1);
+    const output = `${result.stdout}${result.stderr}`;
+    expect(output).toContain("Tailscale is stopped");
+    expect(output).toContain("Run `tailscale up`, then re-run `hack ssh`.");
+    expect(output).not.toContain("Turn on Tailscale?");
+    const calls = (await readFile(callLog, "utf8")).split("\n");
+    expect(calls).toContain("status --json");
+    expect(calls).not.toContain("up");
   },
   { timeout: TEST_TIMEOUT_MS }
 );

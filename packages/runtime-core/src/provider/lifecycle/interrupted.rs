@@ -302,8 +302,19 @@ mod tests {
         assert!(owner.storage.is_none() && owner.overlay.is_none());
         // Recording identifies the disks now, which these non-ext4 fixture files fail; the next
         // boot's allocation and format checks are what should decide instead.
+        // The error is the identification itself (a 4-byte fixture has no superblock to read),
+        // not an earlier release check such as a slow disk-handle scan (HACK-1457).
         let mut recording = pool.owner("booting", true, false);
-        assert!(finish_absent(&pool.candidate, &mut recording, "recovered-unclean", true).is_err());
+        let error =
+            finish_absent(&pool.candidate, &mut recording, "recovered-unclean", true).unwrap_err();
+        assert_eq!(
+            error.code, "provider_state",
+            "E_TEST_RECORDING_REFUSED_EARLY"
+        );
+        assert!(
+            recording.storage.is_none(),
+            "E_TEST_RECORDING_REFUSED_EARLY"
+        );
     }
 
     #[test]

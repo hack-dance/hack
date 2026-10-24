@@ -40,11 +40,22 @@ export const FIXTURE_GIT_INHERITED_ENV = ["PATH", "TMPDIR"] as const;
 /**
  * Settings applied last, over the runner and the caller's values. Global and
  * system config are disabled, the identity is fixed and Git never prompts.
+ *
+ * Automatic maintenance is off too. Otherwise `commit` starts a detached
+ * `git maintenance run --auto` that takes `objects/maintenance.lock` in the
+ * fixture repository after the command returned. That process outlives the
+ * fixture command, can still be writing when a test compares the repository
+ * or removes its temp root, and is a process the test never owns.
  */
 export const FIXTURE_GIT_HERMETIC_ENV: Readonly<Record<string, string>> =
   Object.freeze({
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "maintenance.auto",
+    GIT_CONFIG_VALUE_0: "false",
+    GIT_CONFIG_KEY_1: "gc.auto",
+    GIT_CONFIG_VALUE_1: "0",
     GIT_AUTHOR_NAME: FIXTURE_GIT_IDENTITY.name,
     GIT_AUTHOR_EMAIL: FIXTURE_GIT_IDENTITY.email,
     GIT_COMMITTER_NAME: FIXTURE_GIT_IDENTITY.name,

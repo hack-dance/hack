@@ -2379,41 +2379,58 @@ for (const unsafe of [
   });
 }
 
-test("real linked worktree verifies shared repository but keeps checkout instance/data namespace separate", async () => {
-  const root = await fixture();
-  const git = async (args: readonly string[]) => {
-    const child = Bun.spawn(["git", "-C", root, ...args], {
-      env: fixtureGitEnv(),
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "pipe",
-    });
-    expect(await child.exited).toBe(0);
-  };
-  await git(["init", "-q"]);
-  await git(["add", ".hack/hack.project.json"]);
-  await git([
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "commit",
-    "-qm",
-    "fixture",
-  ]);
-  const linkedRoot = join(dirname(root), "linked");
-  await git(["worktree", "add", "-q", "-b", "feature", linkedRoot]);
-  const primary = await store(root);
-  const linked = await store(linkedRoot, "feature");
-  expect(primary.identity.repositoryRoot).toBe(linked.identity.repositoryRoot);
-  expect(primary.identity.checkoutRoot).not.toBe(linked.identity.checkoutRoot);
-  expect(primary.identity.composeProject).not.toBe(
-    linked.identity.composeProject
-  );
-  const primaryGeneration = await activate(primary);
-  const linkedGeneration = await activate(linked);
-  expect(primaryGeneration.composeFile).not.toBe(linkedGeneration.composeFile);
-});
+/**
+ * Four fixture `git` processes, then two stores whose identity verifies the
+ * linked worktree with the product's own `git` reads, and two activations. It
+ * took 2-4 s on an idle host and more than Bun's 5 s default at load average
+ * above 100 (HACK-1459).
+ */
+const LINKED_WORKTREE_BUDGET_MS = 30_000;
+test(
+  "real linked worktree verifies shared repository but keeps checkout instance/data namespace separate",
+  async () => {
+    const root = await fixture();
+    const git = async (args: readonly string[]) => {
+      const child = Bun.spawn(["git", "-C", root, ...args], {
+        env: fixtureGitEnv(),
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      expect(await child.exited).toBe(0);
+    };
+    await git(["init", "-q"]);
+    await git(["add", ".hack/hack.project.json"]);
+    await git([
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-qm",
+      "fixture",
+    ]);
+    const linkedRoot = join(dirname(root), "linked");
+    await git(["worktree", "add", "-q", "-b", "feature", linkedRoot]);
+    const primary = await store(root);
+    const linked = await store(linkedRoot, "feature");
+    expect(primary.identity.repositoryRoot).toBe(
+      linked.identity.repositoryRoot
+    );
+    expect(primary.identity.checkoutRoot).not.toBe(
+      linked.identity.checkoutRoot
+    );
+    expect(primary.identity.composeProject).not.toBe(
+      linked.identity.composeProject
+    );
+    const primaryGeneration = await activate(primary);
+    const linkedGeneration = await activate(linked);
+    expect(primaryGeneration.composeFile).not.toBe(
+      linkedGeneration.composeFile
+    );
+  },
+  LINKED_WORKTREE_BUDGET_MS
+);
 
 test("orphan recovery guard with absent mutation lock blocks admission and explicit recovery", async () => {
   const root = await fixture();

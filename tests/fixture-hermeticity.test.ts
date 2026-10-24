@@ -240,6 +240,22 @@ test("a Git variable set on purpose passes through gitEnv but never overrides th
   expect(env.NOT_GIT).toBeUndefined();
 });
 
+test("fixture git never starts detached automatic maintenance", async () => {
+  // A detached `git maintenance run --auto` after `commit` kept writing in the
+  // repository after the command returned (a flake in the GIT_DIR case above).
+  const root = await scratchRoot();
+  for (const [key, value] of [
+    ["maintenance.auto", "false"],
+    ["gc.auto", "0"],
+  ] as const) {
+    const result = runFixtureGitSync({
+      cwd: root,
+      args: ["config", "--get", key],
+    });
+    expect(result.stdout.trim()).toBe(value);
+  }
+});
+
 // -----------------------------------------------------------------------------
 // Every fixture `git` spawn in tests/ goes through the shared environment.
 // -----------------------------------------------------------------------------

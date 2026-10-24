@@ -4,6 +4,7 @@ import {
   beforeAll,
   beforeEach,
   expect,
+  setDefaultTimeout,
   test,
 } from "bun:test";
 import {
@@ -148,6 +149,14 @@ async function git(projectRoot: string, args: string[]) {
  * this budget instead; a Git that never exits still fails the file.
  */
 const TEMPLATE_BUDGET_MS = 60_000;
+/**
+ * Per-case budget. A case copies a template and runs the product's read-only
+ * metadata resolution, whose Git worktree verification starts several `git`
+ * processes. At load average above 100 one such case took 5.3 s against Bun's
+ * 5 s default (HACK-1459); the product's own inspection bounds stay unchanged.
+ */
+const CASE_BUDGET_MS = 30_000;
+setDefaultTimeout(CASE_BUDGET_MS);
 let templates = "";
 let templatesBuild: Promise<void> | undefined;
 let templatesClosed = false;

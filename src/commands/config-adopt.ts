@@ -108,42 +108,99 @@ export const PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP =
  */
 export const PENDING_ROLLBACK_BUSY_NEXT_STEP =
   "A rollback of the publication switch is pending. If no other adoption command is running, run 'hack config adopt --recover --rollback' to finish restoring the originals.";
+/**
+ * The step for a `switching` publication whose bound env override was moved
+ * or changed since preparation: completing it refuses, because its saved read
+ * binds the override's bytes and identity (ctime included, so moving it back
+ * does not help), while rollback releases the override and restores the
+ * originals (HACK-1437). Fixed text; values omitted.
+ */
+export const PENDING_CHANGED_SWITCH_BUSY_NEXT_STEP =
+  "A publication switch is pending and its bound .hack/.internal/compose.env.override.yml was moved or changed since preparation, so completing it refuses. If no other adoption command is running, run 'hack config adopt --recover --rollback' to restore the originals.";
 
-/** The fixed next step for a busy refusal over a pending switch. */
-function pendingSwitchBusyNextStep(opts: {
-  readonly switchPhase: "switching" | "rolling-back" | null;
-  readonly literal: boolean;
-}): string {
-  if (opts.switchPhase === "rolling-back") {
-    return PENDING_ROLLBACK_BUSY_NEXT_STEP;
+/**
+ * Whether the pending switch's bound env override changed since preparation.
+ * A hint only: unreadable state answers false, which keeps the generic step.
+ */
+async function pendingSwitchEnvOverrideChanged(opts: {
+  readonly projectRoot: string;
+  readonly branch?: string;
+}): Promise<boolean> {
+  try {
+    const store = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot: opts.projectRoot,
+      requestedBranch: opts.branch,
+      mode: "saved",
+    });
+    try {
+      return await store.pendingSwitchEnvOverrideChanged();
+    } finally {
+      await store.close();
+    }
+  } catch {
+    return false;
   }
-  return opts.literal
-    ? PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP
-    : PENDING_SWITCH_BUSY_NEXT_STEP;
 }
 
-/** The store refusal's fixed message, plus the pending-switch step for BUSY. */
+/**
+ * The fixed step a pending switch accepts. Every step names only a command
+ * that state does not refuse for a known reason: plain `--recover` refuses a
+ * `rolling-back` switch, a bound literal override and a bound override that
+ * was moved or changed, so those name `--recover --rollback` alone. With
+ * `busy` false (a refused completion) only those known steps are returned.
+ */
+async function pendingSwitchNextStep(opts: {
+  readonly projectRoot: string;
+  readonly branch?: string;
+  readonly busy: boolean;
+}): Promise<string | null> {
+  const detail = await inspectLegacyComposeAdoptionSelectionDetail({
+    projectRoot: opts.projectRoot,
+  });
+  if (detail?.pending !== "switch") {
+    return null;
+  }
+  if (detail.switchPhase === "rolling-back") {
+    return PENDING_ROLLBACK_BUSY_NEXT_STEP;
+  }
+  if (
+    await legacyAdoptionEnvOverrideHoldsValues({
+      projectRoot: opts.projectRoot,
+    })
+  ) {
+    // A refused completion's own literal-env message already names it.
+    return opts.busy ? PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP : null;
+  }
+  if (await pendingSwitchEnvOverrideChanged(opts)) {
+    return PENDING_CHANGED_SWITCH_BUSY_NEXT_STEP;
+  }
+  return opts.busy ? PENDING_SWITCH_BUSY_NEXT_STEP : null;
+}
+
+/**
+ * The store refusal's fixed message, plus the step a pending switch accepts:
+ * for BUSY, and for a refused plain `--recover` whose cause is known.
+ */
 async function adoptionRefusalMessage(opts: {
   readonly error: LegacyComposeAdoptedGenerationError;
   readonly projectRoot: string;
+  readonly branch?: string;
+  readonly completing: boolean;
 }): Promise<string> {
-  if (opts.error.code !== "E_LEGACY_ADOPTION_BUSY") {
+  const busy = opts.error.code === "E_LEGACY_ADOPTION_BUSY";
+  if (
+    !(busy || opts.completing) ||
+    opts.error.code === "E_LEGACY_ADOPTION_LITERAL_ENV"
+  ) {
     return opts.error.message;
   }
   try {
-    const detail = await inspectLegacyComposeAdoptionSelectionDetail({
+    const step = await pendingSwitchNextStep({
       projectRoot: opts.projectRoot,
+      branch: opts.branch,
+      busy,
     });
-    if (detail?.pending !== "switch") {
-      return opts.error.message;
-    }
-    const literal = await legacyAdoptionEnvOverrideHoldsValues({
-      projectRoot: opts.projectRoot,
-    });
-    return `${opts.error.message} ${pendingSwitchBusyNextStep({
-      switchPhase: detail.switchPhase,
-      literal,
-    })}`;
+    return step ? `${opts.error.message} ${step}` : opts.error.message;
   } catch {
     // Unreadable state keeps the store's fixed message alone.
     return opts.error.message;
@@ -361,7 +418,16 @@ export const configAdoptCommand = withHandler(spec, async ({ ctx, args }) => {
       code: "E_CONFIG_INVALID",
       message:
         error instanceof LegacyComposeAdoptedGenerationError
-          ? await adoptionRefusalMessage({ error, projectRoot })
+          ? await adoptionRefusalMessage({
+              error,
+              projectRoot,
+              branch: args.options.branch,
+              completing: Boolean(
+                args.options.recover &&
+                  !args.options.rollback &&
+                  !args.options.stop
+              ),
+            })
           : "Legacy adoption refused; original data and recovery evidence retained. Values omitted.",
       ...(diagnostic
         ? { detail: { legacy_adoption_publication_refusal: diagnostic } }

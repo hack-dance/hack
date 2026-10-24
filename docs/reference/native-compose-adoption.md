@@ -558,6 +558,56 @@ journaled (`rolling-back`, an interrupted rollback), plain `--recover` refuses
 whatever the override holds, so the message names only `--recover --rollback`
 to finish restoring the originals (HACK-1427).
 
+#### Rollback releases the generated env override (HACK-1437)
+
+A saved read binds each generated override in `.hack/.internal` by its exact
+bytes and file identity: device, inode, mode, link count, size, owner, mtime
+and ctime. Moving the file aside and back keeps its bytes and inode but
+changes its ctime, so the binding cannot be restored by hand. The binding
+protects two things. Adopted execution and switch completion must run exactly
+the inputs that preparation qualified and whose Compose config hash the
+retained containers carry, so a moved, edited or replaced file is treated as
+tampering and refused. And while an adoption is prepared, active or pending,
+`hack doctor --fix` and the env scrubs leave the bound file in place.
+
+Rollback is different. It restores the two held legacy originals, archives the
+candidate and verifies the original resources. It never reads, runs, rewrites
+or removes the generated env override, which is derived from the managed env
+layers and which the next `hack up` writes again. No data depends on it. So
+rollback (`--rollback` from `active`, and `--recover --rollback` from
+`switching` or `rolling-back`) reads the saved proof with the env override
+released: the override may be missing, moved back or replaced, and rollback
+neither reads it nor requires it. The saved `config_files` path list keeps the
+override's path, so each retained container is still matched against the
+exact label Compose recorded. Every other check stays exact: the managed env
+revision, the runtime override and the `.hack/.internal` directory identity,
+the saved config hashes, the original resource identities and stopped state,
+the held originals and the installed candidate. A change to any of those is
+still refused before anything moves. Execution and completion keep the full
+binding, so they still refuse a moved override.
+
+Before this change, moving the bound override aside left an interrupted
+rollback with no supported way out. `--recover --rollback` journaled
+`rolling-back` and then refused, plain `--recover` refuses a rollback, and the
+busy message named `--recover --rollback` again, so the user looped. Now
+`--recover --rollback` finishes in each pending state, and every step names
+only a command that the state does not refuse for a known reason:
+
+- `rolling-back`: `--recover --rollback`, whatever the override holds.
+- `switching` with a literal override: `--recover --rollback`.
+- `switching` with the bound override moved or changed, while the other
+  generated inputs still match: `--recover --rollback`, with a message that
+  completing refuses.
+- `switching` otherwise: `--recover` to complete it, or `--recover --rollback`
+  to restore the originals.
+
+A refused plain `--recover` adds the same step when the cause is one of these
+known states (`rolling-back`, or a moved or changed override). If rollback
+itself refuses, something it still checks has changed, such as a running
+original container, edited held originals or candidate, changed resources or
+managed env layers, or conflicting bytes at an original path. That refusal
+keeps the journal and recovery evidence for inspection.
+
 `hack doctor` reports the pinned literal override and names the first command the
 pending state accepts, since `hack down` and plain `--rollback` refuse in every
 pending state (HACK-1391, HACK-1414):
@@ -633,7 +683,10 @@ files, and preserve both legacy originals for rollback. Raw-byte or selection
 drift, unsafe managed-file permissions, generated-file identity changes, and
 original-resource drift refuse before a new
 effect; drift after an effect retains pending evidence. Rechecks do not freeze
-external editors or the engine. Old version 1/2 receipts remain readable; earlier
+external editors or the engine. Rollback is the one exception: it releases the
+generated env override, which it never reads or writes, and rechecks the rest
+(see "Rollback releases the generated env override"). Old version 1/2 receipts
+remain readable; earlier
 upgraded owners refuse version 3 through the existing selector boundary.
 
 The version 3 synthetic publication, saved-readback and raw-drift controls are

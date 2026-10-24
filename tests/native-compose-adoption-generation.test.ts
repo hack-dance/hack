@@ -22,6 +22,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  PENDING_CHANGED_SWITCH_BUSY_NEXT_STEP,
   PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP,
   PENDING_ROLLBACK_BUSY_NEXT_STEP,
 } from "../src/commands/config-adopt.ts";
@@ -78,6 +79,12 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
 const test = (name: string, run: () => Promise<void>) =>
   boundedTest(name, run, 20_000);
 const CANARY = "synthetic-private-adoption-canary";
+/**
+ * Budget for a rollback-recovery test that runs several saved adoption reads
+ * or CLI adoption commands; adoption tests are load-sensitive on shared hosts
+ * (HACK-1367).
+ */
+const ROLLBACK_RECOVERY_BUDGET_MS = 240_000;
 const ID = "a".repeat(64);
 const NETWORK = "b".repeat(64);
 const VOLUME = "original_private_database";
@@ -2083,6 +2090,100 @@ test("v3 saved adoption consumes canonical original generated sources without en
   }
 });
 
+/** A published v3 adoption over reference-form generated overrides. */
+async function publishedManagedAdoption() {
+  Reflect.deleteProperty(process.env, "CI");
+  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  await trackedManagedCheckout();
+  const files = await managedGenerated();
+  await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
+  await setProjectEnvValue({
+    projectRoot,
+    projectDir: join(projectRoot, ".hack"),
+    envName: null,
+    scope: "global",
+    key: "MANAGED",
+    value: CANARY,
+    secret: true,
+  });
+  const binary = await managedEnvCompilerFixture(
+    join(root, "managed-compiler")
+  );
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    await store.publish({ generation, binary });
+  } finally {
+    await store.close();
+  }
+  return files;
+}
+
+boundedTest(
+  "rollback releases a moved-aside generated env override that execution still refuses (HACK-1437)",
+  async () => {
+    const files = await publishedManagedAdoption();
+    const override = files[2] ?? "";
+    const envText = await readFile(override, "utf8");
+    const aside = join(root, "moved-aside-override.yml");
+    await rename(override, aside);
+    const saved = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+      mode: "saved",
+    });
+    try {
+      // Execution keeps the exact binding: the adoption no longer loads.
+      await refusal(saved.loadActive());
+      expect((await readReceipt()).publication.phase).toBe("active");
+      // Rollback never reads or writes the override, so it is released.
+      await saved.rollback();
+    } finally {
+      await saved.close();
+    }
+    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+      "rolled-back"
+    );
+    expect(await readFile(files[0] ?? "", "utf8")).toContain("name: fixture");
+    expect(await lstat(override).catch(() => null)).toBeNull();
+    expect(await readFile(aside, "utf8")).toBe(envText);
+  },
+  ROLLBACK_RECOVERY_BUDGET_MS
+);
+
+boundedTest(
+  "rollback still binds the generated runtime override when the env override is released (HACK-1437)",
+  async () => {
+    const files = await publishedManagedAdoption();
+    // Releasing the env override must not release its sibling: a runtime
+    // override rewritten with its exact bytes (new mtime and ctime, so only
+    // the identity proof can notice) still refuses rollback before anything
+    // moves.
+    await rename(files[2] ?? "", join(root, "moved-aside-override.yml"));
+    const runtimeText = await readFile(files[1] ?? "", "utf8");
+    const runtimeBefore = await lstat(files[1] ?? "");
+    await Bun.sleep(5);
+    await writeFile(files[1] ?? "", runtimeText);
+    expect(await readFile(files[1] ?? "", "utf8")).toBe(runtimeText);
+    expect((await lstat(files[1] ?? "")).ctimeMs).not.toBe(
+      runtimeBefore.ctimeMs
+    );
+    const saved = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+      mode: "saved",
+    });
+    try {
+      await refusal(saved.rollback());
+    } finally {
+      await saved.close();
+    }
+    expect((await readReceipt()).publication.phase).toBe("active");
+    expect(
+      await Bun.file(join(projectRoot, ".hack/hack.project.json")).exists()
+    ).toBe(true);
+  },
+  ROLLBACK_RECOVERY_BUDGET_MS
+);
+
 test("an adoption bound to an earlier version's literal env override keeps it loadable until rollback frees it (HACK-1273)", async () => {
   Reflect.deleteProperty(process.env, "CI");
   Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
@@ -2202,6 +2303,44 @@ async function adoptableManagedFixture(form: "literal" | "reference") {
     join(root, "managed-compiler")
   );
   return { override: files[2] ?? "", binary };
+}
+/** Each command a fixed recovery step names, in order. */
+function namedAdoptCommands(message: string): string[][] {
+  return [...message.matchAll(/'hack config adopt([^']*)'/g)].map((match) =>
+    (match[1] ?? "").split(" ").filter(Boolean)
+  );
+}
+/**
+ * Runs the only command a pending-switch step names and asserts it finishes
+ * the rollback: originals restored, the selection rolled back, and the
+ * moved or restored override neither read into output nor rewritten.
+ */
+async function runNamedRecoveryStep(opts: {
+  readonly message: string;
+  readonly binary: string;
+  readonly original: Awaited<ReturnType<typeof originalSnapshots>>;
+  readonly moved: {
+    readonly path: string;
+    readonly text: string;
+    readonly ino: number;
+  };
+  readonly override: string;
+}) {
+  const named = namedAdoptCommands(opts.message);
+  expect(named).toEqual([["--recover", "--rollback"]]);
+  const released = await adoptCli([...(named[0] ?? []), "--json"], opts.binary);
+  expect(released.code).toBe(0);
+  expect(JSON.parse(released.stdout)).toMatchObject({ status: "rolled-back" });
+  expect(released.output).not.toContain(CANARY);
+  await expectOriginals(opts.original);
+  expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+    "rolled-back"
+  );
+  expect(await readFile(opts.moved.path, "utf8")).toBe(opts.moved.text);
+  expect((await lstat(opts.moved.path)).ino).toBe(opts.moved.ino);
+  if (opts.moved.path !== opts.override) {
+    expect(await lstat(opts.override).catch(() => null)).toBeNull();
+  }
 }
 async function adoptCli(flags: readonly string[], binary: string) {
   const child = Bun.spawn(
@@ -2501,13 +2640,14 @@ boundedTest(
 );
 
 boundedTest(
-  "CLI busy refusal over an interrupted rollback of a literal-bound switch does not name plain recovery once the override is moved aside (HACK-1427)",
+  "CLI busy refusal over an interrupted rollback of a literal-bound switch does not name plain recovery once the override is moved aside, and that rollback finishes (HACK-1427, HACK-1437)",
   async () => {
     // The reported state: the HACK-1318 fixture after its switch is
     // journaled, rewritten to an interrupted rollback, with the bound literal
     // override moved aside so the busy step no longer comes from the
     // literal-override branch.
     const { override, binary } = await adoptableManagedFixture("literal");
+    const original = await originalSnapshots();
     const store = await openLegacyComposeAdoptedGenerationStore({
       projectRoot,
     });
@@ -2532,7 +2672,10 @@ boundedTest(
       publication: { ...switching.publication, phase: "rolling-back" },
     };
     await writeReceipt(rollingBack);
-    await rename(override, join(root, "moved-aside-override.yml"));
+    const literalText = await readFile(override, "utf8");
+    const literalInfo = await lstat(override);
+    const aside = join(root, "moved-aside-override.yml");
+    await rename(override, aside);
     for (const flags of [
       ["--recover", "--stop", "--json"],
       ["--json"],
@@ -2554,13 +2697,136 @@ boundedTest(
       expect(busy.output).not.toContain(CANARY);
       expect(await readReceipt()).toEqual(rollingBack);
     }
-    // The step the generic message named first refuses here.
+    // The step the generic message named first refuses here, and its
+    // refusal names the step that state accepts (HACK-1437).
     const completed = await adoptCli(["--recover", "--json"], binary);
     expect(completed.code).not.toBe(0);
+    expect(JSON.parse(completed.stdout).error.message).toEndWith(
+      ` ${PENDING_ROLLBACK_BUSY_NEXT_STEP}`
+    );
     expect(completed.output).not.toContain(CANARY);
     expect(await readReceipt()).toEqual(rollingBack);
+    // The named step finishes the rollback with the override still moved
+    // aside: rollback releases it instead of looping (HACK-1437).
+    await runNamedRecoveryStep({
+      message: PENDING_ROLLBACK_BUSY_NEXT_STEP,
+      binary,
+      original,
+      moved: { path: aside, text: literalText, ino: literalInfo.ino },
+      override,
+    });
   },
-  120_000
+  ROLLBACK_RECOVERY_BUDGET_MS
+);
+
+boundedTest(
+  "CLI recovery rollback finishes a pending switch whose bound literal override was moved aside and back, without hand edits (HACK-1437)",
+  async () => {
+    // The reachable state: the HACK-1318 literal fixture with its switch
+    // journaled by the CLI itself, then the bound override moved aside.
+    const { override, binary } = await adoptableManagedFixture("literal");
+    const original = await originalSnapshots();
+    const store = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+    });
+    try {
+      const generation = await store.prepare({ binary });
+      expect(
+        await store.withPreparationStop({
+          generation,
+          binary,
+          run: async () => 7,
+        })
+      ).toBe(7);
+    } finally {
+      await store.close();
+    }
+    const journaled = await adoptCli(["--recover", "--stop", "--json"], binary);
+    expect(journaled.code).not.toBe(0);
+    const switching = await readReceipt();
+    expect(switching.publication).toMatchObject({ phase: "switching" });
+    const literalText = await readFile(override, "utf8");
+    const pinned = await lstat(override);
+    const aside = join(root, "moved-aside-override.yml");
+    await rename(override, aside);
+    // Busy names only the step this state accepts: completing refuses,
+    // because the saved read binds the override's bytes and identity.
+    const busy = await adoptCli(["--recover", "--stop", "--json"], binary);
+    expect(busy.code).not.toBe(0);
+    expect(JSON.parse(busy.stdout)).toEqual({
+      ok: false,
+      error: {
+        code: "E_CONFIG_INVALID",
+        message: `${
+          new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_BUSY")
+            .message
+        } ${PENDING_CHANGED_SWITCH_BUSY_NEXT_STEP}`,
+      },
+    });
+    expect(busy.output).not.toContain("'hack config adopt --recover' to");
+    expect(busy.output).not.toContain(CANARY);
+    // Plain completion refuses, journals nothing, and names the same step.
+    const completed = await adoptCli(["--recover", "--json"], binary);
+    expect(completed.code).not.toBe(0);
+    expect(JSON.parse(completed.stdout).error.message).toEndWith(
+      ` ${PENDING_CHANGED_SWITCH_BUSY_NEXT_STEP}`
+    );
+    expect(completed.output).not.toContain(CANARY);
+    expect(await readReceipt()).toEqual(switching);
+    // Moving it back keeps its bytes and inode but not its ctime, which the
+    // saved read binds; rollback does not depend on it. The literal bytes
+    // are back, so the step comes from the literal branch.
+    await rename(aside, override);
+    const restored = await lstat(override);
+    expect(restored.ino).toBe(pinned.ino);
+    expect(restored.ctimeMs).not.toBe(pinned.ctimeMs);
+    const busyBack = await adoptCli(["--recover", "--stop", "--json"], binary);
+    expect(JSON.parse(busyBack.stdout).error.message).toEndWith(
+      ` ${PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP}`
+    );
+    await runNamedRecoveryStep({
+      message: PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP,
+      binary,
+      original,
+      moved: { path: override, text: literalText, ino: pinned.ino },
+      override,
+    });
+    // Nothing pins the literal file once the switch is rolled back.
+    expect(
+      await removePlaintextComposeEnvOverride({
+        projectDir: join(projectRoot, ".hack"),
+        includeUnverifiable: true,
+      })
+    ).toMatchObject({ removed: true, adoptionBound: false });
+  },
+  ROLLBACK_RECOVERY_BUDGET_MS
+);
+
+boundedTest(
+  "CLI rollback of an active adoption releases a replaced generated env override while plain recovery stays refused (HACK-1437)",
+  async () => {
+    const { override, binary } = await adoptableManagedFixture("reference");
+    const original = await originalSnapshots();
+    const adopted = await adoptCli(["--json"], binary);
+    expect(adopted.code).toBe(0);
+    // A different value-free override at the bound path (a new inode).
+    const replaced = `${await readFile(override, "utf8")}# replaced\n`;
+    await rm(override);
+    await writeFile(override, replaced, { mode: 0o600 });
+    const rolledBack = await adoptCli(["--rollback", "--json"], binary);
+    expect(rolledBack.code).toBe(0);
+    expect(JSON.parse(rolledBack.stdout)).toMatchObject({
+      status: "rolled-back",
+    });
+    expect(rolledBack.output).not.toContain(CANARY);
+    await expectOriginals(original);
+    // Rollback neither read nor rewrote the replaced file.
+    expect(await readFile(override, "utf8")).toBe(replaced);
+    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+      "rolled-back"
+    );
+  },
+  ROLLBACK_RECOVERY_BUDGET_MS
 );
 
 test("v3 value-free env override binds the engine config hash computed with the values (HACK-1273)", async () => {

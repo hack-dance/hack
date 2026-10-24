@@ -2500,6 +2500,69 @@ boundedTest(
   90_000
 );
 
+boundedTest(
+  "CLI busy refusal over an interrupted rollback of a literal-bound switch does not name plain recovery once the override is moved aside (HACK-1427)",
+  async () => {
+    // The reported state: the HACK-1318 fixture after its switch is
+    // journaled, rewritten to an interrupted rollback, with the bound literal
+    // override moved aside so the busy step no longer comes from the
+    // literal-override branch.
+    const { override, binary } = await adoptableManagedFixture("literal");
+    const store = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+    });
+    try {
+      const generation = await store.prepare({ binary });
+      expect(
+        await store.withPreparationStop({
+          generation,
+          binary,
+          run: async () => 7,
+        })
+      ).toBe(7);
+    } finally {
+      await store.close();
+    }
+    const journaled = await adoptCli(["--recover", "--stop", "--json"], binary);
+    expect(journaled.code).not.toBe(0);
+    const switching = await readReceipt();
+    expect(switching.publication).toMatchObject({ phase: "switching" });
+    const rollingBack = {
+      ...switching,
+      publication: { ...switching.publication, phase: "rolling-back" },
+    };
+    await writeReceipt(rollingBack);
+    await rename(override, join(root, "moved-aside-override.yml"));
+    for (const flags of [
+      ["--recover", "--stop", "--json"],
+      ["--json"],
+      ["--stop", "--json"],
+    ]) {
+      const busy = await adoptCli(flags, binary);
+      expect(busy.code).not.toBe(0);
+      expect(JSON.parse(busy.stdout)).toEqual({
+        ok: false,
+        error: {
+          code: "E_CONFIG_INVALID",
+          message: `${
+            new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_BUSY")
+              .message
+          } ${PENDING_ROLLBACK_BUSY_NEXT_STEP}`,
+        },
+      });
+      expect(busy.output).not.toContain("'hack config adopt --recover' to");
+      expect(busy.output).not.toContain(CANARY);
+      expect(await readReceipt()).toEqual(rollingBack);
+    }
+    // The step the generic message named first refuses here.
+    const completed = await adoptCli(["--recover", "--json"], binary);
+    expect(completed.code).not.toBe(0);
+    expect(completed.output).not.toContain(CANARY);
+    expect(await readReceipt()).toEqual(rollingBack);
+  },
+  120_000
+);
+
 test("v3 value-free env override binds the engine config hash computed with the values (HACK-1273)", async () => {
   Reflect.deleteProperty(process.env, "CI");
   Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");

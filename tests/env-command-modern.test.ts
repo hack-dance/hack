@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -31,12 +32,12 @@ afterEach(async () => {
   if (originalLogger === undefined) {
     Reflect.deleteProperty(process.env, "HACK_LOGGER");
   } else {
-    process.env.HACK_LOGGER = originalLogger;
+    restoreEnv("HACK_LOGGER", originalLogger);
   }
   if (originalProjectEnvKey === undefined) {
     Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");
   } else {
-    process.env.HACK_ENV_SECRET_KEY = originalProjectEnvKey;
+    restoreEnv("HACK_ENV_SECRET_KEY", originalProjectEnvKey);
   }
 });
 

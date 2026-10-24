@@ -38,6 +38,7 @@ import {
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const tempDirs = new Set<string>();
 
@@ -662,7 +663,7 @@ test("legacy local overlays stay out of default resolution when git is unavailab
       resolve(repo.projectDir, "hack.env.default.yaml"),
     ]);
   } finally {
-    process.env.PATH = originalPath;
+    restoreEnv("PATH", originalPath);
   }
 });
 
@@ -713,7 +714,7 @@ test("default local overrides still resolve when git is unavailable", async () =
       resolve(repo.projectDir, "hack.env.local.yaml"),
     ]);
   } finally {
-    process.env.PATH = originalPath;
+    restoreEnv("PATH", originalPath);
   }
 });
 
@@ -991,7 +992,7 @@ test("resolveProjectEnvSharedKeyPath returns null when git is unavailable", asyn
       })
     ).resolves.toBeNull();
   } finally {
-    process.env.PATH = originalPath;
+    restoreEnv("PATH", originalPath);
   }
 });
 

@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 
 import { PROJECT_CONFIG_FILENAME } from "../src/constants.ts";
 import { resolveHackEnv } from "../src/lib/hack-env.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const tempDirs = new Set<string>();
 const originalHome = process.env.HOME;
@@ -14,7 +15,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
-  process.env.HOME = originalHome;
+  restoreEnv("HOME", originalHome);
   Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
 });
 

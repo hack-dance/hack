@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { handleNodeRoutes } from "../src/daemon/routes/node.ts";
 import { exec } from "../src/lib/shell.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -22,9 +23,9 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
+  restoreEnv("HOME", originalHome);
   if (originalGlobalConfigPath !== undefined) {
-    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
+    restoreEnv("HACK_GLOBAL_CONFIG_PATH", originalGlobalConfigPath);
   } else {
     Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   }

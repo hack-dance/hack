@@ -8,6 +8,7 @@ import {
   resetNoInteractiveFlagForTests,
   setNoInteractiveFlag,
 } from "../src/lib/interactivity.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const originalNoInteractive = process.env.HACK_NO_INTERACTIVE;
 
@@ -16,7 +17,7 @@ afterEach(() => {
   if (originalNoInteractive === undefined) {
     Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
   } else {
-    process.env.HACK_NO_INTERACTIVE = originalNoInteractive;
+    restoreEnv("HACK_NO_INTERACTIVE", originalNoInteractive);
   }
 });
 

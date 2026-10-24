@@ -508,7 +508,7 @@ test(
         code: "E_LEGACY_ADOPTION_DEADLINE",
         deadlineMs: 15_000,
         deadlineExpired: true,
-        // Nothing in the synthetic binding moved, so HACK-1318 reports the deadline.
+        // Nothing in the synthetic binding moved, so HACK-1340 reports the deadline.
         bindingUnchanged: true,
       });
       expect((await h.receipt()).routingHandoff).toBe("held");
@@ -1439,6 +1439,89 @@ test("HACK-1340: a real binding drift within the caller deadline still refuses a
     expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
   } finally {
     h.hooks.afterEffect = undefined;
+    await store.close();
+  }
+});
+// HACK-1391: the two deadline guards of a retained v14 operation, each proven on
+// its own. The caller-deadline catch in `mutateRetainedContainers` keeps an
+// observed drift's code even when the drift is reported after the deadline, and
+// `requireMutationDeadline` issues the deadline code, not a drift, when the
+// callback's revocation fence finds the deadline passed.
+test("HACK-1391: a binding drift reported after the caller deadline keeps its binding-change code", async () => {
+  const { store, generation } = await prepare();
+  const realNow = Date.now;
+  let offset = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+  const before = bindingFacts();
+  let driftedReads = 0;
+  try {
+    h.hooks.afterEffect = async () => {
+      h.model.volumeBirth = "2026-02-02T01:02:03Z";
+    };
+    h.hooks.afterProbe = async (args) => {
+      // The first read of the drifted volume returns the changed birth; the
+      // clock then passes the deadline before the store compares it (the
+      // bracketed scan may reread the volume once more before comparing).
+      if (
+        h.effects.length === 1 &&
+        args[0] === "volume" &&
+        args[1] === "inspect" &&
+        ++driftedReads === 1
+      ) {
+        offset = SLOW_OPERATION_ADVANCE_MS;
+      }
+    };
+    const code = await refusalCode(
+      h.operation(store, generation, "stop", { preparation: true })
+    );
+    expect(driftedReads).toBeGreaterThanOrEqual(1);
+    expect(bindingFacts()).not.toBe(before);
+    expect(h.lastOperation()).toMatchObject({
+      outcome: "refused",
+      deadlineExpired: true,
+      bindingUnchanged: false,
+    });
+    expect(code).toBe("E_LEGACY_ADOPTION_CHANGED");
+    expect(h.effects).toHaveLength(1);
+    expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
+  } finally {
+    h.hooks.afterEffect = undefined;
+    h.hooks.afterProbe = undefined;
+    clock.mockRestore();
+    await store.close();
+  }
+});
+test("HACK-1391: the callback revocation fence past the caller deadline refuses as a deadline, not a binding change", async () => {
+  const { store, generation } = await prepare();
+  const realNow = Date.now;
+  let offset = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+  const before = bindingFacts();
+  let fenced = false;
+  try {
+    const deadline = Date.now() + 15_000;
+    const code = await refusalCode(
+      store.withPreparationStop({
+        generation,
+        binary: h.compiler,
+        deadline,
+        run: async (input) => {
+          // No probe or check runs between the jump and the fence, so only
+          // `requireMutationDeadline` can refuse here.
+          offset = SLOW_OPERATION_ADVANCE_MS;
+          fenced = true;
+          input.assertActive();
+          return 0;
+        },
+      })
+    );
+    expect(fenced).toBe(true);
+    expect(bindingFacts()).toBe(before);
+    expect(code).toBe("E_LEGACY_ADOPTION_DEADLINE");
+    expect(h.effects).toHaveLength(0);
+    expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
+  } finally {
+    clock.mockRestore();
     await store.close();
   }
 });

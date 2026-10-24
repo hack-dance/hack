@@ -7,6 +7,10 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// How long a child gets to settle after this owner's first SIGTERM or SIGKILL
+/// before a passed termination deadline quarantines the job.
+const TERMINATION_GRACE: Duration = Duration::from_millis(2000);
+
 /// Only this live parent may signal its unreaped child's process group. Recovery never
 /// signals a recorded PID. A crashed supervisor leaves an explicitly uncertain receipt.
 pub fn supervise(root: &Path, executable: &Path, checkout: &Path, id: &str) -> Result<()> {
@@ -176,6 +180,7 @@ fn run_child(
     let started = Instant::now();
     let mut persisted = Instant::now();
     let mut stopping: Option<(Instant, &'static str)> = None;
+    let mut killed: Option<Instant> = None;
     loop {
         drain(&mut stdout, &mut output, &mut truncated)?;
         drain(&mut stderr, &mut errors, &mut truncated)?;
@@ -216,7 +221,10 @@ fn run_child(
         if let Some((since, _)) = stopping {
             if since.elapsed() >= Duration::from_millis(150) {
                 match verify_before_signal(child, identity, inspect(child.id() as i32))? {
-                    Authority::Signal => signal_group(child, libc::SIGKILL)?,
+                    Authority::Signal => {
+                        signal_group(child, libc::SIGKILL)?;
+                        killed.get_or_insert_with(Instant::now);
+                    }
                     Authority::Exited => break,
                     // Our SIGKILL is settling: Darwin drops the leader's metadata
                     // before waitid can report the exit. Keep the stop reason.
@@ -224,7 +232,14 @@ fn run_child(
                 }
             }
         }
-        if started.elapsed() > Duration::from_millis(timeout_ms + 2000) {
+        // The deadline bounds an unresponsive child, not a late owner. A pass that
+        // reaches its first SIGTERM or SIGKILL after the deadline (CPU starvation, a
+        // journal busy wait while a restarted node opens it) still gives that signal
+        // its own settling window. Each anchor is set once, so this stays bounded.
+        let settling = killed.or(stopping.map(|(since, _)| since));
+        if started.elapsed() > Duration::from_millis(timeout_ms + 2000)
+            && settling.is_none_or(|since| since.elapsed() > TERMINATION_GRACE)
+        {
             return Err(error("Child termination deadline exceeded."));
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -715,6 +730,58 @@ mod tests {
         assert_eq!(failure.message, "Child termination deadline exceeded.");
         // Gone never authorized a signal: the TERM-ignoring child still waits for
         // input, and exits with its own status once that input closes.
+        assert!(!exit_published(pid));
+        drop(job.stdin.take());
+        assert_eq!(job.child.wait().unwrap().code(), Some(3));
+    }
+
+    #[test]
+    fn a_kill_check_delayed_past_the_deadline_still_settles_as_the_owners_timeout() {
+        use super::super::ownership::inspect;
+        let mut job = Job::new(50);
+        let mut first = None;
+        let receipt = job
+            .run(&mut |observed| {
+                match first {
+                    // Timeout: the live TERM-ignoring child is signalled with SIGTERM.
+                    None => first = Some(Instant::now()),
+                    // The kill check runs late, as when the owner is starved or waits
+                    // on the journal: its SIGKILL lands after the termination deadline
+                    // (timeout + 2 s from a start at least 50 ms before `first`).
+                    Some(first) => {
+                        let late = first + Duration::from_millis(2100);
+                        std::thread::sleep(late.saturating_duration_since(Instant::now()));
+                    }
+                }
+                inspect(observed)
+            })
+            .unwrap();
+        assert_eq!(receipt.state, "timed_out", "{receipt:?}");
+        assert_eq!(receipt.signal, Some(libc::SIGKILL), "{receipt:?}");
+        assert_eq!(receipt.detail, None, "{receipt:?}");
+    }
+
+    #[test]
+    fn a_stop_that_never_settles_is_still_bounded_by_its_grace() {
+        use super::super::ownership::{Observed, inspect};
+        let mut job = Job::new(50);
+        let pid = job.pid();
+        let begun = Instant::now();
+        let mut calls = 0;
+        let failure = job
+            .run(&mut |observed| {
+                calls += 1;
+                // A regression that never quarantines fails here instead of hanging.
+                assert!(begun.elapsed() < Duration::from_secs(10), "unbounded stop");
+                if calls == 1 {
+                    inspect(observed)
+                } else {
+                    Ok(Observed::Gone)
+                }
+            })
+            .unwrap_err();
+        assert_eq!(failure.message, "Child termination deadline exceeded.");
+        // SIGTERM was ignored and Gone never authorized SIGKILL: still alive.
         assert!(!exit_published(pid));
         drop(job.stdin.take());
         assert_eq!(job.child.wait().unwrap().code(), Some(3));

@@ -14,6 +14,15 @@ use std::{
 const OWNER: &str = "cccccccccccccccccccccccccccccccc";
 const BOOT: &str = "12345678-abcd-abcd-abcd-123456789abc";
 const RUN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+/// Harness budget for each fake-backend graph run, selection, exec, run or log read here.
+///
+/// The fake backend is ready as soon as each effect is applied, so a passing call returns
+/// without waiting on this budget; it only bounds a call that would otherwise hang. It is a
+/// test budget, not the product bound: `execution::run` still refuses budgets above its own
+/// 600 s limit, and cases that exercise expiry pass their own short or zero deadline. Fixed
+/// 1-5 s budgets failed with `graph_timeout` under host load (journal writes and syncs on a
+/// loaded host), so every such call takes its budget from this one constant.
+const RUN_BUDGET: Duration = Duration::from_secs(120);
 struct Fixture {
     root: PathBuf,
     project: PathBuf,
@@ -59,7 +68,7 @@ impl Fixture {
                 profiles: &[],
                 explicit_overlay: None,
                 metadata,
-                deadline: Instant::now() + Duration::from_secs(60),
+                deadline: Instant::now() + RUN_BUDGET,
             },
         )
         .unwrap()
@@ -140,7 +149,7 @@ fn two_owned_bridges_keep_per_network_members_and_aliases_through_cleanup() {
         serde_json::to_value(&session.receipt).unwrap()["version"],
         5
     );
-    execution::run(&graph, &mut session, Duration::from_secs(2)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     assert_eq!(session.receipt.phase, Phase::ReadyObserved);
     assert_eq!(session.backend.state.borrow().networks.len(), 2);
     snapshot(&session.backend, session.receipt.clone()).unwrap();
@@ -222,7 +231,7 @@ fn two_bridge_cancellation_before_second_create_retains_exact_first_bridge_for_c
     session.startup_guard = Some(&guard);
     session.backend.state.borrow_mut().cancel_after_network = Some(canceled.clone());
     assert_eq!(
-        execution::run(&graph, &mut session, Duration::from_secs(2))
+        execution::run(&graph, &mut session, RUN_BUDGET)
             .unwrap_err()
             .code,
         "native_graph_canceled"
@@ -240,7 +249,7 @@ fn two_bridge_cleanup_retries_only_the_retained_second_bridge_after_first_delete
     let fixture = Fixture::new(two_bridges());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"db":{},"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(2)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     session
         .backend
         .state
@@ -648,7 +657,7 @@ fn foreground_cancellation_after_network_creation_prevents_container_effects_and
     session.startup_guard = Some(&guard);
     session.backend.state.borrow_mut().cancel_after_network = Some(canceled.clone());
     assert_eq!(
-        execution::run(&graph, &mut session, Duration::from_secs(1))
+        execution::run(&graph, &mut session, RUN_BUDGET)
             .unwrap_err()
             .code,
         "native_graph_canceled"
@@ -659,7 +668,7 @@ fn foreground_cancellation_after_network_creation_prevents_container_effects_and
     assert_eq!(retained.resources["network:default"].phase, "created");
     assert!(retained.resources["network:default"].id.is_some());
     canceled.set(false);
-    assert!(execution::run(&graph, &mut session, Duration::from_secs(1)).is_err());
+    assert!(execution::run(&graph, &mut session, RUN_BUDGET).is_err());
     assert_eq!(session.backend.state.borrow().effects, ["create:network"]);
     cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
     assert_eq!(session.receipt.phase, Phase::Removed);
@@ -1083,7 +1092,7 @@ fn live_source_controller_preserves_edits_and_cleans_only_original_owned_resourc
     let fixture = source_fixture();
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     assert_eq!(
         serde_json::to_value(&session.receipt).unwrap()["version"],
         3
@@ -1135,7 +1144,7 @@ fn selected_source_replacement_before_effect_or_after_create_refuses_without_sta
             fs::rename(&path, fixture.project.join("original")).unwrap();
             fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
         }
-        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+        assert!(execution::run(&graph, &mut session, RUN_BUDGET).is_err());
         assert!(
             !session
                 .backend
@@ -1155,7 +1164,7 @@ fn selected_source_replacement_before_effect_or_after_create_refuses_without_sta
         } else {
             assert!(session.backend.state.borrow().effects.is_empty());
         }
-        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+        assert!(execution::run(&graph, &mut session, RUN_BUDGET).is_err());
     }
 }
 
@@ -1165,7 +1174,7 @@ fn retained_source_bind_or_approved_share_drift_refuses_cleanup_before_mutation(
         let fixture = source_fixture();
         let (graph, mut session) =
             fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
         if changed_share {
             session.backend.source.as_mut().unwrap().share.inode += 1;
         } else {
@@ -1184,7 +1193,7 @@ fn source_cleanup_does_not_recapture_a_moved_or_deleted_host_project() {
         let fixture = source_fixture();
         let (graph, mut session) =
             fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
         let moved = fixture.root.join("moved-project");
         if deleted {
             fs::remove_dir_all(&fixture.project).unwrap();
@@ -1215,7 +1224,7 @@ fn real_compiler_job_dependency_and_readiness_drive_durable_native_effects_and_c
     let fixture = Fixture::new(project);
     let prepared = fixture.prepared(json!({"web":{},"z.seed":{}}), &BTreeMap::new());
     let (graph, mut session) = fixture.session(prepared);
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     assert_eq!(session.receipt.phase, Phase::ReadyObserved);
     assert_eq!(
         session.backend.state.borrow().effects,
@@ -1259,12 +1268,12 @@ fn create_and_start_uncertainty_are_retained_once_without_replay_or_adoption() {
             fake.fail_create = !fail_start;
             fake.fail_start = fail_start;
         }
-        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+        assert!(execution::run(&graph, &mut session, RUN_BUDGET).is_err());
         let (retained, _) = journal::load(&fixture.candidate, RUN, OWNER, BOOT).unwrap();
         assert_eq!(retained.resources["container:web"].phase, "uncertain");
         assert_eq!(retained.resources["container:web"].id.is_some(), fail_start);
         let count = session.backend.state.borrow().effects.len();
-        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+        assert!(execution::run(&graph, &mut session, RUN_BUDGET).is_err());
         assert_eq!(session.backend.state.borrow().effects.len(), count);
     }
 }
@@ -1277,12 +1286,12 @@ fn project_network_create_uncertainty_is_durable_and_never_replayed() {
             fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
         session.backend.state.borrow_mut().fail_network_create = !applied;
         session.backend.state.borrow_mut().fail_network_after_apply = applied;
-        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+        assert!(execution::run(&graph, &mut session, RUN_BUDGET).is_err());
         let (retained, _) = journal::load(&fixture.candidate, RUN, OWNER, BOOT).unwrap();
         assert_eq!(retained.resources["network:default"].phase, "create-intent");
         assert!(retained.resources["network:default"].id.is_none());
         assert_eq!(retained.resources["container:web"].phase, "reserved");
-        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+        assert!(execution::run(&graph, &mut session, RUN_BUDGET).is_err());
         assert_eq!(
             session.backend.state.borrow().effects,
             vec!["create:network"]
@@ -1303,7 +1312,7 @@ fn foreign_or_changed_project_networks_refuse_cleanup_before_any_stop_or_delete(
         let fixture = Fixture::new(basic());
         let (graph, mut session) =
             fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
         let name = session.receipt.resources["network:default"].name.clone();
         {
             let mut state = session.backend.state.borrow_mut();
@@ -1336,7 +1345,7 @@ fn changed_network_ids_aliases_extra_attachments_and_endpoint_addresses_refuse_o
         let fixture = Fixture::new(basic());
         let (graph, mut session) =
             fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
         let name = session.receipt.resources["container:web"].name.clone();
         let network = session.receipt.resources["network:default"].name.clone();
         {
@@ -1389,13 +1398,13 @@ fn authored_change_and_foreign_container_identity_refuse_before_effects() {
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
     fs::write(fixture.project.join(".hack/hack.project.json"), "changed").unwrap();
-    assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+    assert!(execution::run(&graph, &mut session, RUN_BUDGET).is_err());
     assert!(session.backend.state.borrow().effects.is_empty());
 
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     let name = session.receipt.resources["container:web"].name.clone();
     session
         .backend
@@ -1441,7 +1450,7 @@ fn native_reservations_count_against_the_common_budget_and_uncertainty_blocks_ad
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     for requested in [31, 32] {
         let mut budget = admission::Budget::default();
         for _ in 0..requested {
@@ -1495,7 +1504,7 @@ fn private_native_input_crosses_typed_stage_intent_without_entering_public_journ
         &values,
     );
     let (graph, mut session) = fixture.session(prepared);
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     assert_eq!(session.backend.state.borrow().staged, vec!["web"]);
     assert!(
         !fs::read_to_string(session.root.join("state.json"))
@@ -1542,7 +1551,7 @@ fn cleanup_retry_keeps_observed_stop_request_for_the_same_immutable_id() {
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     session.backend.state.borrow_mut().fail_delete = true;
     assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
     let (mut retained, _) = journal::load(&fixture.candidate, RUN, OWNER, BOOT).unwrap();
@@ -1568,7 +1577,7 @@ fn committed_removal_retry_does_not_repeat_stop_or_regress_the_receipt_phase() {
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     session.backend.state.borrow_mut().fail_delete = true;
     assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
     let (mut retained, _) = journal::load(&fixture.candidate, RUN, OWNER, BOOT).unwrap();
@@ -1597,7 +1606,7 @@ fn stopped_cleanup_resumes_only_terminal_instances_without_another_stop_batch() 
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     session.backend.state.borrow_mut().fail_delete = true;
     assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
     // Select the durable Stopped boundary with actual matching terminal observations.
@@ -1623,7 +1632,7 @@ fn cleanup_of_removed_inventory_is_read_only_and_keeps_the_committed_bytes() {
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
     let before = fs::read(session.root.join("state.json")).unwrap();
     let effects = session.backend.state.borrow().effects.clone();
@@ -1648,7 +1657,7 @@ fn stopped_or_removing_inventory_refuses_a_restarted_instance_before_effects() {
         let fixture = Fixture::new(basic());
         let (graph, mut session) =
             fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
         session.backend.state.borrow_mut().fail_delete = true;
         assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
         session.receipt.phase = phase;
@@ -1677,7 +1686,7 @@ fn removed_inventory_refuses_even_matching_resource_reappearance_without_effects
         let fixture = Fixture::new(basic());
         let (graph, mut session) =
             fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
         let containers = session.backend.state.borrow().containers.clone();
         let networks = session.backend.state.borrow().networks.clone();
         cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
@@ -1712,7 +1721,7 @@ fn cleanup_owner_guard_refuses_before_provider_connection_or_receipt_mutation() 
     assert!(!fixture.candidate.state_root.join("run/smolvm").exists());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     let before = session.backend.state.borrow().effects.clone();
     assert!(
         cleanup_using_guarded(
@@ -1750,7 +1759,7 @@ fn cleanup_guard_loss_during_first_observation_prevents_next_request_and_stop_in
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     let changed = Cell::new(false);
     let backend = Changed {
         backend: &session.backend,
@@ -1830,7 +1839,7 @@ fn native_stop_failure_keeps_reservation_and_maps_only_owned_ids_to_workload_nam
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     session.backend.state.borrow_mut().fail_stop = true;
     let error = cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap_err();
     let detail = error.stop_failures.as_ref().unwrap();
@@ -1865,7 +1874,7 @@ fn cleanup_owner_guard_fences_delete_after_stop_and_network_delete_after_contain
         let fixture = Fixture::new(basic());
         let (graph, mut session) =
             fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
         let changed = Rc::new(Cell::new(false));
         {
             let mut state = session.backend.state.borrow_mut();
@@ -1948,7 +1957,7 @@ fn owner_change_during_final_terminal_inspection_refuses_container_delete() {
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     let changed = Rc::new(Cell::new(false));
     session
         .backend
@@ -2004,7 +2013,7 @@ fn old_boot_removed_history_releases_capacity_only_after_strict_owner_and_remova
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
     let new_boot = "87654321-abcd-abcd-abcd-123456789abc";
     let check = || {
@@ -2845,7 +2854,7 @@ fn finite_native_logs_bind_exact_member_tail_and_restart_generation_without_effe
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(2)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     let name = session.receipt.resources["container:web"].name.clone();
     let id = session.receipt.resources["container:web"]
         .id
@@ -2859,7 +2868,7 @@ fn finite_native_logs_bind_exact_member_tail_and_restart_generation_without_effe
         .get_mut(&name)
         .unwrap()["State"]["StartedAt"] = json!("2026-10-09T00:00:00.000000000Z");
     let effects = session.backend.state.borrow().effects.clone();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + RUN_BUDGET;
     let logs = logs_with(
         &session.backend,
         session.receipt.clone(),
@@ -2932,7 +2941,7 @@ fn finite_native_logs_share_one_deadline_with_all_source_and_data_checks() {
     let fixture = Fixture::new(basic());
     let (graph, mut session) =
         fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
-    execution::run(&graph, &mut session, Duration::from_secs(2)).unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
     let name = session.receipt.resources["container:web"].name.clone();
     session
         .backend
@@ -2947,7 +2956,7 @@ fn finite_native_logs_share_one_deadline_with_all_source_and_data_checks() {
         .borrow_mut()
         .log_data_deadlines
         .clear();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + RUN_BUDGET;
     logs_with(
         &session.backend,
         session.receipt.clone(),
@@ -2968,6 +2977,8 @@ fn finite_native_logs_share_one_deadline_with_all_source_and_data_checks() {
         state.log_data_deadlines.clear();
         state.expire_source_check = 4;
     }
+    // The expiry under test: the fake sleeps past this deadline at the fourth source check,
+    // so it stays short instead of using `RUN_BUDGET`.
     let deadline = Instant::now() + Duration::from_secs(1);
     assert!(
         logs_with(

@@ -39,6 +39,7 @@ import {
   renderComposeEnvReferenceOverride,
   renderManagedComposeEnvOverride,
 } from "../src/lib/compose-managed-env.ts";
+import { COMPOSE_STARTUP_TIMEOUT_ENV } from "../src/lib/compose-startup-budget.ts";
 import { acquireLegacyComposeAdoptionPreparationBinding } from "../src/lib/native-compose-adoption-binding.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
 import {
@@ -47,7 +48,7 @@ import {
 } from "../src/lib/native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
-  openLegacyComposeAdoptedGenerationStore,
+  openLegacyComposeAdoptedGenerationStore as openAdoptedGenerationStore,
 } from "../src/lib/native-compose-adoption-generation.ts";
 import { inspectLegacyComposeAdoptionSelection } from "../src/lib/native-compose-adoption-marker.ts";
 import {
@@ -70,10 +71,47 @@ import { createCompletedJobFixtureSettlement } from "./e2e/scenarios/native-comp
 import { restoreEnv } from "./helpers/env.ts";
 import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import { testBudgetMs } from "./helpers/test-budget.ts";
 
-// Each owner workflow performs multiple bounded child probes; allow their cumulative work on shared CI hosts.
+/*
+ * Harness budgets. Every engine probe below spawns the Bun stub engine, and one
+ * retained dispatch issues several hundred probes, so an owner operation's wall
+ * time follows host load. Case timeouts and the caller deadlines of cases that
+ * are not about the deadline derive from `testBudgetMs`. The expiry cases'
+ * promptness assertion (1.5 s past the deadline) is a product bound under test
+ * and stays literal.
+ */
+/** Caller deadline for one owner operation in a case that is not about the deadline. */
+const OPERATION_DEADLINE_MS = testBudgetMs(20_000);
 const test = (name: string, run: () => Promise<void>) =>
-  boundedTest(name, run, 20_000);
+  boundedTest(name, run, testBudgetMs(20_000));
+/**
+ * Probe-phase bound for stores these cases open. One store probe carries a
+ * single aggregate clock across a whole inspection (dozens of stub-engine
+ * processes), 15 s by default. That default is a product bound no case here
+ * tests, so stores open with the largest phase bound the product accepts.
+ * Public dispatch opens its own store and keeps the default (see the PR gaps).
+ */
+const PROBE_PHASE_BUDGET_MS = 60_000;
+/**
+ * Caller deadline in the cases that test its expiry after the callback. The
+ * product behavior under test (expiry ends a held probe or an overlong callback
+ * with `E_LEGACY_ADOPTION_DEADLINE`, keeps the operation pending, and returns
+ * within 1.5 s of the deadline) does not depend on its length, but the work
+ * before the callback must finish first: a 5 s deadline expired before the
+ * callback at load 30-45. It stays under the probe-phase bound, so the caller
+ * deadline, not a probe's own phase clock, ends a held probe.
+ */
+const EXPIRY_DEADLINE_MS = PROBE_PHASE_BUDGET_MS - 15_000;
+/** The product store opener, with the harness probe-phase bound unless a case names one. */
+function openLegacyComposeAdoptedGenerationStore(
+  input: Parameters<typeof openAdoptedGenerationStore>[0]
+): ReturnType<typeof openAdoptedGenerationStore> {
+  return openAdoptedGenerationStore({
+    timeoutMs: PROBE_PHASE_BUDGET_MS,
+    ...input,
+  });
+}
 const CANARY = "synthetic-private-adoption-canary";
 const ID = "a".repeat(64);
 const NETWORK = "b".repeat(64);
@@ -150,6 +188,7 @@ let priorPath: string | undefined;
 let priorCI: string | undefined;
 let priorExecutionMode: string | undefined;
 let priorRuntimeBackend: string | undefined;
+let priorDispatchDeadline: string | undefined;
 let fixture: Fixture;
 let publicStatic7Commands = 0;
 const publicStatic7Settlement = createCompletedJobFixtureSettlement();
@@ -160,7 +199,13 @@ beforeEach(async () => {
   priorCI = process.env.CI;
   priorExecutionMode = process.env.HACK_EXECUTION_MODE;
   priorRuntimeBackend = process.env.HACK_RUNTIME_BACKEND;
+  priorDispatchDeadline = process.env[COMPOSE_STARTUP_TIMEOUT_ENV];
   process.env.HACK_RUNTIME_BACKEND = "compose";
+  // Public dispatch (`tryLegacyComposeAdoptedCommand`) takes its caller
+  // deadline from the Compose startup budget, 90 s by default. No case here
+  // tests that default, so inject the direct operations' harness deadline
+  // through the product's own setting.
+  process.env[COMPOSE_STARTUP_TIMEOUT_ENV] = String(OPERATION_DEADLINE_MS);
   root = await realpath(
     await mkdtemp(join(tmpdir(), "native-adoption-binding-"))
   );
@@ -322,6 +367,7 @@ afterEach(async () => {
   restoreEnv("CI", priorCI);
   restoreEnv("HACK_EXECUTION_MODE", priorExecutionMode);
   restoreEnv("HACK_RUNTIME_BACKEND", priorRuntimeBackend);
+  restoreEnv(COMPOSE_STARTUP_TIMEOUT_ENV, priorDispatchDeadline);
   await rm(root, { recursive: true, force: true });
 });
 async function save() {
@@ -721,7 +767,7 @@ boundedTest.each(["no", ""] as const)(
     });
   },
   // Cover prepare/publish and separate bounded up/down operations without changing their deadlines.
-  60_000
+  testBudgetMs(60_000)
 );
 
 boundedTest.each([
@@ -782,7 +828,7 @@ boundedTest.each([
       }
     });
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -836,7 +882,7 @@ boundedTest(
       }
     });
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest.each(["start", "restart", "stop"] as const)(
@@ -855,7 +901,7 @@ boundedTest.each(["start", "restart", "stop"] as const)(
         fixture.states = { [ID]: true, [app]: true, [job]: false };
         await save();
       }
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -914,7 +960,7 @@ boundedTest.each(["start", "restart", "stop"] as const)(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -931,7 +977,7 @@ boundedTest(
           binary,
           operation: "start",
           services: [],
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + OPERATION_DEADLINE_MS,
           run: async () => {
             fixture.states = { [ID]: true, [app]: true, [job]: false };
             await save();
@@ -941,7 +987,7 @@ boundedTest(
       ).rejects.toThrow("values omitted");
       expect((await readReceipt()).pendingOperation.operation).toBe("start");
       expect(await mutationCommands()).toEqual([]);
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -969,7 +1015,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -985,7 +1031,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       await expect(
         store.withMutation({
           generation,
@@ -1012,7 +1058,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1024,7 +1070,7 @@ boundedTest(
       const binary = await compiler();
       await store.publish({ generation, binary });
       let previous: LegacyComposeRetainedOutcome | undefined;
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -1051,7 +1097,7 @@ boundedTest(
           binary,
           operation: "start",
           services: [],
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + OPERATION_DEADLINE_MS,
           run: async () => {
             if (!previous) {
               throw new Error("missing completion");
@@ -1066,7 +1112,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1077,7 +1123,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       await expect(
         store.withMutation({
           generation,
@@ -1107,7 +1153,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1122,7 +1168,7 @@ boundedTest(
         join(projectRoot, ".hack/hack.project.json"),
         "utf8"
       );
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       await refusal(
         store.withMutation({
           generation,
@@ -1156,7 +1202,7 @@ boundedTest(
       fixture.jobFinalRace = false;
       await save();
       await writeFile(join(projectRoot, ".hack/hack.project.json"), original);
-      const recoveryDeadline = Date.now() + 20_000;
+      const recoveryDeadline = Date.now() + OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -1178,7 +1224,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1189,7 +1235,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       await expect(
         store.withMutation({
           generation,
@@ -1225,7 +1271,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1252,7 +1298,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1265,7 +1311,7 @@ boundedTest(
     const controller = new AbortController();
     try {
       const binary = await compiler(),
-        deadline = Date.now() + 20_000;
+        deadline = Date.now() + OPERATION_DEADLINE_MS;
       expect(
         await store.withPreparationStop({
           generation,
@@ -1295,7 +1341,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1306,7 +1352,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 5000;
+      const deadline = Date.now() + EXPIRY_DEADLINE_MS;
       await refusal(
         store.withMutation({
           generation,
@@ -1327,7 +1373,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1368,7 +1414,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 for (const linked of [false, true]) {
@@ -1452,7 +1498,7 @@ for (const linked of [false, true]) {
         stage("closed");
       }
     },
-    30_000
+    testBudgetMs(30_000)
   );
 }
 
@@ -1465,7 +1511,7 @@ for (const stage of ["per-effect freshness", "final observation"] as const) {
       try {
         const binary = await compiler();
         await store.publish({ generation, binary });
-        const deadline = Date.now() + 5000;
+        const deadline = Date.now() + EXPIRY_DEADLINE_MS;
         let reachedCallback = false;
         await refusal(
           store.withMutation({
@@ -1507,7 +1553,7 @@ for (const stage of ["per-effect freshness", "final observation"] as const) {
         await store.close();
       }
     },
-    30_000
+    testBudgetMs(30_000)
   );
 }
 
@@ -1532,7 +1578,7 @@ boundedTest(
     expect(await mutationCommands()).toEqual([]);
     expect(fixture.volume[0]?.createdAt).toBe(CREATED);
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1565,7 +1611,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1626,7 +1672,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1640,7 +1686,7 @@ boundedTest(
       let calls = 0;
       await refusal(
         store.withMutation({
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + OPERATION_DEADLINE_MS,
           generation,
           binary,
           operation: "start",
@@ -1656,7 +1702,7 @@ boundedTest(
       expect((await readReceipt()).pendingOperation).toBeNull();
       let retained: (() => Promise<void>) | undefined;
       await store.withMutation({
-        deadline: Date.now() + 20_000,
+        deadline: Date.now() + OPERATION_DEADLINE_MS,
         generation,
         binary,
         operation: "stop",
@@ -1679,7 +1725,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1729,7 +1775,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1742,7 +1788,7 @@ boundedTest(
       await store.publish({ generation, binary });
       await refusal(
         store.withMutation({
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + OPERATION_DEADLINE_MS,
           generation,
           binary,
           operation: "start",
@@ -1765,7 +1811,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1784,7 +1830,7 @@ boundedTest(
       let effects = 0;
       await refusal(
         store.withMutation({
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + OPERATION_DEADLINE_MS,
           generation,
           binary,
           operation: "start",
@@ -1805,7 +1851,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1823,7 +1869,7 @@ boundedTest(
       await store.publish({ generation, binary });
       fixture.hangMutation = true;
       await save();
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       let effectStartedAt = 0;
       await refusal(
         store.withMutation({
@@ -1839,7 +1885,7 @@ boundedTest(
               deadline,
               signal: controller.signal,
             });
-            const readyUntil = Date.now() + 4000;
+            const readyUntil = Date.now() + testBudgetMs(4000);
             while (
               !(await Bun.file(join(root, "effect-started")).exists()) &&
               Date.now() < readyUntil
@@ -1872,7 +1918,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
@@ -1900,7 +1946,7 @@ boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",
-          timeout: 5000,
+          timeout: testBudgetMs(5000),
         }
       );
       const [stdout, stderr, code] = await Promise.all([
@@ -1916,7 +1962,7 @@ boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 /** Current writers keep references at rest; "literal" models a file an earlier
@@ -2272,7 +2318,7 @@ boundedTest(
       "active"
     );
   },
-  90_000
+  testBudgetMs(90_000)
 );
 
 boundedTest(
@@ -2436,7 +2482,7 @@ boundedTest(
       })
     ).toMatchObject({ removed: true, adoptionBound: false });
   },
-  90_000
+  testBudgetMs(90_000)
 );
 
 test("v3 value-free env override binds the engine config hash computed with the values (HACK-1273)", async () => {
@@ -2644,7 +2690,7 @@ test("v4 typed locals preserve generated bytes, exact original IDs and key-free 
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",
-          timeout: 5000,
+          timeout: testBudgetMs(5000),
         }
       );
       const [stdout, stderr, code] = await Promise.all([
@@ -2824,7 +2870,7 @@ boundedTest(
       await store.close();
     }
   },
-  240_000
+  testBudgetMs(240_000)
 );
 
 boundedTest(
@@ -2887,7 +2933,7 @@ boundedTest(
       await store.close();
     }
   },
-  60_000
+  testBudgetMs(60_000)
 );
 async function artifactPath(name: string) {
   const receipt = JSON.parse(
@@ -3492,7 +3538,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 test("v10 saved bridge and health owner rejects other contract receipts", async () => {
@@ -3580,7 +3626,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 boundedTest(
@@ -3615,7 +3661,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 test("rolled-back v10 can reprepare the same owned bridge without health under v6", async () => {
@@ -3785,7 +3831,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  testBudgetMs(30_000)
 );
 
 test("v6 rollback permits a later plain owner without inheriting topology authority", async () => {

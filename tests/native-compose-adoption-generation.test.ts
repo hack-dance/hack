@@ -48,7 +48,7 @@ import {
 } from "../src/lib/native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
-  openLegacyComposeAdoptedGenerationStore,
+  openLegacyComposeAdoptedGenerationStore as openAdoptedGenerationStore,
 } from "../src/lib/native-compose-adoption-generation.ts";
 import { inspectLegacyComposeAdoptionSelection } from "../src/lib/native-compose-adoption-marker.ts";
 import {
@@ -77,14 +77,41 @@ import { testBudgetMs } from "./helpers/test-budget.ts";
  * Harness budgets. Every engine probe below spawns the Bun stub engine, and one
  * retained dispatch issues several hundred probes, so an owner operation's wall
  * time follows host load. Case timeouts and the caller deadlines of cases that
- * are not about the deadline derive from `testBudgetMs`. The short deadlines in
- * the expiry cases (5 s) and their promptness assertions are product bounds
- * under test and stay literal.
+ * are not about the deadline derive from `testBudgetMs`. The expiry cases'
+ * promptness assertion (1.5 s past the deadline) is a product bound under test
+ * and stays literal.
  */
 /** Caller deadline for one owner operation in a case that is not about the deadline. */
 const OPERATION_DEADLINE_MS = testBudgetMs(20_000);
 const test = (name: string, run: () => Promise<void>) =>
   boundedTest(name, run, testBudgetMs(20_000));
+/**
+ * Probe-phase bound for stores these cases open. One store probe carries a
+ * single aggregate clock across a whole inspection (dozens of stub-engine
+ * processes), 15 s by default. That default is a product bound no case here
+ * tests, so stores open with the largest phase bound the product accepts.
+ * Public dispatch opens its own store and keeps the default (see the PR gaps).
+ */
+const PROBE_PHASE_BUDGET_MS = 60_000;
+/**
+ * Caller deadline in the cases that test its expiry after the callback. The
+ * product behavior under test (expiry ends a held probe or an overlong callback
+ * with `E_LEGACY_ADOPTION_DEADLINE`, keeps the operation pending, and returns
+ * within 1.5 s of the deadline) does not depend on its length, but the work
+ * before the callback must finish first: a 5 s deadline expired before the
+ * callback at load 30-45. It stays under the probe-phase bound, so the caller
+ * deadline, not a probe's own phase clock, ends a held probe.
+ */
+const EXPIRY_DEADLINE_MS = PROBE_PHASE_BUDGET_MS - 15_000;
+/** The product store opener, with the harness probe-phase bound unless a case names one. */
+function openLegacyComposeAdoptedGenerationStore(
+  input: Parameters<typeof openAdoptedGenerationStore>[0]
+): ReturnType<typeof openAdoptedGenerationStore> {
+  return openAdoptedGenerationStore({
+    timeoutMs: PROBE_PHASE_BUDGET_MS,
+    ...input,
+  });
+}
 const CANARY = "synthetic-private-adoption-canary";
 const ID = "a".repeat(64);
 const NETWORK = "b".repeat(64);
@@ -1325,7 +1352,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 5000;
+      const deadline = Date.now() + EXPIRY_DEADLINE_MS;
       await refusal(
         store.withMutation({
           generation,
@@ -1484,7 +1511,7 @@ for (const stage of ["per-effect freshness", "final observation"] as const) {
       try {
         const binary = await compiler();
         await store.publish({ generation, binary });
-        const deadline = Date.now() + 5000;
+        const deadline = Date.now() + EXPIRY_DEADLINE_MS;
         let reachedCallback = false;
         await refusal(
           store.withMutation({

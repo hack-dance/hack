@@ -21,7 +21,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP } from "../src/commands/config-adopt.ts";
+import {
+  PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP,
+  PENDING_ROLLBACK_BUSY_NEXT_STEP,
+} from "../src/commands/config-adopt.ts";
 import { checkComposeEnvOverrideAtRest } from "../src/commands/doctor.ts";
 import {
   resolveModernComposeEnvOverrides,
@@ -2435,6 +2438,64 @@ boundedTest(
         includeUnverifiable: true,
       })
     ).toMatchObject({ removed: true, adoptionBound: false });
+  },
+  90_000
+);
+
+boundedTest(
+  "CLI busy refusal over an interrupted rollback names only the recovery rollback that finishes it (HACK-1427)",
+  async () => {
+    // A reference-form override, so the busy step cannot come from the
+    // literal-override branch.
+    const { override, binary } = await adoptableManagedFixture("reference");
+    const original = await originalSnapshots();
+    const adopted = await adoptCli(["--json"], binary);
+    expect(adopted.code).toBe(0);
+    const active = await readReceipt();
+    expect(active.publication).toMatchObject({ phase: "active" });
+    const pinned = await lstat(override);
+    // An interrupted rollback: `rollback()` journals `rolling-back` and is
+    // stopped before it restores the originals.
+    const rollingBack = {
+      ...active,
+      publication: { ...active.publication, phase: "rolling-back" },
+    };
+    await writeReceipt(rollingBack);
+    const busy = await adoptCli(["--recover", "--stop", "--json"], binary);
+    expect(busy.code).not.toBe(0);
+    expect(JSON.parse(busy.stdout)).toEqual({
+      ok: false,
+      error: {
+        code: "E_CONFIG_INVALID",
+        message: `${
+          new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_BUSY")
+            .message
+        } ${PENDING_ROLLBACK_BUSY_NEXT_STEP}`,
+      },
+    });
+    expect(busy.output).not.toContain("'hack config adopt --recover' to");
+    expect(busy.output).not.toContain(CANARY);
+    expect(await readReceipt()).toEqual(rollingBack);
+    // Plain `--recover`, which the generic pending-switch step names first,
+    // refuses in this state and changes nothing.
+    const completed = await adoptCli(["--recover", "--json"], binary);
+    expect(completed.code).not.toBe(0);
+    expect(completed.output).not.toContain(CANARY);
+    expect(await readReceipt()).toEqual(rollingBack);
+    // The named step finishes the rollback.
+    const released = await adoptCli(
+      ["--recover", "--rollback", "--json"],
+      binary
+    );
+    expect(released.code).toBe(0);
+    expect(JSON.parse(released.stdout)).toMatchObject({
+      status: "rolled-back",
+    });
+    await expectOriginals(original);
+    expect((await lstat(override)).ino).toBe(pinned.ino);
+    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+      "rolled-back"
+    );
   },
   90_000
 );

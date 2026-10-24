@@ -549,7 +549,10 @@ diagnostic; the literal-env message appears only on the first refusal. Plain
 override, so whenever `hack config adopt` refuses as busy over a pending switch
 its message adds the step that state accepts: `--recover --rollback` when the
 bound override holds literal values, otherwise `--recover` to complete or
-`--recover --rollback` to restore (HACK-1414).
+`--recover --rollback` to restore (HACK-1414). Once the switch's rollback is
+journaled (`rolling-back`, an interrupted rollback), plain `--recover` refuses
+whatever the override holds, so the message names only `--recover --rollback`
+to finish restoring the originals (HACK-1427).
 
 `hack doctor` reports the pinned literal override and names the first command the
 pending state accepts, since `hack down` and plain `--rollback` refuse in every

@@ -100,6 +100,27 @@ export const PENDING_SWITCH_BUSY_NEXT_STEP =
   "A publication switch is pending. If no other adoption command is running, run 'hack config adopt --recover' to complete it or 'hack config adopt --recover --rollback' to restore the originals.";
 export const PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP =
   "A publication switch is pending and the bound .hack/.internal/compose.env.override.yml holds literal env values, so completing it refuses. If no other adoption command is running, run 'hack config adopt --recover --rollback' to release it.";
+/**
+ * The step for a switch whose rollback is journaled (`rolling-back`): plain
+ * `--recover` completes only a `switching` publication and refuses this one,
+ * whatever the override holds, so only `--recover --rollback` finishes it
+ * (HACK-1427). Fixed text; values omitted.
+ */
+export const PENDING_ROLLBACK_BUSY_NEXT_STEP =
+  "A rollback of the publication switch is pending. If no other adoption command is running, run 'hack config adopt --recover --rollback' to finish restoring the originals.";
+
+/** The fixed next step for a busy refusal over a pending switch. */
+function pendingSwitchBusyNextStep(opts: {
+  readonly switchPhase: "switching" | "rolling-back" | null;
+  readonly literal: boolean;
+}): string {
+  if (opts.switchPhase === "rolling-back") {
+    return PENDING_ROLLBACK_BUSY_NEXT_STEP;
+  }
+  return opts.literal
+    ? PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP
+    : PENDING_SWITCH_BUSY_NEXT_STEP;
+}
 
 /** The store refusal's fixed message, plus the pending-switch step for BUSY. */
 async function adoptionRefusalMessage(opts: {
@@ -119,7 +140,10 @@ async function adoptionRefusalMessage(opts: {
     const literal = await legacyAdoptionEnvOverrideHoldsValues({
       projectRoot: opts.projectRoot,
     });
-    return `${opts.error.message} ${literal ? PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP : PENDING_SWITCH_BUSY_NEXT_STEP}`;
+    return `${opts.error.message} ${pendingSwitchBusyNextStep({
+      switchPhase: detail.switchPhase,
+      literal,
+    })}`;
   } catch {
     // Unreadable state keeps the store's fixed message alone.
     return opts.error.message;

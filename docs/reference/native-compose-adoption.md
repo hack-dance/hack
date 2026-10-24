@@ -136,7 +136,12 @@ stop recovery can clear it. A retained operation that reaches its caller deadlin
 refuses with its own fixed message ("reached its caller deadline"), not the
 source-or-binding-changed message, which only an observed drift issues
 (HACK-1340). `hack up`, `hack down` and `config adopt --stop` pass the Compose
-startup budget as that deadline. These rechecks do not freeze external editors or
+startup budget as that deadline. Every adopted project command (`up --detach`,
+`restart`, `down`, `ps`, `logs`, `exec`) starts one such deadline before it opens the
+store, and each store inspection phase takes the time it has left, capped at 60
+seconds, instead of a fixed 15-second clock. When that deadline expires the command
+returns `E_STARTUP_TIMEOUT` with the "reached its caller deadline" message, not
+`E_CONFIG_INVALID` (HACK-1458). These rechecks do not freeze external editors or
 the engine atomically. Public output remains field/count/status metadata;
 capabilities and authored probe arguments are private. Prior versions 1–4 keep
 their existing execution behavior, and older upgraded owners refuse version 5

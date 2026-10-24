@@ -32,6 +32,12 @@ export type NativeProjectSelection = {
   /** Exact native source namespace context; supplied branches never trigger implicit Git/domain discovery. */
   readonly compilerBranch?: string;
   readonly signal?: AbortSignal;
+  /**
+   * Budget of each compiler invocation, read again for every invocation so a
+   * caller can bound them by its remaining deadline (HACK-1458). Undefined, or
+   * a getter returning undefined, keeps the compiler's own default.
+   */
+  readonly compilerTimeoutMs?: () => number | undefined;
 };
 
 /** Offline project selection; local policy is read only after Rust validates it. */
@@ -117,6 +123,7 @@ export async function planPreparedNativeProject(opts: {
   }
   const result = await planNativeConfig({
     ...prepared.selection,
+    timeoutMs: prepared.selection.compilerTimeoutMs?.(),
     signal: opts.signal,
     input: prepared.input,
     ...prepared.locals,
@@ -195,6 +202,7 @@ export async function prepareNativeProjectSelection(
   const compiled = await compileNativeConfig({
     input: project.input,
     profiles: opts.profiles,
+    timeoutMs: opts.compilerTimeoutMs?.(),
     signal: opts.signal,
     requireLocalResolution: true,
     requireEnvPlanning: opts.requireEnvPlanning,
@@ -260,6 +268,7 @@ export async function prepareNativeProjectSelection(
   };
   let result = await resolveNativeConfig({
     ...resolveInputs,
+    timeoutMs: opts.compilerTimeoutMs?.(),
     probeRoutingInputs: opts.compilerBranch === undefined,
   });
   checkResolvedIdentity(result);
@@ -275,6 +284,7 @@ export async function prepareNativeProjectSelection(
     result = await resolveNativeConfig({
       ...resolveInputs,
       ...routingInputs,
+      timeoutMs: opts.compilerTimeoutMs?.(),
       requireRoutingPlanning: true,
     });
   }

@@ -87,6 +87,14 @@ report installed live acceptance.
 
 Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
 input preparation and native review, with a native maximum of 300000 milliseconds.
+Each startup compiler call is bounded by the time the startup budget has left,
+capped at 60 seconds, rather than by a fixed 10-second clock. Compiler calls outside
+startup (the down hooks' input check after Ctrl-C or a stop request, and checks after
+ready) have no startup budget and take the 60-second cap, so a slow host does not
+fail a graceful stop (HACK-1458). A start that fails or is cancelled after host
+processes began and before its startup intent exists stops those processes, or ends
+the launch it had begun through its own session token, before it returns. A
+teardown it cannot prove keeps the host process records retained.
 Startup refusals identify a fixed owning stage and, when available, a closed
 compiler or native error code. They omit arbitrary errors, child output, paths and
 values. If startup fails before publishing a receipt and the later retirement

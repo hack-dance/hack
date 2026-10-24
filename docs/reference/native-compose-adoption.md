@@ -544,10 +544,26 @@ A repeated `--recover --stop` after that refusal does not reach the publication
 boundary again: the switch is already journaled, so the retried preparation stop
 refuses it as a pending publication with the generic `E_LEGACY_ADOPTION_BUSY`
 code ("busy or requires explicit interrupted-lock recovery") and no publication
-diagnostic; the literal-env message appears only on the first refusal.
-`hack doctor` reports the pinned literal override and names
-`hack config adopt --recover --rollback` as the next step while the switch is
-pending, since `hack down` and plain `--rollback` refuse in that state (HACK-1391).
+diagnostic; the literal-env message appears only on the first refusal. Plain
+`hack config adopt --recover` would complete the switch, which refuses the literal
+override, so whenever `hack config adopt` refuses as busy over a pending switch
+its message adds the step that state accepts: `--recover --rollback` when the
+bound override holds literal values, otherwise `--recover` to complete or
+`--recover --rollback` to restore (HACK-1414).
+
+`hack doctor` reports the pinned literal override and names the first command the
+pending state accepts, since `hack down` and plain `--rollback` refuse in every
+pending state (HACK-1391, HACK-1414):
+
+- A pending switch: `hack config adopt --recover --rollback`.
+- An interrupted preparation stop (before any switch, so `--recover --rollback`
+  refuses too): `hack config adopt --recover --stop`, which refuses to publish
+  over the literal override and journals the switch; then
+  `hack config adopt --recover --rollback`.
+- An interrupted retained-container command of an active adoption:
+  `hack down --recover`, then `hack config adopt --rollback`.
+
+`hack doctor --fix` keeps the pinned file and its note names the same step.
 
 Unmodified v4 clients cannot be universally fenced: they ignore future legacy
 versions and may select ancestor Compose inputs. Adoption requires the upgraded

@@ -66,6 +66,22 @@ setDefaultTimeout(FAKE_DOCKER_TEST_TIMEOUT_MS);
 const CHILD_START_WAIT_MS = PROBE_DEADLINE_MS;
 const CHILD_START_POLL_MS = 10;
 /**
+ * The aggregate deadline of the moving job snapshot case's ordered start. It
+ * covers about four freshness checks, each one fixture-deadline probe. The
+ * maintained job fixture's 20 s bound refused with "did not become ready"
+ * under heavy load (HACK-1452).
+ */
+const ORDERED_OPERATION_DEADLINE_MS = 4 * FIXTURE_PROBE_DEADLINE_MS;
+/**
+ * The probe deadline of the tests that prove a moving snapshot exhausts it.
+ * Each repeated scan is several cold fake Docker processes, so a 3 s deadline
+ * under heavy load ended before the first bridge read (HACK-1452). The test
+ * still requires repeated scans and a refusal soon after this deadline.
+ */
+const EXHAUSTED_PROBE_DEADLINE_MS = PROBE_DEADLINE_MS;
+/** How late after its deadline an exhausted probe may refuse under load. */
+const EXHAUSTED_REFUSAL_SLACK_MS = 5000;
+/**
  * A placeholder acquisition repeats bridge scans under one probe deadline
  * (two extra scans with two owned bridges). The default refused one under
  * heavy host load (HACK-1432), so the placeholder tests name a wider deadline
@@ -637,10 +653,9 @@ test("moving job snapshot counterexample retains identity and admits a fresh com
         maximumRetryCount: 0,
       }));
     }
-    // The maintained job fixture uses the same 20s operation bound. The case
-    // bound is the file's fake-Docker budget, so a slow host ends in the
-    // operation's own refusal rather than an unconfirmed snapshot lifetime.
-    const deadline = Date.now() + 20_000;
+    // The case bound is the file's fake-Docker budget, so a slow host ends in
+    // the operation's own refusal rather than an unconfirmed snapshot lifetime.
+    const deadline = Date.now() + ORDERED_OPERATION_DEADLINE_MS;
     await executeLegacyComposeRetainedPlan({
       plan,
       binding: original,
@@ -771,10 +786,15 @@ test("moving snapshot guard exhausts the original shared deadline", async () => 
   await save();
   const started = Date.now();
   await refusal(
-    acquireFixtureBinding({ projectRoot, timeoutMs: 3000 }),
+    acquireFixtureBinding({
+      projectRoot,
+      timeoutMs: EXHAUSTED_PROBE_DEADLINE_MS,
+    }),
     "E_LEGACY_COMPOSE_BINDING_PROBE"
   );
-  expect(Date.now() - started).toBeLessThan(5000);
+  expect(Date.now() - started).toBeLessThan(
+    EXHAUSTED_PROBE_DEADLINE_MS + EXHAUSTED_REFUSAL_SLACK_MS
+  );
   const commands = (await readFile(join(root, "commands"), "utf8"))
     .trim()
     .split("\n")
@@ -854,10 +874,15 @@ test("a persistent endpoint placeholder exhausts the original shared deadline", 
   await save();
   const started = Date.now();
   await refusal(
-    acquireFixtureBinding({ projectRoot, timeoutMs: 6000 }),
+    acquireFixtureBinding({
+      projectRoot,
+      timeoutMs: EXHAUSTED_PROBE_DEADLINE_MS,
+    }),
     "E_LEGACY_COMPOSE_BINDING_PROBE"
   );
-  expect(Date.now() - started).toBeLessThan(9000);
+  expect(Date.now() - started).toBeLessThan(
+    EXHAUSTED_PROBE_DEADLINE_MS + EXHAUSTED_REFUSAL_SLACK_MS
+  );
   // Identity read plus at least two discarded loop reads before the deadline.
   expect(networkInspections(await commands())).toBeGreaterThan(2);
 });

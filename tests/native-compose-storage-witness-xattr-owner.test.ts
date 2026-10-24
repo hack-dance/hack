@@ -13,8 +13,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createNativeComposeStartDeadline } from "../src/lib/compose-startup-budget.ts";
 import {
   assertNativeComposeEffectOwned,
+  nativeComposeGuardStorageProof,
   runOneOff,
 } from "../src/lib/native-compose-command.ts";
 import {
@@ -1886,6 +1888,84 @@ test("runEffect captures the original fresh carrier factory across a long phase 
   } finally {
     now.mockRestore();
   }
+});
+
+test("a guard storage proof extends the start deadline by its carrier proof only, never by its freshness checks", async () => {
+  const { store, transport, generation } = await rememberedActive();
+  const command = commandPorts(transport);
+  // Fake monotonic clock: each freshness check takes 7 s, each carrier 3 s.
+  let monotonic = 0;
+  let excluding = 0;
+  let armed = false;
+  const steps: string[] = [];
+  const createCarrier = command.ports.carrier;
+  command.ports.carrier = async (opts) => {
+    if (armed) {
+      steps.push(excluding > 0 ? "carrier-excluded" : "carrier-counted");
+      monotonic += 3000;
+    }
+    return await createCarrier(opts);
+  };
+  await store.withMutation(async (mutation) => {
+    const storage = await prepareNativeComposeCommandStorage({
+      store,
+      mutation,
+      operation: "up",
+      selected: [selection],
+      signal: transport.controller.signal,
+      ports: command.ports,
+      assertFresh: async () => {
+        if (armed) {
+          steps.push(excluding > 0 ? "fresh-excluded" : "fresh-counted");
+          monotonic += 7000;
+        }
+      },
+    });
+    if (!storage) {
+      throw new Error("Expected retained storage");
+    }
+    const start = createNativeComposeStartDeadline({
+      timeoutMs: 10_000,
+      storageTimeoutMs: 90_000,
+      wallNow: () => 1_000_000,
+      monotonicNow: () => monotonic,
+    });
+    const excludeStorage = <T>(work: () => Promise<T>): Promise<T> =>
+      start.excludeStorage(async () => {
+        excluding += 1;
+        try {
+          return await work();
+        } finally {
+          excluding -= 1;
+        }
+      });
+    let adjacentAnswers = 0;
+    armed = true;
+    await nativeComposeGuardStorageProof({
+      verify: storage.verify,
+      generation,
+      excludeStorage,
+      takeAdjacentProof: () => {
+        adjacentAnswers += 1;
+        return false;
+      },
+    })();
+    armed = false;
+    expect(adjacentAnswers).toBe(1);
+    // The enrolled volume's carrier proof is the only excluded span.
+    expect(steps).toEqual([
+      "fresh-counted",
+      "carrier-excluded",
+      "fresh-counted",
+    ]);
+    // Only that carrier's 3 s moved the deadline; the guard's 14 s of
+    // freshness checks consumed the start budget.
+    expect(start.deadline()).toBe(1_000_000 + 10_000 + 3000);
+  });
+  // Admission's proof plus the guard's: each verified the retained witness.
+  expect(
+    helperOperations(transport).filter((call) => call === "verify")
+  ).toHaveLength(2);
 });
 
 test("durable tagged Expected precedes one cold provision/seed and fresh proof before workload", async () => {

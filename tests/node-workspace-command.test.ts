@@ -12,7 +12,7 @@ beforeEach(() => {
 afterEach(() => {
   process.env.HOME = previousHome;
   if (previousGlobalConfigPath === undefined) {
-    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
     return;
   }
   process.env.HACK_GLOBAL_CONFIG_PATH = previousGlobalConfigPath;

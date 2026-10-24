@@ -46,8 +46,8 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
-  process.env.HACK_SECRETS_FILE_KEY = undefined;
-  process.env.HACK_ENV_SECRET_KEY = undefined;
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");
 });
 
 async function createRepo(): Promise<{
@@ -967,7 +967,7 @@ test("linked worktrees fall back to the shared git-common-dir env key", async ()
   const sharedKeyText = (await readFile(sharedKeyPath, "utf8")).trim();
   expect(sharedKeyText.length).toBeGreaterThan(10);
 
-  process.env.HACK_ENV_SECRET_KEY = undefined;
+  Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");
   const resolved = await resolveProjectEnvConfig({
     projectRoot: linkedRoot,
     projectDir,

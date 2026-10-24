@@ -449,8 +449,9 @@ that end. A refusal with its own observed reason keeps that reason even when it
 is caught after the deadline, including when a recorded command or its command
 record replaces it with a fixed refusal. Such reasons include a helper policy
 refusal, `helper-policy-stability` for a re-inspected carrier whose creation
-time or policy changed, and `private-state` for a saved material binding that
-changed during a carrier step. Cancellation
+time, policy or stopped state changed, and `private-state` for a saved material
+binding that changed during a carrier step or before a verification's deferred
+evidence retirement. Cancellation
 keeps `probe-cancel`. The reason changes no check, retention or recovery rule.
 
 Only the original in-memory writer can advance its exact sequence. Publication

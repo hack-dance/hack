@@ -22,12 +22,24 @@ import {
 
 const REFUSAL = "Initial process-policy replay unavailable; values omitted";
 /**
- * Harness budget for one replay child: a fresh Bun process that transpiles the
- * ownership policy and spawns one stub engine per recorded reply. This bounds
- * the replay itself; the ownership policy's own probe bounds run unchanged
- * inside it. A fixed 5 s refused replays on loaded hosts.
+ * Aggregate probe bound the replayed ownership policy runs with, unless the
+ * recorded selection names one: the largest the policy accepts. One query
+ * spawns a stub engine per recorded reply under a single clock, 15 s by
+ * default. The replay classifies recorded replies and never tests that clock;
+ * at the default, a 36-worker churn (load 100-120) expired it
+ * (`E_NATIVE_COMPOSE_PROBE_TIMEOUT`) and changed the replayed outcome.
  */
-const REPLAY_CHILD_BUDGET_MS = testBudgetMs(5000);
+const REPLAY_PROBE_BUDGET_MS = 60_000;
+/**
+ * Harness budget for one replay child: a fresh Bun process that transpiles the
+ * ownership policy and spawns one stub engine per recorded reply. It outlasts
+ * the policy's own probe bound inside it. A fixed 5 s refused replays on
+ * loaded hosts.
+ */
+const REPLAY_CHILD_BUDGET_MS = Math.max(
+  testBudgetMs(5000),
+  REPLAY_PROBE_BUDGET_MS + 10_000
+);
 /** Harness budget for every replay child of one trace summary together. */
 const REPLAY_SUMMARY_BUDGET_MS = testBudgetMs(30_000);
 const SERVICES = ["forced", "graceful", "reaper", "retry"] as const;
@@ -170,7 +182,8 @@ await Bun.write(Bun.stdout,row.stdout);process.exit(row.exitCode);
   await chmod(docker, 0o700);
   const program = `
 import {assertNativeComposeOwned,observeNativeComposeStartupOwned,NativeComposeOwnershipError,nativeComposeOwnershipRefusal,nativeComposeTopologyPredicate} from ${JSON.stringify(join(import.meta.dir, "../../src/lib/native-compose-ownership.ts"))};
-const {selection}=await Bun.file(${JSON.stringify(inputs)}).json();
+const {selection:recorded}=await Bun.file(${JSON.stringify(inputs)}).json();
+const selection={timeoutMs:${REPLAY_PROBE_BUDGET_MS},...recorded};
 let outcome="refused",code=null,reason=null,topologyPredicate=null;
 try {const value=${REPLAY_CALLS[opts.mode]};outcome=value===null?"unready":"owned";}
 catch(error){code=error instanceof NativeComposeOwnershipError?error.code:null;reason=nativeComposeOwnershipRefusal(error)??null;topologyPredicate=nativeComposeTopologyPredicate(error)??null;}

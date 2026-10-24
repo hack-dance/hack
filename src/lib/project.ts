@@ -136,13 +136,22 @@ export const ENV_BASE_SELECTION_ALIASES: ReadonlySet<string> = new Set([
 export const ENV_CONFIG_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /**
+ * Longest accepted overlay name. An overlay name becomes part of several file
+ * names in one directory; the longest is the env layer lock's staging name,
+ * `hack.env.<name>.local.yaml.lock.<uuid>.owner` (the name plus 68 bytes),
+ * which must fit the common 255-byte file name limit with room to spare.
+ */
+export const ENV_CONFIG_NAME_MAX_LENGTH = 128;
+
+/**
  * Parse a requested overlay selection (CLI `--env`, daemon `env`).
  *
  * - `undefined` input: no selection.
  * - `null`: base layers only (empty, or a base alias in any case).
  * - `string`: the overlay name, exactly as given apart from surrounding
  *   whitespace.
- * - `undefined` for a non-empty input: refused. A requested name is never
+ * - `undefined` for a non-empty input that is not a canonical overlay name
+ *   or is longer than {@link ENV_CONFIG_NAME_MAX_LENGTH}: refused. A requested name is never
  *   slugged, so `X=secret` or `QA` cannot silently become `xsecret` or `qa`
  *   and then be printed or written into an overlay file name. Callers must
  *   refuse with fixed text that does not include the input.
@@ -163,7 +172,10 @@ export function parseEnvConfigSelection(
     return null;
   }
 
-  return ENV_CONFIG_NAME_PATTERN.test(trimmed) ? trimmed : undefined;
+  return trimmed.length <= ENV_CONFIG_NAME_MAX_LENGTH &&
+    ENV_CONFIG_NAME_PATTERN.test(trimmed)
+    ? trimmed
+    : undefined;
 }
 
 export function sanitizeBranchSlug(input: string): string {

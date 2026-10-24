@@ -361,9 +361,21 @@ jobs:
             exit 1
           fi
 
-  test:
+  test-shard:
+    # One deterministic slice of the `bun run test` file set per runner
+    # (scripts/test-shard-plan.ts, HACK-1381). The serial job took 37-42 min and
+    # reached the 60 min limit on slow runners; each file now runs in its own
+    # `bun test` process with a start/result line, so a hang names its file.
+    name: test shard ${{ matrix.shard }}/4
+    strategy:
+      # Let every shard finish so one failure still reports the other files.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: blacksmith-6vcpu-macos-15
-    timeout-minutes: 60
+    # A shard plans about 10.5 min of tests. The runner's own 30 min deadline
+    # stops first and names the running file; this bounds a hung runner.
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -373,21 +385,60 @@ jobs:
           bun-version: "1.4.2"
       - name: Install dependencies
         run: bun install --frozen-lockfile
+      # The one-off checks and builds run once, on shard 1.
       - name: Typecheck (Turbo)
+        if: matrix.shard == 1
         run: bun run turbo:typecheck
       - name: Privacy check
+        if: matrix.shard == 1
         run: bun run privacy:check
       - name: Quality checks (Turbo)
+        if: matrix.shard == 1
         run: bun run turbo:check
       - uses: dtolnay/rust-toolchain@1.97.1
       - name: Prepare matching compiler for private file owner tests
         run: bun run build:config-compiler
-      - name: Tests (Turbo)
-        run: bun run turbo:test
+      # Runs check:bun-version and test:preflight as `bun run test` does, then
+      # verifies that the four shards cover the full test file set exactly once.
+      - name: Tests (shard)
+        env:
+          HACK_TEST_SHARD: ${{ matrix.shard }}/4
+        run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
+      - name: Preserve measured file durations
+        # Per-file seconds only; refresh scripts/test-shard-durations.json with
+        # `bun scripts/test-shard.ts update-durations`.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-shard-durations-${{ matrix.shard }}
+          path: ${{ runner.temp }}/test-shard-durations.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Build CLI
+        if: matrix.shard == 1
         run: bun run build
       - name: Build release smoke (no tests)
+        if: matrix.shard == 1
         run: bun run build:release --skip-tests --no-clean --out=dist/release-ci
+
+  test:
+    # The required `test` check (repository ruleset) for `next` and `main`. It
+    # runs even when a shard fails or is cancelled and passes only when every
+    # shard succeeded, so a failed shard can never surface as a skipped check.
+    needs: test-shard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every test shard to succeed
+        env:
+          SHARD_RESULT: ${{ needs.test-shard.result }}
+        run: |
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "test shards did not all succeed (result: $SHARD_RESULT)"
+            exit 1
+          fi
 
   linux-process-lifetime:
     runs-on: blacksmith-4vcpu-ubuntu-2404

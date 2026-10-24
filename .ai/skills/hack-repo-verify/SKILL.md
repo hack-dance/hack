@@ -98,10 +98,27 @@ untracked candidate additions. Keep private artifacts excluded from the index.
 | Native authored command slices | `tests/native-authored-command.test.ts` (unsupported matrix), `tests/native-authored-command-dispatch.test.ts`, `tests/native-authored-project-{start,run,observe,logs,exec,recovery}.test.ts` and the [command contract](../../../docs/reference/native-authored-commands.md); the dispatch "source CLI" cases need the prepared compiler (`bun run build:config-compiler` or absolute `HACK_CONFIG_COMPILER_BINARY`) and fail without it; `native-authored-project-start` and `native-authored-project-exec` are nondeterministic on a local macOS host, so a single local pass or failure is not proof; live acceptance runs host-serialized on one prepared macOS provider slot |
 | Native VM/routing/reclamation | [candidate guide](../../../docs/guides/native-candidate.md), relevant acceptance gate and isolated host fixture; Linux checks cannot qualify macOS effects |
 | Resource/performance claims | [performance skill](../hack-repo-performance/SKILL.md), matched workload and measured boundaries |
-| Bun runtime crashes | Read-only history: `bun run ci:bun-crash-census -- --since <UTC> --until <UTC>` (failed `test` job logs; `--scan-passing` for all). Matched reproduction: the gated [experiment](../../../.github/workflows/bun-crash-experiment.yml), which spends hosted macOS minutes and needs an explicit go-ahead; never loop on a shared host. Its default `focused` mode loops `tests/native-https-owner.test.ts` (where both original segfaults happened); `full` needs a budget of at least 40 minutes because one full suite takes 30-35. A run never starts unless its estimate fits the remaining budget, so read `summary.json` for the verdict and per-mode crash, failure and skipped-for-budget counts. Both share [the classifier](../../../scripts/lib/bun-crash-classify.ts) |
+| Bun runtime crashes | Read-only history: `bun run ci:bun-crash-census -- --since <UTC> --until <UTC>` (failed `test` job logs; `--scan-passing` for all; since the suite moved to `test shard i/4` jobs, pass `--job "test shard i/4"` once per shard for newer runs). Matched reproduction: the gated [experiment](../../../.github/workflows/bun-crash-experiment.yml), which spends hosted macOS minutes and needs an explicit go-ahead; never loop on a shared host. Its default `focused` mode loops `tests/native-https-owner.test.ts` (where both original segfaults happened); `full` needs a budget of at least 40 minutes because one full suite takes 30-35. A run never starts unless its estimate fits the remaining budget, so read `summary.json` for the verdict and per-mode crash, failure and skipped-for-budget counts. Both share [the classifier](../../../scripts/lib/bun-crash-classify.ts) |
 
 Read [CI](../../../.github/workflows/ci.yml) for current hosted gates. A local pass
-does not mean CI ran. Existing unsupported remote/gateway/native-app checks are
+does not mean CI ran.
+
+Hosted CI runs the `bun run test` file set on four `test shard i/4` jobs;
+the required `test` check is their fan-in and passes only when every shard did.
+[`scripts/test-shard-plan.ts`](../../../scripts/test-shard-plan.ts) splits the files
+by the durations in `scripts/test-shard-durations.json`. A file with no recorded
+duration is planned at 5 s. Each shard runs each of its files in its own
+`bun test ./<file>` process and prints a start line and a result line per file.
+It stops a file after 12 min, and stops the shard at 30 min or on cancellation.
+When it stops early it names the running file, the files not started and the
+slowest files. Each shard first checks that the four shards cover the files
+`git ls-files` lists exactly once. To reproduce one shard locally, run
+`bun scripts/test-shard.ts plan --shard=i/4` or
+`bun scripts/test-shard.ts run --shard=i/4`. To check the split after adding
+or moving tests, run `bun scripts/test-shard.ts verify --count=4`. To refresh the
+durations, download the `test-shard-durations-<i>` artifacts and run
+`bun scripts/test-shard.ts update-durations --source=<run> <files>`. A per-file
+process does not share module state with other files, unlike one `bun test` run. Existing unsupported remote/gateway/native-app checks are
 not default local-product requirements; use them only for explicitly scoped work.
 
 ## Verify the verifier

@@ -335,16 +335,6 @@ function translate(
     if (error instanceof LegacyComposeAdoptedGenerationError) {
       throw error;
     }
-    if (deadlineExpiry(error, deadline)) {
-      const expired = new LegacyComposeAdoptedGenerationError(
-        "E_LEGACY_ADOPTION_DEADLINE"
-      );
-      const diagnostic = legacyComposeOrderedRefusal(error);
-      if (diagnostic) {
-        attachLegacyComposeOrderedRefusal(expired, diagnostic);
-      }
-      throw expired;
-    }
     if (
       error instanceof NativeComposeGenerationError &&
       error.code === "E_NATIVE_COMPOSE_BUSY"
@@ -352,7 +342,9 @@ function translate(
       refuse("E_LEGACY_ADOPTION_BUSY");
     }
     const translated = new LegacyComposeAdoptedGenerationError(
-      "E_LEGACY_ADOPTION_STATE"
+      deadlineExpiry(error, deadline)
+        ? "E_LEGACY_ADOPTION_DEADLINE"
+        : "E_LEGACY_ADOPTION_STATE"
     );
     const diagnostic = legacyComposeOrderedRefusal(error);
     if (diagnostic) {

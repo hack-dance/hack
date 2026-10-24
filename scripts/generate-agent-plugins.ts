@@ -4,6 +4,11 @@ import { dirname, resolve } from "node:path";
 import { renderHackCliSkill } from "../src/agents/codex-skill.ts";
 import { renderCursorRules } from "../src/agents/cursor.ts";
 import {
+  FEEDBACK_ISSUE_TEMPLATE_PATH,
+  renderFeedbackIssueTemplateFile,
+  renderHackFeedbackSkill,
+} from "../src/agents/feedback-skill.ts";
+import {
   FOCUSED_SKILLS,
   type FocusedSkillName,
   HACK_CLI_PLUGIN_ROUTING,
@@ -42,6 +47,10 @@ export async function generateAgentPlugins({
       content: renderPluginSkill(skill.name),
     })),
     {
+      path: resolve(pluginRoot, "skills", "hack-feedback", "SKILL.md"),
+      content: renderPluginSkill("hack-feedback"),
+    },
+    {
       path: resolve(pluginRoot, "skills", "hack-init", "SKILL.md"),
       content: renderHackInitSkill(),
     },
@@ -56,6 +65,11 @@ export async function generateAgentPlugins({
     {
       path: resolve(pluginRoot, "rules", "hack.mdc"),
       content: renderPluginRule(),
+    },
+    {
+      // The repository issue template shares the hack-feedback skill's source.
+      path: resolve(repoRoot, FEEDBACK_ISSUE_TEMPLATE_PATH),
+      content: renderFeedbackIssueTemplateFile(),
     },
   ] as const;
 
@@ -335,25 +349,34 @@ export function portableMcpManifest(
  *
  * The plugin `hack-cli` routes branch, env and diagnosis intents to the
  * focused skills; standalone installs keep `renderCodexSkill` (broad routing,
- * no references) because they ship neither.
+ * no references) because they ship neither. `hack-feedback` is plugin-only.
  */
 export function renderPluginSkill(
-  skill: "hack-cli" | FocusedSkillName
+  skill: "hack-cli" | "hack-feedback" | FocusedSkillName
 ): string {
-  const content =
-    skill === "hack-cli"
-      ? renderHackCliSkill({
-          descriptionLines: renderDescriptionFrontmatter(
-            renderSkillDescription(HACK_CLI_PLUGIN_ROUTING)
-          ),
-        })
-      : renderFocusedSkill(skill);
-  return withSkillReferenceLinks({ skill, content });
+  return withSkillReferenceLinks({ skill, content: pluginSkillContent(skill) });
+}
+
+function pluginSkillContent(
+  skill: "hack-cli" | "hack-feedback" | FocusedSkillName
+): string {
+  if (skill === "hack-cli") {
+    return renderHackCliSkill({
+      descriptionLines: renderDescriptionFrontmatter(
+        renderSkillDescription(HACK_CLI_PLUGIN_ROUTING)
+      ),
+    });
+  }
+  if (skill === "hack-feedback") {
+    return renderHackFeedbackSkill();
+  }
+  return renderFocusedSkill(skill);
 }
 
 const PLUGIN_SKILLS: readonly PluginSkillName[] = [
   "hack-cli",
   ...FOCUSED_SKILLS.map((skill) => skill.name),
+  "hack-feedback",
   "hack-init",
   "hack-install",
   "hack-remote",

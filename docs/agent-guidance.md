@@ -22,8 +22,9 @@ run only `hack agent prime`. See [model-policy ownership](reference/agent-client
 | `src/agents/init-patterns.ts`, `init-assistant.ts` | Repo inventory embedded by the onboarding builder, and pattern hints |
 | `src/agents/install-skill.ts`, `remote-bootstrap-skill.ts` | Plugin installation/channel selection and fresh-host/cloud setup skills |
 | `src/agents/focused-skills.ts` | Plugin `hack-branches`, `hack-env` and `hack-diagnose` skills, composed from canonical section ids, and the plugin `hack-cli` routing description |
+| `src/agents/feedback-review.ts`, `feedback-skill.ts` | Plugin `hack-feedback` skill, its issue-template and examples references, and `.github/ISSUE_TEMPLATE/hack-feedback.md`, all rendered from one typed contract (taxonomy, statuses, evidence classes, redaction kinds, posting-gate refusals) |
 | `src/agents/error-code-reference.ts` | `hack-diagnose` error-code reference, rendered from the exported `HACK_ERROR_CODES` registry in `src/lib/cli-result.ts` |
-| `scripts/generate-agent-plugins.ts` | Skills-only `hack` plugin (portable manifest, three client compatibility manifests, seven skills, Cursor rule) and the complete opt-in `hack-mcp` plugin |
+| `scripts/generate-agent-plugins.ts` | Skills-only `hack` plugin (portable manifest, three client compatibility manifests, eight skills, Cursor rule), the feedback issue template, and the complete opt-in `hack-mcp` plugin |
 
 The `hack` plugin is skills-only: the generator refuses a client manifest that
 declares `mcpServers` and removes stale `.mcp.json`/`mcp.json` files from it. Each
@@ -120,6 +121,17 @@ renders from `HACK_ERROR_CODES` in `src/lib/cli-result.ts`.
 `tests/focused-skills.test.ts` checks section ids, CLI_SPEC resolution,
 error-code parity and trigger overlap.
 
+The plugin-only `hack-feedback` skill drafts privacy-reviewed reports about Hack
+itself. Its vocabularies, the issue template (packaged as a reference and generated
+into `.github/ISSUE_TEMPLATE/hack-feedback.md`) and the synthetic examples render
+from `src/agents/feedback-review.ts`. That module also holds the reference
+sanitizer and the posting gate the skill describes: a confirmed destination, a
+single-use approval of the exact payload, recheck after edits, and no automatic
+retry. Hack ships no sender. `tests/feedback-review.test.ts` drives the gate with a
+mock sender over synthetic secret, path, URL, config, log-instruction, duplicate,
+partial-reproduction, denial, edit and failed-send cases. Live issue creation is not
+part of any test and needs the user's own authorization.
+
 Skill candidates and where their patterns live now:
 
 | Candidate | Decision | Patterns live in | Promotion owner and missing contract |
@@ -129,4 +141,4 @@ Skill candidates and where their patterns live now:
 | checks | Defer | `hack-cli` "Running things"; catalogue HACK-P02, P10, P11 | WU11: qualified portable toolchain fixture with a distinct trigger |
 | sessions | Defer | `hack-cli` "Workspaces" and [sessions](sessions.md) | WU18: trigger evaluations showing `hack-cli` misroutes session work |
 | hack-run | Defer | `hack-cli` "Running things" | WU26: decides between a hack-run skill and references |
-| hack-feedback | Defer | Not shipped | WU25: privacy-reviewed feedback drafts |
+| hack-feedback | Shipped | Plugin `hack-feedback` and its references | WU25: posting stays with the user's own tooling after review; no built-in sender |

@@ -1,3 +1,5 @@
+import { DEFAULT_FILE_TIMEOUT_SECONDS } from "../../scripts/test-shard.ts";
+
 /**
  * Harness budgets for load-sensitive tests.
  *
@@ -19,13 +21,69 @@
  * 200 s deadline, and a v7 dispatch case took 146 s even at load 22-50.
  * A deadline a case does not test must not expire first, so the scale keeps
  * twice that headroom.
+ *
+ * The scale stops at `CASE_TIMEOUT_CEILING_MS`. Hosted CI runs each file under
+ * the shard's per-file limit; a case whose budget outlives that limit is
+ * reported as a file timeout instead of by name. So the headroom is real only
+ * up to the ceiling, and a host loaded past it fails cases by name.
  */
 export const TEST_BUDGET_SCALE = 20;
 
-/** Scale the unloaded time a fixture needs to the budget a loaded host needs. */
-export function testBudgetMs(unloadedMs: number): number {
-  if (!(Number.isSafeInteger(unloadedMs) && unloadedMs > 0)) {
-    throw new Error("Test budget refused a non-positive or fractional time.");
+/** Per-file limit of the hosted test shard (`scripts/test-shard.ts`). */
+export const SHARD_FILE_TIMEOUT_MS = DEFAULT_FILE_TIMEOUT_SECONDS * 1000;
+
+/**
+ * Largest Bun timeout one case may have, its settlement or drain included: a
+ * third of the shard's per-file limit. The slowest hosted file (adoption
+ * generation, 4m55s-6m57s) plus one case hung for this long still ends inside
+ * the 720 s limit, so Bun prints that case's own timeout before the shard
+ * stops the file.
+ */
+export const CASE_TIMEOUT_CEILING_MS = Math.floor(SHARD_FILE_TIMEOUT_MS / 3);
+
+/**
+ * Scale the unloaded time a fixture needs to the budget a loaded host needs,
+ * never above `ceilingMs` (the case ceiling by default). A file whose Bun
+ * timeout adds settlement or drain time to a body budget passes the body's
+ * share of the ceiling.
+ */
+export function testBudgetMs(
+  unloadedMs: number,
+  opts: { readonly ceilingMs?: number } = {}
+): number {
+  const ceilingMs = opts.ceilingMs ?? CASE_TIMEOUT_CEILING_MS;
+  if (
+    !(
+      Number.isSafeInteger(unloadedMs) &&
+      unloadedMs > 0 &&
+      Number.isSafeInteger(ceilingMs) &&
+      ceilingMs > 0 &&
+      ceilingMs <= CASE_TIMEOUT_CEILING_MS
+    )
+  ) {
+    throw new Error(
+      "E_TEST_BUDGET_INVALID: a test budget must be a positive whole number of milliseconds within the case ceiling."
+    );
   }
-  return unloadedMs * TEST_BUDGET_SCALE;
+  return Math.min(unloadedMs * TEST_BUDGET_SCALE, ceilingMs);
+}
+
+/**
+ * Check a composed Bun timeout (a body budget plus settlement, drain or
+ * margin) against the case ceiling when the file loads, so a file cannot
+ * register a case that would outlive the shard's per-file limit.
+ */
+export function withinCaseCeilingMs(timeoutMs: number): number {
+  if (
+    !(
+      Number.isSafeInteger(timeoutMs) &&
+      timeoutMs > 0 &&
+      timeoutMs <= CASE_TIMEOUT_CEILING_MS
+    )
+  ) {
+    throw new Error(
+      "E_TEST_BUDGET_CEILING: a case timeout must be a positive whole number of milliseconds within the case ceiling."
+    );
+  }
+  return timeoutMs;
 }

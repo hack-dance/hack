@@ -44,9 +44,14 @@ import { writeLifecycleMuxFixture } from "./helpers/lifecycle-mux-fixture.ts";
 import { awaitPidFile } from "./helpers/native-authored-settlement.ts";
 import {
   createNativeFixtureCases,
+  NATIVE_FIXTURE_BUN_MARGIN_MS,
   type NativeFixtureCase,
 } from "./helpers/native-fixture-cases.ts";
-import { testBudgetMs } from "./helpers/test-budget.ts";
+import {
+  CASE_TIMEOUT_CEILING_MS,
+  testBudgetMs,
+  withinCaseCeilingMs,
+} from "./helpers/test-budget.ts";
 
 const run = "a".repeat(32);
 const CANARY = "synthetic-private-native-start-canary";
@@ -54,36 +59,44 @@ const CANARY = "synthetic-private-native-start-canary";
  * Allowance for a case's owners, groups and stop endpoints to be absent
  * afterwards. Harness budget: a passing case settles as soon as they exit.
  */
-const SETTLEMENT_BUDGET_MS = testBudgetMs(5000);
+const SETTLEMENT_BUDGET_MS = testBudgetMs(1500);
 /** Largest caller startup deadline `serveNativeAuthoredProject` accepts. */
 const MAX_STARTUP_TIMEOUT_MS = 300_000;
+/**
+ * Body budget for every case, the two-cycle case included: what the case
+ * ceiling leaves after the settlement budget and the guard's margin. A case
+ * that overruns it fails by name, inside the hosted shard's per-file limit.
+ */
+const CASE_TIMEOUT_MS =
+  CASE_TIMEOUT_CEILING_MS - SETTLEMENT_BUDGET_MS - NATIVE_FIXTURE_BUN_MARGIN_MS;
+withinCaseCeilingMs(
+  CASE_TIMEOUT_MS + SETTLEMENT_BUDGET_MS + NATIVE_FIXTURE_BUN_MARGIN_MS
+);
 /**
  * Caller startup deadline for cases that are not about the deadline itself.
  * Each start spawns several Bun children (compiler, planner, owner, hooks); on
  * a loaded host that takes well over the 10-20 s these cases used to allow.
- * The scaled budget is capped at the product's own ceiling. Cases that test
- * the deadline pass their own literal product deadline.
+ * The scaled budget is capped at the product's own ceiling and at half the
+ * case budget, so a start and its stop fit in one case. Cases that test the
+ * deadline pass their own literal product deadline.
  */
 const STARTUP_TIMEOUT_MS = Math.min(
   testBudgetMs(15_000),
-  MAX_STARTUP_TIMEOUT_MS
+  MAX_STARTUP_TIMEOUT_MS,
+  Math.floor(CASE_TIMEOUT_MS / 2)
 );
 /** Caller stop deadline for ordinary `down` in the hook and live-stop cases. */
 const STOP_TIMEOUT_MS = STARTUP_TIMEOUT_MS;
-/**
- * Body budget for every case: a full start plus a stop, with slack. The guard
- * adds the settlement budget on top, so cases never fall back to Bun's 5 s.
- */
-const CASE_TIMEOUT_MS = 2 * STARTUP_TIMEOUT_MS;
 /** A caller's 50 ms startup deadline must return the frontend well inside this wall bound. */
 const DEADLINE_WALL_BOUND_MS = 1000;
 /**
- * Upper bound for a stand-in owner that never receives its release or SIGTERM.
- * This bounds the orphan a broken case can leave rather than preventing it: the
- * cap outlasts the longest case's Bun timeout (two start and stop cycles).
- * Passing cases release it explicitly.
+ * Upper bound for a stand-in owner that never receives its release or SIGTERM,
+ * and for a stand-in status request that hangs. This bounds the orphan a broken
+ * case can leave rather than preventing it: it outlasts every case's Bun
+ * timeout, which the case ceiling bounds, and ends well inside the hosted
+ * shard's per-file limit. Passing cases release or cancel them explicitly.
  */
-const OWNER_RELEASE_CAP_MS = 3 * CASE_TIMEOUT_MS;
+const STAND_IN_CAP_MS = CASE_TIMEOUT_CEILING_MS;
 const cases = createNativeFixtureCases({
   label: "Startup fixture",
   defaultTimeoutMs: CASE_TIMEOUT_MS,
@@ -495,7 +508,7 @@ import {appendFile,readFile,readdir,rename,unlink,writeFile} from 'node:fs/promi
 import {createHash} from 'node:crypto';import {join} from 'node:path';
 const args=process.argv.slice(2);const action=args[4];await appendFile(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');
 if(${options.runtimeStopped === true}&&args[2]==='runtime'&&args[3]==='status'){console.log(JSON.stringify({phase:'stopped',process_alive:false}));process.exit(0)}
-if(${options.runtimeStatusHangs === true}&&args[2]==='runtime'&&args[3]==='status'){const staged=${JSON.stringify(statusPid)}+'.'+process.pid;await writeFile(staged,process.pid+'\\n');await rename(staged,${JSON.stringify(statusPid)});await new Promise((resolve)=>setTimeout(resolve,${2 * CASE_TIMEOUT_MS}));process.exit(0)}
+if(${options.runtimeStatusHangs === true}&&args[2]==='runtime'&&args[3]==='status'){const staged=${JSON.stringify(statusPid)}+'.'+process.pid;await writeFile(staged,process.pid+'\\n');await rename(staged,${JSON.stringify(statusPid)});await new Promise((resolve)=>setTimeout(resolve,${STAND_IN_CAP_MS}));process.exit(0)}
 if(${options.runtimeStatusWrappedStop === true}&&args[2]==='runtime'&&args[3]==='status'){console.error(JSON.stringify({code:'native_graph_foreground',cause_code:'runtime_not_running',message:${JSON.stringify(CANARY)}}));process.exit(2)}
 const journal=${JSON.stringify(journal)};
 const root=${JSON.stringify(join(projectDir, ".internal", "native-authored-runs"))};
@@ -563,7 +576,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
  // Handshake, not a wall-clock window: retire only once the frontend has
  // finished ready publication and the test released this run (or on SIGTERM).
  const release=${JSON.stringify(ownerRelease(root, ""))}+input.run;
- const cap=performance.now()+${OWNER_RELEASE_CAP_MS};
+ const cap=performance.now()+${STAND_IN_CAP_MS};
  while(!(await Bun.file(release).exists())&&performance.now()<cap)await Bun.sleep(10);
  await unlink(release).catch(()=>undefined);
  await finish();
@@ -1783,8 +1796,9 @@ macTest(
       2
     );
   },
-  // Two full start and stop cycles.
-  2 * CASE_TIMEOUT_MS
+  // Two full start and stop cycles. The case ceiling leaves no room for a
+  // second case budget; a passing cycle takes a small part of one.
+  CASE_TIMEOUT_MS
 );
 
 macTest(

@@ -18,7 +18,11 @@
  *   (`owner`, `generation`, `helper`, `carrier`).
  *
  * A project must not declare a label in these namespaces, because their
- * consumers trust them as ownership evidence. Add a namespace here before
+ * consumers trust them as ownership evidence. The TypeScript Compose
+ * classifier rejects them, and runtime-core's own label review rejects them
+ * again from a Rust mirror of this list
+ * (`packages/runtime-core/src/project/compose/ownership_labels.rs`) that the
+ * same test keeps identical. Add a namespace here, and to the mirror, before
  * writing a label in it.
  */
 export const HACK_OWNERSHIP_LABEL_NAMESPACES = [

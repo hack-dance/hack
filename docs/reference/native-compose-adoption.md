@@ -531,6 +531,14 @@ publication and `--recover` switch completion refuse at the `publication-inputs`
 boundary with the closed `literal-env-override` reason, before any original moves.
 The switch stays journaled and the fixed message names
 `hack config adopt --recover --rollback`; rollback stays allowed (HACK-1318).
+A repeated `--recover --stop` after that refusal does not reach the publication
+boundary again: the switch is already journaled, so the retried preparation stop
+refuses it as a pending publication with the generic `E_LEGACY_ADOPTION_BUSY`
+code ("busy or requires explicit interrupted-lock recovery") and no publication
+diagnostic; the literal-env message appears only on the first refusal.
+`hack doctor` reports the pinned literal override and names
+`hack config adopt --recover --rollback` as the next step while the switch is
+pending, since `hack down` and plain `--rollback` refuse in that state (HACK-1391).
 
 Unmodified v4 clients cannot be universally fenced: they ignore future legacy
 versions and may select ancestor Compose inputs. Adoption requires the upgraded

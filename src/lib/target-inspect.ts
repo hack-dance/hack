@@ -231,7 +231,8 @@ export const TARGET_REFUSALS = Object.freeze({
     code: "E_PERMISSION",
     stage: "project",
     retry: "fix_project",
-    message: "A project input could not be read: permission denied.",
+    message:
+      "A project input could not be read: permission denied. Fix the permissions first: make the project directory (.hack or .dev), the directories inside it and its input files readable by your user, and the directories searchable (for example chmod u+rwx .hack), then retry.",
   },
   input_unreadable: {
     code: "E_CONFIG_INVALID",

@@ -2336,6 +2336,46 @@ boundedTest(
       await expectOriginals(original);
       expect((await lstat(override)).ino).toBe(pinned.ino);
     }
+    // A second `--recover --stop` no longer reaches the publication boundary:
+    // the switch is already journaled, so the retried preparation stop refuses
+    // it as a pending publication (the generic busy code) without the
+    // literal-env message or a publication diagnostic (HACK-1391).
+    const repeated = await adoptCli(["--recover", "--stop", "--json"], binary);
+    expect(repeated.code).not.toBe(0);
+    expect(JSON.parse(repeated.stdout)).toEqual({
+      ok: false,
+      error: {
+        code: "E_CONFIG_INVALID",
+        message: new LegacyComposeAdoptedGenerationError(
+          "E_LEGACY_ADOPTION_BUSY"
+        ).message,
+      },
+    });
+    expect(repeated.output).not.toContain(CANARY);
+    expect((await readReceipt()).publication).toMatchObject({
+      phase: "switching",
+      native: null,
+    });
+    // Doctor's next step for the pinned literal override must be a command
+    // this pending state accepts: explicit recovery rollback, not plain
+    // rollback or `hack down`, which it refuses (HACK-1391).
+    const report = await inspectComposeEnvAtRest({
+      projectDir: join(projectRoot, ".hack"),
+    });
+    expect(report).toMatchObject({
+      override: { kind: "plaintext" },
+      adoptionBound: true,
+      adoptionPending: true,
+    });
+    const checked = await checkComposeEnvOverrideAtRest({
+      startDir: projectRoot,
+    });
+    expect(checked.status).toBe("warn");
+    expect(checked.message).toContain("pins this file");
+    expect(checked.message).toContain("hack config adopt --recover --rollback");
+    expect(checked.message).not.toContain("'hack config adopt --rollback'");
+    expect(checked.message).not.toContain("stop the adopted containers");
+    expect(checked.message).not.toContain(CANARY);
     // The named step releases the switch; nothing pins the file afterwards.
     const released = await adoptCli(
       ["--recover", "--rollback", "--json"],

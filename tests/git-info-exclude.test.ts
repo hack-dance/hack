@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { constants } from "node:fs";
 import {
+  access,
   chmod,
   lstat,
   mkdir,
@@ -12,7 +14,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -126,6 +128,82 @@ test("leaves a read-only exclude file unchanged instead of replacing it", async 
   } finally {
     await chmod(exclude, 0o644);
   }
+});
+
+/**
+ * HACK-1378: the same read-only policy as `.hack/.gitignore`. A file with no
+ * write permission bit is read-only even when `access(2)` grants write, as it
+ * does for root whatever the mode, or for a user an ACL grants write. The
+ * injected probe always resolves to model both on an ordinary host.
+ */
+test("a 0444 exclude file stays unchanged even when access(2) would grant write", async () => {
+  const exclude = join(repo, ".git", "info", "exclude");
+  await writeFile(exclude, "# user rule\n");
+  await chmod(exclude, 0o444);
+  let probes = 0;
+  try {
+    await ensureHackGitInfoExclude({
+      projectDir: join(repo, ".hack"),
+      checkWriteAccess: async () => {
+        probes += 1;
+      },
+    });
+    expect(await readFile(exclude, "utf8")).toBe("# user rule\n");
+    expect((await lstat(exclude)).mode & 0o777).toBe(0o444);
+    expect(probes).toBe(0);
+  } finally {
+    await chmod(exclude, 0o644);
+  }
+});
+
+test.skipIf(process.platform !== "darwin")(
+  "a 0444 exclude file stays unchanged when a macOS ACL grants write",
+  async () => {
+    const exclude = join(repo, ".git", "info", "exclude");
+    await writeFile(exclude, "# user rule\n");
+    await chmod(exclude, 0o444);
+    const acl = Bun.spawnSync(
+      ["/bin/chmod", "+a", `${userInfo().username} allow write`, exclude],
+      { stdin: "ignore", stdout: "ignore", stderr: "ignore" }
+    );
+    expect(acl.exitCode).toBe(0);
+    // The ACL makes access(W_OK) succeed; only the mode bits refuse it.
+    await expect(access(exclude, constants.W_OK)).resolves.toBeNull();
+    try {
+      await ensureHackGitInfoExclude({ projectDir: join(repo, ".hack") });
+      expect(await readFile(exclude, "utf8")).toBe("# user rule\n");
+      expect((await lstat(exclude)).mode & 0o777).toBe(0o444);
+    } finally {
+      await chmod(exclude, 0o644);
+    }
+  }
+);
+
+test("with a write bit set, the access(2) probe decides", async () => {
+  const exclude = join(repo, ".git", "info", "exclude");
+  await writeFile(exclude, "# user rule\n");
+  await chmod(exclude, 0o644);
+  const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+
+  await ensureHackGitInfoExclude({
+    projectDir: join(repo, ".hack"),
+    checkWriteAccess: () => Promise.reject(denied),
+  });
+  expect(await readFile(exclude, "utf8")).toBe("# user rule\n");
+
+  resetHackGitInfoExcludeCacheForTests();
+  const probed: string[] = [];
+  await ensureHackGitInfoExclude({
+    projectDir: join(repo, ".hack"),
+    checkWriteAccess: async (path) => {
+      probed.push(path);
+    },
+  });
+  expect(probed).toEqual([exclude]);
+  const updated = await readFile(exclude, "utf8");
+  expect(updated.startsWith("# user rule\n")).toBe(true);
+  expect(updated).toContain("\n/.hack/.internal/\n");
+  expect((await lstat(exclude)).mode & 0o777).toBe(0o644);
 });
 
 test("a read-only info directory is a silent no-op, not an error", async () => {

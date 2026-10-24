@@ -57,17 +57,33 @@ export class ProjectInputSelectionError extends HackCliError {
   }
 }
 
+/** Non-enumerable property holding a {@link ProjectInputAccessError}'s diagnostic. */
+const PROJECT_INPUT_ACCESS_DIAGNOSTIC_PROPERTY = "diagnosticCause";
+const DIAGNOSTIC_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+const DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const DIAGNOSTIC = /^[A-Za-z][A-Za-z0-9]{0,63}(?::[A-Z][A-Z0-9_]{0,63})?$/;
+const DEFAULT_DIAGNOSTIC = "ProjectInputAccessError";
+
 /**
  * Stable, value-free refusal when a project input's presence cannot be
  * checked (for example a file where `.dev` belongs, or a project directory the
  * caller cannot search). Only ENOENT means absence, so the guard refuses
  * rather than guessing. `access` classifies the fault without its OS message,
  * which carries the absolute path and is therefore never kept.
+ *
+ * The fault itself is kept only as a value-free diagnostic: the class name and
+ * errno code of the underlying error (for example `Error:ENOTDIR`), never its
+ * message or path. It is a non-enumerable own property rather than `cause`,
+ * so envelopes, printed errors and serializers stay unchanged. Read it with
+ * {@link projectInputAccessDiagnostic}.
  */
 export class ProjectInputAccessError extends HackCliError {
   readonly access: "permission" | "unreadable";
 
-  constructor(access: "permission" | "unreadable") {
+  constructor(
+    access: "permission" | "unreadable",
+    diagnostic: string = DEFAULT_DIAGNOSTIC
+  ) {
     super({
       code: "E_CONFIG_INVALID",
       message:
@@ -75,7 +91,58 @@ export class ProjectInputAccessError extends HackCliError {
     });
     this.name = "ProjectInputAccessError";
     this.access = access;
+    Object.defineProperty(this, PROJECT_INPUT_ACCESS_DIAGNOSTIC_PROPERTY, {
+      value: DIAGNOSTIC.test(diagnostic) ? diagnostic : DEFAULT_DIAGNOSTIC,
+      enumerable: false,
+    });
   }
+}
+
+/**
+ * The value-free diagnostic of a {@link ProjectInputAccessError} (for example
+ * `Error:EACCES`), for tests and debugging. Undefined for any other value.
+ */
+export function projectInputAccessDiagnostic(
+  error: unknown
+): string | undefined {
+  if (!(error instanceof ProjectInputAccessError)) {
+    return undefined;
+  }
+  const diagnostic: unknown = Reflect.get(
+    error,
+    PROJECT_INPUT_ACCESS_DIAGNOSTIC_PROPERTY
+  );
+  return typeof diagnostic === "string" && DIAGNOSTIC.test(diagnostic)
+    ? diagnostic
+    : undefined;
+}
+
+/**
+ * The closed refusal for a fault other than ENOENT while checking whether a
+ * project input exists: `permission` for `EACCES`/`EPERM`, `unreadable` for
+ * any other fault, keeping only the fault's class/code diagnostic. Exported
+ * as a seam so faults a fixture cannot produce (such as `EPERM`) stay tested.
+ */
+export function projectInputAccessFault(
+  error: unknown
+): ProjectInputAccessError {
+  const code = isRecord(error) ? error.code : undefined;
+  return new ProjectInputAccessError(
+    code === "EACCES" || code === "EPERM" ? "permission" : "unreadable",
+    valueFreeErrorDiagnostic(error)
+  );
+}
+
+/** Class name and identifier-shaped code of `error`; never its message. */
+function valueFreeErrorDiagnostic(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return error === null ? "null" : typeof error;
+  }
+  const name = DIAGNOSTIC_NAME.test(error.name) ? error.name : "Error";
+  const code: unknown = Reflect.get(error, "code");
+  return typeof code === "string" && DIAGNOSTIC_CODE.test(code)
+    ? `${name}:${code}`
+    : name;
 }
 
 /**
@@ -209,12 +276,9 @@ async function inputPresent(path: string): Promise<boolean> {
     await lstat(path);
     return true;
   } catch (error: unknown) {
-    const code = isRecord(error) ? error.code : undefined;
-    if (code === "ENOENT") {
+    if (isRecord(error) && error.code === "ENOENT") {
       return false;
     }
-    throw new ProjectInputAccessError(
-      code === "EACCES" || code === "EPERM" ? "permission" : "unreadable"
-    );
+    throw projectInputAccessFault(error);
   }
 }

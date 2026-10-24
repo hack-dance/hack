@@ -61,7 +61,7 @@ import {
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import {
-  ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+  adoptedComposeEnvOverrideNextStep,
   composeEnvAtRestRepairs,
   describeComposeEnvAtRest,
   inspectComposeEnvAtRest,
@@ -119,10 +119,7 @@ import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
-import {
-  confirmSafe,
-  isExplicitlyNonInteractive,
-} from "../lib/interactivity.ts";
+import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
@@ -2933,10 +2930,6 @@ export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
 }
 
 /**
- * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
- * it; each finding suggests the exact command instead.
- */
-/**
  * Reports which Compose features keep the current project on the Compose
  * backend (HACK-1291). Reads only the project's Compose file and, on the native
  * backend, the `HACK_NATIVE_ADAPTATION` selection native up applies. An
@@ -2963,6 +2956,10 @@ async function checkComposeBackendFeatures(opts: {
   });
 }
 
+/**
+ * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
+ * it; each finding suggests the exact command instead.
+ */
 async function checkProjectEnvKey({
   startDir,
 }: {
@@ -4188,7 +4185,7 @@ async function maybeRemovePlaintextComposeEnvOverride(opts: {
   const repairs = composeEnvAtRestRepairs(report);
   if (report.adoptionBound) {
     note(
-      `Kept ${file}: a saved 'hack config adopt' generation pins it, and removing it would break the adoption (values omitted). ${ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP}`,
+      `Kept ${file}: a saved 'hack config adopt' generation pins it, and removing it would break the adoption (values omitted). ${adoptedComposeEnvOverrideNextStep(report)}`,
       "compose env at rest"
     );
   }
@@ -4346,7 +4343,7 @@ async function doctorConfirm(opts: {
     initialValue: opts.initialValue,
     nonInteractive: opts.destructive ? "decline" : "accept-default",
   });
-  if (!ok && opts.destructive && isExplicitlyNonInteractive()) {
+  if (!ok && opts.destructive && !canPrompt()) {
     noteSkippedDoctorFixStep({ what: firstLine(opts.message) });
   }
   return ok;

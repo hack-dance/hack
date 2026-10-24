@@ -1009,6 +1009,50 @@ describe("target inspector domain", () => {
     );
   });
 
+  // Root can search a mode-000 or mode-0644 directory, so this fault cannot be
+  // produced.
+  test.skipIf(process.getuid?.() === 0)(
+    "an unsearchable .hack or .hack/.internal names the permission fix, not adoption recovery",
+    async () => {
+      // HACK-1390: a project that never used adoption must not be told to run
+      // adoption recovery when its project directories cannot be searched.
+      const message = TARGET_REFUSALS.input_permission_denied.message;
+      expect(message).toContain("permission denied. Fix the permissions first");
+      expect(message).toContain("chmod u+rwx .hack");
+      expect(message.toLowerCase()).not.toContain("adoption");
+      for (const [dir, mode] of [
+        [".hack", 0o000],
+        [".hack", 0o644],
+        [".hack/.internal", 0o000],
+        [".hack/.internal", 0o644],
+      ] as const) {
+        const repo = await mkdtemp(join(fixture.root, "never-adopted-"));
+        await writeProject({ repo, name: "never-adopted", services: ["api"] });
+        await mkdir(join(repo, ".hack", ".internal"), { recursive: true });
+        const locked = join(repo, dir);
+        await chmod(locked, mode);
+        try {
+          const result = await inspectTarget({
+            cwd: fixture.root,
+            registryPath: join(fixture.state, "projects.json"),
+            selector: { path: repo },
+          });
+          expect({ dir, mode, result }).toEqual({
+            dir,
+            mode,
+            result: targetRefusalEnvelope({
+              reason: "input_permission_denied",
+            }),
+          });
+          expect(JSON.stringify(result)).not.toContain(repo);
+          expect(JSON.stringify(result)).not.toContain("EACCES");
+        } finally {
+          await chmod(locked, 0o755);
+        }
+      }
+    }
+  );
+
   test("the MCP argv carries every selector as one --name=value token", () => {
     // The paired cases build the direct CLI argv with this same helper, so a
     // dropped selector would change both sides alike. Pin the argv literally.

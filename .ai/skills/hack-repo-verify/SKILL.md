@@ -63,6 +63,18 @@ Host and container `dist` remain separate. This checks compatibility, not exact
 source provenance. Raw `bun test <paths>` remains available for focused tests;
 it bypasses the suite preflight and does not prepare compiler-dependent fixtures.
 
+All test files share one Bun process. `bunfig.toml` preloads
+[the global-state guard](../../../tests/helpers/global-state-guard-preload.ts) for
+every `bun test` run: a test or file that leaves the environment, cwd, umask,
+exit code, a guarded global function or a process listener changed fails with a
+`[global-state-guard]` message naming the file. The guard restores the
+environment, cwd, umask and exit code so later files run clean; it keeps
+replaced functions and listeners, which may still protect unsettled work. Fix
+the named file's restore (`try`/`finally` or `afterEach`), not the later failures.
+Restore environment keys with `restoreEnv` from `tests/helpers/env.ts`: Bun keeps
+a deleted `HTTP_PROXY`-style key for `fetch` and `Bun.spawn` without `env`, and
+the guard reports that as `native env <KEY> changed`.
+
 For release workflow edits, run the pinned syntax/context check also enforced by CI:
 `mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/prerelease.yml .github/workflows/bun-crash-experiment.yml`.
 This validates event globs and reusable workflow contexts; Bun YAML parsing alone does not.

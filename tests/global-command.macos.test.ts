@@ -256,9 +256,15 @@ beforeEach(async () => {
   reachabilityByHost = {};
   idUser = "mock-user";
   confirmResponder = null;
+  // The clack confirm mock stands in for an interactive user, so the run must
+  // look interactive: `confirmSafe` resolves TTY-less runs by policy without
+  // entering the prompt (HACK-1385), and `bun test` has no TTY.
+  restoreInteractiveTty = stubInteractiveTty();
 });
 
 afterEach(async () => {
+  restoreInteractiveTty?.();
+  restoreInteractiveTty = null;
   if (originalMcpCommand === undefined) {
     Reflect.deleteProperty(process.env, "HACK_MCP_COMMAND");
   } else {
@@ -799,6 +805,13 @@ test("global up uses the dns recovery helper when it is installed", async () => 
 
 test("global up falls back to brew when the helper restart fails", async () => {
   pathExistsOverrides.set("/usr/local/libexec/hack-dns-recovery", true);
+  // Non-interactive sudo path: with a TTY on stdin the failed helper restart
+  // retries with interactive sudo instead of falling back to brew. afterEach
+  // restores the original descriptor.
+  Object.defineProperty(process.stdin, "isTTY", {
+    configurable: true,
+    value: false,
+  });
   const caddyCompose = join(
     tempDir!,
     GLOBAL_HACK_DIR_NAME,
@@ -907,6 +920,37 @@ test("global up falls back to interactive sudo when stdin is tty but stdout is r
     restoreIsTty({ stream: process.stdout, descriptor: stdoutDescriptor });
   }
 });
+
+let restoreInteractiveTty: (() => void) | null = null;
+
+/**
+ * Makes stdin and stdout report a TTY for one test so `canPrompt()` is true and
+ * the mocked clack confirm is reached. Returns the restore function; a test
+ * that stubs its own values on top restores to these and `afterEach` restores
+ * the originals.
+ */
+function stubInteractiveTty(): () => void {
+  const stdinDescriptor = Object.getOwnPropertyDescriptor(
+    process.stdin,
+    "isTTY"
+  );
+  const stdoutDescriptor = Object.getOwnPropertyDescriptor(
+    process.stdout,
+    "isTTY"
+  );
+  Object.defineProperty(process.stdin, "isTTY", {
+    configurable: true,
+    value: true,
+  });
+  Object.defineProperty(process.stdout, "isTTY", {
+    configurable: true,
+    value: true,
+  });
+  return () => {
+    restoreIsTty({ stream: process.stdin, descriptor: stdinDescriptor });
+    restoreIsTty({ stream: process.stdout, descriptor: stdoutDescriptor });
+  };
+}
 
 /**
  * Restores a stubbed isTTY property. When the stream had no own isTTY

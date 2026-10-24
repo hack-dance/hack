@@ -770,7 +770,7 @@ test.skipIf(process.platform !== "darwin")(
   }
 );
 
-// This intentional-unknown negative is last: its root and global spy remain retained until process exit.
+// This intentional-unknown negative is last: its root remains retained until process exit.
 test("closed-pipe survivor refuses completion and permanently vetoes restoration without a former-group signal", async () => {
   const pidPath = join(directory, "descendant"),
     child = join(directory, "child.ts"),
@@ -847,4 +847,8 @@ test("closed-pipe survivor refuses completion and permanently vetoes restoration
   expect(descendantJoined).toBe(true);
   expect(lifetime!.canRestore()).toBe(false);
   expectedUnknown = true;
+  // The descendant has joined, so this pass-through spy guards nothing more.
+  // Restore it here: the vetoed teardown would otherwise leave process.kill
+  // replaced for every later file in the Bun process (HACK-1327).
+  signal.mockRestore();
 });

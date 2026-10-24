@@ -66,6 +66,8 @@ pub(crate) fn existing_private_file(path: &Path) -> Result<Option<File>> {
 }
 
 fn open_private_file(path: &Path, create: bool) -> std::io::Result<File> {
+    #[cfg(test)]
+    test_support::before_open(path);
     OpenOptions::new()
         .read(true)
         .write(true)
@@ -100,6 +102,85 @@ pub(crate) fn try_lock(path: &Path) -> Result<Option<File>> {
         Ok(None)
     } else {
         Err(error(e))
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{Receipt, Store};
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    type Hook = (PathBuf, Box<dyn FnOnce(&Path)>);
+    thread_local! {
+        static BEFORE_OPEN: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Runs this thread's one-shot hook when the node opens `path`, just before the
+    /// `open` system call: the instant another writer (SQLite committing) can act.
+    pub(crate) fn before_open(path: &Path) {
+        let hook = BEFORE_OPEN.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.as_ref().is_some_and(|(target, _)| target == path) {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        if let Some((target, hook)) = hook {
+            hook(&target);
+        }
+    }
+
+    /// Arms a one-shot hook for `path` on this thread; dropping it disarms the hook.
+    pub(crate) struct BeforeOpen;
+    impl BeforeOpen {
+        pub(crate) fn arm(path: &Path, hook: impl FnOnce(&Path) + 'static) -> Self {
+            BEFORE_OPEN.with(|cell| cell.replace(Some((path.to_owned(), Box::new(hook)))));
+            Self
+        }
+        pub(crate) fn fired(&self) -> bool {
+            BEFORE_OPEN.with(|cell| cell.borrow().is_none())
+        }
+    }
+    impl Drop for BeforeOpen {
+        fn drop(&mut self) {
+            BEFORE_OPEN.with(|cell| cell.replace(None));
+        }
+    }
+
+    /// Writes one non-terminal job receipt directly, bypassing admission, so supervisor
+    /// and recovery tests can start from an exact journal state.
+    pub(crate) fn job(store: &Store, id: &str, state: &str, timeout_ms: u64) -> Receipt {
+        let receipt = Receipt {
+            job_id: id.into(),
+            fixture: "tree".into(),
+            source: None,
+            state: state.into(),
+            accepted_at_ms: super::now(),
+            queue_deadline_ms: super::now() + 60_000,
+            execution_timeout_ms: timeout_ms,
+            starts: 0,
+            supervisor_pid: None,
+            child_pid: None,
+            supervisor_identity: None,
+            child_identity: None,
+            cancel_requested: false,
+            stdout: String::new(),
+            stderr: String::new(),
+            truncated: false,
+            exit_code: None,
+            signal: None,
+            detail: None,
+        };
+        store
+            .connection
+            .execute(
+                "INSERT INTO jobs VALUES (?,?)",
+                rusqlite::params![id, serde_json::to_string(&receipt).unwrap()],
+            )
+            .unwrap();
+        receipt
     }
 }
 

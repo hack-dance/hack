@@ -14,15 +14,9 @@ use std::{
 const OWNER: &str = "cccccccccccccccccccccccccccccccc";
 const BOOT: &str = "12345678-abcd-abcd-abcd-123456789abc";
 const RUN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-/// Harness budget for each fake-backend graph run, selection, exec, run or log read here.
-///
-/// The fake backend is ready as soon as each effect is applied, so a passing call returns
-/// without waiting on this budget; it only bounds a call that would otherwise hang. It is a
-/// test budget, not the product bound: `execution::run` still refuses budgets above its own
-/// 600 s limit, and cases that exercise expiry pass their own short or zero deadline. Fixed
-/// 1-5 s budgets failed with `graph_timeout` under host load (journal writes and syncs on a
-/// loaded host), so every such call takes its budget from this one constant.
-const RUN_BUDGET: Duration = Duration::from_secs(120);
+/// Harness budget for each fake-backend graph run, selection, exec, run or log read here
+/// (see `crate::TEST_RUN_BUDGET`).
+const RUN_BUDGET: Duration = crate::TEST_RUN_BUDGET;
 struct Fixture {
     root: PathBuf,
     project: PathBuf,

@@ -20,6 +20,7 @@ import {
   lokiLogs,
   lokiSnapshot,
 } from "../src/ui/loki-logs.ts";
+import { withOwnedProcessListeners } from "./helpers/owned-process-listeners.ts";
 
 // HACK-1277: a one-shot Compose service that exits quickly must not make
 // Loki-backed `hack logs` look empty while `docker compose logs` has output.
@@ -571,5 +572,27 @@ test("Loki follow stops on SIGINT and leaves no listener behind", async () => {
       expect(await exit).toBe(0);
       expect(sameListeners(process.listeners("SIGINT"), before)).toBe(true);
     }
+  );
+});
+
+test("Loki follow drops its SIGINT listener through a real SIGINT emit", async () => {
+  // The fixture owns every SIGINT listener, so the emit reaches only the
+  // follow's handler and not another file's or test's.
+  await withOwnedProcessListeners("SIGINT", () =>
+    withFakeLokiTail(
+      () => undefined,
+      async ({ baseUrl, sockets }) => {
+        captureStdout();
+        const exit = lokiLogs({ baseUrl, ...FOLLOW_PARAMS });
+        await waitFor(() => sockets.length === 1, "the tail connection");
+        expect(process.listenerCount("SIGINT")).toBe(1);
+        process.emit("SIGINT");
+        // The signal path itself removes the `once` listener, before the
+        // tail closes and the follow's `finally` runs.
+        expect(process.listenerCount("SIGINT")).toBe(0);
+        expect(await exit).toBe(0);
+        expect(process.listenerCount("SIGINT")).toBe(0);
+      }
+    )
   );
 });

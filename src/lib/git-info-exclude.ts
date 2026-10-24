@@ -39,7 +39,9 @@ import { exec } from "./shell.ts";
  *   and is left alone instead of being replaced through the rename. When some
  *   write bit is set, `access(2)` decides, so a file only another user may
  *   write is left alone too. The mode bits are checked first, so an ACL that
- *   grants write access to a 0444 file does not make it writable here.
+ *   grants write access to a 0444 file does not make it writable here. As for
+ *   `.hack/.gitignore`, a file that vanished before the probe (ENOENT) counts
+ *   as writable; any other probe error skips the update.
  * - Concurrency: two writers can race and one block update can be lost; the
  *   next lifecycle command converges it again. Within a process, the work
  *   runs at most once per project dir.
@@ -158,7 +160,10 @@ async function ensureUncached(opts: {
       });
       return;
     }
-    await opts.checkWriteAccess(excludePath);
+    await probeExcludeWriteAccess({
+      path: excludePath,
+      checkWriteAccess: opts.checkWriteAccess,
+    });
   }
   await replaceNoFollow({
     dir: infoDir,
@@ -166,6 +171,26 @@ async function ensureUncached(opts: {
     text: next,
     mode: existing.kind === "text" ? existing.mode : 0o644,
   });
+}
+
+/**
+ * Runs the write probe with the same error policy as `.hack/.gitignore`
+ * (`isHackDirGitignoreWritable`): a file that vanished after it was read
+ * (ENOENT) counts as writable, since the rename recreates it. Any other probe
+ * error, read-only codes included, is rethrown, and the best-effort wrapper in
+ * {@link ensureHackGitInfoExclude} turns it into a skipped update.
+ */
+async function probeExcludeWriteAccess(opts: {
+  readonly path: string;
+  readonly checkWriteAccess: GitInfoExcludeWriteAccess;
+}): Promise<void> {
+  try {
+    await opts.checkWriteAccess(opts.path);
+  } catch (error: unknown) {
+    if (errorCode(error) !== "ENOENT") {
+      throw error;
+    }
+  }
 }
 
 async function resolveExcludeLocation(opts: {

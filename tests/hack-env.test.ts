@@ -15,7 +15,7 @@ afterEach(async () => {
   }
   tempDirs.clear();
   process.env.HOME = originalHome;
-  process.env.HACK_SECRETS_FILE_KEY = undefined;
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
 });
 
 test("resolveHackEnv skips encrypted backend access when no legacy env contract exists", async () => {

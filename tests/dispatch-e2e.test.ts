@@ -56,7 +56,7 @@ afterEach(async () => {
   if (previousGlobalConfigPath !== undefined) {
     process.env.HACK_GLOBAL_CONFIG_PATH = previousGlobalConfigPath;
   } else {
-    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   }
 });
 

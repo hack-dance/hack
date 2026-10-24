@@ -20,7 +20,7 @@ beforeEach(async () => {
   originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
   tempDir = await mkdtemp(join(tmpdir(), "hack-node-workspace-map-"));
   process.env.HOME = tempDir;
-  process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+  Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
 });
 
 afterEach(async () => {
@@ -32,7 +32,7 @@ afterEach(async () => {
   if (originalGlobalConfigPath !== undefined) {
     process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
   } else {
-    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   }
 });
 

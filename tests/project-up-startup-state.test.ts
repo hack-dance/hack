@@ -143,7 +143,11 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
-  process.env.HACK_HOME = originalHackHome;
+  if (originalHackHome === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_HOME");
+  } else {
+    process.env.HACK_HOME = originalHackHome;
+  }
   if (originalComposeProfiles === undefined) {
     Reflect.deleteProperty(process.env, "COMPOSE_PROFILES");
   } else {

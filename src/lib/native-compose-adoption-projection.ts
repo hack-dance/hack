@@ -65,6 +65,8 @@ const FILES = [
   "compose.runtime.override.yml",
   "compose.env.override.yml",
 ] as const;
+const ENV_OVERRIDE_FILE = "compose.env.override.yml";
+const ENV_OVERRIDE_INDEX = FILES.indexOf(ENV_OVERRIDE_FILE);
 const CONSTRUCTION_TOKEN = Symbol("legacy-adoption-projection");
 const ownedProjections = new WeakSet<object>();
 type Source = Extract<NativeConfigImportInputs, { readonly ok: true }>;
@@ -150,6 +152,37 @@ function generatedProof(generated: Generated) {
         },
       };
     }),
+  };
+}
+/**
+ * A saved generated proof with its env override entry released, for rollback
+ * only (HACK-1437). The directory identity and every other entry stay exact;
+ * `bound` records whether preparation bound an env override at all, which
+ * keeps its path in the containers' saved `config_files` list.
+ */
+function releasedEnvOverrideProof(generated: unknown) {
+  if (
+    !(
+      isRecord(generated) &&
+      Array.isArray(generated.files) &&
+      generated.files.length === FILES.length
+    )
+  ) {
+    refuse();
+  }
+  const bound: unknown = generated.files[ENV_OVERRIDE_INDEX];
+  if (!(bound === null || isRecord(bound))) {
+    refuse();
+  }
+  return {
+    proof: {
+      ...generated,
+      files: generated.files.map((file: unknown, index) =>
+        index === ENV_OVERRIDE_INDEX ? null : file
+      ),
+    },
+    bound: bound !== null,
+    files: generated.files as readonly unknown[],
   };
 }
 function privatePrimaryProof(
@@ -255,10 +288,22 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
   readonly proof: unknown;
   readonly signal?: AbortSignal;
   readonly checkOwner: () => Promise<void>;
+  /**
+   * `bound` (the default) requires the generated env override's exact bytes
+   * and identity. `released` is rollback's read: the override is neither read
+   * nor required, because rollback never reads, executes, rewrites or removes
+   * it; every other proof stays exact (HACK-1437, see
+   * docs/reference/native-compose-adoption.md).
+   */
+  readonly envOverride?: "bound" | "released";
 }) {
   try {
     const { projectRoot, configText, composeText, signal, checkOwner } = opts;
+    const released = opts.envOverride === "released";
     if (
+      (opts.envOverride !== undefined &&
+        opts.envOverride !== "bound" &&
+        !released) ||
       typeof projectRoot !== "string" ||
       projectRoot.includes("\0") ||
       resolve(projectRoot) !== projectRoot ||
@@ -412,10 +457,14 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
       projectRoot,
       assertFresh: checkOwner,
       signal,
+      ...(released ? { releaseEnvOverride: true as const } : {}),
     });
+    const releasedEnv = released
+      ? releasedEnvOverrideProof(proof.generated)
+      : undefined;
     if (
       JSON.stringify(generatedProof(generated)) !==
-      JSON.stringify(proof.generated)
+      JSON.stringify(releasedEnv ? releasedEnv.proof : proof.generated)
     ) {
       refuse();
     }
@@ -436,7 +485,7 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
     // current writer, or an earlier version's literal values. A literal form
     // holds a value (resolved values never contain `$`), so it never
     // classifies as references. Private and value-free (HACK-1318).
-    const envText = generated.files[1]?.text;
+    const envText = generated.files[ENV_OVERRIDE_INDEX]?.text;
     const literalEnvOverride =
       envText !== undefined &&
       classifyComposeEnvOverrideText(envText).kind !== "references";
@@ -447,9 +496,18 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
         ? { routingResolution: proof.routingResolution }
         : {}),
       metadata,
+      // A released override keeps the saved path list that the containers'
+      // `config_files` label records, without reading the file.
       composeFiles: [
         join(projectRoot, ".hack/docker-compose.yml"),
-        ...generated.files.flatMap((file) => (file ? [file.path] : [])),
+        ...generated.files.flatMap((file, index) => {
+          if (file) {
+            return [file.path];
+          }
+          return index === ENV_OVERRIDE_INDEX && releasedEnv?.bound
+            ? [join(projectRoot, ".hack/.internal", ENV_OVERRIDE_FILE)]
+            : [];
+        }),
       ],
     };
     await checkOwner();
@@ -470,6 +528,8 @@ async function acquireGenerated(opts: {
     readonly signal?: AbortSignal;
   }) => Promise<void>;
   readonly signal?: AbortSignal;
+  /** Leaves the env override unread and unobserved (a null entry). */
+  readonly releaseEnvOverride?: true;
 }): Promise<Generated> {
   check(opts.signal);
   await opts.assertFresh(opts);
@@ -488,8 +548,12 @@ async function acquireGenerated(opts: {
   const directory = await holdDirectory(path, false);
   try {
     const files: (GeneratedFile | null)[] = [];
-    for (const filename of FILES) {
+    for (const [index, filename] of FILES.entries()) {
       check(opts.signal);
+      if (opts.releaseEnvOverride && index === ENV_OVERRIDE_INDEX) {
+        files.push(null);
+        continue;
+      }
       const selected = join(path, filename);
       const info = await lstat(selected).catch((error: unknown) => {
         if (hasCode(error, "ENOENT")) {
@@ -526,6 +590,56 @@ async function acquireGenerated(opts: {
     };
   } finally {
     await directory.file.close();
+  }
+}
+
+/**
+ * Whether the generated env override no longer matches a saved projection
+ * proof while its other generated inputs still do. Completing the pending
+ * switch then refuses (its saved read binds the override's bytes and
+ * identity, ctime included), and only rollback can release it (HACK-1437).
+ * Read-only and value-free; refuses when another generated input changed,
+ * since neither answer then names a command known to work.
+ */
+export async function savedLegacyComposeEnvOverrideChanged(opts: {
+  readonly projectRoot: string;
+  readonly proof: unknown;
+  readonly signal?: AbortSignal;
+}): Promise<boolean> {
+  try {
+    const saved = releasedEnvOverrideProof(
+      savedProjectionEnvelope(opts.proof).generated
+    );
+    const fresh = (): Promise<void> => {
+      check(opts.signal);
+      return Promise.resolve();
+    };
+    const others = await acquireGenerated({
+      projectRoot: opts.projectRoot,
+      assertFresh: fresh,
+      signal: opts.signal,
+      releaseEnvOverride: true,
+    });
+    if (
+      JSON.stringify(generatedProof(others)) !== JSON.stringify(saved.proof)
+    ) {
+      refuse();
+    }
+    const current = await acquireGenerated({
+      projectRoot: opts.projectRoot,
+      assertFresh: fresh,
+      signal: opts.signal,
+    }).catch(() => null);
+    if (current === null) {
+      // The override is no longer a private regular file it can read.
+      return true;
+    }
+    return (
+      JSON.stringify(generatedProof(current).files[ENV_OVERRIDE_INDEX]) !==
+      JSON.stringify(saved.files[ENV_OVERRIDE_INDEX])
+    );
+  } catch (error: unknown) {
+    redact(error);
   }
 }
 

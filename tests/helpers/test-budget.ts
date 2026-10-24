@@ -9,11 +9,16 @@
  * caller deadline, a cancellation latency) keep their own literal values.
  *
  * Each call site names the time its fixture work needs on an unloaded host;
- * `TEST_BUDGET_SCALE` is the headroom for a loaded one. On the M5 at load
- * 15-40, and on the M3 while another suite ran, these fixtures took three to
- * four times their unloaded time and failed at the former literal budgets.
+ * `TEST_BUDGET_SCALE` is the headroom for a loaded one. These fixtures are
+ * spawn-bound (a retained adoption dispatch runs about 750 stub-engine
+ * processes; an authored start runs the compiler several times), so their wall
+ * time grows faster than the load average. On the M5 at 1-min load 15-40, and
+ * on the M3 while another suite ran, they took three to four times their
+ * unloaded time. With a second suite plus churn workers (load 28-66) a scale
+ * of 4 still expired Source5 authored starts and v7 retained dispatches, and
+ * one v7 dispatch case took 146 s at load 22-50.
  */
-export const TEST_BUDGET_SCALE = 4;
+export const TEST_BUDGET_SCALE = 10;
 
 /** Scale the unloaded time a fixture needs to the budget a loaded host needs. */
 export function testBudgetMs(unloadedMs: number): number {

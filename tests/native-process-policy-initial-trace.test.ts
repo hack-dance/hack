@@ -35,21 +35,21 @@ import {
 import { restoreEnv } from "./helpers/env.ts";
 import { testBudgetMs } from "./helpers/test-budget.ts";
 
+/** Bun's own default case timeout, used as the unloaded time of a case that names none. */
+const BUN_DEFAULT_CASE_TIMEOUT_MS = 5000;
+
 /**
- * A case whose last argument is the time its replay children need on an
- * unloaded host. The Bun timeout is that time scaled by `testBudgetMs`, since
- * each replay child cold-starts Bun and one stub engine per recorded reply.
- * Cases without one keep Bun's default.
+ * A case whose last argument is the time it needs on an unloaded host. The Bun
+ * timeout is that time scaled by `testBudgetMs`, since these cases cold-start
+ * Bun children: trace forwarders, stub engines and replay children. A case
+ * that names no time gets Bun's default, scaled the same way, so no case here
+ * keeps an unscaled 5 s budget.
  */
 function test(
   name: string,
   run: () => void | Promise<void>,
-  unloadedTimeoutMs?: number
+  unloadedTimeoutMs = BUN_DEFAULT_CASE_TIMEOUT_MS
 ): void {
-  if (unloadedTimeoutMs === undefined) {
-    bunTest(name, run);
-    return;
-  }
   bunTest(name, run, testBudgetMs(unloadedTimeoutMs));
 }
 
@@ -271,7 +271,12 @@ test("initial forwarding preserves a multicall Docker entry and refuses its repl
     await symlink(target, entry);
     process.env.PATH = root;
     expect(
-      (await exec([target], { stdin: "ignore", timeoutMs: 3000 })).exitCode
+      (
+        await exec([target], {
+          stdin: "ignore",
+          timeoutMs: FORWARDED_DOCKER_EXEC_TIMEOUT_MS,
+        })
+      ).exitCode
     ).toBe(79);
     const prepared = await prepareProcessPolicyInitialTrace({
       directory: traceRoot,
@@ -280,7 +285,7 @@ test("initial forwarding preserves a multicall Docker entry and refuses its repl
       await exec([join(traceRoot, "docker"), "version"], {
         env: { PATH: prepared.path },
         stdin: "ignore",
-        timeoutMs: 3000,
+        timeoutMs: FORWARDED_DOCKER_EXEC_TIMEOUT_MS,
       });
     expect(await run()).toEqual({
       exitCode: 0,
@@ -331,7 +336,10 @@ test("malformed UTF-8 keeps the caller's exact bytes/exit and makes replay unava
     expect(await new Response(child.stderr).text()).toBe("");
     process.env.PATH = prepared.path;
     await expect(
-      assertNativeComposeOwned({ ...selection, timeoutMs: 3000 })
+      assertNativeComposeOwned({
+        ...selection,
+        timeoutMs: FORWARDED_DOCKER_EXEC_TIMEOUT_MS,
+      })
     ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_PROBE" });
     await expect(
       readProcessPolicyInitialTrace(prepared.directory)

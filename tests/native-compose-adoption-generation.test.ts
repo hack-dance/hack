@@ -39,6 +39,7 @@ import {
   renderComposeEnvReferenceOverride,
   renderManagedComposeEnvOverride,
 } from "../src/lib/compose-managed-env.ts";
+import { COMPOSE_STARTUP_TIMEOUT_ENV } from "../src/lib/compose-startup-budget.ts";
 import { acquireLegacyComposeAdoptionPreparationBinding } from "../src/lib/native-compose-adoption-binding.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
 import {
@@ -160,6 +161,7 @@ let priorPath: string | undefined;
 let priorCI: string | undefined;
 let priorExecutionMode: string | undefined;
 let priorRuntimeBackend: string | undefined;
+let priorDispatchDeadline: string | undefined;
 let fixture: Fixture;
 let publicStatic7Commands = 0;
 const publicStatic7Settlement = createCompletedJobFixtureSettlement();
@@ -170,7 +172,13 @@ beforeEach(async () => {
   priorCI = process.env.CI;
   priorExecutionMode = process.env.HACK_EXECUTION_MODE;
   priorRuntimeBackend = process.env.HACK_RUNTIME_BACKEND;
+  priorDispatchDeadline = process.env[COMPOSE_STARTUP_TIMEOUT_ENV];
   process.env.HACK_RUNTIME_BACKEND = "compose";
+  // Public dispatch (`tryLegacyComposeAdoptedCommand`) takes its caller
+  // deadline from the Compose startup budget, 90 s by default. No case here
+  // tests that default, so inject the direct operations' harness deadline
+  // through the product's own setting.
+  process.env[COMPOSE_STARTUP_TIMEOUT_ENV] = String(OPERATION_DEADLINE_MS);
   root = await realpath(
     await mkdtemp(join(tmpdir(), "native-adoption-binding-"))
   );
@@ -332,6 +340,7 @@ afterEach(async () => {
   restoreEnv("CI", priorCI);
   restoreEnv("HACK_EXECUTION_MODE", priorExecutionMode);
   restoreEnv("HACK_RUNTIME_BACKEND", priorRuntimeBackend);
+  restoreEnv(COMPOSE_STARTUP_TIMEOUT_ENV, priorDispatchDeadline);
   await rm(root, { recursive: true, force: true });
 });
 async function save() {

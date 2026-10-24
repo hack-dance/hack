@@ -74,9 +74,10 @@ const DEADLINE_WALL_BOUND_MS = 1000;
 /**
  * Upper bound for a stand-in owner that never receives its release or SIGTERM.
  * This bounds the orphan a broken case can leave rather than preventing it: the
- * cap outlasts the case's Bun timeout. Passing cases release it explicitly.
+ * cap outlasts the longest case's Bun timeout (two start and stop cycles).
+ * Passing cases release it explicitly.
  */
-const OWNER_RELEASE_CAP_MS = 2 * CASE_TIMEOUT_MS;
+const OWNER_RELEASE_CAP_MS = 3 * CASE_TIMEOUT_MS;
 const cases = createNativeFixtureCases({
   label: "Startup fixture",
   defaultTimeoutMs: CASE_TIMEOUT_MS,
@@ -1069,7 +1070,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "not-started"
     );
@@ -1776,7 +1777,8 @@ macTest(
       2
     );
   },
-  CASE_TIMEOUT_MS
+  // Two full start and stop cycles.
+  2 * CASE_TIMEOUT_MS
 );
 
 macTest(

@@ -368,8 +368,17 @@ mod tests {
             before
         );
         // Once that supervisor is gone the job is quarantined, still without a signal.
+        // A sibling test thread's fork can briefly share the lock's open file until its
+        // exec closes the CLOEXEC descriptor, so allow a bounded retry.
         drop(held);
-        schedule(&mut store, unused, unused, &mut workers).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            schedule(&mut store, unused, unused, &mut workers).unwrap();
+            if store.get(&id).unwrap().state != "running" || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let recovered = store.get(&id).unwrap();
         assert_eq!(recovered.state, "quarantined", "{recovered:?}");
         assert_eq!(recovered.child_identity, Some(legacy));

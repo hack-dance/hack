@@ -51,25 +51,56 @@ export class LegacyComposeAdoptionSelectionError extends HackCliError {
 function refuse(): never {
   throw new LegacyComposeAdoptionSelectionError();
 }
+/**
+ * What a `pending` selection waits on, which decides the only command that
+ * moves it on:
+ * - `switch`: a journaled publication switch or rollback. `hack config adopt
+ *   --recover` completes it and `--recover --rollback` restores the originals.
+ * - `preparation-stop`: an interrupted `hack config adopt --stop` before
+ *   publication. Only `hack config adopt --recover --stop` retries it.
+ * - `retained-operation`: an interrupted retained-container command of an
+ *   active adoption. Only `hack down --recover` settles it.
+ * A receipt never holds a pending operation and a pending switch together.
+ */
+export type LegacyComposeAdoptionPending =
+  | "switch"
+  | "preparation-stop"
+  | "retained-operation";
+
+/** A selection status with what a pending one waits on. */
+export type LegacyComposeAdoptionSelectionDetail = {
+  readonly status: LegacyComposeAdoptionSelection;
+  /** Null unless `status` is `pending`. */
+  readonly pending: LegacyComposeAdoptionPending | null;
+};
+
 function classify(
   value: unknown,
   checkout: Parameters<typeof parseLegacyComposeAdoptionReceipt>[1]
-): LegacyComposeAdoptionSelection {
+): LegacyComposeAdoptionSelectionDetail {
   const state = parseLegacyComposeAdoptionReceipt(value, checkout);
   if (state.pendingOperation !== null) {
-    return "pending";
+    // The receipt parser admits a pending operation only over an active
+    // publication (a retained command) or before one (a preparation stop).
+    return {
+      status: "pending",
+      pending:
+        state.publication?.phase === "active"
+          ? "retained-operation"
+          : "preparation-stop",
+    };
   }
   if (state.publication === null) {
-    return "prepared";
+    return { status: "prepared", pending: null };
   }
   switch (state.publication.phase) {
     case "switching":
     case "rolling-back":
-      return "pending";
+      return { status: "pending", pending: "switch" };
     case "active":
-      return "active";
+      return { status: "active", pending: null };
     case "rolled-back":
-      return "rolled-back";
+      return { status: "rolled-back", pending: null };
     default:
       refuse();
   }
@@ -99,6 +130,19 @@ function classifyStateRootFailure(error: unknown): StateRootFailure | null {
 export async function inspectLegacyComposeAdoptionSelection(opts: {
   readonly projectRoot: string;
 }): Promise<LegacyComposeAdoptionSelection | null> {
+  return (
+    (await inspectLegacyComposeAdoptionSelectionDetail(opts))?.status ?? null
+  );
+}
+
+/**
+ * {@link inspectLegacyComposeAdoptionSelection} plus what a pending selection
+ * waits on, for callers that name a recovery command. Same reads, refusals
+ * and value-free result.
+ */
+export async function inspectLegacyComposeAdoptionSelectionDetail(opts: {
+  readonly projectRoot: string;
+}): Promise<LegacyComposeAdoptionSelectionDetail | null> {
   const directories: HeldDirectory[] = [];
   let stateRootFailure: StateRootFailure | null = null;
   try {
@@ -140,7 +184,7 @@ export async function inspectLegacyComposeAdoptionSelection(opts: {
     }
     const saved = await readPrivate(receiptPath, 64 * 1024),
       parsed = parseImportDocument({ text: saved.text, document: "config" });
-    const status = classify(parsed.value, {
+    const detail = classify(parsed.value, {
       root: { dev: rootDirectory.info.dev, ino: rootDirectory.info.ino },
       project: {
         dev: projectDirectory.info.dev,
@@ -154,7 +198,7 @@ export async function inspectLegacyComposeAdoptionSelection(opts: {
     if (!sameFile(saved.info, current.info) || saved.text !== current.text) {
       refuse();
     }
-    return status;
+    return detail;
   } catch {
     if (stateRootFailure !== null) {
       throw new LegacyComposeAdoptionSelectionError(stateRootFailure);

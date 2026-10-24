@@ -10,17 +10,17 @@ import { test as bunTest } from "bun:test";
  * used to latch after the first abandoned case and fail every later case.
  *
  * This guard runs each body under its own budget instead, so an overrun fails
- * that case by name. The overrunning body then gets `drainMs` (inside the same
- * case's Bun timeout) to settle; bodies normally end within it, because each
- * owner operation they await has its own caller deadline below `drainMs`.
+ * that case by name, once. The overrunning body then gets `drainMs`, inside
+ * the same case's Bun timeout, to settle.
  *
- * - Settled: the case still fails once with its budget refusal, and the next
- *   case starts normally.
- * - Still running: the shared state stays reserved for that body. `reservedBy`
- *   names it, so the file's `beforeEach` refuses with a closed reason instead
- *   of reusing state the body may still touch, and `afterEach` keeps its roots.
- *   The reservation clears by itself when the body settles, and later cases
- *   run normally again.
+ * - Settled within the drain: the next case starts normally.
+ * - Still running: the shared state stays reserved for that body, and
+ *   `afterEach` keeps its roots. The next case's `beforeEach` calls
+ *   `awaitUnreserved`, which waits (outside that case's own timeout) for the
+ *   body to settle; a slow body on a loaded host usually does, and the case
+ *   then starts normally. Only a body that outlasts that wait too makes later
+ *   cases refuse with a closed reason naming it, without waiting again, until
+ *   it settles.
  */
 export type CaseDrain = {
   /** Register a case: `budgetMs` bounds its body; the Bun timeout adds the drain. */
@@ -39,6 +39,12 @@ export type CaseDrain = {
   readonly bunTimeoutMs: (budgetMs: number) => number;
   /** The case whose body still runs past its budget and drain, if any. */
   readonly reservedBy: () => string | undefined;
+  /**
+   * Wait up to `waitMs` for a reserving body to settle, then refuse with a
+   * closed reason. After one wait has run out, refuse at once until the body
+   * settles.
+   */
+  readonly awaitUnreserved: (waitMs: number) => Promise<void>;
   /** Refuse, with a closed reason, while an earlier case's body still runs. */
   readonly requireUnreserved: () => void;
 };
@@ -66,20 +72,39 @@ async function within(running: Promise<void>, ms: number): Promise<Outcome> {
   }
 }
 
+type Reservation = {
+  readonly name: string;
+  /** Resolves once the body settled and this reservation was cleared. */
+  readonly released: Promise<void>;
+  waitedOut: boolean;
+};
+
 export function createCaseDrain(opts: {
   /** Prefix for refusals, e.g. "Adoption fixture". */
   readonly label: string;
-  /** Time an overrunning body gets to settle before its state stays reserved. */
+  /** Time an overrunning body gets to settle inside its own case. */
   readonly drainMs: number;
 }): CaseDrain {
-  let reservation: { readonly name: string } | undefined;
+  let reservation: Reservation | undefined;
   const bunTimeoutMs = (budgetMs: number) =>
     budgetMs + opts.drainMs + CASE_DRAIN_BUN_MARGIN_MS;
+  const refusal = (held: Reservation) =>
+    new Error(
+      `E_TEST_CASE_RESERVED: ${opts.label} case "${held.name}" still runs past its budget, drain and wait, so this case did not start; cases start again once it settles.`
+    );
   const requireUnreserved = () => {
     if (reservation !== undefined) {
-      throw new Error(
-        `E_TEST_CASE_RESERVED: ${opts.label} case "${reservation.name}" still runs past its budget and drain, so this case did not start; cases start again once it settles.`
-      );
+      throw refusal(reservation);
+    }
+  };
+  const awaitUnreserved = async (waitMs: number) => {
+    const held = reservation;
+    if (held === undefined) {
+      return;
+    }
+    if (held.waitedOut || (await within(held.released, waitMs)) === "overrun") {
+      held.waitedOut = true;
+      throw refusal(held);
     }
   };
   const run = async (
@@ -97,20 +122,20 @@ export function createCaseDrain(opts: {
     }
     const drained = await within(running, opts.drainMs);
     if (drained === "overrun") {
-      const held = { name };
-      reservation = held;
-      running
+      const released = running
         .catch(() => undefined)
-        .finally(() => {
+        .then(() => {
           if (reservation === held) {
             reservation = undefined;
           }
         });
+      const held: Reservation = { name, released, waitedOut: false };
+      reservation = held;
     }
     throw new Error(
       drained === "settled"
         ? `E_TEST_CASE_BUDGET: ${opts.label} case exceeded its ${budgetMs} ms budget; its body settled within the ${opts.drainMs} ms drain, so later cases start normally.`
-        : `E_TEST_CASE_BUDGET: ${opts.label} case exceeded its ${budgetMs} ms budget and its ${opts.drainMs} ms drain; its state stays reserved until its body settles.`
+        : `E_TEST_CASE_BUDGET: ${opts.label} case exceeded its ${budgetMs} ms budget and its ${opts.drainMs} ms drain; the next case waits for its body to settle.`
     );
   };
   return {
@@ -120,6 +145,7 @@ export function createCaseDrain(opts: {
     run,
     bunTimeoutMs,
     reservedBy: () => reservation?.name,
+    awaitUnreserved,
     requireUnreserved,
   };
 }

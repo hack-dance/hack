@@ -41,7 +41,7 @@ test("a case still running past its drain reserves shared state only until its b
   await expect(
     cases.run("hung", () => release.promise, BUDGET_MS)
   ).rejects.toThrow(
-    /^E_TEST_CASE_BUDGET: Fixture case exceeded .*stays reserved/
+    /^E_TEST_CASE_BUDGET: Fixture case exceeded .*the next case waits/
   );
   expect(cases.reservedBy()).toBe("hung");
   expect(() => cases.requireUnreserved()).toThrow(
@@ -101,4 +101,52 @@ test("the Bun timeout covers the budget, the drain and the margin", () => {
   expect(cases.bunTimeoutMs(BUDGET_MS)).toBe(
     BUDGET_MS + DRAIN_MS + CASE_DRAIN_BUN_MARGIN_MS
   );
+});
+
+test("the next case waits for a reserving body and starts once it settles", async () => {
+  const cases = createCaseDrain({ label: "Fixture", drainMs: DRAIN_MS });
+  const release = Promise.withResolvers<void>();
+  await expect(
+    cases.run("slow", () => release.promise, BUDGET_MS)
+  ).rejects.toThrow(/^E_TEST_CASE_BUDGET/);
+  setTimeout(() => release.resolve(), 50);
+  await cases.awaitUnreserved(DRAIN_MS);
+  expect(cases.reservedBy()).toBeUndefined();
+  let ran = false;
+  await cases.run(
+    "next",
+    () => {
+      ran = true;
+    },
+    BUDGET_MS
+  );
+  expect(ran).toBe(true);
+});
+
+test("after one wait runs out, later cases refuse at once until the body settles", async () => {
+  const cases = createCaseDrain({ label: "Fixture", drainMs: DRAIN_MS });
+  const release = Promise.withResolvers<void>();
+  await expect(
+    cases.run("hung", () => release.promise, BUDGET_MS)
+  ).rejects.toThrow(/^E_TEST_CASE_BUDGET/);
+  const started = performance.now();
+  await expect(cases.awaitUnreserved(BUDGET_MS)).rejects.toThrow(
+    /^E_TEST_CASE_RESERVED: Fixture case "hung"/
+  );
+  expect(performance.now() - started).toBeGreaterThanOrEqual(BUDGET_MS - 5);
+  const again = performance.now();
+  await expect(cases.awaitUnreserved(DRAIN_MS)).rejects.toThrow(
+    /^E_TEST_CASE_RESERVED/
+  );
+  expect(performance.now() - again).toBeLessThan(BUDGET_MS);
+  release.resolve();
+  await Bun.sleep(0);
+  await cases.awaitUnreserved(DRAIN_MS);
+  expect(cases.reservedBy()).toBeUndefined();
+});
+
+test("awaiting with no reservation returns at once", async () => {
+  const cases = createCaseDrain({ label: "Fixture", drainMs: DRAIN_MS });
+  await cases.awaitUnreserved(DRAIN_MS);
+  expect(cases.reservedBy()).toBeUndefined();
 });

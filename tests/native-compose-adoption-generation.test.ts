@@ -92,10 +92,19 @@ import {
 /** Caller deadline for one owner operation in a case that is not about the deadline. */
 const OPERATION_DEADLINE_MS = testBudgetMs(4000);
 /**
- * Time a case body that overran its budget gets to settle. Such a body is
- * normally inside one owner operation, which ends by its own caller deadline.
+ * Time a case body that overran its budget gets to settle inside its own case:
+ * one caller deadline plus slack. A body with several owner operations left
+ * can need longer on a loaded host; the next case then waits for it.
  */
 const CASE_DRAIN_MS = OPERATION_DEADLINE_MS + testBudgetMs(250);
+/**
+ * How long the next case's `beforeEach` waits for a body still running after
+ * its budget and drain, outside that case's own timeout: one more case
+ * ceiling. The overrunning case has already failed by name by then.
+ */
+const CASE_RESERVATION_WAIT_MS = CASE_TIMEOUT_CEILING_MS;
+/** `beforeEach` timeout: the reservation wait plus the fixture setup. */
+const BEFORE_EACH_TIMEOUT_MS = CASE_RESERVATION_WAIT_MS + testBudgetMs(500);
 /**
  * Every case shares this file's roots, stub engine and environment, and Bun's
  * timeout does not cancel a body, so cases run under the drain guard: an
@@ -284,8 +293,8 @@ const FILE_ENV = Object.freeze({
 });
 beforeEach(async () => {
   // A body still running past its budget and drain owns the shared roots,
-  // stub engine and environment. Do not recycle them under it.
-  cases.requireUnreserved();
+  // stub engine and environment. Wait for it rather than recycling them.
+  await cases.awaitUnreserved(CASE_RESERVATION_WAIT_MS);
   process.env.HACK_RUNTIME_BACKEND = "compose";
   // Public dispatch (`tryLegacyComposeAdoptedCommand`) takes its caller
   // deadline from the Compose startup budget, 90 s by default. No case here
@@ -438,7 +447,7 @@ if (fixture.mode === "inventory-change" && kind === "container" && action === "l
   process.env.PATH = root;
   await mkdir(join(projectRoot, ".git"));
   await save();
-});
+}, BEFORE_EACH_TIMEOUT_MS);
 afterEach(async () => {
   if (cases.reservedBy() !== undefined) {
     // The body still runs and owns this root and environment; keep both.

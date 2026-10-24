@@ -147,7 +147,7 @@ test.each([
     );
   }
   // The long spelling still parses, so the CLI can name it as not valid.
-  expect(parse([name, "--follow"]).values).toMatchObject({ follow: true });
+  expect(parse([name, "--follow"]).values).toEqual({ follow: true });
 });
 
 test("config adopt --rollback stays boolean; setup migrate --rollback-manifest takes a value", () => {

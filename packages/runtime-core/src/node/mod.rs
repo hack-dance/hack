@@ -48,14 +48,34 @@ pub(crate) fn private_directory(path: &Path, create: bool) -> Result<()> {
 }
 
 pub(crate) fn private_file(path: &Path, create: bool) -> Result<File> {
-    let file = OpenOptions::new()
+    checked_private_file(open_private_file(path, create).map_err(error)?)
+}
+
+/// Validates a file that exists at open time; a path absent at open time is `None`.
+///
+/// SQLite deletes its rollback journal at each commit, so a live writer may remove
+/// it between any existence check and this open. Absence is decided by the open
+/// itself, never by an earlier `stat`. `O_NOFOLLOW` still refuses a symlink, dangling
+/// or not, with an error rather than `None`.
+pub(crate) fn existing_private_file(path: &Path) -> Result<Option<File>> {
+    match open_private_file(path, false) {
+        Ok(file) => checked_private_file(file).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(error(e)),
+    }
+}
+
+fn open_private_file(path: &Path, create: bool) -> std::io::Result<File> {
+    OpenOptions::new()
         .read(true)
         .write(true)
         .create(create)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
-        .map_err(error)?;
+}
+
+fn checked_private_file(file: File) -> Result<File> {
     let m = file.metadata().map_err(error)?;
     if !m.is_file()
         || m.nlink() != 1
@@ -80,5 +100,39 @@ pub(crate) fn try_lock(path: &Path) -> Result<Option<File>> {
         Ok(None)
     } else {
         Err(error(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_private_file_treats_only_absence_at_open_as_absent() {
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hkl-node-private",
+        );
+        let journal = root.join("journal.sqlite-journal");
+        // A rollback journal that SQLite already deleted is simply absent.
+        assert!(existing_private_file(&journal).unwrap().is_none());
+        std::fs::write(&journal, b"").unwrap();
+        std::fs::set_permissions(
+            &journal,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .unwrap();
+        assert!(existing_private_file(&journal).unwrap().is_some());
+        std::fs::set_permissions(
+            &journal,
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .unwrap();
+        assert!(existing_private_file(&journal).is_err());
+        std::fs::remove_file(&journal).unwrap();
+        // Aliases still refuse, including a dangling symlink whose target is absent.
+        std::os::unix::fs::symlink(root.join("missing"), &journal).unwrap();
+        assert!(existing_private_file(&journal).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

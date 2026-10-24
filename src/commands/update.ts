@@ -7,6 +7,7 @@ import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir } from "../lib/fs.ts";
+import { canPrompt } from "../lib/interactivity.ts";
 import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
@@ -185,7 +186,9 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
 
   const wantsInstall = await confirmInstall({
     yes: args.options.yes === true,
-    isTty: process.stdout.isTTY,
+    // canPrompt() covers stdin and stdout TTYs plus the explicit opt-outs; a
+    // piped stdin alone would otherwise spin in the clack prompt (HACK-1385).
+    isTty: canPrompt(),
     prompt: `${announce}. Install now?`,
   });
   if (!wantsInstall.ok) {

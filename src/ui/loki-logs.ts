@@ -408,10 +408,6 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
     }
   };
 
-  process.once("SIGINT", () => {
-    stop();
-  });
-
   ws.addEventListener("error", () => {
     exitCode = 1;
     if (opts.json && opts.streamContext) {
@@ -485,7 +481,7 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
     }
   });
 
-  await new Promise<void>((resolve) => {
+  const closedSocket = new Promise<void>((resolve) => {
     ws.addEventListener("close", () => {
       closed = true;
       clearNoEntriesTimer();
@@ -493,16 +489,27 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
     });
   });
 
-  if (opts.json && opts.streamContext) {
-    writeLogStreamEvent({
-      event: buildLogStreamEndEvent({
-        context: opts.streamContext,
-        reason: exitCode === 0 ? "closed" : "error",
-      }),
-    });
+  // Installed only while the tail is open and removed on every exit path. A
+  // `once` listener that never fires would otherwise outlive the follow and
+  // the next SIGINT in the process would run a stale stop (HACK-1392).
+  const onSigInt = () => {
+    stop();
+  };
+  process.once("SIGINT", onSigInt);
+  try {
+    await closedSocket;
+    if (opts.json && opts.streamContext) {
+      writeLogStreamEvent({
+        event: buildLogStreamEndEvent({
+          context: opts.streamContext,
+          reason: exitCode === 0 ? "closed" : "error",
+        }),
+      });
+    }
+    return exitCode;
+  } finally {
+    process.off("SIGINT", onSigInt);
   }
-
-  return exitCode;
 }
 
 function safeJsonParse(text: string): unknown {

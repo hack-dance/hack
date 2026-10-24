@@ -61,7 +61,7 @@ import {
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import {
-  ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+  adoptedComposeEnvOverrideNextStep,
   composeEnvAtRestRepairs,
   describeComposeEnvAtRest,
   inspectComposeEnvAtRest,
@@ -119,10 +119,7 @@ import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
-import {
-  confirmSafe,
-  isExplicitlyNonInteractive,
-} from "../lib/interactivity.ts";
+import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
@@ -4189,7 +4186,7 @@ async function maybeRemovePlaintextComposeEnvOverride(opts: {
   const repairs = composeEnvAtRestRepairs(report);
   if (report.adoptionBound) {
     note(
-      `Kept ${file}: a saved 'hack config adopt' generation pins it, and removing it would break the adoption (values omitted). ${ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP}`,
+      `Kept ${file}: a saved 'hack config adopt' generation pins it, and removing it would break the adoption (values omitted). ${adoptedComposeEnvOverrideNextStep(report)}`,
       "compose env at rest"
     );
   }
@@ -4347,7 +4344,7 @@ async function doctorConfirm(opts: {
     initialValue: opts.initialValue,
     nonInteractive: opts.destructive ? "decline" : "accept-default",
   });
-  if (!ok && opts.destructive && isExplicitlyNonInteractive()) {
+  if (!ok && opts.destructive && !canPrompt()) {
     noteSkippedDoctorFixStep({ what: firstLine(opts.message) });
   }
   return ok;

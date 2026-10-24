@@ -62,17 +62,29 @@ How it is maintained:
   initialized), `hack doctor` reports the "hack gitignore" check as a warning,
   and `hack doctor --fix` creates the file, or restores its managed block,
   as its own step. Commit the result so fresh clones and worktrees get the
-  rules. `hack init` does not repair an existing project. Hack never writes
+  rules. `hack init` does not repair an existing project unless you confirm
+  overwriting its scaffold files. Hack never writes
   through a symlinked `.hack/.gitignore` or `.hack/` (including a `.hack/`
   that links outside the repository); doctor reports that case and leaves it
-  alone.
-- a read-only `.hack/.gitignore` (for example mode 0444) is never replaced,
-  the same policy as for `info/exclude`. When it lacks the managed block,
-  `hack doctor` warns and names the fix (make it writable, then run
+  alone. Doctor asks git about the project root (the directory that holds
+  `.hack/`), not about `.hack/` itself. So when the project root is not a git
+  checkout, the check reports "Skipped (not a git checkout)" even if `.hack/`
+  links into another repository; Hack still refuses to write through that
+  link.
+- a read-only `.hack/.gitignore` is never replaced, the same policy as for
+  `info/exclude`. A file with no write permission bit (for example mode 0444)
+  is read-only for every user, root included; otherwise Hack asks the
+  operating system whether you may write it. Hack checks the mode bits first,
+  so an access control list (ACL) that grants you write access to a 0444 file
+  does not make it writable for Hack; add a write bit instead. When it lacks
+  the managed block, `hack doctor` warns and names the fix (make it writable,
+  then run
   `hack doctor --fix`), and `--fix` leaves it unchanged. `hack env set --local`
   and `hack env hydrate` still write the local layer, print the same warning
   on stderr (so `--json` output on stdout stays valid JSON), and leave the
-  file unchanged. A read-only file that already has the block is fine.
+  file unchanged. Interactive `hack init` that overwrites an existing scaffold
+  prints the same warning and leaves the file unchanged. A read-only file that
+  already has the block is fine.
 - runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
   into your working tree to set up ignores, so they leave `git status`
   unchanged. Before they write `.hack/.internal/` or `.hack/.branch/` files,
@@ -84,12 +96,20 @@ How it is maintained:
   clone and never committed. The update
   is best-effort: if git is unavailable, or `info/` or `info/exclude` is a
   symlink or not writable, Hack leaves it alone and the command still runs.
+  "Not writable" follows the `.hack/.gitignore` rule above: an `info/exclude`
+  with no write permission bit is left alone even for root or when an ACL
+  grants write.
 - never commit `.hack/.internal/`: it holds machine-local generated state that
   runtime commands rewrite. If it is tracked, `hack doctor --fix` untracks it.
 - the entries live inside a marked, hack-managed block; anything you add
   outside the markers is preserved on every rewrite
 - the root `.gitignore` still gets a `.hack.secret.key` entry when the secret
-  key is first generated (the key lives at the repo root, not under `.hack/`)
+  key is first generated (the key lives at the repo root, not under `.hack/`).
+  Hack writes that entry before the key, so if the entry cannot be written, no
+  key is created. Before a `--secret` set or hydrate uses an existing
+  checkout-local key that git does not ignore, Hack adds the entry; if it
+  cannot, or a later rule re-includes the key, the command is refused and
+  nothing is encrypted with that key
 - older repos that added `.hack/.internal/` to the root `.gitignore` keep
   working; the entries are equivalent and nothing is removed
 
@@ -249,8 +269,14 @@ A value that a service gets from the global scope uses one `HACK_ENV_*` referenc
 by every such service. A key that a service scope sets keeps a reference of its own for
 that service. The Compose client environment therefore grows with the distinct values,
 not with services times keys: twenty services that share one 64 KiB global value add
-about 64 KiB, not 1.25 MiB. The choice follows which scope sets each key, never the
-values, so the override file still holds no value. Compose also receives each global
+about 64 KiB, not 1.25 MiB. The choice follows which scope sets each key, so the
+override file still holds no value. One safety check does compare values: if a key that
+the resolved scopes call global has a value for a service that differs from the global
+value, that service keeps a reference of its own for the key, so the container still gets
+its own value. In that case the file shows that the service's value differs from the
+global value, but never the value itself or its length. With a normal env config the
+scopes and values come from the same resolution and always agree, so this check never
+changes the file. Compose also receives each global
 value under its own name for `${KEY}` interpolation in your Compose file, so a global
 value reaches the `docker compose` process twice.
 
@@ -634,6 +660,34 @@ hack env unset SERVICE_TOKEN --service api --env qa
 hack env unset API_BASE_URL --local
 ```
 
+### Concurrent writes to one env file
+
+Hack env commands that change an env file never silently lose another command's change.
+`hack env set`, `hack env add`, `hack env unset` and `hack env hydrate` each read the
+file, change it and replace it while holding that file's write lock,
+`.hack/.internal/<file name>.lock` (for example `.hack/.internal/hack.env.yaml.lock`).
+The same applies to the legacy `.hack/.env` files. So when several commands change
+different keys of the same file at once, every change is kept. A command
+that finds the lock held waits up to 10 seconds, then stops with a one-line message that
+names the file and says nothing was written; run it again. The lock is released when the
+command ends. If a command is killed while it holds the lock, the next command takes the
+lock over once it confirms that process has exited.
+
+`.hack/.internal/` is ignored by the managed `.hack/.gitignore`, so lock files never show
+in `git status`. If `.hack/.internal` is a symlink or not a directory, these commands
+refuse instead of creating the lock through it. If you cannot write the directory that
+holds the env file (for example a read-only checkout), no lock is taken: no command can
+replace the file there, so a command that changes nothing still succeeds and one that
+would change the file is refused as before.
+
+Programs that do not take this lock, such as an editor or Hack v4, are not kept out. For
+`hack.env*.yaml` files, `hack env set`, `add`, `unset` and `hydrate` also check that the
+file still has the contents they read just before replacing it. If it changed, the
+command writes nothing and stops with a retryable conflict ("The file changed while it
+was being replaced; nothing was written."), or, for `hydrate`, a `concurrent_write`
+refusal. That check narrows the window in which such a program's write can be
+overwritten, but cannot close it.
+
 ### Hydrate machine-local values in one step
 
 `hack env hydrate` imports many values into the machine-local layer at once, for example
@@ -701,15 +755,17 @@ Hydration refuses, without changing the layer, when:
   re-run with `--secret`, or remove the key with `hack env unset <key> --local` first
 - another `hack env hydrate` for the same project is running, or an interrupted one left
   a stale lock (see below)
-- the local layer changed between hydration's read and its rename, for example from a
-  concurrent `hack env set --local`
+- the local layer changed between hydration's read and its rename, by a program that
+  does not take the env file's write lock (for example an editor or Hack v4)
+- hydration waited 10 seconds for the env file's write lock without getting it
 
 Concurrent hydrations are serialized by `.hack/.internal/env-hydrate.lock`, which holds
 the owner's process ID. A hydration that is killed (for example with SIGKILL) cannot
 remove it; the next hydration then reports the stale lock and its path instead of taking
 it over. Remove the file once no hydration is running. `hack env set --local` does not
-take this lock. Hydration checks the layer again just before its rename, which narrows
-the window in which such a write could be overwritten but cannot close it.
+take this lock, but hydration also holds the local file's write lock (see
+[Concurrent writes to one env file](#concurrent-writes-to-one-env-file)), so a
+concurrent `hack env set --local` waits for the hydration and both changes are kept.
 
 Materialize a compatibility `.hack/.env`:
 
@@ -870,6 +926,7 @@ it cannot spell portably as `<unprintable-path>/.hack.secret.key`.
 | `env-key-wrong-owner` | warn | the file is not owned by the current user |
 | `env-key-wrong-length` | warn | shorter than the 43-character base64url form of a 256-bit key, or empty |
 | `env-key-low-entropy` | warn | long enough but repetitive (estimated under 128 bits) |
+| `env-key-unignored` | warn | the checkout-local key is not ignored by git, so `git status` offers it for commit; suggests adding it to the root `.gitignore` |
 | `env-key-symlink` | error | the key path is a symlink; Hack refuses symlinked keys |
 | `env-key-not-regular` | error | the key path is a directory or another non-file entry |
 | `env-key-unreadable` | error | unreadable, oversized or not UTF-8 |

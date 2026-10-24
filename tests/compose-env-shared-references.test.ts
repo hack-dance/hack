@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { YAML } from "bun";
 import {
   classifyComposeEnvOverrideText,
@@ -8,6 +11,10 @@ import {
   renderComposeEnvReferenceOverride,
   withoutComposeEnvReferences,
 } from "../src/lib/compose-managed-env.ts";
+import {
+  resolveProjectEnvConfig,
+  setProjectEnvValue,
+} from "../src/lib/project-env-config.ts";
 
 /**
  * HACK-1317: values a service gets from the global scope share one Compose
@@ -216,4 +223,90 @@ test("the shared name never equals a per-service name, even for a service named 
   expect(composeEnvGlobalReferenceName({ key: "a.b" })).toMatch(
     /^HACK_ENV_[0-9A-F]{12}$/
   );
+});
+
+test("with metadata and values from one resolution the value guard never fires, so the text depends only on scopes", async () => {
+  // docs/env.md: scopes and values come from the same traversal, so a key
+  // whose winning scope is global has the global value. Layered default and
+  // local files, with service overrides in both, exercise the traversal.
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-env-shared-guard-"))
+  );
+  try {
+    const projectDir = join(root, ".hack");
+    await mkdir(projectDir);
+    const set = async (opts: {
+      readonly scope: string;
+      readonly key: string;
+      readonly tag: string;
+      readonly local?: boolean;
+    }) =>
+      await setProjectEnvValue({
+        projectRoot: root,
+        projectDir,
+        envName: null,
+        scope: opts.scope,
+        key: opts.key,
+        value: `${CANARY}-${opts.tag}`,
+        secret: false,
+        local: opts.local,
+      });
+    await set({ scope: "global", key: "SHARED", tag: "default-global" });
+    await set({ scope: "global", key: "LAYERED", tag: "default-global" });
+    await set({ scope: "web", key: "LAYERED", tag: "default-web" });
+    await set({
+      scope: "global",
+      key: "LAYERED",
+      tag: "local-global",
+      local: true,
+    });
+    await set({
+      scope: "worker",
+      key: "SHARED",
+      tag: "local-worker",
+      local: true,
+    });
+    const resolved = await resolveProjectEnvConfig({
+      projectRoot: root,
+      projectDir,
+      serviceNames: ["web", "worker"],
+    });
+    if (!resolved) {
+      throw new Error("expected a resolved env config");
+    }
+    const scopeOf = (service: string, key: string) =>
+      resolved.effectiveMetadata[service]?.[key]?.scope;
+    // Both scope kinds occur, so the check below is not vacuous. The local
+    // global value is a later layer than the default web value, so it wins
+    // for web too, with scope global.
+    expect(scopeOf("web", "LAYERED")).toBe("global");
+    expect(scopeOf("worker", "LAYERED")).toBe("global");
+    expect(scopeOf("worker", "SHARED")).toBe("worker");
+    expect(scopeOf("web", "SHARED")).toBe("global");
+    for (const service of ["web", "worker"]) {
+      for (const [key, value] of Object.entries(
+        resolved.serviceEnv[service] ?? {}
+      )) {
+        if (scopeOf(service, key) === "global") {
+          // A flag, so a failure never prints a value.
+          expect(value === resolved.globalEnv[key]).toBe(true);
+        }
+      }
+    }
+    const rendered = renderComposeEnvReferenceOverride({
+      targetServices: ["web", "worker"],
+      globalEnv: resolved.globalEnv,
+      serviceEnv: resolved.serviceEnv,
+      effectiveScopes: resolved.effectiveMetadata,
+    });
+    expect(Object.keys(rendered?.env ?? {}).sort()).toEqual(
+      [
+        composeEnvGlobalReferenceName({ key: "LAYERED" }),
+        composeEnvGlobalReferenceName({ key: "SHARED" }),
+        composeEnvReferenceName({ service: "worker", key: "SHARED" }),
+      ].sort()
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

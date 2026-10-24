@@ -663,7 +663,8 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   // `push --receive-pack`, and `!` alias values (`git config alias.x '!cmd'`).
   // Git accepts abbreviated long options (`--upl=cmd`) and a value attached
   // to a short option (`-u/path/cmd`). A dashed builtin (`git-clone`,
-  // `/usr/lib/git-core/git-config`) is read as `git <sub>`.
+  // `/usr/lib/git-core/git-config`) is read as `git <sub>`, and a plumbing
+  // helper (`git-bisect--helper`, `git submodule--helper`) as its porcelain.
   git: evaluator({
     inline: [
       "-c",
@@ -851,12 +852,32 @@ function programName(arg: string): string {
 
 /** A dashed Git builtin (`git-clone`) and its subcommand (`clone`). */
 const DASHED_GIT = /^git-(.+)$/;
+/**
+ * A Git plumbing helper subcommand (`bisect--helper`, `submodule--helper`)
+ * and the porcelain subcommand it implements (`bisect`, `submodule`).
+ */
+const GIT_HELPER = /^([a-z0-9][a-z0-9-]*?)--helper$/i;
+
+/**
+ * A Git argument with a `<sub>--helper` subcommand read as its porcelain
+ * `<sub>`, so `git bisect--helper --bisect-run cmd` meets the `bisect` rule
+ * and `submodule--helper foreach` the `foreach` rule. Any other argument is
+ * unchanged. A matching argument starts with a letter or digit and holds no
+ * `=` or `!`, so no inline flag, word or `!` value is lost by the rewrite.
+ */
+function gitSubcommand(arg: string): string {
+  const helper = GIT_HELPER.exec(arg);
+  return helper === null ? arg : (helper[1] ?? arg).toLowerCase();
+}
 
 /**
  * The evaluator table key for a program name and the arguments it reads:
  * a dashed Git builtin (`git-clone -u cmd url`) is `git` given its
  * subcommand first (`git clone -u cmd url`), so the subcommand-scoped and
- * `!` alias rules apply to it as well.
+ * `!` alias rules apply to it as well. A dashed plumbing helper
+ * (`git-bisect--helper`, `/usr/lib/git-core/git-submodule--helper`) is
+ * `git` given its porcelain subcommand (`git bisect`, `git submodule`), and
+ * so is a `<sub>--helper` argument to `git` itself.
  */
 function programArgs(opts: {
   readonly name: string;
@@ -864,9 +885,14 @@ function programArgs(opts: {
 }): { readonly key: string; readonly rest: readonly string[] } {
   const dashed = DASHED_GIT.exec(opts.name);
   if (dashed === null) {
-    return { key: opts.name, rest: opts.rest };
+    return opts.name === "git"
+      ? { key: "git", rest: opts.rest.map(gitSubcommand) }
+      : { key: opts.name, rest: opts.rest };
   }
-  return { key: "git", rest: [dashed[1] ?? "", ...opts.rest] };
+  return {
+    key: "git",
+    rest: [gitSubcommand(dashed[1] ?? ""), ...opts.rest.map(gitSubcommand)],
+  };
 }
 
 /**

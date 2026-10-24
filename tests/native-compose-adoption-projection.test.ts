@@ -202,6 +202,53 @@ test("real canonical legacy writers produce exactly the privately qualified frag
   expect(JSON.stringify(await projection.resolve())).toBe("{}");
 });
 
+test("a generation saved with per-service references (before shared global references) still resolves", async () => {
+  await layer();
+  await generated();
+  // The writer before HACK-1317 gave every service its own reference, even
+  // for global values. A generation an earlier version saved over that file
+  // must keep loading after the upgrade.
+  const projection = {
+    targetServices: ["web", "worker"],
+    globalEnv: { PRIVATE: CANARY, EMPTY: "" },
+    serviceEnv: {
+      web: { PRIVATE: CANARY, EMPTY: "" },
+      worker: { PRIVATE: CANARY, EMPTY: "" },
+    },
+  };
+  const perService = renderComposeEnvReferenceOverride(projection);
+  const fromGlobal = {
+    PRIVATE: { scope: "global" },
+    EMPTY: { scope: "global" },
+  };
+  const shared = renderComposeEnvReferenceOverride({
+    ...projection,
+    effectiveScopes: { web: fromGlobal, worker: fromGlobal },
+  });
+  if (!(perService && shared)) {
+    throw new Error("Expected reference projections");
+  }
+  // The two forms differ, so this pins the per-service form specifically.
+  expect(perService.text === shared.text).toBe(false);
+  await writeFile(
+    join(root, ".hack/.internal/compose.env.override.yml"),
+    perService.text
+  );
+  const resolved = await (
+    await LegacyComposeAdoptionProjection.acquire({ source: await source() })
+  ).resolve();
+  // The hash probe gets the per-service names and values that file needs.
+  // Compared by flags only, so a failure never prints a value.
+  expect(Object.keys(resolved.composeEnv).sort()).toEqual(
+    Object.keys(perService.env).sort()
+  );
+  expect(
+    Object.entries(perService.env).every(
+      ([name, value]) => resolved.composeEnv[name] === value
+    )
+  ).toBe(true);
+});
+
 test("reference-form generated env still refuses a dropped managed key", async () => {
   await layer();
   await generated();

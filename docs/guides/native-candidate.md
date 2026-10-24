@@ -118,9 +118,15 @@ with your own Hack home and existing global routing services. It needs no
 `HACK_NATIVE_HOME` and removes the native selectors. Other values refuse with exit
 code 64. The [candidate installer guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends)
 describes Compose testing and its shared-state limits: run stable `hack global up`,
-then stable `hack daemon stop`, confirm `pgrep -fl "hack daemon start"` prints
-nothing, and run no stable `hack` command while the candidate uses your Hack home.
-Stable `hack global up` (v4.2.0) starts a stopped `hackd` again. Do not commit the
+then any stable `hack doctor` or `hack doctor --fix`, then stable `hack daemon stop`,
+confirm `pgrep -fl "hack daemon start"` prints nothing, and run no stable `hack`
+command while the candidate uses your Hack home. Stable `hack global up` (v4.2.0)
+starts a stopped `hackd` again, and so does stable `hack doctor --fix` (it asks
+first only in a terminal). If the check lists a process, the guide gives the
+launchd remedy. The entrypoint turns off daemon autostart in newer builds, so the
+candidate does not start the stable `hackd` on its own: a candidate
+`hack doctor --fix` skips its `hackd` repair without asking and prints the
+command to run yourself, which runs the stable CLI. Do not commit the
 project's generated `.hack/.internal/` directory; newer generators rewrite files
 such as `compose.override.yml`. The entrypoint preserves arguments, exit codes and
 signals through `exec`, and never replaces the installed `hack`. Project-specific
@@ -184,16 +190,23 @@ Compose backend. Native support for them is planned after v5.
 | Compose feature | Kept on the Compose backend when |
 | --- | --- |
 | External network | A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the `HACK_NATIVE_ADAPTATION` selection (see [Frontend integration status](#frontend-integration-status)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
-| Reserved ownership label | A service, network or volume label key starts with `com.docker.compose.`, `io.hack-local.` or `io.hack.native-config.`. Compose, the native runtime and native-config Compose use these labels to prove which resources they own. |
+| External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
+| Reserved ownership label | A service, network or volume label key starts with `com.docker.compose.`, `io.hack-local.`, `io.hack.native-config.`, `io.hack.native-file.` or `io.hack.storage-witness.`. Compose, the native runtime and native-config Compose use these labels to prove which resources they own. |
 | Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. |
-| Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64 only. |
+| Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64 only. A missing or `null` `platform` is unset and passes. |
 
 Native `hack up` and `hack restart` check for these features after selecting the
 project and before branch, environment, lifecycle, storage or runtime work. They
 refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and one line that names each feature
-found, without network names, label keys, paths or platform values. Nothing is
-started, stopped or written. Every service is checked, including services outside
-the selected profiles.
+found, without network or volume names, label keys, paths or platform values.
+Nothing is started, stopped or written. Every service is checked, including
+services outside the selected profiles.
+
+The check reads only `.hack/docker-compose.yml`, as native start does. It does not
+merge Compose override files, follow `extends` or `include`, or read environment
+defaults such as `DOCKER_DEFAULT_PLATFORM`: a platform counts only when a service
+sets its `platform` field. The native runtime's own review reports `extends` and
+`include` as unsupported fields.
 
 The check applies the explicit `HACK_NATIVE_ADAPTATION` selection first, as native
 start does. An unchanged Compose file whose external network is listed in
@@ -221,10 +234,10 @@ authored native format.
 
 `hack doctor` reports the same features for the current project in its
 `compose backend features` check. With `--json`, the check's `composeBackend.features`
-lists the closed names `external_network`, `reserved_label`, `unsupported_build`
-and `foreign_platform`. On the native backend a found feature is a warning; on
-the Compose backend it is informational. Native doctor applies the same
-`HACK_NATIVE_ADAPTATION` selection before it reports.
+lists the closed names `external_network`, `external_volume`, `reserved_label`,
+`unsupported_build` and `foreign_platform`. On the native backend a found feature
+is a warning; on the Compose backend it is informational. Native doctor applies
+the same `HACK_NATIVE_ADAPTATION` selection before it reports.
 
 Native `up` and `restart` also stay in the foreground in every project:
 `--detach` refuses with one `E_USAGE` line. Run `hack up` in its own terminal and
@@ -876,7 +889,12 @@ are optional; when given they must equal the selection recorded at startup
 recorded selectors, refuses with `E_USAGE` before any runtime request. An empty
 value (`--env ""`, `--profile ""`, or one that is only spaces or commas) also
 refuses with `E_USAGE`: it does not mean "inherit" or an empty selection. Omit
-the option to inherit. `run` never restarts the project to change its selection.
+the option to inherit. A profile list is empty only when every entry is, so
+`--profile "web,"` asks for `web`. On the native backend the empty check runs
+first, before the project is selected, so an authored `hack.project.json`
+project refuses an empty value with the same `E_USAGE` line rather than its
+`E_NATIVE_PROJECT_UNSUPPORTED` refusal of any `--env` or `--profile`.
+`run` never restarts the project to change its selection.
 Services with no managed environment values also support `run`; they keep the
 admitted image's environment without creating a private environment mount or
 launcher. The one-off request still carries an explicit empty, identity-bound

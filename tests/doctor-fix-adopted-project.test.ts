@@ -7,6 +7,7 @@ import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { inspectLegacyComposeAdoptionSelection } from "../src/lib/native-compose-adoption-marker.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import {
+  leaveRetainedSourceBindOperationPending,
   retainedSourceBindFixture,
   SOURCE_BIND_CANARY,
 } from "./helpers/retained-source-bind-adoption.ts";
@@ -208,6 +209,90 @@ for (const testCase of CASES) {
   }, 120_000);
 }
 
+test("doctor --fix with a pending adoption leaves the pending operation for explicit recovery and completes the global steps (HACK-1311)", async () => {
+  // A real Git checkout with a committed generated file, as in the cases above.
+  await rm(join(h.root, ".git"), { recursive: true });
+  git(["init", "-q"]);
+  const trackedPath = join(h.root, ".hack/.env.state.json");
+  await writeFile(trackedPath, "{}\n", { mode: 0o600 });
+  git(["add", "-f", ".hack/.env.state.json"]);
+  const store = await h.store();
+  try {
+    const generation = await store.prepare({ binary: h.compiler });
+    await store.publish({ generation, binary: h.compiler });
+  } finally {
+    await store.close();
+  }
+  await leaveRetainedSourceBindOperationPending(h);
+  expect(
+    await inspectLegacyComposeAdoptionSelection({ projectRoot: h.root })
+  ).toBe("pending");
+  const receipt = await readFile(receiptPath(), "utf8");
+  const engineCommands = (await h.commands()).length;
+
+  const code = await runDoctorFix();
+
+  const notes = noteCalls.join("\n");
+  expect(notes).not.toContain("E_NATIVE_PROJECT");
+  expect(notes).not.toContain(SOURCE_BIND_CANARY);
+  // The pending project check is a warning, so doctor exits 0.
+  expect(code).toBe(0);
+  expect(notes).toContain(
+    "Leave the adopted Compose project's inputs, retained containers and adoption state to 'hack config adopt'; --fix changes none of them."
+  );
+  expect(notes).toContain(
+    "Removed 1 path(s) from the git index. Left .hack/.gitignore unchanged: an adopted Compose project's .hack/ belongs to 'hack config adopt'."
+  );
+  expect(notes).toContain(
+    "Skip env migration because an adopted Compose project's env config belongs to 'hack config adopt'."
+  );
+  // Every step ran: the closing note follows the last one.
+  expect(noteCalls.at(-1)).toBe("Re-run: hack doctor");
+  expect(git(["ls-files"])).toBe("");
+  expect(await lstat(join(h.root, ".hack/.gitignore")).catch(() => null)).toBe(
+    null
+  );
+
+  // The pending operation is left for explicit recovery: the journal is
+  // unchanged, and no retained container or project command ran.
+  expect(
+    await inspectLegacyComposeAdoptionSelection({ projectRoot: h.root })
+  ).toBe("pending");
+  expect(await readFile(receiptPath(), "utf8")).toBe(receipt);
+  expect((await h.commands()).length).toBe(engineCommands);
+  for (const call of runCalls) {
+    expect(call.join(" ")).not.toContain(h.root);
+  }
+}, 120_000);
+
+/** `runCli doctor --fix` in the fixture with a private HOME and the mocks on. */
+async function runDoctorFix(): Promise<number> {
+  process.env.HOME = home;
+  process.env.HACK_HOME = join(home, "hack-home");
+  Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+  process.env.HACK_NO_INTERACTIVE = "1";
+  process.env.HACK_MUTAGEN_PATH = "/usr/local/bin/mutagen";
+  process.env.HACK_LOGGER = "console";
+  for (const mock of mocks) {
+    mock.activate();
+  }
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    return await runCli([
+      "doctor",
+      "--fix",
+      "--no-interactive",
+      "--migrate-env-config",
+      "--path",
+      h.root,
+    ]);
+  } finally {
+    for (const mock of mocks) {
+      mock.deactivate();
+    }
+  }
+}
+
 async function runAdoptedFixCase(testCase: (typeof CASES)[number]) {
   // A real Git checkout with a committed generated file.
   await rm(join(h.root, ".git"), { recursive: true });
@@ -230,27 +315,7 @@ async function runAdoptedFixCase(testCase: (typeof CASES)[number]) {
   const receipt = await readFile(receiptPath(), "utf8");
   const engineCommands = (await h.commands()).length;
 
-  process.env.HOME = home;
-  process.env.HACK_HOME = join(home, "hack-home");
-  Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
-  process.env.HACK_NO_INTERACTIVE = "1";
-  process.env.HACK_MUTAGEN_PATH = "/usr/local/bin/mutagen";
-  process.env.HACK_LOGGER = "console";
-  for (const mock of mocks) {
-    mock.activate();
-  }
-  const { runCli } = await import("../src/cli/run.ts");
-  const code = await runCli([
-    "doctor",
-    "--fix",
-    "--no-interactive",
-    "--migrate-env-config",
-    "--path",
-    h.root,
-  ]);
-  for (const mock of mocks) {
-    mock.deactivate();
-  }
+  const code = await runDoctorFix();
 
   const notes = noteCalls.join("\n");
   expect(notes).not.toContain("E_NATIVE_PROJECT");

@@ -19,18 +19,14 @@ struct ControlRoot {
     removed: bool,
 }
 impl ControlRoot {
-    fn temporary() -> Result<Self, CandidateError> {
-        Self::create(
-            fs::canonicalize("/tmp")
-                .map_err(state::io)?
-                .join(format!("hack-relay-live-{}", std::process::id())),
-        )
+    fn temporary(prefix: &str) -> Result<Self, CandidateError> {
+        Self::claim(crate::private_test_root(
+            &fs::canonicalize("/tmp").map_err(state::io)?,
+            prefix,
+        ))
     }
-    fn create(path: PathBuf) -> Result<Self, CandidateError> {
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .map_err(state::io)?;
+    /// Record the identity of a root that `crate::private_test_root` just created.
+    fn claim(path: PathBuf) -> Result<Self, CandidateError> {
         let metadata = fs::symlink_metadata(&path).map_err(state::io)?;
         Ok(Self {
             path,
@@ -88,7 +84,7 @@ impl Drop for ControlWorker {
 #[test]
 fn private_control_fixture_can_publish() -> Result<(), CandidateError> {
     use crate::provider::relay_owner::publication::ControlListener;
-    let mut root = ControlRoot::temporary()?;
+    let mut root = ControlRoot::temporary("hack-relay-live")?;
     let mut owner = RelayOwner::new(
         Context {
             runtime: [11; 16],
@@ -355,7 +351,7 @@ fn owned_graph_registration_live() -> Result<(), CandidateError> {
         other_guest.set_nonblocking(true).map_err(state::io)?;
         owner.admit(&unrelated.target, other_flow, Duration::from_secs(5))?;
         // A short private publication root avoids sockaddr_un length dependence.
-        let mut control_root = ControlRoot::temporary()?;
+        let mut control_root = ControlRoot::temporary("hack-relay-live")?;
         let control = ControlListener::bind(&control_root.path, &mut owner)?;
         let pin = control.endpoint();
         let stopping = Arc::new(AtomicBool::new(false));
@@ -511,11 +507,7 @@ fn owned_graph_registration_live() -> Result<(), CandidateError> {
                 "graph_relay_enrollment"
             );
             // A valid same-VM owner at another root is not this graph's enrolled owner.
-            let mut other_root = ControlRoot::create(
-                fs::canonicalize("/tmp")
-                    .map_err(state::io)?
-                    .join(format!("hack-relay-other-{}", std::process::id())),
-            )?;
+            let mut other_root = ControlRoot::temporary("hack-relay-other")?;
             let mut other_owner = RelayOwner::new(context, limits())?;
             let other_control = ControlListener::bind(&other_root.path, &mut other_owner)?;
             let other_pin = other_control.endpoint();

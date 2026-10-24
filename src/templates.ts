@@ -144,8 +144,9 @@ export function renderGlobalLoggingCompose(): string {
     "    image: grafana/alloy:v1.12.0",
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock",
+    `      - ${GLOBAL_ALLOY_DATA_VOLUME}:${GLOBAL_ALLOY_STORAGE_PATH}`,
     `      - ./${GLOBAL_ALLOY_FILENAME}:/etc/alloy/config.alloy:ro`,
-    "    command: run /etc/alloy/config.alloy",
+    `    command: run --storage.path=${GLOBAL_ALLOY_STORAGE_PATH} /etc/alloy/config.alloy`,
     "    networks:",
     `      - ${DEFAULT_LOGGING_NETWORK}`,
     "",
@@ -175,9 +176,30 @@ export function renderGlobalLoggingCompose(): string {
     "volumes:",
     "  loki-data:",
     "  grafana-data:",
+    `  ${GLOBAL_ALLOY_DATA_VOLUME}:`,
     "",
   ].join("\n");
 }
+
+/**
+ * Named volume that holds Alloy's component data, above all the
+ * `loki.source.docker` positions file (`positions.yml`). Without it the
+ * positions live in the container's writable layer, so every recreated Alloy
+ * container (`hack global down` then `hack global up`, or an image change)
+ * read every retained container log again and could resend entries Loki
+ * already held. `docker compose down` keeps named volumes;
+ * `hack global logs-reset` (`down -v`) removes it together with Loki's data.
+ */
+export const GLOBAL_ALLOY_DATA_VOLUME = "alloy-data";
+
+/**
+ * Alloy's `--storage.path` inside the container: the directory the official
+ * image creates for it and names in its default command. The image's default
+ * command is replaced to point at the mounted config, so the flag is repeated
+ * explicitly; without it Alloy falls back to `data-alloy/` under its working
+ * directory, outside the volume.
+ */
+export const GLOBAL_ALLOY_STORAGE_PATH = "/var/lib/alloy/data";
 
 // Back-compat alias (internal). Promtail has been replaced by Grafana Alloy.
 export function renderGlobalPromtailYaml(): string {
@@ -202,6 +224,15 @@ export const GLOBAL_ALLOY_DOCKER_STATUSES = [
   "exited",
 ] as const;
 
+/**
+ * Minimum level of Alloy's own log output. Alloy's container is itself a
+ * Compose service that Alloy ships to Loki, so info-level component logs (a
+ * "finished transferring logs" line on every log reopen, which repeats every
+ * 5 seconds for each kept exited container that never logged a line) would
+ * grow Loki without bound.
+ */
+export const GLOBAL_ALLOY_LOG_LEVEL = "warn";
+
 export function renderGlobalAlloyConfig(): string {
   // Docs:
   // - https://grafana.com/docs/alloy/latest/reference/components/discovery/discovery.docker/
@@ -214,11 +245,52 @@ export function renderGlobalAlloyConfig(): string {
   // service that started and exited between two polls was never tailed, so Loki
   // had nothing while `docker compose logs` still showed its output. Docker sets
   // `all=true` when a `status` filter is present, so exited containers are listed
-  // too and loki.source.docker reads their retained logs once (it restarts a
-  // tailer only while the container runs or finished after the last read). The
-  // poll interval is shortened so a container removed soon after it exits (for
-  // example `docker compose run --rm`) has a smaller window to be missed.
+  // too and loki.source.docker ships their retained logs. The poll interval is
+  // shortened so a container removed soon after it exits (for example
+  // `docker compose run --rm`) has a smaller window to be missed.
+  //
+  // Cost (Alloy v1.12.0, internal/component/loki/source/docker/runner.go):
+  // loki.source.docker calls ContainerInspect on every discovered target every
+  // 5s, running or exited, for as long as Docker keeps the container. It then
+  // reopens the log (one more inspect call and one logs call) when
+  // `res.State.Running || finished.Unix() >= t.target.Last()` and the log is
+  // not already open. `finished` is `State.FinishedAt` in whole seconds (0
+  // when unparsable). `Last()` is the wall-clock unix second at which Alloy
+  // last processed a line from the container (dockertarget/target.go stores
+  // `time.Now()` after each line); it starts at 0 when the target is created
+  // and is not kept in the positions file. A reopen asks Docker for lines
+  // `since` the position, a whole second that Docker includes, so it reads at
+  // least the container's last line again and moves `Last()` past `finished`.
+  // For an exited container:
+  // - one that never logged a line keeps `Last()` at 0 and is reopened every
+  //   5s for as long as Docker keeps it;
+  // - one whose last line Alloy read in or before the second it finished (it
+  //   logged and then exited while followed), or whose lines the positions
+  //   file already covers (after an Alloy restart), is reopened once, resends
+  //   its last logged second, and then stays closed (a second reopen happens
+  //   only when the first falls within the second the container finished);
+  // - one whose last line Alloy read in a later second than it finished in
+  //   is not reopened.
+  // Discovery exposes no container state or exit time, so the config cannot
+  // age kept containers out; removing them (`hack down`,
+  // `docker compose down`) ends the inspect calls. Each reopen also logs an
+  // info line ("finished transferring logs"); Alloy runs as a Compose service,
+  // so those lines would be shipped into Loki, one every 5s for each kept
+  // container that never logged. The `logging` block keeps Alloy's own output
+  // at warn and above.
+  //
+  // Read positions are written under `--storage.path`, which the logging
+  // compose maps to the GLOBAL_ALLOY_DATA_VOLUME volume, so a recreated Alloy
+  // container resumes after the last line it shipped instead of reading every
+  // retained log again. A position is a whole second and Docker's `since`
+  // includes that second, so lines from the last second Alloy read can be sent
+  // again.
   return [
+    "logging {",
+    `  level  = "${GLOBAL_ALLOY_LOG_LEVEL}"`,
+    '  format = "logfmt"',
+    "}",
+    "",
     'discovery.docker "local" {',
     '  host             = "unix:///var/run/docker.sock"',
     `  refresh_interval = "${GLOBAL_ALLOY_DOCKER_REFRESH_INTERVAL}"`,

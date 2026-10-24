@@ -9,16 +9,24 @@ import {
   isFzfAvailable,
   resetFzfPathCacheForTests,
 } from "../src/ui/fzf.ts";
+import { restoreEnv } from "./helpers/env.ts";
+
+const TOUCHED_ENV = ["HACK_FZF_PATH", "HACK_HOME", "HOME", "PATH"] as const;
 
 describe("fzf", () => {
-  const originalEnv = { ...process.env };
+  let savedEnv: Map<string, string | undefined> = new Map();
 
   beforeEach(() => {
+    // Edit the live process.env in place and restore only the keys these
+    // cases touch; replacing the object would detach it from Bun.env.
+    savedEnv = new Map(TOUCHED_ENV.map((key) => [key, process.env[key]]));
     resetFzfPathCacheForTests();
   });
 
   afterEach(() => {
-    process.env = { ...originalEnv };
+    for (const [key, value] of savedEnv) {
+      restoreEnv(key, value);
+    }
     resetFzfPathCacheForTests();
   });
 

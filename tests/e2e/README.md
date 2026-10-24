@@ -23,8 +23,10 @@ failed (nothing ran) or the launchd canary saw the real hackd plist change.
 
 ## CI tiering
 
-Only the `test` job (typecheck, lint, unit tests, build) is a required status
-check on `next` and `main`. `docker-e2e`, `Config compiler`, `Candidate core`,
+Only the `test` job is a required status check on `next` and `main`. It is the
+fan-in of four `test shard i/4` jobs, which run the unit test files in parallel.
+Shard 1 also runs typecheck, lint and the build. `test` passes only when every
+shard succeeded (`scripts/test-shard-plan.ts`). `docker-e2e`, `Config compiler`, `Candidate core`,
 `Runtime state models`, `secret-scan`, `runtime-images` and
 `linux-process-lifetime` run on every push and pull request but are optional
 checks: a red result is a signal to triage, not a merge block. "Registered in

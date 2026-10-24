@@ -18,6 +18,7 @@ import {
   resolveHackEnv,
   selectHackEnvValues,
 } from "../lib/hack-env.ts";
+import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
 import {
   defaultProjectSlugFromPath,
@@ -343,10 +344,25 @@ function buildSessionPickerOptions(opts: {
   return options;
 }
 
-async function promptAttachedWorkspaceAction(opts: {
+/**
+ * Asks whether to attach to a workspace that another client holds, or to
+ * create an isolated one. Without a TTY it refuses with
+ * `E_INTERACTIVE_REQUIRED` instead of entering the clack prompt, which cannot
+ * settle on a piped stdin (HACK-1385).
+ *
+ * Exported for the non-TTY regression test: in a spawned non-TTY CLI the
+ * picker refuses first, so this guard is exercised directly.
+ */
+export async function promptAttachedWorkspaceAction(opts: {
   readonly attachedWorkspaceName: string;
   readonly nextWorkspaceName: string;
 }): Promise<"attach" | "new" | null> {
+  if (!canPrompt()) {
+    requireInteractive({
+      what: `workspace '${opts.attachedWorkspaceName}' is attached elsewhere`,
+      hint: "Pass --new (optionally with --name <suffix>) to create an isolated workspace instead of attaching, or run this command in a terminal.",
+    });
+  }
   const action = await p.select({
     message: `Workspace '${opts.attachedWorkspaceName}' is attached elsewhere`,
     options: [
@@ -814,6 +830,13 @@ async function handleSessionPicker(): Promise<number> {
     );
     p.outro("");
     return 1;
+  }
+
+  if (!canPrompt()) {
+    requireInteractive({
+      what: "the workspace picker needs a selection",
+      hint: "Run `hack session list` to see workspaces and `hack session attach <name>` to attach to one.",
+    });
   }
 
   const selection = await p.select({

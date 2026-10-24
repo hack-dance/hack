@@ -148,8 +148,30 @@ impl Drop for Pool {
     }
 }
 
+/// Run one ignored fixture of this module alone in a child test process.
+///
+/// Inspection and migration first prove the pool's disks have no open handle. In the shared
+/// parallel test process, an unrelated test's pre-exec fork (`process::clean_command`) holds a
+/// copy of every descriptor open at the fork until it execs, so a disk this fixture just wrote
+/// or read can still show up to the host-wide `lsof` scan, which correctly refuses as
+/// `stop_uncertain` before the result under test. Every test that needs that proof to pass,
+/// to reach a later check or effect, runs isolated.
+fn isolated(child: &str) {
+    use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+    run_isolated(
+        &format!("provider::lifecycle::host_filesystem::tests::{child}"),
+        ISOLATED_HANG_GUARD,
+    );
+}
+
 #[test]
 fn migration_changes_only_devices_and_keeps_alias_graph_history_and_data() {
+    isolated("device_migration_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by migration_changes_only_devices_and_keeps_alias_graph_history_and_data"]
+fn device_migration_child() {
     let pool = Pool::new();
     let old = pool.receipt();
     let storage = fs::read(pool.data().join("storage.raw")).unwrap();
@@ -206,6 +228,12 @@ fn disk_and_share_changes_beyond_common_device_refuse_without_writes() {
 
 #[test]
 fn stale_owner_or_host_boot_selection_refuses() {
+    isolated("stale_selection_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by stale_owner_or_host_boot_selection_refuses"]
+fn stale_selection_child() {
     let mut pool = Pool::new();
     let selection = pool.selected();
     assert!(pool.apply(&"a".repeat(64)).is_err());
@@ -250,6 +278,12 @@ fn same_boot_live_reused_pid_and_unknown_identity_refuse() {
 
 #[test]
 fn held_operation_vm_lock_and_disk_handles_refuse() {
+    isolated("held_handles_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by held_operation_vm_lock_and_disk_handles_refuse"]
+fn held_handles_child() {
     for case in 0..3 {
         let pool = Pool::new();
         let selected = pool.selected();
@@ -281,6 +315,12 @@ fn held_operation_vm_lock_and_disk_handles_refuse() {
 
 #[test]
 fn pending_foreign_updates_and_prepared_pools_are_preserved() {
+    isolated("pending_updates_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by pending_foreign_updates_and_prepared_pools_are_preserved"]
+fn pending_updates_child() {
     for name in [
         "owner.pending",
         "network-update.json",
@@ -301,6 +341,12 @@ fn pending_foreign_updates_and_prepared_pools_are_preserved() {
 
 #[test]
 fn foreign_alias_and_source_substitution_refuse() {
+    isolated("foreign_alias_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by foreign_alias_and_source_substitution_refuse"]
+fn foreign_alias_child() {
     for case in 0..2 {
         let pool = Pool::new();
         let selected = pool.selected();
@@ -323,6 +369,12 @@ fn foreign_alias_and_source_substitution_refuse() {
 
 #[test]
 fn final_recheck_rejects_identity_change_before_publication() {
+    isolated("final_recheck_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by final_recheck_rejects_identity_change_before_publication"]
+fn final_recheck_child() {
     let pool = Pool::new();
     let selected = pool.selected();
     let before = pool.receipt();
@@ -343,6 +395,12 @@ fn final_recheck_rejects_identity_change_before_publication() {
 
 #[test]
 fn substituted_lock_paths_do_not_authorize_publication_on_an_old_descriptor() {
+    isolated("substituted_lock_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by substituted_lock_paths_do_not_authorize_publication_on_an_old_descriptor"]
+fn substituted_lock_child() {
     for name in ["operation.lock", "vm.lock"] {
         let pool = Pool::new();
         let selected = pool.selected();

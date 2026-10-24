@@ -11,6 +11,11 @@ import { HackCliError } from "./cli-result.ts";
 import { pathExists } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import { assertLegacyComposeAdoptionSelectionStable } from "./native-compose-adoption-marker.ts";
+import {
+  attachValueFreeDiagnostic,
+  readValueFreeDiagnostic,
+  valueFreeErrorDiagnostic,
+} from "./value-free-diagnostic.ts";
 
 export const NATIVE_PROJECT_FILENAME = "hack.project.json";
 type ProjectDirName =
@@ -55,6 +60,71 @@ export class ProjectInputSelectionError extends HackCliError {
     this.name = "ProjectInputSelectionError";
     this.code = code;
   }
+}
+
+const DEFAULT_DIAGNOSTIC = "ProjectInputAccessError";
+
+/**
+ * Stable, value-free refusal when a project input's presence cannot be
+ * checked (for example a file where `.dev` belongs, or a project directory the
+ * caller cannot search). Only ENOENT means absence, so the guard refuses
+ * rather than guessing. `access` classifies the fault without its OS message,
+ * which carries the absolute path and is therefore never kept.
+ *
+ * The fault itself is kept only as a value-free diagnostic: the class name and
+ * errno code of the underlying error (for example `Error:ENOTDIR`), never its
+ * message or path. It is a non-enumerable own property rather than `cause`,
+ * so envelopes, printed errors and serializers stay unchanged. Read it with
+ * {@link projectInputAccessDiagnostic}.
+ */
+export class ProjectInputAccessError extends HackCliError {
+  readonly access: "permission" | "unreadable";
+
+  constructor(
+    access: "permission" | "unreadable",
+    diagnostic: string = DEFAULT_DIAGNOSTIC
+  ) {
+    super({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Cannot inspect Hack project inputs. Check filesystem permissions and paths before retrying. Values omitted.",
+    });
+    this.name = "ProjectInputAccessError";
+    this.access = access;
+    attachValueFreeDiagnostic({
+      target: this,
+      diagnostic,
+      fallback: DEFAULT_DIAGNOSTIC,
+    });
+  }
+}
+
+/**
+ * The value-free diagnostic of a {@link ProjectInputAccessError} (for example
+ * `Error:EACCES`), for tests and debugging. Undefined for any other value.
+ */
+export function projectInputAccessDiagnostic(
+  error: unknown
+): string | undefined {
+  return error instanceof ProjectInputAccessError
+    ? readValueFreeDiagnostic(error)
+    : undefined;
+}
+
+/**
+ * The closed refusal for a fault other than ENOENT while checking whether a
+ * project input exists: `permission` for `EACCES`/`EPERM`, `unreadable` for
+ * any other fault, keeping only the fault's class/code diagnostic. Exported
+ * as a seam so faults a fixture cannot produce (such as `EPERM`) stay tested.
+ */
+export function projectInputAccessFault(
+  error: unknown
+): ProjectInputAccessError {
+  const code = isRecord(error) ? error.code : undefined;
+  return new ProjectInputAccessError(
+    code === "EACCES" || code === "EPERM" ? "permission" : "unreadable",
+    valueFreeErrorDiagnostic(error)
+  );
 }
 
 /**
@@ -191,9 +261,6 @@ async function inputPresent(path: string): Promise<boolean> {
     if (isRecord(error) && error.code === "ENOENT") {
       return false;
     }
-    throw new Error(
-      "Cannot inspect Hack project inputs. Check filesystem permissions and paths before retrying.",
-      { cause: error }
-    );
+    throw projectInputAccessFault(error);
   }
 }

@@ -165,7 +165,7 @@ mod tests {
     use std::{
         fs,
         io::{BufRead, BufReader},
-        net::{TcpListener, TcpStream},
+        net::TcpStream,
         os::{
             fd::AsRawFd,
             unix::{fs::PermissionsExt, net::UnixListener},
@@ -197,14 +197,13 @@ mod tests {
             let path = root.join("upstream");
             let upstream = UnixListener::bind(&path).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-            let port = TcpListener::bind("127.0.0.1:0")
-                .unwrap()
-                .local_addr()
-                .unwrap()
-                .port();
             let control = root.join("control");
+            // Port 0: the publisher binds a kernel-chosen port and reports it, so no released
+            // probe port is handed to it. A probe listener dropped here could still be held by
+            // an unrelated parallel test's pre-exec fork (`process::clean_command`), or taken
+            // by another test, and the publisher would exit 73 without readiness.
             let mut child = Command::new(concat!(env!("OUT_DIR"), "/stream-relay-host"))
-                .args(["--publish", &port.to_string()])
+                .args(["--publish", "0"])
                 .arg(path)
                 .args([TOKEN, "10000", "--control"])
                 .arg(&control)
@@ -227,14 +226,20 @@ mod tests {
             }
             let mut line = String::new();
             let read = BufReader::new(output).read_line(&mut line);
-            if read.is_err() || line != "ready\n" {
+            // "ready <canonical nonzero port>\n" is the port-0 readiness contract.
+            let port = line
+                .strip_prefix("ready ")
+                .and_then(|value| value.strip_suffix('\n'))
+                .filter(|value| !value.starts_with('0'))
+                .and_then(|value| value.parse::<u16>().ok());
+            let Some(port) = port.filter(|_| read.is_ok()) else {
                 // Preserve the natural failure status before forced cleanup; never retry.
                 let observed = child.try_wait().ok().flatten();
                 let _ = child.kill();
                 let reaped = child.wait().ok();
                 let _ = fs::remove_dir_all(&root);
                 panic!("publisher readiness missing: observed={observed:?}, reaped={reaped:?}");
-            }
+            };
             let process = identity::observe(child.id() as i32).unwrap();
             Self {
                 child,

@@ -31,6 +31,8 @@ const entrypoint = resolve("index.ts");
 const STACK_FRAME = /^\s+at /m;
 const SPAWN_TIMEOUT_MS = 60_000;
 const IMAGE = `sha256:${"e".repeat(64)}`;
+const RESERVED_LABEL =
+  "a label in a reserved ownership namespace (com.docker.compose.*, io.hack-local.*, io.hack.native-config.*, io.hack.native-file.* or io.hack.storage-witness.*)";
 const SELECTION =
   "this project runs on the Compose backend. Set HACK_RUNTIME_BACKEND=compose (hack-next and hack-v5 accept it too) and run the command again. Nothing was started or stopped.";
 
@@ -209,9 +211,42 @@ test(
           },
         },
       },
-      phrase:
-        "a label in a reserved ownership namespace (com.docker.compose.*, io.hack-local.* or io.hack.native-config.*)",
+      phrase: RESERVED_LABEL,
       secrets: ["borrowed-owner-token", "io.hack-local.owner"],
+    });
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "a storage witness ownership label refuses native up before any request or write",
+  async () => {
+    await expectComposeBackendRefusal({
+      compose: {
+        services: {
+          web: {
+            image: IMAGE,
+            labels: { "io.hack.storage-witness.owner": "borrowed-witness" },
+          },
+        },
+      },
+      phrase: RESERVED_LABEL,
+      secrets: ["borrowed-witness", "io.hack.storage-witness.owner"],
+    });
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "an external Compose volume refuses native up before any request or write",
+  async () => {
+    await expectComposeBackendRefusal({
+      compose: {
+        services: { web: { image: IMAGE, volumes: ["shared-data:/data"] } },
+        volumes: { "shared-data": { external: true } },
+      },
+      phrase: "an external Compose volume",
+      secrets: ["shared-data"],
     });
   },
   SPAWN_TIMEOUT_MS
@@ -262,10 +297,10 @@ test(
           api: { image: IMAGE, build: ".." },
         },
         networks: { edge: { external: { name: "edge" } } },
+        volumes: { cache: { external: true } },
       },
       env: {},
-      phrase:
-        "an external Compose network, a label in a reserved ownership namespace (com.docker.compose.*, io.hack-local.* or io.hack.native-config.*), a Compose build outside the basic context, dockerfile and target form and a service platform other than linux/arm64",
+      phrase: `an external Compose network, an external Compose volume, ${RESERVED_LABEL}, a Compose build outside the basic context, dockerfile and target form and a service platform other than linux/arm64`,
     });
   },
   SPAWN_TIMEOUT_MS
@@ -479,6 +514,7 @@ test(
     const f = await fixture({
       services: { web: { image: IMAGE, platform: "linux/amd64" } },
       networks: { "shared-dev-net": { external: true } },
+      volumes: { "shared-dev-data": { external: true } },
     });
     const result = await cli(f, ["doctor", "--json"], {});
     const envelope: unknown = JSON.parse(
@@ -492,14 +528,20 @@ test(
             id: "compose backend features",
             status: "warn",
             composeBackend: {
-              features: ["external_network", "foreign_platform"],
+              features: [
+                "external_network",
+                "external_volume",
+                "foreign_platform",
+              ],
             },
           }),
         ]),
       },
     });
     expect(result.output).toContain("HACK_RUNTIME_BACKEND=compose");
+    expect(result.output).toContain("an external Compose volume");
     expect(result.output).not.toContain("shared-dev-net");
+    expect(result.output).not.toContain("shared-dev-data");
     expect(result.output).not.toContain("linux/amd64");
   },
   SPAWN_TIMEOUT_MS
@@ -515,6 +557,63 @@ test(
       "E_USAGE: Native `hack up` runs in the foreground only, so --detach is not supported. Run `hack up` without --detach in its own terminal and keep it open; use `hack ps` and `hack logs` from another terminal, and press Ctrl-C to stop it."
     );
     expect(await f.calls()).toEqual([]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "a null service platform is unset, as in native review, and passes the check",
+  async () => {
+    const f = await fixture({
+      services: { web: { image: IMAGE, platform: null } },
+    });
+    const result = await cli(f, ["up"]);
+    expect(result.output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+    expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
+    // The check passed and native review admitted the null platform: native
+    // start reached its source preflight and then `runtime up`.
+    expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
+    const calls = await f.calls();
+    expect(calls).toEqual(
+      ["runtime check-project-share", "runtime up"].slice(0, calls.length)
+    );
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "control: the check does not follow extends or include into another file",
+  async () => {
+    for (const compose of [
+      {
+        services: {
+          web: {
+            image: IMAGE,
+            extends: { file: "base.yml", service: "amd64" },
+          },
+        },
+      },
+      { include: ["base.yml"], services: { web: { image: IMAGE } } },
+    ]) {
+      const f = await fixture(compose);
+      await writeFile(
+        join(f.project, ".hack", "base.yml"),
+        JSON.stringify({
+          services: { amd64: { image: IMAGE, platform: "linux/amd64" } },
+          networks: { edge: { external: true } },
+          volumes: { data: { external: true } },
+        })
+      );
+      const result = await cli(f, ["up"]);
+      // Only `.hack/docker-compose.yml` is classified, as native start reads
+      // it; the native runtime's own review owns `extends` and `include`.
+      expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
+      expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
+      const calls = await f.calls();
+      expect(calls).toEqual(
+        ["runtime check-project-share", "runtime up"].slice(0, calls.length)
+      );
+    }
   },
   SPAWN_TIMEOUT_MS
 );

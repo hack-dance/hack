@@ -295,12 +295,13 @@ mod tests {
     impl Fixture {
         fn new(label: &str) -> Self {
             let root = std::env::temp_dir().join(format!(
-                "hack-disk-template-{label}-{}-{}",
+                "hack-disk-template-{label}-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                crate::next_test_scratch()
             ));
             fs::create_dir(&root).unwrap();
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();

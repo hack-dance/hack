@@ -22,7 +22,10 @@ import {
   untrackGeneratedFiles,
 } from "../src/lib/doctor-generated-files.ts";
 import { ensureGitignoreEntry, pathExists } from "../src/lib/fs.ts";
-import { ensureHackDirGitignore } from "../src/lib/project-env-config.ts";
+import {
+  ensureHackDirGitignore,
+  HackDirGitignoreRefusalError,
+} from "../src/lib/project-env-config.ts";
 
 const tempDirs = new Set<string>();
 
@@ -338,6 +341,32 @@ test("a .hack symlinked outside the repository is reported unsafe, not skipped a
     ".hack/.gitignore or its directory is a symlink or not a regular file; Hack will not read or write through it. Replace it with a regular file."
   );
   expect(await readdir(outsideDir)).toEqual(["docker-compose.yml"]);
+});
+
+test("a non-git project root whose .hack links into another repository is skipped, and writes are still refused", async () => {
+  // The probe asks the project root, not the linked .hack: the file only
+  // matters to the root's git, and the root has none.
+  const dir = await mkdtemp(join(tmpdir(), "hack-doctor-gitignore-"));
+  tempDirs.add(dir);
+  const otherRepo = resolve(dir, "other-repo");
+  const linkedTarget = resolve(otherRepo, "hack-dir");
+  await mkdir(linkedTarget, { recursive: true });
+  await runGit(["init", "-b", "main"], otherRepo);
+  await writeFile(resolve(linkedTarget, "docker-compose.yml"), COMPOSE_TEXT);
+  const plainRoot = resolve(dir, "plain");
+  await mkdir(plainRoot);
+  const projectDir = resolve(plainRoot, ".hack");
+  await symlink(linkedTarget, projectDir);
+
+  expect(await inspectHackDirGitignoreForDoctor({ projectDir })).toBeNull();
+  expect(await checkHackDirGitignore({ startDir: plainRoot })).toMatchObject({
+    status: "ok",
+    message: "Skipped (not a git checkout)",
+  });
+  await expect(ensureHackDirGitignore({ projectDir })).rejects.toBeInstanceOf(
+    HackDirGitignoreRefusalError
+  );
+  expect(await readdir(linkedTarget)).toEqual(["docker-compose.yml"]);
 });
 
 test("a project root outside git is still skipped", async () => {

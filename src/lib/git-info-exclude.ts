@@ -33,21 +33,33 @@ import { exec } from "./shell.ts";
  * - No-follow: a symlinked `info/` dir or `exclude` file is left alone; the
  *   new content is written to an exclusive, no-follow temp file in `info/`
  *   and renamed into place, so readers never see a partial file.
- * - Read-only is respected: an `exclude` file the user cannot write is left
- *   alone instead of being replaced through the rename.
+ * - Read-only is respected, with the same policy as `.hack/.gitignore`
+ *   (`ensureHackDirGitignore`): an `exclude` file with no write permission
+ *   bit (for example mode 0444) is read-only for every user, root included,
+ *   and is left alone instead of being replaced through the rename. When some
+ *   write bit is set, `access(2)` decides, so a file only another user may
+ *   write is left alone too. The mode bits are checked first, so an ACL that
+ *   grants write access to a 0444 file does not make it writable here. As for
+ *   `.hack/.gitignore`, a file that vanished before the probe (ENOENT) counts
+ *   as writable; any other probe error skips the update.
  * - Concurrency: two writers can race and one block update can be lost; the
  *   next lifecycle command converges it again. Within a process, the work
  *   runs at most once per project dir.
  */
 export async function ensureHackGitInfoExclude(opts: {
   readonly projectDir: string;
+  /** Test seam; see {@link GitInfoExcludeWriteAccess}. */
+  readonly checkWriteAccess?: GitInfoExcludeWriteAccess;
 }): Promise<void> {
   const key = resolve(opts.projectDir);
   const pending = ensured.get(key);
   if (pending) {
     return await pending;
   }
-  const run = ensureUncached(key).catch((error: unknown) => {
+  const run = ensureUncached({
+    projectDir: key,
+    checkWriteAccess: opts.checkWriteAccess ?? accessExcludeForWrite,
+  }).catch((error: unknown) => {
     logger.debug({
       message: `Skipped git info/exclude update (${errorCode(error)})`,
     });
@@ -57,6 +69,21 @@ export async function ensureHackGitInfoExclude(opts: {
 }
 
 const ensured = new Map<string, Promise<void>>();
+
+/**
+ * Write-permission probe for an existing `info/exclude`: resolves when the
+ * user may write the path, rejects otherwise. Production uses
+ * `access(path, W_OK)`. Tests inject a probe that always resolves to model
+ * root, or an ACL that grants write, for which `access(2)` ignores the mode
+ * bits.
+ */
+export type GitInfoExcludeWriteAccess = (path: string) => Promise<void>;
+
+const accessExcludeForWrite: GitInfoExcludeWriteAccess = (path) =>
+  access(path, constants.W_OK);
+
+/** Permission bits that grant write access to owner, group or others. */
+const ANY_WRITE_PERMISSION_BITS = 0o222;
 
 /** Test hook: forget which project dirs were already handled. */
 export function resetHackGitInfoExcludeCacheForTests(): void {
@@ -91,8 +118,13 @@ export function renderHackGitInfoExcludeBlock(opts: {
   };
 }
 
-async function ensureUncached(projectDir: string): Promise<void> {
-  const location = await resolveExcludeLocation({ projectDir });
+async function ensureUncached(opts: {
+  readonly projectDir: string;
+  readonly checkWriteAccess: GitInfoExcludeWriteAccess;
+}): Promise<void> {
+  const location = await resolveExcludeLocation({
+    projectDir: opts.projectDir,
+  });
   if (location === null) {
     return;
   }
@@ -120,8 +152,18 @@ async function ensureUncached(projectDir: string): Promise<void> {
     return;
   }
   if (existing.kind === "text") {
-    // A rename would replace a read-only file the user cannot write.
-    await access(excludePath, constants.W_OK);
+    // A rename would replace a read-only file the user cannot write. No write
+    // bit means read-only even for root, whose access(2) ignores the mode.
+    if ((existing.mode & ANY_WRITE_PERMISSION_BITS) === 0) {
+      logger.debug({
+        message: "Skipped git info/exclude update (no write permission bit)",
+      });
+      return;
+    }
+    await probeExcludeWriteAccess({
+      path: excludePath,
+      checkWriteAccess: opts.checkWriteAccess,
+    });
   }
   await replaceNoFollow({
     dir: infoDir,
@@ -129,6 +171,26 @@ async function ensureUncached(projectDir: string): Promise<void> {
     text: next,
     mode: existing.kind === "text" ? existing.mode : 0o644,
   });
+}
+
+/**
+ * Runs the write probe with the same error policy as `.hack/.gitignore`
+ * (`isHackDirGitignoreWritable`): a file that vanished after it was read
+ * (ENOENT) counts as writable, since the rename recreates it. Any other probe
+ * error, read-only codes included, is rethrown, and the best-effort wrapper in
+ * {@link ensureHackGitInfoExclude} turns it into a skipped update.
+ */
+async function probeExcludeWriteAccess(opts: {
+  readonly path: string;
+  readonly checkWriteAccess: GitInfoExcludeWriteAccess;
+}): Promise<void> {
+  try {
+    await opts.checkWriteAccess(opts.path);
+  } catch (error: unknown) {
+    if (errorCode(error) !== "ENOENT") {
+      throw error;
+    }
+  }
 }
 
 async function resolveExcludeLocation(opts: {

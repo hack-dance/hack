@@ -1,9 +1,39 @@
 # Native process census phase diagnostics
 
-Recovery requires fresh, bounded, complete process observations. A changed process
-identity or expired observation refuses recovery. These rules apply even when the
-changed row is unrelated to the selected process. Diagnostics do not authorize
-retry, extend the three-second budget, or establish runtime acceptance.
+Recovery requires fresh, bounded, complete process observations. An expired
+observation refuses recovery. A changed identity refuses when the row is of
+interest: it carries the original process's PID, PGID or SID.
+
+Recovery quiescence bounds its census to those rows of interest. A foreign row
+decides nothing, but nothing about it is accepted on trust either:
+
+- Drift of one foreign process between the two observations (same PID and
+  birth) is accepted. Examples are exec, reparenting, a PGID or SID change,
+  live/transient state, and a live process becoming a zombie.
+- A foreign zombie seen in only one observation is kept and counted as an
+  unresolved zombie. A zombie cannot execute.
+- On macOS, a process that exits between the listing and its SID lookup fails
+  that lookup. For a live row whose PID and PGID are both foreign, the census
+  resolves the SID from stable rows: processes listed in both observations with
+  the same known SID, which is not the original's. The failed row takes the SID
+  its own process showed earlier, the SID of a stable row in its PGID (a process
+  group lies within one session), or the SID of a stable parent that never led
+  a session (its children are born into that SID). A resolved SID is never the
+  original's. A row of interest whose lookup fails still refuses.
+- Foreign PID reuse, a zombie turning live, or a failed SID lookup that cannot
+  be resolved supersedes the pair.
+
+A superseded attempt is discarded whole. It leaves no denial fact, and it needs
+two new complete observations within the same budget. A census without rows of
+interest still refuses every change. Diagnostics do not authorize retry, extend
+the three-second budget, or establish runtime acceptance.
+
+Heavy short-lived process churn can still exhaust the budget. A whole
+short-lived process tree that exits before its SIDs are read, or a short-lived
+child that leads its own process group under a session leader, cannot be
+resolved. If most listings include one, the census refuses as expired. The
+parent rule trusts the listed parent; ptrace attachment also reparents a
+process, to its debugger.
 
 For source-level investigation, explicitly create a
 `createNativeProcessCensusDiagnostics()` collector from
@@ -23,9 +53,9 @@ No caller callback executes inside the observation protocol.
 | Phase | Scope |
 | --- | --- |
 | `metadata` | One complete system metadata child, including pipe/exit settlement and parsing. |
-| `sessions` | Session qualification of captured rows; includes fallback metadata used to classify an unavailable live session. |
+| `sessions` | Session qualification of captured rows; includes fallback metadata used to classify an unavailable live session (only for rows of interest when the census is bounded). |
 | `merge` | Existing identity/membership comparison of two complete observations. |
-| `census` | One complete census call, including any already-authorized disappearance retries within its original budget. |
+| `census` | One complete census call, including any disappearance or superseded-attempt retries within its original budget. |
 
 A sample's `complete` outcome describes that phase only. A successful metadata or
 session phase does not imply a complete census or successful recovery. Likewise,

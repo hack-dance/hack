@@ -320,6 +320,13 @@ mod tests {
         }
         let (client, mut server) = UnixStream::pair().unwrap();
         server.write_all(&[1, 0, 0, 0, 0, 0, 0, 5, b'x']).unwrap();
+        // Shut the peer down instead of only dropping it: an unrelated parallel test's
+        // pre-exec fork (`process::clean_command`) can hold a copy of this descriptor until
+        // it execs, and the client then sees no end of stream yet. A shutdown ends the
+        // stream for every copy, so the truncated frame is always observed at its close.
+        // `inherited` models such a copy, so this holds whether or not a fork is running.
+        let inherited = server.try_clone().unwrap();
+        server.shutdown(std::net::Shutdown::Write).unwrap();
         drop(server);
         client.set_nonblocking(true).unwrap();
         let mut transport = RelayExec {
@@ -329,6 +336,7 @@ mod tests {
             received: 0,
         };
         assert!(transport.poll(&mut vec![], &mut vec![]).is_err());
+        drop(inherited);
         let mut out = vec![0; 4096];
         assert!(decode(&mut frame(2, b"x"), &mut out, &mut vec![]).is_err());
     }

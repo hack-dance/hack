@@ -88,8 +88,19 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     readFirst: "`hack env list --json`",
   },
   E_PERMISSION: {
-    meaning: "A filesystem or runtime permission was denied.",
+    meaning:
+      "A filesystem or runtime permission was denied, or a file Hack must write is on a read-only filesystem.",
     readFirst: "`hack doctor --json`",
+  },
+  E_NO_SPACE: {
+    meaning:
+      "A file Hack must write could not be written because the disk is full or the disk quota is exceeded.",
+    readFirst: "`df -h <path from the message>`",
+  },
+  E_PATH_CONFLICT: {
+    meaning:
+      "A path Hack must read or write is the wrong kind of entry: a file where a directory is needed, or a directory or special file where a regular file is needed.",
+    readFirst: "`ls -ld <path from the message>`",
   },
   E_INTERACTIVE_REQUIRED: {
     meaning:

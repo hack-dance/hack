@@ -10,7 +10,6 @@ import { optPath, optProject } from "../cli/options.ts";
 import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import {
   GLOBAL_ONLY_EXTENSION_IDS,
-  HACK_PROJECT_DIR_PRIMARY,
   PROJECT_CONFIG_FILENAME,
   PROJECT_CONFIG_LEGACY_FILENAME,
 } from "../constants.ts";
@@ -21,6 +20,7 @@ import {
 } from "../lib/default-domain.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import { findProjectContext } from "../lib/project.ts";
 import { assertLegacyProjectDirectory } from "../lib/project-input-selection.ts";
@@ -286,9 +286,7 @@ async function requireProjectContext(
 ): Promise<ProjectContext> {
   const ctx = await findProjectContext(startDir);
   if (!ctx) {
-    throw new Error(
-      `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`
-    );
+    throw new MissingProjectContextError();
   }
   return ctx;
 }

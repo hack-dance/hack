@@ -12,6 +12,7 @@ import {
 import type { NativeAuthoredStorageTool } from "./native-authored-storage-tool.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_EXIT_DRAIN_BOUND_MS,
   type NativeRuntimeSelection,
   readNativeFailureCodes,
   rethrowNativeInputFailure,
@@ -47,6 +48,12 @@ type ProcessOptions = {
   readonly onStopFailure?: () => void;
   /** Durable capture in the existing frontend owner, before private input delivery. */
   readonly onGroup?: (group: number) => Promise<void>;
+  /**
+   * Test seam: how long after the owned child's observed exit a pipe a
+   * descendant still holds keeps being read. Production callers leave it at
+   * {@link NATIVE_EXIT_DRAIN_BOUND_MS}; EOF ends the drain earlier.
+   */
+  readonly exitDrainBoundMs?: number;
 };
 
 /**
@@ -261,9 +268,11 @@ function nativeSnapshotReady(
 }
 
 function assertProcessSelection(opts: ProcessOptions): void {
+  const exitDrainBoundMs = opts.exitDrainBoundMs ?? NATIVE_EXIT_DRAIN_BOUND_MS;
   if (
     !(RUN.test(opts.run) && Number.isSafeInteger(opts.startupTimeoutMs)) ||
     opts.startupTimeoutMs < 1 ||
+    !(Number.isSafeInteger(exitDrainBoundMs) && exitDrainBoundMs >= 1) ||
     opts.startupTimeoutMs > 600_000 ||
     (opts.privateInput?.byteLength ?? 0) > MAX_INPUT ||
     canceledAtEntry(opts)
@@ -317,14 +326,18 @@ async function serveGraphProcess(
     }
   );
   // Descendants may inherit a pipe after the owned receiver exits. Its exit,
-  // not unrelated writers' EOF, bounds draining; final graph inspection remains
-  // the caller's authority for cleanup, regardless of a successful exit code.
+  // not unrelated writers' EOF, bounds draining (see NATIVE_EXIT_DRAIN_BOUND_MS);
+  // final graph inspection remains the caller's authority for cleanup,
+  // regardless of a successful exit code.
   const drain = new AbortController();
   const owner = new AbortController();
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   void child.exited.then(() => {
     owner.abort();
-    drainTimer = setTimeout(() => drain.abort(), 250);
+    drainTimer = setTimeout(
+      () => drain.abort(),
+      opts.exitDrainBoundMs ?? NATIVE_EXIT_DRAIN_BOUND_MS
+    );
   });
   const failureCodes = readNativeFailureCodes(child.stderr, drain.signal);
   const failureCode = failureCodes.then((failure) => failure?.code);

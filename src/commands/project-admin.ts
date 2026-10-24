@@ -3,7 +3,7 @@ import type { CommandHandlerFor } from "../cli/command.ts";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optJson, optPath, optProject } from "../cli/options.ts";
 import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
-import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import {
   findProjectContext,
   readProjectConfig,
@@ -115,9 +115,7 @@ async function resolveProjectTarget(input: {
     : input.cwd;
   const project = await findProjectContext(startDir);
   if (!project) {
-    throw new Error(
-      `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`
-    );
+    throw new MissingProjectContextError();
   }
   return project;
 }

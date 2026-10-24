@@ -51,12 +51,45 @@ export function buildLogSelector(opts: {
   return `{${parts.join(",")}}`;
 }
 
+/**
+ * Quote `value` as a LogQL double-quoted string literal.
+ *
+ * Loki's lexer scans the literal with Go's `text/scanner` (a raw newline ends
+ * it with an error) and unquotes it with `strconv.Unquote`. Each character is
+ * escaped once: `\` and `"` get a backslash, and control characters use Go
+ * escapes, so the unquoted label value equals `value` exactly.
+ */
 function quoteLogql(value: string): string {
-  return `"${value.replaceAll("\\\\", "\\\\\\\\").replaceAll('"', '\\\\"')}"`;
+  let out = '"';
+  for (const ch of value) {
+    out += LOGQL_STRING_ESCAPES[ch] ?? escapeLogqlControl(ch);
+  }
+  return `${out}"`;
 }
 
+const LOGQL_STRING_ESCAPES: Readonly<Record<string, string>> = {
+  "\\": "\\\\",
+  '"': '\\"',
+  "\n": "\\n",
+  "\r": "\\r",
+  "\t": "\\t",
+};
+
+function escapeLogqlControl(ch: string): string {
+  const code = ch.codePointAt(0) ?? 0;
+  if (code < 0x20 || code === 0x7f) {
+    return `\\x${code.toString(16).padStart(2, "0")}`;
+  }
+  return ch;
+}
+
+/**
+ * Escape RE2 metacharacters so `value` matches only itself inside a regex.
+ * Adds exactly one backslash; {@link quoteLogql} then escapes that backslash
+ * for the string literal.
+ */
 function escapeRegex(value: string): string {
-  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\\\$&");
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -106,6 +139,43 @@ export interface LokiSnapshotOutcome {
 }
 
 /**
+ * Project selection the user gave `hack logs`, repeated in a suggested
+ * `hack logs --compose` command so it targets the same project and instance.
+ */
+export interface LogsCommandTarget {
+  readonly path?: string;
+  readonly project?: string;
+  readonly branch?: string;
+}
+
+/**
+ * Everything else the user gave `hack logs` that selects or shapes its output,
+ * repeated in a suggested `hack logs --compose` command. Each field is set only
+ * when the user passed it. `--services`, `--query`, `--since` and `--until`
+ * are Loki-only (`--compose` refuses them), and the compose backend reads one
+ * service or all of them, so a selector the suggestion cannot apply is named
+ * in {@link ComposeLogsSuggestion.omitted} instead of being dropped silently.
+ */
+export interface LogsCommandSelectors {
+  /** Services from `--services` plus the positional, deduplicated, in order. */
+  readonly services?: readonly string[];
+  readonly tail?: number;
+  readonly profiles?: readonly string[];
+  readonly pretty?: boolean;
+  readonly json?: boolean;
+  readonly query?: string;
+  readonly since?: string;
+  readonly until?: string;
+}
+
+/** A `hack logs --compose` command and the selectors it could not carry. */
+export interface ComposeLogsSuggestion {
+  readonly command: string;
+  /** Selectors with no compose equivalent, rendered as the user passed them. */
+  readonly omitted: readonly string[];
+}
+
+/**
  * Run a Loki snapshot and handle an empty result.
  *
  * Alloy discovers containers by polling Docker, so a one-shot service that
@@ -115,12 +185,13 @@ export interface LokiSnapshotOutcome {
  * back to the compose backend before any output is written, so stdout carries
  * exactly one backend's stream. When Loki was requested explicitly (`--loki`,
  * `--services`, `--query`, `--since`, `--until`), the Loki result stands and a
- * one-line hint on stderr points at `--compose`.
+ * one-line hint on stderr points at `hack logs --compose --no-follow`.
  */
 export async function runLokiSnapshotWithFallback(opts: {
   readonly wantsLokiExplicit: boolean;
   readonly query: string;
-  readonly service: string | undefined;
+  readonly target: LogsCommandTarget;
+  readonly selectors: LogsCommandSelectors;
   readonly runLoki: (opts: {
     readonly deferEmpty: boolean;
   }) => Promise<LokiSnapshotOutcome>;
@@ -134,7 +205,8 @@ export async function runLokiSnapshotWithFallback(opts: {
         renderEmptyLokiSnapshotNotice({
           action: "hint",
           query: opts.query,
-          service: opts.service,
+          target: opts.target,
+          selectors: opts.selectors,
         })
       );
     }
@@ -149,27 +221,149 @@ export async function runLokiSnapshotWithFallback(opts: {
     renderEmptyLokiSnapshotNotice({
       action: "fallback",
       query: opts.query,
-      service: opts.service,
+      target: opts.target,
+      selectors: opts.selectors,
     })
   );
   return await opts.runCompose();
 }
 
+const EMPTY_LOKI_REASON =
+  "a short-lived container can exit before Alloy discovers it, and older logs sit outside the queried window";
+
 /** One-line stderr notice for an empty Loki snapshot. */
 export function renderEmptyLokiSnapshotNotice(opts: {
   readonly action: "fallback" | "hint";
   readonly query: string;
-  readonly service: string | undefined;
+  readonly target: LogsCommandTarget;
+  readonly selectors: LogsCommandSelectors;
 }): string {
-  const reason =
-    "a short-lived container can exit before Alloy discovers it, and older logs sit outside the queried window";
   if (opts.action === "fallback") {
-    return `Loki returned no log entries for ${opts.query}; showing docker compose logs instead (${reason}).`;
+    return `Loki returned no log entries for ${opts.query}; showing docker compose logs instead (${EMPTY_LOKI_REASON}).`;
   }
-  const service = (opts.service ?? "").trim();
-  const composeCommand =
-    service.length > 0
-      ? `hack logs --compose ${service}`
-      : "hack logs --compose";
-  return `Loki returned no log entries for ${opts.query} (${reason}); try \`${composeCommand}\`.`;
+  const suggestion = renderComposeLogsSuggestion({
+    follow: false,
+    target: opts.target,
+    selectors: opts.selectors,
+  });
+  return `Loki returned no log entries for ${opts.query} (${EMPTY_LOKI_REASON}); try \`${suggestion.command}\`.${renderOmittedSelectors(suggestion)}`;
+}
+
+/**
+ * How long a Loki follow waits for its first entry before
+ * {@link renderEmptyLokiFollowNotice} is shown. Loki's tail endpoint sends
+ * recent history as soon as it connects, so a socket that stays quiet this
+ * long means Loki holds nothing recent for the selector. One Alloy discovery
+ * poll (5s) plus its push batch fits inside it.
+ */
+export const LOKI_FOLLOW_EMPTY_NOTICE_DELAY_MS = 8000;
+
+/**
+ * One-line stderr notice for a Loki follow that has received no entries yet.
+ * Following continues; the notice points at the compose backend, which also
+ * shows containers Alloy never shipped.
+ */
+export function renderEmptyLokiFollowNotice(opts: {
+  readonly query: string;
+  readonly target: LogsCommandTarget;
+  readonly selectors: LogsCommandSelectors;
+}): string {
+  const suggestion = renderComposeLogsSuggestion({
+    follow: true,
+    target: opts.target,
+    selectors: opts.selectors,
+  });
+  return `Loki has sent no log entries for ${opts.query} yet (${EMPTY_LOKI_REASON}); still following. Try \`${suggestion.command}\`.${renderOmittedSelectors(suggestion)}`;
+}
+
+function renderOmittedSelectors(suggestion: ComposeLogsSuggestion): string {
+  if (suggestion.omitted.length === 0) {
+    return "";
+  }
+  return ` The compose backend has no equivalent for ${formatList(suggestion.omitted)}.`;
+}
+
+function formatList(items: readonly string[]): string {
+  if (items.length <= 1) {
+    return items.join("");
+  }
+  return `${items.slice(0, -1).join(", ")} and ${items.at(-1) ?? ""}`;
+}
+
+/**
+ * Render the `hack logs --compose` command that matches the current
+ * invocation: the same follow mode, project selection and every selector the
+ * compose backend accepts (`--tail`, `--profile`, `--pretty`, `--json` and a
+ * single service). A selector it cannot apply (`--query`, `--since`,
+ * `--until`, or more than one service) is listed in `omitted`. A value is
+ * single-quoted for POSIX shells when it has characters outside a safe set.
+ */
+export function renderComposeLogsSuggestion(opts: {
+  readonly follow: boolean;
+  readonly target: LogsCommandTarget;
+  readonly selectors: LogsCommandSelectors;
+}): ComposeLogsSuggestion {
+  const words = ["hack", "logs", "--compose"];
+  if (!opts.follow) {
+    words.push("--no-follow");
+  }
+  const flags = [
+    ["--path", opts.target.path],
+    ["--project", opts.target.project],
+    ["--branch", opts.target.branch],
+  ] as const;
+  for (const [flag, value] of flags) {
+    const trimmed = (value ?? "").trim();
+    if (trimmed.length > 0) {
+      words.push(flag, quoteShellWord(trimmed));
+    }
+  }
+  const selectors = opts.selectors;
+  if (selectors.tail !== undefined) {
+    words.push("--tail", String(selectors.tail));
+  }
+  const profiles = trimmedWords(selectors.profiles);
+  if (profiles.length > 0) {
+    words.push("--profile", quoteShellWord(profiles.join(",")));
+  }
+  if (selectors.pretty) {
+    words.push("--pretty");
+  }
+  if (selectors.json) {
+    words.push("--json");
+  }
+
+  const omitted: string[] = [];
+  const services = trimmedWords(selectors.services);
+  if (services.length === 1) {
+    words.push(quoteShellWord(services[0] ?? ""));
+  } else if (services.length > 1) {
+    omitted.push(`--services ${quoteShellWord(services.join(","))}`);
+  }
+  const lokiOnly = [
+    ["--query", selectors.query],
+    ["--since", selectors.since],
+    ["--until", selectors.until],
+  ] as const;
+  for (const [flag, value] of lokiOnly) {
+    if (value !== undefined) {
+      omitted.push(`${flag} ${quoteShellWord(value)}`);
+    }
+  }
+  return { command: words.join(" "), omitted };
+}
+
+function trimmedWords(values: readonly string[] | undefined): string[] {
+  return (values ?? [])
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+const SHELL_SAFE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+function quoteShellWord(value: string): string {
+  if (SHELL_SAFE_WORD.test(value)) {
+    return value;
+  }
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }

@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serveNativeProjectGraph } from "../src/backends/native-project-process.ts";
+import { NATIVE_EXIT_DRAIN_BOUND_MS } from "../src/backends/native-runtime-client.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
@@ -227,53 +228,285 @@ test("readiness rejection retains identity while observing safe native cleanup c
   expect(Bun.inspect(diagnostic)).not.toContain("synthetic-private-cleanup");
 });
 
-test("owned exit completes without waiting for descendant-held stdout and stderr", async () => {
-  const opts = await fixture(`
-    const keeper = Bun.spawn(["/bin/sh", "-c", "sleep 3"], {
-      stdin: "ignore", stdout: "inherit", stderr: "inherit", detached: true,
-    });
-    keeper.unref();
-    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
-    console.error(JSON.stringify({code:"graph_owner_recovery",message:"synthetic-private-detail"}));
-    process.exit(0);
-  `);
-  let diagnostic: unknown;
-  const started = performance.now();
-  const result = await serveNativeProjectGraph({
-    ...opts,
-    onReady: async () => {},
-    onExitDiagnostic: (value) => {
-      diagnostic = value;
-    },
-  });
-  expect(result).toBe(0);
-  expect(performance.now() - started).toBeLessThan(1500);
-  expect(diagnostic).toEqual({
-    exitCode: 0,
-    nativeCode: "graph_owner_recovery",
-  });
-  expect(Bun.inspect(diagnostic)).not.toContain("synthetic-private-detail");
-}, 6000);
+/** Slack for host load between the stand-in's recorded exit and settlement. */
+const DRAIN_SETTLE_MARGIN_MS = 5000;
+/**
+ * Fixed delay before the descendant writes the closed code, measured from the
+ * test observing the stand-in reaped: well above the former 250 ms window.
+ */
+const LATE_CODE_DELAY_MS = 1000;
+/**
+ * Injected drain bound for the late-writer case: wide enough that host load
+ * cannot push the delayed write past it, so the case proves that EOF, not a
+ * fixed window, ends the drain. The held-descendant cases keep the production
+ * bound and prove that it still ends a drain EOF cannot.
+ */
+const LATE_WRITER_DRAIN_BOUND_MS = 25_000;
+/**
+ * Gap between creating the stand-in's pid file and writing its digits. It
+ * makes the empty-file window that a loaded host opens by chance happen on
+ * every run, so a reader that only waits for existence fails every time.
+ */
+const TORN_HANDSHAKE_GAP_MS = 50;
+/** Budget for a handshake file (a pid) to appear on a loaded host. */
+const HANDSHAKE_BUDGET_MS = 20_000;
+/** The stand-in's startup deadline; exit, not readiness, ends these cases. */
+const STARTUP_TIMEOUT_MS = 60_000;
+/** A held descendant always retires by itself, even if this test process dies. */
+const DESCENDANT_CAP_MS = 60_000;
+const SETTLEMENT_WAIT_MS = DESCENDANT_CAP_MS + 5000;
+const CASE_TIMEOUT_MS = SETTLEMENT_WAIT_MS + STARTUP_TIMEOUT_MS;
 
-test("early native failure retains its safe code when descendant pipes stay open", async () => {
-  const opts = await fixture(`
-    const keeper = Bun.spawn(["/bin/sh", "-c", "sleep 3"], {
-      stdin: "ignore", stdout: "inherit", stderr: "inherit", detached: true,
-    });
-    keeper.unref();
-    console.error(JSON.stringify({code:"graph_budget",message:"synthetic-private-detail"}));
-    process.exit(2);
+async function waitForFile(path: string, budgetMs: number): Promise<boolean> {
+  const deadline = performance.now() + budgetMs;
+  while (!(await Bun.file(path).exists())) {
+    if (performance.now() >= deadline) {
+      return false;
+    }
+    await Bun.sleep(10);
+  }
+  return true;
+}
+
+/**
+ * Wait until a fixture's pid handshake holds a complete pid. A fixture's
+ * writeFileSync creates the file before it writes the digits, so a read that
+ * only waited for existence can see "": Number("") is 0, and kill(0, 0)
+ * always succeeds, so the absence wait would never end. Returns undefined
+ * when no complete pid appears within the budget.
+ */
+async function waitForPid(
+  path: string,
+  budgetMs: number
+): Promise<number | undefined> {
+  const deadline = performance.now() + budgetMs;
+  for (;;) {
+    const file = Bun.file(path);
+    if (await file.exists()) {
+      const pid = Number(await file.text());
+      if (Number.isSafeInteger(pid) && pid > 1) {
+        return pid;
+      }
+    }
+    if (performance.now() >= deadline) {
+      return undefined;
+    }
+    await Bun.sleep(10);
+  }
+}
+
+function processPresent(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ESRCH"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Run `body`, then release the stand-in's descendant through `release` and
+ * confirm it finished. An unconfirmed descendant retains the fixture root.
+ */
+async function settleDescendant(opts: {
+  readonly root: string;
+  readonly release: string;
+  readonly finished: string;
+  readonly body: () => Promise<void>;
+}): Promise<void> {
+  let failed: unknown;
+  try {
+    await opts.body();
+  } catch (error: unknown) {
+    failed = error;
+  } finally {
+    await Bun.write(join(opts.root, opts.release), "release");
+  }
+  const completed = await waitForFile(
+    join(opts.root, opts.finished),
+    SETTLEMENT_WAIT_MS
+  );
+  if (!completed) {
+    roots.splice(roots.indexOf(opts.root), 1);
+    throw new AggregateError(
+      failed === undefined ? [] : [failed],
+      `Owned descendant completion is unconfirmed; fixture retained at ${opts.root}.`
+    );
+  }
+  if (failed !== undefined) {
+    throw failed;
+  }
+}
+
+// Keeps the stand-in's stdout and stderr open until the test releases it.
+const HOLDING_KEEPER = `import {existsSync, writeFileSync} from "node:fs";
+writeFileSync("keeper-pid", String(process.pid));
+const end = Date.now() + ${DESCENDANT_CAP_MS};
+while (!existsSync("release") && Date.now() < end) await Bun.sleep(20);
+writeFileSync("keeper-finished", "finished");`;
+
+test.each([
+  ["ready", 0],
+  ["early failure", 2],
+] as const)(
+  "%s exit settles within the named drain bound while a descendant holds stdout and stderr",
+  async (mode, exitCode) => {
+    const ready = mode === "ready";
+    const nativeCode = ready ? "graph_owner_recovery" : "graph_budget";
+    const opts = await fixture(`
+    import { spawn } from "node:child_process";
+    import { existsSync, writeFileSync } from "node:fs";
+    spawn(process.execPath, ["--eval", ${JSON.stringify(HOLDING_KEEPER)}], {
+      detached: true, stdio: ["ignore", 1, 2],
+    }).unref();
+    const deadline = Date.now() + ${HANDSHAKE_BUDGET_MS};
+    while (!existsSync("keeper-pid") && Date.now() < deadline) await Bun.sleep(10);
+    if (!existsSync("keeper-pid")) process.exit(3);
+    ${ready ? `console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));` : ""}
+    console.error(JSON.stringify({code:"${nativeCode}",message:"synthetic-private-detail"}));
+    writeFileSync("exited-at", String(Date.now()));
+    process.exit(${exitCode});
   `);
-  let ready = false;
-  const started = performance.now();
-  await expect(
-    serveNativeProjectGraph({
-      ...opts,
-      onReady: async () => {
-        ready = true;
+    const root = opts.projectRoot;
+    await settleDescendant({
+      root,
+      release: "release",
+      finished: "keeper-finished",
+      body: async () => {
+        let diagnostic: unknown;
+        let readyCount = 0;
+        let result: number | undefined;
+        let caught: unknown;
+        try {
+          result = await serveNativeProjectGraph({
+            ...opts,
+            startupTimeoutMs: STARTUP_TIMEOUT_MS,
+            onReady: async () => {
+              readyCount++;
+            },
+            onExitDiagnostic: (value) => {
+              diagnostic = value;
+            },
+          });
+        } catch (error: unknown) {
+          caught = error;
+        }
+        const settledAt = Date.now();
+        const exitedAt = Number(await Bun.file(join(root, "exited-at")).text());
+        const keeper = await waitForPid(
+          join(root, "keeper-pid"),
+          HANDSHAKE_BUDGET_MS
+        );
+        expect(keeper).toBeDefined();
+        // The bound, not the descendant's EOF, ended the drain: it is still holding.
+        expect(processPresent(keeper ?? 0)).toBe(true);
+        expect(await Bun.file(join(root, "keeper-finished")).exists()).toBe(
+          false
+        );
+        expect(settledAt - exitedAt).toBeLessThan(
+          NATIVE_EXIT_DRAIN_BOUND_MS + DRAIN_SETTLE_MARGIN_MS
+        );
+        if (ready) {
+          expect(caught).toBeUndefined();
+          expect(result).toBe(0);
+          expect(readyCount).toBe(1);
+        } else {
+          expect(readyCount).toBe(0);
+          const refusal = await expectClosedRefusal(
+            Promise.reject(caught),
+            nativeCode
+          );
+          expect(refusal.message).not.toContain("synthetic-private-detail");
+        }
+        expect(diagnostic).toEqual({ exitCode, nativeCode });
+        expect(Bun.inspect(diagnostic)).not.toContain(
+          "synthetic-private-detail"
+        );
       },
-    })
-  ).rejects.toThrow("graph_budget");
-  expect(ready).toBe(false);
-  expect(performance.now() - started).toBeLessThan(1500);
-}, 6000);
+    });
+  },
+  CASE_TIMEOUT_MS
+);
+
+// Writes the closed code on the stand-in's inherited stderr only after the
+// test has observed the stand-in reaped, i.e. after its exit was reported.
+const LATE_CODE_WRITER = `import {existsSync, writeFileSync} from "node:fs";
+writeFileSync("writer-pid", String(process.pid));
+const end = Date.now() + ${DESCENDANT_CAP_MS};
+while (!existsSync("exit-observed") && Date.now() < end) await Bun.sleep(10);
+if (existsSync("exit-observed")) {
+  await Bun.sleep(${LATE_CODE_DELAY_MS});
+  process.stderr.write(JSON.stringify({code:"graph_budget",message:"synthetic-private-detail"}));
+}
+writeFileSync("writer-finished", "finished");`;
+
+test(
+  "closed code written after the reported exit is kept regardless of a late reader",
+  async () => {
+    expect(LATE_CODE_DELAY_MS).toBeLessThan(LATE_WRITER_DRAIN_BOUND_MS);
+    const opts = await fixture(`
+    import { spawn } from "node:child_process";
+    import { existsSync, writeFileSync } from "node:fs";
+    spawn(process.execPath, ["--eval", ${JSON.stringify(LATE_CODE_WRITER)}], {
+      detached: true, stdio: ["ignore", "ignore", 2],
+    }).unref();
+    const deadline = Date.now() + ${HANDSHAKE_BUDGET_MS};
+    while (!existsSync("writer-pid") && Date.now() < deadline) await Bun.sleep(10);
+    // Publish the pid in two steps, as a torn handshake: the reader must wait
+    // for a complete pid, not just for the file to exist.
+    writeFileSync("child-pid", "");
+    await Bun.sleep(${TORN_HANDSHAKE_GAP_MS});
+    writeFileSync("child-pid", String(process.pid));
+    process.exit(existsSync("writer-pid") ? 2 : 3);
+  `);
+    const root = opts.projectRoot;
+    await settleDescendant({
+      root,
+      release: "exit-observed",
+      finished: "writer-finished",
+      body: async () => {
+        let diagnostic: unknown;
+        let readyCount = 0;
+        const outcome = serveNativeProjectGraph({
+          ...opts,
+          startupTimeoutMs: STARTUP_TIMEOUT_MS,
+          exitDrainBoundMs: LATE_WRITER_DRAIN_BOUND_MS,
+          onReady: async () => {
+            readyCount++;
+          },
+          onExitDiagnostic: (value) => {
+            diagnostic = value;
+          },
+        });
+        void outcome.catch(() => undefined);
+        const child = await waitForPid(
+          join(root, "child-pid"),
+          HANDSHAKE_BUDGET_MS * 2
+        );
+        if (child === undefined) {
+          throw new Error("Stand-in pid handshake did not complete.");
+        }
+        // Absence means the CLI reaped the stand-in: its exit has been reported.
+        const deadline = performance.now() + HANDSHAKE_BUDGET_MS;
+        while (processPresent(child) && performance.now() < deadline) {
+          await Bun.sleep(10);
+        }
+        expect(processPresent(child)).toBe(false);
+        await Bun.write(join(root, "exit-observed"), "observed");
+        const refusal = await expectClosedRefusal(outcome, "graph_budget");
+        expect(refusal.message).not.toContain("synthetic-private-detail");
+        expect(readyCount).toBe(0);
+        expect(diagnostic).toEqual({ exitCode: 2, nativeCode: "graph_budget" });
+      },
+    });
+  },
+  CASE_TIMEOUT_MS
+);

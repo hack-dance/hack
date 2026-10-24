@@ -47,16 +47,26 @@ let projectRoot: string;
 let capture: string;
 let lokiStreams: unknown[] = [];
 const lokiQueries: string[] = [];
+const tailQueries: string[] = [];
+const tailSockets: { close: () => void }[] = [];
+const liveChildren: Bun.Subprocess[] = [];
 let fakeLoki: ReturnType<typeof Bun.serve> | null = null;
 
 beforeAll(() => {
   fakeLoki = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch(request) {
+    fetch(request, server) {
       const url = new URL(request.url);
       if (url.pathname === "/ready") {
         return new Response("ready");
+      }
+      if (url.pathname === "/loki/api/v1/tail") {
+        tailQueries.push(url.searchParams.get("query") ?? "");
+        if (server.upgrade(request, { data: undefined })) {
+          return;
+        }
+        return new Response("upgrade failed", { status: 400 });
       }
       if (url.pathname === "/loki/api/v1/query_range") {
         lokiQueries.push(url.searchParams.get("query") ?? "");
@@ -66,6 +76,15 @@ beforeAll(() => {
         });
       }
       return new Response("not found", { status: 404 });
+    },
+    websocket: {
+      // A quiet tail: Loki has nothing for the selector.
+      open(ws) {
+        tailSockets.push(ws);
+      },
+      message() {
+        // The tail endpoint ignores client messages.
+      },
     },
   });
 });
@@ -107,12 +126,23 @@ beforeEach(async () => {
 afterEach(async () => {
   lokiStreams = [];
   lokiQueries.length = 0;
+  tailQueries.length = 0;
+  for (const socket of tailSockets) {
+    socket.close();
+  }
+  tailSockets.length = 0;
+  // A follow test that fails early must not leave its CLI running.
+  for (const child of liveChildren) {
+    child.kill();
+  }
+  await Promise.all(liveChildren.map((child) => child.exited));
+  liveChildren.length = 0;
   await rm(root, { recursive: true, force: true });
 });
 
-async function runLogs(args: readonly string[]) {
+function spawnLogs(args: readonly string[], opts: { readonly cwd: string }) {
   const child = Bun.spawn([process.execPath, CLI, "logs", ...args], {
-    cwd: projectRoot,
+    cwd: opts.cwd,
     env: privateCliEnv({
       root,
       env: {
@@ -126,6 +156,15 @@ async function runLogs(args: readonly string[]) {
     stdout: "pipe",
     stderr: "pipe",
   });
+  liveChildren.push(child);
+  return child;
+}
+
+async function runLogs(
+  args: readonly string[],
+  opts: { readonly cwd: string } = { cwd: projectRoot }
+) {
+  const child = spawnLogs(args, opts);
   const [exitCode, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
@@ -158,8 +197,140 @@ test("explicit --loki snapshot with no entries hints at --compose and stays on L
 
   expect(result.exitCode).toBe(0);
   expect(lokiQueries).toHaveLength(1);
-  expect(result.stderr).toContain("try `hack logs --compose migrate`");
+  expect(result.stderr).toContain(
+    "try `hack logs --compose --no-follow migrate`."
+  );
   expect(result.stdout).not.toContain("from compose");
+  expect(await composeLogsCalls()).toEqual([]);
+}, 60_000);
+
+test("explicit --loki snapshot hint repeats --path and --branch", async () => {
+  const result = await runLogs(
+    [
+      "--loki",
+      "--no-follow",
+      "--path",
+      projectRoot,
+      "--branch",
+      "feat-x",
+      "migrate",
+    ],
+    { cwd: root }
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(lokiQueries).toEqual([
+    '{project="oneshot--feat-x",service="migrate"}',
+  ]);
+  expect(result.stderr).toContain(
+    `try \`hack logs --compose --no-follow --path ${projectRoot} --branch feat-x migrate\`.`
+  );
+  expect(await composeLogsCalls()).toEqual([]);
+}, 60_000);
+
+// HACK-1379: the hint carries every selector the user passed, and names the
+// ones `--compose` cannot apply instead of dropping them.
+test("explicit --loki snapshot hint carries --tail and --profile and names --services and --since", async () => {
+  const result = await runLogs([
+    "--loki",
+    "--no-follow",
+    "--services",
+    "api,migrate",
+    "--tail",
+    "5",
+    "--since",
+    "15m",
+    "--profile",
+    "jobs",
+    "migrate",
+  ]);
+
+  expect(result.exitCode).toBe(0);
+  expect(lokiQueries).toEqual([
+    '{project="oneshot",service=~"^(api|migrate)$"}',
+  ]);
+  expect(result.stderr).toContain(
+    "try `hack logs --compose --no-follow --tail 5 --profile jobs`. The compose backend has no equivalent for --services api,migrate and --since 15m."
+  );
+  expect(await composeLogsCalls()).toEqual([]);
+}, 60_000);
+
+test("explicit --loki snapshot hint turns a single --services value into the positional and keeps --json", async () => {
+  const result = await runLogs([
+    "--loki",
+    "--no-follow",
+    "--services",
+    "migrate",
+    "--json",
+  ]);
+
+  expect(result.exitCode).toBe(0);
+  expect(lokiQueries).toEqual(['{project="oneshot",service="migrate"}']);
+  expect(result.stderr).toContain(
+    "try `hack logs --compose --no-follow --json migrate`."
+  );
+  expect(result.stderr).not.toContain("no equivalent");
+  const types = result.stdout
+    .trim()
+    .split("\n")
+    .map((line) => (JSON.parse(line) as { type: string }).type);
+  expect(types).toEqual(["start", "end"]);
+  expect(await composeLogsCalls()).toEqual([]);
+}, 60_000);
+
+test("Loki follow backend notices an empty tail on stderr and keeps following", async () => {
+  await writeFile(
+    join(projectRoot, ".hack", "hack.config.json"),
+    `${JSON.stringify({
+      name: "oneshot",
+      dev_host: "oneshot.hack",
+      internal: { dns: false, tls: false },
+      logs: { follow_backend: "loki" },
+    })}\n`
+  );
+  // `--tail` is a selector the follow hint must carry (HACK-1379).
+  const child = spawnLogs(["--tail", "5", "migrate"], { cwd: projectRoot });
+  const stdoutText = new Response(child.stdout).text();
+  const reader = child.stderr.getReader();
+  const decoder = new TextDecoder();
+  let stderr = "";
+  const deadline = Date.now() + 30_000;
+  while (!stderr.includes("still following")) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      break;
+    }
+    const chunk = await Promise.race([
+      reader.read(),
+      Bun.sleep(remaining).then(() => null),
+    ]);
+    if (chunk === null || chunk.done) {
+      break;
+    }
+    stderr += decoder.decode(chunk.value, { stream: true });
+  }
+  // The notice arrived while the tail was still open; end it from Loki's side.
+  expect(tailSockets).toHaveLength(1);
+  for (const socket of tailSockets) {
+    socket.close();
+  }
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) {
+      break;
+    }
+    stderr += decoder.decode(chunk.value, { stream: true });
+  }
+
+  expect(await child.exited).toBe(0);
+  expect(tailQueries).toEqual(['{project="oneshot",service="migrate"}']);
+  expect(stderr).toContain(
+    'Loki has sent no log entries for {project="oneshot",service="migrate"} yet'
+  );
+  expect(stderr).toContain("Try `hack logs --compose --tail 5 migrate`.");
+  expect(stderr).not.toContain("no equivalent");
+  expect(stderr.match(/Loki has sent no log entries/g)).toHaveLength(1);
+  expect(await stdoutText).toBe("");
   expect(await composeLogsCalls()).toEqual([]);
 }, 60_000);
 

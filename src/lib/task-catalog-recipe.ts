@@ -369,13 +369,16 @@ type Evaluator = {
   /**
    * Inline flags that count only under one subcommand, because the same
    * letter is harmless elsewhere: `git clone -u <cmd>` runs a command, while
-   * `git push -u` sets an upstream. They count when any operand names the
-   * subcommand, not only the first, so a global option missing from
+   * `git push -u` sets an upstream. They count after any operand that names
+   * the subcommand, not only the first, so a global option missing from
    * `valueOptions` (whose value would be taken as the subcommand) cannot
-   * hide it (fail-closed). Keys are lowercase and operands are lowercased
-   * before lookup, because Git finds a non-builtin subcommand
-   * (`git-send-email`, `git-instaweb`) as a file in its exec path, and on a
-   * case-insensitive filesystem `git Send-Email` runs it.
+   * hide it (fail-closed). They do not count before it: Git reads a
+   * subcommand's options only after the subcommand's name and rejects an
+   * unknown option before it, so `git push -u origin clone` (a branch named
+   * `clone`) passes. Keys are lowercase and operands are lowercased before
+   * lookup, because Git finds a non-builtin subcommand (`git-send-email`,
+   * `git-instaweb`) as a file in its exec path, and on a case-insensitive
+   * filesystem `git Send-Email` runs it.
    */
   readonly subcommandInline: Readonly<Record<string, readonly string[]>>;
   /**
@@ -697,10 +700,14 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   // Git accepts abbreviated long options (`--upl=cmd`) and a value attached
   // to a short option (`-u/path/cmd`). A dashed builtin (`git-clone`,
   // `/usr/lib/git-core/git-config`) is read as `git <sub>`, and a plumbing
-  // helper (`git-bisect--helper`, `git submodule--helper`) as its porcelain,
-  // so older Git's `rebase--helper --add-exec-commands cmd` meets a
-  // `rebase`-scoped flag. That flag is scoped because, as a `git` inline
-  // flag, it would also match `git config --add` (Git abbreviates options).
+  // helper (`git-bisect--helper`, `git submodule--helper`, Git 2.20-2.33's
+  // `git rebase--interactive`) as its porcelain, so Git 2.13-2.19's
+  // `rebase--helper --add-exec-commands cmd` meets a `rebase`-scoped flag.
+  // That flag is scoped because, as a `git` inline flag, it would also
+  // match `git config --add` (Git abbreviates options). The
+  // `rebase--interactive --cmd cmd` option is not scoped: no other Git
+  // option starts with `--cm`, and a repository alias for the helper
+  // (`git ri --cmd cmd`) would hide the subcommand.
   // HACK-1438 adds the remaining porcelain options that run a command, each
   // scoped to its subcommand: `send-email --to-cmd`/`--cc-cmd`/
   // `--header-cmd`/`--sendmail-cmd` and `--smtp-server` (an absolute path
@@ -718,6 +725,7 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
       "--extcmd",
       "--upload-pack",
       "--receive-pack",
+      "--cmd",
     ],
     words: ["foreach", "bisect", "filter-branch", "remote-ext", "archimport"],
     // Global options before the subcommand that consume the next argument.
@@ -921,15 +929,17 @@ function programName(arg: string): string {
 /** A dashed Git builtin (`git-clone`) and its subcommand (`clone`). */
 const DASHED_GIT = /^git-(.+)$/;
 /**
- * A Git plumbing helper subcommand (`bisect--helper`, `submodule--helper`)
- * and the porcelain subcommand it implements (`bisect`, `submodule`).
+ * A Git plumbing helper subcommand (`bisect--helper`, `submodule--helper`,
+ * Git 2.20-2.33's `rebase--interactive`) and the porcelain subcommand it
+ * implements (`bisect`, `submodule`, `rebase`).
  */
-const GIT_HELPER = /^([a-z0-9][a-z0-9-]*?)--helper$/i;
+const GIT_HELPER = /^([a-z0-9][a-z0-9-]*?)--(?:helper|interactive)$/i;
 
 /**
- * A Git argument with a `<sub>--helper` subcommand read as its porcelain
- * `<sub>`, so `git bisect--helper --bisect-run cmd` meets the `bisect` rule
- * and `submodule--helper foreach` the `foreach` rule. Any other argument is
+ * A Git argument with a `<sub>--helper` or `<sub>--interactive` subcommand
+ * read as its porcelain `<sub>`, so `git bisect--helper --bisect-run cmd`
+ * meets the `bisect` rule, `submodule--helper foreach` the `foreach` rule
+ * and `rebase--interactive --add-exec-commands` the `rebase` rule. Any other argument is
  * unchanged. A matching argument starts with a letter or digit and holds no
  * `=` or `!`, so no inline flag, word or `!` value is lost by the rewrite.
  * The porcelain is lowercased, like a program name, so a mixed-case helper
@@ -1276,23 +1286,28 @@ function afterModuleFlag(opts: {
   return index === -1 ? [] : opts.rest.slice(index + 1);
 }
 
+/** An operand and its index in the program's arguments. */
+type Operand = { readonly word: string; readonly index: number };
+
 /**
  * Every argument that is neither an option nor a known option's value,
- * in order. Everything after `--` is an operand.
+ * in order, with its index. Everything after `--` is an operand.
  */
 function operands(opts: {
   readonly rest: readonly string[];
   readonly spec: Evaluator;
-}): string[] {
-  const out: string[] = [];
+}): Operand[] {
+  const out: Operand[] = [];
   for (let index = 0; index < opts.rest.length; index++) {
     const arg = opts.rest[index] ?? "";
     if (arg === "--") {
-      out.push(...opts.rest.slice(index + 1));
+      for (let after = index + 1; after < opts.rest.length; after++) {
+        out.push({ word: opts.rest[after] ?? "", index: after });
+      }
       break;
     }
     if (arg === "-" || !(arg.startsWith("-") || arg.startsWith("+"))) {
-      out.push(arg);
+      out.push({ word: arg, index });
     } else if (
       opts.spec.valueOptions.includes(normalizeOption(arg, opts.spec))
     ) {
@@ -1336,16 +1351,22 @@ function getoptLongSelects(opts: {
 }
 
 /**
- * The entries of a subcommand-keyed table for every operand that names a
- * subcommand, compared lowercased.
+ * The entries of a subcommand-keyed table in force at argument `at`: one
+ * for every operand before it that names a subcommand, compared
+ * lowercased (`git clone -u`, `git Send-Email --to-cmd`, not
+ * `git push -u origin clone`).
  */
-function scopedEntries<T>(
-  table: Readonly<Record<string, T>>,
-  positional: readonly string[]
-): T[] {
-  return positional.flatMap((word) => {
+function scopedEntries<T>(opts: {
+  readonly table: Readonly<Record<string, T>>;
+  readonly positional: readonly Operand[];
+  readonly at: number;
+}): T[] {
+  return opts.positional.flatMap(({ word, index }) => {
+    if (index >= opts.at) {
+      return [];
+    }
     const key = word.toLowerCase();
-    const entry = Object.hasOwn(table, key) ? table[key] : undefined;
+    const entry = Object.hasOwn(opts.table, key) ? opts.table[key] : undefined;
     return entry === undefined ? [] : [entry];
   });
 }
@@ -1371,15 +1392,28 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
     return rest.length > 0;
   }
   const positional = operands({ rest, spec });
-  const operand = positional[0] ?? null;
-  const scoped = scopedEntries(spec.subcommandInline, positional).flat();
-  const getoptLong = scopedEntries(spec.subcommandGetoptLong, positional);
-  const flags = [...spec.inline, ...spec.stdin, ...scoped];
+  const operand = positional[0]?.word ?? null;
+  const flags = [...spec.inline, ...spec.stdin];
   if (
     rest.some(
-      (arg) =>
-        matchesFlag({ arg, flags, spec }) ||
-        getoptLong.some((options) => getoptLongSelects({ arg, options })) ||
+      (arg, at) =>
+        matchesFlag({
+          arg,
+          flags: [
+            ...flags,
+            ...scopedEntries({
+              table: spec.subcommandInline,
+              positional,
+              at,
+            }).flat(),
+          ],
+          spec,
+        }) ||
+        scopedEntries({
+          table: spec.subcommandGetoptLong,
+          positional,
+          at,
+        }).some((options) => getoptLongSelects({ arg, options })) ||
         spec.words.includes(arg.toLowerCase()) ||
         (spec.dataUrlModules && DATA_URL.test(arg)) ||
         (spec.bangCommands && BANG_COMMAND.test(arg)) ||

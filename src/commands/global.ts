@@ -375,7 +375,8 @@ const globalTrustSpec = defineCommand({
 
 const globalLogsResetSpec = defineCommand({
   name: "logs-reset",
-  summary: "Wipe Loki/Grafana volumes (fresh logs + dashboards)",
+  summary:
+    "Wipe Loki, Grafana and Alloy volumes (fresh logs, dashboards and Alloy read positions)",
   group: "Global",
   options: [],
   positionals: [],
@@ -1202,7 +1203,7 @@ async function globalLogsReset(): Promise<number> {
 
   const ok = await confirmSafe({
     message:
-      "This will stop the logging stack and delete ALL Loki logs and Grafana state (volumes).\nContinue?",
+      "This will stop the logging stack and delete its volumes: ALL Loki logs, Grafana state and Alloy read positions.\nContinue?",
     initialValue: false,
     nonInteractive: "accept-default",
   });

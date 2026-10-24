@@ -1006,51 +1006,58 @@ describe("catalog domain", () => {
     });
   });
 
-  test("pins must be Git-tracked files; untracked content is never hashed", async () => {
-    const { dir, registryPath } = await project("tracking");
-    const inspect = (taskId: string) =>
-      inspectTask({ cwd: dir, selector: {}, registryPath, taskId });
-    // Gitignored and untracked: refused without any digest.
-    const untracked = await inspect("untracked-secret");
-    expect(untracked).toMatchObject({
-      ok: false,
-      error: { detail: { reason: "input_path_invalid" } },
-    });
-    expect(JSON.stringify(untracked)).not.toContain(
-      sha256(canonical("fixture-value"))
-    );
-    // Positive control: once the file is tracked the same pin is checked,
-    // so the tracked-file rule was the only reason for the refusal.
-    await git(dir, ["add", "--force", "config/secrets.json"]);
-    expect(await inspect("untracked-secret")).toMatchObject({
-      ok: false,
-      error: {
-        detail: {
-          reason: "stale_recipe",
-          stale: {
-            inputs: [
-              { index: 1, observed_sha256: sha256(canonical("fixture-value")) },
-            ],
+  test(
+    "pins must be Git-tracked files; untracked content is never hashed",
+    async () => {
+      const { dir, registryPath } = await project("tracking");
+      const inspect = (taskId: string) =>
+        inspectTask({ cwd: dir, selector: {}, registryPath, taskId });
+      // Gitignored and untracked: refused without any digest.
+      const untracked = await inspect("untracked-secret");
+      expect(untracked).toMatchObject({
+        ok: false,
+        error: { detail: { reason: "input_path_invalid" } },
+      });
+      expect(JSON.stringify(untracked)).not.toContain(
+        sha256(canonical("fixture-value"))
+      );
+      // Positive control: once the file is tracked the same pin is checked,
+      // so the tracked-file rule was the only reason for the refusal.
+      await git(dir, ["add", "--force", "config/secrets.json"]);
+      expect(await inspect("untracked-secret")).toMatchObject({
+        ok: false,
+        error: {
+          detail: {
+            reason: "stale_recipe",
+            stale: {
+              inputs: [
+                {
+                  index: 1,
+                  observed_sha256: sha256(canonical("fixture-value")),
+                },
+              ],
+            },
           },
         },
-      },
-    });
-    // A reviewed recipe whose script leaves the index is refused.
-    expect((await inspect("lint")).ok).toBe(true);
-    await git(dir, ["rm", "--cached", "--quiet", "scripts/run-tool.sh"]);
-    expect(await inspect("lint")).toMatchObject({
-      ok: false,
-      error: { detail: { reason: "input_path_invalid" } },
-    });
-    // Without Git nothing is tracked, so every pinned recipe is refused.
-    await git(dir, ["add", "scripts/run-tool.sh"]);
-    expect((await inspect("lint")).ok).toBe(true);
-    await rm(join(dir, ".git"), { recursive: true, force: true });
-    expect(await inspect("lint")).toMatchObject({
-      ok: false,
-      error: { detail: { reason: "input_path_invalid" } },
-    });
-  });
+      });
+      // A reviewed recipe whose script leaves the index is refused.
+      expect((await inspect("lint")).ok).toBe(true);
+      await git(dir, ["rm", "--cached", "--quiet", "scripts/run-tool.sh"]);
+      expect(await inspect("lint")).toMatchObject({
+        ok: false,
+        error: { detail: { reason: "input_path_invalid" } },
+      });
+      // Without Git nothing is tracked, so every pinned recipe is refused.
+      await git(dir, ["add", "scripts/run-tool.sh"]);
+      expect((await inspect("lint")).ok).toBe(true);
+      await rm(join(dir, ".git"), { recursive: true, force: true });
+      expect(await inspect("lint")).toMatchObject({
+        ok: false,
+        error: { detail: { reason: "input_path_invalid" } },
+      });
+    },
+    CASE_TIMEOUT_MS
+  );
 
   test(
     "HACK-1331: the tracked-pin query ignores the caller's GIT_* env",
@@ -1773,12 +1780,20 @@ describe("recipe grammar", () => {
         ["git", "send-email", "--sender=a@b.example", "--no-header-cmd", "p"],
         ["git", "send-email", "--smtp-server-port=587", "--no-to", "p"],
         ["git", "send-email", "-h"],
+        // `--` and `-` name no option, so they select none.
+        ["git", "send-email", "--to=a@b.example", "--", "0001.patch"],
+        ["git", "send-email", "--to=a@b.example", "-"],
         // Scoped to `send-email`: the same names elsewhere pass.
         ["git", "rev-list", "--header", "HEAD"],
         ["git", "status", "-s"],
         ["git", "diff-tree", "-t", "HEAD"],
         ["git", "format-patch", "--to=a@b.example", "-1"],
         ["git", "log", "--cc"],
+        // Before the subcommand's name they pass (HACK-1423): Git reads
+        // send-email's options only after `send-email`, so a branch of
+        // that name does not scope `--header` to it.
+        ["git", "rev-list", "--header", "send-email"],
+        ["git", "log", "-s", "--", "Send-Email"],
       ],
     },
     {
@@ -1807,6 +1822,8 @@ describe("recipe grammar", () => {
         ["git", "clone", "EXT::id", "dir"],
         ["git", "remote", "add", "origin", "ext::id"],
         ["git", "fetch", "--negotiation-tip=x", "--", "ext::id"],
+        // An option value after `=` is a URL too.
+        ["git", "push", "--repo=ext::id"],
         // archimport pastes each operand into a `tla abrowse` shell
         // pipeline, so `x/y;cmd #` runs `cmd` even without tla.
         ["git", "archimport", "x/y"],
@@ -1822,6 +1839,67 @@ describe("recipe grammar", () => {
         ["git", "instaweb", "--stop"],
         ["git", "remote", "add", "origin", "https://example.test/x.git"],
         ["git", "add", "extension.txt"],
+        // `ext::` counts only at the start of an argument or after `=`.
+        ["git", "add", "docs/ext::notes.md"],
+        // Before the subcommand's name they pass (HACK-1423).
+        ["git", "diff", "-Oorderfile", "--", "grep"],
+        ["git", "push", "-d", "origin", "instaweb"],
+      ],
+    },
+    {
+      // Git 2.20-2.33 ship `rebase--interactive`, whose `--cmd <cmd>` adds
+      // an `exec <cmd>` line after each pick and runs it.
+      issue: "HACK-1423",
+      rule: "Git rebase--interactive --cmd",
+      refused: [
+        ["git", "rebase--interactive", "--cmd", "id"],
+        ["git", "rebase--interactive", "--cmd=id"],
+        ["git-rebase--interactive", "--cmd", "id"],
+        ["/usr/lib/git-core/git-rebase--interactive", "--cmd=id"],
+        ["git", "Rebase--Interactive", "--cm", "id"],
+        ["git", "--git-dir", "x", "rebase--interactive", "--cmd", "id"],
+        // A repository alias for the helper hides the subcommand, so
+        // `--cmd` is not scoped to `rebase`.
+        ["git", "ri", "--cmd", "id"],
+        // `rebase--interactive` is read as `rebase`, so its
+        // `--add-exec-commands` mode meets the `rebase`-scoped flag.
+        ["git", "rebase--interactive", "--add-exec-commands"],
+        ["git-rebase--interactive", "--add-exec"],
+      ],
+      accepted: [
+        ["git", "rebase--interactive", "--continue"],
+        ["git-rebase--interactive", "--edit-todo"],
+        ["git", "add", "rebase--interactive.txt"],
+      ],
+    },
+    {
+      // A subcommand-scoped flag counts only after the operand that names
+      // the subcommand: Git reads a subcommand's options after its name
+      // and rejects an unknown option before it.
+      issue: "HACK-1423",
+      rule: "subcommand-scoped Git flags count after the subcommand",
+      refused: [
+        ["git", "clone", "-u", "id", "url"],
+        ["git-clone", "-u", "id", "url"],
+        ["git", "--attr-source", "HEAD", "clone", "-u", "id", "url"],
+        // An unknown global option's value is read as an operand, so the
+        // subcommand after it still scopes the flag (fail-closed).
+        ["git", "--unknown", "v", "clone", "-u", "id", "url"],
+        [
+          "git",
+          "--unknown",
+          "v",
+          "rebase--helper",
+          "--add-exec-commands",
+          "id",
+        ],
+        ["git", "--namespace", "n", "rebase--helper", "--add", "id"],
+      ],
+      accepted: [
+        ["git", "push", "-u", "origin", "clone"],
+        ["git", "remote", "set-branches", "--add", "origin", "rebase"],
+        ["git", "config", "--add", "alias.r", "rebase"],
+        ["git", "push", "-u", "origin", "clone--helper"],
       ],
     },
   ];
@@ -1847,11 +1925,6 @@ describe("recipe grammar", () => {
     // `-C` matches `-c` (case-folded), so `git -C dir status` is refused;
     // a recipe must set the Compose workdir instead.
     expect(isInlineCommandArgv(["git", "-C", "dir", "status"])).toBe(true);
-    // Any operand named `clone` scopes `-u` to it, so a branch or remote
-    // named `clone` makes `git push -u` refused too.
-    expect(isInlineCommandArgv(["git", "push", "-u", "origin", "clone"])).toBe(
-      true
-    );
     // Git's value-taking short options depend on the subcommand
     // (`rebase -mx cmd`), so an attached value containing `c`, `x` or `u`
     // is refused; the value as its own argument passes.
@@ -1871,18 +1944,25 @@ describe("recipe grammar", () => {
   });
 
   test("HACK-1411: documented Git helper fail-closed collateral stays refused", () => {
-    // Any whole-word `<sub>--helper` argument is read as `<sub>`, so a
-    // branch named `clone--helper` scopes `-u` to `clone` and a file named
-    // `bisect--helper` meets the `bisect` rule.
-    expect(
-      isInlineCommandArgv(["git", "push", "-u", "origin", "clone--helper"])
-    ).toBe(true);
+    // Any whole-word `<sub>--helper` or `<sub>--interactive` argument is
+    // read as `<sub>`, so a file named `bisect--helper` meets the `bisect`
+    // rule.
     expect(isInlineCommandArgv(["git", "add", "bisect--helper"])).toBe(true);
-    // Any operand named `rebase` scopes `--add-exec-commands` to it, and
-    // Git abbreviates, so `--add` before an alias value `rebase` is refused.
+    // HACK-1423: an operand named `clone` or `rebase` scopes its flags to
+    // everything after it, even when it is another option's value (Git's
+    // option values are not modeled), and Git abbreviates, so `--add`
+    // after a message `rebase` and `-u` (`--patch`) after a pickaxe string
+    // `clone` are refused. The same flag before the word passes.
     expect(
-      isInlineCommandArgv(["git", "config", "--add", "alias.r", "rebase"])
+      isInlineCommandArgv(["git", "commit", "-m", "rebase", "--add"])
     ).toBe(true);
+    expect(isInlineCommandArgv(["git", "log", "-S", "clone", "-u"])).toBe(true);
+    expect(isInlineCommandArgv(["git", "log", "-u", "-S", "clone"])).toBe(
+      false
+    );
+    // HACK-1423: `--cmd` is refused under every subcommand, so a Git
+    // argument spelled `--cmd` or `--cm` is refused too.
+    expect(isInlineCommandArgv(["git", "grep", "-e", "--cmd"])).toBe(true);
   });
 
   test("HACK-1438: documented send-email and grep fail-closed collateral stays refused", () => {
@@ -1899,8 +1979,10 @@ describe("recipe grammar", () => {
     // `-O` is case-folded like every flag, so `git grep -o` is refused.
     expect(isInlineCommandArgv(["git", "grep", "-o", "x"])).toBe(true);
     // A subcommand is matched in any letter case and at any operand, so a
-    // path named `Grep` scopes `-O` to it.
-    expect(isInlineCommandArgv(["git", "log", "-o", "--", "Grep"])).toBe(true);
+    // path named `Grep` scopes `-O` to the arguments after it (HACK-1423);
+    // the same flag before it passes.
+    expect(isInlineCommandArgv(["git", "log", "--", "Grep", "-o"])).toBe(true);
+    expect(isInlineCommandArgv(["git", "log", "-o", "--", "Grep"])).toBe(false);
   });
 
   test("effects must be covered by required capabilities", () => {

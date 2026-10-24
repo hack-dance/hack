@@ -68,6 +68,13 @@ import {
 import type { LegacyComposeSourceBindIntent } from "./native-config-import-storage.ts";
 
 const ID = /^[a-f0-9]{64}$/;
+/**
+ * Docker lists an endpoint that is not joined to a sandbox as `ep-<endpoint>`
+ * in a bridge's `.Containers`. That happens for a moment on every container
+ * start (endpoint created, sandbox not yet joined) and exit (sandbox left,
+ * endpoint not yet deleted), and the bridge read takes no container lock.
+ */
+const ENDPOINT_PLACEHOLDER = /^ep-[a-f0-9]{64}$/;
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/;
 const ENGINE_ID = /^[a-zA-Z0-9:._-]{1,128}$/;
 const TIME = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/;
@@ -708,6 +715,28 @@ function containerRows(
     })
     .sort((a, b) => a.service.localeCompare(b.service));
 }
+/**
+ * Split a bridge's `.Containers` keys into container IDs and a transient flag.
+ * A placeholder is never attributed, admitted or retained: it only marks this
+ * bridge read as mid-transition so the caller re-observes under its original
+ * deadline. Any other non-ID key, or a duplicate, refuses as before.
+ */
+function bridgeMembers(value: unknown): {
+  readonly ids: readonly string[];
+  readonly transient: boolean;
+} {
+  requireValue(
+    Array.isArray(value) &&
+      value.every(
+        (key) =>
+          typeof key === "string" &&
+          (ID.test(key) || ENDPOINT_PLACEHOLDER.test(key))
+      ) &&
+      new Set(value).size === value.length
+  );
+  const ids = value.filter((key: string) => ID.test(key));
+  return { ids, transient: ids.length !== value.length };
+}
 function networkRow(
   rows: readonly Record<string, unknown>[],
   intent: LegacyComposeStorageIntent
@@ -736,11 +765,9 @@ function networkRow(
       timestamp(row.createdAt) &&
       row.driver === "bridge" &&
       row.scope === "local" &&
-      row.internal === (intent.ownedNetwork?.internal ?? false) &&
-      Array.isArray(row.containers) &&
-      row.containers.every((id) => typeof id === "string" && ID.test(id)) &&
-      new Set(row.containers).size === row.containers.length
+      row.internal === (intent.ownedNetwork?.internal ?? false)
   );
+  const members = bridgeMembers(row.containers);
   return {
     network: {
       id: row.id,
@@ -753,7 +780,8 @@ function networkRow(
           }
         : {}),
     },
-    containerIds: row.containers,
+    containerIds: members.ids,
+    transient: members.transient,
   };
 }
 function pluralNetworkRows(
@@ -762,7 +790,9 @@ function pluralNetworkRows(
 ): {
   readonly networks: readonly LegacyComposeVerifiedNetwork[];
   readonly members: ReadonlyMap<string, readonly string[]>;
+  readonly transient: boolean;
 } {
+  let transient = false;
   const declared = intent.ownedNetworks?.networks;
   requireValue(declared && declared.length === 2 && rows.length === 2);
   requireValue(
@@ -794,7 +824,8 @@ function pluralNetworkRows(
       ]);
       const expected = declared.find((network) => network.name === row.name);
       const id = row.id;
-      const rowMembers = row.containers;
+      const rowMembers = bridgeMembers(row.containers);
+      transient ||= rowMembers.transient;
       requireValue(
         expected &&
           typeof id === "string" &&
@@ -805,16 +836,11 @@ function pluralNetworkRows(
           row.internal === expected.internal &&
           row.driver === "bridge" &&
           row.scope === "local" &&
-          timestamp(row.createdAt) &&
-          Array.isArray(rowMembers) &&
-          rowMembers.every(
-            (member) => typeof member === "string" && ID.test(member)
-          ) &&
-          new Set(rowMembers).size === rowMembers.length
+          timestamp(row.createdAt)
       );
       ids.add(id);
       names.add(expected.name);
-      members.set(expected.logical, [...rowMembers].sort());
+      members.set(expected.logical, [...rowMembers.ids].sort());
       return {
         id,
         name: expected.name,
@@ -824,7 +850,7 @@ function pluralNetworkRows(
       };
     })
     .sort((a, b) => a.logical.localeCompare(b.logical));
-  return { networks, members };
+  return { networks, members, transient };
 }
 async function engine(probe: Probe) {
   const rows = lines(
@@ -981,8 +1007,14 @@ async function inspectResources(
         )
       );
     }
-    return { plural, single };
+    return {
+      plural,
+      single,
+      transient: plural?.transient === true || single?.transient === true,
+    };
   };
+  // The first bridge read only fixes identity and refuses foreign members; the
+  // loop below always re-reads, so a placeholder here needs no extra scan.
   let { plural, single } = await readNetwork();
   const networkIdentity = JSON.stringify(plural?.networks ?? single?.network);
   let ingress: NativeComposeIngressBinding | undefined;
@@ -1019,18 +1051,21 @@ async function inspectResources(
   let containerFacts: readonly Record<string, unknown>[];
   let containers: LegacyComposeVerifiedContainer[];
   for (;;) {
-    ({ plural, single } = await readNetwork());
+    let transient: boolean;
+    ({ plural, single, transient } = await readNetwork());
     requireValue(
       JSON.stringify(plural?.networks ?? single?.network) === networkIdentity
     );
     const after = await readContainers();
     // Both scans validate all labels, mounts and configured attachments against
-    // the same originals. Only running state is transient; stopped aliases may
-    // be absent under the existing contract. No completion authority is granted.
+    // the same originals. Only running state and a sandbox-less endpoint
+    // placeholder are transient; stopped aliases may be absent under the
+    // existing contract. No completion authority is granted.
     requireValue(JSON.stringify(after.containers) === containerIdentity);
     if (
+      transient ||
       JSON.stringify(before.facts.map((row) => [row.id, row.running])) !==
-      JSON.stringify(after.facts.map((row) => [row.id, row.running]))
+        JSON.stringify(after.facts.map((row) => [row.id, row.running]))
     ) {
       // Reuse this aggregate probe's original deadline and output allowance.
       // Never accept mixed membership, reset a timer, or retry an identity error.

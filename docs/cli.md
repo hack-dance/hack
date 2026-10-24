@@ -150,6 +150,14 @@ Historical remote guides are excluded from the supported documentation.
   trace; set `HACK_DEBUG=1` to add the stack. Unexpected exceptions always print their stack.
 - `--no-interactive` (or `HACK_NO_INTERACTIVE=1`) is a global flag: commands never prompt — they
   apply documented defaults or fail fast with `E_INTERACTIVE_REQUIRED`.
+- A run whose stdin or stdout is not a TTY (piped input, an agent harness, CI) is treated the same
+  way, with or without the flag: the command resolves every prompt by its documented
+  non-interactive policy within milliseconds and never waits on a prompt. Confirmations that have
+  a safe default apply it (`hack env unset KEY` removes the key; `hack doctor --fix` applies safe
+  remediations and skips destructive ones with a note); prompts that need a real answer fail
+  closed with `E_INTERACTIVE_REQUIRED`, naming the flag or argument that makes the invocation
+  scriptable (for example `hack update --yes`, `hack mcp --all`, `hack session attach <name>`).
+  Set `HACK_NO_INTERACTIVE=1` explicitly in scripts anyway so the intent is visible.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
 
 Generated agent docs, Cursor rules, Codex skills, and the shared `~/.ai/skills/hack-cli` skill carry

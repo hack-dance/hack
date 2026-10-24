@@ -8,6 +8,7 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
+import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import type { AgentDocTarget } from "../mcp/agent-docs.ts";
 import { upsertAgentDocs } from "../mcp/agent-docs.ts";
 import {
@@ -399,6 +400,13 @@ async function resolveTargets(opts: {
   }
   if (targets.length > 0) {
     return dedupeTargets({ targets });
+  }
+
+  if (!canPrompt()) {
+    requireInteractive({
+      what: "hack mcp needs at least one target",
+      hint: "Pass --all, or any of --cursor, --claude, --codex.",
+    });
   }
 
   const selected = await autocompleteMultiselect<McpTarget>({

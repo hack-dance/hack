@@ -194,6 +194,21 @@ export function assertNativeComposeStorageCarrierStable(
     refuseObserved("storage-helper-policy", "helper-policy-stability");
   }
 }
+/**
+ * Refuse unless a stopped helper carrier, inspected again, still shows the
+ * exact stopped state first observed. A change is the same instability as a
+ * changed creation time or policy, so it reports `helper-policy-stability` at
+ * `storage-helper-policy`; untagged, such a refusal caught after the carrier
+ * deadline would read `storage-budget`.
+ */
+export function assertNativeComposeStorageCarrierStateUnchanged(
+  observed: NativeComposeStorageDockerCarrier,
+  stopped: NativeComposeStorageDockerCarrier
+): void {
+  if (!same(observed.state, stopped.state)) {
+    refuseObserved("storage-helper-policy", "helper-policy-stability");
+  }
+}
 function lifetime(context: Context): void {
   if (context.signal.aborted) {
     refuse();
@@ -2013,9 +2028,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         }
         const repeated = await inspectCarrier(true);
         assertNativeComposeStorageCarrierStable(repeated, known);
-        if (!same(repeated.state, stopped.state)) {
-          return refuse();
-        }
+        assertNativeComposeStorageCarrierStateUnchanged(repeated, stopped);
         stage = "storage-helper-cleanup";
         await checkFiles(files);
         tool();
@@ -2042,9 +2055,10 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           assertAdmitted: async () => {
             const finalCarrier = await inspectCarrier(true);
             assertNativeComposeStorageCarrierStable(finalCarrier, owned);
-            if (!same(finalCarrier.state, stopped.state)) {
-              refuse();
-            }
+            assertNativeComposeStorageCarrierStateUnchanged(
+              finalCarrier,
+              stopped
+            );
             await engine(probe(true), context);
             tool();
             assertNativeComposeStorageBindingUnchanged({
@@ -2117,14 +2131,16 @@ export async function createNativeComposeDockerStorageXattrCarrier(
             const check = async () => {
               await checkCompletion();
               tool();
-              if (
-                !(
-                  nativeComposeStorageCommandOwnerConfirmed(owner) &&
-                  same(before, await current(context, input.target))
-                )
-              ) {
+              if (!nativeComposeStorageCommandOwnerConfirmed(owner)) {
                 return refuse();
               }
+              // Deferred retirement is the carrier's own cleanup: a binding
+              // changed since the invocation began reports `private-state`.
+              assertNativeComposeStorageBindingUnchanged({
+                stage: "storage-helper-cleanup",
+                before,
+                after: await current(context, input.target),
+              });
             };
             try {
               await check();

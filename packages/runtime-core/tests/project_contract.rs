@@ -566,6 +566,48 @@ fn hack_ownership_label_namespaces_block_enrollment() {
             assert!(!fixture.candidate.state_root.exists());
         }
     }
+    // The dependency cache declaration form: its own `hack.dependencies.*`
+    // labels are recognized, so without an ownership key nothing else reports
+    // an owner label. With one, the declaration does not exempt it.
+    let dependency_cache = |extra: &str| {
+        Fixture::new(&format!(
+            "services:\n  deps:\n    image: alpine:3.21\n    volumes: ['node_modules:/app/node_modules']\n    labels:\n      hack.dependencies.cache-volume: node_modules\n      hack.dependencies.lockfiles: bun.lock\n      hack.dependencies.bootstrap: 'true'\n{extra}volumes:\n  node_modules: {{}}\n"
+        ))
+    };
+    let declared = dependency_cache("");
+    assert!(
+        declared.plan().plan.services["deps"]
+            .dependency_cache
+            .is_some()
+    );
+    assert!(!owner_label(&declared));
+    for key in [
+        "io.hack-local.owner",
+        "io.hack.native-config.owner",
+        "io.hack.native-file.token",
+        "io.hack.storage-witness.carrier",
+    ] {
+        let fixture = dependency_cache(&format!("      '{key}': owner-canary\n"));
+        let plan = fixture.plan();
+        assert!(
+            plan.plan.services["deps"].dependency_cache.is_some(),
+            "{key}"
+        );
+        assert!(owner_label(&fixture), "{key}");
+        assert!(!plan.plan.enrollment_compatible, "{key}");
+        assert!(
+            !serde_json::to_string(&plan)
+                .unwrap()
+                .contains("owner-canary")
+        );
+        assert_eq!(
+            project::enroll(&fixture.candidate, fixture.options(), &plan.plan_id)
+                .unwrap_err()
+                .code,
+            "incompatible_compose"
+        );
+        assert!(!fixture.candidate.state_root.exists());
+    }
     // Near misses outside every ownership namespace stay reviewable. Closer
     // misses (a longer first segment, or another segment under the same
     // reverse-DNS root) are pinned by the `ownership_labels` unit tests; they

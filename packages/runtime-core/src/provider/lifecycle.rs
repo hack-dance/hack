@@ -1998,7 +1998,15 @@ impl Drop for VmLock {
 }
 
 /// How long `down`, `recover` and other stop paths wait for `lsof` over the owned disks.
+#[cfg(not(test))]
 const STOP_HANDLE_WAIT: Duration = Duration::from_secs(5);
+/// The unit-test build of [`STOP_HANDLE_WAIT`]. Release-check fixtures prove what the scan
+/// reports (status 1, no output), not how fast it reports it, and they run beside other
+/// tests' whole-host scans; on a loaded host one scan took longer than 5 s and the
+/// fixture failed as `provider_timeout_uncertain` before its result under test (HACK-1457).
+/// Tests of the timeout itself pass their own bound to [`lock_absent_disks_within`].
+#[cfg(test)]
+const STOP_HANDLE_WAIT: Duration = super::test_executable::LOADED_HOST_SCAN_WAIT;
 
 /// Keep this guard through alias restoration and the stopped receipt.
 fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<VmLock, CandidateError> {

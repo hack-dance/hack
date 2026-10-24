@@ -44,6 +44,13 @@ pub(super) fn sleeping_executable(binary: &Path) {
     fs::set_permissions(binary, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+/// Test bound for one whole-host `lsof` scan. `lsof` walks every process on the host, so
+/// on a loaded machine with other tests scanning at the same time one scan can take well
+/// over its production budget (HACK-1457: over 5 s at load average ~80-120 with process
+/// spawn churn). Only a scan that never finishes should reach this; it stays well inside
+/// [`ISOLATED_HANG_GUARD`], so an isolated fixture still reports its own failure.
+pub(super) const LOADED_HOST_SCAN_WAIT: Duration = Duration::from_secs(60);
+
 /// Hang guard for [`run_isolated`]: the child launches the whole test binary on a host that
 /// may be heavily loaded, so this bounds a hang rather than the fixture's own timing.
 pub(super) const ISOLATED_HANG_GUARD: Duration = Duration::from_secs(120);

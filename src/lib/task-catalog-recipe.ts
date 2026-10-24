@@ -372,15 +372,46 @@ type Evaluator = {
    * `git push -u` sets an upstream. They count when any operand names the
    * subcommand, not only the first, so a global option missing from
    * `valueOptions` (whose value would be taken as the subcommand) cannot
-   * hide it (fail-closed).
+   * hide it (fail-closed). Keys are lowercase and operands are lowercased
+   * before lookup, because Git finds a non-builtin subcommand
+   * (`git-send-email`, `git-instaweb`) as a file in its exec path, and on a
+   * case-insensitive filesystem `git Send-Email` runs it.
    */
   readonly subcommandInline: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Inline options of a subcommand that is a Perl script reading its
+   * options with Getopt::Long's defaults (`git send-email`), keyed like
+   * `subcommandInline` and scoped the same way. Getopt::Long's grammar
+   * differs from Git's, so these are matched by `getoptLongSelects`.
+   */
+  readonly subcommandGetoptLong: Readonly<Record<string, GetoptLongOptions>>;
   /**
    * True when a value starting with `!` (a whole argument, or after `=`)
    * is a shell command: a Git alias defined as `!cmd`, through
    * `git config alias.x '!cmd'` or `git -c alias.x=!cmd`.
    */
   readonly bangCommands: boolean;
+  /**
+   * True when an `ext::` remote URL (a whole argument, or after `=`) is a
+   * command: Git's `ext` remote helper runs the rest of the URL
+   * (`git ls-remote 'ext::sh -c cmd'`) when `protocol.ext.allow` permits.
+   */
+  readonly extUrls: boolean;
+};
+
+/**
+ * Inline options of a Getopt::Long subcommand, as option names without a
+ * prefix, lowercase.
+ */
+type GetoptLongOptions = {
+  /** Options whose value is a command the script runs. */
+  readonly inline: readonly string[];
+  /**
+   * Other options of the same script whose whole name is a prefix of an
+   * inline option (`to` for `to-cmd`). Getopt::Long takes an exact name
+   * as that option, so `--to` is not an abbreviation of `--to-cmd`.
+   */
+  readonly exact: readonly string[];
 };
 
 function evaluator(spec: Partial<Evaluator>): Evaluator {
@@ -404,7 +435,9 @@ function evaluator(spec: Partial<Evaluator>): Evaluator {
     trampolineModules: [],
     pipeOptions: [],
     subcommandInline: {},
+    subcommandGetoptLong: {},
     bangCommands: false,
+    extUrls: false,
     ...spec,
   };
 }
@@ -668,6 +701,13 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   // so older Git's `rebase--helper --add-exec-commands cmd` meets a
   // `rebase`-scoped flag. That flag is scoped because, as a `git` inline
   // flag, it would also match `git config --add` (Git abbreviates options).
+  // HACK-1438 adds the remaining porcelain options that run a command, each
+  // scoped to its subcommand: `send-email --to-cmd`/`--cc-cmd`/
+  // `--header-cmd`/`--sendmail-cmd` and `--smtp-server` (an absolute path
+  // there is a sendmail program), `grep -O`/`--open-files-in-pager`,
+  // `daemon --access-hook`, `instaweb -d`/`--httpd` and
+  // `svn --authors-prog`; the `remote-ext` helper and its `ext::` URLs;
+  // and `archimport`, which pastes its operands into a shell pipeline.
   git: evaluator({
     inline: [
       "-c",
@@ -679,7 +719,7 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
       "--upload-pack",
       "--receive-pack",
     ],
-    words: ["foreach", "bisect", "filter-branch"],
+    words: ["foreach", "bisect", "filter-branch", "remote-ext", "archimport"],
     // Global options before the subcommand that consume the next argument.
     valueOptions: [
       "-C",
@@ -697,8 +737,33 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
     // cluster: `git log -Scache` and `git commit -mcleanup` are refused
     // (fail-closed); pass the value as its own argument instead.
     shortValueOptions: [],
-    subcommandInline: { clone: ["-u"], rebase: ["--add-exec-commands"] },
+    subcommandInline: {
+      clone: ["-u"],
+      rebase: ["--add-exec-commands"],
+      // `-O<pager>` and `--open-files-in-pager=<pager>` run the pager
+      // through the shell with the matching file names.
+      grep: ["-O", "--open-files-in-pager"],
+      // Run through the shell for each connection.
+      daemon: ["--access-hook"],
+      // The HTTP daemon command line instaweb starts.
+      instaweb: ["-d", "--httpd"],
+      // git-svn runs it in backticks for each unknown SVN author.
+      svn: ["--authors-prog"],
+    },
+    subcommandGetoptLong: {
+      "send-email": {
+        inline: [
+          "to-cmd",
+          "cc-cmd",
+          "header-cmd",
+          "sendmail-cmd",
+          "smtp-server",
+        ],
+        exact: ["to", "cc", "h"],
+      },
+    },
     bangCommands: true,
+    extUrls: true,
   }),
   // SQL clients given a statement string. A statement can also reach the
   // host shell (`psql` `\!`, `mysql` `system`, the `sqlite3` `.shell`).
@@ -1239,6 +1304,51 @@ function operands(opts: {
 
 /** A value that is a shell command to Git: `!cmd` or `key=!cmd`. */
 const BANG_COMMAND = /(?:^|=)\s*!/;
+/** An `ext::` remote URL, whole or after `=`, in any letter case. */
+const EXT_URL = /(?:^|=)ext::/i;
+/** Getopt::Long's default option prefixes (without `POSIXLY_CORRECT`). */
+const GETOPT_LONG_PREFIX = /^(?:--|-|\+)/;
+
+/**
+ * True when an argument selects one of `options.inline` the way
+ * Getopt::Long reads it with its defaults, as `git send-email` does: the
+ * name may follow `--`, `-` or `+` (`-to-cmd`, `+to-cmd`), letter case is
+ * ignored (`--CC-CMD`), a value may follow `=`, and any prefix of a name
+ * is accepted as an abbreviation (`--cc-cm`). A prefix that names more
+ * than one option is ambiguous to Getopt::Long, but it is refused here
+ * (fail-closed), unless it is the whole name of another option listed in
+ * `options.exact` (`--to`, `--cc`).
+ */
+function getoptLongSelects(opts: {
+  readonly arg: string;
+  readonly options: GetoptLongOptions;
+}): boolean {
+  const prefix = GETOPT_LONG_PREFIX.exec(opts.arg)?.[0];
+  if (prefix === undefined) {
+    return false;
+  }
+  const body = opts.arg.slice(prefix.length);
+  const name = (body.split("=", 1)[0] ?? body).toLowerCase();
+  if (name === "" || opts.options.exact.includes(name)) {
+    return false;
+  }
+  return opts.options.inline.some((option) => option.startsWith(name));
+}
+
+/**
+ * The entries of a subcommand-keyed table for every operand that names a
+ * subcommand, compared lowercased.
+ */
+function scopedEntries<T>(
+  table: Readonly<Record<string, T>>,
+  positional: readonly string[]
+): T[] {
+  return positional.flatMap((word) => {
+    const key = word.toLowerCase();
+    const entry = Object.hasOwn(table, key) ? table[key] : undefined;
+    return entry === undefined ? [] : [entry];
+  });
+}
 
 function isShellSyntax(arg: string): boolean {
   return (
@@ -1262,19 +1372,18 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
   }
   const positional = operands({ rest, spec });
   const operand = positional[0] ?? null;
-  const scoped = positional.flatMap((word) =>
-    Object.hasOwn(spec.subcommandInline, word)
-      ? (spec.subcommandInline[word] ?? [])
-      : []
-  );
+  const scoped = scopedEntries(spec.subcommandInline, positional).flat();
+  const getoptLong = scopedEntries(spec.subcommandGetoptLong, positional);
   const flags = [...spec.inline, ...spec.stdin, ...scoped];
   if (
     rest.some(
       (arg) =>
         matchesFlag({ arg, flags, spec }) ||
+        getoptLong.some((options) => getoptLongSelects({ arg, options })) ||
         spec.words.includes(arg.toLowerCase()) ||
         (spec.dataUrlModules && DATA_URL.test(arg)) ||
-        (spec.bangCommands && BANG_COMMAND.test(arg))
+        (spec.bangCommands && BANG_COMMAND.test(arg)) ||
+        (spec.extUrls && EXT_URL.test(arg))
     ) ||
     pipesToCommand({ rest, spec })
   ) {
@@ -1316,8 +1425,9 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
  * (`python -m code`, also behind a trampoline: `python -m runpy code`); a
  * SQL client given a statement string (`psql -c`, `sqlite3 db 'SQL'`) or
  * an output pipe (`psql -o '|cmd'`); a package runner, privilege wrapper
- * or tool given its string-to-shell option, word or `!` alias value (also
- * as a dashed Git builtin, `git-clone -u cmd`);
+ * or tool given its string-to-shell option, word, `!` alias value or
+ * `ext::` URL (also as a dashed Git builtin, `git-clone -u cmd`, and in
+ * Getopt::Long spellings for `git send-email -to-cmd=cmd`);
  * `eval`, `env`, `xargs`, `su`, `ssh`, awk, sed or another always-refused
  * program anywhere; or bare shell syntax copied from a log line. Recipes
  * must run a reviewed script file instead; there is no shell endpoint.

@@ -76,7 +76,22 @@ is not implemented here.
    `doas -s`, `git -c`/`--config`/`--exec`/`--upload-pack`/
    `--receive-pack`/`clone -u`/`submodule foreach`/`bisect`/
    `filter-branch`, a Git `!` alias value such as
-   `git config alias.x '!cmd'`, `make --eval`, `nix eval`). A dashed Git
+   `git config alias.x '!cmd'`, `make --eval`, `nix eval`). Git porcelain
+   options that run a command are refused under their own subcommand:
+   `send-email --to-cmd`/`--cc-cmd`/`--header-cmd`/`--sendmail-cmd` and
+   `--smtp-server` (an absolute path there is a sendmail program),
+   `grep -O`/`--open-files-in-pager`, `daemon --access-hook`,
+   `instaweb -d`/`--httpd` and `svn --authors-prog`. So are the
+   `remote-ext` helper, an `ext::` remote URL (Git runs it when
+   `protocol.ext.allow` permits) and `archimport`, which pastes its
+   operands into a shell pipeline. `git send-email` reads options with
+   Perl's Getopt::Long, which also takes a one-dash or `+` prefix, any
+   letter case and any unique prefix, so `-to-cmd=cmd`, `+to-cmd=cmd`,
+   `--CC-CMD=cmd` and `--cc-cm=cmd` count too. The `sendemail.*Cmd` config
+   equivalents are refused through `git -c`/`--config-env`, whatever the
+   key. A subcommand name is matched in any letter case, because Git finds
+   a script subcommand as a file and a case-insensitive filesystem runs
+   `git-send-email` for `git Send-Email`. A dashed Git
    builtin, by basename or absolute path (`git-clone`,
    `/usr/lib/git-core/git-config`), is read as `git <sub>`, so
    `git-clone -u cmd`, `git-config alias.x '!cmd'`,
@@ -106,8 +121,10 @@ is not implemented here.
    `duckdb -storage-version v1.2.0 data.duckdb`, `python -m pytest`,
    `python -mpytest`, `python -m unittest discover -s tests`,
    `psql -o out.txt -f script.sql`, `git-clone url dir`,
-   `git clone url dir`, `git push -u origin main`, `git add -u` and
-   `git config alias.st status`.
+   `git clone url dir`, `git push -u origin main`, `git add -u`,
+   `git config alias.st status`,
+   `git send-email --to=a@b.example --cc c@d.example 0001.patch`,
+   `git rev-list --header HEAD` and `git branch -d topic`.
 3. **Repository and log text grant no authority.** A recipe that passes every
    check is `reviewed`: its pins still match what a reviewer approved. Results
    still say `authority: "none"` and `execution: "unavailable"`. A recipe that
@@ -358,6 +375,8 @@ until its recipes are re-reviewed.
 | `psql -o`/`--output` piped to a command (`-o '\|cmd'`, `-o\|cmd`, `-qo\|cmd`, `--output=\|cmd`, `--out=\|cmd`) | `inline_command`; `psql -o out.txt`, `psql -F'\|'`, `psql -L '\|log'` (a file name) still pass | domain test |
 | Dashed Git builtins (`/usr/lib/git-core/git-clone -u cmd`, `git-config alias.x '!cmd'`, `git-ls-remote --upload-pack=cmd`, `git-fetch-pack --exec=cmd`) | `inline_command`; `git-clone url dir`, `git-push -u origin main`, `git-config alias.st status` still pass | domain test |
 | Git plumbing helpers read as their porcelain (`git-bisect--helper --bisect-run cmd`, `/usr/lib/git-core/git-bisect--helper.exe run cmd`, `git bisect--helper --bisect-run cmd`, `git-submodule--helper foreach cmd`, `git-config alias.x bisect--helper`, older Git's `git rebase--helper --add-exec-commands cmd` in any letter case) | `inline_command`; `git-submodule--helper status`, `git-difftool--helper a b`, `git add bisect--helper.txt`, `git config --add alias.st status` still pass | domain test |
+| `git send-email --to-cmd`/`--cc-cmd`/`--header-cmd`/`--sendmail-cmd`/`--smtp-server` in every Getopt::Long spelling (`--opt cmd`, `--opt=cmd`, `--cc-cm`, `--CC-CMD`, `-to-cmd`, `+to-cmd`), dashed or mixed-case (`git-send-email`, `git Send-Email`), and `-c sendemail.ccCmd=…`/`toCmd`/`headerCmd`/`sendmailCmd` in any key case | `inline_command`; `git send-email --to=… --cc …`, `--suppress-cc=all`, `--no-header-cmd`, `--smtp-server-port=587`, `git rev-list --header`, `git status -s`, `git format-patch --to=…` still pass | domain test |
+| Other Git porcelain command runners (`git grep -Ocmd`/`--open-files-in-pager=cmd`, `git daemon --access-hook=cmd`, `git instaweb -d`/`--httpd`, `git svn --authors-prog`, `git remote-ext`, `ext::` URLs, `git archimport`) | `inline_command`; `git grep -n`, `git branch -d`, `git svn fetch --authors-file=…`, `git daemon --export-all`, an `https://` remote still pass | domain test |
 | Detached linked worktree with no named instance, on CLI `task list`/`task inspect` and MCP `hack.project.task.list`/`inspect` | `detached_checkout`; naming the instance (`--branch`, MCP `branch`) passes | paired fixture, domain test |
 | `duckdb -storage-version VER db` | accepted; a SQL operand after the database is still refused | domain test |
 | `git clone -u` (also after `--attr-source <tree>` or an unknown global option), abbreviated or attached `--upload-pack`/`--receive-pack`/`--exec`, `clone --config`, and `!` alias values (`git config alias.x '!cmd'`, `git -c alias.x=!cmd`) | `inline_command`; `git clone url dir`, `git push -u origin main`, `git add -u`, `git config alias.st status` still pass | domain test |
@@ -426,8 +445,24 @@ until its recipes are re-reviewed.
   `git push -u origin clone--helper` (a branch of that name) and
   `git add bisect--helper` (a file of that name) are refused. The `rebase`-scoped flag counts when any
   operand is `rebase`, and Git abbreviates, so
-  `git config --add alias.r rebase` is refused too. Git config writes other than `!` aliases (for example
-  `git config core.pager cmd` or `include.path`) are not detected. Nor are
+  `git config --add alias.r rebase` is refused too. Any prefix of a refused
+  `send-email` option is refused, even one Getopt::Long finds ambiguous
+  and passes on to `format-patch` (`git send-email -s`, `--smtp`), and
+  `--smtp-server` is refused whatever its value, so a host name too.
+  `grep -O` is case-folded like every flag, so `git grep -o` is refused;
+  use `--only-matching`. A subcommand name is matched at any operand and
+  in any letter case, so a path or branch named `Grep` or `send-email`
+  scopes those flags to it. A repository alias still hides a
+  subcommand from its scoped flags (`git se --cc-cmd cmd` with
+  `alias.se = send-email`). Git config writes other than `!` aliases (for example
+  `git config core.pager cmd`, `git config sendemail.ccCmd cmd` or
+  `include.path`) are not detected. Nor are Git options that run a
+  program file rather than a string: `git --exec-path=dir` (non-builtin
+  subcommands and remote helpers are looked up there),
+  `git clone --template=dir` (its hooks, such as `post-checkout`, run
+  during the clone), `git merge -s name` (runs `git-merge-name` from
+  `PATH`), `git hook run` and a `transport::address` URL (runs
+  `git-remote-transport` from `PATH`). Nor are
   `mysql`/`mariadb` option files named in argv (`--defaults-extra-file`,
   which can set `init-command`) or `--pager`, which runs a command only in
   interactive mode.

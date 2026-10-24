@@ -2958,9 +2958,10 @@ async function checkComposeBackendFeatures(opts: {
 
 /**
  * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
- * it; each finding suggests the exact command instead.
+ * it; each finding suggests the exact command instead. It also catches a key
+ * that a later `git init` left unignored (`env-key-unignored`, HACK-1386).
  */
-async function checkProjectEnvKey({
+export async function checkProjectEnvKey({
   startDir,
 }: {
   readonly startDir: string;

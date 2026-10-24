@@ -196,7 +196,10 @@ export function assertNativeComposeStorageCarrierStable(
 }
 function lifetime(context: Context): void {
   if (context.signal.aborted) {
-    refuse();
+    // Same refusal; only its effect reason names the cancellation. A plain
+    // refusal here reached every carrier boundary, including the helper
+    // start's pre-spawn check, as `unclassified` (HACK-1365).
+    refuseCommand("probe-cancel");
   }
   if (Date.now() >= context.deadline) {
     // Same refusal; only its effect reason names the exhausted storage budget.
@@ -979,14 +982,17 @@ async function commandBoot(
 }
 /** No callback can reject before the shared owner awaits exit. A rejected owner or
  * unproven group retains the journal; daemon effects are never inferred from exit. */
-type StorageCommandRefusal = "probe-timeout" | "probe-cancel" | "probe-budget";
+type StorageCommandRefusal = Exclude<
+  NativeComposeEffectRefusal["reason"],
+  "unclassified"
+>;
 const storageCommandRefusals = new WeakMap<object, StorageCommandRefusal>();
 /** The same fixed refusal, keeping only its closed command cause (a timed-out or
- * cancelled child, or an exhausted publication/settlement budget) for the effect
- * diagnostic. A replaced `source` refusal keeps its issued owner boundary (for
- * example a helper policy refusal observed during admission), so a later carrier
- * boundary cannot relabel it. It grants nothing and changes no check, deadline or
- * retention. */
+ * cancelled child, an exhausted publication/settlement budget, or the classified
+ * cause of a rewrapped admission rejection) for the effect diagnostic. A replaced
+ * `source` refusal keeps its issued owner boundary (for example a helper policy
+ * refusal observed during admission), so a later carrier boundary cannot relabel
+ * it. It grants nothing and changes no check, deadline or retention. */
 function refuseCommand(
   reason: StorageCommandRefusal | undefined,
   source?: unknown
@@ -1006,6 +1012,21 @@ function storageCommandRefusal(
   return typeof error === "object" && error !== null
     ? storageCommandRefusals.get(error)
     : undefined;
+}
+/**
+ * Closed cause of a rejection that a recorded command rewraps as its own fixed
+ * refusal: its own command cause, else the trusted effect classification of the
+ * original (for example a cancelled or timed-out admission probe, or an
+ * exhausted storage budget). Without it a known cause reached the effect
+ * boundary as `unclassified` (HACK-1365). Never reads the message or cause.
+ */
+function commandCause(error: unknown): StorageCommandRefusal | undefined {
+  const own = storageCommandRefusal(error);
+  if (own) {
+    return own;
+  }
+  const reason = nativeComposeEffectReason(error);
+  return reason === "unclassified" ? undefined : reason;
 }
 function exitRefusal(
   exit: RunExitEvent | null
@@ -1127,7 +1148,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
   // boundary, so no single path can drop the observed reason.
   const stopPublication = (
     error: unknown,
-    cause = storageCommandRefusal(error)
+    cause = commandCause(error)
   ): void => {
     publicationRefused = true;
     publicationCause ??= cause;
@@ -1396,7 +1417,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
   } catch (error) {
     if (opts.originalCommand) {
       invalidateNativeComposeStorageCommandOwner(opts.originalCommand.owner);
-      return refuseCommand(storageCommandRefusal(error), error);
+      return refuseCommand(commandCause(error), error);
     }
     throw error;
   } finally {

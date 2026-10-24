@@ -1562,14 +1562,27 @@ export async function openNativeComposeGenerationStore(opts: {
         readonly anchor: ProjectionAnchor;
       }
     >();
+    /**
+     * `bracketed` is only for a caller that completed a full store `check()`
+     * earlier in the same proof step, with nothing but private reads since,
+     * and that runs another full `check()` after this load before any write,
+     * hook, engine or storage effect. Those caller checks then bracket the
+     * generation reads, so this load's own leading and trailing store checks
+     * would only repeat them. The generation directory's own hold and
+     * recheck, and every manifest and document identity check, always run
+     * (HACK-1440).
+     */
     const load = async (
       generationId: string,
-      expected?: GenerationAnchor
+      expected?: GenerationAnchor,
+      bracketed = false
     ): Promise<NativeComposeGeneration> => {
       if (!TOKEN.test(generationId)) {
         refuse();
       }
-      await check();
+      if (!bracketed) {
+        await check();
+      }
       const generationRoot = join(generationsRoot, generationId);
       const held = await holdDirectory(generationRoot, true);
       try {
@@ -1603,7 +1616,9 @@ export async function openNativeComposeGenerationStore(opts: {
           refuse();
         }
         await recheckDirectories([held]);
-        await check();
+        if (!bracketed) {
+          await check();
+        }
         const generation = Object.freeze(
           Object.defineProperty(
             {
@@ -1624,7 +1639,11 @@ export async function openNativeComposeGenerationStore(opts: {
         await held.file.close();
       }
     };
-    const verifyGeneration = async (generation: NativeComposeGeneration) => {
+    /** `bracketed` has the same narrow contract as in `load`. */
+    const verifyGeneration = async (
+      generation: NativeComposeGeneration,
+      bracketed = false
+    ) => {
       const manifest = known.get(generation);
       if (!manifest) {
         refuse();
@@ -1633,7 +1652,7 @@ export async function openNativeComposeGenerationStore(opts: {
       if (!anchor) {
         refuse();
       }
-      const loaded = await load(generation.generationId, anchor);
+      const loaded = await load(generation.generationId, anchor, bracketed);
       if (JSON.stringify(known.get(loaded)) !== JSON.stringify(manifest)) {
         refuse();
       }
@@ -1988,7 +2007,9 @@ export async function openNativeComposeGenerationStore(opts: {
             ) {
               return refuse();
             }
-            await verifyGeneration(selection.generation);
+            // Bracketed by the material assertion's leading and closing
+            // `lease.assertHeld()`, each of which runs a full store check.
+            await verifyGeneration(selection.generation, true);
             const anchor = knownAnchor(selection.generation);
             if (
               !(

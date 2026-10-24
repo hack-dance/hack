@@ -69,8 +69,10 @@ pub fn storage_root_witness_tool() -> std::process::ExitCode {
     storage_root_witness::entry()
 }
 pub mod storage_usage;
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, unix))]
 mod test_executable;
+#[cfg(all(test, unix))]
+mod test_socket;
 pub use image_load::load as load_image;
 mod lifecycle;
 pub use lifecycle::host_filesystem;

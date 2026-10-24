@@ -1706,6 +1706,147 @@ describe("recipe grammar", () => {
       ],
     },
     {
+      // `git send-email` is a Perl script that reads its options with
+      // Getopt::Long's defaults: `--`, `-` or `+` before a name, any letter
+      // case, `=` or a separate value, and unique prefixes. Each spelling
+      // here ran a marker command under Git 2.56.
+      issue: "HACK-1438",
+      rule: "git send-email options that run a command",
+      refused: [
+        ["git", "send-email", "--to-cmd", "id", "0001.patch"],
+        ["git", "send-email", "--to-cmd=id", "0001.patch"],
+        ["git", "send-email", "--cc-cmd", "id", "0001.patch"],
+        ["git", "send-email", "--cc-cmd=id", "0001.patch"],
+        ["git", "send-email", "--header-cmd", "id", "0001.patch"],
+        ["git", "send-email", "--header-cmd=id", "0001.patch"],
+        ["git", "send-email", "--sendmail-cmd", "id", "0001.patch"],
+        ["git", "send-email", "--sendmail-cmd=id", "0001.patch"],
+        // An absolute path is a sendmail-like program, not a host.
+        ["git", "send-email", "--smtp-server", "/tmp/x.sh", "0001.patch"],
+        ["git", "send-email", "--smtp-server=/tmp/x.sh", "0001.patch"],
+        // Abbreviations.
+        ["git", "send-email", "--cc-cm=id", "0001.patch"],
+        ["git", "send-email", "--to-cm", "id", "0001.patch"],
+        ["git", "send-email", "--hea=id", "0001.patch"],
+        ["git", "send-email", "--sendm=id", "0001.patch"],
+        // Letter case, and the one-dash and `+` prefixes.
+        ["git", "send-email", "--CC-CMD=id", "0001.patch"],
+        ["git", "send-email", "-to-cmd=id", "0001.patch"],
+        ["git", "send-email", "-header-cmd", "id", "0001.patch"],
+        ["git", "send-email", "-sendmail-cmd=id", "0001.patch"],
+        ["git", "send-email", "-smtp-server=/tmp/x.sh", "0001.patch"],
+        ["git", "send-email", "+to-cmd=id", "0001.patch"],
+        // The dashed form, by name or absolute path, and a global option
+        // or mixed-case subcommand (a case-insensitive filesystem finds
+        // `git-send-email` for `git Send-Email`).
+        ["git-send-email", "--to-cmd=id", "0001.patch"],
+        ["/usr/lib/git-core/git-send-email", "--cc-cmd", "id", "0001.patch"],
+        ["git", "--git-dir", "x", "send-email", "--header-cmd=id", "p"],
+        ["git", "Send-Email", "--sendmail-cmd=id", "0001.patch"],
+        // The `sendemail.*` config equivalents (keys are case-insensitive;
+        // `-c` and `--config-env` are refused whatever the key).
+        ["git", "-c", "sendemail.ccCmd=id", "send-email", "0001.patch"],
+        ["git", "-c", "sendemail.toCmd=id", "send-email", "0001.patch"],
+        ["git", "-c", "sendemail.headerCmd=id", "send-email", "0001.patch"],
+        ["git", "-c", "sendemail.sendmailCmd=id", "send-email", "0001.patch"],
+        ["git", "-c", "SENDEMAIL.CCCMD=id", "send-email", "0001.patch"],
+        ["git", "-c", "sendemail.work.ccCmd=id", "send-email", "p"],
+        ["git", "-c", "sendemail.smtpServer=/tmp/x.sh", "send-email", "p"],
+        ["git", "--config-env=sendemail.toCmd=CMD", "send-email", "p"],
+        // The `-c` rule alone refuses it when an alias hides `send-email`
+        // (the Getopt::Long rule also reads `-c` as a prefix of `cc-cmd`).
+        [
+          "git",
+          "-c",
+          "sendemail.ccCmd=id",
+          "-c",
+          "alias.se=send-email",
+          "se",
+          "p",
+        ],
+      ],
+      accepted: [
+        [
+          "git",
+          "send-email",
+          "--dry-run",
+          "--confirm=never",
+          "--to=a@b.example",
+          "--cc",
+          "c@d.example",
+          "0001.patch",
+        ],
+        ["git", "send-email", "--from=a@b.example", "--suppress-cc=all", "p"],
+        ["git", "send-email", "--sender=a@b.example", "--no-header-cmd", "p"],
+        ["git", "send-email", "--smtp-server-port=587", "--no-to", "p"],
+        ["git", "send-email", "-h"],
+        // `--` and `-` name no option, so they select none.
+        ["git", "send-email", "--to=a@b.example", "--", "0001.patch"],
+        ["git", "send-email", "--to=a@b.example", "-"],
+        // Scoped to `send-email`: the same names elsewhere pass.
+        ["git", "rev-list", "--header", "HEAD"],
+        ["git", "status", "-s"],
+        ["git", "diff-tree", "-t", "HEAD"],
+        ["git", "format-patch", "--to=a@b.example", "-1"],
+        ["git", "log", "--cc"],
+        // Before the subcommand's name they pass (HACK-1423): Git reads
+        // send-email's options only after `send-email`, so a branch of
+        // that name does not scope `--header` to it.
+        ["git", "rev-list", "--header", "send-email"],
+        ["git", "log", "-s", "--", "Send-Email"],
+      ],
+    },
+    {
+      // HACK-1438 sweep: other porcelain options that run a command, each
+      // scoped to its subcommand.
+      issue: "HACK-1438",
+      rule: "Git porcelain options that run a command",
+      refused: [
+        ["git", "grep", "-Oid", "x"],
+        ["git", "grep", "-iOid", "x"],
+        ["git", "grep", "--open-files-in-pager=id", "x"],
+        ["git", "grep", "--open-files=id", "x"],
+        ["git", "daemon", "--inetd", "--access-hook=id"],
+        ["git-daemon", "--access-hook=/tmp/x.sh", "--export-all"],
+        ["git", "instaweb", "--httpd=/tmp/httpd", "--start"],
+        ["git", "instaweb", "--htt=/tmp/httpd", "--start"],
+        ["git", "instaweb", "-d", "/tmp/httpd", "--start"],
+        ["git-instaweb", "-d/tmp/httpd"],
+        ["git", "svn", "clone", "--authors-prog=id", "url"],
+        ["git", "svn", "fetch", "--authors-p", "id"],
+        // The `ext` remote helper runs its URL; Git refuses the URL unless
+        // `protocol.ext.allow` permits it, which config can.
+        ["git", "remote-ext", "origin", "id"],
+        ["git-remote-ext", "origin", "id"],
+        ["git", "ls-remote", "ext::sh -c id"],
+        ["git", "clone", "EXT::id", "dir"],
+        ["git", "remote", "add", "origin", "ext::id"],
+        ["git", "fetch", "--negotiation-tip=x", "--", "ext::id"],
+        // An option value after `=` is a URL too.
+        ["git", "push", "--repo=ext::id"],
+        // archimport pastes each operand into a `tla abrowse` shell
+        // pipeline, so `x/y;cmd #` runs `cmd` even without tla.
+        ["git", "archimport", "x/y"],
+        ["git-archimport", "-v", "x/y"],
+      ],
+      accepted: [
+        ["git", "grep", "-n", "pattern"],
+        ["git", "grep", "--only-matching", "--or", "pattern"],
+        ["git", "branch", "-d", "topic"],
+        ["git", "log", "--author", "me"],
+        ["git", "svn", "fetch", "--authors-file=authors.txt"],
+        ["git", "daemon", "--export-all", "--base-path=/srv/git"],
+        ["git", "instaweb", "--stop"],
+        ["git", "remote", "add", "origin", "https://example.test/x.git"],
+        ["git", "add", "extension.txt"],
+        // `ext::` counts only at the start of an argument or after `=`.
+        ["git", "add", "docs/ext::notes.md"],
+        // Before the subcommand's name they pass (HACK-1423).
+        ["git", "diff", "-Oorderfile", "--", "grep"],
+        ["git", "push", "-d", "origin", "instaweb"],
+      ],
+    },
+    {
       // Git 2.20-2.33 ship `rebase--interactive`, whose `--cmd <cmd>` adds
       // an `exec <cmd>` line after each pick and runs it.
       issue: "HACK-1423",
@@ -1822,6 +1963,86 @@ describe("recipe grammar", () => {
     // HACK-1423: `--cmd` is refused under every subcommand, so a Git
     // argument spelled `--cmd` or `--cm` is refused too.
     expect(isInlineCommandArgv(["git", "grep", "-e", "--cmd"])).toBe(true);
+  });
+
+  test("HACK-1438: documented send-email and grep fail-closed collateral stays refused", () => {
+    // Any prefix of a refused send-email option is refused, even one that
+    // Getopt::Long finds ambiguous and passes to format-patch (`-s`, `-t`).
+    expect(isInlineCommandArgv(["git", "send-email", "-s", "p"])).toBe(true);
+    expect(isInlineCommandArgv(["git", "send-email", "--smtp", "h"])).toBe(
+      true
+    );
+    // `--smtp-server` is refused whatever its value, so a host name too.
+    expect(
+      isInlineCommandArgv(["git", "send-email", "--smtp-server=mail", "p"])
+    ).toBe(true);
+    // `-O` is case-folded like every flag, so `git grep -o` is refused.
+    expect(isInlineCommandArgv(["git", "grep", "-o", "x"])).toBe(true);
+    // A subcommand name is case-folded and scopes its flags from any
+    // operand that names it, not only the first, so a path named `Grep`
+    // scopes `-O` to the arguments after it (HACK-1423); the same flag
+    // before that operand passes.
+    expect(isInlineCommandArgv(["git", "log", "--", "Grep", "-o"])).toBe(true);
+    expect(isInlineCommandArgv(["git", "log", "-o", "--", "Grep"])).toBe(false);
+  });
+
+  test("HACK-1461: names that a case-insensitive filesystem folds to a listed name are refused", () => {
+    const refused = (argv: string[]) => ({
+      argv,
+      refused: isInlineCommandArgv(argv),
+    });
+    const cases: string[][] = [
+      // U+017F LONG S folds to `s`: APFS runs `git-send-email` for these.
+      ["git", "ſend-email", "--to-cmd=id", "p"],
+      ["git-ſend-email", "--to-cmd=id", "p"],
+      ["git", "inſtaweb", "--httpd=id"],
+      ["git", "ſvn", "clone", "--authors-prog=id", "u"],
+      // U+FB01 LIGATURE FI folds to `fi`.
+      ["git", "ﬁlter-branch", "--tree-filter", "id", "HEAD"],
+      // U+212A KELVIN SIGN folds to `k`.
+      ["Ksh", "-c", "id"],
+      ["awK", "BEGIN{}"],
+      // U+0131 DOTLESS I is folded to `i` too (fail-closed).
+      ["git", "ınstaweb", "--httpd=id"],
+      ["ıex"],
+      // A listed name after the first operand is folded too: the `words`
+      // check, the subcommand-scoped flags and Python's REPL modules.
+      ["git", "log", "ﬁlter-branch"],
+      ["git", "log", "bıſect"],
+      ["git", "help", "ſend-email", "--to-cmd=id"],
+      ["git", "log", "filter​-branch"],
+      ["python3", "-m", "ｃｏｄｅ"],
+      // A listed program or a Git subcommand spelled with any non-ASCII
+      // character is refused whatever follows.
+      ["ſh", "scripts/x.sh"],
+      ["git-ſtatus"],
+      ["git", "ſtatus"],
+      ["git", "--work-tree", "dir", "pack-refſ"],
+    ];
+    expect(cases.map(refused)).toEqual(
+      cases.map((argv) => ({ argv, refused: true }))
+    );
+    // Their ASCII controls behave as before, and non-ASCII operands and
+    // programs outside the tables pass.
+    const accepted: string[][] = [
+      ["git", "status"],
+      ["git-status"],
+      ["sh", "scripts/x.sh"],
+      ["git", "commit", "-m", "café ſ"],
+      ["git", "log", "--author=Zoë"],
+      ["git", "--work-tree", "répertoire", "status"],
+      ["cat", "ſend-email"],
+      ["python3", "-m", "pytest", "tests/ünï"],
+    ];
+    expect(accepted.map(refused)).toEqual(
+      accepted.map((argv) => ({ argv, refused: false }))
+    );
+    expect(
+      isInlineCommandArgv(["git", "filter-branch", "--tree-filter", "id"])
+    ).toBe(true);
+    expect(isInlineCommandArgv(["git", "send-email", "--to-cmd=id"])).toBe(
+      true
+    );
   });
 
   test("effects must be covered by required capabilities", () => {

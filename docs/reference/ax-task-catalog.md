@@ -76,7 +76,30 @@ is not implemented here.
    `doas -s`, `git -c`/`--config`/`--exec`/`--upload-pack`/
    `--receive-pack`/`--cmd`/`clone -u`/`submodule foreach`/`bisect`/
    `filter-branch`, a Git `!` alias value such as
-   `git config alias.x '!cmd'`, `make --eval`, `nix eval`). A dashed Git
+   `git config alias.x '!cmd'`, `make --eval`, `nix eval`). Git porcelain
+   options that run a command are refused under their own subcommand:
+   `send-email --to-cmd`/`--cc-cmd`/`--header-cmd`/`--sendmail-cmd` and
+   `--smtp-server` (an absolute path there is a sendmail program),
+   `grep -O`/`--open-files-in-pager`, `daemon --access-hook`,
+   `instaweb -d`/`--httpd` and `svn --authors-prog`. So are the
+   `remote-ext` helper, an `ext::` remote URL (Git runs it when
+   `protocol.ext.allow` permits) and `archimport`, which pastes its
+   operands into a shell pipeline. `git send-email` reads options with
+   Perl's Getopt::Long, which also takes a one-dash or `+` prefix, any
+   letter case and any unique prefix, so `-to-cmd=cmd`, `+to-cmd=cmd`,
+   `--CC-CMD=cmd` and `--cc-cm=cmd` count too. The `sendemail.*Cmd` config
+   equivalents are refused through `git -c`/`--config-env`, whatever the
+   key. A subcommand name is matched in any letter case, because Git finds
+   a script subcommand as a file and a case-insensitive filesystem runs
+   `git-send-email` for `git Send-Email`. Such a filesystem folds Unicode
+   too: on APFS `git ſend-email` (long s) runs `git-send-email` and
+   `git ﬁlter-branch` (the `fi` ligature) runs `git-filter-branch`. So
+   program, subcommand and module names are compared after NFKC
+   normalization, removal of invisible (default-ignorable) characters and
+   full case folding (the Kelvin sign is `k`, dotless `ı` is `i`), and a
+   listed program or a Git subcommand spelled with any non-ASCII character
+   (`ſh`, `git-ſend-email`, `git ſtatus`) is refused whatever follows.
+   A dashed Git
    builtin, by basename or absolute path (`git-clone`,
    `/usr/lib/git-core/git-config`), is read as `git <sub>`, so
    `git-clone -u cmd`, `git-config alias.x '!cmd'`,
@@ -109,8 +132,10 @@ is not implemented here.
    `duckdb -storage-version v1.2.0 data.duckdb`, `python -m pytest`,
    `python -mpytest`, `python -m unittest discover -s tests`,
    `psql -o out.txt -f script.sql`, `git-clone url dir`,
-   `git clone url dir`, `git push -u origin main`, `git add -u` and
-   `git config alias.st status`.
+   `git clone url dir`, `git push -u origin main`, `git add -u`,
+   `git config alias.st status`,
+   `git send-email --to=a@b.example --cc c@d.example 0001.patch`,
+   `git rev-list --header HEAD` and `git branch -d topic`.
 3. **Repository and log text grant no authority.** A recipe that passes every
    check is `reviewed`: its pins still match what a reviewer approved. Results
    still say `authority: "none"` and `execution: "unavailable"`. A recipe that
@@ -361,8 +386,11 @@ until its recipes are re-reviewed.
 | `psql -o`/`--output` piped to a command (`-o '\|cmd'`, `-o\|cmd`, `-qo\|cmd`, `--output=\|cmd`, `--out=\|cmd`) | `inline_command`; `psql -o out.txt`, `psql -F'\|'`, `psql -L '\|log'` (a file name) still pass | domain test |
 | Dashed Git builtins (`/usr/lib/git-core/git-clone -u cmd`, `git-config alias.x '!cmd'`, `git-ls-remote --upload-pack=cmd`, `git-fetch-pack --exec=cmd`) | `inline_command`; `git-clone url dir`, `git-push -u origin main`, `git-config alias.st status` still pass | domain test |
 | Git plumbing helpers read as their porcelain (`git-bisect--helper --bisect-run cmd`, `/usr/lib/git-core/git-bisect--helper.exe run cmd`, `git bisect--helper --bisect-run cmd`, `git-submodule--helper foreach cmd`, `git-config alias.x bisect--helper`, older Git's `git rebase--helper --add-exec-commands cmd` in any letter case) | `inline_command`; `git-submodule--helper status`, `git-difftool--helper a b`, `git add bisect--helper.txt`, `git config --add alias.st status` still pass | domain test |
+| `git send-email --to-cmd`/`--cc-cmd`/`--header-cmd`/`--sendmail-cmd`/`--smtp-server` in every Getopt::Long spelling (`--opt cmd`, `--opt=cmd`, `--cc-cm`, `--CC-CMD`, `-to-cmd`, `+to-cmd`), dashed or mixed-case (`git-send-email`, `git Send-Email`), and `-c sendemail.ccCmd=…`/`toCmd`/`headerCmd`/`sendmailCmd` in any key case | `inline_command`; `git send-email --to=… --cc …`, `--suppress-cc=all`, `--no-header-cmd`, `--smtp-server-port=587`, `git rev-list --header`, `git status -s`, `git format-patch --to=…` still pass | domain test |
+| Names a case-insensitive filesystem folds to a listed one (`git ſend-email --to-cmd=cmd`, `git-ſend-email`, `git inſtaweb --httpd=cmd`, `git ſvn clone --authors-prog=cmd`, `git ﬁlter-branch`, `git log bıſect`, `git log filter<U+200B>-branch`, the Kelvin sign in `ksh -c`, dotless `ı` in `iex`), and any listed program or Git subcommand with a non-ASCII character (`ſh script.sh`, `git-ſtatus`, `git ſtatus`) | `inline_command`; `git status`, `sh scripts/x.sh`, `git commit -m 'café'`, `git log --author=Zoë`, `cat ſend-email` still pass | domain test |
+| Other Git porcelain command runners (`git grep -Ocmd`/`--open-files-in-pager=cmd`, `git daemon --access-hook=cmd`, `git instaweb -d`/`--httpd`, `git svn --authors-prog`, `git remote-ext`, `ext::` URLs, `git archimport`) | `inline_command`; `git grep -n`, `git branch -d`, `git svn fetch --authors-file=…`, `git daemon --export-all`, an `https://` remote still pass | domain test |
 | Git 2.20-2.33's `rebase--interactive --cmd cmd` (`git rebase--interactive --cmd=cmd`, `git-rebase--interactive --cmd cmd`, `--cm cmd`, a repository alias such as `git ri --cmd cmd`) and its `--add-exec-commands` mode | `inline_command`; `git rebase--interactive --continue`, `git-rebase--interactive --edit-todo` still pass | domain test |
-| A subcommand-scoped Git flag before the subcommand's name (`git push -u origin clone`, `git remote set-branches --add origin rebase`, `git config --add alias.r rebase`) | accepted; the flag after the name (`git clone -u cmd url`, `git --unknown v clone -u cmd url`, `git rebase--helper --add cmd`) is still refused | domain test |
+| A subcommand-scoped Git flag before the subcommand's name (`git push -u origin clone`, `git remote set-branches --add origin rebase`, `git config --add alias.r rebase`, `git rev-list --header send-email`, `git push -d origin instaweb`, `git log -o -- Grep`) | accepted; the flag after the name (`git clone -u cmd url`, `git --unknown v clone -u cmd url`, `git rebase--helper --add cmd`, `git log -- Grep -o`) is still refused | domain test |
 | Detached linked worktree with no named instance, on CLI `task list`/`task inspect` and MCP `hack.project.task.list`/`inspect` | `detached_checkout`; naming the instance (`--branch`, MCP `branch`) passes | paired fixture, domain test |
 | `duckdb -storage-version VER db` | accepted; a SQL operand after the database is still refused | domain test |
 | `git clone -u` (also after `--attr-source <tree>` or an unknown global option), abbreviated or attached `--upload-pack`/`--receive-pack`/`--exec`, `clone --config`, and `!` alias values (`git config alias.x '!cmd'`, `git -c alias.x=!cmd`) | `inline_command`; `git clone url dir`, `git push -u origin main`, `git add -u`, `git config alias.st status` still pass | domain test |
@@ -434,14 +462,36 @@ until its recipes are re-reviewed.
   `git grep -e --cmd`, is refused with it. Any whole-word `<sub>--helper` or `<sub>--interactive`
   argument is read as `<sub>` (fail-closed), so `git add bisect--helper`
   (a file of that name) is refused. A subcommand-scoped flag (`clone -u`,
-  `rebase --add-exec-commands`) counts after any operand that names the
-  subcommand, and Git abbreviates, so an earlier word `clone` or `rebase`
-  scopes it even when that word is another option's value:
-  `git commit -m rebase --add` and `git log -S clone -u` (`-u` is
-  `--patch`) are refused. The same flag before the word passes
+  `rebase --add-exec-commands`, `send-email --to-cmd`, `grep -O`) counts
+  after any operand that names the subcommand, in any letter case or
+  Unicode spelling that folds to it (`git ſend-email --to-cmd`), and Git
+  abbreviates, so an earlier word `clone` or `rebase` scopes it even when
+  that word is another option's value: `git commit -m rebase --add` and
+  `git log -S clone -u` (`-u` is `--patch`) are refused, and so is
+  `git log -- Grep -o`. The same flag before the word passes
   (`git config --add alias.r rebase`,
-  `git remote set-branches --add origin rebase`). Git config writes other than `!` aliases (for example
-  `git config core.pager cmd` or `include.path`) are not detected. Nor are
+  `git remote set-branches --add origin rebase`,
+  `git log -o -- Grep`). Any prefix of a refused
+  `send-email` option is refused, even one Getopt::Long finds ambiguous
+  and passes on to `format-patch` (`git send-email -s`, `--smtp`), and
+  `--smtp-server` is refused whatever its value, so a host name too.
+  `grep -O` is case-folded like every flag, so `git grep -o` is refused;
+  use `--only-matching`. A repository alias still hides a subcommand from
+  its scoped flags (`git se --cc-cmd cmd` with `alias.se = send-email`),
+  and so does Git's `help.autocorrect` setting: with it set to run the
+  correction (`immediate`, a delay, or `prompt` answered yes), a mistyped
+  subcommand such as `git send-emai --to-cmd=cmd` runs `send-email` with
+  the flag, but the catalog sees an unknown subcommand and does not scope
+  the flag to it. The check does not read Git config.
+  Git config writes other than `!` aliases (for example
+  `git config core.pager cmd`, `git config sendemail.ccCmd cmd` or
+  `include.path`) are not detected. Nor are Git options that run a
+  program file rather than a string: `git --exec-path=dir` (non-builtin
+  subcommands and remote helpers are looked up there),
+  `git clone --template=dir` (its hooks, such as `post-checkout`, run
+  during the clone), `git merge -s name` (runs `git-merge-name` from
+  `PATH`), `git hook run` and a `transport::address` URL (runs
+  `git-remote-transport` from `PATH`). Nor are
   `mysql`/`mariadb` option files named in argv (`--defaults-extra-file`,
   which can set `init-command`) or `--pager`, which runs a command only in
   interactive mode.

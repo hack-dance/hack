@@ -64,6 +64,7 @@ import {
   requireInteractive,
 } from "../lib/interactivity.ts";
 import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
   defaultProjectSlugFromPath,
@@ -696,7 +697,7 @@ async function resolveProjectForEnv(opts: {
     : opts.ctx.cwd;
   const project = await findProjectContext(startDir);
   if (!project) {
-    throw new CliUsageError("No .hack/ found. Run: hack init");
+    throw new MissingProjectContextError();
   }
   return project;
 }

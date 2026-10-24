@@ -15,7 +15,7 @@ export type ComposeBackendReport = {
 /**
  * Doctor result for the current project's Compose-backend features
  * (HACK-1291). Read-only and value-free: it names closed features, never a
- * network, label, path or platform value.
+ * network, volume, label, path or platform value.
  *
  * On the native backend a blocking feature is a warning, because native `up`
  * refuses the project; on the Compose backend it is informational, because

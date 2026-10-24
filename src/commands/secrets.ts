@@ -1,8 +1,13 @@
-import { confirm, isCancel, password, text } from "@clack/prompts";
+import { isCancel, password, text } from "@clack/prompts";
 
 import { secrets } from "bun";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
+import {
+  canPrompt,
+  confirmSafe,
+  requireInteractive,
+} from "../lib/interactivity.ts";
 import { logger } from "../ui/logger.ts";
 
 const DEFAULT_SECRETS_SERVICE = "hack-cli" as const;
@@ -75,6 +80,13 @@ async function resolveName(positionals: readonly string[]): Promise<string> {
     return fromPos;
   }
 
+  if (!canPrompt()) {
+    requireInteractive({
+      what: "a secret name is required",
+      hint: "Pass the name as an argument (e.g. `hack secrets get <name>`).",
+    });
+  }
+
   const name = await text({
     message: "Secret name:",
     validate: (value) => {
@@ -101,6 +113,13 @@ async function handleSecretsSet({
   const name = await resolveName(
     [args.positionals.name].filter((v) => typeof v === "string")
   );
+
+  if (!canPrompt()) {
+    requireInteractive({
+      what: `a value for secret "${name}" is required`,
+      hint: "Run `hack secrets set <name>` in a terminal; the value is read from a hidden prompt and never from an argument.",
+    });
+  }
 
   const value = await password({
     message: `Value for "${name}" (${service}):`,
@@ -150,13 +169,12 @@ async function handleSecretsDelete({
     [args.positionals.name].filter((v) => typeof v === "string")
   );
 
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message: `Delete secret "${name}" (${service})?`,
     initialValue: false,
+    nonInteractive: "fail",
+    hint: "Run `hack secrets delete <name>` in a terminal to confirm the deletion.",
   });
-  if (isCancel(ok)) {
-    return 1;
-  }
   if (!ok) {
     return 0;
   }

@@ -32,6 +32,14 @@ export interface LokiLogsParams {
    * from another backend.
    */
   readonly deferEmpty?: boolean;
+  /**
+   * Follow only: call `notify` once when the tail has been open for `afterMs`
+   * without receiving any entry. Following continues either way.
+   */
+  readonly noEntriesNotice?: {
+    readonly afterMs: number;
+    readonly notify: () => void;
+  };
 }
 
 type LokiLabelSet = Record<string, string>;
@@ -379,8 +387,16 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
 
   let closed = false;
   let exitCode = 0;
+  let noEntriesTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearNoEntriesTimer = () => {
+    if (noEntriesTimer !== undefined) {
+      clearTimeout(noEntriesTimer);
+      noEntriesTimer = undefined;
+    }
+  };
 
   const stop = () => {
+    clearNoEntriesTimer();
     if (closed) {
       return;
     }
@@ -391,10 +407,6 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
       // ignore
     }
   };
-
-  process.once("SIGINT", () => {
-    stop();
-  });
 
   ws.addEventListener("error", () => {
     exitCode = 1;
@@ -408,6 +420,18 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
     }
     stop();
   });
+
+  const noEntriesNotice = opts.noEntriesNotice;
+  if (noEntriesNotice) {
+    ws.addEventListener("open", () => {
+      noEntriesTimer = setTimeout(() => {
+        noEntriesTimer = undefined;
+        if (!closed) {
+          noEntriesNotice.notify();
+        }
+      }, noEntriesNotice.afterMs);
+    });
+  }
 
   if (opts.json && opts.streamContext) {
     writeLogStreamEvent({
@@ -433,6 +457,7 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
         showProjectPrefix: opts.showProjectPrefix,
       });
       for (const [tsNs, line] of s.values) {
+        clearNoEntriesTimer();
         if (opts.json) {
           const entry = parseLokiLogLine({
             labels: s.stream,
@@ -456,23 +481,35 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
     }
   });
 
-  await new Promise<void>((resolve) => {
+  const closedSocket = new Promise<void>((resolve) => {
     ws.addEventListener("close", () => {
       closed = true;
+      clearNoEntriesTimer();
       resolve();
     });
   });
 
-  if (opts.json && opts.streamContext) {
-    writeLogStreamEvent({
-      event: buildLogStreamEndEvent({
-        context: opts.streamContext,
-        reason: exitCode === 0 ? "closed" : "error",
-      }),
-    });
+  // Installed only while the tail is open and removed on every exit path. A
+  // `once` listener that never fires would otherwise outlive the follow and
+  // the next SIGINT in the process would run a stale stop (HACK-1392).
+  const onSigInt = () => {
+    stop();
+  };
+  process.once("SIGINT", onSigInt);
+  try {
+    await closedSocket;
+    if (opts.json && opts.streamContext) {
+      writeLogStreamEvent({
+        event: buildLogStreamEndEvent({
+          context: opts.streamContext,
+          reason: exitCode === 0 ? "closed" : "error",
+        }),
+      });
+    }
+    return exitCode;
+  } finally {
+    process.off("SIGINT", onSigInt);
   }
-
-  return exitCode;
 }
 
 function safeJsonParse(text: string): unknown {

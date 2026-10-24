@@ -127,7 +127,12 @@ is not implemented here.
    [`hack.target.v0`](./ax-target-result-contract.md) target, and target
    refusals pass through unchanged. Recipes are judged against that target's
    env selection and Compose services; if the config generation changes
-   during the read, the result is `generation_changed_during_read`.
+   during the read, the result is `generation_changed_during_read`. The
+   runtime instance does not change how a recipe is judged, but the embedded
+   target still names one. A detached linked worktree (for example one made
+   with `git worktree add --detach`) has no implicit instance, so it is
+   refused as `detached_checkout` unless the caller names one with
+   `--branch` (MCP `branch`).
 
 ## Commands
 
@@ -349,6 +354,7 @@ until its recipes are re-reviewed.
 | An attached `-m` module (`python -mpytest`) as the program's operand | accepted, also after a value option's value (`python -W ignore -mpytest`); `python -mcode`, `python -m`, `python -Ximporttime` and a `-m` taken as an option's value (`python -W -m --`, `python -X -mpytest`) still refused (stdin) | domain test |
 | `psql -o`/`--output` piped to a command (`-o '\|cmd'`, `-o\|cmd`, `-qo\|cmd`, `--output=\|cmd`, `--out=\|cmd`) | `inline_command`; `psql -o out.txt`, `psql -F'\|'`, `psql -L '\|log'` (a file name) still pass | domain test |
 | Dashed Git builtins (`/usr/lib/git-core/git-clone -u cmd`, `git-config alias.x '!cmd'`, `git-ls-remote --upload-pack=cmd`, `git-fetch-pack --exec=cmd`) | `inline_command`; `git-clone url dir`, `git-push -u origin main`, `git-config alias.st status` still pass | domain test |
+| Git plumbing helpers read as their porcelain (`git-bisect--helper --bisect-run cmd`, `/usr/lib/git-core/git-bisect--helper.exe run cmd`, `git bisect--helper --bisect-run cmd`, `git-submodule--helper foreach cmd`) | `inline_command`; `git-submodule--helper status`, `git-difftool--helper a b`, `git add bisect--helper.txt` still pass | domain test |
 | `duckdb -storage-version VER db` | accepted; a SQL operand after the database is still refused | domain test |
 | `git clone -u` (also after `--attr-source <tree>` or an unknown global option), abbreviated or attached `--upload-pack`/`--receive-pack`/`--exec`, `clone --config`, and `!` alias values (`git config alias.x '!cmd'`, `git -c alias.x=!cmd`) | `inline_command`; `git clone url dir`, `git push -u origin main`, `git add -u`, `git config alias.st status` still pass | domain test |
 | Caller `GIT_DIR`/`GIT_INDEX_FILE`/`GIT_WORK_TREE` naming another index that tracks a secret | `input_path_invalid` with no digest; a foreign `GIT_DIR` does not hide the checkout's own index | domain test |
@@ -404,7 +410,14 @@ until its recipes are re-reviewed.
   because a one-letter word is too common as an ordinary argument. A SQL
   client that reads statements from stdin (`psql db`, `mysql db`,
   `sqlite3 app.db` with no SQL operand) is not refused; only a statement
-  string in argv is. Git config writes other than `!` aliases (for example
+  string in argv is. Code a program loads from a file is not inspected
+  either: for example, a reviewed script that loads a data file with
+  `pickle` or `marshal`, or reads a config file that it evaluates. A Git
+  `<sub>--helper` plumbing command (`git-bisect--helper`,
+  `git submodule--helper`) is read as `git <sub>`, so it meets the rules for
+  that subcommand, but a helper's own options are not modeled: the
+  `--add-exec-commands` mode of older Git's `rebase--helper` is not
+  refused. Git config writes other than `!` aliases (for example
   `git config core.pager cmd` or `include.path`) are not detected. Nor are
   `mysql`/`mariadb` option files named in argv (`--defaults-extra-file`,
   which can set `init-command`) or `--pager`, which runs a command only in

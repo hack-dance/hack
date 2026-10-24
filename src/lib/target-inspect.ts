@@ -18,6 +18,7 @@ import {
   resolveGitCurrentBranch,
 } from "./git-worktree.ts";
 import { isRecord } from "./guards.ts";
+import { LegacyComposeAdoptionSelectionError } from "./native-compose-adoption-marker.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -30,7 +31,10 @@ import {
   sanitizeBranchSlug,
   sanitizeProjectSlug,
 } from "./project.ts";
-import { ProjectInputSelectionError } from "./project-input-selection.ts";
+import {
+  ProjectInputAccessError,
+  ProjectInputSelectionError,
+} from "./project-input-selection.ts";
 import {
   AmbiguousProjectNameError,
   normalizeProjectName,
@@ -170,6 +174,13 @@ export const TARGET_REFUSALS = Object.freeze({
     message:
       "The selected project's inputs are not supported by this inspector (native or conflicting project files).",
   },
+  adoption_state_unsafe: {
+    code: "E_CONFIG_INVALID",
+    stage: "project",
+    retry: "fix_project",
+    message:
+      "The project's legacy adoption state is unreadable, interrupted or unsafe. Use explicit adoption recovery.",
+  },
   config_parse_failed: {
     code: "E_CONFIG_PARSE",
     stage: "project",
@@ -220,7 +231,8 @@ export const TARGET_REFUSALS = Object.freeze({
     code: "E_PERMISSION",
     stage: "project",
     retry: "fix_project",
-    message: "A project input could not be read: permission denied.",
+    message:
+      "A project input could not be read: permission denied. Fix the permissions first: make the project directory (.hack or .dev), the directories inside it and its input files readable by your user, and the directories searchable (for example chmod u+rwx .hack), then retry.",
   },
   input_unreadable: {
     code: "E_CONFIG_INVALID",
@@ -357,8 +369,11 @@ export function targetRefusalEnvelope(opts: {
  * A filesystem fault while reading inputs (for example a permission-denied
  * Compose file, or a directory where a config file belongs) is mapped to the
  * closed `input_permission_denied` / `input_unreadable` refusals, so the OS
- * message and its absolute path never reach the caller. Only non-filesystem
- * faults (programming errors) still throw.
+ * message and its absolute path never reach the caller. The shared project
+ * input guards' own refusals (native or conflicting inputs, an unsafe or
+ * unreadable legacy adoption state, an input whose presence cannot be checked)
+ * are mapped too, wherever they are raised.
+ * Only other faults (programming errors) still throw.
  *
  * `afterResolve` is a test seam that runs after the target is resolved and
  * before the generation is re-read; production callers never pass it.
@@ -382,6 +397,10 @@ export async function inspectTarget(opts: {
           : { observedGeneration: error.observedGeneration }),
       });
     }
+    const guarded = projectInputGuardReason(error);
+    if (guarded !== null) {
+      return targetRefusalEnvelope({ reason: guarded });
+    }
     const fault = filesystemFaultCode(error);
     if (fault !== null) {
       return targetRefusalEnvelope({
@@ -393,6 +412,32 @@ export async function inspectTarget(opts: {
     }
     throw error;
   }
+}
+
+/**
+ * Closed reason for a refusal raised by the shared project input guards. Those
+ * guards run during discovery and again inside every config read, so they are
+ * classified here rather than at one call site. Their messages are value-free
+ * but are not catalogue text, so they are never passed through.
+ */
+function projectInputGuardReason(error: unknown): TargetRefusalReason | null {
+  if (error instanceof ProjectInputSelectionError) {
+    return "project_inputs_unsupported";
+  }
+  if (error instanceof ProjectInputAccessError) {
+    return error.access === "permission"
+      ? "input_permission_denied"
+      : "input_unreadable";
+  }
+  if (error instanceof LegacyComposeAdoptionSelectionError) {
+    if (error.kind === "permission") {
+      return "input_permission_denied";
+    }
+    return error.kind === "input-access"
+      ? "input_unreadable"
+      : "adoption_state_unsafe";
+  }
+  return null;
 }
 
 /** Shape of an errno code such as `EACCES` or `EISDIR`. */
@@ -652,12 +697,10 @@ async function selectProject(opts: {
     if (!(await isDirectory(match.repoRoot))) {
       throw new TargetRefusal("registered_root_missing");
     }
-    const context = await guardInputs(() =>
-      findProjectContextAtRoot({
-        projectRoot: match.repoRoot,
-        projectDirName: match.projectDirName,
-      })
-    );
+    const context = await findProjectContextAtRoot({
+      projectRoot: match.repoRoot,
+      projectDirName: match.projectDirName,
+    });
     if (!context) {
       throw new TargetRefusal("no_project_context");
     }
@@ -671,22 +714,11 @@ async function selectProject(opts: {
   if (opts.selector.path !== null && !(await isDirectory(startDir))) {
     throw new TargetRefusal("path_not_found");
   }
-  const context = await guardInputs(() => findProjectContext(startDir));
+  const context = await findProjectContext(startDir);
   if (!context) {
     throw new TargetRefusal("no_project_context");
   }
   return { context, kind: opts.selector.path === null ? "cwd" : "path" };
-}
-
-async function guardInputs<T>(read: () => Promise<T>): Promise<T> {
-  try {
-    return await read();
-  } catch (error: unknown) {
-    if (error instanceof ProjectInputSelectionError) {
-      throw new TargetRefusal("project_inputs_unsupported");
-    }
-    throw error;
-  }
 }
 
 /**

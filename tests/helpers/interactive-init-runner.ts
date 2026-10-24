@@ -12,18 +12,31 @@ import {
  * the overwrite confirm defaults to "no". No agent files are exported. Spawn it with `privateCliEnv` and a PATH without agent CLIs, so
  * the interactive handoff prints its copy-paste fallback instead of launching.
  *
- * Usage: bun tests/helpers/interactive-init-runner.ts <repo> <claude|codex>
+ * Usage: bun tests/helpers/interactive-init-runner.ts <repo> <claude|codex|none> [overwrite]
+ *
+ * `none` runs without `--with`. `overwrite` answers "yes" to the
+ * "Overwrite scaffold files?" confirm for an existing `.hack/`.
  */
 
-const [repo, withValue] = process.argv.slice(2);
-if (!(repo && withValue)) {
-  throw new Error("usage: interactive-init-runner.ts <repo> <claude|codex>");
+const [repo, withArg, overwriteArg] = process.argv.slice(2);
+if (
+  !(repo && withArg) ||
+  (overwriteArg !== undefined && overwriteArg !== "overwrite")
+) {
+  throw new Error(
+    "usage: interactive-init-runner.ts <repo> <claude|codex|none> [overwrite]"
+  );
 }
+const withValue = withArg === "none" ? undefined : withArg;
+const overwrite = overwriteArg === "overwrite";
 
 const io: InitInteractiveIo = {
   canPrompt: () => true,
   text: async ({ initialValue }) => initialValue,
-  confirm: async ({ initialValue }) => initialValue,
+  confirm: async ({ message, initialValue }) =>
+    overwrite && message.endsWith("Overwrite scaffold files?")
+      ? true
+      : initialValue,
   // The service wizard is out of scope here; a fixed compose keeps it inert.
   composeWizard: async ({ input }) =>
     `name: ${input.projectSlug}\nservices: {}\n`,
@@ -50,7 +63,12 @@ const args = {
   },
   positionals: {},
   raw: {
-    argv: ["init", "--path", repo, "--with", withValue],
+    argv: [
+      "init",
+      "--path",
+      repo,
+      ...(withValue === undefined ? [] : ["--with", withValue]),
+    ],
     positionals: [],
   },
 } as unknown as InitInput["args"];

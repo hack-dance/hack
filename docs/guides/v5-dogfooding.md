@@ -43,8 +43,9 @@ These commands do not establish that an arbitrary v4 project can run natively.
    stable `hack` must not run against the same home at the same time. For a Compose
    run, use the order in
    [Stop stable hackd before a Compose run](candidate-install.md#stop-stable-hackd-before-a-compose-run):
-   stable `hack global up`, then `hack daemon stop`, then confirm
-   `pgrep -fl "hack daemon start"` prints nothing. Keep the project's
+   stable `hack global up`, then any stable `hack doctor` or `hack doctor --fix`,
+   then `hack daemon stop`, then confirm `pgrep -fl "hack daemon start"` prints
+   nothing; the guide gives the remedy when it lists a process. Keep the project's
    `.hack/.internal/` directory out of Git.
 3. Exercise the project's supported command form: foreground start, readiness,
    status, finite logs, noninteractive exec, retaining stop and restart. Exercise

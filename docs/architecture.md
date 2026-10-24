@@ -193,8 +193,11 @@ returns no entries and Loki was not requested explicitly, `hack logs` writes a o
 to stderr and answers from `docker compose logs` instead. Nothing from Loki is written first,
 so `--json` output still has one `start`/`end` pair. When Loki was requested explicitly
 (`--loki`, `--services`, `--query`, `--since`, `--until`), the empty result stands and the
-notice suggests `hack logs --compose`. Follow mode (`hack logs` without `--no-follow`)
-does not fall back.
+notice suggests `hack logs --compose --no-follow`, keeping any `--path`, `--project`,
+`--branch` and service you gave. Follow mode (`hack logs` without `--no-follow`) does not
+fall back. When Loki is the follow backend (`logs.followBackend: loki`, or `--loki`) and no
+entry arrives within 8 seconds, `hack logs` writes a one-line stderr notice that suggests
+`hack logs --compose` and keeps following.
 
 Short-lived containers: Alloy finds containers by polling Docker every 5 seconds. It includes
 exited containers, so a one-shot Compose service (a migration or seed job) is shipped after it
@@ -202,9 +205,25 @@ stops, as long as Docker keeps the container. A container that starts, exits and
 between two polls (for example `docker compose run --rm`) never reaches Loki; use
 `hack logs --compose` or the command's own output for those. Existing installs pick up this
 discovery config after `hack global install` rewrites `~/.hack/logging/alloy.alloy` and the
-Alloy container restarts (`hack global down` then `hack global up`). On its first start with
-this config, Alloy also reads the retained logs of exited Compose containers. Loki rejects
-entries older than its sample age limit (one week by default).
+Alloy container restarts (`hack global down` then `hack global up`).
+
+Alloy keeps its read positions inside its own container (there is no positions volume). Each
+time the Alloy container is recreated, for example by `hack global down` then
+`hack global up`, it reads the retained logs of all exited Compose
+containers again and can send entries that Loki already holds. Loki rejects entries older than
+its sample age limit (one week by default).
+
+Exited containers have a polling cost. In Alloy v1.12.0, `loki.source.docker` checks each
+discovered container on a fixed 5-second timer. It reopens an exited container's log when the
+container finished after the last log line Alloy shipped from it. That is true for a container
+that never logged anything, and for one whose last line was shipped before it exited, so such
+a container is reopened every 5 seconds (two container inspect calls and one logs call) for as
+long as Docker keeps it. Docker discovery does not expose a container's state or exit time, so
+the config cannot skip old exited containers. Remove them (`hack down` or
+`docker compose down`) to stop the checks. Each reopen also makes Alloy log a
+"finished transferring logs" info line. Alloy runs as a Compose service, so it would ship that
+line into Loki every 5 seconds per container. The Alloy config sets
+`logging { level = "warn" }`, so only Alloy's warnings and errors are written and shipped.
 
 Retention:
 - Loki retention is set in the global Loki config (`~/.hack/logging/loki.yaml`), default `168h` in the template.
@@ -243,6 +262,19 @@ Matching a process name is insufficient: a different `HOME` or `HACK_HOME` may
 own another daemon. If socket ownership cannot be established, automatic orphan
 termination is skipped. Scripted/noninteractive commands do not autostart the
 daemon; after an explicit stop, use `hack daemon start` to restore cached queries.
+`HACK_DAEMON_AUTOSTART_DISABLE=1` turns autostart off for interactive commands
+too. Candidate runs never autostart: `hack-next` and the bundled `hack-v5`
+entrypoint set `HACK_CANDIDATE_ENTRYPOINT`, and `hack-v5` also sets the opt-out.
+Autostart would start whatever hackd the host resolves (the launchd plist or the
+first `hack` on PATH), which is the stable daemon, not the candidate. Under
+either variable, `hack global up` also skips its `daemon.autoStart` step (the
+`hack daemon start` it runs through the first `hack` on PATH), and macOS
+`hack global install` skips its offer to run `hack daemon install`; both log the
+skip. `hack doctor --fix` also skips its hackd repair (restart an incompatible
+hackd, clear stale pid/socket files, start hackd), in interactive and
+non-interactive mode alike, because each step runs the first `hack` on PATH. It
+asks nothing, notes the skip with the reason, and names the command to run
+yourself, for example `hack daemon clear && hack daemon start`.
 
 launchd and isolated state roots: on macOS the hackd launchd service is one
 per-user service (`gui/<uid>/dance.hack.hackd`, plist in

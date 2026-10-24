@@ -34,6 +34,9 @@ export const LEGACY_ADOPTION_SELECTION_MESSAGES = {
 } as const;
 /** Private owner markers fence upgraded discovery without parsing authored inputs or contacting an engine. */
 export class LegacyComposeAdoptionSelectionError extends HackCliError {
+  /** Which refusal this is, so readers can classify it without its message. */
+  readonly kind: keyof typeof LEGACY_ADOPTION_SELECTION_MESSAGES;
+
   constructor(
     kind: keyof typeof LEGACY_ADOPTION_SELECTION_MESSAGES = "adoption"
   ) {
@@ -42,6 +45,7 @@ export class LegacyComposeAdoptionSelectionError extends HackCliError {
       message: LEGACY_ADOPTION_SELECTION_MESSAGES[kind],
     });
     this.name = "LegacyComposeAdoptionSelectionError";
+    this.kind = kind;
   }
 }
 function refuse(): never {

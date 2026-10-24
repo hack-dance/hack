@@ -1148,6 +1148,50 @@ test("a carrier boundary names its exhausted storage budget, never a cancellatio
   ).toBe("probe-cancel");
 });
 
+test("a helper policy refusal caught after its carrier deadline keeps its policy reason", () => {
+  // Fake clock past the carrier deadline; the carrier was not cancelled.
+  const deadline = 5_000_000;
+  const late = () => deadline + 30_000;
+  const selected = input(),
+    fake = carrier(selected);
+  fake.value.host.Privileged = true;
+  const policy = (() => {
+    try {
+      checkNativeComposeStorageDockerCarrier({
+        value: fake.value,
+        input: selected,
+        program: fake.program,
+        imageIds: [selected.artifact.imageId],
+      });
+    } catch (error: unknown) {
+      return error;
+    }
+  })();
+  expect(nativeComposeEffectRefusal(policy)).toEqual({
+    stage: "storage-helper-policy",
+    reason: "helper-host-policy",
+  });
+  const live = new AbortController();
+  // The deadline expiring later does not make the policy failure a budget one.
+  expect(
+    nativeComposeStorageCarrierBudgetReason({
+      error: policy,
+      signal: live.signal,
+      deadline,
+      now: late,
+    })
+  ).toBe("helper-host-policy");
+  // A deadline-shaped refusal with no observed cause still names the budget.
+  expect(
+    nativeComposeStorageCarrierBudgetReason({
+      error: new Error("Native storage xattr proof refused; values omitted."),
+      signal: live.signal,
+      deadline,
+      now: late,
+    })
+  ).toBe("storage-budget");
+});
+
 test("an exhausted xattr carrier lifetime refuses with the storage budget reason", () => {
   const artifact: NativeComposeStorageXattrArtifact = {
     version: 1,

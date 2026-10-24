@@ -6,6 +6,7 @@ import {
   classifyNativeAuthoredSessionFailure,
   isCapturedNativeAuthoredProcess,
   mergeNativeAuthoredProcessCensuses,
+  type NativeAuthoredProcessRow,
   parseNativeAuthoredProcessCensus,
   parseNativeAuthoredProcessIncarnation,
   requireNativeAuthoredProcessQuiescent,
@@ -398,4 +399,211 @@ test("PGID-only drift in an unrelated row still refuses a complete census", () =
       mergeNativeAuthoredProcessCensuses([unrelated], [{ ...unrelated, group }])
     ).toThrow("identity changed");
   }
+});
+
+test("bounded merge ignores foreign same-incarnation drift and keeps every row of interest strict", () => {
+  const value = parseNativeAuthoredProcessIncarnation(original);
+  const merge = (
+    before: readonly NativeAuthoredProcessRow[],
+    after: readonly NativeAuthoredProcessRow[]
+  ) => mergeNativeAuthoredProcessCensuses(before, after, value);
+  const foreign: NativeAuthoredProcessRow = {
+    ...row,
+    pid: 77,
+    group: 77,
+    session: "77",
+  };
+  for (const drift of [
+    { executable: "/private-exec-canary" },
+    { state: "transient" as const },
+    { parent: 1 },
+    { group: 78 },
+    { session: "78" },
+    { uid: 502 },
+  ]) {
+    const after = { ...foreign, ...drift };
+    expect(merge([foreign], [after])).toEqual([after]);
+    expect(merge([after], [foreign])).toEqual([foreign]);
+  }
+  const reborn = { ...foreign, birth: "Thu Oct 8 12:00:00 2026" };
+  const exited = { ...foreign, state: "zombie" as const, session: null };
+  expect(() => merge([foreign], [reborn])).toThrow("superseded");
+  expect(merge([foreign], [exited])).toEqual([exited]);
+  expect(merge([exited], [{ ...exited, parent: 1 }])).toEqual([
+    { ...exited, parent: 1 },
+  ]);
+  expect(() => merge([exited], [foreign])).toThrow("superseded");
+  const dead: NativeAuthoredProcessRow = {
+    ...foreign,
+    pid: 79,
+    state: "zombie",
+    session: null,
+  };
+  // A foreign zombie cannot execute, so seen once it is kept, not superseded.
+  for (const [before, after] of [
+    [
+      [foreign, dead],
+      [foreign, dead],
+    ],
+    [[foreign, dead], [foreign]],
+    [[foreign], [foreign, dead]],
+  ]) {
+    expect(merge(before ?? [], after ?? [])).toEqual([foreign, dead]);
+  }
+  // Each interest key alone makes the PID decide, in either observation.
+  for (const interest of [
+    { pid: value.pid, group: 77, session: "77" },
+    { group: value.group },
+    { session: value.session },
+  ]) {
+    const member = { ...foreign, ...interest };
+    for (const after of [
+      { ...member, executable: "/private-exec-canary" },
+      { ...member, state: "transient" as const },
+      { ...member, birth: "Thu Oct 8 12:00:00 2026" },
+      { ...member, state: "zombie" as const, session: null },
+    ]) {
+      expect(() => merge([member], [after])).toThrow("identity changed");
+      expect(() => merge([after], [member])).toThrow("identity changed");
+    }
+    if (member.pid === foreign.pid) {
+      expect(() => merge([foreign], [member])).toThrow("identity changed");
+      expect(() => merge([member], [foreign])).toThrow("identity changed");
+    }
+  }
+  for (const zombie of [
+    { ...dead, pid: value.pid },
+    { ...dead, group: value.group },
+  ]) {
+    expect(merge([zombie], [zombie])).toEqual([zombie]);
+    expect(() => merge([zombie], [])).toThrow("unknown or occupied");
+    expect(() => merge([], [zombie])).toThrow("unknown or occupied");
+    // A refusal of interest wins over foreign supersession.
+    expect(() =>
+      merge(
+        [foreign, zombie],
+        [{ ...foreign, birth: "Thu Oct 8 12:00:00 2026" }]
+      )
+    ).toThrow("unknown or occupied");
+  }
+  expect(() =>
+    merge(
+      [foreign, { ...foreign, pid: value.pid }],
+      [
+        { ...foreign, birth: "Thu Oct 8 12:00:00 2026" },
+        { ...foreign, pid: value.pid, parent: 1 },
+      ]
+    )
+  ).toThrow("identity changed");
+});
+
+test("a foreign failed SID lookup is resolved from stable rows or supersedes, never kept unknown", () => {
+  const value = parseNativeAuthoredProcessIncarnation(original);
+  const merge = (
+    before: readonly NativeAuthoredProcessRow[],
+    after: readonly NativeAuthoredProcessRow[]
+  ) => mergeNativeAuthoredProcessCensuses(before, after, value);
+  // Stable rows: the same incarnation with one known foreign SID in both.
+  // PID 70 never led a session; PID 60 leads its own.
+  const member: NativeAuthoredProcessRow = {
+    ...row,
+    pid: 70,
+    group: 60,
+    session: "50",
+  };
+  const leader: NativeAuthoredProcessRow = {
+    ...row,
+    pid: 60,
+    group: 60,
+    session: "60",
+  };
+  const lost: NativeAuthoredProcessRow = {
+    ...row,
+    pid: 88,
+    group: 60,
+    session: null,
+  };
+  const resolved = (session: string) => ({ ...lost, session });
+  // PGID, later listing: any stable row proves it.
+  expect(merge([member], [member, lost])).toEqual([member, resolved("50")]);
+  expect(merge([leader], [leader, lost])).toEqual([leader, resolved("60")]);
+  // PGID, earlier listing: a row that never led a session, or a session
+  // leader leading that PGID, proves it.
+  expect(merge([member, lost], [member])).toEqual([member, resolved("50")]);
+  expect(merge([leader, lost], [leader])).toEqual([leader, resolved("60")]);
+  const outsider = { ...leader, group: 61 };
+  expect(() => merge([outsider, { ...lost, group: 61 }], [outsider])).toThrow(
+    "superseded"
+  );
+  expect(merge([outsider], [outsider, { ...lost, group: 61 }])).toEqual([
+    outsider,
+    { ...lost, group: 61, session: "60" },
+  ]);
+  // Parent: only a parent that never led a session proves it.
+  const orphan = { ...lost, group: 88 };
+  const launchd = { ...leader, pid: 1, group: 1, session: "1" };
+  for (const [parent, session] of [
+    [member, "50"],
+    [leader, undefined],
+    [launchd, undefined],
+  ] as const) {
+    const lostChild = { ...orphan, parent: parent.pid };
+    for (const [before, after] of [
+      [[parent], [parent, lostChild]],
+      [[parent, lostChild], [parent]],
+    ]) {
+      if (session === undefined) {
+        expect(() => merge(before ?? [], after ?? [])).toThrow("superseded");
+      } else {
+        expect(merge(before ?? [], after ?? [])).toEqual([
+          parent,
+          { ...lostChild, session },
+        ]);
+      }
+    }
+  }
+  // Its own earlier SID resolves a later failure; the reverse supersedes.
+  const exiting = { ...orphan, session: "40" };
+  expect(merge([exiting], [{ ...exiting, session: null }])).toEqual([exiting]);
+  for (const [before, after] of [
+    [[{ ...exiting, session: null }], [exiting]],
+    [[orphan], [orphan]],
+  ]) {
+    expect(() => merge(before ?? [], after ?? [])).toThrow("superseded");
+  }
+  // Nothing unstable, ambiguous or of interest proves a SID.
+  const zombie = { ...member, state: "zombie" as const, session: null };
+  const interest = { ...member, session: value.session };
+  for (const [before, after] of [
+    [[member], [{ ...member, session: "51" }, lost]],
+    [[member], [{ ...member, birth: "Thu Oct 8 12:00:00 2026" }, lost]],
+    [[member], [zombie, lost]],
+    [[member], [{ ...zombie, session: "50" }, lost]],
+    [
+      [member],
+      [
+        { ...zombie, session: "50" },
+        { ...orphan, parent: 70 },
+      ],
+    ],
+    [[member], [member, { ...member, pid: 71, session: "71" }, lost]],
+    [[{ ...member, session: null }], [member, lost]],
+    [[], [member, lost]],
+    [[interest], [interest, lost]],
+  ]) {
+    expect(() => merge(before ?? [], after ?? [])).toThrow("superseded");
+  }
+  // A failed lookup of a PID or PGID of interest, or in an unbounded census,
+  // refuses as before.
+  for (const vanished of [
+    { ...lost, pid: value.pid },
+    { ...lost, group: value.group },
+  ]) {
+    expect(() => merge([member], [member, vanished])).toThrow(
+      "unknown or occupied"
+    );
+  }
+  expect(() =>
+    mergeNativeAuthoredProcessCensuses([member], [member, lost])
+  ).toThrow("unknown or occupied");
 });

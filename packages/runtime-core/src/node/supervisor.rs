@@ -564,6 +564,11 @@ mod tests {
 
     /// One owned job for `run_child`: a private journal holding a running receipt, and
     /// a TERM-ignoring group leader that exits 3 on its own when its stdin closes.
+    ///
+    /// `new` returns only after the leader has printed `ready`, which its shell does
+    /// after `trap '' TERM` is installed. Without that handshake a starved shell can
+    /// still have the default TERM action when a short timeout signals it, and the
+    /// tests that rely on SIGTERM being ignored would then flake.
     struct Job {
         root: std::path::PathBuf,
         store: Store,
@@ -582,7 +587,7 @@ mod tests {
             let id = "a".repeat(64);
             super::super::test_support::job(&store, &id, "running", timeout_ms);
             let mut child = Command::new("/bin/sh")
-                .args(["-c", "trap '' TERM; read line; exit 3"])
+                .args(["-c", "trap '' TERM; echo ready; read line; exit 3"])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -590,6 +595,15 @@ mod tests {
                 .spawn()
                 .unwrap();
             let stdin = child.stdin.take();
+            // Exactly the handshake line: run_child later drains the rest of stdout.
+            let mut ready = [0_u8; 6];
+            child
+                .stdout
+                .as_mut()
+                .unwrap()
+                .read_exact(&mut ready)
+                .unwrap();
+            assert_eq!(&ready, b"ready\n");
             let identity = super::super::ownership::observe(child.id() as i32).unwrap();
             Self {
                 root,

@@ -57,6 +57,17 @@ const LATE_CODE_DELAY_MS = 1000;
  */
 const LATE_WRITER_DRAIN_BOUND_MS = 25_000;
 /**
+ * The production exit drain bound's documented floor (the doc comment on
+ * NATIVE_EXIT_DRAIN_BOUND_MS). Every other case reads the constant itself, so
+ * without this pin a smaller production bound would pass them all (HACK-1425).
+ */
+const DOCUMENTED_EXIT_DRAIN_BOUND_MS = 5000;
+/**
+ * How much earlier than its delay a timer may appear to fire when measured
+ * with whole-millisecond wall clocks in two processes.
+ */
+const TIMER_CLOCK_TOLERANCE_MS = 50;
+/**
  * Gap between creating a stand-in's pid file and writing its digits. It makes
  * the empty-file window that a loaded host opens by chance happen on every
  * run, so a reader that only waits for existence fails every time.
@@ -82,6 +93,31 @@ async function waitForFile(
     if (performance.now() >= deadline) {
       throw new Error(
         `Fixture handshake did not appear within ${budgetMs} ms.`
+      );
+    }
+    await Bun.sleep(10);
+  }
+}
+
+/**
+ * Wait until a fixture's completion file holds exactly `expected`. A
+ * fixture's writeFileSync creates the file before it writes the bytes, so an
+ * existence wait can return while the file is still "" (HACK-1422).
+ */
+async function waitForFileText(
+  path: string,
+  expected: string,
+  budgetMs = HANDSHAKE_BUDGET_MS
+): Promise<void> {
+  const deadline = performance.now() + budgetMs;
+  for (;;) {
+    const file = Bun.file(path);
+    if ((await file.exists()) && (await file.text()) === expected) {
+      return;
+    }
+    if (performance.now() >= deadline) {
+      throw new Error(
+        `Fixture completion did not write its text within ${budgetMs} ms.`
       );
     }
     await Bun.sleep(10);
@@ -391,6 +427,17 @@ test("native recovery draining requires exact independent selectors and refuses 
   }
 });
 
+test("the production exit drain bound keeps its documented floor and outlasts a late writer", () => {
+  expect(NATIVE_EXIT_DRAIN_BOUND_MS).toBeGreaterThanOrEqual(
+    DOCUMENTED_EXIT_DRAIN_BOUND_MS
+  );
+  // A closed code written this long after the exit must still be read under
+  // the production bound, not only under the late-writer cases' wide seam.
+  expect(NATIVE_EXIT_DRAIN_BOUND_MS).toBeGreaterThan(
+    LATE_CODE_DELAY_MS + TIMER_CLOCK_TOLERANCE_MS
+  );
+});
+
 bunTest.each([
   ["read", "exit"],
   ["read", "abort"],
@@ -409,11 +456,15 @@ bunTest.each([
     // The keeper holds the request's stdout/stderr until the test releases it,
     // so the request can only finish by bounding its drain. The bound is
     // measured from the stand-in's own exit (or the abort), never from spawn,
-    // so slow process startup under load cannot decide the outcome.
+    // so slow process startup under load cannot decide the outcome. Its
+    // completion write opens the empty-file window on every run, so the
+    // completion wait below must wait for the text, not for existence.
     const keeper = `import {existsSync,writeFileSync} from 'node:fs';
 writeFileSync(${JSON.stringify(holding)},String(process.pid));
 const cap=performance.now()+${KEEPER_RELEASE_CAP_MS};
 while(!existsSync(${JSON.stringify(release)})&&performance.now()<cap)await Bun.sleep(10);
+writeFileSync(${JSON.stringify(finished)},'');
+await Bun.sleep(${TORN_HANDSHAKE_GAP_MS});
 writeFileSync(${JSON.stringify(finished)},'finished');`;
     await Bun.write(
       runtime.binary,
@@ -481,6 +532,13 @@ ${mode === "abort" ? "await Bun.sleep(60_000);" : `(await import('node:fs')).wri
       expect((settledAt ?? Number.POSITIVE_INFINITY) - endedAt).toBeLessThan(
         NATIVE_EXIT_DRAIN_BOUND_MS + DRAIN_SETTLE_MARGIN_MS
       );
+      if (mode === "exit") {
+        // No seam is passed, so the production bound is the one in effect:
+        // the drain kept reading the held pipes for all of it (HACK-1425).
+        expect((settledAt ?? 0) - endedAt).toBeGreaterThanOrEqual(
+          NATIVE_EXIT_DRAIN_BOUND_MS - TIMER_CLOCK_TOLERANCE_MS
+        );
+      }
       expect(await Bun.file(finished).exists()).toBe(false);
       const keeperPid = await waitForPid(holding);
       expect(() => process.kill(keeperPid, 0)).not.toThrow();
@@ -490,7 +548,7 @@ ${mode === "abort" ? "await Bun.sleep(60_000);" : `(await import('node:fs')).wri
       controller.abort();
       await request.catch(() => undefined);
       await Bun.write(release, "release");
-      completed = await waitForFile(finished).then(
+      completed = await waitForFileText(finished, "finished").then(
         () => true,
         () => false
       );
@@ -560,6 +618,47 @@ const LATE_WRITER_SELECTIONS = {
       "true",
     ],
     flags: { boundNativeAuthoredExecDrain: true },
+  },
+  "one-off": {
+    args: [
+      "graph",
+      "native",
+      "one-off",
+      "--run-id",
+      RUN_ID,
+      "--service",
+      "web",
+      "--json",
+      "--",
+      "true",
+    ],
+    flags: { boundNativeAuthoredOneOffDrain: true },
+  },
+  selection: {
+    args: [
+      "graph",
+      "native",
+      "recovery-selection",
+      "--run-id",
+      RUN_ID,
+      "--json",
+    ],
+    flags: { boundNativeAuthoredRecoveryDrain: "selection" },
+  },
+  cleanup: {
+    args: [
+      "graph",
+      "native",
+      "recover-live-owner",
+      "--run-id",
+      RUN_ID,
+      "--expect-receipt",
+      "b".repeat(64),
+      "--expect-owner",
+      "c".repeat(64),
+      "--json",
+    ],
+    flags: { boundNativeAuthoredRecoveryDrain: "cleanup" },
   },
 } as const;
 

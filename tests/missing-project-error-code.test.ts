@@ -245,11 +245,13 @@ async function emptyProject() {
 async function cli(opts: {
   readonly root: string;
   readonly args: readonly string[];
+  /** Working directory; defaults to the fixture root. */
+  readonly cwd?: string;
 }) {
   const child = Bun.spawn(
     [process.execPath, resolve("index.ts"), ...opts.args],
     {
-      cwd: opts.root,
+      cwd: opts.cwd ?? opts.root,
       env: privateCliEnv({
         root: opts.root,
         env: { HACK_NO_INTERACTIVE: "1", HACK_LOGGER: "console" },
@@ -324,11 +326,40 @@ for (const [name, expectation] of Object.entries(COMMANDS)) {
   );
 }
 
+/**
+ * The commands pinned above in their `--json` form. Without `--json` each
+ * prints the same closed line (HACK-1426: `up` used to drop the code).
+ */
+const ENVELOPE_COMMANDS_WITHOUT_JSON = [
+  "up",
+  "down",
+  "restart",
+  "ps",
+  "logs",
+  "open",
+] as const;
+
+for (const command of ENVELOPE_COMMANDS_WITHOUT_JSON) {
+  test(
+    `${command} -p <empty dir> without --json prints one closed line and no stack`,
+    async () => {
+      const { root, dir } = await emptyProject();
+      const result = await cli({ root, args: [command, "-p", dir] });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(
+        `ERROR: E_PROJECT_NOT_FOUND: ${MISSING_PROJECT_MESSAGE}\n`
+      );
+    },
+    SPAWN_TIMEOUT_MS
+  );
+}
+
 test(
-  "ps -p <empty dir> without --json prints one closed line and no stack",
+  "up from a working directory without a project prints the closed E_PROJECT_NOT_FOUND line",
   async () => {
     const { root, dir } = await emptyProject();
-    const result = await cli({ root, args: ["ps", "-p", dir] });
+    const result = await cli({ root, cwd: dir, args: ["up"] });
     expect(result.code).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe(

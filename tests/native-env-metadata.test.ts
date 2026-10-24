@@ -1,6 +1,14 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  test,
+} from "bun:test";
 import {
   chmod,
+  cp,
   mkdir,
   mkdtemp,
   readdir,
@@ -47,8 +55,8 @@ afterEach(async () => {
   }
   await rm(root, { recursive: true, force: true });
 });
-async function project(name = "primary") {
-  const projectRoot = join(root, name);
+async function project(name = "primary", base = root) {
+  const projectRoot = join(base, name);
   await mkdir(join(projectRoot, ".hack"), { recursive: true });
   // Selection is supplied by the compiler; this owner never parses project policy.
   await writeFile(
@@ -127,32 +135,83 @@ async function git(projectRoot: string, args: string[]) {
   });
   expect(await child.exited).toBe(0);
 }
-/** An exact Git root with an empty index: one process, no commit or checkout. */
-async function repository() {
-  const primary = await project();
-  await git(primary, ["init", "--quiet", "-b", "main"]);
-  return primary;
-}
-async function linked() {
-  const primary = await repository();
-  await git(primary, ["add", ".hack/hack.project.json"]);
-  await git(primary, [
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "-c",
-    "commit.gpgsign=false",
-    // Never leave a detached background maintenance process behind the fixture.
-    "-c",
-    "maintenance.auto=false",
-    "commit",
-    "--quiet",
-    "-m",
-    "fixture",
+/**
+ * Git fixtures are built once per file and copied into each test's root.
+ * Creating a repository writes many files (init, index, objects, refs, worktree
+ * checkout); on a loaded runner those writes, not the product's read-only
+ * inspections, took seconds per test and hit bun's 5 s test budget (HACK-1362).
+ * A copy is filesystem-only and spawns no Git.
+ */
+let templates: string;
+beforeAll(async () => {
+  templates = await realpath(
+    await mkdtemp(join(tmpdir(), "native-env-metadata-template-"))
+  );
+  const plain = await project("primary", join(templates, "repository"));
+  const primary = await project("primary", join(templates, "linked"));
+  // No hook samples: fewer files to write now and to copy per test.
+  const init = ["init", "--quiet", "--template=", "-b", "main"];
+  await Promise.all([
+    git(plain, init),
+    (async () => {
+      await git(primary, init);
+      await git(primary, ["add", ".hack/hack.project.json"]);
+      await git(primary, [
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        // Never leave a detached background maintenance process behind the fixture.
+        "-c",
+        "maintenance.auto=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "fixture",
+      ]);
+      await git(primary, [
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "fixture",
+        join(templates, "linked/linked"),
+      ]);
+    })(),
   ]);
+});
+afterAll(async () => {
+  await rm(templates, { recursive: true, force: true });
+});
+async function copyTemplate(name: "repository" | "linked") {
+  await cp(join(templates, name), root, {
+    recursive: true,
+    verbatimSymlinks: true,
+  });
+}
+/** An exact Git root with an empty index and no commit or checkout. */
+async function repository() {
+  await copyTemplate("repository");
+  return join(root, "primary");
+}
+/**
+ * A committed primary with one linked checkout. The two linkage files are the
+ * only absolute paths Git keeps, so the copy points them at this test's root.
+ */
+async function linked() {
+  await copyTemplate("linked");
+  const primary = join(root, "primary");
   const checkout = join(root, "linked");
-  await git(primary, ["worktree", "add", "--quiet", "-b", "fixture", checkout]);
+  await writeFile(
+    join(checkout, ".git"),
+    `gitdir: ${join(primary, ".git/worktrees/linked")}\n`
+  );
+  await writeFile(
+    join(primary, ".git/worktrees/linked/gitdir"),
+    `${join(checkout, ".git")}\n`
+  );
   return { primary, checkout };
 }
 const VALUE_FREE_DIAGNOSTIC = /^[A-Za-z][A-Za-z0-9]*(?::[A-Z][A-Z0-9_]*)?$/;
@@ -274,15 +333,12 @@ test("all six layers use live verified primary inputs with checkout-local preced
   await layer(checkout, "hack.env.qa.local.yaml", {
     global: { WIN: secure, CURRENT_OVERLAY: "" },
   });
-  expect((await metadata(checkout, "qa")).effectiveMetadata.web?.WIN).toEqual({
+  const qa = await metadata(checkout, "qa");
+  expect(qa.effectiveMetadata.web?.WIN).toEqual({
     scope: "global",
     secret: true,
   });
-  expect(
-    Object.keys(
-      (await metadata(checkout, "qa")).effectiveMetadata.web ?? {}
-    ).sort()
-  ).toEqual([
+  expect(Object.keys(qa.effectiveMetadata.web ?? {}).sort()).toEqual([
     "BASE",
     "CURRENT",
     "CURRENT_OVERLAY",
@@ -339,7 +395,7 @@ test("invalid exact-root Git linkage refuses instead of inheriting or falling ba
 });
 
 test("tracked local filename compatibility and non-Git environment hint remain supported", async () => {
-  // Tracking is index state at an exact Git root; a linked checkout adds only fixture cost.
+  // Tracking is index state at an exact Git root; no commit or linked checkout is needed.
   const primary = await repository();
   await layer(
     primary,
@@ -516,7 +572,7 @@ test("tracked-path inspection disables repository fsmonitor and ignores caller G
 });
 
 test("cancellation interrupts and reaps an in-flight owned Git inspection", async () => {
-  const { primary } = await linked();
+  const primary = await repository();
   const bin = join(root, "bin");
   const marker = join(root, "inspection-started");
   await mkdir(bin);
@@ -527,6 +583,7 @@ test("cancellation interrupts and reaps an in-flight owned Git inspection", asyn
   await chmod(join(bin, "git"), 0o700);
   process.env.PATH = bin;
   const controller = new AbortController();
+  let settled = false;
   const pending = resolveProjectEnvMetadataForNativeSelection({
     projectRoot: primary,
     overlay: null,
@@ -537,12 +594,14 @@ test("cancellation interrupts and reaps an in-flight owned Git inspection", asyn
     () => null,
     (error: unknown) => error
   );
+  pending.then(() => {
+    settled = true;
+  });
   try {
-    for (
-      let attempt = 0;
-      attempt < 100 && !(await Bun.file(marker).exists());
-      attempt++
-    ) {
+    // Wait for the owned child itself, not a fixed poll budget: on a loaded runner
+    // starting the inspection can outlast any fixed count of short sleeps. A call
+    // that settles without starting it fails the marker assertion below.
+    while (!(settled || (await Bun.file(marker).exists()))) {
       await Bun.sleep(5);
     }
     expect(await Bun.file(marker).exists()).toBe(true);
@@ -714,7 +773,7 @@ test("a host-named declared workload disables generic host injection even when n
   });
 });
 
-test("host metadata observes all six real worktree layers and explicit base selection", async () => {
+async function hostSixLayers() {
   const { primary, checkout } = await linked();
   await layer(checkout, "hack.env.default.yaml", {
     host: { BASE: "", WIN: secure },
@@ -734,6 +793,11 @@ test("host metadata observes all six real worktree layers and explicit base sele
   await layer(checkout, "hack.env.qa.local.yaml", {
     global: { CURRENT_OVERLAY: "", WIN: "" },
   });
+  return checkout;
+}
+
+test("host metadata observes all six real worktree layers and explicit base selection", async () => {
+  const checkout = await hostSixLayers();
   const result = await hostMetadata(checkout, { overlay: "qa" });
   expect(result.hostMetadata?.default?.WIN).toEqual({
     scope: "global",
@@ -758,12 +822,15 @@ test("host metadata observes all six real worktree layers and explicit base sele
   });
   expect(base.hostMetadata?.default?.PRIMARY_OVERLAY).toBeUndefined();
   expect(base.hostMetadata?.default?.CURRENT_OVERLAY).toBeUndefined();
-  for (const exclusion of ["optout", "ci", "slim"]) {
+});
+
+for (const exclusion of ["optout", "ci", "slim"] as const) {
+  test(`host metadata ${exclusion} skips primary layers but retains checkout-local layers`, async () => {
+    const checkout = await hostSixLayers();
     if (exclusion === "ci") {
       process.env.CI = "true";
     }
     if (exclusion === "slim") {
-      Reflect.deleteProperty(process.env, "CI");
       process.env.HACK_EXECUTION_MODE = "slim";
     }
     const excluded = await hostMetadata(checkout, {
@@ -776,8 +843,8 @@ test("host metadata observes all six real worktree layers and explicit base sele
       scope: "host",
       secret: false,
     });
-  }
-});
+  });
+}
 
 test("unknown, duplicate, noncanonical and malformed host requests refuse without disclosure", async () => {
   const p = await project();

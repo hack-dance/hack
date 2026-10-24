@@ -4917,3 +4917,91 @@ test("preparation stop refuses changed source, forged claims and config drift be
     await store.close();
   }
 });
+
+/**
+ * HACK-1458: public adoption dispatch derives each store inspection phase from
+ * the command's caller deadline. A synthetic clock jumps once, right after the
+ * dispatch's first engine probe, so these cases need no real waiting: the
+ * phase that probe opened must survive the jump while the deadline remains,
+ * and must end as a timeout once the deadline has passed.
+ *
+ * The case budget is a ceiling only: prepare and publish spawn hundreds of
+ * stub-engine probes, so a loaded host needs minutes; a passing case never
+ * waits on it.
+ */
+const PUBLIC_DEADLINE_CASE_MS = 300_000;
+async function publicDispatchAfterClockJump(opts: {
+  readonly startupTimeoutMs: number;
+  readonly jumpMs: number;
+}): Promise<{ readonly result: unknown; readonly jumped: boolean }> {
+  const { store, generation } = await prepared();
+  const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+  const priorStartup = process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS;
+  const realNow = Date.now;
+  let clock: { mockRestore: () => void } | undefined;
+  let offset = 0;
+  try {
+    const binary = await compiler();
+    process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+    await store.publish({ generation, binary });
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = String(opts.startupTimeoutMs);
+    const commands = join(root, "commands");
+    const before = Bun.file(commands).size;
+    clock = spyOn(Date, "now").mockImplementation(() => {
+      if (offset === 0 && Bun.file(commands).size > before) {
+        offset = opts.jumpMs;
+      }
+      return realNow() + offset;
+    });
+    const result = await tryLegacyComposeAdoptedCommand({
+      cwd: projectRoot,
+      operation: "up",
+      detach: true,
+    }).catch((error: unknown) => error);
+    return { result, jumped: offset === opts.jumpMs };
+  } finally {
+    clock?.mockRestore();
+    restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+    restoreEnv("HACK_COMPOSE_STARTUP_TIMEOUT_MS", priorStartup);
+    await store.close();
+  }
+}
+
+boundedTest(
+  "HACK-1458: public dispatch inspection outlives the former fixed 15 s phase clock while the caller deadline remains",
+  async () => {
+    const { result, jumped } = await publicDispatchAfterClockJump({
+      startupTimeoutMs: 120_000,
+      jumpMs: 16_000,
+    });
+    expect(jumped).toBe(true);
+    expect(result).toBe(0);
+    expect(await mutationCommands()).toEqual([["container", "start", ID]]);
+  },
+  PUBLIC_DEADLINE_CASE_MS
+);
+
+boundedTest(
+  "HACK-1458: an expired public dispatch deadline ends inspection as a startup timeout, not invalid config",
+  async () => {
+    const { result, jumped } = await publicDispatchAfterClockJump({
+      startupTimeoutMs: 5000,
+      jumpMs: 6000,
+    });
+    expect(jumped).toBe(true);
+    expect(result).toBeInstanceOf(HackCliError);
+    if (!(result instanceof HackCliError)) {
+      throw new Error("missing public refusal");
+    }
+    expect(result.code).toBe("E_STARTUP_TIMEOUT");
+    // The fixed store message keeps the closed `legacy-deadline` diagnostic.
+    expect(result.message).toBe(
+      new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_DEADLINE")
+        .message
+    );
+    expect(result.message).not.toContain(CANARY);
+    expect(await mutationCommands()).toEqual([]);
+    expect((await readReceipt()).pendingOperation).toBeNull();
+  },
+  PUBLIC_DEADLINE_CASE_MS
+);

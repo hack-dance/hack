@@ -2043,3 +2043,272 @@ for (const [httpsPort, branch, url] of [
     }
   );
 }
+
+/**
+ * Just past the compiler transport's fixed 10 s per-invocation default, which
+ * authored compiler calls used to keep whatever time their caller had left.
+ */
+const SLOW_COMPILE_MS = 10_500;
+
+/**
+ * A wrapper around the fixture compiler whose first invocation of `operation`
+ * (any operation when omitted) sleeps {@link SLOW_COMPILE_MS} before it runs.
+ * `install` selects it; the case guard restores the fixture's compiler key.
+ * `slept` is the marker the wrapper writes when it has slept.
+ */
+async function slowCompilerOnce(opts: {
+  readonly root: string;
+  readonly operation?: string;
+}): Promise<{ readonly install: () => void; readonly slept: string }> {
+  const compiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+  if (!compiler) {
+    throw new Error("missing fixture compiler");
+  }
+  const slept = join(opts.root, "slow-compile-once");
+  const wrapper = join(opts.root, "slow-compiler");
+  const selected = opts.operation
+    ? `process.argv[2]===${JSON.stringify(opts.operation)}`
+    : "true";
+  await writeFile(
+    wrapper,
+    `#!${process.execPath}
+import {existsSync,writeFileSync} from "node:fs";
+if(${selected}&&!existsSync(${JSON.stringify(slept)})){writeFileSync(${JSON.stringify(slept)},"");await Bun.sleep(${SLOW_COMPILE_MS});}
+const child=Bun.spawn([${JSON.stringify(compiler)},...process.argv.slice(2)],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});
+process.exit(await child.exited);
+`
+  );
+  await chmod(wrapper, 0o700);
+  return {
+    install: () => {
+      process.env.HACK_CONFIG_COMPILER_BINARY = wrapper;
+    },
+    slept,
+  };
+}
+
+macTest(
+  "HACK-1458: a startup compiler call may outlast the compiler's 10 s default while the startup deadline remains",
+  async () => {
+    const selected = await fixture({ noManaged: true });
+    const slow = await slowCompilerOnce({
+      root: selected.root,
+      operation: "compile",
+    });
+    slow.install();
+    expect(
+      await serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
+      })
+    ).toBe(0);
+    expect(await Bun.file(slow.slept).exists()).toBe(true);
+    expect(await artifacts(selected.scope)).toEqual([]);
+  }
+);
+
+// HACK-1458: the loaded hang of "Source5 cancellation after readiness". The
+// cancel's down.before acquisition kept the compiler's fixed 10 s default, so
+// a slow compiler failed the graceful stop, and the start then retained the
+// live owner and host processes until a hard cancellation that never came.
+macTest(
+  "HACK-1458: Source5 cancellation after readiness settles when its down acquisition compiler is slow",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, hostProcesses: true });
+    const slow = await slowCompilerOnce({ root: selected.root });
+    const signal = new AbortController();
+    const stages: string[] = [];
+    expect(
+      await serveNativeAuthoredProject({
+        ...selected,
+        run,
+        signal: signal.signal,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
+        onHookDiagnostic: (event) => {
+          stages.push(`${event.phase}:${event.boundary}`);
+        },
+        onReady: () => {
+          // The next compiler invocation is the cancel's down acquisition.
+          slow.install();
+          signal.abort();
+          return undefined;
+        },
+      })
+    ).toBe(0);
+    expect(await Bun.file(slow.slept).exists()).toBe(true);
+    expect(stages).not.toContain("down.before:stop-operation");
+    expect(stages).toContain("down.after:complete");
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "process-order")).text()
+    ).toBe("started\nstopped\n");
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
+    ).toBe("up-before\nup-after\ndown-before\ndown-after\n");
+    const files = await artifacts(selected.scope);
+    expect(
+      files.some((name) => name.endsWith(".host-process-owner.json"))
+    ).toBe(false);
+    expect(files.some((name) => name.endsWith(".hooks.json"))).toBe(false);
+  }
+);
+
+/**
+ * Wrap the fixture's native stand-in so its second `frontend-plan` request
+ * (the one after up.before has run and the host processes have started)
+ * publishes `held` and then waits until the start kills it.
+ */
+async function holdSecondFrontendPlan(opts: {
+  readonly root: string;
+  readonly binary: string;
+}): Promise<{ readonly binary: string; readonly held: string }> {
+  const plans = join(opts.root, "frontend-plans");
+  const held = join(opts.root, "second-frontend-plan-held");
+  const binary = join(opts.root, "native-hold-second-plan");
+  await writeFile(
+    binary,
+    `#!${process.execPath}
+import {appendFileSync,readFileSync,writeFileSync} from "node:fs";
+const args=process.argv.slice(2);
+if(args.includes("frontend-plan")){appendFileSync(${JSON.stringify(plans)},"plan\\n");if(readFileSync(${JSON.stringify(plans)},"utf8").trim().split("\\n").length===2){writeFileSync(${JSON.stringify(held)},String(process.pid));setInterval(()=>{},1000);await new Promise(()=>{});}}
+const child=Bun.spawn([${JSON.stringify(opts.binary)},...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});
+process.exit(await child.exited);
+`
+  );
+  await chmod(binary, 0o700);
+  return { binary, held };
+}
+
+// HACK-1458: a cancel (or the startup deadline, which aborts the same signal)
+// after the host processes started and before the startup intent exists must
+// stop them. Their teardown freshness check used the startup inputs, bound to
+// the aborted startup signal, so it always refused and left the groups running.
+macTest(
+  "HACK-1458: cancellation after host processes start and before reservation stops them",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, hostProcesses: true });
+    const hold = await holdSecondFrontendPlan({
+      root: selected.root,
+      binary: selected.runtime.binary,
+    });
+    const signal = new AbortController();
+    let settled = false;
+    const pending = serveNativeAuthoredProject({
+      ...selected,
+      runtime: { ...selected.runtime, binary: hold.binary },
+      run,
+      signal: signal.signal,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
+    })
+      .catch((error: unknown) => error)
+      .finally(() => {
+        settled = true;
+      });
+    while (!(settled || (await Bun.file(hold.held).exists()))) {
+      await Bun.sleep(20);
+    }
+    expect(await Bun.file(hold.held).exists()).toBe(true);
+    signal.abort();
+    const error = await pending;
+    expect(error).toBeInstanceOf(NativeAuthoredProjectStartError);
+    expect(error).toHaveProperty("canceled", true);
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "process-order")).text()
+    ).toBe("started\nstopped\n");
+    const files = await artifacts(selected.scope);
+    expect(files.some((name) => name.endsWith(".start.json"))).toBe(false);
+    expect(
+      files.some((name) => name.endsWith(".host-process-owner.json"))
+    ).toBe(false);
+  }
+);
+
+/**
+ * Delay the stand-in mux's first `list-panes` (issued right after it started
+ * the host process window) and publish `held` first, so a case can cancel
+ * while the host process launch is still in progress.
+ */
+async function holdFirstPaneQuery(root: string): Promise<string> {
+  const bin = join(root, "bin");
+  const held = join(root, "pane-query-held");
+  await writeFile(
+    join(bin, "tmux-stand-in"),
+    await readFile(join(bin, "tmux")),
+    { mode: 0o700 }
+  );
+  await writeFile(
+    join(bin, "tmux"),
+    `#!${process.execPath}
+import {existsSync,writeFileSync} from "node:fs";
+const args=process.argv.slice(2);
+if(args[0]==="list-panes"&&!existsSync(${JSON.stringify(held)})){writeFileSync(${JSON.stringify(held)},"");await Bun.sleep(1000);}
+const child=Bun.spawn([${JSON.stringify(join(bin, "tmux-stand-in"))},...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});
+process.exit(await child.exited);
+`
+  );
+  await chmod(join(bin, "tmux"), 0o700);
+  return held;
+}
+
+/** True once no process in `group` remains, within a 5 s bound. */
+async function groupEnded(group: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      process.kill(-group, 0);
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "ESRCH") {
+        return true;
+      }
+      throw error;
+    }
+    await Bun.sleep(50);
+  }
+  return false;
+}
+
+// HACK-1458: a start that failed after the host process launch began but
+// before its ready record left the launched group running: teardown required
+// a ready record, and recovery never converts a bare launch intent into
+// authority. The launch now ends what it started through its session token.
+macTest(
+  "HACK-1458: cancellation during the host process launch ends the launched group",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, hostProcesses: true });
+    const held = await holdFirstPaneQuery(selected.root);
+    const signal = new AbortController();
+    let settled = false;
+    const pending = serveNativeAuthoredProject({
+      ...selected,
+      run,
+      signal: signal.signal,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
+    })
+      .catch((error: unknown) => error)
+      .finally(() => {
+        settled = true;
+      });
+    while (!(settled || (await Bun.file(held).exists()))) {
+      await Bun.sleep(20);
+    }
+    expect(await Bun.file(held).exists()).toBe(true);
+    // The window exists now; record its group before the launch can end it.
+    const state = JSON.parse(
+      await readFile(join(selected.root, "mux.json"), "utf8")
+    ) as { readonly windows: Record<string, { readonly pid: number }> };
+    const groups = Object.values(state.windows).map((row) => row.pid);
+    expect(groups).toHaveLength(1);
+    signal.abort();
+    const error = await pending;
+    expect(error).toBeInstanceOf(NativeAuthoredProjectStartError);
+    expect(error).toHaveProperty("canceled", true);
+    for (const group of groups) {
+      expect(await groupEnded(group)).toBe(true);
+    }
+    // The owned session was ended through its token. Its owner record stays
+    // unless every launched group was recorded and proven absent; a launch
+    // cancelled this early may not have recorded its command group yet.
+    expect(await Bun.file(join(selected.root, "mux.json")).exists()).toBe(
+      false
+    );
+  }
+);

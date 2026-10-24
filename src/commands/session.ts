@@ -344,7 +344,16 @@ function buildSessionPickerOptions(opts: {
   return options;
 }
 
-async function promptAttachedWorkspaceAction(opts: {
+/**
+ * Asks whether to attach to a workspace that another client holds, or to
+ * create an isolated one. Without a TTY it refuses with
+ * `E_INTERACTIVE_REQUIRED` instead of entering the clack prompt, which cannot
+ * settle on a piped stdin (HACK-1385).
+ *
+ * Exported for the non-TTY regression test: in a spawned non-TTY CLI the
+ * picker refuses first, so this guard is exercised directly.
+ */
+export async function promptAttachedWorkspaceAction(opts: {
   readonly attachedWorkspaceName: string;
   readonly nextWorkspaceName: string;
 }): Promise<"attach" | "new" | null> {

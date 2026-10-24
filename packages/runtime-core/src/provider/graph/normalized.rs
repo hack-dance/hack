@@ -295,8 +295,7 @@ mod tests {
 
     #[test]
     fn admission_rejects_mismatched_review_and_original_before_provider_effects() {
-        let root = std::env::temp_dir().join(format!("hkg-normalized-{}", std::process::id()));
-        fs::create_dir(&root).unwrap();
+        let root = crate::unique_test_root(&std::env::temp_dir(), "hkg-normalized");
         let result = std::panic::catch_unwind(|| {
             let project = root.join("project");
             let checkout = root.join("candidate");

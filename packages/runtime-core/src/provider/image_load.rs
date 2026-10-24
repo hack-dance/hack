@@ -543,16 +543,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     impl RunningPool {
         fn new() -> Self {
-            use std::os::unix::fs::DirBuilderExt;
-            let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-                "hkl-image-lease-{}-{}",
-                std::process::id(),
-                crate::node::now()
-            ));
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&root)
-                .unwrap();
+            let root = crate::private_test_root(
+                &std::env::temp_dir().canonicalize().unwrap(),
+                "hkl-image-lease",
+            );
             let candidate = Candidate::discover(&root).unwrap();
             let mut owner = state::Owner::create(
                 &candidate,
@@ -640,12 +634,7 @@ mod tests {
 
     #[test]
     fn a_wrong_archive_hash_cannot_create_runtime_state() {
-        let root = std::env::temp_dir().join(format!(
-            "hkl-image-{}-{}",
-            std::process::id(),
-            crate::node::now()
-        ));
-        std::fs::create_dir(&root).unwrap();
+        let root = crate::unique_test_root(&std::env::temp_dir(), "hkl-image");
         let candidate = Candidate::discover(&root).unwrap();
         let (bytes, image) = fixture("arm64", false, false);
         let path = root.join("image.tar");

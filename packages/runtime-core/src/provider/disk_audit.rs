@@ -270,12 +270,13 @@ mod tests {
             }
         }
         let root = std::env::temp_dir().join(format!(
-            "hack-audit-{}-{}",
+            "hack-audit-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::next_test_scratch()
         ));
         std::fs::create_dir(&root).unwrap();
         let root = root.canonicalize().unwrap();

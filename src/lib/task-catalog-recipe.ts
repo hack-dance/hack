@@ -664,7 +664,10 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   // Git accepts abbreviated long options (`--upl=cmd`) and a value attached
   // to a short option (`-u/path/cmd`). A dashed builtin (`git-clone`,
   // `/usr/lib/git-core/git-config`) is read as `git <sub>`, and a plumbing
-  // helper (`git-bisect--helper`, `git submodule--helper`) as its porcelain.
+  // helper (`git-bisect--helper`, `git submodule--helper`) as its porcelain,
+  // so older Git's `rebase--helper --add-exec-commands cmd` meets a
+  // `rebase`-scoped flag. That flag is scoped because, as a `git` inline
+  // flag, it would also match `git config --add` (Git abbreviates options).
   git: evaluator({
     inline: [
       "-c",
@@ -694,7 +697,7 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
     // cluster: `git log -Scache` and `git commit -mcleanup` are refused
     // (fail-closed); pass the value as its own argument instead.
     shortValueOptions: [],
-    subcommandInline: { clone: ["-u"] },
+    subcommandInline: { clone: ["-u"], rebase: ["--add-exec-commands"] },
     bangCommands: true,
   }),
   // SQL clients given a statement string. A statement can also reach the
@@ -864,6 +867,10 @@ const GIT_HELPER = /^([a-z0-9][a-z0-9-]*?)--helper$/i;
  * and `submodule--helper foreach` the `foreach` rule. Any other argument is
  * unchanged. A matching argument starts with a letter or digit and holds no
  * `=` or `!`, so no inline flag, word or `!` value is lost by the rewrite.
+ * The porcelain is lowercased, like a program name, so a mixed-case helper
+ * (`git Rebase--Helper`) still meets the subcommand-scoped flags, which are
+ * keyed by lowercase name. Git itself matches case-sensitively, so this
+ * only refuses more (fail-closed).
  */
 function gitSubcommand(arg: string): string {
   const helper = GIT_HELPER.exec(arg);

@@ -406,6 +406,13 @@ publication before it can select ancestor Compose inputs or write legacy files.
 An active adopted receipt remains a selection boundary even if its candidate is
 removed; missing or edited candidates refuse execution.
 
+Project commands look for an adoption before ordinary discovery. The search goes up
+from the start directory to the nearest project root or the filesystem root, as far
+as ordinary discovery goes, with no depth limit. Ordinary discovery reads an active
+adoption as native input, so an adoption the search missed would reach the native
+path. From a directory with no project, however deep, a command gets the ordinary
+missing-project error. Unsafe adoption state is still refused with `E_CONFIG_INVALID`.
+
 The distinct execution owner consumes the saved binding. It never sends these
 resources through ordinary native startup, which allocates a different Compose
 namespace and native volume names. `up --detach`, `restart` and `down` start, restart and
@@ -435,14 +442,16 @@ failing, with status `ok` and the message
 Doctor uses `warn` for a skip that points at something to fix, such as no `.hack/`
 found. These skips apply to every adopted project by design, so they are not warnings.
 A pending adoption is a warning that asks for explicit recovery, and the `--fix` steps
-treat it like an active one. The adoption search stops after 64 parent directories.
-From a deeper start directory doctor finds no adoption and uses ordinary project
-discovery instead of failing. The
+treat it like an active one. Doctor uses the same adoption search as project
+commands, so from a directory with no adoption above it, however deep, doctor uses
+ordinary project discovery instead of failing. The
 `--fix` plan says that it leaves the adoption's inputs, retained containers and state
 alone. For the project it only removes tracked generated files from the Git index
 (the files stay on disk) and keeps an env override that the adoption pins. It leaves
 `.hack/.gitignore` unchanged; a committed `.hack.secret.key` is also added to the
-root `.gitignore`. Global repairs still run.
+root `.gitignore`. Global repairs still run. The tracked generated files warning for
+an adopted project says that `--fix` leaves `.hack/.gitignore` unchanged, so the
+files must be kept out of later commits.
 
 ## Rollback and interruption recovery
 
@@ -535,10 +544,26 @@ A repeated `--recover --stop` after that refusal does not reach the publication
 boundary again: the switch is already journaled, so the retried preparation stop
 refuses it as a pending publication with the generic `E_LEGACY_ADOPTION_BUSY`
 code ("busy or requires explicit interrupted-lock recovery") and no publication
-diagnostic; the literal-env message appears only on the first refusal.
-`hack doctor` reports the pinned literal override and names
-`hack config adopt --recover --rollback` as the next step while the switch is
-pending, since `hack down` and plain `--rollback` refuse in that state (HACK-1391).
+diagnostic; the literal-env message appears only on the first refusal. Plain
+`hack config adopt --recover` would complete the switch, which refuses the literal
+override, so whenever `hack config adopt` refuses as busy over a pending switch
+its message adds the step that state accepts: `--recover --rollback` when the
+bound override holds literal values, otherwise `--recover` to complete or
+`--recover --rollback` to restore (HACK-1414).
+
+`hack doctor` reports the pinned literal override and names the first command the
+pending state accepts, since `hack down` and plain `--rollback` refuse in every
+pending state (HACK-1391, HACK-1414):
+
+- A pending switch: `hack config adopt --recover --rollback`.
+- An interrupted preparation stop (before any switch, so `--recover --rollback`
+  refuses too): `hack config adopt --recover --stop`, which refuses to publish
+  over the literal override and journals the switch; then
+  `hack config adopt --recover --rollback`.
+- An interrupted retained-container command of an active adoption:
+  `hack down --recover`, then `hack config adopt --rollback`.
+
+`hack doctor --fix` keeps the pinned file and its note names the same step.
 
 Unmodified v4 clients cannot be universally fenced: they ignore future legacy
 versions and may select ancestor Compose inputs. Adoption requires the upgraded

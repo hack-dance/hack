@@ -21,7 +21,10 @@ import {
   saveNativeAuthoredProjectRun,
   withNativeAuthoredProjectStatus,
 } from "../src/backends/native-authored-project-run.ts";
-import { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
+import {
+  invokeNativeRuntime,
+  NATIVE_EXIT_DRAIN_BOUND_MS,
+} from "../src/backends/native-runtime-client.ts";
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
 import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
@@ -34,8 +37,8 @@ import {
 const DEFAULT_BUDGET_MS = 4000;
 /** The cancelled request child sleeps this long after writing its identity. */
 const REQUEST_SLEEP_MS = 3000;
-/** The inherited-stream keeper child lives this long after its parent exits. */
-const KEEPER_SLEEP_MS = 800;
+/** An inherited-stream keeper its case never releases still retires after this cap. */
+const KEEPER_HOLD_CAP_MS = 60_000;
 /** Explicit keeper join allowance on top of its own lifetime. */
 const KEEPER_JOIN_MS = 3000;
 
@@ -596,10 +599,15 @@ test(
       "exited exec request joins finite keeper",
       async () => {
         const f = await fixture(),
-          marker = join(f.runtime.home, "keeper.pid");
+          marker = join(f.runtime.home, "keeper.pid"),
+          release = join(f.runtime.home, "keeper.release");
+        // The keeper holds the inherited streams until the test releases it
+        // after the refusal, so the output cannot settle to EOF and the
+        // exit-relative drain bound (NATIVE_EXIT_DRAIN_BOUND_MS) ends the drain.
+        const keeper = `import {existsSync} from 'node:fs';const end=Date.now()+${KEEPER_HOLD_CAP_MS};while(!existsSync(${JSON.stringify(release)})&&Date.now()<end)await Bun.sleep(20);`;
         await Bun.write(
           f.runtime.binary,
-          `#!${process.execPath}\nconst child=Bun.spawn([process.execPath,'--eval','await Bun.sleep(${KEEPER_SLEEP_MS})'],{stdin:'ignore',stdout:'inherit',stderr:'inherit'});await Bun.write(${JSON.stringify(marker)},String(child.pid));console.log('{}');process.exit(0);\n`
+          `#!${process.execPath}\nconst child=Bun.spawn([process.execPath,'--eval',${JSON.stringify(keeper)}],{stdin:'ignore',stdout:'inherit',stderr:'inherit'});await Bun.write(${JSON.stringify(marker)},String(child.pid));console.log('{}');process.exit(0);\n`
         );
         caseAdmission();
         try {
@@ -612,13 +620,14 @@ test(
             })
           ).rejects.toThrow("did not settle");
         } finally {
+          await Bun.write(release, "release");
           // The keeper identity was registered by the fixture; join it explicitly.
           await settlement.settle({ budgetMs: KEEPER_JOIN_MS });
         }
       },
-      KEEPER_SLEEP_MS + KEEPER_JOIN_MS + DEFAULT_BUDGET_MS
+      NATIVE_EXIT_DRAIN_BOUND_MS + KEEPER_JOIN_MS + DEFAULT_BUDGET_MS
     ),
-  10_000
+  NATIVE_EXIT_DRAIN_BOUND_MS + KEEPER_JOIN_MS + DEFAULT_BUDGET_MS + 5000
 );
 macTest.each([
   { extra: [], code: 17 },

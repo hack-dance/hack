@@ -525,12 +525,12 @@ mod tests {
     #[test]
     fn source_replacement_after_inventory_refuses_capture() {
         let root = Fixture(std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-snapshot-replacement-{}-{}",
+            "hack-snapshot-replacement-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(), crate::next_test_scratch()
         )));
         fs::create_dir(&root.0).unwrap();
         let project = root.0.join("project");

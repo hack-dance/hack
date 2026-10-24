@@ -223,12 +223,13 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let root = Path::new("/tmp").canonicalize().unwrap().join(format!(
-                "hkd-{}-{}",
+                "hkd-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                crate::next_test_scratch()
             ));
             state::private_directory(&root).unwrap();
             Self(root)

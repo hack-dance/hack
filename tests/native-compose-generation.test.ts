@@ -34,6 +34,7 @@ import {
   type NativeComposeRouteClaims,
   openNativeComposeRouteClaims,
 } from "../src/lib/native-compose-route-claims.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const REVISION = createHash("sha256").update("synthetic input").digest("hex");
 const fixtures: string[] = [];
@@ -2382,6 +2383,7 @@ test("real linked worktree verifies shared repository but keeps checkout instanc
   const root = await fixture();
   const git = async (args: readonly string[]) => {
     const child = Bun.spawn(["git", "-C", root, ...args], {
+      env: fixtureGitEnv(),
       stdin: "ignore",
       stdout: "ignore",
       stderr: "pipe",

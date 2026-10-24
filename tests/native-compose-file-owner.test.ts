@@ -1,4 +1,10 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  test as bunTest,
+  expect,
+  setDefaultTimeout,
+} from "bun:test";
 import {
   lstat,
   mkdir,
@@ -65,6 +71,48 @@ const SOURCE = {
 };
 const BYTES = Buffer.from([0, 255, 10]);
 const compiler = requireTestConfigCompiler();
+/**
+ * One budget for every case here (HACK-1460). A case opens a durable store,
+ * runs the real config compiler, stages fsynced material and often spawns a
+ * child Bun; the cancellation cases add durable arm/journal writes. The
+ * `up` cancellation case took 5.3 s on the macOS Intel runner against Bun's
+ * 5 s default, and other cases already needed 30 s. The cases' own product
+ * deadlines (for example the 10 s admission window) stay as they are, so a
+ * slow host still ends in the product's closed refusal before this expires.
+ */
+const FILE_OWNER_CASE_BUDGET_MS = 60_000;
+setDefaultTimeout(FILE_OWNER_CASE_BUDGET_MS);
+/**
+ * The body of the case that is running. Bun starts `afterEach` as soon as a
+ * case times out while the body keeps running, and the body reads the
+ * module-level `store`, `root` and `materialRoot`, which the next case's
+ * `beforeEach` replaces. A timed-out body could then take the next case's
+ * mutation lock or change its state and fail it as unsafe. `afterEach` therefore
+ * waits for the body to settle before it closes and removes anything, so the
+ * next case starts only after the previous body has finished.
+ */
+let runningCase: Promise<void> | undefined;
+function tracked<A extends unknown[]>(
+  body: (...args: A) => Promise<void> | void
+): (...args: A) => Promise<void> {
+  return (...args) => {
+    const run = Promise.resolve().then(() => body(...args));
+    runningCase = run;
+    return run;
+  };
+}
+const test = Object.assign(
+  (name: string, body: () => Promise<void> | void) => {
+    bunTest(name, tracked(body));
+  },
+  {
+    each:
+      <T extends string>(table: readonly T[]) =>
+      (name: string, body: (row: T) => Promise<void> | void) => {
+        bunTest.each([...table])(name, tracked(body));
+      },
+  }
+);
 let parent = "";
 let root = "";
 let materialRoot = "";
@@ -146,6 +194,9 @@ beforeEach(async () => {
   stores.push(store);
 });
 afterEach(async () => {
+  // A failure belongs to the case that already reported it.
+  await runningCase?.catch(() => undefined);
+  runningCase = undefined;
   await Promise.all(owners.splice(0).map((owner) => owner.close()));
   await Promise.all(sources.splice(0).map(closeNativeComposeFileSources));
   await Promise.all(stores.splice(0).map((store) => store.close()));
@@ -153,7 +204,7 @@ afterEach(async () => {
     restoreEnv(key, saved[key]);
   }
   await rm(parent, { recursive: true, force: true });
-});
+}, FILE_OWNER_CASE_BUDGET_MS);
 function ownerFor(
   mutation: NativeComposeMutation,
   opts: { root?: string; afterMemberUnlink?: () => Promise<void> } = {}
@@ -289,85 +340,78 @@ async function expectAbsent(paths: readonly string[]) {
   }
 }
 for (const operation of ["up", "down"] as const) {
-  test(
-    `cancellation during the last durable ${operation} arm never spawns a child and retains the exact pending material`,
-    async () => {
-      const initial =
-        operation === "down" ? await store.withMutation(running) : null;
-      await store.withMutation(async (mutation) => {
-        const selected = initial ?? (await staged(mutation));
-        const owner = initial ? ownerFor(mutation) : selected.owner;
-        const controller = new AbortController();
-        const marker = join(parent, "unexpected-child");
-        const admittedUntil = Date.now() + 10_000;
-        await expect(
-          mutation.runEffect({
-            generation: selected.generation,
-            operation,
-            assertFresh: operation === "up" ? selected.assertFresh : undefined,
-            assertOwned: async () => {},
-            effect: async () => {
-              const input = {
-                command: [
-                  process.execPath,
-                  "-e",
-                  `await Bun.write(${JSON.stringify(marker)}, "effect")`,
-                ],
-                signal: controller.signal,
-                deadline: () => admittedUntil,
-                options: {
-                  stdin: "ignore" as const,
-                  stdout: "ignore" as const,
-                  stderr: "ignore" as const,
-                },
-                assertOwned: async () => {},
-                arm: async () => {
-                  if (operation === "up") {
-                    await owner.arm({
-                      attempt: selected.attempt,
-                      generation: selected.generation,
-                    });
-                  } else {
-                    expect(
-                      await owner.armStop(selected.generation)
-                    ).not.toBeNull();
-                  }
-                  controller.abort();
-                  Object.assign(input, {
-                    signal: new AbortController().signal,
-                    deadline: () => admittedUntil + 50_000,
+  test(`cancellation during the last durable ${operation} arm never spawns a child and retains the exact pending material`, async () => {
+    const initial =
+      operation === "down" ? await store.withMutation(running) : null;
+    await store.withMutation(async (mutation) => {
+      const selected = initial ?? (await staged(mutation));
+      const owner = initial ? ownerFor(mutation) : selected.owner;
+      const controller = new AbortController();
+      const marker = join(parent, "unexpected-child");
+      const admittedUntil = Date.now() + 10_000;
+      await expect(
+        mutation.runEffect({
+          generation: selected.generation,
+          operation,
+          assertFresh: operation === "up" ? selected.assertFresh : undefined,
+          assertOwned: async () => {},
+          effect: async () => {
+            const input = {
+              command: [
+                process.execPath,
+                "-e",
+                `await Bun.write(${JSON.stringify(marker)}, "effect")`,
+              ],
+              signal: controller.signal,
+              deadline: () => admittedUntil,
+              options: {
+                stdin: "ignore" as const,
+                stdout: "ignore" as const,
+                stderr: "ignore" as const,
+              },
+              assertOwned: async () => {},
+              arm: async () => {
+                if (operation === "up") {
+                  await owner.arm({
+                    attempt: selected.attempt,
+                    generation: selected.generation,
                   });
-                },
-              };
-              const code = await runNativeComposeOwnedFileChild(input);
-              return { outcome: "complete", value: code };
-            },
-          })
-        ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
-        expect(await Bun.file(marker).exists()).toBe(false);
-        expect((await store.loadPending())?.generationId).toBe(
-          selected.generation.generationId
-        );
-        expect(
-          (await store.readGenerationDocument(selected.generation))[
-            NATIVE_COMPOSE_FILES_EXTENSION
-          ]
-        ).toEqual(selected.projection.reference);
-        const journal = await readFile(
-          journalPath(selected.projection),
-          "utf8"
-        );
-        expect(journal).toContain(
-          operation === "up" ? '"phase":"armed"' : '"phase":"stop-armed"'
-        );
-        expect(journal).not.toContain(
-          operation === "up" ? '"phase":"reaped"' : '"phase":"stop-reaped"'
-        );
-        await expectPresent(memberPaths(selected.projection));
-      });
-    },
-    operation === "down" ? 30_000 : 5000
-  );
+                } else {
+                  expect(
+                    await owner.armStop(selected.generation)
+                  ).not.toBeNull();
+                }
+                controller.abort();
+                Object.assign(input, {
+                  signal: new AbortController().signal,
+                  deadline: () => admittedUntil + 50_000,
+                });
+              },
+            };
+            const code = await runNativeComposeOwnedFileChild(input);
+            return { outcome: "complete", value: code };
+          },
+        })
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+      expect(await Bun.file(marker).exists()).toBe(false);
+      expect((await store.loadPending())?.generationId).toBe(
+        selected.generation.generationId
+      );
+      expect(
+        (await store.readGenerationDocument(selected.generation))[
+          NATIVE_COMPOSE_FILES_EXTENSION
+        ]
+      ).toEqual(selected.projection.reference);
+      const journal = await readFile(journalPath(selected.projection), "utf8");
+      expect(journal).toContain(
+        operation === "up" ? '"phase":"armed"' : '"phase":"stop-armed"'
+      );
+      expect(journal).not.toContain(
+        operation === "up" ? '"phase":"reaped"' : '"phase":"stop-reaped"'
+      );
+      await expectPresent(memberPaths(selected.projection));
+    });
+  });
 }
 test("actual acquisition stages binary and empty 0444 files outside checkout", async () => {
   await store.withMutation(async (mutation) => {
@@ -466,7 +510,7 @@ test("literal dollar roots and targets are encoded once in binds while saved fil
     diagnostic?.("saved-ready", "end");
   });
   diagnostic?.("mutation", "end");
-}, 30_000);
+});
 test("actual renderer requires the exact live owner projection and preserves literal bind encoding once", async () => {
   await dollarFixture();
   await store.withMutation(async (mutation) => {
@@ -537,7 +581,7 @@ test("actual renderer requires the exact live owner projection and preserves lit
       renderNativeCompose({ ...options, fileProjection: projection })
     ).toThrow();
   });
-}, 30_000);
+});
 test("only the original live stop attempt may reap; copied and replacement-owner handles refuse", async () => {
   const selected = await store.withMutation(running);
   await store.withMutation(async (mutation) => {
@@ -579,7 +623,7 @@ test("only the original live stop attempt may reap; copied and replacement-owner
     });
   });
   await expectAbsent(memberPaths(selected.projection));
-}, 30_000);
+});
 test("stop authority exists only within the exact live down effect; an unknown stop survives mutation revocation and cannot be handed off", async () => {
   const selected = await store.withMutation(running);
   let original: Awaited<
@@ -644,7 +688,7 @@ test("stop authority exists only within the exact live down effect; an unknown s
     selected.generation.generationId
   );
   await expectPresent(memberPaths(selected.projection));
-}, 30_000);
+});
 test("a known stop can re-arm after partial retirement intent and finish exact saved retry without recreating missing members", async () => {
   const selected = await store.withMutation(running);
   let unlinked = 0;
@@ -707,7 +751,7 @@ test("a known stop can re-arm after partial retirement intent and finish exact s
   });
   await expectAbsent(memberPaths(selected.projection));
   expect(await store.loadPending()).toBeNull();
-}, 30_000);
+});
 test.each([
   "extra-private-bind",
   "interpolated-bind",
@@ -877,7 +921,7 @@ test("source-unavailable saved down retires only exact material before completed
       code: "E_NATIVE_COMPOSE_STATE",
     });
   });
-}, 30_000);
+});
 test.each([
   "absent-proof",
   "missing-before-intent",
@@ -931,7 +975,7 @@ test.each([
     expect((await store.loadCurrent()).stopped).toBe(false);
     await expectPresent(paths.slice(1));
   });
-}, 30_000);
+});
 test("partial unlink interruption retains durable intent and exact pending reference; fresh saved mutation resumes without source", async () => {
   const selected = await store.withMutation(running);
   let unlinked = 0;
@@ -989,7 +1033,7 @@ test("partial unlink interruption retains durable intent and exact pending refer
     expect((await store.loadCurrent()).pending).toBeNull();
     expect((await store.loadCurrent()).stopped).toBe(true);
   });
-}, 30_000);
+});
 test("failure after retired marker but before receipt commit keeps exact recovery generation and retries marker idempotently", async () => {
   const selected = await store.withMutation(running);
   await store.withMutation(async (mutation) => {
@@ -1039,7 +1083,7 @@ test("failure after retired marker but before receipt commit keeps exact recover
     expect((await store.loadCurrent()).stopped).toBe(true);
     await expectAbsent(memberPaths(selected.projection));
   });
-}, 30_000);
+});
 test("uncertain after hook permits owned stop but retains material and blocks completion", async () => {
   let hooks = 0;
   const selected = await store.withMutation(async (mutation) => {
@@ -1110,7 +1154,7 @@ test("uncertain after hook permits owned stop but retains material and blocks co
       await readFile(journalPath(selected.projection), "utf8")
     ).not.toContain('"phase":"retiring"');
   });
-}, 30_000);
+});
 
 test("live unarmed rollback retires exact new files despite source change; armed or copied attempts cannot authorize it", async () => {
   await store.withMutation(async (mutation) => {
@@ -1165,7 +1209,7 @@ test("ownership drift after material retirement blocks completed receipt and kee
       '"phase":"retired"'
     );
   });
-}, 30_000);
+});
 test("absence proof drift during retirement preserves other members and pending recovery state", async () => {
   const selected = await store.withMutation(running);
   await store.withMutation(async (mutation) => {
@@ -1202,7 +1246,7 @@ test("absence proof drift during retirement preserves other members and pending 
       await readFile(journalPath(selected.projection), "utf8")
     ).not.toContain('"phase":"retired"');
   });
-}, 30_000);
+});
 
 test("replacement retires obsolete current snapshot before receipt handoff while new pending material remains", async () => {
   await store.withMutation(async (mutation) => {
@@ -1249,7 +1293,7 @@ test("replacement retires obsolete current snapshot before receipt handoff while
     );
     await current.owner.assertSavedReady(current.generation);
   });
-}, 30_000);
+});
 test("a replacement member after partial retirement is never deleted on retry", async () => {
   const selected = await store.withMutation(running);
   const paths = memberPaths(selected.projection);
@@ -1306,7 +1350,7 @@ test("a replacement member after partial retirement is never deleted on retry", 
       await readFile(journalPath(selected.projection), "utf8")
     ).not.toContain('"phase":"retired"');
   });
-}, 30_000);
+});
 
 // Budget: two owned mutations (acquire ~0.5 s, prepare ~0.5 s, publish/assert-fresh
 // ~1.5 s, arm/reap ~0.8 s, then the refused recovery stop) measured 5113 ms on the
@@ -1381,7 +1425,7 @@ test("armed startup without durable reaped evidence cannot retire from container
     );
     await expectPresent(memberPaths(selected.projection));
   });
-}, 15_000);
+});
 test("known reaped readiness failure retains pending material until a separate verified stop retires it", async () => {
   const selected = await store.withMutation(async (mutation) => {
     const selected = await staged(mutation);
@@ -1429,4 +1473,4 @@ test("known reaped readiness failure retains pending material until a separate v
     expect((await store.loadCurrent()).stopped).toBe(true);
     await expectAbsent(memberPaths(selected.projection));
   });
-}, 30_000);
+});

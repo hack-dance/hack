@@ -1,7 +1,7 @@
 import type { Stats } from "node:fs";
 import { lstat, mkdir, readdir, readlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-
+import { fixtureGitEnv } from "../helpers/fixture-git.ts";
 import { runCommand } from "./harness.ts";
 
 /**
@@ -112,6 +112,7 @@ export async function addLinkedWorktree(opts: {
     `${opts.fixture.name}-${opts.branch}`
   );
   const result = await runCommand({
+    exactEnv: fixtureGitEnv(),
     argv: [
       "git",
       "-C",
@@ -477,6 +478,7 @@ async function git(opts: {
   readonly args: readonly string[];
 }): Promise<void> {
   const result = await runCommand({
+    exactEnv: fixtureGitEnv(),
     argv: [
       "git",
       "-C",

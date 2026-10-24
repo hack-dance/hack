@@ -19,6 +19,7 @@ import {
   resolveProjectEnvMetadata,
 } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const roots: string[] = [];
 const originalEnv = {
@@ -95,6 +96,7 @@ function metadataFromRuntime(resolved: ProjectEnvResolvedConfig | null) {
 
 async function git(cwd: string, args: string[]) {
   const child = Bun.spawn(["git", ...args], {
+    env: fixtureGitEnv(),
     cwd,
     stdout: "pipe",
     stderr: "pipe",

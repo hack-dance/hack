@@ -15,6 +15,7 @@ import { resolveHackEnv } from "../src/lib/hack-env.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const savedEnv = new Map<string, string | undefined>();
 let root: string;
@@ -527,7 +528,12 @@ async function git(cwd: string, args: readonly string[]) {
       "core.hooksPath=/dev/null",
       ...args,
     ],
-    { cwd, stdout: "pipe", stderr: "pipe" }
+    {
+      env: fixtureGitEnv(),
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    }
   );
   const [code, stderr] = await Promise.all([
     child.exited,

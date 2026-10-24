@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -63,7 +64,7 @@ function cliEnv(): Record<string, string> {
 async function git(args: readonly string[], cwd: string): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
-    env: cliEnv(),
+    env: fixtureGitEnv({ env: cliEnv() }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -282,7 +283,7 @@ test("doctor reports a missing .hack/.gitignore in an initialized project", asyn
 async function isIgnored(path: string, cwd: string): Promise<boolean> {
   const proc = Bun.spawn(["git", "check-ignore", "-q", "--no-index", path], {
     cwd,
-    env: cliEnv(),
+    env: fixtureGitEnv({ env: cliEnv() }),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

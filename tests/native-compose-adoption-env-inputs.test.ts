@@ -20,6 +20,7 @@ import {
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const CANARY = "synthetic-adoption-env-value-never-public";
 const KEY = "synthetic-adoption-key-not-real-credentials";
@@ -138,11 +139,13 @@ async function git(projectRoot: string, args: readonly string[]) {
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
-    env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_CONFIG_NOSYSTEM: "1",
-    },
+    env: fixtureGitEnv({
+      env: {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+      },
+    }),
   });
   expect(await child.exited).toBe(0);
 }

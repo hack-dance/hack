@@ -51,6 +51,7 @@ import {
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const tempDirs = new Set<string>();
 
@@ -94,6 +95,7 @@ async function createRepo(): Promise<{
 
 async function runGit(args: readonly string[], cwd: string): Promise<string> {
   const proc = Bun.spawn({
+    env: fixtureGitEnv(),
     cmd: ["git", ...args],
     cwd,
     stdout: "pipe",

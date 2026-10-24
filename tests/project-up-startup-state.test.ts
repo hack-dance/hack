@@ -22,6 +22,7 @@ import {
 import { evaluateComposeServiceEnvFreshness } from "../src/lib/compose-env-fingerprint.ts";
 import { readProjectRuntimeStateEntry } from "../src/lib/project-runtime-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const psRows: string[] = [];
@@ -1062,6 +1063,7 @@ test("linked startup combines inherited aliases, local static precedence and sam
     });
     const git = async (...args: string[]) => {
       const child = Bun.spawn(["git", "-C", primary, ...args], {
+        env: fixtureGitEnv(),
         stdout: "ignore",
         stderr: "pipe",
       });

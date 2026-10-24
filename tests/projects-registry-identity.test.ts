@@ -21,6 +21,7 @@ import {
 } from "../src/lib/projects-registry.ts";
 import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { projectNameFixture } from "./helpers/project-name-fixture.ts";
 
 const NOW = "2026-01-02T00:00:00Z";
@@ -114,7 +115,7 @@ test("registered lookup stays at its stored root instead of an ancestor Compose 
 
 function git(cwd: string, args: readonly string[]) {
   const result = Bun.spawnSync(["git", "-C", cwd, ...args], {
-    env: fixture.env,
+    env: fixtureGitEnv({ env: fixture.env }),
     stdout: "pipe",
     stderr: "pipe",
     timeout: 10_000,

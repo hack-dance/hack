@@ -1658,6 +1658,31 @@ describe("recipe grammar", () => {
         ["git-config", "alias.st", "status"],
       ],
     },
+    {
+      // A `<sub>--helper` plumbing command, dashed (also by an absolute
+      // git-core path or with `.exe`) or under `git`, is `git <sub>`.
+      rule: "Git plumbing helpers read as their porcelain",
+      refused: [
+        ["git-bisect--helper", "--bisect-run", "id"],
+        ["/usr/lib/git-core/git-bisect--helper", "run", "id"],
+        ["/usr/libexec/git-core/git-bisect--helper.exe", "--bisect-run", "id"],
+        ["exec", "Git-Bisect--Helper", "--bisect-run", "id"],
+        ["git", "bisect--helper", "--bisect-run", "id"],
+        ["git", "--git-dir", "x", "Bisect--Helper", "run", "id"],
+        ["/usr/lib/git-core/git-submodule--helper", "foreach", "id"],
+        ["git-submodule--helper.exe", "foreach", "--recursive", "id"],
+        ["git", "submodule--helper", "foreach", "id"],
+      ],
+      accepted: [
+        ["git-submodule--helper", "status"],
+        ["/usr/lib/git-core/git-submodule--helper", "list"],
+        ["git", "submodule--helper", "name", "path"],
+        ["git-difftool--helper", "a.txt", "b.txt"],
+        ["git", "log", "--grep=bisect--helper"],
+        // Only a whole `<sub>--helper` word is a helper, not a file name.
+        ["git", "add", "bisect--helper.txt"],
+      ],
+    },
   ];
 
   for (const gap of gapCases) {

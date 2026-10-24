@@ -55,15 +55,21 @@ const CANARY = "synthetic-private-native-start-canary";
  * afterwards. Harness budget: a passing case settles as soon as they exit.
  */
 const SETTLEMENT_BUDGET_MS = testBudgetMs(5000);
+/** Largest caller startup deadline `serveNativeAuthoredProject` accepts. */
+const MAX_STARTUP_TIMEOUT_MS = 300_000;
 /**
  * Caller startup deadline for cases that are not about the deadline itself.
  * Each start spawns several Bun children (compiler, planner, owner, hooks); on
  * a loaded host that takes well over the 10-20 s these cases used to allow.
- * Cases that test the deadline pass their own literal product deadline.
+ * The scaled budget is capped at the product's own ceiling. Cases that test
+ * the deadline pass their own literal product deadline.
  */
-const STARTUP_TIMEOUT_MS = testBudgetMs(15_000);
+const STARTUP_TIMEOUT_MS = Math.min(
+  testBudgetMs(15_000),
+  MAX_STARTUP_TIMEOUT_MS
+);
 /** Caller stop deadline for ordinary `down` in the hook and live-stop cases. */
-const STOP_TIMEOUT_MS = testBudgetMs(15_000);
+const STOP_TIMEOUT_MS = STARTUP_TIMEOUT_MS;
 /**
  * Body budget for every case: a full start plus a stop, with slack. The guard
  * adds the settlement budget on top, so cases never fall back to Bun's 5 s.

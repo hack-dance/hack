@@ -14,11 +14,13 @@
  * processes; an authored start runs the compiler several times), so their wall
  * time grows faster than the load average. On the M5 at 1-min load 15-40, and
  * on the M3 while another suite ran, they took three to four times their
- * unloaded time. With a second suite plus churn workers (load 28-66) a scale
- * of 4 still expired Source5 authored starts and v7 retained dispatches, and
- * one v7 dispatch case took 146 s at load 22-50.
+ * unloaded time. With a second suite plus churn workers, the M5 at load 28-90
+ * took more than ten times: one public retained `up` dispatch outlasted a
+ * 200 s deadline, and a v7 dispatch case took 146 s even at load 22-50.
+ * A deadline a case does not test must not expire first, so the scale keeps
+ * twice that headroom.
  */
-export const TEST_BUDGET_SCALE = 10;
+export const TEST_BUDGET_SCALE = 20;
 
 /** Scale the unloaded time a fixture needs to the budget a loaded host needs. */
 export function testBudgetMs(unloadedMs: number): number {

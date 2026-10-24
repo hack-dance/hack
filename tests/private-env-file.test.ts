@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  expect,
+  setDefaultTimeout,
+  spyOn,
+  test,
+} from "bun:test";
 import { randomUUID } from "node:crypto";
 import * as privateFiles from "node:fs/promises";
 import {
@@ -38,6 +45,19 @@ import { restoreEnv } from "./helpers/env.ts";
 const SENTINEL_KEY = "SYNTHETIC_PRIVATE_ENV_KEY";
 const SENTINEL_VALUE = "synthetic-private-env-value-never-in-errors";
 const OUTSIDE_TEXT = "OUTSIDE_SENTINEL=synthetic-outside-file-never-read\n";
+
+/**
+ * Bun timeout for every case and hook here. The cases wait on no timer: their
+ * cost is a fixed amount of env store work (the layer lock, a no-follow read,
+ * a staged write and an atomic rename per write, and for `materializeProjectEnv`
+ * the whole layered config resolution). That takes under 1 s at a load of
+ * 3x the CPU count, but the `materializeProjectEnv` cases passed Bun's 5 s
+ * default on a more loaded host while their assertions held (HACK-1439). This
+ * is a hang guard, not a speed assertion. `setDefaultTimeout` is scoped to
+ * this file, so it changes no other file's budget.
+ */
+const ENV_STORE_CASE_BUDGET_MS = 60_000;
+setDefaultTimeout(ENV_STORE_CASE_BUDGET_MS);
 
 let root: string | null = null;
 let previousHome: string | undefined;

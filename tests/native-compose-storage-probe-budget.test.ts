@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { resolveNativeStorageTimeoutMs } from "../src/lib/compose-startup-budget.ts";
 import { runNativeComposeStorageVerifiedExec } from "../src/lib/native-compose-command-storage.ts";
 import { nativeComposeEffectRefusal } from "../src/lib/native-compose-effect-diagnostics.ts";
@@ -22,6 +22,14 @@ import {
   openNativeComposeGenerationStore,
 } from "../src/lib/native-compose-generation.ts";
 import * as ownership from "../src/lib/native-compose-ownership.ts";
+import {
+  type HeldDirectory,
+  holdDirectory,
+} from "../src/lib/native-compose-private-state.ts";
+import {
+  beginNativeComposeStorageCarrierIntent,
+  initializeNativeComposeStorageCarrierJournal,
+} from "../src/lib/native-compose-storage-carrier-journal.ts";
 import { parseNativeComposeStorageCommandRecord } from "../src/lib/native-compose-storage-command-record.ts";
 import {
   createNativeComposeDockerStorageXattrCarrier,
@@ -68,6 +76,7 @@ const invocationId = "a".repeat(32);
 const SLOW_START_MS = 20_000;
 const roots: string[] = [];
 const stores: NativeComposeGenerationStore[] = [];
+const heldJournals: HeldDirectory[] = [];
 const ENV_KEYS = [
   "PATH",
   "HOME",
@@ -132,8 +141,16 @@ afterEach(async () => {
   }
   await Promise.all(stores.splice(0).map((store) => store.close()));
   await Promise.all(
+    heldJournals.splice(0).map((directory) => directory.file.close())
+  );
+  await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
   );
+  // A held directory this file failed to close would otherwise be closed by a
+  // later garbage collection and fail an unrelated file; collect here so a leak
+  // is reported against this file.
+  Bun.gc(true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
 /** Runs `effect` inside one owned generation effect with its material authority. */
@@ -470,10 +487,11 @@ function invocation(opts: {
   readonly binding: NativeComposeMaterialBinding;
   readonly target: NativeComposeStorageXattrInvocation["target"];
   readonly request: NativeComposeStorageXattrRequest;
+  readonly recordCreated?: NativeComposeStorageXattrInvocation["recordCreated"];
 }): NativeComposeStorageXattrInvocation {
   const { binding, target, request } = opts;
   return {
-    recordCreated: async () => {},
+    recordCreated: opts.recordCreated ?? (async () => {}),
     invocationId,
     artifact: NATIVE_STORAGE_DOCKER_ARTIFACT,
     target,
@@ -496,6 +514,8 @@ type Proof = {
   readonly error: unknown;
   /** Original-command record of a recorded proof, read after it returned. */
   readonly record: string | null;
+  /** A recorded proof's finish() retired its invocation directory. */
+  readonly retired: boolean;
 };
 
 /**
@@ -549,11 +569,35 @@ async function proveWithSlowStart(opts: {
     const ports = nativeComposeStorageXattrCarrierPorts(handle);
     // Callers pass the carrier's own observed target, as storage proofs do.
     const target = await ports.inspect(selection);
-    input = invocation({
+    const base = invocation({
       binding,
       target: target as NativeComposeStorageXattrInvocation["target"],
       request,
     });
+    // A recorded proof journals its intent the way the witness owner does, so
+    // its completion can retire the invocation through finish().
+    let journal: Awaited<
+      ReturnType<typeof beginNativeComposeStorageCarrierIntent>
+    > | null = null;
+    if (opts.recorded) {
+      const directory = await holdDirectory(
+        await tempDirectory("native-storage-budget-journal-"),
+        true
+      );
+      heldJournals.push(directory);
+      const bound = {
+        directory,
+        token: "b".repeat(32),
+        check: async () => {},
+      };
+      await initializeNativeComposeStorageCarrierJournal(bound);
+      const { recordCreated: _transportOnly, ...journalInput } = base;
+      journal = await beginNativeComposeStorageCarrierIntent({
+        ...bound,
+        input: journalInput,
+      });
+    }
+    input = journal ? { ...base, recordCreated: journal.recordCreated } : base;
     let result: unknown = null;
     let error: unknown = null;
     try {
@@ -575,15 +619,15 @@ async function proveWithSlowStart(opts: {
       opts.recorded && existsSync(recordPath)
         ? await readFile(recordPath, "utf8")
         : null;
-    if (opts.recorded && result !== null) {
-      // A recorded proof defers file retirement to finish() with the carrier
-      // journal's completion. Only that journal issues one, so a synthetic
-      // completion refuses; finish still closes the held invocation directories.
-      await expect(
-        ports.finish?.({ input, completion: Object.freeze({}) })
-      ).rejects.toThrow("values omitted");
+    let retired = false;
+    if (journal && result !== null) {
+      // A recorded proof defers file retirement (and closing its held
+      // invocation directories) to finish() with the journal's completion.
+      const completion = await journal.complete({ id: carrierId, createdAt });
+      await ports.finish?.({ input, completion });
+      retired = !existsSync(dirname(recordPath));
     }
-    outcome = { engine, result, error, record };
+    outcome = { engine, result, error, record, retired };
   });
   if (!outcome) {
     throw new Error("Storage proof fixture did not run");
@@ -640,7 +684,7 @@ test("a helper start slower than the former 15 s cap completes within the defaul
 test("a recorded exec/up verify proof completes a helper start slower than the former 15 s cap", async () => {
   const budgetMs = resolveNativeStorageTimeoutMs({ env: {} });
   expect(budgetMs).toBe(90_000);
-  const { engine, result, error, record } = await proveWithSlowStart({
+  const { engine, result, error, record, retired } = await proveWithSlowStart({
     budgetMs,
     recorded: true,
   });
@@ -683,6 +727,8 @@ test("a recorded exec/up verify proof completes a helper start slower than the f
       cancelled: false,
     });
   }
+  // The journal's completion retired the invocation files through finish().
+  expect(retired).toBe(true);
   expect(engine.elapsed).toBe(SLOW_START_MS);
   expect(existsSync(tripwire)).toBe(false);
 }, 30_000);

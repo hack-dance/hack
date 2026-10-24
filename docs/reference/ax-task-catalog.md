@@ -131,8 +131,11 @@ is not implemented here.
    runtime instance does not change how a recipe is judged, but the embedded
    target still names one. A detached linked worktree (for example one made
    with `git worktree add --detach`) has no implicit instance, so it is
-   refused as `detached_checkout` unless the caller names one with
-   `--branch` (MCP `branch`).
+   refused as `detached_checkout`. The refusal offers two remedies: name an
+   instance with `--branch` (MCP `branch`), or set `worktree.auto_branch` to
+   `false` in the project config so the checkout targets the base instance.
+   The CLI `task list` and `task inspect` and both MCP task tools refuse the
+   same way.
 
 ## Commands
 
@@ -354,7 +357,8 @@ until its recipes are re-reviewed.
 | An attached `-m` module (`python -mpytest`) as the program's operand | accepted, also after a value option's value (`python -W ignore -mpytest`); `python -mcode`, `python -m`, `python -Ximporttime` and a `-m` taken as an option's value (`python -W -m --`, `python -X -mpytest`) still refused (stdin) | domain test |
 | `psql -o`/`--output` piped to a command (`-o '\|cmd'`, `-o\|cmd`, `-qo\|cmd`, `--output=\|cmd`, `--out=\|cmd`) | `inline_command`; `psql -o out.txt`, `psql -F'\|'`, `psql -L '\|log'` (a file name) still pass | domain test |
 | Dashed Git builtins (`/usr/lib/git-core/git-clone -u cmd`, `git-config alias.x '!cmd'`, `git-ls-remote --upload-pack=cmd`, `git-fetch-pack --exec=cmd`) | `inline_command`; `git-clone url dir`, `git-push -u origin main`, `git-config alias.st status` still pass | domain test |
-| Git plumbing helpers read as their porcelain (`git-bisect--helper --bisect-run cmd`, `/usr/lib/git-core/git-bisect--helper.exe run cmd`, `git bisect--helper --bisect-run cmd`, `git-submodule--helper foreach cmd`) | `inline_command`; `git-submodule--helper status`, `git-difftool--helper a b`, `git add bisect--helper.txt` still pass | domain test |
+| Git plumbing helpers read as their porcelain (`git-bisect--helper --bisect-run cmd`, `/usr/lib/git-core/git-bisect--helper.exe run cmd`, `git bisect--helper --bisect-run cmd`, `git-submodule--helper foreach cmd`, `git-config alias.x bisect--helper`, older Git's `git rebase--helper --add-exec-commands cmd` in any letter case) | `inline_command`; `git-submodule--helper status`, `git-difftool--helper a b`, `git add bisect--helper.txt`, `git config --add alias.st status` still pass | domain test |
+| Detached linked worktree with no named instance, on CLI `task list`/`task inspect` and MCP `hack.project.task.list`/`inspect` | `detached_checkout`; naming the instance (`--branch`, MCP `branch`) passes | paired fixture, domain test |
 | `duckdb -storage-version VER db` | accepted; a SQL operand after the database is still refused | domain test |
 | `git clone -u` (also after `--attr-source <tree>` or an unknown global option), abbreviated or attached `--upload-pack`/`--receive-pack`/`--exec`, `clone --config`, and `!` alias values (`git config alias.x '!cmd'`, `git -c alias.x=!cmd`) | `inline_command`; `git clone url dir`, `git push -u origin main`, `git add -u`, `git config alias.st status` still pass | domain test |
 | Caller `GIT_DIR`/`GIT_INDEX_FILE`/`GIT_WORK_TREE` naming another index that tracks a secret | `input_path_invalid` with no digest; a foreign `GIT_DIR` does not hide the checkout's own index | domain test |
@@ -415,9 +419,14 @@ until its recipes are re-reviewed.
   `pickle` or `marshal`, or reads a config file that it evaluates. A Git
   `<sub>--helper` plumbing command (`git-bisect--helper`,
   `git submodule--helper`) is read as `git <sub>`, so it meets the rules for
-  that subcommand, but a helper's own options are not modeled: the
-  `--add-exec-commands` mode of older Git's `rebase--helper` is not
-  refused. Git config writes other than `!` aliases (for example
+  that subcommand. A helper's own options are modeled only where they run a
+  command: older Git's `rebase--helper --add-exec-commands` is refused
+  through a flag scoped to `rebase`. Any whole-word `<sub>--helper`
+  argument is read as `<sub>` (fail-closed), so
+  `git push -u origin clone--helper` (a branch of that name) and
+  `git add bisect--helper` (a file of that name) are refused. The `rebase`-scoped flag counts when any
+  operand is `rebase`, and Git abbreviates, so
+  `git config --add alias.r rebase` is refused too. Git config writes other than `!` aliases (for example
   `git config core.pager cmd` or `include.path`) are not detected. Nor are
   `mysql`/`mariadb` option files named in argv (`--defaults-extra-file`,
   which can set `init-command`) or `--pager`, which runs a command only in

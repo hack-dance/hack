@@ -196,12 +196,13 @@ fn listener_accepts_one_and_preserves_owned_path() {
         }
     }
     let root = Dir(std::env::temp_dir().join(format!(
-        "hka-{}-{}",
+        "hka-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        crate::next_test_scratch()
     )));
     std::fs::create_dir(&root.0).unwrap();
     let path = root.0.join("relay.sock");

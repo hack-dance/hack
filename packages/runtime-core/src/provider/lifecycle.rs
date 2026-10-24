@@ -2184,12 +2184,13 @@ mod tests {
     #[test]
     fn source_preflight_is_read_only_and_preserves_unowned_state() {
         let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-source-preflight-{}-{}",
+            "hack-source-preflight-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::next_test_scratch()
         ));
         state::private_directory(&directory).unwrap();
         struct Remove(std::path::PathBuf);
@@ -2267,12 +2268,13 @@ mod tests {
         let root = std::fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
-                "hkl-lease-{}-{}",
+                "hkl-lease-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                crate::next_test_scratch()
             ));
         struct Remove(std::path::PathBuf);
         impl Drop for Remove {
@@ -2338,12 +2340,13 @@ mod tests {
         let root = std::fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
-                "hkl-startup-lease-{}-{}",
+                "hkl-startup-lease-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                crate::next_test_scratch()
             ));
         struct Remove(std::path::PathBuf);
         impl Drop for Remove {
@@ -2722,12 +2725,13 @@ printf 'verified-cache\n'
     #[test]
     fn a_prepared_start_refuses_ambiguous_capacity_before_any_pool_state() {
         let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-prepared-sockets-{}-{}",
+            "hack-prepared-sockets-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::next_test_scratch()
         ));
         fs::create_dir(&checkout).unwrap();
         let candidate = Candidate::discover(&checkout).unwrap();
@@ -2763,12 +2767,13 @@ printf 'verified-cache\n'
         // disks and expands nothing until the first start, so only the compressed templates
         // exist. The removed after-create check refused exactly this state.
         let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-template-sequence-{}-{}",
+            "hack-template-sequence-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::next_test_scratch()
         ));
         fs::create_dir(&checkout).unwrap();
         let candidate = Candidate::discover(&checkout).unwrap();

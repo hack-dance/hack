@@ -196,12 +196,13 @@ mod tests {
         let path = fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
-                "guest-artifact-{}-{}",
+                "guest-artifact-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                crate::next_test_scratch()
             ));
         fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
         let fixture = Fixture(path);

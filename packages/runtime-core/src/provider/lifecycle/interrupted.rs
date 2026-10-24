@@ -164,12 +164,13 @@ mod tests {
     impl Pool {
         fn new(label: &str) -> Self {
             let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
-                "hack-interrupted-{label}-{}-{}",
+                "hack-interrupted-{label}-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                crate::next_test_scratch()
             ));
             fs::create_dir(&checkout).unwrap();
             let candidate = Candidate::discover(&checkout).unwrap();

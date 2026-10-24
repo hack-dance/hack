@@ -555,12 +555,13 @@ mod tests {
     #[test]
     fn publication_load_reads_a_regular_receipt_and_refuses_aliases() {
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-publication-{}-{}",
+            "hack-publication-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::next_test_scratch()
         ));
         state::private_directory(&root).unwrap();
         let source = root.join("source");

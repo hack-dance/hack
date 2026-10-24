@@ -200,6 +200,7 @@ async function fixture() {
   };
   let source = "original",
     failChild = false;
+  let checkRefusal: unknown;
   const owner = await createNativeComposeStorageCommandOwner({
     directory,
     binding: {
@@ -216,6 +217,9 @@ async function fixture() {
     check: async () => {
       if (source !== "original") {
         throw new Error("private source canary");
+      }
+      if (checkRefusal !== undefined) {
+        throw checkRefusal;
       }
     },
     published: () => {
@@ -257,7 +261,21 @@ async function fixture() {
     failChild: () => {
       failChild = true;
     },
+    /** The owner check refuses with this error from now on. */
+    refuseCheck: (error: unknown) => {
+      checkRefusal = error;
+    },
   };
+}
+/** A fixed refusal with an issued owner boundary, as a carrier check makes. */
+function issuedRefusal(
+  diagnostic: Parameters<typeof retainNativeComposeEffectRefusal>[1]
+): Error {
+  const error = new Error(
+    "Native storage xattr proof refused; values omitted."
+  );
+  retainNativeComposeEffectRefusal(error, diagnostic);
+  return error;
 }
 test(
   "v2 is closed and never promotes a copied or legacy original owner",
@@ -535,12 +553,15 @@ test(
   30_000
 );
 test.each([
-  ["before arming", 1],
-  ["after arming", 2],
-  ["after the stopped child is published", 3],
+  ["before arming", 1, false],
+  ["after arming", 2, false],
+  ["after the stopped child is published", 3, false],
+  // Thrown before the bounded await sees it: only the child-publication catch
+  // records it as the publication-stopping refusal.
+  ["thrown synchronously after the stopped child is published", 3, true],
 ] as const)(
   "a helper policy refusal %s keeps its own reason after the carrier deadline",
-  (_, failingCall) =>
+  (_, failingCall, synchronous) =>
     ownedCase(async () => {
       const f = await fixture(),
         marker = join(f.root, "effect"),
@@ -556,18 +577,19 @@ test.each([
           beforeSpawn: () => {},
           // The carrier's admission re-inspects the helper; the chosen call
           // observes a policy refusal with its own issued boundary.
-          assertAdmitted: async () => {
+          assertAdmitted: () => {
             calls += 1;
             if (calls === failingCall) {
-              const policy = new Error(
-                "Native storage xattr proof refused; values omitted."
-              );
-              retainNativeComposeEffectRefusal(policy, {
+              const policy = issuedRefusal({
                 stage: "storage-helper-policy",
                 reason: "helper-host-policy",
               });
-              throw policy;
+              if (synchronous) {
+                throw policy;
+              }
+              return Promise.reject(policy);
             }
+            return Promise.resolve();
           },
           originalCommand: { owner: f.owner, kind: "create", carrier: null },
         }).catch((error: unknown) => error);
@@ -598,6 +620,135 @@ test.each([
     })(),
   30_000
 );
+test(
+  "an owner check refusal while arming keeps its own reason after the carrier deadline",
+  ownedCase(async () => {
+    const f = await fixture(),
+      marker = join(f.root, "effect"),
+      signal = new AbortController().signal,
+      deadline = Date.now() + 5000;
+    let calls = 0;
+    // The saved material binding changed: the owner check refuses the arm
+    // publication, inside the runner's bounded publication await.
+    f.refuseCheck(
+      issuedRefusal({ stage: "storage-helper-start", reason: "private-state" })
+    );
+    try {
+      const caught = await runNativeComposeStorageDockerCommand({
+        context: { signal, deadline },
+        files: f.files,
+        args: ["/bin/sh", "-c", 'printf complete > "$1"', "owned", marker],
+        timeoutMs: 5000,
+        beforeSpawn: () => {},
+        assertAdmitted: () => {
+          calls += 1;
+          return Promise.resolve();
+        },
+        originalCommand: { owner: f.owner, kind: "create", carrier: null },
+      }).catch((error: unknown) => error);
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toContain("values omitted");
+      // Refused while arming: no later admission and no spawned target.
+      expect(calls).toBe(1);
+      expect(existsSync(marker)).toBe(false);
+      expect(nativeComposeStorageCommandOwnerConfirmed(f.owner)).toBe(false);
+      expect(nativeComposeEffectRefusal(caught)).toEqual({
+        stage: "storage-helper-start",
+        reason: "private-state",
+      });
+      expect(
+        nativeComposeStorageCarrierBudgetReason({
+          error: caught,
+          signal,
+          deadline,
+          now: () => deadline + 1,
+        })
+      ).toBe("private-state");
+    } finally {
+      if (!nativeComposeStorageCommandOwnerConfirmed(f.owner)) {
+        retained.add(f.root);
+      }
+    }
+  }),
+  30_000
+);
+test(
+  "a record publication refused by its owner check keeps the check's issued boundary",
+  ownedCase(async () => {
+    const f = await fixture();
+    f.refuseCheck(
+      issuedRefusal({ stage: "storage-helper-create", reason: "private-state" })
+    );
+    const caught = await f.arm().catch((error: unknown) => error);
+    expect((caught as Error).message).toBe(
+      "Native storage xattr proof refused; values omitted."
+    );
+    expect(nativeComposeEffectRefusal(caught)).toEqual({
+      stage: "storage-helper-create",
+      reason: "private-state",
+    });
+    // The writer stays permanently invalidated, exactly as before.
+    expect(nativeComposeStorageCommandOwnerConfirmed(f.owner)).toBe(false);
+    retained.add(f.root);
+  })
+);
+// Owner creation checks the saved binding before writing the record (1) and
+// after reading it back (2). Either refusal is the same fixed refusal and keeps
+// only the check's issued boundary (`refuseFrom`), as `publish()` does.
+test.each([
+  ["before it writes its record", 1, "storage-target"],
+  ["after it reads its record back", 2, "storage-helper-start"],
+] as const)("a command owner whose creation check refuses %s keeps the check's issued boundary", (_, failingCheck, stage) =>
+  ownedCase(async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "native-command-record-"))
+    );
+    roots.push(root);
+    const directory = await holdDirectory(root, true);
+    held.push(directory);
+    let checks = 0;
+    const caught = await createNativeComposeStorageCommandOwner({
+      directory,
+      binding: {
+        invocationId: "b".repeat(32),
+        engineId: "synthetic-engine",
+        materialHash: hash,
+        helperHash: hash,
+        requestHash: hash,
+        invocationHash: hash,
+        sourceHash: hash,
+        fixedInvocationHash: hash,
+        directory: { dev: directory.info.dev, ino: directory.info.ino },
+      },
+      check: async () => {
+        checks += 1;
+        if (checks === failingCheck) {
+          throw issuedRefusal({ stage, reason: "private-state" });
+        }
+      },
+      published: () => {
+        throw new Error("Unexpected owner publication");
+      },
+    }).catch((error: unknown) => error);
+    expect(checks).toBe(failingCheck);
+    expect((caught as Error).message).toBe(
+      "Native storage xattr proof refused; values omitted."
+    );
+    expect(nativeComposeEffectRefusal(caught)).toEqual({
+      stage,
+      reason: "private-state",
+    });
+    expect(
+      nativeComposeStorageCarrierBudgetReason({
+        error: caught,
+        signal: new AbortController().signal,
+        deadline: 5_000_000,
+        now: () => 5_000_001,
+      })
+    ).toBe("private-state");
+    // A record written before the refusal is never promoted to an owner.
+    expect(existsSync(join(root, "commands.json"))).toBe(failingCheck === 2);
+  })());
 test(
   "failed arm directory sync prevents the target spawn rather than proving no-spawn from a record",
   ownedCase(async () => {

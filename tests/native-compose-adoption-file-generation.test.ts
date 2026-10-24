@@ -172,10 +172,13 @@ else {const source=JSON.parse(await Bun.stdin.text());const {schema_version,...p
   pathReplaced = true;
   process.env.PATH = root;
 });
-afterEach(async () => {
-  // PATH is restored even when the lifetime is unknown: a PATH left pointing
-  // at this fixture root hides git and bun from every later file in the Bun
-  // process (HACK-1327). The root and spawn spy stay retained.
+/**
+ * The per-case teardown, run from `afterEach`. PATH is restored even when the
+ * lifetime is unknown: a PATH left pointing at this fixture root hides git and
+ * bun from every later file in the Bun process (HACK-1327). The root and spawn
+ * spy stay retained, and later cases in this file refuse.
+ */
+async function releaseRetainedFileFixture() {
   if (pathReplaced) {
     pathReplaced = false;
     restoreEnv("PATH", priorPath);
@@ -189,6 +192,28 @@ afterEach(async () => {
   spawnSpy?.mockRestore();
   spawnSpy = undefined;
   await rm(root, { recursive: true, force: true });
+}
+afterEach(releaseRetainedFileFixture);
+test("an unknown lifetime still restores PATH before the teardown refuses", async () => {
+  expect(process.env.PATH).toBe(root);
+  const owned = lifetime;
+  const refused = retainedRoutingFixtureLifetime(Date.now() + 5000);
+  refused.retain();
+  lifetime = refused;
+  try {
+    await expect(releaseRetainedFileFixture()).rejects.toThrow(
+      "Retained-file fixture callback or child is unsettled"
+    );
+    expect(uncertain).toBe(true);
+    expect<string | undefined>(process.env.PATH).toBe(priorPath);
+    // The refusal kept the spawn spy for the unsettled work.
+    expect(Bun.spawn).not.toBe(originalSpawn);
+  } finally {
+    // Only this case's synthetic lifetime was unknown; its own lifetime ends
+    // normally in afterEach, which restores the spy and removes the root.
+    uncertain = false;
+    lifetime = owned;
+  }
 });
 async function save() {
   await writeFile(join(root, "fixture.json"), JSON.stringify(fixture));

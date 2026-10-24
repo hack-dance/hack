@@ -3,6 +3,7 @@ use serde_json::{Map, Value};
 mod dependency_cache;
 mod fields;
 mod graph;
+mod ownership_labels;
 pub(super) mod routing;
 mod service;
 use fields::*;

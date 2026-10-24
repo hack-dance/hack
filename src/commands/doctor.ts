@@ -170,7 +170,9 @@ import {
   inspectProjectEnvMaterialization,
   type LegacyComposeEnvFileReference,
   migrateLegacyProjectEnv,
+  ProjectEnvLayerPathConflictError,
   projectEnvConfigExists,
+  projectEnvConfigExistsForMutation,
   removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
@@ -3722,8 +3724,12 @@ async function maybeMigrateProjectEnvConfig(opts: {
     return;
   }
 
+  // The migration writes env layers, so it decides the format like
+  // `hack env set`: a symlinked layer counts as an env layer (never written
+  // through), and a dangling or non-file layer entry refuses closed with
+  // E_PATH_CONFLICT instead of being replaced.
   if (
-    await projectEnvConfigExists({
+    await projectEnvConfigExistsForMutation({
       projectDir: project.projectDir,
     })
   ) {
@@ -3758,8 +3764,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
       "Detected legacy project env files.",
       hasContract
         ? `- source: ${contractPath} and current local env state`
-        : `- source: ${resolve(project.projectDir, PROJECT_ENV_FILENAME)} and its overlays (no ${PROJECT_ENV_CONTRACT_FILENAME}; values become plaintext global values, and secret-backend values are not migrated)`,
-      `- target: ${resolve(project.projectDir, "hack.env.default.yaml")}`,
+        : `- source: ${resolve(project.projectDir, PROJECT_ENV_FILENAME)} and its overlays (no ${PROJECT_ENV_CONTRACT_FILENAME}; secret-backend values are not migrated)`,
+      hasContract
+        ? `- target: ${resolve(project.projectDir, "hack.env.default.yaml")}`
+        : `- target: values go to the gitignored ${resolve(project.projectDir, "hack.env.local.yaml")} (and hack.env.<overlay>.local.yaml); ${resolve(project.projectDir, "hack.env.default.yaml")} is written with no values`,
       "- runtime: direct env injection by default; .hack/.env becomes compatibility-only",
     ].join("\n"),
     "env migration"
@@ -4014,11 +4022,19 @@ async function buildEnvMigrationPlanStep(opts: {
     return "Skip env migration because no project was detected from this path.";
   }
 
-  if (
-    await projectEnvConfigExists({
+  // The same format decision as the migration itself; a plan never throws.
+  let modernExists: boolean;
+  try {
+    modernExists = await projectEnvConfigExistsForMutation({
       projectDir: opts.project.projectDir,
-    })
-  ) {
+    });
+  } catch (error: unknown) {
+    if (error instanceof ProjectEnvLayerPathConflictError) {
+      return `Refuse env migration (E_PATH_CONFLICT) because ${error.path} is not a regular env layer file.`;
+    }
+    throw error;
+  }
+  if (modernExists) {
     return "Skip env migration because this project already uses hack.env.*.yaml.";
   }
 
@@ -4030,7 +4046,7 @@ async function buildEnvMigrationPlanStep(opts: {
     return "Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.";
   }
 
-  return "Prompt to migrate legacy env values (.hack/.env and its overlays, no .hack/hack.env.json) to hack.env.*.yaml as plaintext global values.";
+  return "Prompt to migrate legacy env values (.hack/.env and its overlays, no .hack/hack.env.json) to the gitignored machine-local hack.env.local.yaml and hack.env.<overlay>.local.yaml layers.";
 }
 
 /**

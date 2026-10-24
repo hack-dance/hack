@@ -1000,12 +1000,35 @@ That migrates the repo into:
 - `.hack.secret.key` when needed
 
 A repo that has no `.hack/hack.env.json` is migrated as well. Its values live only in
-`.hack/.env` and `.hack/.env.<overlay>`, so each `.hack/.env` entry becomes a plaintext
-global value in `hack.env.default.yaml`, and each overlay entry that differs from
-`.hack/.env` becomes a global value in `hack.env.<overlay>.yaml`. A repo with no legacy env
-file gets an empty `hack.env.default.yaml`. Without `hack.env.json`, nothing lists values
-kept in a secret backend, so none are migrated: set them again with
-`hack env set --secret` after the migration. In that case `.hack/hack.config.json`, and
+`.hack/.env` and `.hack/.env.<overlay>`, which are gitignored and may hold passwords or
+API keys, so the migration keeps them out of tracked files: each `.hack/.env` entry
+becomes a plaintext global value in the gitignored machine-local layer
+`hack.env.local.yaml`, and each overlay entry that differs from `.hack/.env` becomes a
+global value in `hack.env.<overlay>.local.yaml`. The tracked `hack.env.default.yaml`, and
+`hack.env.<overlay>.yaml` for each migrated overlay, are written with no values, so the
+repo switches to env layers. Teammates do not receive these values through git; share
+the ones they need with `hack env set` (plain settings) or `hack env set --secret`
+(encrypted) after the migration. A repo with no legacy env file gets only an empty
+`hack.env.default.yaml`.
+
+This migration refuses, with a one-line `E_*` error, writes nothing and keeps the legacy
+files, when:
+
+- a key does not match `^[A-Z_][A-Z0-9_]*$`, for example a lowercase name or a line
+  that starts with `export ` (`E_CONFIG_INVALID`). The error counts the keys per file but
+  does not show them, because a malformed line may hold a value. Rename or remove them;
+- a legacy file is named `.hack/.env.default`, `.hack/.env.local` or
+  `.hack/.env.<name>.local`, whose layer would be the default or a machine-local layer
+  rather than an overlay (`E_CONFIG_INVALID`). Rename or remove it;
+- an entry named like an env layer (`.hack/hack.env.*.yaml`) is a dangling symlink, a
+  directory or another non-file (`E_PATH_CONFLICT`). A regular layer file, or a symlink
+  to one, means the repo already uses env layers: `hack doctor` reports that and writes
+  nothing, never through the link;
+- git tracks a machine-local layer it would write, or, in a git checkout, git cannot
+  report whether it does (`E_PATH_CONFLICT`).
+
+Without `hack.env.json`, nothing lists values kept in a secret backend, so none are
+migrated: set them again with `hack env set --secret` after the migration. In that case `.hack/hack.config.json`, and
 any secret backend it configures, is left unchanged. The migration changes project files
 only, so it runs even when Docker is not reachable; the other `--migrate-env-config`
 repairs still need Docker. As with any migration, `hack doctor` then offers to remove the

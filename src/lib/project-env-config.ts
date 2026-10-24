@@ -4786,7 +4786,8 @@ export async function migrateLegacyProjectEnv(opts: {
   readonly materialize: boolean;
   /**
    * Also migrate a project that has no contract: the legacy `.hack/.env`
-   * and `.hack/.env.<overlay>` files become plaintext global values. Only an
+   * and `.hack/.env.<overlay>` files become plaintext global values in the
+   * gitignored machine-local layers, never in a tracked layer. Only an
    * explicit migration request (`hack doctor --migrate-env-config`) sets it;
    * the implicit migrations run by other commands keep requiring a contract.
    */
@@ -4922,18 +4923,152 @@ export async function migrateLegacyProjectEnv(opts: {
 }
 
 /**
+ * Closed, value-free refusal of the explicit migration of a project without a
+ * `.hack/hack.env.json` contract ({@link migrateUndeclaredLegacyDotenv}). It is
+ * raised before any file is written, so the legacy `.hack/.env*` files and any
+ * existing entries stay as they were. The message names paths, legacy file
+ * names and counts only, never a key or a value.
+ */
+export class LegacyDotenvMigrationRefusalError extends HackCliError {
+  constructor(opts: {
+    readonly code: "E_CONFIG_INVALID" | "E_PATH_CONFLICT";
+    readonly reason: string;
+  }) {
+    super({
+      code: opts.code,
+      message: `Refusing to migrate the legacy .hack/.env files: ${opts.reason} Nothing was written, and the legacy files are kept.`,
+    });
+    this.name = "LegacyDotenvMigrationRefusalError";
+  }
+}
+
+/** `.hack/.env.state.json` is Hack's own state file, not a dotenv overlay. */
+const LEGACY_DOTENV_STATE_OVERLAY = PROJECT_ENV_STATE_FILENAME.slice(
+  `${PROJECT_ENV_FILENAME}.`.length
+);
+
+/**
+ * Legacy overlay names whose env layers would be the default layer or a
+ * machine-local layer instead of an overlay (`.env.default`, `.env.local`,
+ * `.env.<name>.local`).
+ */
+function isReservedLegacyOverlayName(name: string): boolean {
+  return (
+    name === "default" ||
+    name === PROJECT_ENV_LOCAL_SEGMENT ||
+    name.endsWith(`.${PROJECT_ENV_LOCAL_SEGMENT}`)
+  );
+}
+
+function countLabel(opts: {
+  readonly count: number;
+  readonly noun: string;
+}): string {
+  return `${opts.count} ${opts.noun}${opts.count === 1 ? "" : "s"}`;
+}
+
+type PlannedEnvLayerWrite = {
+  readonly path: string;
+  readonly config: ProjectEnvConfig;
+};
+
+/**
+ * Refuses a machine-local migration target that git tracks, or that sits in a
+ * git checkout where git cannot say (fail closed), since migrated values
+ * written there could be committed. Mirrors `hack env hydrate`.
+ */
+async function assertUntrackedMigrationLocalLayer(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<void> {
+  const tracked = await isGitTrackedProjectEnvPath(opts);
+  if (tracked === true) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `git tracks the machine-local env layer ${opts.path}, so migrated values would be committed. Untrack it with \`git rm --cached\` and retry.`,
+    });
+  }
+  if (
+    tracked === null &&
+    (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+  ) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `this checkout is a git repository, but git could not report whether it tracks ${opts.path}, so migrated values could be committed. Make \`git status\` work in this checkout and retry.`,
+    });
+  }
+}
+
+/**
+ * Entries of `.hack/.env` (key `null`) and each legacy overlay file. Refuses,
+ * before anything is written, when a key cannot be an env layer key; the
+ * refusal counts such keys per file and never shows them.
+ */
+async function readValidatedLegacyDotenvFiles(opts: {
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+}): Promise<ReadonlyMap<string | null, Record<string, string>>> {
+  const legacyFiles = [
+    { envName: null, label: PROJECT_ENV_FILENAME },
+    ...opts.overlayNames.map((name) => ({
+      envName: name,
+      label: `${PROJECT_ENV_FILENAME}.${name}`,
+    })),
+  ];
+  const legacyValues = new Map<string | null, Record<string, string>>();
+  const invalidKeyCounts: string[] = [];
+  for (const file of legacyFiles) {
+    const values = await readLegacyDotenvFile({
+      path: resolveEnvFilePath({
+        projectDir: opts.projectDir,
+        envName: file.envName,
+      }),
+    });
+    legacyValues.set(file.envName, values);
+    const invalid = Object.keys(values).filter(
+      (key) => !PROJECT_ENV_KEY_PATTERN.test(key)
+    ).length;
+    if (invalid > 0) {
+      invalidKeyCounts.push(
+        `${countLabel({ count: invalid, noun: "key" })} in ${file.label}`
+      );
+    }
+  }
+  if (invalidKeyCounts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `env keys must match ^[A-Z_][A-Z0-9_]*$, but ${invalidKeyCounts.join(", ")} do not (for example a lowercase name or an "export " prefix). The keys are not shown because a malformed line may contain a value. Rename or remove them, then retry.`,
+    });
+  }
+  return legacyValues;
+}
+
+/**
  * Migrates a legacy project that has no `.hack/hack.env.json` contract, so
- * its values live only in `.hack/.env` and `.hack/.env.<overlay>`: every
- * base entry becomes a plaintext global value in `hack.env.default.yaml`, and
- * every overlay entry that differs from the base becomes a global value in
- * `hack.env.<overlay>.yaml`. With no legacy file at all it still writes an
- * empty default layer, so the project switches to env layers.
+ * its values live only in `.hack/.env` and `.hack/.env.<overlay>`.
  *
- * Without a contract nothing names secret-backend values, so none are read or
- * migrated, and `hack.config.json` (including any secret backend it
- * configures, and that backend's store) is left unchanged and never offered
- * for cleanup. Values are written to the layer files only, never returned or
- * printed.
+ * Contract:
+ * - Those files are gitignored, so their values stay out of tracked files:
+ *   every base entry becomes a plaintext global value in the machine-local
+ *   layer `hack.env.local.yaml`, and every overlay entry that differs from the
+ *   base becomes a global value in `hack.env.<overlay>.local.yaml`. The tracked
+ *   `hack.env.default.yaml` (and `hack.env.<overlay>.yaml` for each migrated
+ *   overlay) is written with no values, so the project switches to env layers.
+ *   With no legacy file at all only the empty default layer is written.
+ * - Refused before anything is written ({@link LegacyDotenvMigrationRefusalError},
+ *   or {@link ProjectEnvLayerPathConflictError} for an unusable layer entry):
+ *   any existing env layer entry, a legacy overlay named like the default or a
+ *   machine-local layer, a key that does not match `^[A-Z_][A-Z0-9_]*$`
+ *   (counted per file, never shown), and a machine-local target that git
+ *   tracks or, inside a git checkout, cannot report on.
+ * - Layers are created only where nothing exists (compare-and-swap against an
+ *   absent file); if a later write fails, the layers this call created are
+ *   removed again, so the project keeps using the legacy files.
+ * - Without a contract nothing names secret-backend values, so none are read
+ *   or migrated, and `hack.config.json` (including any secret backend it
+ *   configures, and that backend's store) is left unchanged and never offered
+ *   for cleanup. Values are written to the layer files only, never returned or
+ *   printed.
  */
 async function migrateUndeclaredLegacyDotenv(opts: {
   readonly projectRoot: string;
@@ -4941,60 +5076,123 @@ async function migrateUndeclaredLegacyDotenv(opts: {
   readonly serviceNames: readonly string[];
   readonly materialize: boolean;
 }): Promise<LegacyProjectEnvMigration> {
-  const overlayNames = await discoverLegacyOverlayNames({
+  // Also refuses a dangling or non-file layer entry (E_PATH_CONFLICT), which
+  // an atomic write would otherwise replace or write through.
+  if (
+    await projectEnvConfigExistsForMutation({ projectDir: opts.projectDir })
+  ) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `env layer files already exist in ${opts.projectDir}.`,
+    });
+  }
+  const overlayNames = (
+    await discoverLegacyOverlayNames({ projectDir: opts.projectDir })
+  ).filter((name) => name !== LEGACY_DOTENV_STATE_OVERLAY);
+  const reservedOverlays = overlayNames.filter(isReservedLegacyOverlayName);
+  if (reservedOverlays.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${reservedOverlays.map((name) => `${PROJECT_ENV_FILENAME}.${name}`).join(", ")} would become the default or a machine-local env layer rather than an overlay. Rename it to another overlay name or remove it, then retry.`,
+    });
+  }
+
+  const legacyValues = await readValidatedLegacyDotenvFiles({
     projectDir: opts.projectDir,
-  });
-  const baseValues = await readLegacyDotenvFile({
-    path: resolveEnvFilePath({ projectDir: opts.projectDir, envName: null }),
+    overlayNames,
   });
 
-  const wroteFiles: string[] = [];
-  const defaultPath = resolveProjectEnvConfigPath({
-    projectDir: opts.projectDir,
-    envName: null,
-  });
-  if (
-    await writeProjectEnvConfigFile({
-      path: defaultPath,
+  const baseValues = legacyValues.get(null) ?? {};
+  const localWrites: PlannedEnvLayerWrite[] = [];
+  const trackedWrites: PlannedEnvLayerWrite[] = [
+    {
+      path: resolveProjectEnvConfigPath({
+        projectDir: opts.projectDir,
+        envName: null,
+      }),
+      config: buildMigratedProjectEnvConfig({
+        environment: "default",
+        values: { global: {} },
+      }),
+    },
+  ];
+  if (Object.keys(baseValues).length > 0) {
+    localWrites.push({
+      path: resolveProjectEnvLocalConfigPath({
+        projectDir: opts.projectDir,
+        envName: null,
+      }),
       config: buildMigratedProjectEnvConfig({
         environment: "default",
         values: { global: { ...baseValues } },
       }),
-    })
-  ) {
-    wroteFiles.push(defaultPath);
-  }
-
-  for (const overlayName of overlayNames) {
-    const overlayValues = await readLegacyDotenvFile({
-      path: resolveEnvFilePath({
-        projectDir: opts.projectDir,
-        envName: overlayName,
-      }),
     });
+  }
+  for (const overlayName of overlayNames) {
     const changedValues = Object.fromEntries(
-      Object.entries(overlayValues).filter(
+      Object.entries(legacyValues.get(overlayName) ?? {}).filter(
         ([key, value]) => baseValues[key] !== value
       )
     );
     if (Object.keys(changedValues).length === 0) {
       continue;
     }
-    const overlayPath = resolveProjectEnvConfigPath({
-      projectDir: opts.projectDir,
-      envName: overlayName,
+    localWrites.push({
+      path: resolveProjectEnvLocalConfigPath({
+        projectDir: opts.projectDir,
+        envName: overlayName,
+      }),
+      config: buildMigratedProjectEnvConfig({
+        environment: overlayName,
+        values: { global: changedValues },
+      }),
     });
-    if (
-      await writeProjectEnvConfigFile({
-        path: overlayPath,
-        config: buildMigratedProjectEnvConfig({
-          environment: overlayName,
-          values: { global: changedValues },
-        }),
-      })
-    ) {
-      wroteFiles.push(overlayPath);
+    trackedWrites.push({
+      path: resolveProjectEnvConfigPath({
+        projectDir: opts.projectDir,
+        envName: overlayName,
+      }),
+      config: buildMigratedProjectEnvConfig({
+        environment: overlayName,
+        values: { global: {} },
+      }),
+    });
+  }
+
+  for (const write of localWrites) {
+    await assertUntrackedMigrationLocalLayer({
+      projectRoot: opts.projectRoot,
+      path: write.path,
+    });
+  }
+  if (localWrites.length > 0) {
+    await ensureHackDirGitignoreForLocalEnvWrite({
+      projectDir: opts.projectDir,
+    });
+  }
+
+  // Machine-local layers first, so the tracked layers switch the format only
+  // once the values have a home.
+  const wroteFiles: string[] = [];
+  try {
+    for (const write of [...localWrites, ...trackedWrites]) {
+      if (
+        await writeProjectEnvConfigFile({
+          path: write.path,
+          config: write.config,
+          expectedExisting: null,
+        })
+      ) {
+        wroteFiles.push(write.path);
+      }
     }
+  } catch (error: unknown) {
+    // Every target was absent before this call, so removing what it created
+    // leaves the project on the legacy files.
+    for (const path of [...wroteFiles].reverse()) {
+      await unlink(path).catch(() => undefined);
+    }
+    throw error;
   }
 
   if (opts.materialize) {

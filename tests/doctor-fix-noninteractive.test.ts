@@ -633,16 +633,90 @@ for (const docker of [
     // the requested migration, which needs no Docker, has run.
     expect(code).toBe(docker.exitCode === 0 ? 0 : 1);
 
+    // The gitignored value lands in the machine-local layer; the tracked
+    // default layer only switches the format.
+    const localPath = resolve(projectDir, "hack.env.local.yaml");
     const layerPath = resolve(projectDir, "hack.env.default.yaml");
-    expect(YAML.parse(await readFile(layerPath, "utf8"))).toMatchObject({
+    expect(YAML.parse(await readFile(localPath, "utf8"))).toMatchObject({
       environment: "default",
       values: { global: { LEGACY_SETTING: value } },
     });
+    expect(YAML.parse(await readFile(layerPath, "utf8"))).toMatchObject({
+      environment: "default",
+      values: { global: {} },
+    });
+    expect(await readFile(layerPath, "utf8")).not.toContain(value);
     const notes = noteCalls.join("\n");
-    expect(notes).toContain(`Wrote ${layerPath}`);
+    expect(notes).toContain(`Wrote ${localPath}, ${layerPath}`);
     expect(notes).not.toContain(value);
     expect(notes.includes("Docker is not reachable")).toBe(
       docker.exitCode !== 0
     );
   }, 30_000);
 }
+
+test("doctor --migrate-env-config treats a symlinked overlay as env layers and never writes through it (HACK-1370)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  const owned = ["synthetic", "owned", "77d1"].join("-");
+  const legacy = ["synthetic", "legacy", "b9e0"].join("-");
+  await writeFile(resolve(projectDir, ".env"), `OWNED=${legacy}\n`);
+  await writeFile(resolve(projectDir, ".env.staging"), `OWNED=${legacy}-s\n`);
+  const target = resolve(projectRoot, "..", "outside-staging.yaml");
+  const targetText = `version: 1\nenvironment: staging\nsecretsprovider: project_key\nvalues:\n  global:\n    OWNED: ${owned}\n`;
+  await writeFile(target, targetText);
+  const link = resolve(projectDir, "hack.env.staging.yaml");
+  await symlink(target, link);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli([
+    "doctor",
+    "--migrate-env-config",
+    "--no-interactive",
+    "--path",
+    projectRoot,
+  ]);
+  expect(code).toBe(0);
+  expect(noteCalls.join("\n")).toContain(
+    "Project already uses the new env config files."
+  );
+  // The link and its target are untouched; nothing was migrated or cleaned.
+  expect(await readlink(link)).toBe(target);
+  expect(await readFile(target, "utf8")).toBe(targetText);
+  expect(await readFile(resolve(projectDir, ".env"), "utf8")).toContain(legacy);
+  expect(await readFile(resolve(projectDir, ".env.staging"), "utf8")).toContain(
+    legacy
+  );
+  for (const name of ["hack.env.default.yaml", "hack.env.local.yaml"]) {
+    expect(await lstat(resolve(projectDir, name)).catch(() => null)).toBeNull();
+  }
+}, 30_000);
+
+test("doctor --migrate-env-config refuses a dangling default layer with E_PATH_CONFLICT and keeps it (HACK-1370)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  const legacy = ["synthetic", "legacy", "0a6f"].join("-");
+  await writeFile(resolve(projectDir, ".env"), `OWNED=${legacy}\n`);
+  const link = resolve(projectDir, "hack.env.default.yaml");
+  const missing = resolve(projectDir, "missing-layer.yaml");
+  await symlink(missing, link);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli([
+    "doctor",
+    "--migrate-env-config",
+    "--no-interactive",
+    "--path",
+    projectRoot,
+  ]);
+  expect(code).toBe(1);
+  // Still the same dangling link; the legacy file is kept and nothing else
+  // was written.
+  expect((await lstat(link)).isSymbolicLink()).toBe(true);
+  expect(await readlink(link)).toBe(missing);
+  expect(await readFile(resolve(projectDir, ".env"), "utf8")).toContain(legacy);
+  expect(
+    await lstat(resolve(projectDir, "hack.env.local.yaml")).catch(() => null)
+  ).toBeNull();
+  expect(noteCalls.join("\n")).not.toContain(legacy);
+}, 30_000);

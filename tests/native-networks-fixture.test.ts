@@ -33,6 +33,9 @@ import {
   nativeNetworkFixtureNetworkMatches,
   nativeNetworkFixturePeerProbe,
   nativeNetworkFixturePreservedContainerMatches,
+  nativeNetworkFixtureProbeDiagnostic,
+  nativeNetworkFixtureProbeEvidence,
+  nativeNetworkFixtureProbeRoute,
   nativeNetworkFixtureProjectKind,
   nativeNetworkFixtureProtocolMatches,
   nativeNetworkFixtureRefusalDiagnostic,
@@ -404,6 +407,285 @@ test("probe scripts exit with a closed code for every in-container failure", asy
     server.stop(true);
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// HACK-1419: a hosted probe exited 27 with no way to tell which URL or phase stalled.
+test("peer probe attributes a failure to one URL and phase in closed stderr evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-network-probe-"));
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      return new URL(request.url).pathname === "/hang"
+        ? new Promise<Response>(() => undefined)
+        : new Response("primary:peer");
+    },
+  });
+  const closed = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response(""),
+  });
+  const refused = `http://127.0.0.1:${closed.port}`;
+  closed.stop(true);
+  const origin = `http://127.0.0.1:${server.port}`;
+  const run = async (opts: {
+    readonly origin: string;
+    readonly alias: string;
+    readonly timeoutMs: number;
+  }): Promise<{ readonly code: number; readonly stderr: string }> => {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        nativeNetworkFixturePeerProbe({ ...opts, expected: "primary:peer" }),
+      ],
+      {
+        cwd: root,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          PEER_ORIGIN: opts.origin,
+        },
+        stdout: "ignore",
+        stderr: "pipe",
+      }
+    );
+    const [code, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stderr).text(),
+    ]);
+    return { code, stderr };
+  };
+  try {
+    // A name resolving to several families still reaches the IPv4 listener.
+    const named = `http://localhost:${server.port}`;
+    expect(
+      await run({ origin: named, alias: `${named}/a`, timeoutMs: 4000 })
+    ).toEqual({ code: 0, stderr: "" });
+
+    const hung = await run({ origin, alias: `${origin}/hang`, timeoutMs: 300 });
+    expect(hung.code).toBe(NATIVE_NETWORK_PROBE_EXIT.timeout);
+    const hungEvidence = nativeNetworkFixtureProbeEvidence(hung.stderr);
+    expect(hungEvidence).toMatchObject({
+      url: "alias",
+      phase: "http",
+      addresses: 1,
+    });
+    // Resolution and the HTTP exchange share one budget per URL.
+    expect(hungEvidence?.elapsedMs).toBeGreaterThanOrEqual(250);
+    expect(hungEvidence?.elapsedMs).toBeLessThan(2000);
+
+    const rejected = await run({
+      origin: refused,
+      alias: `${origin}/a`,
+      timeoutMs: 4000,
+    });
+    expect(rejected.code).toBe(NATIVE_NETWORK_PROBE_EXIT.rejected);
+    expect(nativeNetworkFixtureProbeEvidence(rejected.stderr)).toMatchObject({
+      url: "origin",
+      phase: "http",
+    });
+
+    // RFC 6761 `.invalid` never resolves; an unreachable resolver times out instead.
+    const unresolved = await run({
+      origin,
+      alias: "http://probe-1419.invalid:3000/",
+      timeoutMs: 2000,
+    });
+    expect<number[]>([
+      NATIVE_NETWORK_PROBE_EXIT.dnsRejected,
+      NATIVE_NETWORK_PROBE_EXIT.dnsTimeout,
+    ]).toContain(unresolved.code);
+    expect(nativeNetworkFixtureProbeEvidence(unresolved.stderr)).toMatchObject({
+      url: "alias",
+      phase: "dns",
+      addresses: 0,
+    });
+    expect(unresolved.stderr).not.toContain("probe-1419");
+
+    expect(new Set(Object.values(NATIVE_NETWORK_PROBE_EXIT)).size).toBe(
+      Object.values(NATIVE_NETWORK_PROBE_EXIT).length
+    );
+  } finally {
+    server.stop(true);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("probe evidence admits only the closed stderr line", () => {
+  const secret = "/private/fixture/secret-path";
+  expect(
+    nativeNetworkFixtureProbeEvidence(
+      `warning ${secret}\nprobe-evidence origin dns 4001 4003 0\n`
+    )
+  ).toEqual({
+    url: "origin",
+    phase: "dns",
+    dnsMs: 4001,
+    elapsedMs: 4003,
+    addresses: 0,
+  });
+  for (const text of [
+    "",
+    secret,
+    "probe-evidence other http 1 2 1",
+    "probe-evidence alias connect 1 2 1",
+    `probe-evidence alias http 1 2 1 ${secret}`,
+    "probe-evidence alias http -1 2 1",
+    "probe-evidence alias http 1 2 1000",
+  ]) {
+    expect(nativeNetworkFixtureProbeEvidence(text)).toBeNull();
+  }
+});
+
+test("probe route state reduces inspections to closed counts and booleans", () => {
+  const outbound = "a".repeat(64);
+  const ingress = "b".repeat(64);
+  const foreign = "c".repeat(64);
+  const source = {
+    State: { Status: "running", Health: { Status: "healthy" } },
+    NetworkSettings: {
+      Networks: {
+        project_outbound: { NetworkID: outbound, IPAddress: "10.9.0.2" },
+        "hack-dev": { NetworkID: ingress, IPAddress: "10.8.0.5" },
+      },
+    },
+  };
+  const target = {
+    State: { Status: "running", Health: { Status: "starting" } },
+    NetworkSettings: {
+      Networks: {
+        project_outbound: { NetworkID: outbound, IPAddress: "10.9.0.3" },
+        other: { NetworkID: foreign, IPAddress: "10.7.0.3" },
+      },
+    },
+  };
+  const shared = nativeNetworkFixtureProbeRoute({
+    source,
+    target,
+    resolved:
+      "10.9.0.3        STREAM peer\n10.9.0.3        DGRAM\n10.9.0.3        RAW\n",
+    ingressId: ingress,
+  });
+  expect(shared).toEqual({
+    source: { state: "running", health: "healthy" },
+    target: { state: "running", health: "starting" },
+    sourceAttachments: 2,
+    targetAttachments: 2,
+    sharedBridges: 1,
+    sourceIngress: true,
+    addresses: 1,
+    resolvesToSharedTarget: true,
+  });
+  for (const value of [outbound, ingress, foreign, "10.9.0", "hack-dev"]) {
+    expect(JSON.stringify(shared)).not.toContain(value);
+  }
+  // A name answering an address off the shared bridge (another network, a
+  // stale container) is the misroute a timeout would hide.
+  expect(
+    nativeNetworkFixtureProbeRoute({
+      source,
+      target,
+      resolved: "10.9.0.3 STREAM peer\n10.7.0.3 STREAM peer\n",
+      ingressId: null,
+    })
+  ).toMatchObject({
+    addresses: 2,
+    resolvesToSharedTarget: false,
+    sourceIngress: false,
+  });
+  expect(
+    nativeNetworkFixtureProbeRoute({
+      source,
+      target,
+      resolved: "",
+      ingressId: ingress,
+    })
+  ).toMatchObject({ addresses: 0, resolvesToSharedTarget: false });
+  expect(
+    nativeNetworkFixtureProbeRoute({
+      source: null,
+      target: { State: { Status: "secret" } },
+      resolved: null,
+      ingressId: ingress,
+    })
+  ).toEqual({
+    source: { state: "unknown", health: "unknown" },
+    target: { state: "unknown", health: "none" },
+    sourceAttachments: 0,
+    targetAttachments: 0,
+    sharedBridges: 0,
+    sourceIngress: false,
+    addresses: null,
+    resolvesToSharedTarget: null,
+  });
+});
+
+test("probe diagnostic names role, pair, outcomes and route state only", () => {
+  const secret = "/private/fixture/secret-path";
+  const route = nativeNetworkFixtureProbeRoute({
+    source: null,
+    target: null,
+    resolved: null,
+    ingressId: null,
+  });
+  const text = nativeNetworkFixtureProbeDiagnostic({
+    role: "primary",
+    service: "web",
+    target: "peer",
+    first: {
+      exitCode: NATIVE_NETWORK_PROBE_EXIT.timeout,
+      timedOut: false,
+      stderr: `${secret}\nprobe-evidence alias http 2 4001 1\n`,
+    },
+    rerun: { exitCode: 0, timedOut: false, stderr: "" },
+    route,
+  });
+  expect(text).toBe(
+    `Network probe diagnostic ${JSON.stringify({
+      role: "primary",
+      service: "web",
+      target: "peer",
+      exit: 27,
+      timedOut: false,
+      outcome: "timeout",
+      evidence: {
+        url: "alias",
+        phase: "http",
+        dnsMs: 2,
+        elapsedMs: 4001,
+        addresses: 1,
+      },
+      rerun: {
+        exit: 0,
+        timedOut: false,
+        outcome: "pass",
+        evidence: null,
+      },
+      route,
+    })}`
+  );
+  expect(text).not.toContain(secret);
+  expect(
+    nativeNetworkFixtureProbeDiagnostic({
+      role: "sibling-a",
+      service: "reader",
+      target: "vault",
+      first: { exitCode: 1, timedOut: false, stderr: secret },
+      rerun: null,
+      route: null,
+    })
+  ).toContain('"exit":1,"timedOut":false,"outcome":"other","evidence":null');
+  expect(
+    nativeNetworkFixtureProbeDiagnostic({
+      role: "primary",
+      service: secret,
+      target: "peer",
+      first: { exitCode: 27, timedOut: false, stderr: "" },
+      rerun: null,
+      route: null,
+    })
+  ).toBe("Network probe diagnostic unavailable");
 });
 
 test("saved-state evidence reports closed flags and pending operation only", () => {

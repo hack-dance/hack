@@ -354,6 +354,10 @@ Container observations bracket the active-member read. If an original changes
 running state while all immutable facts remain verified, the mixed observation
 is discarded within the same aggregate deadline and output allowance. Foreign
 members, replaced identities and stable membership mismatches refuse immediately.
+Docker keys an endpoint that is not joined to a sandbox as `ep-<endpoint>`. This
+happens for a moment while any container starts or exits. Such a member is never
+attributed, admitted or saved: the observation is discarded and re-read within
+the same deadline, and a placeholder that persists until the deadline refuses.
 This is not an atomic daemon snapshot: delayed endpoint removal can still refuse,
 and fresh successful job completion remains the scheduler's separate decision.
 The Docker routing environment is captured for later comparison. Queries never

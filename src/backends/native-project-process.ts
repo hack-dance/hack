@@ -12,6 +12,7 @@ import {
 import type { NativeAuthoredStorageTool } from "./native-authored-storage-tool.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_EXIT_DRAIN_BOUND_MS,
   type NativeRuntimeSelection,
   readNativeFailureCodes,
   rethrowNativeInputFailure,
@@ -21,20 +22,6 @@ import {
 const RUN = /^[a-f0-9]{32}$/;
 const MAX_OUTPUT = 16 * 1024 * 1024;
 const MAX_INPUT = 256 * 1024;
-
-/**
- * Exit-relative bound on draining the owned child's stdout and stderr.
- *
- * The native runtime writes its closed error code (and any readiness line)
- * before it exits, so those bytes are already in the pipes when the exit is
- * observed; with no other writer, EOF follows immediately and the drain ends
- * there. This bound only ends a drain that EOF cannot end: a descendant that
- * inherited a pipe and keeps it open. It is measured from the observed exit,
- * not from spawn, and is deliberately generous so that a heavily
- * oversubscribed host still schedules the pipe readers before it expires.
- * A 250 ms bound lost the closed code under load (HACK-1350).
- */
-export const NATIVE_EXIT_DRAIN_BOUND_MS = 5000;
 
 export type NativeExitDiagnostic = {
   readonly exitCode: number;
@@ -61,6 +48,12 @@ type ProcessOptions = {
   readonly onStopFailure?: () => void;
   /** Durable capture in the existing frontend owner, before private input delivery. */
   readonly onGroup?: (group: number) => Promise<void>;
+  /**
+   * Test seam: how long after the owned child's observed exit a pipe a
+   * descendant still holds keeps being read. Production callers leave it at
+   * {@link NATIVE_EXIT_DRAIN_BOUND_MS}; EOF ends the drain earlier.
+   */
+  readonly exitDrainBoundMs?: number;
 };
 
 /**
@@ -275,9 +268,11 @@ function nativeSnapshotReady(
 }
 
 function assertProcessSelection(opts: ProcessOptions): void {
+  const exitDrainBoundMs = opts.exitDrainBoundMs ?? NATIVE_EXIT_DRAIN_BOUND_MS;
   if (
     !(RUN.test(opts.run) && Number.isSafeInteger(opts.startupTimeoutMs)) ||
     opts.startupTimeoutMs < 1 ||
+    !(Number.isSafeInteger(exitDrainBoundMs) && exitDrainBoundMs >= 1) ||
     opts.startupTimeoutMs > 600_000 ||
     (opts.privateInput?.byteLength ?? 0) > MAX_INPUT ||
     canceledAtEntry(opts)
@@ -339,7 +334,10 @@ async function serveGraphProcess(
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   void child.exited.then(() => {
     owner.abort();
-    drainTimer = setTimeout(() => drain.abort(), NATIVE_EXIT_DRAIN_BOUND_MS);
+    drainTimer = setTimeout(
+      () => drain.abort(),
+      opts.exitDrainBoundMs ?? NATIVE_EXIT_DRAIN_BOUND_MS
+    );
   });
   const failureCodes = readNativeFailureCodes(child.stderr, drain.signal);
   const failureCode = failureCodes.then((failure) => failure?.code);

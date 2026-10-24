@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   invokeNativeRuntime,
   isNativeRuntimeNotRunning,
+  NATIVE_EXIT_DRAIN_BOUND_MS,
   NativeRuntimeRequestError,
   nativeCodesReportRuntimeNotRunning,
   resolveNativeRuntimeSelection,
@@ -37,12 +38,30 @@ const KEEPER_RELEASE_CAP_MS = 120_000;
 /** Bun timeout for every case here: most spawn the stand-in runtime. */
 const CASE_TIMEOUT_MS = 2 * HANDSHAKE_BUDGET_MS;
 /**
- * Upper bound from the stand-in's exit (or the caller's abort) to the request
- * settling while a descendant still holds stdout/stderr. The client stops
- * draining 250 ms after exit; this is far above that, so load cannot flake it,
- * and far below the request timeout, so an unbounded drain still fails.
+ * Slack for host load between the stand-in's recorded exit (or the caller's
+ * abort) and the request settling. Added to the named drain bound, the sum
+ * stays far below the request timeout, so an unbounded drain still fails.
  */
-const DRAIN_SETTLE_BOUND_MS = 5000;
+const DRAIN_SETTLE_MARGIN_MS = 5000;
+/**
+ * Fixed delay before a descendant writes the closed code on the stand-in's
+ * inherited stderr, measured from the test observing the stand-in reaped. It
+ * is well above the former 250 ms window, which dropped such a code.
+ */
+const LATE_CODE_DELAY_MS = 1000;
+/**
+ * Injected drain bound for the late-writer cases: wide enough that host load
+ * cannot push the delayed write past it, so those cases prove that EOF, not a
+ * fixed window, ends the drain. The held-descendant cases keep the production
+ * bound and prove that it still ends a drain EOF cannot.
+ */
+const LATE_WRITER_DRAIN_BOUND_MS = 25_000;
+/**
+ * Gap between creating a stand-in's pid file and writing its digits. It makes
+ * the empty-file window that a loaded host opens by chance happen on every
+ * run, so a reader that only waits for existence fails every time.
+ */
+const TORN_HANDSHAKE_GAP_MS = 50;
 
 /** Every case gets a named budget; none relies on Bun's 5 s default. */
 function test(
@@ -66,6 +85,51 @@ async function waitForFile(
       );
     }
     await Bun.sleep(10);
+  }
+}
+
+/**
+ * Wait until a fixture's pid handshake holds a complete pid. A fixture's
+ * writeFileSync creates the file before it writes the digits, so a read that
+ * only waited for existence can see "": Number("") is 0, and kill(0, 0)
+ * always succeeds, so an absence wait on it would never end.
+ */
+async function waitForPid(
+  path: string,
+  budgetMs = HANDSHAKE_BUDGET_MS
+): Promise<number> {
+  const deadline = performance.now() + budgetMs;
+  for (;;) {
+    const file = Bun.file(path);
+    if (await file.exists()) {
+      const pid = Number(await file.text());
+      if (Number.isSafeInteger(pid) && pid > 1) {
+        return pid;
+      }
+    }
+    if (performance.now() >= deadline) {
+      throw new Error(
+        `Fixture pid handshake did not complete within ${budgetMs} ms.`
+      );
+    }
+    await Bun.sleep(10);
+  }
+}
+
+function processPresent(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ESRCH"
+    ) {
+      return false;
+    }
+    throw error;
   }
 }
 
@@ -415,11 +479,10 @@ ${mode === "abort" ? "await Bun.sleep(60_000);" : `(await import('node:fs')).wri
       // though the unreleased keeper still holds both pipes.
       expect(settledAt).toBeDefined();
       expect((settledAt ?? Number.POSITIVE_INFINITY) - endedAt).toBeLessThan(
-        DRAIN_SETTLE_BOUND_MS
+        NATIVE_EXIT_DRAIN_BOUND_MS + DRAIN_SETTLE_MARGIN_MS
       );
       expect(await Bun.file(finished).exists()).toBe(false);
-      const keeperPid = Number(await Bun.file(holding).text());
-      expect(Number.isSafeInteger(keeperPid) && keeperPid > 1).toBe(true);
+      const keeperPid = await waitForPid(holding);
       expect(() => process.kill(keeperPid, 0)).not.toThrow();
     } catch (error: unknown) {
       failed = error;
@@ -445,6 +508,150 @@ ${mode === "abort" ? "await Bun.sleep(60_000);" : `(await import('node:fs')).wri
       throw failed;
     }
     expect(await Bun.file(finished).text()).toBe("finished");
+  },
+  CASE_TIMEOUT_MS
+);
+
+const RUN_ID = "a".repeat(32);
+const LATE_WRITER_SELECTIONS = {
+  status: {
+    args: [
+      "graph",
+      "native",
+      "control",
+      "--run-id",
+      RUN_ID,
+      "--action",
+      "status",
+      "--json",
+    ],
+    flags: { boundNativeStatusDrain: true },
+  },
+  read: {
+    args: ["graph", "native", "inspect", "--run-id", RUN_ID, "--json"],
+    flags: { boundNativeAuthoredReadDrain: true },
+  },
+  logs: {
+    args: [
+      "graph",
+      "native",
+      "logs",
+      "--run-id",
+      RUN_ID,
+      "--service",
+      "web",
+      "--tail",
+      "10",
+      "--json",
+    ],
+    flags: { boundNativeAuthoredLogsDrain: true },
+  },
+  exec: {
+    args: [
+      "graph",
+      "native",
+      "exec",
+      "--run-id",
+      RUN_ID,
+      "--service",
+      "web",
+      "--json",
+      "--",
+      "true",
+    ],
+    flags: { boundNativeAuthoredExecDrain: true },
+  },
+} as const;
+
+bunTest.each(
+  Object.keys(LATE_WRITER_SELECTIONS) as (keyof typeof LATE_WRITER_SELECTIONS)[]
+)(
+  "authored %s keeps a closed code written after the reported exit",
+  async (selection) => {
+    const runtime = await fixture();
+    const writerPid = join(runtime.home, "writer-pid");
+    const childPid = join(runtime.home, "child-pid");
+    const exitObserved = join(runtime.home, "exit-observed");
+    const finished = join(runtime.home, "finished");
+    // The writer inherits only stderr. It writes the closed code after the
+    // test has seen the stand-in reaped, i.e. after the client observed the
+    // exit, and then closes the pipe. A fixed post-exit window drops the code;
+    // draining to EOF keeps it. The stand-in publishes its pid as a torn
+    // handshake (an empty file first), so the reader must wait for a complete
+    // pid rather than for the file to exist.
+    const writer = `import {existsSync,writeFileSync} from 'node:fs';
+writeFileSync(${JSON.stringify(writerPid)},String(process.pid));
+const cap=performance.now()+${KEEPER_RELEASE_CAP_MS};
+while(!existsSync(${JSON.stringify(exitObserved)})&&performance.now()<cap)await Bun.sleep(10);
+if(existsSync(${JSON.stringify(exitObserved)})){
+  await Bun.sleep(${LATE_CODE_DELAY_MS});
+  process.stderr.write(JSON.stringify({code:"graph_budget",message:"synthetic-secret-diagnostic"}));
+}
+writeFileSync(${JSON.stringify(finished)},'finished');`;
+    await Bun.write(
+      runtime.binary,
+      `#!${process.execPath}
+import {spawn} from 'node:child_process';
+import {existsSync,writeFileSync} from 'node:fs';
+spawn(${JSON.stringify(process.execPath)},['--eval',${JSON.stringify(writer)}],{detached:true,stdio:['ignore','ignore',2]}).unref();
+const cap=performance.now()+${HANDSHAKE_BUDGET_MS};
+while(!existsSync(${JSON.stringify(writerPid)})&&performance.now()<cap)await Bun.sleep(10);
+writeFileSync(${JSON.stringify(childPid)},'');
+await Bun.sleep(${TORN_HANDSHAKE_GAP_MS});
+writeFileSync(${JSON.stringify(childPid)},String(process.pid));
+process.exit(existsSync(${JSON.stringify(writerPid)})?23:3);
+`
+    );
+    const { args, flags } = LATE_WRITER_SELECTIONS[selection];
+    const request = invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      exitDrainBoundMs: LATE_WRITER_DRAIN_BOUND_MS,
+      ...flags,
+    });
+    void request.catch(() => undefined);
+    let failed: unknown;
+    let completed = false;
+    try {
+      const child = await waitForPid(childPid);
+      // Absence means the client reaped the stand-in: its exit was reported.
+      const deadline = performance.now() + HANDSHAKE_BUDGET_MS;
+      while (processPresent(child) && performance.now() < deadline) {
+        await Bun.sleep(10);
+      }
+      expect(processPresent(child)).toBe(false);
+      await Bun.write(exitObserved, "observed");
+      const error: unknown = await request.catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+      expect(error).toMatchObject({ nativeCode: "graph_budget" });
+      expect(String(error)).toContain(
+        "Native runtime request failed (graph_budget)"
+      );
+      expect(String(error)).not.toContain("synthetic-secret-diagnostic");
+    } catch (error: unknown) {
+      failed = error;
+    } finally {
+      await Bun.write(exitObserved, "observed");
+      await request.catch(() => undefined);
+      completed = await waitForFile(finished).then(
+        () => true,
+        () => false
+      );
+      if (!completed) {
+        roots.splice(roots.indexOf(runtime.home), 1);
+      }
+    }
+    if (!completed) {
+      throw new AggregateError(
+        failed === undefined ? [] : [failed],
+        "owned writer completion is unconfirmed; fixture retained"
+      );
+    }
+    if (failed !== undefined) {
+      throw failed;
+    }
   },
   CASE_TIMEOUT_MS
 );

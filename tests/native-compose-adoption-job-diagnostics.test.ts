@@ -8,6 +8,9 @@ import {
   legacyComposeOrderedError,
   legacyComposeOrderedRefusal,
 } from "../src/lib/native-compose-adoption-diagnostics.ts";
+import { LegacyComposeAdoptedGenerationError } from "../src/lib/native-compose-adoption-generation.ts";
+import { LegacyComposeAdoptionSelectionError } from "../src/lib/native-compose-adoption-marker.ts";
+import { projectInputAccessFault } from "../src/lib/project-input-selection.ts";
 import { createCompletedJobFixtureStartDiagnostics } from "./e2e/scenarios/native-compose-adoption-job-diagnostics.ts";
 
 function diagnostics(messages: string[]) {
@@ -118,8 +121,10 @@ test("completed-job start diagnostics omit reply values and unknown codes or lab
     "ordered-stage=unavailable ordered-reason=unavailable"
   );
   expect(messages[1]).toContain("code=unavailable");
+  expect(messages[0]).toContain("refusal=other");
+  expect(messages[2]).toContain("refusal=unavailable");
   expect(messages[3]).toContain(
-    "timed-out=yes code=unavailable ordered-stage=unavailable ordered-reason=unavailable"
+    "timed-out=yes code=unavailable ordered-stage=unavailable ordered-reason=unavailable refusal=unavailable"
   );
   expect(messages.at(-1)).toBe(
     "start-operation=unavailable worktree=unavailable stage=fresh-exit status=end"
@@ -154,7 +159,7 @@ test("completed-job CLI diagnostics report only the owner-issued closed ordered 
       }),
     });
     expect(messages.at(-1)).toBe(
-      `start-operation=restart worktree=alpha stage=cli-result exit=nonzero timed-out=no code=E_CONFIG_INVALID ordered-stage=${issued.stage} ordered-reason=${issued.reason}`
+      `start-operation=restart worktree=alpha stage=cli-result exit=nonzero timed-out=no code=E_CONFIG_INVALID ordered-stage=${issued.stage} ordered-reason=${issued.reason} refusal=other`
     );
   }
   expect(messages.join("\n")).not.toContain("canary");
@@ -195,7 +200,7 @@ test("completed-job CLI diagnostics refuse malformed, extra and unrelated detail
       }),
     });
     expect(messages.at(-1)).toBe(
-      `start-operation=restart worktree=alpha stage=cli-result exit=nonzero timed-out=no code=${code} ordered-stage=unavailable ordered-reason=unavailable`
+      `start-operation=restart worktree=alpha stage=cli-result exit=nonzero timed-out=no code=${code} ordered-stage=unavailable ordered-reason=unavailable refusal=other`
     );
   }
   expect(messages.join("\n")).not.toContain("canary");
@@ -238,6 +243,72 @@ test("completed-job CLI diagnostics treat an unreadable reply as unavailable", (
   });
   expect(() => diagnostic.cliOutcome(result)).not.toThrow();
   expect(messages).toEqual([
-    "start-operation=restart worktree=alpha stage=cli-result exit=unavailable timed-out=unavailable code=unavailable ordered-stage=unavailable ordered-reason=unavailable",
+    "start-operation=restart worktree=alpha stage=cli-result exit=unavailable timed-out=unavailable code=unavailable ordered-stage=unavailable ordered-reason=unavailable refusal=unavailable",
   ]);
+});
+
+test("completed-job CLI diagnostics name a fixed refusal message by closed token only (HACK-1421)", () => {
+  const messages: string[] = [];
+  const diagnostic = diagnostics(messages);
+  const refusal = (error: HackCliError) => {
+    diagnostic.cliOutcome({
+      exitCode: 1,
+      timedOut: false,
+      stdout: renderCliResult({ result: errorResultFromUnknown({ error }) }),
+    });
+    return messages.at(-1)?.split(" ").at(-1);
+  };
+  // The adopted command rewraps a store refusal as E_CONFIG_INVALID with its fixed message.
+  for (const [code, token] of [
+    ["E_LEGACY_ADOPTION_STATE", "legacy-state"],
+    ["E_LEGACY_ADOPTION_BUSY", "legacy-busy"],
+    ["E_LEGACY_ADOPTION_CHANGED", "legacy-changed"],
+    ["E_LEGACY_ADOPTION_UNSUPPORTED", "legacy-unsupported"],
+    ["E_LEGACY_ADOPTION_CANCELLED", "legacy-cancelled"],
+    ["E_LEGACY_ADOPTION_DEADLINE", "legacy-deadline"],
+    ["E_LEGACY_ADOPTION_LITERAL_ENV", "legacy-literal-env"],
+  ] as const) {
+    expect(
+      refusal(
+        new HackCliError({
+          code: "E_CONFIG_INVALID",
+          message: new LegacyComposeAdoptedGenerationError(code).message,
+        })
+      )
+    ).toBe(`refusal=${token}`);
+  }
+  expect(
+    refusal(
+      new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message:
+          "Adopted Compose ownership or execution refused; original data is retained. Values omitted.",
+      })
+    )
+  ).toBe("refusal=adopted-refused");
+  expect(refusal(new LegacyComposeAdoptionSelectionError())).toBe(
+    "refusal=marker-adoption"
+  );
+  expect(refusal(new LegacyComposeAdoptionSelectionError("permission"))).toBe(
+    "refusal=marker-permission"
+  );
+  expect(messages.at(-1)).toContain("code=E_PERMISSION");
+  expect(refusal(new LegacyComposeAdoptionSelectionError("input-access"))).toBe(
+    "refusal=input-access"
+  );
+  const fault = Object.assign(new Error("private-path-canary"), {
+    code: "ENOTDIR",
+  });
+  expect(refusal(projectInputAccessFault(fault))).toBe("refusal=input-access");
+  expect(
+    refusal(
+      new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message: `${new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_STATE").message} private-suffix-canary`,
+      })
+    )
+  ).toBe("refusal=other");
+  expect(messages.join("\n")).not.toContain("canary");
+  expect(messages.join("\n")).not.toContain("ENOTDIR");
+  expect(messages.join("\n")).not.toContain("values omitted");
 });

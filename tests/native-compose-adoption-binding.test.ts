@@ -90,14 +90,15 @@ const ORDERED_START_FRESHNESS_CHECKS = 20;
 const ORDERED_OPERATION_DEADLINE_MS =
   ORDERED_START_FRESHNESS_CHECKS * FIXTURE_PROBE_DEADLINE_MS;
 /**
- * The moving job snapshot case's own test budget: its ordered start, plus its
- * acquisition, its first resolve, its closing freshness check and its closing
- * resolve, each one fixture-deadline probe, plus one more probe deadline for
- * the fixture's file reads and the readiness polls' sleeps. A slow host
- * therefore ends in the closed refusal before Bun's timeout.
+ * The moving job snapshot case's own test budget: its ordered start, plus the
+ * 5 probes it makes outside the start (3 before it: the acquisition creates 2
+ * and the first resolve 1; 2 after it: the closing freshness check and the
+ * closing resolve), each one fixture-deadline probe, plus one more probe
+ * deadline for the fixture's file reads and the readiness polls' sleeps. A
+ * slow host therefore ends in the closed refusal before Bun's timeout.
  */
 const MOVING_JOB_TEST_TIMEOUT_MS =
-  ORDERED_OPERATION_DEADLINE_MS + 5 * FIXTURE_PROBE_DEADLINE_MS;
+  ORDERED_OPERATION_DEADLINE_MS + 6 * FIXTURE_PROBE_DEADLINE_MS;
 /**
  * The probe deadline of the tests that prove a moving snapshot exhausts it.
  * Each repeated scan is several cold fake Docker processes, so a 3 s deadline

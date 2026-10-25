@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { fixtureGitEnv } from "./fixture-git.ts";
 
 /**
  * Disposable Git fixtures for env-secret tests: a Hack project committed in a
@@ -22,16 +23,18 @@ export function runFixtureGit(opts: {
 }): string {
   const result = Bun.spawnSync(["git", ...opts.args], {
     cwd: opts.cwd,
-    env: {
-      PATH: process.env.PATH ?? "/usr/bin:/bin",
-      HOME: opts.home,
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_AUTHOR_NAME: "Hack Test",
-      GIT_AUTHOR_EMAIL: "hack-test@example.invalid",
-      GIT_COMMITTER_NAME: "Hack Test",
-      GIT_COMMITTER_EMAIL: "hack-test@example.invalid",
-    },
+    env: fixtureGitEnv({
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: opts.home,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_AUTHOR_NAME: "Hack Test",
+        GIT_AUTHOR_EMAIL: "hack-test@example.invalid",
+        GIT_COMMITTER_NAME: "Hack Test",
+        GIT_COMMITTER_EMAIL: "hack-test@example.invalid",
+      },
+    }),
     stdout: "pipe",
     stderr: "pipe",
   });

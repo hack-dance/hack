@@ -22,6 +22,7 @@ import {
 } from "../src/lib/native-project-inputs.ts";
 import { resolveVerifiedPrimaryWorktreeRoot } from "../src/lib/worktree-local-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const ENV_KEYS = [
   "CI",
@@ -74,6 +75,7 @@ async function git(opts: {
   readonly args: readonly string[];
 }) {
   const child = Bun.spawn(["git", "-C", opts.projectRoot, ...opts.args], {
+    env: fixtureGitEnv(),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "pipe",

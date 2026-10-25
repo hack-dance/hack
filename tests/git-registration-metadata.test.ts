@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 let fixture = "";
 let env: Record<string, string | undefined>;
@@ -42,7 +43,10 @@ async function canUseReftable() {
     const child = Bun.spawn(
       ["git", "init", "--ref-format=reftable", join(root, "repo")],
       {
-        env: isolatedEnv(root),
+        env: fixtureGitEnv({
+          env: isolatedEnv(root),
+          gitEnv: { GIT_CEILING_DIRECTORIES: root },
+        }),
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
@@ -89,7 +93,10 @@ afterEach(async () => {
 
 async function git(repoRoot: string, args: readonly string[]) {
   const child = Bun.spawn(["git", "-C", repoRoot, ...args], {
-    env,
+    env: fixtureGitEnv({
+      env,
+      gitEnv: { GIT_CEILING_DIRECTORIES: fixture },
+    }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

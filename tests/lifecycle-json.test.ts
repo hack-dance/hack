@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { buildLifecycleJsonData } from "../src/commands/project.ts";
 import { setLoggerBackendOverride } from "../src/ui/logger.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -179,6 +180,7 @@ function runGit(opts: {
   readonly args: readonly string[];
 }): void {
   const result = Bun.spawnSync(["git", "-C", opts.cwd, ...opts.args], {
+    env: fixtureGitEnv(),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

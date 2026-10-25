@@ -13,6 +13,7 @@ import {
   loadNativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const roots: string[] = [];
 const entrypoint = resolve("index.ts");
@@ -161,7 +162,7 @@ for (const command of ["up"] as const) {
     ]) {
       const result = Bun.spawnSync(["git", ...args], {
         cwd: f.project,
-        env: f.env,
+        env: fixtureGitEnv({ env: f.env }),
         stdout: "pipe",
         stderr: "pipe",
       });

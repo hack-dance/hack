@@ -4,6 +4,7 @@ import {
   beforeAll,
   beforeEach,
   expect,
+  setDefaultTimeout,
   test,
 } from "bun:test";
 import {
@@ -26,6 +27,7 @@ import {
   resolveProjectEnvMetadataForNativeSelection,
 } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const SENTINEL = "private-synthetic-value-must-not-escape";
 const secure = { secure: `invalid-ciphertext-${SENTINEL}` };
@@ -120,15 +122,14 @@ function metadata(
 }
 /**
  * Fixture Git ignores the caller's global/system configuration, so a contributor's
- * hooks, fsmonitor or signing setup cannot add processes or latency to a test.
+ * hooks, fsmonitor or signing setup cannot add processes or latency to a test,
+ * and a caller-exported `GIT_DIR`/`GIT_WORK_TREE` cannot point it at another
+ * repository (HACK-1459): `beforeAll` runs before the `beforeEach` that clears
+ * those variables for the product code.
  */
 async function git(projectRoot: string, args: string[]) {
   const child = Bun.spawn(["git", "-C", projectRoot, ...args], {
-    env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_CONFIG_NOSYSTEM: "1",
-    },
+    env: fixtureGitEnv(),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
@@ -141,9 +142,49 @@ async function git(projectRoot: string, args: string[]) {
  * checkout); on a loaded runner those writes, not the product's read-only
  * inspections, took seconds per test and hit bun's 5 s test budget (HACK-1362).
  * A copy is filesystem-only and spawns no Git.
+ *
+ * The build itself is five Git processes that write two repositories and a
+ * linked worktree. Under heavy I/O (8 writers plus `sync` loops) 24 of 36 runs
+ * spent more than Bun's 5 s hook default on it (HACK-1459), so both hooks get
+ * this budget instead; a Git that never exits still fails the file.
  */
-let templates: string;
-beforeAll(async () => {
+const TEMPLATE_BUDGET_MS = 60_000;
+/**
+ * Per-case budget. A case copies a template and runs the product's read-only
+ * metadata resolution, whose Git worktree verification starts several `git`
+ * processes. At load average above 100 one such case took 5.3 s against Bun's
+ * 5 s default (HACK-1459); the product's own inspection bounds stay unchanged.
+ */
+const CASE_BUDGET_MS = 30_000;
+setDefaultTimeout(CASE_BUDGET_MS);
+let templates = "";
+let templatesBuild: Promise<void> | undefined;
+let templatesClosed = false;
+async function removeTemplates() {
+  if (templates !== "") {
+    await rm(templates, { recursive: true, force: true });
+  }
+}
+/**
+ * A timed-out `beforeAll` keeps running: Bun starts `afterAll` at once, while
+ * the build may still create the template directory and its repositories. So
+ * `afterAll` waits for the build to settle before removing it, and a build that
+ * outlives even that wait removes the directory itself when it ends.
+ */
+beforeAll(() => {
+  templatesBuild = buildTemplates().finally(async () => {
+    if (templatesClosed) {
+      await removeTemplates();
+    }
+  });
+  return templatesBuild;
+}, TEMPLATE_BUDGET_MS);
+afterAll(async () => {
+  templatesClosed = true;
+  await templatesBuild?.catch(() => undefined);
+  await removeTemplates();
+}, TEMPLATE_BUDGET_MS);
+async function buildTemplates() {
   templates = await realpath(
     await mkdtemp(join(tmpdir(), "native-env-metadata-template-"))
   );
@@ -181,10 +222,7 @@ beforeAll(async () => {
       ]);
     })(),
   ]);
-});
-afterAll(async () => {
-  await rm(templates, { recursive: true, force: true });
-});
+}
 async function copyTemplate(name: "repository" | "linked") {
   await cp(join(templates, name), root, {
     recursive: true,

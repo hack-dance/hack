@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { resolveEffectiveBranch } from "../src/lib/branches.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const tempDirs = new Set<string>();
 
@@ -16,6 +17,7 @@ afterEach(async () => {
 
 async function runGit(args: readonly string[], cwd: string): Promise<string> {
   const proc = Bun.spawn({
+    env: fixtureGitEnv(),
     cmd: ["git", ...args],
     cwd,
     stdout: "pipe",

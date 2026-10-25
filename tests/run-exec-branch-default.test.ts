@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -50,6 +51,7 @@ function runGit(opts: {
   readonly args: readonly string[];
 }): void {
   const result = Bun.spawnSync(["git", "-C", opts.cwd, ...opts.args], {
+    env: fixtureGitEnv(),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

@@ -17,6 +17,7 @@ import {
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const SENTINEL = "private-synthetic-value-must-not-escape";
 const KEY = "synthetic-key-never-real-credentials";
@@ -104,6 +105,7 @@ function values(
 
 async function git(projectRoot: string, args: string[]) {
   const child = Bun.spawn(["git", "-C", projectRoot, ...args], {
+    env: fixtureGitEnv(),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

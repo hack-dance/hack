@@ -36,6 +36,7 @@ import {
   suiteForFile,
   type TestSuite,
 } from "../scripts/test-shard-plan.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const owned: string[] = [];
@@ -60,6 +61,7 @@ async function fixtureRepo(opts: {
   const root = await mkdtemp(join(tmpdir(), "hack-test-shard-"));
   owned.push(root);
   const init = Bun.spawnSync(["git", "init", "--quiet", root], {
+    env: fixtureGitEnv(),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

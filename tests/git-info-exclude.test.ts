@@ -22,6 +22,7 @@ import {
   renderHackGitInfoExcludeBlock,
   resetHackGitInfoExcludeCacheForTests,
 } from "../src/lib/git-info-exclude.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 let root: string;
 let repo: string;
@@ -29,11 +30,13 @@ let repo: string;
 async function git(args: readonly string[], cwd: string): Promise<void> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
-    env: {
-      PATH: process.env.PATH ?? "/usr/bin:/bin",
-      GIT_CONFIG_NOSYSTEM: "1",
-      HOME: root,
-    },
+    env: fixtureGitEnv({
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        GIT_CONFIG_NOSYSTEM: "1",
+        HOME: root,
+      },
+    }),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "pipe",

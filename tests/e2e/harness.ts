@@ -26,6 +26,7 @@ import {
   LAUNCHD_ALLOW_ISOLATED_ENV,
   LAUNCHD_DISABLE_ENV,
 } from "../../src/daemon/launchd.ts";
+import { fixtureGitEnv } from "../helpers/fixture-git.ts";
 
 /**
  * Core end-to-end harness for the hack CLI.
@@ -544,13 +545,19 @@ async function readCapture(opts: { readonly path: string }): Promise<string> {
 export async function runCommand(opts: {
   readonly argv: readonly string[];
   readonly cwd: string;
+  /** Laid over the harness environment. Ignored when `exactEnv` is set. */
   readonly env?: Readonly<Record<string, string>>;
+  /**
+   * The child's complete environment, with nothing from the harness. Fixture
+   * `git` passes `fixtureGitEnv()` here (tests/helpers/fixture-git.ts).
+   */
+  readonly exactEnv?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
   readonly onStderrChunk?: (chunk: string) => void;
 }): Promise<CliResult> {
   const proc = Bun.spawn([...opts.argv], {
     cwd: opts.cwd,
-    env: { ...process.env, ...(opts.env ?? {}) },
+    env: opts.exactEnv ?? { ...process.env, ...(opts.env ?? {}) },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -839,6 +846,7 @@ async function writeCanaryProject(opts: {
     ["services: {}", ""].join("\n")
   );
   await runCommand({
+    exactEnv: fixtureGitEnv(),
     argv: ["git", "init", "-q", "-b", "main"],
     cwd: opts.projectRoot,
   });

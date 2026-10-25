@@ -738,7 +738,9 @@ test("a helper start that outlasts the whole storage budget still refuses at the
   const { engine, result, error } = await proveWithSlowStart({ budgetMs });
   expect(result).toBeNull();
   // The start was granted only the carrier's remaining budget; its timeout
-  // lands at the carrier's end and names that exhausted budget.
+  // lands at the carrier's end and names that exhausted budget. This pins the
+  // decided reason for a hung helper start since #437: `storage-budget`, never
+  // `probe-timeout` (HACK-1459; docs/reference/native-compose-storage-xattr-carrier.md).
   expect(nativeComposeEffectRefusal(error)).toEqual({
     stage: "storage-helper-start",
     reason: "storage-budget",

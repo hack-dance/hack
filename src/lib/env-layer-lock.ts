@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { access, lstat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { ClosedCliError } from "./cli-result.ts";
+import { ClosedCliError, HackCliError } from "./cli-result.ts";
 import { closedFileWriteError, ensureDirForWrite } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import {
@@ -65,14 +65,18 @@ function envLayerLockTimeoutMessage(opts: {
 }
 
 /**
- * A `.internal` entry next to the layer that is a symlink or not a directory.
- * The lock is never created through it.
+ * A `.internal` entry next to the layer that is a symlink (dangling or not) or
+ * not a directory. The lock is never created through it. Closed and
+ * value-free, with the stable `E_PATH_CONFLICT` code that `hack env hydrate`
+ * gives the same entry, so the CLI prints one `E_PATH_CONFLICT: ...` line and
+ * `--json` reports that code instead of `E_UNEXPECTED` (HACK-1459).
  */
-export class EnvLayerLockRefusedError extends ClosedCliError {
+export class EnvLayerLockRefusedError extends HackCliError {
   constructor(opts: { readonly path: string }) {
-    super(
-      `Refused to update ${opts.path}: the .internal entry beside it is a symlink or not a directory, so its write lock cannot be taken safely. Replace it with a regular directory and retry. Nothing was written.`
-    );
+    super({
+      code: "E_PATH_CONFLICT",
+      message: `Refused to update ${opts.path}: the .internal entry beside it is a symlink or not a directory, so its write lock cannot be taken safely. Replace it with a regular directory and retry. Nothing was written.`,
+    });
     this.name = "EnvLayerLockRefusedError";
   }
 }

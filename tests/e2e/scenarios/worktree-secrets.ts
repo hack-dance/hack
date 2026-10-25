@@ -1,5 +1,5 @@
 import { join } from "node:path";
-
+import { fixtureGitEnv } from "../../helpers/fixture-git.ts";
 import {
   addLinkedWorktree,
   commitAll,
@@ -140,6 +140,7 @@ async function assertNoDivergentKey(opts: {
   readonly worktreeRoot: string;
 }): Promise<void> {
   const commonDirResult = await runCommand({
+    exactEnv: fixtureGitEnv(),
     argv: ["git", "-C", opts.primaryRoot, "rev-parse", "--git-common-dir"],
     cwd: opts.primaryRoot,
   });

@@ -12,6 +12,7 @@ import type {
   RuntimeContainer,
   RuntimeProject,
 } from "../src/lib/runtime-projects.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const tempDirs = new Set<string>();
 
@@ -24,6 +25,7 @@ afterEach(async () => {
 
 async function runGit(args: readonly string[], cwd: string): Promise<void> {
   const proc = Bun.spawn({
+    env: fixtureGitEnv(),
     cmd: ["git", ...args],
     cwd,
     stdout: "pipe",

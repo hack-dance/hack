@@ -36,6 +36,7 @@ import {
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { resolveVerifiedPrimaryWorktreeRoot } from "../src/lib/worktree-local-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
 
 const KEYS = [
@@ -522,6 +523,7 @@ test("managed secret file decrypts only through the existing project key owner, 
 });
 async function git(args: readonly string[]): Promise<void> {
   const child = Bun.spawn(["git", "-C", root, ...args], {
+    env: fixtureGitEnv(),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

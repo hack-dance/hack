@@ -1,6 +1,9 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
 import { join } from "node:path";
-import { DEFAULT_NATIVE_STORAGE_TIMEOUT_MS } from "../src/lib/compose-startup-budget.ts";
+import {
+  DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+  DEFAULT_NATIVE_STORAGE_TIMEOUT_MS,
+} from "../src/lib/compose-startup-budget.ts";
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
 import { nativeComposeRetainedVolumesValid } from "../src/lib/native-compose-retained-storage.ts";
 import {
@@ -22,24 +25,27 @@ import { legacyStorageFixture } from "./helpers/native-compose-legacy-storage.ts
  * which `invoke` sets to 1 s by default. On a loaded host (HACK-1459: load
  * average above 60) the stop's synthetic Docker processes alone take longer,
  * the deadline expires mid-stop, and the CLI reports a `private-uncertain`
- * effect refusal instead of the `E_COMPOSE_FAILED` these cases pin. Recovery
- * gets this deadline instead; a CLI that hangs is still killed by
- * {@link CLI_COMMAND_TIMEOUT_MS}.
+ * effect refusal instead of the `E_COMPOSE_FAILED` these cases pin. A 30 s
+ * deadline still expired at load average 120. Recovery therefore runs with the
+ * product's default budget, as on a host that sets none; a CLI that hangs is
+ * still killed by {@link CLI_COMMAND_TIMEOUT_MS}.
  */
-const RECOVERY_DEADLINE_MS = 30_000;
+const RECOVERY_DEADLINE_MS = DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
 /**
  * Kill bound for one source CLI process here. `invoke`'s 15 s default killed a
  * cold CLI start with its synthetic Docker and compiler processes (exit 137)
- * at load average 110; it stays above the recovery deadline.
+ * at load average 110. It stays a minute above the recovery deadline, which
+ * covers the stop's bounded cleanup after that deadline.
  */
-const CLI_COMMAND_TIMEOUT_MS = RECOVERY_DEADLINE_MS + 15_000;
+const CLI_COMMAND_TIMEOUT_MS = RECOVERY_DEADLINE_MS + 60_000;
 /**
  * Each case builds a legacy fixture through the public store, runs up to four
  * source CLI processes (each a cold Bun start plus synthetic Docker and compiler
- * processes) and reads saved state back. Under load that took up to 100 s; Bun's
- * old 30 s per-case budget ended cases while their CLI child still ran.
+ * processes) and reads saved state back. At load average 120 a case took up to
+ * 4 minutes; Bun's old 30 s per-case budget ended cases while their CLI child
+ * still ran. In CI the whole file takes about 5 s.
  */
-const STORAGE_WITNESS_CASE_BUDGET_MS = 3 * 60_000;
+const STORAGE_WITNESS_CASE_BUDGET_MS = 8 * 60_000;
 setDefaultTimeout(STORAGE_WITNESS_CASE_BUDGET_MS);
 
 function cli(root: string, args: string[]) {

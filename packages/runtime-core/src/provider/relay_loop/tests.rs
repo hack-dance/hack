@@ -1,5 +1,6 @@
 use super::*;
 use crate::provider::relay_auth::{Authority, Binding, Credential};
+use crate::provider::test_executable::{LOADED_EVENT_HANG_GUARD, MAX_CONNECT_BUDGET};
 use std::{net::TcpListener, thread};
 pub(super) fn fixture() -> (TcpListener, HostEndpoint, Authority, Credential) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -32,25 +33,27 @@ pub(super) fn session(
     let (session, proof) = server.finish(&proof).unwrap();
     (client.accept(&proof).unwrap().into_traffic(), session)
 }
+/// A reactor whose flows neither expire on the connect budget nor go idle while a loaded
+/// host delays the test's own threads (HACK-1457). Tests of either deadline force it.
 pub(super) fn reactor(max_flows: usize) -> RelayLoop {
     RelayLoop::new(Limits {
         max_flows,
-        connect_timeout: Duration::from_secs(2),
-        idle_timeout: Duration::from_secs(3),
+        connect_timeout: MAX_CONNECT_BUDGET,
+        idle_timeout: LOADED_EVENT_HANG_GUARD,
     })
     .unwrap()
 }
 pub(super) fn accept(listener: &TcpListener) -> TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(false).unwrap();
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
                     .unwrap();
                 stream
-                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .set_write_timeout(Some(LOADED_EVENT_HANG_GUARD))
                     .unwrap();
                 return stream;
             }
@@ -65,19 +68,19 @@ pub(super) fn accept(listener: &TcpListener) -> TcpStream {
 pub(super) fn transport_pair() -> (UnixStream, UnixStream) {
     let (server, client) = UnixStream::pair().unwrap();
     client
-        .set_read_timeout(Some(Duration::from_secs(3)))
+        .set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
         .unwrap();
     client
-        .set_write_timeout(Some(Duration::from_secs(3)))
+        .set_write_timeout(Some(LOADED_EVENT_HANG_GUARD))
         .unwrap();
     (server, client)
 }
 pub(super) fn guest(transport: &mut UnixStream, mut traffic: Traffic, bytes: usize, seed: usize) {
     transport
-        .set_read_timeout(Some(Duration::from_secs(3)))
+        .set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
         .unwrap();
     transport
-        .set_write_timeout(Some(Duration::from_secs(3)))
+        .set_write_timeout(Some(LOADED_EVENT_HANG_GUARD))
         .unwrap();
     let mut writer = transport.try_clone().unwrap();
     thread::scope(|scope| {
@@ -135,8 +138,9 @@ fn multiple_streaming_flows_preserve_eof_and_bound_queues() {
             let mut peer = accept(&listener);
             peers.push(scope.spawn(move || {
                 peer.set_nonblocking(false).unwrap();
-                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-                peer.set_write_timeout(Some(Duration::from_secs(3)))
+                peer.set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
+                    .unwrap();
+                peer.set_write_timeout(Some(LOADED_EVENT_HANG_GUARD))
                     .unwrap();
                 let mut total = 0;
                 let mut body = [0; MAX_DATA];
@@ -153,7 +157,7 @@ fn multiple_streaming_flows_preserve_eof_and_bound_queues() {
             }));
             guests.push(scope.spawn(move || guest(&mut transport, client, 262144, flow * 17)));
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
         while relay.active() > 0 {
             assert!(Instant::now() < deadline);
             relay.tick(Duration::from_millis(100)).unwrap();
@@ -208,7 +212,9 @@ fn idle_and_pending_deadlines_retire_without_payload() {
     let (_, session) = session(&authority, &credential);
     let (server, mut guest) = transport_pair();
     relay.add(server, &endpoint, session).unwrap();
-    relay.flows[0].last_activity = Instant::now() - Duration::from_secs(4);
+    relay.flows[0].last_activity = Instant::now()
+        .checked_sub(relay.limits.idle_timeout + Duration::from_secs(1))
+        .unwrap();
     relay.tick(Duration::from_secs(1)).unwrap();
     assert_eq!(relay.stats.timed_out, 1);
     assert_eq!(guest.read(&mut [0]).unwrap(), 0);
@@ -428,7 +434,7 @@ fn peer_fin_keeps_the_request_direction_open() {
                 .unwrap();
             assert_eq!(request, b"after response FIN");
         });
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
         while relay.active() > 0 {
             assert!(Instant::now() < deadline);
             relay.tick(Duration::from_millis(100)).unwrap();
@@ -446,7 +452,7 @@ fn unaccepted_peer_expires_on_the_connection_budget() {
     let (_, session) = session(&authority, &credential);
     let (server, mut guest) = transport_pair();
     relay.add(server, &endpoint, session).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
     while relay.active() > 0 {
         assert!(Instant::now() < deadline);
         relay.tick(Duration::from_millis(100)).unwrap();
@@ -467,7 +473,7 @@ fn truncated_request_is_reset_not_graceful_backend_eof() {
         .write_all(&client.send.encode(Frame::Data(b"partial request")).unwrap())
         .unwrap();
     guest.shutdown(Shutdown::Write).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
     while relay.active() > 0 {
         assert!(Instant::now() < deadline);
         relay.tick(Duration::from_millis(20)).unwrap();

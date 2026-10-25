@@ -271,7 +271,7 @@ fn rejects_a_live_inherited_unix_listener_at_the_pinned_inode() {
     // ConnectionRefused. Poll the unchanged classifier for a bounded time and
     // record the raw observation on the final attempt so a consistent platform
     // errno can be identified later without relaxing the product classifier.
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + crate::provider::test_executable::LOADED_EVENT_HANG_GUARD;
     while socket_absent(&stale).is_err() {
         if Instant::now() >= deadline {
             let observed = UnixStream::connect(&stale)
@@ -419,9 +419,9 @@ fn complete_fixture() -> (Fixture, Candidate, Alias) {
     receipt["caSha256"] = serde_json::json!(digest(&der));
     receipt["authority"]["socket"] =
         hostname_authority::managed::inspect(&candidate).unwrap()["socket"].clone();
-    let free = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    receipt["listener"]["port"] = serde_json::json!(free.local_addr().unwrap().port());
-    drop(free);
+    // Recovery requires this recorded port free much later; never an ephemeral one.
+    receipt["listener"]["port"] =
+        serde_json::json!(crate::provider::test_socket::unallocated_tcp_port());
     config["binding"]["httpsPort"] = receipt["listener"]["port"].clone();
     fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
     fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
@@ -564,9 +564,8 @@ fn successful_port_guards_own_all_four_allocated_addresses_during_observation() 
             IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
         };
         let reachable = std::net::SocketAddr::new(local_ip, address.port());
-        let peer =
-            std::net::TcpStream::connect_timeout(&reachable, std::time::Duration::from_secs(1))
-                .unwrap();
+        let guard = crate::provider::test_executable::LOADED_EVENT_HANG_GUARD;
+        let peer = std::net::TcpStream::connect_timeout(&reachable, guard).unwrap();
         let mut readiness = libc::pollfd {
             fd: listener.as_raw_fd(),
             events: libc::POLLIN,
@@ -574,7 +573,8 @@ fn successful_port_guards_own_all_four_allocated_addresses_during_observation() 
         };
         // SAFETY: readiness is one live pollfd holding our live listener. Observe
         // its asynchronous accept readiness once with a finite timeout, no retry.
-        assert_eq!(unsafe { libc::poll(&raw mut readiness, 1, 1000) }, 1);
+        let guard = guard.as_millis() as libc::c_int;
+        assert_eq!(unsafe { libc::poll(&raw mut readiness, 1, guard) }, 1);
         assert_eq!(readiness.revents, libc::POLLIN);
         let (accepted, peer_address) = listener.accept().unwrap();
         assert_eq!(peer_address, peer.local_addr().unwrap());

@@ -51,6 +51,23 @@ pub(super) fn sleeping_executable(binary: &Path) {
 /// [`ISOLATED_HANG_GUARD`], so an isolated fixture still reports its own failure.
 pub(super) const LOADED_HOST_SCAN_WAIT: Duration = Duration::from_secs(60);
 
+/// Hang guard for a test that waits for an event it has already caused: a queued
+/// connection, bytes or a close it wrote, a relay draining flows whose peers it drives, a
+/// child it spawned reaching exec. It bounds a hang, not latency. On a loaded host, 1-5 s
+/// waits for such events were too short even though the event did arrive (HACK-1457).
+/// Only an event that never happens reaches it.
+// The host-endpoint, relay and resource fixtures that use it are macOS-only.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) const LOADED_EVENT_HANG_GUARD: Duration = Duration::from_secs(60);
+
+/// The largest connect or admission budget that `HostEndpoint` and `RelayLoop` accept (they
+/// refuse zero and anything over 5 s). A test whose result is not that budget's expiry
+/// passes it, so a loaded host's scheduling delay before the next progress check cannot
+/// turn the result into a timeout (HACK-1457). Tests of expiry still force an expired
+/// deadline themselves, and the 5 s bound of the APIs is unchanged.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) const MAX_CONNECT_BUDGET: Duration = Duration::from_secs(5);
+
 /// Hang guard for [`run_isolated`]: the child launches the whole test binary on a host that
 /// may be heavily loaded, so this bounds a hang rather than the fixture's own timing.
 pub(super) const ISOLATED_HANG_GUARD: Duration = Duration::from_secs(120);

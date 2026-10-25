@@ -923,6 +923,27 @@ mod tests {
         assert_eq!(busy.release_within(wait), Release::Refused);
         assert!(absent(&receipt).unwrap());
     }
+    /// Dropping the guard is what releases an abandoned start: `Drop` runs the bounded
+    /// release, and an admitted reservation's receipt stays for its running graph.
+    #[test]
+    fn dropping_an_unadmitted_reservation_releases_its_receipt_under_a_free_lease() {
+        let fixture = LeaseFixture::new();
+        let (abandoned, abandoned_receipt) = fixture.reservation('3', 0);
+        drop(abandoned);
+        assert!(
+            absent(&abandoned_receipt).unwrap(),
+            "E_TEST_DROP_NOT_RELEASED"
+        );
+        let (mut admitted, admitted_receipt) = fixture.reservation('4', 1);
+        let written = fs::read(&admitted_receipt).unwrap();
+        admitted.admitted();
+        drop(admitted);
+        assert_eq!(
+            fs::read(&admitted_receipt).ok().as_deref(),
+            Some(&written[..]),
+            "E_TEST_DROP_RELEASED_ADMITTED"
+        );
+    }
     /// Hang guard for the claim-writer test, not a correctness bound. A writer can
     /// wait behind seven fsync-backed critical sections whose latency is unbounded on
     /// a loaded host (HACK-1430: a 3 s per-writer budget expired at load average

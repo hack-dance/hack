@@ -423,28 +423,64 @@ fn remove_record(directory: &Path, record: &Record) -> Result<(), CandidateError
         .and_then(|f| f.sync_all())
         .map_err(state::io)
 }
-impl Drop for Reservation {
-    fn drop(&mut self) {
+/// How long dropping an unadmitted [`Reservation`] waits for the provider lease to remove
+/// its own receipt. Drop cannot report failure, so this bounds how long an abandoned start
+/// blocks its caller. When the lease stays busy past it, or the lease, home or receipt
+/// cannot be verified, the receipt is left exactly as written: its slots stay reserved
+/// (never double-assigned), and the fallback that releases it is the explicit
+/// [`recover_orphan`] for a never-admitted run, or dead-owner graph cleanup
+/// ([`recover_cleaned`]) once this process is gone. Both require the recorded owner to
+/// be dead, so a live process never loses its own reservation to them.
+const RELEASE_LEASE_WAIT: Duration = Duration::from_secs(5);
+
+/// What [`Reservation::release_within`] did with an unadmitted reservation's receipt.
+#[derive(Debug, PartialEq, Eq)]
+enum Release {
+    /// Admitted or already released: the receipt is not this guard's to remove.
+    Retained,
+    /// The lease was taken and an exact, unbound receipt was removed.
+    Removed,
+    /// The lease was taken but the home, a socket or the receipt did not verify.
+    Refused,
+    /// The lease was still busy when the wait expired; the receipt was left for recovery.
+    LeaseBusy,
+    /// The lease could not be opened or verified; the receipt was left for recovery.
+    LeaseUnavailable,
+}
+
+impl Reservation {
+    /// Remove this unadmitted reservation's receipt under the provider lease, waiting at
+    /// most `wait` for that lease. `LeaseBusy` and `LeaseUnavailable` never touch the receipt.
+    fn release_within(&mut self, wait: Duration) -> Release {
         if !self.releasable {
-            return;
+            return Release::Retained;
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + wait;
         loop {
             match state::Lock::acquire_existing(&self.provider) {
                 Ok(_lock) => {
-                    if fs::metadata(&self.home)
+                    let removed = fs::metadata(&self.home)
                         .is_ok_and(|m| (m.dev(), m.ino()) == self.home_identity)
-                    {
-                        let _ = self.cancel_locked();
-                    }
-                    return;
+                        && self.cancel_locked().is_ok();
+                    self.releasable = false;
+                    return if removed {
+                        Release::Removed
+                    } else {
+                        Release::Refused
+                    };
                 }
                 Err(e) if e.code == "provider_busy" && Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(20))
                 }
-                Err(_) => return,
+                Err(e) if e.code == "provider_busy" => return Release::LeaseBusy,
+                Err(_) => return Release::LeaseUnavailable,
             }
         }
+    }
+}
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        let _ = self.release_within(RELEASE_LEASE_WAIT);
     }
 }
 fn fingerprint(record: &Record) -> Result<String, CandidateError> {
@@ -777,13 +813,178 @@ mod tests {
             other
         );
     }
+    /// A candidate whose provider holds an owner record, plus the short-home alias it names.
+    struct LeaseFixture {
+        _root: super::super::tests::Fixture,
+        candidate: Candidate,
+        provider: PathBuf,
+        short_home: PathBuf,
+        token: String,
+    }
+    impl LeaseFixture {
+        fn new() -> Self {
+            let root = super::super::tests::Fixture::new();
+            let candidate = Candidate::discover(&root.0).unwrap();
+            let provider = candidate.state_root.join("run/smolvm");
+            state::private_directory(&provider.join("home")).unwrap();
+            drop(state::Lock::acquire(&provider).unwrap());
+            let token = super::super::probes::token().unwrap();
+            let short_home = Path::new("/private/tmp").join(format!("hkl-{}", &token[..12]));
+            std::os::unix::fs::symlink(provider.join("home"), &short_home).unwrap();
+            let owner: state::Owner = serde_json::from_value(serde_json::json!({
+                "version":1,"checkout":candidate.checkout,"token":token,
+                "machine":format!("hack-{}",&token[..12]),"short_home":short_home,
+                "created":true,"phase":"running","process":null,
+                "dependency_sockets":{"slots":2},"storage":null,"overlay":null,
+                "guest_boot_id":null,"previous_guest_boot_id":null,"daemon_pid":null,
+                "daemon_start":null,"rootfs_digest":null
+            }))
+            .unwrap();
+            state::write(&provider.join("owner.json"), &owner).unwrap();
+            Self {
+                _root: root,
+                candidate,
+                provider,
+                short_home,
+                token,
+            }
+        }
+        /// An unadmitted reservation of `slot` whose recorded owner is a dead process,
+        /// as it is for recovery once the process that dropped it has exited.
+        fn reservation(&self, run: char, slot: u8) -> (Reservation, PathBuf) {
+            let mut record = fixture_record(run, slot);
+            record.owner = self.token.clone();
+            record.process.pid = i32::MAX;
+            assert!(!identity::alive(record.process.pid).unwrap());
+            let directory = root(&self.candidate);
+            store(&directory, &record);
+            let m = fs::metadata(&self.short_home).unwrap();
+            let receipt = directory.join(format!("{}.json", record.run));
+            let reservation = Reservation {
+                record,
+                directory,
+                provider: self.provider.clone(),
+                home: self.short_home.clone(),
+                home_identity: (m.dev(), m.ino()),
+                releasable: true,
+            };
+            (reservation, receipt)
+        }
+    }
+    impl Drop for LeaseFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.short_home);
+        }
+    }
+    /// HACK-1457: when the lease stays busy past the release wait, dropping an unadmitted
+    /// reservation leaves its receipt exactly as written, still reserving its slot, and
+    /// dead-owner recovery (the core of `recover_orphan` and `recover_cleaned`) releases it.
+    #[test]
+    fn a_release_that_outlasts_a_busy_lease_leaves_a_recoverable_receipt() {
+        let fixture = LeaseFixture::new();
+        // A free lease: the guard removes its own unbound receipt.
+        let (mut free, free_receipt) = fixture.reservation('1', 0);
+        assert_eq!(
+            free.release_within(Duration::ZERO),
+            Release::Removed,
+            "E_TEST_RELEASE_NOT_REMOVED"
+        );
+        assert!(absent(&free_receipt).unwrap(), "E_TEST_RELEASE_NOT_REMOVED");
+
+        let (mut busy, receipt) = fixture.reservation('2', 1);
+        let written = fs::read(&receipt).unwrap();
+        let held = state::Lock::acquire_existing(&fixture.provider).unwrap();
+        let wait = Duration::from_millis(100);
+        let started = Instant::now();
+        assert_eq!(
+            busy.release_within(wait),
+            Release::LeaseBusy,
+            "E_TEST_RELEASE_IGNORED_BUSY_LEASE"
+        );
+        assert!(started.elapsed() >= wait, "E_TEST_RELEASE_WAIT_NOT_HONORED");
+        assert_eq!(
+            fs::read(&receipt).ok().as_deref(),
+            Some(&written[..]),
+            "E_TEST_RECEIPT_CHANGED"
+        );
+        let reserved = records(&root(&fixture.candidate), &fixture.token, 2).unwrap();
+        assert_eq!(
+            reserved,
+            vec![busy.record.clone()],
+            "E_TEST_SLOT_NOT_RESERVED"
+        );
+        drop(held);
+
+        let lease = state::Lock::acquire_existing(&fixture.provider).unwrap();
+        recover_record(&fixture.candidate, &busy.record, None).unwrap();
+        assert!(absent(&receipt).unwrap(), "E_TEST_RECEIPT_NOT_RECOVERED");
+        drop(lease);
+        // A late retry never removes or recreates a receipt it no longer matches.
+        assert_eq!(busy.release_within(wait), Release::Refused);
+        assert!(absent(&receipt).unwrap());
+    }
+    /// Dropping the guard is what releases an abandoned start: `Drop` runs the bounded
+    /// release, and an admitted reservation's receipt stays for its running graph.
+    #[test]
+    fn dropping_an_unadmitted_reservation_releases_its_receipt_under_a_free_lease() {
+        let fixture = LeaseFixture::new();
+        let (abandoned, abandoned_receipt) = fixture.reservation('3', 0);
+        drop(abandoned);
+        assert!(
+            absent(&abandoned_receipt).unwrap(),
+            "E_TEST_DROP_NOT_RELEASED"
+        );
+        let (mut admitted, admitted_receipt) = fixture.reservation('4', 1);
+        let written = fs::read(&admitted_receipt).unwrap();
+        admitted.admitted();
+        drop(admitted);
+        assert_eq!(
+            fs::read(&admitted_receipt).ok().as_deref(),
+            Some(&written[..]),
+            "E_TEST_DROP_RELEASED_ADMITTED"
+        );
+    }
     /// Hang guard for the claim-writer test, not a correctness bound. A writer can
     /// wait behind seven fsync-backed critical sections whose latency is unbounded on
     /// a loaded host (HACK-1430: a 3 s per-writer budget expired at load average
     /// ~190), so only a lease that is never released should reach this limit.
     const CLAIM_LEASE_HANG_GUARD: Duration = Duration::from_secs(120);
+    /// Counts one writer inside the claim lease. Declared after the lease guard, it drops
+    /// first, so a writer that panics inside the lease has left the count before the next
+    /// writer can take the lease, and that writer does not report the panic as an overlap.
+    struct InsideLease<'a>(&'a std::sync::atomic::AtomicUsize);
+    impl Drop for InsideLease<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    /// The panic message a writer thread ended with, or a closed placeholder.
+    fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+        payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("E_TEST_CLAIM_WRITER_PANIC_UNPRINTABLE")
+    }
     #[test]
     fn concurrent_claim_writers_serialize_without_overlapping_slots() {
+        let slots = claim_writers(None).unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(slots, (0..8).collect());
+    }
+    /// HACK-1457: a writer that panics inside the lease is reported as that panic. Before,
+    /// it left the inside count raised, and the next writer failed as a lease overlap.
+    #[test]
+    fn a_writer_panic_inside_the_lease_names_itself_not_an_overlap() {
+        let failure = claim_writers(Some(0)).unwrap_err();
+        assert_eq!(
+            failure, "E_TEST_CLAIM_WRITER_PANICKED (writer 0: E_TEST_INJECTED_WRITER_FAULT)",
+            "E_TEST_CLAIM_FAILURE_MISATTRIBUTED"
+        );
+    }
+    /// Run eight contending claim writers; `fault` names a writer that panics inside the
+    /// lease. Returns the slots claimed, or every writer panic in writer order, so a
+    /// failure names its own cause rather than a symptom it left for other writers.
+    fn claim_writers(fault: Option<u8>) -> Result<BTreeSet<u8>, String> {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
         const WRITERS: u8 = 8;
@@ -815,21 +1016,29 @@ mod tests {
                             assert!(Instant::now() < deadline, "E_TEST_CLAIM_LEASE_HANG");
                             std::thread::sleep(Duration::from_millis(1));
                         }
-                        Err(e) => panic!("unexpected reservation lock refusal: {}", e.code),
+                        Err(e) => panic!("E_TEST_CLAIM_LEASE_REFUSED: {}", e.code),
                     }
                 };
                 assert!(was_refused, "E_TEST_CLAIM_WRITER_UNCONTENDED");
                 // The lease, not the slot selection, must exclude other writers.
-                assert_eq!(inside.fetch_add(1, SeqCst), 0, "E_TEST_CLAIM_LEASE_OVERLAP");
+                let entered = inside.fetch_add(1, SeqCst);
+                let in_lease = InsideLease(&inside);
+                assert_eq!(entered, 0, "E_TEST_CLAIM_LEASE_OVERLAP");
+                if fault == Some(index) {
+                    panic!("E_TEST_INJECTED_WRITER_FAULT");
+                }
                 let mut record = fixture_record(char::from(b'1' + index), 0);
-                let existing = records(&directory, &record.owner, WRITERS).unwrap();
+                let existing = records(&directory, &record.owner, WRITERS)
+                    .unwrap_or_else(|e| panic!("E_TEST_CLAIM_RECORDS_REFUSED: {}", e.code));
                 let used = existing
                     .iter()
                     .flat_map(|r| r.slots.values().copied())
                     .collect();
-                record.slots = select(&BTreeSet::from([0]), &used, WRITERS, true).unwrap();
+                record.slots = select(&BTreeSet::from([0]), &used, WRITERS, true)
+                    .unwrap_or_else(|e| panic!("E_TEST_CLAIM_SELECT_REFUSED: {}", e.code));
                 store(&directory, &record);
-                assert_eq!(inside.fetch_sub(1, SeqCst), 1, "E_TEST_CLAIM_LEASE_OVERLAP");
+                assert_eq!(inside.load(SeqCst), 1, "E_TEST_CLAIM_LEASE_OVERLAP");
+                drop(in_lease);
                 drop(lock);
                 record.slots[&0]
             }));
@@ -846,16 +1055,30 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         drop(held);
-        let slots = threads
-            .into_iter()
-            .map(|t| t.join().unwrap())
-            .collect::<BTreeSet<_>>();
+        let mut slots = BTreeSet::new();
+        let mut panics = Vec::new();
+        for (index, thread) in threads.into_iter().enumerate() {
+            match thread.join() {
+                Ok(slot) => {
+                    slots.insert(slot);
+                }
+                Err(payload) => {
+                    panics.push(format!("writer {index}: {}", panic_message(&*payload)))
+                }
+            }
+        }
+        if !panics.is_empty() {
+            return Err(format!(
+                "E_TEST_CLAIM_WRITER_PANICKED ({})",
+                panics.join("; ")
+            ));
+        }
         assert!(all_refused, "E_TEST_CLAIM_WRITERS_NOT_REFUSED");
-        assert_eq!(slots, (0..WRITERS).collect());
         assert_eq!(
             records(&directory, &"a".repeat(32), WRITERS).unwrap().len(),
             usize::from(WRITERS)
         );
+        Ok(slots)
     }
     #[test]
     fn legacy_exact_selection_cannot_steal_unbound_durable_reservation() {

@@ -72,25 +72,19 @@ impl Relay {
         if let Some(reservation) = reservation {
             command.args(["--reservation", reservation]);
         }
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let output = child.stdout.take().unwrap();
-        let mut descriptor = libc::pollfd {
-            fd: output.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
+        // A caller-supplied root stays the caller's; only a fresh root is removed on failure.
+        let mut startup = PublisherStartup {
+            child: None,
+            root: if reuse { PathBuf::new() } else { root.clone() },
         };
-        assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 3000) }, 1);
-        let mut line = String::new();
-        BufReader::new(output).read_line(&mut line).unwrap();
-        assert_eq!(line, "ready\n");
-        assert_eq!(
-            fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
-            0o700
+        startup.child = Some(
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
         );
+        let child = await_bare_ready(startup, &socket);
         Self {
             child,
             root,
@@ -98,6 +92,8 @@ impl Relay {
             port: None,
         }
     }
+    /// Connects a client the relay must keep. Setting a timeout fails if the relay already
+    /// closed the stream (see `connect_refused`), which is a real failure here.
     fn connect(&self) -> UnixStream {
         let stream = UnixStream::connect(&self.socket).unwrap();
         stream
@@ -107,6 +103,16 @@ impl Relay {
             .set_write_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         stream
+    }
+    /// Connects a client the relay must refuse, and proves the refusal.
+    ///
+    /// The relay refuses by closing the accepted stream, which can happen before this
+    /// client's next syscall. Once the peer has closed, XNU's `sosetopt` rejects
+    /// `SO_RCVTIMEO`/`SO_SNDTIMEO` with EINVAL (both directions are shut), so this never
+    /// sets socket timeouts; it bounds the wait with `poll` instead.
+    fn connect_refused(&self) {
+        let stream = UnixStream::connect(&self.socket).unwrap();
+        assert_refused_within(&stream, REFUSAL_DEADLINE);
     }
     fn stop(&mut self) {
         if self.child.try_wait().unwrap().is_none() {
@@ -134,6 +140,79 @@ impl Drop for Relay {
         self.stop();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+/// Requires a relay's bare "ready\n" line and a private socket, then hands the child over.
+/// No `Relay` exists until this returns, so `startup` owns the child meanwhile: if any check
+/// fails or panics, its `Drop` kills and reaps the child (and removes a fresh root) instead
+/// of orphaning `stream-relay-host`.
+fn await_bare_ready(mut startup: PublisherStartup, socket: &std::path::Path) -> Child {
+    let output = startup
+        .child
+        .as_mut()
+        .expect("startup owns child")
+        .stdout
+        .take()
+        .unwrap();
+    let mut descriptor = libc::pollfd {
+        fd: output.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 3000) }, 1);
+    let mut line = String::new();
+    BufReader::new(output).read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    assert_eq!(
+        fs::metadata(socket).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    startup.root = PathBuf::new();
+    startup.child.take().expect("startup owns child")
+}
+
+#[test]
+fn failed_relay_readiness_kills_and_reaps_the_child() {
+    let root = PathBuf::from(format!(
+        "/tmp/hkr-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).unwrap();
+    // A live child with the wrong readiness line fails the check without exiting on its own.
+    let child = Command::new("/bin/sh")
+        .args(["-c", "echo unready; exec sleep 30"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id() as libc::pid_t;
+    let startup = PublisherStartup {
+        child: Some(child),
+        root: root.clone(),
+    };
+    let socket = root.join("app.sock");
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        await_bare_ready(startup, &socket)
+    }));
+    let mut status = 0;
+    // SAFETY: a non-blocking wait on this test's own child pid.
+    let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    let error = io::Error::last_os_error();
+    if waited == 0 {
+        // SAFETY: the child is still ours and unreaped; stop it before failing.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, &mut status, 0);
+        }
+        let _ = fs::remove_dir_all(&root);
+        panic!("E_RELAY_STARTUP_ORPHAN: failed readiness left the relay child running");
+    }
+    assert!(failed.is_err(), "wrong readiness line must fail startup");
+    // ECHILD: the guard already killed and reaped it, so no zombie or orphan remains.
+    assert_eq!(waited, -1);
+    assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    assert!(!root.exists(), "failed startup must remove its fresh root");
 }
 #[test]
 fn large_stream_half_close_drains_all_buffered_bytes() {
@@ -326,8 +405,7 @@ fn occupied_socket_is_not_unlinked_and_unavailable_target_fails_connection() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(73));
-    let mut client = relay.connect();
-    assert_refused(client.read(&mut [0]));
+    relay.connect_refused();
     assert!(relay.child.try_wait().unwrap().is_none());
 }
 
@@ -347,8 +425,7 @@ fn connection_limit_refuses_excess_without_disrupting_existing_streams() {
         clients.push(client);
         upstreams.push(upstream);
     }
-    let mut excess = relay.connect();
-    assert_refused(excess.read(&mut [0]));
+    relay.connect_refused();
     assert!(relay.child.try_wait().unwrap().is_none());
     for (client, upstream) in clients.iter_mut().zip(&mut upstreams) {
         upstream.write_all(b"alive").unwrap();
@@ -370,6 +447,66 @@ fn assert_refused(result: std::io::Result<usize>) {
             ) => {}
         other => panic!("expected prompt refusal, received {other:?}"),
     }
+}
+
+/// Bounds how long a refused client waits for the relay to close it.
+const REFUSAL_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Proves `stream` is refused within `limit` without setting socket timeouts: waits for
+/// readability with `poll`, then requires EOF or a reset. A live peer times out and fails;
+/// a peer that sends data fails the refusal check.
+fn assert_refused_within(stream: &UnixStream, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized descriptor lives throughout this bounded poll.
+        let polled = unsafe {
+            libc::poll(
+                &mut descriptor,
+                1,
+                remaining.as_millis().min(i32::MAX as u128) as i32,
+            )
+        };
+        if polled < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        assert_eq!(
+            polled, 1,
+            "expected prompt refusal, stream stayed open for {limit:?}"
+        );
+        break;
+    }
+    // Readable: EOF, a reset, or data is pending, so this read cannot block.
+    let mut reader = stream;
+    assert_refused(reader.read(&mut [0]));
+}
+
+#[test]
+fn refusal_check_accepts_a_peer_that_closed_before_the_check() {
+    // The relay can close a refused stream before the client's first syscall after connect.
+    let (client, relay_side) = UnixStream::pair().unwrap();
+    drop(relay_side);
+    assert_refused_within(&client, REFUSAL_DEADLINE);
+}
+
+#[test]
+#[should_panic(expected = "expected prompt refusal")]
+fn refusal_check_rejects_a_live_peer() {
+    let (client, _relay_side) = UnixStream::pair().unwrap();
+    assert_refused_within(&client, Duration::from_millis(50));
+}
+
+#[test]
+#[should_panic(expected = "expected prompt refusal")]
+fn refusal_check_rejects_a_peer_that_sends_data() {
+    let (client, mut relay_side) = UnixStream::pair().unwrap();
+    relay_side.write_all(b"x").unwrap();
+    assert_refused_within(&client, REFUSAL_DEADLINE);
 }
 
 #[test]

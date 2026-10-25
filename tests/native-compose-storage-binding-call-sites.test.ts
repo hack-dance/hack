@@ -10,6 +10,7 @@ import {
   beginNativeComposeStorageCarrierIntent,
   initializeNativeComposeStorageCarrierJournal,
 } from "../src/lib/native-compose-storage-carrier-journal.ts";
+import * as commandRecord from "../src/lib/native-compose-storage-command-record.ts";
 import {
   createNativeComposeDockerStorageXattrCarrier,
   nativeComposeStorageCarrierBudgetReason,
@@ -257,6 +258,9 @@ function outcomeOf(error: unknown, deadline: number) {
 async function verifyOnce(opts: {
   readonly perturb: number;
   readonly fault?: { readonly name: Fault; readonly inspection: number };
+  /** Invalidate the real original command owner once the invoke returned,
+   * before its deferred finish, as a live owner veto would. */
+  readonly vetoOwner?: true;
 }) {
   const f = await fixture({ volume: true });
   if (opts.fault) {
@@ -266,6 +270,17 @@ async function verifyOnce(opts: {
     );
   }
   return await withCarrierEnvironment(f, opts.perturb, async (reads) => {
+    // The real owner, captured as it is created; nothing else changes.
+    const owners: commandRecord.NativeComposeStorageCommandOwner[] = [];
+    const createOwner = commandRecord.createNativeComposeStorageCommandOwner;
+    const ownerCreation = spyOn(
+      commandRecord,
+      "createNativeComposeStorageCommandOwner"
+    ).mockImplementation(async (owner) => {
+      const created = await createOwner(owner);
+      owners.push(created);
+      return created;
+    });
     const { deadline, handle } = await carrier(f);
     const ports = nativeComposeStorageXattrCarrierPorts(handle);
     const journalPath = join(f.root, "journal");
@@ -324,10 +339,17 @@ async function verifyOnce(opts: {
       if (!finish) {
         throw new Error("Expected an original deferred finish");
       }
+      if (opts.vetoOwner) {
+        expect(owners).toHaveLength(1);
+        for (const owner of owners) {
+          commandRecord.invalidateNativeComposeStorageCommandOwner(owner);
+        }
+      }
       await finish({ input, completion });
     } catch (error: unknown) {
       caught = error;
     } finally {
+      ownerCreation.mockRestore();
       await directory.file.close();
     }
     return {
@@ -443,6 +465,13 @@ test.each([
 // once more (7) and at each of its remove command's three admissions (8-10).
 // The chosen inspection shows another stopped state under the same creation
 // time and policy.
+//
+// The reported refusal is asserted first: it is the property, and a carrier
+// that refused before the fault (for example a host identity read refused
+// under load, HACK-1463) then fails with its own stage and reason instead of a
+// bare inspection count. Only the fault reports `helper-policy-stability`, and
+// it refuses at once, so given that refusal the count pins which inspection
+// reached the tagged call site.
 test.each([
   ["on its repeated stopped inspection", 7],
   ["at its remove command's first admission", 8],
@@ -454,11 +483,6 @@ test.each([
       perturb: 0,
       fault: { name: "fault-carrier-state-changed", inspection },
     });
-    expect(
-      Number(
-        await Bun.file(join(verified.root, "carrier-state-inspects")).text()
-      )
-    ).toBe(inspection);
     expect(verified.outcome).toEqual({
       refusal: {
         stage: "storage-helper-policy",
@@ -466,7 +490,32 @@ test.each([
       },
       late: "helper-policy-stability",
     });
+    expect(
+      Number(
+        await Bun.file(join(verified.root, "carrier-state-inspects")).text()
+      )
+    ).toBe(inspection);
     // The helper ran once; nothing proved or retired the witness afterwards.
+    expect(await helperOperations(verified.root)).toEqual(["verify"]);
+  },
+  CASE_BUDGET_MS
+);
+
+// The deferred finish checks the live original command owner before its
+// binding read (read 49). An owner vetoed after every command settled is the
+// invocation's saved private state, so the finish refuses as `private-state` at
+// the carrier's own cleanup stage; untagged, it would report `unclassified`,
+// and `storage-budget` once caught after the carrier deadline.
+test(
+  "a verify whose original command owner was vetoed before its deferred finish refuses as private-state at storage-helper-cleanup, even after its deadline",
+  async () => {
+    const verified = await verifyOnce({ perturb: 0, vetoOwner: true });
+    expect(verified.outcome).toEqual({
+      refusal: { stage: "storage-helper-cleanup", reason: "private-state" },
+      late: "private-state",
+    });
+    // It refused before the finish's binding read and evidence retirement.
+    expect(verified.reads).toBe(48);
     expect(await helperOperations(verified.root)).toEqual(["verify"]);
   },
   CASE_BUDGET_MS

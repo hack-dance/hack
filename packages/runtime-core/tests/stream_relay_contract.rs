@@ -19,6 +19,25 @@ use std::{
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const BINARY: &str = concat!(env!("OUT_DIR"), "/stream-relay-host");
+
+/// Creates a new scratch root `/tmp/<prefix>-<pid>-<n>`. A name left behind by
+/// an earlier run whose PID is now reused is skipped, so a stale directory
+/// never fails a fresh test.
+fn fresh_root(prefix: &str) -> PathBuf {
+    loop {
+        let root = PathBuf::from(format!(
+            "/tmp/{prefix}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&root) {
+            Ok(()) => return root,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create {}: {error}", root.display()),
+        }
+    }
+}
+
 struct Relay {
     child: Child,
     root: PathBuf,
@@ -41,16 +60,7 @@ impl Relay {
         existing: Option<PathBuf>,
     ) -> Self {
         let reuse = existing.is_some();
-        let root = existing.unwrap_or_else(|| {
-            PathBuf::from(format!(
-                "/tmp/hkr-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ))
-        });
-        if !reuse {
-            fs::create_dir(&root).unwrap();
-        }
+        let root = existing.unwrap_or_else(|| fresh_root("hkr"));
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let socket = root.join("app.sock");
         let mut command = Command::new(BINARY);
@@ -172,13 +182,23 @@ fn await_bare_ready(mut startup: PublisherStartup, socket: &std::path::Path) -> 
 }
 
 #[test]
-fn failed_relay_readiness_kills_and_reaps_the_child() {
-    let root = PathBuf::from(format!(
-        "/tmp/hkr-{}-{}",
+fn fresh_root_skips_a_stale_directory_with_the_next_name() {
+    let stale = PathBuf::from(format!(
+        "/tmp/hks-{}-{}",
         std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
+        NEXT.load(Ordering::Relaxed)
     ));
-    fs::create_dir(&root).unwrap();
+    fs::create_dir(&stale).unwrap();
+    let root = fresh_root("hks");
+    assert_ne!(root, stale);
+    assert!(root.is_dir());
+    fs::remove_dir(&root).unwrap();
+    fs::remove_dir(&stale).unwrap();
+}
+
+#[test]
+fn failed_relay_readiness_kills_and_reaps_the_child() {
+    let root = fresh_root("hkr");
     // A live child with the wrong readiness line fails the check without exiting on its own.
     let child = Command::new("/bin/sh")
         .args(["-c", "echo unready; exec sleep 30"])
@@ -528,8 +548,7 @@ fn inherited_descriptors_do_not_keep_parent_channels_alive() {
 
 #[test]
 fn namespace_requests_reject_invalid_identity_before_publishing() {
-    let root = PathBuf::from(format!("/tmp/hkr-netns-{}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkr-netns");
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let path = root.join("app.sock");
     for (address, option, pid, start, code) in [
@@ -695,8 +714,7 @@ fn reused_socket_rejects_old_reservation_and_expiring_partial_handshakes() {
 
 #[test]
 fn malformed_reservations_refuse_before_socket_creation() {
-    let root = PathBuf::from(format!("/tmp/hkr-reservation-{}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkr-reservation");
     let socket = root.join("app.sock");
     for token in [
         "",
@@ -786,12 +804,7 @@ fn try_frontend_publisher(
     control_token: Option<&str>,
     unix: bool,
 ) -> Result<Relay, PublisherStartupFailure> {
-    let root = PathBuf::from(format!(
-        "/tmp/hkp-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkp");
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let mut command = Command::new(BINARY);
     command
@@ -1135,8 +1148,7 @@ fn publisher_refuses_port_conflicts_and_stale_reused_upstream() {
 #[test]
 fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
     use std::os::unix::{fs::MetadataExt, net::UnixListener};
-    let root = PathBuf::from(format!("/tmp/hkp-ack-{}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkp-ack");
     let path = root.join("socket");
     let upstream = UnixListener::bind(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1179,8 +1191,7 @@ fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
 #[test]
 fn publisher_refuses_nonprivate_or_aliased_upstream_before_listening() {
     use std::os::unix::{fs::symlink, net::UnixListener};
-    let root = PathBuf::from(format!("/tmp/hkp-private-{}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkp-private");
     let path = root.join("socket");
     let _listener = UnixListener::bind(&path).unwrap();
     // Hold the requested port for the whole test: a publisher that reached bind()
@@ -1222,12 +1233,7 @@ fn publisher_refuses_nonprivate_or_aliased_upstream_before_listening() {
 #[test]
 fn private_control_stops_only_matching_publisher_and_preserves_replaced_path() {
     use std::os::unix::net::{UnixDatagram, UnixListener};
-    let root = PathBuf::from(format!(
-        "/tmp/hkc-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkc");
     let upstream = root.join("upstream");
     let _server = UnixListener::bind(&upstream).unwrap();
     fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1293,12 +1299,7 @@ fn private_control_stops_only_matching_publisher_and_preserves_replaced_path() {
 #[test]
 fn control_startup_refuses_occupied_and_nonprivate_paths_without_retaining_publisher_resources() {
     use std::os::unix::{fs::MetadataExt, net::UnixListener};
-    let root = PathBuf::from(format!(
-        "/tmp/hkcf-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkcf");
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let upstream = root.join("upstream");
     let _server = UnixListener::bind(&upstream).unwrap();
@@ -1453,12 +1454,7 @@ fn unix_publication_streams_and_preserves_occupied_or_replaced_frontend() {
 
 #[test]
 fn unix_publication_survives_a_delayed_private_upstream_ack() {
-    let root = PathBuf::from(format!(
-        "/tmp/hkr-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkr");
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let upstream = root.join("delayed.sock");
     let listener = UnixListener::bind(&upstream).unwrap();

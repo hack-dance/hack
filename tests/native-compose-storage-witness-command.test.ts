@@ -26,9 +26,10 @@ import { legacyStorageFixture } from "./helpers/native-compose-legacy-storage.ts
  * average above 60) the stop's synthetic Docker processes alone take longer,
  * the deadline expires mid-stop, and the CLI reports a `private-uncertain`
  * effect refusal instead of the `E_COMPOSE_FAILED` these cases pin. A 30 s
- * deadline still expired at load average 120. Recovery therefore runs with the
- * product's default budget, as on a host that sets none; a CLI that hangs is
- * still killed by {@link CLI_COMMAND_TIMEOUT_MS}.
+ * deadline still expired at load average 120. Every source CLI process here
+ * (`ps`, `down`, `up`/`run`/`exec` refusals and recovery) therefore runs with
+ * the product's default budget, as on a host that sets none; a CLI that hangs
+ * is still killed by {@link CLI_COMMAND_TIMEOUT_MS}.
  */
 const RECOVERY_DEADLINE_MS = DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
 /**
@@ -49,7 +50,7 @@ const STORAGE_WITNESS_CASE_BUDGET_MS = 8 * 60_000;
 setDefaultTimeout(STORAGE_WITNESS_CASE_BUDGET_MS);
 
 function cli(root: string, args: string[]) {
-  return invoke(root, args, undefined, CLI_COMMAND_TIMEOUT_MS);
+  return invoke(root, args, RECOVERY_DEADLINE_MS, CLI_COMMAND_TIMEOUT_MS);
 }
 
 function recover(root: string) {

@@ -1,3 +1,9 @@
+## [4.2.4](https://github.com/hack-dance/hack/compare/v4.2.3...v4.2.4) (2026-10-27)
+
+### Bug Fixes
+
+* **deps:** bump zod to 4.6.7 for GHSA-mrhx-c7xc-m3w5 (HACK-1394) ([#513](https://github.com/hack-dance/hack/issues/513)) ([75225e0](https://github.com/hack-dance/hack/commit/75225e00452aedffbed0345cbde982cafbc74b13)), closes [#59](https://github.com/hack-dance/hack/issues/59) [#456](https://github.com/hack-dance/hack/issues/456)
+
 ## [4.2.3](https://github.com/hack-dance/hack/compare/v4.2.2...v4.2.3) (2026-10-27)
 
 ### Bug Fixes

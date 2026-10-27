@@ -21,6 +21,10 @@ import { mapLegacyNativeRetainedRouting } from "../../src/lib/native-config-impo
 import type { NativeRoutingResolution } from "../../src/lib/native-routing-plan-protocol.ts";
 import * as shell from "../../src/lib/shell.ts";
 import { restoreEnv } from "./env.ts";
+import { optionalFixtureNode } from "./optional-fixture-node.ts";
+import { installStaticFixtureNode } from "./static-fixture-node.ts";
+
+let fixtureNode: Promise<string | null> | undefined;
 
 export const ROUTING_CANARY = "synthetic-retained-sql-row";
 /** Closed set: the product's 15 s default proof deadline or its 60 s cap. */
@@ -121,8 +125,12 @@ export function retainedRoutingFixtureLifetime(deadline: number) {
 /** Private-store model only. Docker metadata and child effects are injected;
  * this does not qualify Go formatting, compiler semantics, TLS, SQL or a daemon. */
 export async function retainedRoutingFixture(
-  lifetime: ReturnType<typeof retainedRoutingFixtureLifetime>
+  lifetime: ReturnType<typeof retainedRoutingFixtureLifetime>,
+  options: { readonly lightweightCompiler?: boolean } = {}
 ) {
+  const node = options.lightweightCompiler
+    ? await (fixtureNode ??= optionalFixtureNode())
+    : null;
   const outer = await realpath(
     await mkdtemp(join(tmpdir(), "retained-routing-owner-"))
   );
@@ -222,6 +230,7 @@ else {
 `,
     { mode: 0o700 }
   );
+  await installStaticFixtureNode({ binary: compiler, node });
   const previousHome = process.env.HACK_HOME;
   process.env.HACK_HOME = home;
   const model = {

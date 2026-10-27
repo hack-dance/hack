@@ -142,7 +142,9 @@ const test = (
       let failed = false;
       let failure: unknown;
       try {
-        h = await retainedRoutingFixture(lifetime);
+        h = await retainedRoutingFixture(lifetime, {
+          lightweightCompiler: true,
+        });
         fixture = h;
         await run();
       } catch (error: unknown) {

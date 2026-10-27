@@ -1044,7 +1044,13 @@ async function assertRetainedRouteState(
     refuse();
   }
   const observedManifest = JSON.stringify(first.manifest);
-  const current: Context = { ...ctx };
+  // A context copy must not snapshot the caller's remaining proof budget.
+  const current: Context = {
+    ...ctx,
+    get timeoutMs() {
+      return ctx.timeoutMs;
+    },
+  };
   let active = true;
   const assertActive = () => {
     cancelled(current.signal);
@@ -2308,6 +2314,9 @@ async function completePublication(
     );
     const transaction: Context = {
       ...ctx,
+      get timeoutMs() {
+        return ctx.timeoutMs;
+      },
       check: async () => {
         await ctx.check();
         await recheckDirectories([held]);
@@ -2427,6 +2436,9 @@ async function completeRollback(ctx: Context, state: Receipt) {
   );
   const transaction: Context = {
     ...ctx,
+    get timeoutMs() {
+      return ctx.timeoutMs;
+    },
     check: async () => {
       await ctx.check();
       await recheckDirectories([held]);

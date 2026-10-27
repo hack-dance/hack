@@ -239,6 +239,9 @@ else {
     effects: string[][] = [];
   const hooks: {
     afterProbe?: (args: readonly string[]) => Promise<void>;
+    beforeProbeOwner?: (
+      opts: Parameters<typeof ownership.createNativeComposeProbe>[0]
+    ) => void;
     afterEffect?: () => Promise<void>;
   } = {};
   const json = (value: unknown) => JSON.stringify(value);
@@ -514,9 +517,10 @@ else {
   };
   const originalKill = process.kill;
   const spies = [
-    spyOn(ownership, "createNativeComposeProbe").mockImplementation(
-      () => probe
-    ),
+    spyOn(ownership, "createNativeComposeProbe").mockImplementation((opts) => {
+      hooks.beforeProbeOwner?.(opts);
+      return probe;
+    }),
     spyOn(engine, "createNativeComposeEngineIdentityObserver").mockReturnValue(
       null
     ),
@@ -601,11 +605,15 @@ else {
      * a compound lifecycle test may ask for the 60 s product cap so suite load cannot
      * expire its rollback proof. Both values are well-known product bounds. */
     store: (
-      opts: { readonly timeoutMs?: RetainedRoutingStoreTimeoutMs } = {}
+      opts: {
+        readonly timeoutMs?: RetainedRoutingStoreTimeoutMs;
+        readonly deadline?: number;
+      } = {}
     ) =>
       openLegacyComposeAdoptedGenerationStore({
         projectRoot: root,
         timeoutMs: opts.timeoutMs ?? 15_000,
+        deadline: opts.deadline,
       }),
     operation: async (
       store: Awaited<

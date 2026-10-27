@@ -139,7 +139,9 @@ source-or-binding-changed message, which only an observed drift issues
 startup budget as that deadline. Every adopted project command (`up --detach`,
 `restart`, `down`, `ps`, `logs`, `exec`) starts one such deadline before it opens the
 store, and each store inspection phase takes the time it has left, capped at 60
-seconds, instead of a fixed 15-second clock. When that deadline expires the command
+seconds, instead of a fixed 15-second clock. Publication file moves, rollback
+restoration and scoped routing revalidation retain that live remaining budget;
+copying their operation context cannot restore time already spent. When that deadline expires the command
 returns `E_STARTUP_TIMEOUT` with the "reached its caller deadline" message, not
 `E_CONFIG_INVALID` (HACK-1458). These rechecks do not freeze external editors or
 the engine atomically. Public output remains field/count/status metadata;

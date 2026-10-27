@@ -21,6 +21,7 @@ import {
   touchNode,
   upsertNodeRecord,
 } from "../src/lib/nodes-registry.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -33,7 +34,7 @@ beforeEach(async () => {
   originalSecretsFileKey = process.env.HACK_SECRETS_FILE_KEY;
   tempDir = await mkdtemp(join(tmpdir(), "hack-nodes-registry-"));
   process.env.HOME = tempDir;
-  process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+  Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
 });
 
 afterEach(async () => {
@@ -41,16 +42,16 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
+  restoreEnv("HOME", originalHome);
   if (originalGlobalConfigPath !== undefined) {
-    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
+    restoreEnv("HACK_GLOBAL_CONFIG_PATH", originalGlobalConfigPath);
   } else {
-    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   }
   if (originalSecretsFileKey !== undefined) {
-    process.env.HACK_SECRETS_FILE_KEY = originalSecretsFileKey;
+    restoreEnv("HACK_SECRETS_FILE_KEY", originalSecretsFileKey);
   } else {
-    process.env.HACK_SECRETS_FILE_KEY = undefined;
+    Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
   }
 });
 
@@ -312,8 +313,8 @@ test.skipIf(process.platform !== "darwin")(
       );
       expect(await readFile(callsPath, "utf8")).toBe(calls);
     } finally {
-      process.env.PATH = previousPath;
-      process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = previousFlag;
+      restoreEnv("PATH", previousPath);
+      restoreEnv("HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK", previousFlag);
     }
   }
 );

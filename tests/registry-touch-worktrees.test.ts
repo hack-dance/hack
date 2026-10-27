@@ -14,6 +14,7 @@ import {
   touchProjectRegistration,
   upsertProjectRegistration,
 } from "../src/lib/projects-registry.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -29,7 +30,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
+  restoreEnv("HOME", originalHome);
 });
 
 function runGit(opts: {

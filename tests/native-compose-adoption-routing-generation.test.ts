@@ -129,7 +129,11 @@ const test = (
       | typeof COMPOUND_TEST_BUDGET_MS;
   } = {}
 ) => {
-  const timeoutMs = opts.timeoutMs ?? 30_000;
+  // Every default case cold-starts the same store fixture and must also settle
+  // its cleanup. The former 30 s outer guard interrupted unchanged diagnostics
+  // under native I/O load and left the lifetime gate closed for later cases.
+  // This named hang guard does not extend any product proof/caller deadline.
+  const timeoutMs = opts.timeoutMs ?? SINGLE_OPERATION_TEST_BUDGET_MS;
   return gatedTest(
     name,
     async (restored) => {

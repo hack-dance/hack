@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { PROJECT_CONFIG_FILENAME } from "../src/constants.ts";
 import { readControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let tempGlobalConfig: string | null = null;
@@ -28,9 +29,9 @@ afterEach(async () => {
     tempGlobalConfig = null;
   }
   if (originalGlobalConfigPath === undefined) {
-    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   } else {
-    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
+    restoreEnv("HACK_GLOBAL_CONFIG_PATH", originalGlobalConfigPath);
   }
 });
 

@@ -8,6 +8,7 @@ import {
   updateGlobalConfig,
   updateProjectConfigBatch,
 } from "../src/lib/config.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 describe("global config utilities", () => {
   let tempDir: string;
@@ -23,9 +24,9 @@ describe("global config utilities", () => {
 
   afterEach(async () => {
     if (originalConfigPath !== undefined) {
-      process.env.HACK_GLOBAL_CONFIG_PATH = originalConfigPath;
+      restoreEnv("HACK_GLOBAL_CONFIG_PATH", originalConfigPath);
     } else {
-      process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+      Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
     }
     await rm(tempDir, { recursive: true, force: true });
   });

@@ -45,6 +45,8 @@ import {
   createNativeFixtureCases,
   type NativeFixtureCase,
 } from "./helpers/native-fixture-cases.ts";
+import { optionalFixtureNode } from "./helpers/optional-fixture-node.ts";
+import { installStaticFixtureNode } from "./helpers/static-fixture-node.ts";
 
 const run = "a".repeat(32);
 const CANARY = "synthetic-private-native-start-canary";
@@ -272,9 +274,14 @@ type FixtureOptions = {
     | "foreign-owner";
 };
 
+let compilerFixtureNode: Promise<string | null> | undefined;
+
 /** Fake compiler/engine transport; real managed inputs, admission, process and storage owners. */
 async function fixture(options: FixtureOptions = {}) {
   const owner = cases.current();
+  // Resolve before fixture PATH/env mutation. This only changes the pure
+  // compiler protocol transport; the original Bun script remains the fallback.
+  const node = await (compilerFixtureNode ??= optionalFixtureNode());
   // Optional effect-free integration uses the real compiler and native planner;
   // execution/status/cleanup remain this file's separately controlled fake driver.
   const realCompiler = process.env.HACK_TEST_NATIVE_COMPILER;
@@ -435,6 +442,7 @@ console.log(JSON.stringify(result));
 `
   );
   await chmod(compiler, 0o700);
+  await installStaticFixtureNode({ binary: compiler, node });
   process.env.HACK_CONFIG_COMPILER_BINARY =
     options.compilerFailure === true ? compiler : (realCompiler ?? compiler);
   const bundle =

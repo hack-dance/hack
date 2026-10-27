@@ -41,11 +41,11 @@
     },
     "packages/cli": {
       "name": "@hack/cli",
-      "version": "3.5.2",
+      "version": "4.2.2",
     },
     "packages/db": {
       "name": "@hack/db",
-      "version": "3.5.2",
+      "version": "4.2.2",
       "dependencies": {
         "@neondatabase/serverless": "^1.0.1",
         "drizzle-orm": "0.45.2",

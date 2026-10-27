@@ -1,3 +1,9 @@
+## [4.2.3](https://github.com/hack-dance/hack/compare/v4.2.2...v4.2.3) (2026-10-27)
+
+### Bug Fixes
+
+* **deps:** security bumps for next, MCP SDK, drizzle-orm (HACK-1394) ([#456](https://github.com/hack-dance/hack/issues/456)) ([739c4e5](https://github.com/hack-dance/hack/commit/739c4e5776eb144e005aa7ad1a6251163a985f6c))
+
 ## [4.2.2](https://github.com/hack-dance/hack/compare/v4.2.1...v4.2.2) (2026-10-23)
 
 ### Bug Fixes

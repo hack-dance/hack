@@ -94,7 +94,13 @@ ready) have no startup budget and take the 60-second cap, so a slow host does no
 fail a graceful stop (HACK-1458). A start that fails or is cancelled after host
 processes began and before its startup intent exists stops those processes, or ends
 the launch it had begun through its own session token, before it returns. A
-teardown it cannot prove keeps the host process records retained.
+teardown it cannot prove keeps the host process records retained. If the graph fails
+before Ready after reserving the startup intent, host teardown additionally requires
+the original producer and readers to settle and the original graph group to be
+absent. Startup reacquires unchanged host inputs under the hard-stop signal, then
+authenticates an exact Removed receipt and absent resource observations before
+stopping the owned host session. A live, foreign, unknown or unreserved receipt,
+changed input, or hard cancellation keeps this attempt retained.
 Startup refusals identify a fixed owning stage and, when available, a closed
 compiler or native error code. They omit arbitrary errors, child output, paths and
 values. If startup fails before publishing a receipt and the later retirement

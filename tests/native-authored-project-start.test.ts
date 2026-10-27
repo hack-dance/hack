@@ -230,6 +230,9 @@ type FixtureOptions = {
   /** Closed native code for `planFailure` (default `native_graph_compile`). */
   readonly planFailureCode?: string;
   readonly failBeforeReceipt?: boolean;
+  readonly removedBeforeReady?: boolean;
+  readonly foreignRemovalReview?: boolean;
+  readonly releaseHostAfterTest?: boolean;
   /**
    * Like `failBeforeReceipt`, but serve fails the way authored foreground
    * control reports a runtime that stopped: `runtime_not_running` wrapped in
@@ -354,7 +357,10 @@ async function fixture(options: FixtureOptions = {}) {
                               process.execPath,
                               "--no-env-file",
                               "-e",
-                              'const {appendFileSync}=await import("node:fs");appendFileSync("process-order","started\\n");await Bun.write("process-value",process.env.PROCESS_TOKEN??"missing");const stop=()=>{appendFileSync("process-order","stopped\\n");process.exit(0)};process.on("SIGTERM",stop);process.on("SIGINT",stop);setInterval(()=>{},1000)',
+                              'const {appendFileSync}=await import("node:fs");appendFileSync("process-order","started\\n");await Bun.write("process-value",process.env.PROCESS_TOKEN??"missing");const stop=()=>{appendFileSync("process-order","stopped\\n");process.exit(0)};process.on("SIGTERM",stop);process.on("SIGINT",stop);' +
+                                (options.releaseHostAfterTest
+                                  ? 'const {existsSync}=await import("node:fs");setInterval(()=>{if(existsSync("release-host-test")){appendFileSync("process-order","fixture-released"+String.fromCharCode(10));process.exit(0)}},20)'
+                                  : "setInterval(()=>{},1000)"),
                             ],
                           },
                           env_target: { kind: "host" },
@@ -527,6 +533,17 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
  if(${options.failBeforeReceipt === true}){console.error(JSON.stringify({code:${JSON.stringify(options.failBeforeReceiptCode ?? "graph_network_intent")},message:${JSON.stringify(CANARY)}}));process.exit(2)}
  if(${options.stoppedDuringServe === true}){console.error(JSON.stringify({code:'native_graph_foreground',cause_code:'runtime_not_running',message:${JSON.stringify(CANARY)}}));process.exit(2)}
  const receipt={version:2,kind:'native-graph-runtime',owner:'f'.repeat(32),boot:'00000000-0000-0000-0000-000000000001',review,phase:'ready-observed',readiness:{web:'started'},resources:{'network:default':{kind:'network',key:'default',name:'hkn-'+input.run+'-network-0',id:'1'.repeat(64),image:null,phase:'created',outbound:true},'container:web':{kind:'container',key:'web',name:'hkn-'+input.run+'-container-0',id:'2'.repeat(64),image:'sha256:'+ '3'.repeat(64),phase:'started',networks:['default']}}};
+ if(${options.removedBeforeReady === true}){
+  if(${JSON.stringify(options.cleanup ?? "removed")}!=='live'){
+   receipt.phase='removed';for(const resource of Object.values(receipt.resources))resource.phase='removed';
+  }
+  if(${options.foreignRemovalReview === true}){
+   provenance.namespace='9'.repeat(64);
+   review.review_id=createHash('sha256').update('hack.native-graph-review/v1\\0').update(JSON.stringify(provenance)).digest('hex');
+  }
+  await writeFile(journal,JSON.stringify(receipt));
+  console.error(JSON.stringify({code:'graph_network_intent',message:${JSON.stringify(CANARY)}}));process.exit(2);
+ }
  if(${options.storage === true && options.liveStop === true}){
   const namespace=provenance.namespace, owner='9'.repeat(32);
   receipt.version=4;
@@ -2312,3 +2329,94 @@ macTest(
     );
   }
 );
+
+for (const proof of [
+  "removed",
+  "live",
+  "foreign",
+  "hard-canceled",
+  "unconfirmed-group",
+] as const) {
+  macTest(
+    `pre-Ready host retirement requires settled authenticated removal: ${proof}`,
+    async () => {
+      const selected = await fixture({
+        finiteHooks: true,
+        hostProcesses: true,
+        removedBeforeReady: true,
+        releaseHostAfterTest: true,
+        cleanup: proof === "live" ? "live" : "removed",
+        foreignRemovalReview: proof === "foreign",
+      });
+      const signal = new AbortController();
+      const force = new AbortController();
+      let ready = false;
+      const originalKill = process.kill.bind(process);
+      let group: number | undefined;
+      let killSpy: ReturnType<typeof spyOn<typeof process, "kill">> | undefined;
+      try {
+        const error = await failure(
+          serveNativeAuthoredProject({
+            ...selected,
+            run,
+            signal: signal.signal,
+            forceSignal: force.signal,
+            startupTimeoutMs: STARTUP_TIMEOUT_MS,
+            onReady: () => {
+              ready = true;
+              return undefined;
+            },
+            onExitDiagnostic: () => {
+              signal.abort();
+              if (proof === "unconfirmed-group") {
+                killSpy = spyOn(process, "kill").mockImplementation(
+                  (pid, signal) => {
+                    // Refuse only the consumer's first settlement probe. A later
+                    // real ESRCH must not replace its missing onSettled event.
+                    if (pid < 0 && signal === 0 && group === undefined) {
+                      group = pid;
+                      throw Object.assign(
+                        new Error("synthetic group uncertainty"),
+                        { code: "EPERM" }
+                      );
+                    }
+                    return originalKill(pid, signal);
+                  }
+                );
+              }
+              if (proof === "hard-canceled") {
+                force.abort();
+              }
+            },
+          }),
+          proof === "removed" ? "removed" : "retained"
+        );
+        expect(error).toHaveProperty("canceled", true);
+        expect(ready).toBe(false);
+        expect(
+          await Bun.file(
+            join(selected.scope.projectRoot, "process-order")
+          ).text()
+        ).toBe(proof === "removed" ? "started\nstopped\n" : "started\n");
+        const files = await artifacts(selected.scope);
+        expect(files.some((name) => name.endsWith(".start.json"))).toBe(
+          proof !== "removed"
+        );
+        expect(
+          files.some((name) => name.endsWith(".host-process-owner.json"))
+        ).toBe(proof !== "removed");
+      } finally {
+        if (killSpy) {
+          confirmTestGroupAbsent(group, originalKill);
+          killSpy.mockRestore();
+        }
+        // Only this test's cooperating stand-in observes this marker. It does not
+        // turn an unproved production cleanup into an accepted stop.
+        await Bun.write(
+          join(selected.scope.projectRoot, "release-host-test"),
+          "release"
+        );
+      }
+    }
+  );
+}

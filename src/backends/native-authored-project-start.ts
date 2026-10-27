@@ -575,6 +575,27 @@ async function prepareHostSelection(opts: {
   return { hooks, lifecycle, persistent, owner, processes };
 }
 
+/** A canceled startup input cannot authorize teardown after a pre-Ready failure. */
+async function refreshPreReadyHostInputs(opts: {
+  readonly hostProcesses: NativeAuthoredHostProcesses | undefined;
+  readonly ready: Attempt["ready"];
+  readonly processSettled: boolean;
+  readonly refresh: () => Promise<void>;
+}): Promise<void> {
+  if (!opts.hostProcesses || opts.ready !== undefined) {
+    return;
+  }
+  // No down.before phase refreshed these inputs. Do not acquire teardown
+  // authority until the original producer and its readers have settled.
+  // The caller still authenticates Removed immediately before host stop.
+  if (!opts.processSettled) {
+    throw new Error(
+      "Native foreground settlement is unconfirmed; values omitted."
+    );
+  }
+  await opts.refresh();
+}
+
 async function runPreparedLifecycle(ctx: {
   readonly options: Options;
   readonly admitted: Attempt;
@@ -585,6 +606,7 @@ async function runPreparedLifecycle(ctx: {
   readonly hookOwner: NativeAuthoredHookOwner | undefined;
   readonly hostProcesses: NativeAuthoredHostProcesses | undefined;
   readonly hostRetired: () => void;
+  readonly refreshHostInputs: () => Promise<void>;
   readonly phase: (name: NativeHookPhase) => Promise<NativeHookResult>;
   readonly graph: AbortController;
   readonly hard: AbortController;
@@ -724,6 +746,12 @@ async function runPreparedLifecycle(ctx: {
     attempt: ctx.admitted,
   };
   if (ctx.hookOwner) {
+    await refreshPreReadyHostInputs({
+      hostProcesses: ctx.hostProcesses,
+      ready: ctx.admitted.ready,
+      processSettled,
+      refresh: ctx.refreshHostInputs,
+    });
     // Keep frontend bindings recoverable until every hook has known completion.
     await confirmRemoved(retirement);
     if (ctx.hostProcesses) {
@@ -1183,6 +1211,7 @@ export async function serveNativeAuthoredProject(
             storageTool,
             hookOwner,
             hostProcesses,
+            refreshHostInputs: teardownInputs,
             hostRetired: () => {
               hostProcesses = undefined;
             },

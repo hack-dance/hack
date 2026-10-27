@@ -61,6 +61,10 @@ agent changes need source/render parity and actual client loading when relevant.
 Distinguish local tests, hosted CI, installed versions, and published artifacts.
 A required check failing is a blocker; unrelated optional integration warnings are not.
 
+For stateful control-plane changes, use `tlaplus-workbench`: save and review the
+statechart and usage walkthrough before modeling, then run `bun run check:tla`.
+See `specs/fv/COVERAGE.md` for property scope, known bugs, and source sync revisions.
+
 ## Runtime and secrets
 
 Use Hack for its managed runtime. Never hand-edit `.hack/.internal/` or `.hack/.branch/`.

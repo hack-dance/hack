@@ -164,7 +164,7 @@ mod tests {
     use crate::provider::identity;
     use std::{
         fs,
-        io::{BufRead, BufReader},
+        io::{BufRead, BufReader, Write},
         net::TcpStream,
         os::{
             fd::AsRawFd,
@@ -176,6 +176,7 @@ mod tests {
     };
     static NEXT: AtomicU64 = AtomicU64::new(0);
     const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const RESERVATION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     struct Fixture {
         child: Child,
         process: ProcessIdentity,
@@ -202,14 +203,26 @@ mod tests {
             // probe port is handed to it. A probe listener dropped here could still be held by
             // an unrelated parallel test's pre-exec fork (`process::clean_command`), or taken
             // by another test, and the publisher would exit 73 without readiness.
-            let mut child = Command::new(concat!(env!("OUT_DIR"), "/stream-relay-host"))
+            let mut command = Command::new(concat!(env!("OUT_DIR"), "/stream-relay-host"));
+            command
                 .args(["--publish", "0"])
                 .arg(path)
-                .args([TOKEN, "10000", "--control"])
+                .args([RESERVATION, "10000", "--control"])
                 .arg(&control)
-                .arg(TOKEN)
-                .stdout(Stdio::piped())
-                .spawn()
+                .args(["--control-fd", "0"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped());
+            assert!(
+                command
+                    .get_args()
+                    .all(|arg| !arg.to_string_lossy().contains(TOKEN))
+            );
+            let mut child = command.spawn().unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(TOKEN.as_bytes())
                 .unwrap();
             let output = child.stdout.take().unwrap();
             let mut ready = libc::pollfd {

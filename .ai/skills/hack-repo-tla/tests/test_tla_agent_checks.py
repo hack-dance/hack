@@ -194,7 +194,7 @@ Spec == Init /\\ [][Next]_Vars
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("java@temurin-17", result.stdout)
         self.assertIn("v1.7.4", result.stdout)
-        self.assertIn("v0.62.2", result.stdout)
+        self.assertIn("v0.62.4", result.stdout)
 
 
 if __name__ == "__main__":

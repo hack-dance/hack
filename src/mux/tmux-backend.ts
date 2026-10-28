@@ -68,6 +68,29 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+/**
+ * Read private fd input before launching the command, preserving keys such as UID.
+ * BUN_BE_BUN reuses the running CLI's embedded runtime; no separate Bun install is needed.
+ */
+const ENV_LAUNCHER = `
+const fs = require("node:fs");
+try {
+  const values = JSON.parse(fs.readFileSync(3, "utf8"));
+  fs.closeSync(3);
+  const inherited = { ...process.env };
+  delete inherited.BUN_BE_BUN;
+  const result = Bun.spawnSync(process.argv.slice(1), {
+    env: { ...inherited, ...values },
+    stdin: "inherit", stdout: "inherit", stderr: "inherit"
+  });
+  if (result.signalCode) process.kill(process.pid, result.signalCode);
+  else process.exit(result.exitCode);
+} catch {
+  console.error("Unable to launch command with private environment");
+  process.exit(1);
+}
+`;
+
 function buildEnvInjectedCommand(opts: {
   readonly command: string;
   readonly env?: Readonly<Record<string, string>>;
@@ -76,11 +99,10 @@ function buildEnvInjectedCommand(opts: {
     return opts.command;
   }
 
-  const assignments = Object.entries(opts.env)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `${key}=${shellQuote(value)}`)
-    .join(" ");
-  return `${assignments} ${opts.command}`;
+  // JSON occupies one physical line, so it cannot terminate the quoted heredoc.
+  // Place the redirection before the command: a caller's pipeline must not steal fd 3.
+  const delimiter = "HACK_PRIVATE_ENV_JSON";
+  return `env BUN_BE_BUN=1 ${shellQuote(process.execPath)} --eval ${shellQuote(ENV_LAUNCHER)} 3<<'${delimiter}' -- ${opts.command}\n${JSON.stringify(opts.env)}\n${delimiter}`;
 }
 
 export function createTmuxBackend(): MuxBackend {

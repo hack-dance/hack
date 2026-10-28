@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -102,6 +102,59 @@ test.skipIf(!tmux)(
     expect(await backend.readLifecycleOwnerToken?.({ name: "first" })).toBe(
       "fake-owner-first"
     );
+
+    const readonlyValues = {
+      UID: "fake-uid",
+      EUID: "fake-euid",
+      FAKE_TEST_VALUE: value,
+    };
+    const outputPath = join(root, "injected-values");
+    // Bash's readonly UID/EUID must not intercept the command's selected environment.
+    const bashSession = await privateExec([
+      tmux ?? "tmux",
+      "-S",
+      socket,
+      "new-session",
+      "-d",
+      "-s",
+      "readonly",
+      "/bin/bash --noprofile --norc",
+    ]);
+    expect(bashSession.exitCode).toBe(0);
+    const report = [
+      "const values = [process.env.UID, process.env.EUID, process.env.FAKE_TEST_VALUE];",
+      'const parent = Bun.spawnSync(["ps", "-o", "command=", "-p", String(process.ppid)]);',
+      "const parentArgv = parent.stdout.toString();",
+      "console.log(JSON.stringify({ values, inspected: parent.exitCode === 0 && parentArgv.length > 0,",
+      "leaked: values.some(value => parentArgv.includes(value) || process.argv.some(arg => arg.includes(value))),",
+      "tty: process.stdin.isTTY === true }));",
+    ].join(" ");
+    const sent = await backend.execInSession({
+      name: "readonly",
+      command: `'${process.execPath}' --eval '${report}' | /bin/cat > '${outputPath}'`,
+      env: readonlyValues,
+    });
+    expect(sent.exitCode).toBe(0);
+    const expected = `${JSON.stringify({
+      values: [readonlyValues.UID, readonlyValues.EUID, value],
+      inspected: true,
+      leaked: false,
+      tty: true,
+    })}\n`;
+    const deadline = Date.now() + 5000;
+    let output = "";
+    while (Date.now() < deadline && output !== expected) {
+      output = await readFile(outputPath, "utf8").catch(() => "");
+      if (output !== expected) {
+        await Bun.sleep(20);
+      }
+    }
+    expect(output).toBe(expected);
+    for (const values of Object.values(readonlyValues)) {
+      expect(
+        calls.every((args) => !args.some((arg) => arg.includes(values)))
+      ).toBe(true);
+    }
   },
   20_000
 );

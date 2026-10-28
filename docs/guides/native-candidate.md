@@ -248,6 +248,10 @@ old token argument form is not accepted. Rebuild the runtime and relay together.
 Tmux lifecycle sessions receive their owner token and environment through
 `source-file -` on stdin. The owner token stays in the session environment;
 existing sessions with the older owner option remain readable.
+Commands sent to an existing tmux pane receive selected environment values through
+fd 3. A launcher using the CLI's embedded runtime starts the command with those
+values directly, preserving keys such as `UID` without shell assignments or
+value-bearing arguments. The command keeps the pane's terminal stdin.
 
 Native `up` and `restart` also stay in the foreground in every project:
 `--detach` refuses with one `E_USAGE` line. Run `hack up` in its own terminal and

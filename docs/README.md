@@ -1,7 +1,8 @@
 # Hack documentation
 
 Hack manages local project services, environment variables, secrets, HTTPS routing,
-logs and sessions. Start with [Core docs](core.md) or the
+logs and sessions. Start with [Getting started](guides/getting-started.md),
+[Core docs](core.md) or the
 [Agent-first setup guide](guides/agent-first-setup.md).
 
 ## Guides and reference

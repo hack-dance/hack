@@ -1,0 +1,6 @@
+.next/
+.source/
+content/
+public/llms*.txt
+*.tsbuildinfo
+node_modules/

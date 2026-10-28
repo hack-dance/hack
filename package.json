@@ -76,7 +76,13 @@
     "ci:bun-crash-census": "bun scripts/ci-bun-crash-census.ts",
     "docs:cli-reference": "bun run scripts/generate-cli-reference.ts",
     "docs:agent-client-capabilities": "bun run scripts/generate-agent-client-capabilities.ts",
-    "generate:agent-plugins": "bun run scripts/generate-agent-plugins.ts"
+    "generate:agent-plugins": "bun run scripts/generate-agent-plugins.ts",
+    "docs:prepare": "bun scripts/docs/prepare.ts",
+    "docs:check": "bun scripts/docs/check.ts",
+    "docs:dev": "bun run docs:prepare && bun run --cwd site dev",
+    "docs:build": "bun run docs:prepare && bun run --cwd site build",
+    "docs:typecheck": "bun run docs:prepare && tsc --project scripts/docs/tsconfig.json --noEmit && bun run --cwd site typecheck",
+    "docs:smoke": "bun scripts/docs/smoke.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.11",

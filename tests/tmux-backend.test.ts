@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
+import { readFile, rm } from "node:fs/promises";
+import { dirname } from "node:path";
 
 import type { ExecOptions } from "../src/lib/shell.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
@@ -123,7 +125,18 @@ test("tmux sends command environment values over stdin with tmux quoting", async
     throw new Error("Expected private stdin payload");
   }
   const source = await input.text();
-  expect(source).toContain("\\$value");
+  expect(source).not.toContain("\\$value");
+  const path = source.match(/'([^']+\/env\.json)'/)?.[1];
+  if (!path) {
+    throw new Error("Expected a private input path");
+  }
+  try {
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      FAKE_API_KEY: fake,
+    });
+  } finally {
+    await rm(dirname(path), { recursive: true, force: true });
+  }
   expect(source.split("\n")).toHaveLength(2);
   expect(execCalls[0]?.command.join(" ")).not.toContain(fake);
 });

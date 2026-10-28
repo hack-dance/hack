@@ -118,9 +118,30 @@ test.skipIf(!tmux)(
       "-d",
       "-s",
       "readonly",
+      "-e",
+      "PS1=HACK_TEST_READY> ",
       "/bin/bash --noprofile --norc",
     ]);
     expect(bashSession.exitCode).toBe(0);
+    // A new pane exists before Bash switches its terminal into interactive input mode.
+    const readyDeadline = Date.now() + 5000;
+    let ready = false;
+    while (Date.now() < readyDeadline && !ready) {
+      const pane = await privateExec([
+        tmux ?? "tmux",
+        "-S",
+        socket,
+        "capture-pane",
+        "-p",
+        "-t",
+        "readonly",
+      ]);
+      ready = pane.stdout.includes("HACK_TEST_READY>");
+      if (!ready) {
+        await Bun.sleep(20);
+      }
+    }
+    expect(ready).toBe(true);
     const report = [
       "const values = [process.env.UID, process.env.EUID, process.env.FAKE_TEST_VALUE];",
       'const parent = Bun.spawnSync(["ps", "-o", "command=", "-p", String(process.ppid)]);',
@@ -154,6 +175,35 @@ test.skipIf(!tmux)(
       expect(
         calls.every((args) => !args.some((arg) => arg.includes(values)))
       ).toBe(true);
+    }
+    for (const [label, command, expectedOutput] of [
+      [
+        "assignment",
+        `NODE_ENV='command-local' /usr/bin/printenv NODE_ENV > '${outputPath}'`,
+        "command-local\n",
+      ],
+      [
+        "multiline",
+        `/usr/bin/printenv UID > '${outputPath}'\nprintf 'second\\n' >> '${outputPath}'`,
+        "fake-uid\nsecond\n",
+      ],
+    ] as const) {
+      await rm(outputPath, { force: true });
+      const result = await backend.execInSession({
+        name: "readonly",
+        command,
+        env: { UID: "fake-uid", NODE_ENV: "selected-value" },
+      });
+      expect(result.exitCode, label).toBe(0);
+      const until = Date.now() + 5000;
+      let actual = "";
+      while (Date.now() < until && actual !== expectedOutput) {
+        actual = await readFile(outputPath, "utf8").catch(() => "");
+        if (actual !== expectedOutput) {
+          await Bun.sleep(20);
+        }
+      }
+      expect(actual, label).toBe(expectedOutput);
     }
   },
   20_000

@@ -12,6 +12,22 @@ import {
 if (Bun.argv[2] === TTY_SUPERVISOR_ARGUMENT && process.send) {
   process.exit(await runTtySupervisor());
 }
+if (Bun.argv[2] === "--internal-mux-environment") {
+  if (!Bun.argv[3] || Bun.argv[4] !== "--") {
+    process.exit(2);
+  }
+  const { runMuxEnvironment } = await import(
+    "./src/mux/private-environment.ts"
+  );
+  try {
+    process.exit(await runMuxEnvironment(Bun.argv[3], Bun.argv.slice(5)));
+  } catch {
+    process.stderr.write(
+      "Private mux environment delivery refused; values omitted.\n"
+    );
+    process.exit(1);
+  }
+}
 if (Bun.argv[2] === "--internal-lifecycle-process-client") {
   if (Bun.argv.length !== 4 || !Bun.argv[3]) {
     process.exit(2);

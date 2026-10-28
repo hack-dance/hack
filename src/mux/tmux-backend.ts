@@ -1,11 +1,12 @@
+import { fileURLToPath } from "node:url";
 import type { ExecResult, RunOptions } from "../lib/shell.ts";
 import { exec, findExecutableInPath } from "../lib/shell.ts";
-
 import type {
   MuxBackend,
   MuxSession,
   MuxSessionCreateResult,
 } from "./mux-backend.ts";
+import { stageMuxEnvironment } from "./private-environment.ts";
 
 const LIFECYCLE_OWNER_OPTION = "@hack_lifecycle_owner";
 const LIFECYCLE_OWNER_ENV = "HACK_LIFECYCLE_OWNER_TOKEN";
@@ -66,43 +67,6 @@ function parseIntOrNull(value: string | undefined): number | null {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-/**
- * Read private fd input before launching the command, preserving keys such as UID.
- * BUN_BE_BUN reuses the running CLI's embedded runtime; no separate Bun install is needed.
- */
-const ENV_LAUNCHER = `
-const fs = require("node:fs");
-try {
-  const values = JSON.parse(fs.readFileSync(3, "utf8"));
-  fs.closeSync(3);
-  const inherited = { ...process.env };
-  delete inherited.BUN_BE_BUN;
-  const result = Bun.spawnSync(process.argv.slice(1), {
-    env: { ...inherited, ...values },
-    stdin: "inherit", stdout: "inherit", stderr: "inherit"
-  });
-  if (result.signalCode) process.kill(process.pid, result.signalCode);
-  else process.exit(result.exitCode);
-} catch {
-  console.error("Unable to launch command with private environment");
-  process.exit(1);
-}
-`;
-
-function buildEnvInjectedCommand(opts: {
-  readonly command: string;
-  readonly env?: Readonly<Record<string, string>>;
-}): string {
-  if (!opts.env || Object.keys(opts.env).length === 0) {
-    return opts.command;
-  }
-
-  // JSON occupies one physical line, so it cannot terminate the quoted heredoc.
-  // Place the redirection before the command: a caller's pipeline must not steal fd 3.
-  const delimiter = "HACK_PRIVATE_ENV_JSON";
-  return `env BUN_BE_BUN=1 ${shellQuote(process.execPath)} --eval ${shellQuote(ENV_LAUNCHER)} 3<<'${delimiter}' -- ${opts.command}\n${JSON.stringify(opts.env)}\n${delimiter}`;
 }
 
 export function createTmuxBackend(): MuxBackend {
@@ -264,16 +228,42 @@ export function createTmuxBackend(): MuxBackend {
     readonly command: string;
     readonly env?: Readonly<Record<string, string>>;
   }): Promise<ExecResult> => {
-    return await execTmuxSource([
-      "send-keys",
-      "-t",
-      opts.name,
-      buildEnvInjectedCommand({
-        command: opts.command,
-        env: opts.env,
-      }),
-      "Enter",
-    ]);
+    const privateInput =
+      opts.env && Object.keys(opts.env).length > 0
+        ? await stageMuxEnvironment(opts.env)
+        : undefined;
+    const entrypoint = fileURLToPath(
+      new URL("../../index.ts", import.meta.url)
+    );
+    const invocation = Bun.main.startsWith("/$bunfs/")
+      ? [process.execPath]
+      : [process.execPath, entrypoint];
+    const prefix = privateInput
+      ? `${[
+          ...invocation,
+          "--internal-mux-environment",
+          privateInput.path,
+          "--",
+        ]
+          .map(shellQuote)
+          .join(" ")} `
+      : "";
+    try {
+      const result = await execTmuxSource([
+        "send-keys",
+        "-t",
+        opts.name,
+        prefix + opts.command,
+        "Enter",
+      ]);
+      if (result.exitCode !== 0) {
+        await privateInput?.cleanup();
+      }
+      return result;
+    } catch (error) {
+      await privateInput?.cleanup();
+      throw error;
+    }
   };
 
   const sendInput = async (opts: {

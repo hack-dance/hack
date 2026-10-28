@@ -239,6 +239,16 @@ lists the closed names `external_network`, `external_volume`, `reserved_label`,
 is a warning; on the Compose backend it is informational. Native doctor applies
 the same `HACK_NATIVE_ADAPTATION` selection before it reports.
 
+Publication control tokens are delivered to the relay through a one-shot inherited
+pipe (`--control-fd 0`), never through process arguments. The relay reads exactly
+32 lowercase hexadecimal bytes, requires EOF, and closes the descriptor before
+binding its listeners. Missing, malformed, or stalled input refuses startup; the
+old token argument form is not accepted. Rebuild the runtime and relay together.
+
+Tmux lifecycle sessions receive their owner token and environment through
+`source-file -` on stdin. The owner token stays in the session environment;
+existing sessions with the older owner option remain readable.
+
 Native `up` and `restart` also stay in the foreground in every project:
 `--detach` refuses with one `E_USAGE` line. Run `hack up` in its own terminal and
 keep it open, use `hack ps` and `hack logs` from another terminal, and press

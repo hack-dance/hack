@@ -13,6 +13,32 @@ const NO_TMUX_SERVER = /^no server running on [^\r\n]+$/;
 const MISSING_TMUX_SOCKET =
   /^error connecting to [^\r\n]+ \(No such file or directory\)$/;
 
+/** Quote one tmux source-file argument, without expanding environment variables. */
+function tmuxQuote(value: string): string {
+  return `"${value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("$", "\\$")
+    .replaceAll("\t", "\\t")
+    .replaceAll("\n", "\\n")
+    .replaceAll("\r", "\\r")}"`;
+}
+
+/** Send values over stdin; even a pre-existing server receives the new session's env. */
+async function execTmuxSource(args: readonly string[]): Promise<ExecResult> {
+  if (args.some((arg) => arg.includes("\0"))) {
+    return { exitCode: 1, stdout: "", stderr: "Invalid tmux command input" };
+  }
+  const result = await exec(["tmux", "start-server", ";", "source-file", "-"], {
+    stdin: new Blob([`${args.map(tmuxQuote).join(" ")}\n`]),
+    timeoutMs: 5000,
+  });
+  // Parser diagnostics may quote command input, including private environment values.
+  return result.exitCode === 0
+    ? result
+    : { ...result, stderr: "tmux command failed" };
+}
+
 /** Accept only tmux's explicit absence diagnostics; other failures remain unknown. */
 export function classifyTmuxSessionPresence(opts: {
   readonly result: ExecResult;
@@ -54,7 +80,7 @@ function buildEnvInjectedCommand(opts: {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}=${shellQuote(value)}`)
     .join(" ");
-  return `env ${assignments} ${opts.command}`;
+  return `${assignments} ${opts.command}`;
 }
 
 export function createTmuxBackend(): MuxBackend {
@@ -119,7 +145,7 @@ export function createTmuxBackend(): MuxBackend {
       return { ok: false, error: "tmux_unavailable" };
     }
 
-    const args = ["tmux", "new-session", "-d", "-s", opts.name];
+    const args = ["new-session", "-d", "-s", opts.name];
     if (opts.cwd) {
       args.push("-c", opts.cwd);
     }
@@ -134,37 +160,13 @@ export function createTmuxBackend(): MuxBackend {
       args.push("-e", `${LIFECYCLE_OWNER_ENV}=${opts.lifecycleOwnerToken}`);
     }
 
-    const result = await exec(args, { stdin: "ignore" });
+    const result = await execTmuxSource(args);
     if (result.exitCode !== 0) {
       return {
         ok: false,
         error: "create_failed",
         stderr: result.stderr.trim(),
       };
-    }
-
-    if (opts.lifecycleOwnerToken) {
-      const ownerResult = await exec(
-        [
-          "tmux",
-          "set-option",
-          "-t",
-          opts.name,
-          LIFECYCLE_OWNER_OPTION,
-          opts.lifecycleOwnerToken,
-        ],
-        { stdin: "ignore" }
-      );
-      if (ownerResult.exitCode !== 0) {
-        await exec(["tmux", "kill-session", "-t", opts.name], {
-          stdin: "ignore",
-        });
-        return {
-          ok: false,
-          error: "owner_metadata_failed",
-          stderr: ownerResult.stderr.trim(),
-        };
-      }
     }
 
     const sessions = await listSessions();
@@ -240,22 +242,16 @@ export function createTmuxBackend(): MuxBackend {
     readonly command: string;
     readonly env?: Readonly<Record<string, string>>;
   }): Promise<ExecResult> => {
-    return await exec(
-      [
-        "tmux",
-        "send-keys",
-        "-t",
-        opts.name,
-        buildEnvInjectedCommand({
-          command: opts.command,
-          env: opts.env,
-        }),
-        "Enter",
-      ],
-      {
-        stdin: "ignore",
-      }
-    );
+    return await execTmuxSource([
+      "send-keys",
+      "-t",
+      opts.name,
+      buildEnvInjectedCommand({
+        command: opts.command,
+        env: opts.env,
+      }),
+      "Enter",
+    ]);
   };
 
   const sendInput = async (opts: {

@@ -16,7 +16,7 @@ export interface ExecOptions {
   readonly env?: Record<string, string>;
   /** Inherited variables to drop from the child env (before `env` applies). */
   readonly unsetEnvKeys?: readonly string[];
-  readonly stdin?: "inherit" | "pipe" | "ignore";
+  readonly stdin?: "inherit" | "pipe" | "ignore" | Blob;
   readonly timeoutMs?: number;
 }
 

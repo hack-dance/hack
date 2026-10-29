@@ -3,7 +3,7 @@ use super::*;
 use serde_json::{Value, json};
 use std::{
     os::unix::fs::PermissionsExt,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 struct Fixture(PathBuf);
@@ -193,7 +193,7 @@ fn options<'a>(
             state_root: &f.0,
             binding: b,
             intent: "f0000000000000000000000000000000",
-            deadline: Instant::now() + Duration::from_secs(5),
+            deadline: Instant::now() + crate::TEST_RUN_BUDGET,
             cancelled,
         },
         witness: w,
@@ -203,7 +203,7 @@ fn read_options<'a>(f: &'a Fixture, b: &'a Binding, c: &'a AtomicBool) -> ReadOp
     ReadOptions {
         state_root: &f.0,
         binding: b,
-        deadline: Instant::now() + Duration::from_secs(5),
+        deadline: Instant::now() + crate::TEST_RUN_BUDGET,
         cancelled: c,
     }
 }

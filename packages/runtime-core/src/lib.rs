@@ -19,8 +19,12 @@ pub const CANDIDATE_VERSION: &str = "5.0.0-dev.6";
 mod error;
 mod error_stop_diagnostics;
 pub use error::CandidateError;
+#[cfg(all(test, feature = "native-config-plan"))]
+mod test_budget;
 #[cfg(test)]
 mod test_scratch;
+#[cfg(all(test, feature = "native-config-plan"))]
+pub(crate) use test_budget::TEST_RUN_BUDGET;
 #[cfg(test)]
 pub(crate) use test_scratch::next_test_scratch;
 

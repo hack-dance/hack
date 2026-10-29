@@ -34,7 +34,7 @@ jobs:
             --report-path "$RUNNER_TEMP/gitleaks.sarif"
 
   runtime-images:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: read
     steps:
@@ -71,7 +71,7 @@ jobs:
         run: bash scripts/portable-container-smoke.sh hack-runtime-ci:slim linux/amd64
 
   docker-e2e:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: read
     steps:
@@ -123,7 +123,7 @@ jobs:
         run: bun run build:release --skip-tests --no-clean --out=dist/release-ci
 
   linux-process-lifetime:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - name: Checkout
         uses: useblacksmith/checkout@v1

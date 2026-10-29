@@ -74,6 +74,17 @@ const carrierId = "e".repeat(64);
 const invocationId = "a".repeat(32);
 /** Virtual helper start duration: above the former fixed 15 s start cap. */
 const SLOW_START_MS = 20_000;
+/**
+ * Bun budget of the recorded (original-command) slow-start proof. Its helper
+ * start is virtual (`Date.now` is advanced by the engine, not by waiting), so
+ * {@link SLOW_START_MS} costs no wall time. The real cost is the recorded
+ * branch's host work: three published commands, each with stopped-child
+ * identity reads (`/bin/ps`, `sysctl`), private-state publications and
+ * settlement, plus `finish()` retirement. A hosted run takes a few seconds; a
+ * host at load average 120-140 took over 30 s (HACK-1463), so this is a hang
+ * guard with a clear margin, not a speed assertion.
+ */
+const RECORDED_PROOF_CASE_BUDGET_MS = 120_000;
 const roots: string[] = [];
 const stores: NativeComposeGenerationStore[] = [];
 const heldJournals: HeldDirectory[] = [];
@@ -681,57 +692,63 @@ test("a helper start slower than the former 15 s cap completes within the defaul
 // helper command through the recorded original-command branch (publication,
 // boundary deadline and settlement). That branch computes its own child bound,
 // so it needs its own slow-start proof.
-test("a recorded exec/up verify proof completes a helper start slower than the former 15 s cap", async () => {
-  const budgetMs = resolveNativeStorageTimeoutMs({ env: {} });
-  expect(budgetMs).toBe(90_000);
-  const { engine, result, error, record, retired } = await proveWithSlowStart({
-    budgetMs,
-    recorded: true,
-  });
-  expect(nativeComposeEffectRefusal(error)).toBeUndefined();
-  expect(error).toBeNull();
-  expect(result).toMatchObject({
-    outcome: "complete",
-    exitCode: 0,
-    carrierId,
-    containersAfterCleanup: [],
-  });
-  expect(engine.commands.map(({ verb }) => verb)).toEqual([
-    "create",
-    "start",
-    "rm",
-  ]);
-  const [create, start, remove] = engine.commands;
-  // The recorded child bound is the remaining carrier budget, never more.
-  for (const command of [create, start]) {
-    expect(command?.timeoutMs).toBeGreaterThan(SLOW_START_MS);
-    expect(command?.timeoutMs).toBeLessThanOrEqual(budgetMs);
-  }
-  expect(remove?.timeoutMs).toBeGreaterThan(0);
-  expect(remove?.timeoutMs).toBeLessThanOrEqual(
-    NATIVE_STORAGE_PROBE_CEILING_MS
-  );
-  // Every helper command was published and settled as an original command.
-  expect(record).not.toBeNull();
-  const { commands } = parseNativeComposeStorageCommandRecord(record ?? "");
-  expect(commands.map(({ kind }) => kind)).toEqual([
-    "create",
-    "start",
-    "remove",
-  ]);
-  for (const command of commands) {
-    expect(command.child).not.toBeNull();
-    expect(command.settlement).toMatchObject({
+test(
+  "a recorded exec/up verify proof completes a helper start slower than the former 15 s cap",
+  async () => {
+    const budgetMs = resolveNativeStorageTimeoutMs({ env: {} });
+    expect(budgetMs).toBe(90_000);
+    const { engine, result, error, record, retired } = await proveWithSlowStart(
+      {
+        budgetMs,
+        recorded: true,
+      }
+    );
+    expect(nativeComposeEffectRefusal(error)).toBeUndefined();
+    expect(error).toBeNull();
+    expect(result).toMatchObject({
+      outcome: "complete",
       exitCode: 0,
-      timedOut: false,
-      cancelled: false,
+      carrierId,
+      containersAfterCleanup: [],
     });
-  }
-  // The journal's completion retired the invocation files through finish().
-  expect(retired).toBe(true);
-  expect(engine.elapsed).toBe(SLOW_START_MS);
-  expect(existsSync(tripwire)).toBe(false);
-}, 30_000);
+    expect(engine.commands.map(({ verb }) => verb)).toEqual([
+      "create",
+      "start",
+      "rm",
+    ]);
+    const [create, start, remove] = engine.commands;
+    // The recorded child bound is the remaining carrier budget, never more.
+    for (const command of [create, start]) {
+      expect(command?.timeoutMs).toBeGreaterThan(SLOW_START_MS);
+      expect(command?.timeoutMs).toBeLessThanOrEqual(budgetMs);
+    }
+    expect(remove?.timeoutMs).toBeGreaterThan(0);
+    expect(remove?.timeoutMs).toBeLessThanOrEqual(
+      NATIVE_STORAGE_PROBE_CEILING_MS
+    );
+    // Every helper command was published and settled as an original command.
+    expect(record).not.toBeNull();
+    const { commands } = parseNativeComposeStorageCommandRecord(record ?? "");
+    expect(commands.map(({ kind }) => kind)).toEqual([
+      "create",
+      "start",
+      "remove",
+    ]);
+    for (const command of commands) {
+      expect(command.child).not.toBeNull();
+      expect(command.settlement).toMatchObject({
+        exitCode: 0,
+        timedOut: false,
+        cancelled: false,
+      });
+    }
+    // The journal's completion retired the invocation files through finish().
+    expect(retired).toBe(true);
+    expect(engine.elapsed).toBe(SLOW_START_MS);
+    expect(existsSync(tripwire)).toBe(false);
+  },
+  RECORDED_PROOF_CASE_BUDGET_MS
+);
 
 test("a helper start that outlasts the whole storage budget still refuses at the budget's end", async () => {
   const budgetMs = 12_000;

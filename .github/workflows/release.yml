@@ -20,7 +20,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
         with:
           fetch-depth: 0
       - name: Setup Bun
@@ -160,9 +160,9 @@ jobs:
             exit 1
           fi
       - name: Checkout hack
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
       - name: Checkout tap repo
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
         with:
           repository: hack-dance/homebrew-tap
           token: ${{ secrets.RELEASE_PAT }}

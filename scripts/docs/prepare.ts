@@ -37,6 +37,7 @@ export async function rewriteTarget(
   target: string,
   source: string
 ): Promise<string> {
+  if (/^\/(?:v4|v5)\/llms(?:-full)?\.txt$/.test(target)) return target;
   if (external.test(target)) {
     if (
       /^(?:javascript|data|file):/i.test(target) ||

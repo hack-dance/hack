@@ -1,6 +1,6 @@
 # Give an agent the right context
 
-Read this version's LLM index or full corpus. They contain only the
+Read this version's [LLM index](/v4/llms.txt) or [full corpus](/v4/llms-full.txt). They contain only the
 selected version's allowlisted public docs. Use these canonical URLs when the
 public site is deployed; for local review use the same paths on the preview host:
 

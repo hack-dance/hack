@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import { recordOwnedFixture } from "./docker-ownership.ts";
 import { runCommand } from "./harness.ts";
 
 /**
@@ -64,6 +65,8 @@ export async function createMonorepoFixture(opts: {
   readonly oauthEnabled?: boolean;
 }): Promise<MonorepoFixture> {
   const name = opts.name ?? randomProjectName();
+  // Record ownership before anything can create Docker resources for it.
+  recordOwnedFixture({ name });
   const devHost = `${name}.hack`;
   const root = join(opts.parentDir, name);
   const hackDir = join(root, ".hack");

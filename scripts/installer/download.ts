@@ -16,6 +16,7 @@ import {
   parseJson,
   requireThat,
 } from "./integrity.ts";
+import { TransferBudget } from "./transfer-budget.ts";
 
 const HOSTS = new Set([
   "api.github.com",
@@ -36,21 +37,41 @@ export function secureUrl(raw: string) {
   );
   return url;
 }
-/** Redirects are checked before fetching; one deadline bounds the complete response. */
-export async function download(raw: string, target: string, limit: number) {
-  const signal = AbortSignal.timeout(30_000);
+/** Every redirect is allowlisted; progressing downloads have separate idle and total bounds. */
+export async function download(
+  raw: string,
+  target: string,
+  limit: number,
+  budget = new TransferBudget()
+) {
+  try {
+    return await downloadWithinBudget(raw, target, limit, budget);
+  } finally {
+    budget.close();
+  }
+}
+async function downloadWithinBudget(
+  raw: string,
+  target: string,
+  limit: number,
+  budget: TransferBudget
+) {
+  const signal = budget.signal;
   let url = secureUrl(raw);
   let response: Response | undefined;
   for (let redirects = 0; redirects <= 5; redirects++) {
-    response = await fetch(url, {
-      redirect: "manual",
-      signal,
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": "hack-prerelease-installer",
-        "Accept-Encoding": "identity",
-      },
-    });
+    response = await budget.wait(() =>
+      fetch(url, {
+        redirect: "manual",
+        signal,
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "hack-prerelease-installer",
+          "Accept-Encoding": "identity",
+        },
+      })
+    );
+    budget.progress();
     if (![301, 302, 303, 307, 308].includes(response.status)) {
       break;
     }
@@ -86,11 +107,14 @@ export async function download(raw: string, target: string, limit: number) {
     fchmodSync(fd, 0o600);
     let size = 0;
     for (;;) {
-      const incoming = await reader.read();
+      const incoming = await budget.wait(() => reader.read());
       if (incoming.done) {
         break;
       }
       const chunk = incoming.value;
+      if (chunk.length > 0) {
+        budget.progress();
+      }
       size += chunk.length;
       requireThat(
         size <= limit && (expected === undefined || size <= expected),

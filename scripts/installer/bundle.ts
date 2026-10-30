@@ -13,6 +13,7 @@ import {
   owned,
   parseJson,
   payloadMode,
+  readPinnedArchive,
   requireThat,
   SHA256,
   syncDirectory,
@@ -150,6 +151,9 @@ export function verifyBundle(bundle: string, version: string) {
   }
   return { identity, manifest };
 }
+/** Structural/ad-hoc signature integrity only, not Developer ID origin authentication.
+ * Official HTTPS and pinned release/manager hashes carry the origin trust contract.
+ */
 export function verifySignatures(bundle: string) {
   const payload = bundleInventory(bundle);
   const names = [
@@ -182,6 +186,7 @@ export function extractArchive({
   version,
   releaseMetadata,
   signatures = verifySignatures,
+  afterArchiveOpen,
 }: {
   archive: string;
   checksum: string;
@@ -189,13 +194,12 @@ export function extractArchive({
   version: string;
   releaseMetadata?: Record<string, unknown>;
   signatures?: (bundle: string) => void;
+  afterArchiveOpen?: (fd: number) => void;
 }) {
   owned(archive);
-  requireThat(
-    SHA256.test(checksum) && digest(archive) === checksum,
-    "Archive checksum or size mismatch."
+  const entries = archiveEntries(
+    readPinnedArchive(archive, checksum, afterArchiveOpen)
   );
-  const entries = archiveEntries(readFileSync(archive));
   const payload = inventory([...entries.keys()]);
   const get = (name: string) => {
     const bytes = entries.get(name);

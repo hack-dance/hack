@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildPrereleaseManager } from "../scripts/build-prerelease-manager.ts";
+import { renderBootstrap } from "../scripts/installer/bootstrap.ts";
 import { digest, hash, jsonBytes } from "../scripts/installer/integrity.ts";
 
 const supported = process.platform === "darwin" && process.arch === "arm64";
@@ -33,6 +34,7 @@ int main(int argc, char **argv) {
   }
   if (argc > 1 && strcmp(argv[1], "wait-for-signal") == 0) { puts("ready"); fflush(stdout); pause(); return 9; }
   printf("fixture-cli:%s:%s\\n", getenv("HACK_RUNTIME_BACKEND"), getenv("HACK_HOME"));
+  printf("selectors:%s:%s:%s\\n", getenv("HACK_NATIVE_BINARY") ? getenv("HACK_NATIVE_BINARY") : "<absent>", getenv("HACK_NATIVE_HOME") ? getenv("HACK_NATIVE_HOME") : "<absent>", getenv("HACK_GLOBAL_CONFIG_PATH") ? getenv("HACK_GLOBAL_CONFIG_PATH") : "<absent>");
   return argc > 1 && strcmp(argv[1], "exit-seven") == 0 ? 7 : 0;
 }`;
 
@@ -48,6 +50,18 @@ test.skipIf(!supported)(
         mkdirSync(dir, { mode: 0o700 });
       }
       symlinkSync("/usr/bin/dirname", join(path, "dirname"));
+      for (const [name, system] of Object.entries({
+        shasum: "/usr/bin/shasum",
+        codesign: "/usr/bin/codesign",
+        mktemp: "/usr/bin/mktemp",
+        chmod: "/bin/chmod",
+        rm: "/bin/rm",
+        cp: "/bin/cp",
+        uname: "/usr/bin/uname",
+        date: "/bin/date",
+      })) {
+        symlinkSync(system, join(path, name));
+      }
       writeFileSync(join(path, "hack"), "#!/bin/sh\necho stable-original\n", {
         mode: 0o755,
       });
@@ -146,11 +160,25 @@ test.skipIf(!supported)(
       };
       const first = archive("5.0.0-next.1");
       const second = archive("5.0.0-next.2");
+      const alias = join(root, "temporary-alias");
+      symlinkSync(temp, alias);
+      writeFileSync(
+        join(path, "curl"),
+        '#!/bin/sh\nset -eu\noutput=\nwhile [ "$#" -gt 0 ]; do\n if [ "$1" = --output ]; then shift; output=$1; fi\n shift\ndone\nprintf "%s" "$output" > "$DOWNLOAD_PATH"\ncp "$FIXTURE_MANAGER" "$output"\nprintf "200 "\n',
+        { mode: 0o755 }
+      );
+      const bootstrap = join(root, "install.sh");
+      writeFileSync(
+        bootstrap,
+        renderBootstrap("5.0.0-next.1", digest(manager))
+      );
       const channel = join(home, ".hack-next");
       const env = {
         HOME: home,
         PATH: path,
-        TMPDIR: temp,
+        TMPDIR: alias,
+        FIXTURE_MANAGER: manager,
+        DOWNLOAD_PATH: join(root, "download-path"),
         HACK_HOME: join(root, "caller-home"),
         HACK_NATIVE_BINARY: "/foreign",
         HACK_NATIVE_HOME: "/foreign",
@@ -164,18 +192,24 @@ test.skipIf(!supported)(
           stdout: "pipe",
           stderr: "pipe",
         });
-      const install = run([
-        "install",
-        "--version",
-        "5.0.0-next.1",
-        "--archive",
-        first.target,
-        "--sha256",
-        first.checksum,
-      ]);
+      const install = Bun.spawnSync(
+        [
+          "/bin/sh",
+          bootstrap,
+          "--archive",
+          first.target,
+          "--sha256",
+          first.checksum,
+        ],
+        { env, cwd: root, timeout: 30_000, stdout: "pipe", stderr: "pipe" }
+      );
       expect(install.stderr.toString()).toBe("");
       expect(install.exitCode).toBe(0);
       expect(install.stdout.toString()).toContain('"selected":"5.0.0-next.1"');
+      expect(readFileSync(env.DOWNLOAD_PATH, "utf8")).toStartWith(
+        `${temp}/hack-next-bootstrap.`
+      );
+      expect(digest(join(channel, "manager"))).toBe(digest(manager));
       writeFileSync(
         join(root, ".env"),
         "HACK_RUNTIME_BACKEND=invalid-from-dotenv\n"
@@ -202,6 +236,9 @@ test.skipIf(!supported)(
       expect(launch.exitCode).toBe(0);
       expect(launch.stdout.toString()).toContain(
         `fixture-cli:native:${channel}/versions/5.0.0-next.1/cli-home`
+      );
+      expect(launch.stdout.toString()).toContain(
+        `selectors:${channel}/versions/5.0.0-next.1/bundle/hack-native:${channel}/versions/5.0.0-next.1/native-home:<absent>`
       );
       expect(
         Bun.spawnSync([launcher, "exit-seven"], { env, timeout: 30_000 })
@@ -234,6 +271,9 @@ test.skipIf(!supported)(
       });
       expect(compose.stdout.toString()).toContain(
         `fixture-cli:compose:${env.HACK_HOME}`
+      );
+      expect(compose.stdout.toString()).toContain(
+        "selectors:<absent>:<absent>:/foreign"
       );
       expect(
         Bun.spawnSync([launcher], {

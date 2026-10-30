@@ -14,7 +14,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   extractArchive,
   sameJson,
@@ -37,6 +37,7 @@ import {
   versionNumber,
   writeFile,
 } from "./integrity.ts";
+import { publishAndSync, publishDirectoryExclusive } from "./publication.ts";
 
 const JOURNAL = ".manager-upgrade.json";
 const STAGE = /^\.stage-[0-9a-f]{32}$(?![\s\S])/;
@@ -58,15 +59,26 @@ function lexists(path: string) {
     throw error;
   }
 }
-function atomicFile(path: string, bytes: Uint8Array, mode = 0o600) {
+function atomicFile(
+  path: string,
+  bytes: Uint8Array,
+  mode = 0o600,
+  checkpoint?: (point: string) => void
+) {
   const temporary = join(
     dirname(path),
     `${mode === 0o500 ? ".manager" : ".selection"}-${nonce()}`
   );
   try {
     writeFile(temporary, bytes, mode);
-    renameSync(temporary, path);
-    syncDirectory(dirname(path));
+    publishAndSync(
+      path,
+      () => renameSync(temporary, path),
+      () => {
+        checkpoint?.(`sync:${basename(path)}`);
+        syncDirectory(dirname(path));
+      }
+    );
   } finally {
     try {
       if (lexists(temporary)) {
@@ -77,8 +89,12 @@ function atomicFile(path: string, bytes: Uint8Array, mode = 0o600) {
     }
   }
 }
-function atomicJson(path: string, value: unknown) {
-  atomicFile(path, jsonBytes(value));
+function atomicJson(
+  path: string,
+  value: unknown,
+  checkpoint?: (point: string) => void
+) {
+  atomicFile(path, jsonBytes(value), 0o600, checkpoint);
 }
 interface State {
   schema: string;
@@ -114,46 +130,112 @@ export class Channel {
   private signatures(bundle: string) {
     (this.hooks.signatures ?? verifySignatures)(bundle);
   }
-  initialize() {
-    if (!lexists(this.root)) {
-      owned(dirname(this.root), true);
-      mkdirSync(this.root, { mode: 0o700 });
+  private refuseLegacy() {
+    if (
+      lexists(this.path("manager.py")) ||
+      (lexists(this.path(".channel.json")) &&
+        privateJson(this.path(".channel.json")).schema ===
+          "hack.prerelease-install/v1")
+    ) {
+      throw new Error(
+        "Python/v1 installation is preserved unchanged; use an explicit separate --root. This manager cannot migrate or recover a Python manager journal."
+      );
     }
-    owned(this.root, true, 0o700);
-    if (lexists(this.path(".channel.json"))) {
+  }
+  /** Publish a complete private sibling once, never replace/adopt an existing root.
+   * Crashes before rename retain inert sibling stages; retries do not delete or adopt them.
+   * Crashes after rename expose a complete channel. The parent must be owned, canonical,
+   * and on a filesystem supporting atomic no-replace directory rename and directory fsync.
+   */
+  initialize() {
+    if (lexists(this.root)) {
+      owned(this.root, true, 0o700);
+      this.refuseLegacy();
+      requireThat(
+        lexists(this.path(".channel.json")),
+        "Refusing to adopt an existing installation root, including an empty or incomplete root; use a separate --root."
+      );
+      this.validate();
       return;
     }
-    requireThat(
-      readdirSync(this.root).length === 0,
-      "Refusing to adopt a nonempty installation root; Python-managed channels need a separate root."
-    );
+    const parent = dirname(this.root);
+    owned(parent, true);
     owned(this.source);
-    mkdirSync(this.path("bin"), { mode: 0o700 });
-    mkdirSync(this.path("versions"), { mode: 0o700 });
-    writeFile(this.path("manager"), readFileSync(this.source), 0o500);
-    writeFile(this.path("bin/hack-next"), launcherBytes(), 0o755);
-    const info = owned(this.root, true, 0o700);
-    writeFile(
-      this.path(".channel.json"),
-      jsonBytes({
-        schema: "hack.prerelease-install/v2",
-        root: this.root,
-        uid: process.getuid?.(),
-        device: info.dev,
-        inode: info.ino,
-        manager_sha256: digest(this.path("manager")),
-        launcher_sha256: digest(this.path("bin/hack-next")),
-      })
+    const stage = join(parent, `.${basename(this.root)}.init-${nonce()}`);
+    mkdirSync(stage, { mode: 0o700 });
+    const created = owned(stage, true, 0o700);
+    const path = (name: string) => join(stage, name);
+    this.hooks.checkpoint?.("init-stage");
+    mkdirSync(path("bin"), { mode: 0o700 });
+    mkdirSync(path("versions"), { mode: 0o700 });
+    writeFile(path("manager"), readFileSync(this.source), 0o500);
+    this.hooks.checkpoint?.("init-manager");
+    writeFile(path("bin/hack-next"), launcherBytes(), 0o755);
+    this.hooks.checkpoint?.("init-launcher");
+    const marker = {
+      schema: "hack.prerelease-install/v2",
+      root: this.root,
+      uid: process.getuid?.(),
+      device: created.dev,
+      inode: created.ino,
+      manager_sha256: digest(path("manager")),
+      launcher_sha256: digest(path("bin/hack-next")),
+    };
+    writeFile(path(".channel.json"), jsonBytes(marker));
+    this.hooks.checkpoint?.("init-channel");
+    writeFile(path(".selection.json"), jsonBytes(this.state));
+    this.hooks.checkpoint?.("init-selection");
+    writeFile(path(".manager.lock"), Buffer.alloc(0));
+    this.hooks.checkpoint?.("init-lock");
+    syncDirectory(path("bin"));
+    syncDirectory(path("versions"));
+    syncDirectory(stage);
+    syncDirectory(parent);
+    requireThat(
+      sameJson(privateJson(path(".channel.json")), marker) &&
+        sameJson(privateJson(path(".selection.json")), this.state) &&
+        digest(path("manager")) === digest(this.source) &&
+        digest(path("bin/hack-next")) === marker.launcher_sha256,
+      "Initialization stage changed."
     );
-    writeFile(this.path(".selection.json"), jsonBytes(this.state));
-    writeFile(this.path(".manager.lock"), Buffer.alloc(0));
-    syncDirectory(this.path("bin"));
-    syncDirectory(this.path("versions"));
-    syncDirectory(this.root);
+    this.hooks.checkpoint?.("init-ready");
+    const current = owned(stage, true, 0o700);
+    requireThat(
+      current.dev === created.dev && current.ino === created.ino,
+      "Initialization stage identity changed."
+    );
+    const published = publishDirectoryExclusive(stage, this.root);
+    if (!published) {
+      // A competing initializer may have won. Validate its complete result, never overwrite it.
+      requireThat(
+        lexists(this.root),
+        `Atomic no-replace initialization failed; preserved stage: ${stage}`
+      );
+      owned(this.root, true, 0o700);
+      this.refuseLegacy();
+      requireThat(
+        lexists(this.path(".channel.json")),
+        `A competing existing/foreign root was not adopted; use a separate --root. Preserved stage: ${stage}`
+      );
+      this.validate();
+      return;
+    }
+    publishAndSync(
+      this.root,
+      () => {
+        /* The exclusive rename above has already published the complete root. */
+      },
+      () => {
+        this.hooks.checkpoint?.("init-published");
+        syncDirectory(parent);
+      }
+    );
+    this.validate();
   }
   /** Kernel flock is shared for launches, exclusive for mutations, and never waits. */
   lock(shared = false, managerUpgrade = false) {
     owned(this.root, true, 0o700);
+    this.refuseLegacy();
     const before = owned(this.path(".manager.lock"), false, 0o600);
     const library = dlopen(
       process.platform === "darwin"
@@ -198,6 +280,7 @@ export class Channel {
   }
   validate(managerUpgrade = false) {
     const info = owned(this.root, true, 0o700);
+    this.refuseLegacy();
     const pending = lexists(this.path(JOURNAL));
     requireThat(
       !pending || managerUpgrade,
@@ -370,12 +453,12 @@ export class Channel {
       HACK_CANDIDATE_ENTRYPOINT: "hack-next",
     };
     if (backend === "compose") {
-      environment.HACK_NATIVE_BINARY = undefined;
-      environment.HACK_NATIVE_HOME = undefined;
+      Reflect.deleteProperty(environment, "HACK_NATIVE_BINARY");
+      Reflect.deleteProperty(environment, "HACK_NATIVE_HOME");
       environment.HACK_RUNTIME_BACKEND = "compose";
       return environment;
     }
-    environment.HACK_GLOBAL_CONFIG_PATH = undefined;
+    Reflect.deleteProperty(environment, "HACK_GLOBAL_CONFIG_PATH");
     return {
       ...environment,
       HACK_RUNTIME_BACKEND: "native",
@@ -446,7 +529,7 @@ export class Channel {
       state.previous = state.selected;
       state.selected = version;
     }
-    atomicJson(this.path(".selection.json"), state);
+    atomicJson(this.path(".selection.json"), state, this.hooks.checkpoint);
     this.state = state;
   }
   async install(
@@ -493,6 +576,10 @@ export class Channel {
       current === null || versionNumber(version) > versionNumber(current),
       "Upgrade must increase the prerelease version; use rollback."
     );
+    requireThat(
+      digest(this.path("manager")) === digest(this.source),
+      "Retained manager differs from this installer; use the retained manager or a separate --root. Replacement requires a future reviewed compiled predecessor digest; none is currently approved."
+    );
     this.requireQuiescent(current);
     const stage = this.path(`.stage-${nonce()}`);
     mkdirSync(stage, { mode: 0o700 });
@@ -509,10 +596,6 @@ export class Channel {
         version,
         signatures: (bundle) => this.signatures(bundle),
       });
-      requireThat(
-        digest(this.path("manager")) === digest(this.source),
-        "Retained manager must match this installer; run an explicit reviewed upgrade-manager first."
-      );
       const homes: Record<string, { device: number; inode: number }> = {};
       for (const name of ["native-home", "cli-home"]) {
         mkdirSync(join(installation, name), { mode: 0o700 });
@@ -538,8 +621,14 @@ export class Channel {
         !lexists(destination),
         "Refusing to overwrite a retained candidate version."
       );
-      renameSync(installation, destination);
-      syncDirectory(dirname(destination));
+      publishAndSync(
+        destination,
+        () => renameSync(installation, destination),
+        () => {
+          this.hooks.checkpoint?.("sync:version");
+          syncDirectory(dirname(destination));
+        }
+      );
       this.hooks.checkpoint?.("version-published");
       const state = {
         ...this.state,
@@ -550,7 +639,7 @@ export class Channel {
         selected: version,
         previous: current,
       };
-      atomicJson(this.path(".selection.json"), state);
+      atomicJson(this.path(".selection.json"), state, this.hooks.checkpoint);
       this.state = state;
     } finally {
       // Only this invocation's stage, with the identity recorded at creation, is ours.
@@ -707,9 +796,15 @@ export class Channel {
       writeFile(join(stage, "journal.json"), jsonBytes(plan));
       syncDirectory(stage);
       this.validate();
-      renameSync(join(stage, "journal.json"), this.path(JOURNAL));
-      syncDirectory(stage);
-      syncDirectory(this.root);
+      publishAndSync(
+        this.path(JOURNAL),
+        () => renameSync(join(stage, "journal.json"), this.path(JOURNAL)),
+        () => {
+          this.hooks.checkpoint?.("sync:journal");
+          syncDirectory(stage);
+          syncDirectory(this.root);
+        }
+      );
       this.hooks.checkpoint?.("upgrade-journal");
     }
     this.validate(true);
@@ -719,7 +814,8 @@ export class Channel {
       atomicFile(
         this.path("manager"),
         readFileSync(join(stage, "manager-after")),
-        0o500
+        0o500,
+        this.hooks.checkpoint
       );
     }
     this.hooks.checkpoint?.("upgrade-manager");
@@ -731,13 +827,21 @@ export class Channel {
     ) {
       atomicFile(
         this.path(".channel.json"),
-        readFileSync(join(stage, "channel-after.json"))
+        readFileSync(join(stage, "channel-after.json")),
+        0o600,
+        this.hooks.checkpoint
       );
     }
     this.hooks.checkpoint?.("upgrade-receipt");
     this.validate(true);
-    unlinkSync(this.path(JOURNAL));
-    syncDirectory(this.root);
+    publishAndSync(
+      this.path(JOURNAL),
+      () => unlinkSync(this.path(JOURNAL)),
+      () => {
+        this.hooks.checkpoint?.("sync:journal-removed");
+        syncDirectory(this.root);
+      }
+    );
     this.validate();
   }
   async run(arguments_: string[]) {

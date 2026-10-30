@@ -3,10 +3,12 @@ import {
   closeSync,
   constants,
   fchmodSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   openSync,
   readFileSync,
+  readSync,
   realpathSync,
   writeSync,
 } from "node:fs";
@@ -134,12 +136,91 @@ export function jsonBytes(value: unknown): Buffer {
 export function hash(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
-export function digest(path: string): string {
+/** Hash the opened descriptor with a fixed 1 MiB buffer, including a growth bound. */
+export function digest(path: string, afterOpen?: (fd: number) => void): string {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    // Bound before reading; callers also validate ownership and modes.
-    requireThat(lstatSync(path).size <= MAX_ARCHIVE, "Oversized file.");
-    return hash(readFileSync(fd));
+    afterOpen?.(fd);
+    const before = fstatSync(fd);
+    requireThat(
+      before.isFile() && before.size <= MAX_ARCHIVE,
+      "Oversized or nonregular file."
+    );
+    const value = createHash("sha256");
+    const buffer = Buffer.alloc(1024 * 1024);
+    let total = 0;
+    for (;;) {
+      const size = readSync(fd, buffer, 0, buffer.length, null);
+      if (size === 0) {
+        break;
+      }
+      total += size;
+      requireThat(
+        total <= MAX_ARCHIVE && total <= before.size,
+        "File grew beyond its digest size budget."
+      );
+      value.update(buffer.subarray(0, size));
+    }
+    const after = fstatSync(fd);
+    requireThat(
+      total === before.size &&
+        after.size === before.size &&
+        after.mtimeMs === before.mtimeMs &&
+        after.ctimeMs === before.ctimeMs,
+      "File changed during digest."
+    );
+    return value.digest("hex");
+  } finally {
+    closeSync(fd);
+  }
+}
+/** One no-follow descriptor supplies the exact bounded compressed bytes we pin and parse.
+ * A one-byte probe catches growth without allowing readFileSync to allocate past the bound.
+ * afterOpen is an in-process fixture seam, never a runtime/environment bypass.
+ */
+export function readPinnedArchive(
+  path: string,
+  checksum: string,
+  afterOpen?: (fd: number) => void
+): Buffer {
+  requireThat(SHA256.test(checksum), "Expected archive SHA-256 is required.");
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    afterOpen?.(fd);
+    const before = fstatSync(fd);
+    requireThat(
+      before.isFile() &&
+        before.uid === process.getuid?.() &&
+        before.nlink === 1 &&
+        before.size <= MAX_ARCHIVE,
+      "Foreign, aliased or oversized archive descriptor."
+    );
+    const bytes = Buffer.allocUnsafe(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(
+        fd,
+        bytes,
+        offset,
+        Math.min(1024 * 1024, bytes.length - offset),
+        null
+      );
+      requireThat(count > 0, "Archive was truncated during read.");
+      offset += count;
+    }
+    requireThat(
+      readSync(fd, Buffer.alloc(1), 0, 1, null) === 0,
+      "Archive grew during read."
+    );
+    const after = fstatSync(fd);
+    requireThat(
+      after.size === before.size &&
+        after.mtimeMs === before.mtimeMs &&
+        after.ctimeMs === before.ctimeMs &&
+        hash(bytes) === checksum,
+      "Archive checksum or size changed while reading pinned bytes."
+    );
+    return bytes;
   } finally {
     closeSync(fd);
   }

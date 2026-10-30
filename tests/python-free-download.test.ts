@@ -8,8 +8,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { curlTransferFlags } from "../scripts/installer/bootstrap.ts";
 import { download, officialArchive } from "../scripts/installer/download.ts";
 import { hash, jsonBytes } from "../scripts/installer/integrity.ts";
+import { TransferBudget } from "../scripts/installer/transfer-budget.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -199,3 +201,159 @@ test("official release download binds exact assets, immutable tag and metadata; 
     mock.mockRestore();
   }
 });
+
+class FixtureClock {
+  now = 0;
+  private readonly jobs: {
+    due: number;
+    callback: () => void;
+    active: boolean;
+  }[] = [];
+  schedule = (callback: () => void, milliseconds: number) => {
+    const job = { due: this.now + milliseconds, callback, active: true };
+    this.jobs.push(job);
+    return () => {
+      job.active = false;
+    };
+  };
+  advance(milliseconds: number) {
+    const end = this.now + milliseconds;
+    for (;;) {
+      const job = this.jobs
+        .filter((item) => item.active && item.due <= end)
+        .sort((a, b) => a.due - b.due)[0];
+      if (!job) {
+        break;
+      }
+      this.now = job.due;
+      job.active = false;
+      job.callback();
+    }
+    this.now = end;
+  }
+}
+const drain = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+};
+
+for (const scenario of ["progress", "stall", "total"] as const) {
+  test(`HTTP transfer budget deterministically distinguishes ${scenario}`, async () => {
+    const root = scratch();
+    const clock = new FixtureClock();
+    const budget = new TransferBudget({
+      inactivityMs: 30,
+      totalMs: 100,
+      schedule: clock.schedule,
+    });
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(value) {
+        controller = value;
+      },
+    });
+    const mock = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(stream)
+    );
+    try {
+      const transfer = download(
+        "https://github.com/file",
+        join(root, "download"),
+        100,
+        budget
+      );
+      // Bun's promise matcher can wait eagerly; drive the fake clock before asserting.
+      const settled = transfer.then(
+        () => ({ ok: true, error: "" }),
+        (error) => ({ ok: false, error: String(error) })
+      );
+      await drain();
+      if (scenario === "stall") {
+        clock.advance(31);
+      } else {
+        for (let i = 0; i < (scenario === "progress" ? 3 : 4); i++) {
+          clock.advance(20);
+          controller?.enqueue(Uint8Array.of(65));
+          await drain();
+        }
+        if (scenario === "progress") {
+          controller?.close();
+        } else {
+          clock.advance(21);
+        }
+      }
+      const result = await settled;
+      expect(result.ok).toBe(scenario === "progress");
+      if (scenario !== "progress") {
+        expect(result.error).toContain(
+          scenario === "stall" ? "inactivity budget" : "total transfer budget"
+        );
+      }
+      if (scenario === "progress") {
+        expect(clock.now).toBe(60);
+        expect(readFileSync(join(root, "download"), "utf8")).toBe("AAA");
+      }
+    } finally {
+      budget.close();
+      mock.mockRestore();
+    }
+  });
+}
+
+test("curl's production low-speed and total-budget flags accept progressing loopback bytes and refuse a genuine stall", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      let timer: ReturnType<typeof setInterval> | undefined;
+      const slow = new URL(request.url).pathname === "/progress";
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(slow ? 64 : 1).fill(65));
+            if (slow) {
+              let count = 1;
+              timer = setInterval(() => {
+                controller.enqueue(new Uint8Array(64).fill(65));
+                if (++count === 16) {
+                  clearInterval(timer);
+                  controller.close();
+                }
+              }, 100);
+            }
+          },
+          cancel() {
+            if (timer) {
+              clearInterval(timer);
+            }
+          },
+        })
+      );
+    },
+  });
+  try {
+    const run = (path: string) =>
+      Bun.spawn(
+        [
+          "/usr/bin/curl",
+          "--proto",
+          "=http",
+          "--silent",
+          "--show-error",
+          ...curlTransferFlags({ inactivitySeconds: 1, totalSeconds: 4 }),
+          `http://127.0.0.1:${server.port}/${path}`,
+        ],
+        { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 5000 }
+      );
+    const progress = run("progress");
+    const bytes = await new Response(progress.stdout).bytes();
+    expect(await progress.exited).toBe(0);
+    expect(bytes.length).toBe(1024);
+    const stall = run("stall");
+    const error = await new Response(stall.stderr).text();
+    expect(await stall.exited).toBe(28);
+    expect(error).toContain("too slow");
+    expect((await new Response(stall.stdout).bytes()).length).toBe(1);
+  } finally {
+    await server.stop(true);
+  }
+}, 10_000);

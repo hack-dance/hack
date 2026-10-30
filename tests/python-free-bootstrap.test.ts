@@ -40,7 +40,7 @@ function fixture(
   for (const path of [bin, home, temp]) {
     mkdirSync(path, { mode: 0o700 });
   }
-  for (const tool of ["shasum", "mktemp", "chmod", "rm", "cp"]) {
+  for (const tool of ["shasum", "mktemp", "chmod", "rm", "cp", "date"]) {
     symlinkSync(
       `/bin/${tool === "shasum" || tool === "mktemp" ? "../usr/bin/" : ""}${tool}`,
       join(bin, tool)
@@ -116,11 +116,15 @@ for (const shell of [
       for (const flag of [
         "--proto\n=https",
         "--tlsv1.2",
-        "--max-time\n30",
+        "--speed-limit\n1",
+        "--speed-time\n30",
         "--max-filesize\n268435456",
       ]) {
         expect(args).toContain(flag);
       }
+      const total = Number(args.split("--max-time\n")[1]?.split("\n")[0]);
+      expect(total).toBeGreaterThan(0);
+      expect(total).toBeLessThanOrEqual(1800);
       expect(args).not.toContain("--insecure");
       expect(args).not.toContain("--location");
       expect(result.stdout.toString()).toContain(
@@ -192,5 +196,58 @@ fixtureTest(
     expect(missing.exitCode).not.toBe(0);
     expect(missing.stderr.toString()).toContain("Required system tool");
     expect(existsSync(f.env.CURL_ARGS)).toBe(false);
+  }
+);
+fixtureTest(
+  "bootstrap rejects invalid advanced archive pairs before any transfer",
+  () => {
+    for (const args of [
+      ["--archive", "/fixture"],
+      ["--sha256", "a".repeat(64)],
+      ["--archive", "relative", "--sha256", "a".repeat(64)],
+      ["--archive", "/fixture", "--sha256", "bad"],
+      ["--archive", "/fixture", "--sha256", "A".repeat(64)],
+      [
+        "--archive",
+        "/fixture",
+        "--sha256",
+        "a".repeat(64),
+        "--sha256",
+        "a".repeat(64),
+      ],
+      ["--root", "/one", "--root", "/two"],
+      ["--archive", ""],
+    ]) {
+      const f = fixture();
+      const result = Bun.spawnSync(["/bin/sh", f.bootstrap, ...args], {
+        env: f.env,
+        timeout: 10_000,
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(existsSync(f.env.CURL_ARGS)).toBe(false);
+      expect(existsSync(f.env.INVOCATION)).toBe(false);
+    }
+  }
+);
+fixtureTest(
+  "advanced archive pair is forwarded verbatim to the same manager contract",
+  () => {
+    const f = fixture();
+    const checksum = "a".repeat(64);
+    const result = Bun.spawnSync(
+      [
+        "/bin/sh",
+        f.bootstrap,
+        "--archive",
+        "/fixture with spaces.tar.gz",
+        "--sha256",
+        checksum,
+      ],
+      { env: f.env, timeout: 10_000 }
+    );
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(f.env.INVOCATION, "utf8")).toContain(
+      `--archive\n/fixture with spaces.tar.gz\n--sha256\n${checksum}\n`
+    );
   }
 );

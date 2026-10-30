@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -11,6 +12,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,11 +26,13 @@ import {
   digest,
   hash,
   jsonBytes,
+  MAX_ARCHIVE,
   metadata,
   parseJson,
   SHA256,
   versionNumber,
 } from "../scripts/installer/integrity.ts";
+import { publishDirectoryExclusive } from "../scripts/installer/publication.ts";
 
 // Filesystem fixtures may span several bounded subprocesses; the suite default is only 5 s.
 const fixtureTest = (name: string, run: () => void | Promise<void>) =>
@@ -201,7 +205,7 @@ describe("standalone manager ownership and atomic state", () => {
       });
       const before = readFileSync(join(legacy, "manager.py"));
       const legacyChannel = new Channel(legacy, source);
-      expect(() => legacyChannel.initialize()).toThrow("nonempty");
+      expect(() => legacyChannel.initialize()).toThrow("separate --root");
       writeFileSync(
         join(legacy, ".channel.json"),
         jsonBytes({ schema: "hack.prerelease-install/v1" }),
@@ -308,8 +312,10 @@ describe("standalone manager ownership and atomic state", () => {
       );
       const upgrade = new Channel(channel.root, target, {
         predecessors: [hash(original)],
-        checkpoint: () => {
-          throw new Error("interrupted");
+        checkpoint: (point) => {
+          if (point === "upgrade-journal") {
+            throw new Error("interrupted");
+          }
         },
       });
       expect(() => upgrade.upgradeManager()).toThrow("interrupted");
@@ -437,3 +443,402 @@ describe("bounded input boundaries", () => {
     }
   );
 });
+
+describe("reviewed initialization and durability boundaries", () => {
+  fixtureTest(
+    "first initialization retries every publication boundary without adopting or removing interrupted stages",
+    () => {
+      for (const point of [
+        "init-stage",
+        "init-manager",
+        "init-launcher",
+        "init-channel",
+        "init-selection",
+        "init-lock",
+        "init-ready",
+        "init-published",
+      ]) {
+        const root = scratch();
+        const source = join(root, "source");
+        writeFileSync(source, "fixture-manager");
+        const target = join(root, "channel");
+        const interrupted = new Channel(target, source, {
+          checkpoint: (at) => {
+            if (at === point) {
+              throw new Error("fixture first-init interruption");
+            }
+          },
+        });
+        expect(() => interrupted.initialize()).toThrow(
+          point === "init-published"
+            ? "durability is uncertain"
+            : "first-init interruption"
+        );
+        expect(existsSync(target)).toBe(point === "init-published");
+        const retained = readdirSync(root).filter((name) =>
+          name.includes(".init-")
+        );
+        const retry = new Channel(target, source);
+        retry.initialize();
+        retry.validate();
+        expect(retry.state.selected).toBeNull();
+        expect(readdirSync(target).sort()).toEqual(
+          [
+            ".channel.json",
+            ".selection.json",
+            ".manager.lock",
+            "manager",
+            "bin",
+            "versions",
+          ].sort()
+        );
+        for (const stage of retained) {
+          expect(existsSync(join(root, stage))).toBe(true);
+        }
+      }
+    }
+  );
+  fixtureTest(
+    "concurrent initializers publish exactly one complete root and retain the losing stage",
+    async () => {
+      const root = scratch();
+      const source = join(root, "source");
+      writeFileSync(source, "fixture-manager");
+      const target = join(root, "channel");
+      const module = new URL("../scripts/installer/channel.ts", import.meta.url)
+        .pathname;
+      const code = `import {Channel} from ${JSON.stringify(module)}; import {readSync} from "node:fs"; new Channel(${JSON.stringify(target)},${JSON.stringify(source)},{checkpoint(point){if(point==="init-ready"){process.stdout.write("ready\\n");readSync(0,Buffer.alloc(1),0,1,null);}}}).initialize();`;
+      const children = [0, 1].map(() =>
+        Bun.spawn([process.execPath, "-e", code], {
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 10_000,
+        })
+      );
+      try {
+        for (const child of children) {
+          const reader = child.stdout.getReader();
+          const ready = await reader.read();
+          reader.releaseLock();
+          expect(new TextDecoder().decode(ready.value)).toContain("ready");
+        }
+        for (const child of children) {
+          child.stdin.write("x");
+          child.stdin.end();
+        }
+        for (const child of children) {
+          expect(await new Response(child.stderr).text()).toBe("");
+          expect(await child.exited).toBe(0);
+        }
+        const result = new Channel(target, source);
+        result.validate();
+        expect(
+          readdirSync(root).filter((name) => name.includes(".init-"))
+        ).toHaveLength(1);
+      } finally {
+        for (const child of children) {
+          if (child.exitCode === null) {
+            child.kill();
+            await child.exited;
+          }
+        }
+      }
+    }
+  );
+  fixtureTest(
+    "no-replace publication refuses even an existing empty destination",
+    () => {
+      const root = scratch();
+      const source = join(root, "source");
+      writeFileSync(source, "fixture-manager");
+      const target = join(root, "empty");
+      mkdirSync(target, { mode: 0o700 });
+      expect(() => new Channel(target, source).initialize()).toThrow(
+        "existing installation root"
+      );
+      expect(readdirSync(target)).toEqual([]);
+    }
+  );
+  fixtureTest(
+    "selection sync failure reports uncertainty and on-disk readback is authoritative",
+    async () => {
+      const { channel, source } = await installed();
+      const fail = new Channel(channel.root, source, {
+        signatures: () => {},
+        quiescence: () => {},
+        checkpoint: (point) => {
+          if (point === "sync:.selection.json") {
+            throw new Error("fixture directory sync failure");
+          }
+        },
+      });
+      fail.validate();
+      expect(() => fail.select(null)).toThrow("durability is uncertain");
+      const readback = new Channel(channel.root, source);
+      readback.validate();
+      expect(readback.state.selected).toBeNull();
+      expect(readback.state.previous).toBe("5.0.0-next.1");
+      expect(
+        existsSync(join(channel.root, "versions/5.0.0-next.1/native-home"))
+      ).toBe(true);
+    }
+  );
+  fixtureTest(
+    "version rename sync failure retains published version without claiming its selection committed",
+    async () => {
+      const { root, channel, source } = await installed();
+      const second = fixtureArchive(root, "5.0.0-next.2");
+      const fail = new Channel(channel.root, source, {
+        signatures: () => {},
+        quiescence: () => {},
+        checkpoint: (point) => {
+          if (point === "sync:version") {
+            throw new Error("fixture directory sync failure");
+          }
+        },
+      });
+      fail.validate();
+      await expect(
+        fail.install("5.0.0-next.2", second.archive, second.checksum, true)
+      ).rejects.toThrow("durability is uncertain");
+      const readback = new Channel(channel.root, source);
+      readback.validate();
+      expect(readback.state.selected).toBe("5.0.0-next.1");
+      expect(readback.state.installed["5.0.0-next.2"]).toBeUndefined();
+      expect(
+        existsSync(join(channel.root, "versions/5.0.0-next.2/.receipt.json"))
+      ).toBe(true);
+    }
+  );
+  for (const point of [
+    "sync:journal",
+    "sync:manager",
+    "sync:.channel.json",
+    "sync:journal-removed",
+  ]) {
+    fixtureTest(
+      `manager sync failure ${point} preserves recoverable authoritative state and originals`,
+      () => {
+        const { root, channel } = fixture();
+        const original = readFileSync(join(channel.root, "manager"));
+        const selection = readFileSync(join(channel.root, ".selection.json"));
+        const source = join(root, "new-manager");
+        writeFileSync(source, "fixture-new-manager");
+        const fail = new Channel(channel.root, source, {
+          predecessors: [hash(original)],
+          checkpoint: (at) => {
+            if (at === point) {
+              throw new Error("fixture directory sync failure");
+            }
+          },
+        });
+        expect(() => fail.upgradeManager()).toThrow("durability is uncertain");
+        const pending = existsSync(join(channel.root, ".manager-upgrade.json"));
+        expect(pending).toBe(point !== "sync:journal-removed");
+        const recover = new Channel(channel.root, source, {
+          predecessors: [hash(original)],
+        });
+        const release = recover.lock(false, true);
+        try {
+          recover.upgradeManager();
+        } finally {
+          release();
+        }
+        recover.validate();
+        expect(readFileSync(join(channel.root, "manager"), "utf8")).toBe(
+          "fixture-new-manager"
+        );
+        expect(readFileSync(join(channel.root, ".selection.json"))).toEqual(
+          selection
+        );
+        const stage = readdirSync(channel.root).find((name) =>
+          name.startsWith(".stage-")
+        ) as string;
+        expect(
+          readFileSync(join(channel.root, stage, "manager-before"))
+        ).toEqual(original);
+      }
+    );
+  }
+  fixtureTest(
+    "digest binds its size and bytes to the opened descriptor when the pathname changes",
+    () => {
+      const root = scratch();
+      const path = join(root, "data");
+      writeFileSync(path, "opened bytes");
+      const result = digest(path, () => {
+        renameSync(path, join(root, "original"));
+        writeFileSync(path, "replacement");
+      });
+      expect(result).toBe(hash(Buffer.from("opened bytes")));
+      expect(readFileSync(path, "utf8")).toBe("replacement");
+    }
+  );
+});
+fixtureTest(
+  "actual Python channel with an interrupted old manager journal refuses unchanged before recovery advice",
+  () => {
+    const root = scratch();
+    const target = join(root, "python-channel");
+    const code = `import importlib.util, pathlib, sys
+def load(name, path):
+ spec=importlib.util.spec_from_file_location(name,path)
+ module=importlib.util.module_from_spec(spec)
+ spec.loader.exec_module(module)
+ return module
+old=load('old_manager',sys.argv[2])
+old.Channel(pathlib.Path(sys.argv[1])).initialize()
+current=load('current_manager',sys.argv[3])
+def interrupted(*args):
+ raise RuntimeError('fixture interrupted old upgrade')
+current.atomic_file=interrupted
+channel=current.Channel(pathlib.Path(sys.argv[1]))
+with channel.lock(manager_upgrade=True):
+ try:
+  channel.upgrade_manager()
+ except RuntimeError as error:
+  assert str(error)=='fixture interrupted old upgrade'
+assert (pathlib.Path(sys.argv[1])/'.manager-upgrade.json').is_file()
+`;
+    const python = Bun.spawnSync(
+      [
+        "python3",
+        "-I",
+        "-B",
+        "-c",
+        code,
+        target,
+        new URL("./fixtures/prerelease-manager-storage-v5.py", import.meta.url)
+          .pathname,
+        new URL("../scripts/install-prerelease.py", import.meta.url).pathname,
+      ],
+      { stdout: "pipe", stderr: "pipe", timeout: 10_000 }
+    );
+    expect(python.stderr.toString()).toBe("");
+    expect(python.exitCode).toBe(0);
+    const inventory = (directory: string): Record<string, string> => {
+      const result: Record<string, string> = {};
+      for (const name of readdirSync(directory)) {
+        const path = join(directory, name);
+        const info = lstatSync(path);
+        result[name] = info.isDirectory()
+          ? JSON.stringify(inventory(path))
+          : `${info.mode}:${digest(path)}`;
+      }
+      return result;
+    };
+    const before = inventory(target);
+    const source = join(root, "new-compiled-fixture");
+    writeFileSync(source, "fixture");
+    const channel = new Channel(target, source);
+    for (const operation of [
+      () => channel.initialize(),
+      () => channel.validate(),
+      () => channel.lock(),
+      () => channel.lock(false, true),
+    ]) {
+      expect(operation).toThrow(
+        "cannot migrate or recover a Python manager journal"
+      );
+    }
+    expect(inventory(target)).toEqual(before);
+  }
+);
+fixtureTest(
+  "a mismatched external manager refuses before fetching a complete archive",
+  async () => {
+    const { root, channel } = fixture();
+    const source = join(root, "different-manager");
+    writeFileSync(source, "unreviewed manager");
+    const external = new Channel(channel.root, source);
+    external.validate();
+    const mock = spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("unexpected download")
+    );
+    try {
+      await expect(external.install("5.0.0-next.2")).rejects.toThrow(
+        "none is currently approved"
+      );
+      expect(mock).not.toHaveBeenCalled();
+    } finally {
+      mock.mockRestore();
+    }
+  }
+);
+fixtureTest(
+  "an oversized opened descriptor cannot evade the bound by swapping in a small pathname",
+  () => {
+    const root = scratch();
+    const path = join(root, "oversized");
+    writeFileSync(path, "");
+    truncateSync(path, MAX_ARCHIVE + 1);
+    expect(() =>
+      digest(path, () => {
+        renameSync(path, join(root, "retained-oversized"));
+        writeFileSync(path, "small");
+      })
+    ).toThrow("Oversized");
+    expect(readFileSync(path, "utf8")).toBe("small");
+  }
+);
+fixtureTest(
+  "OS no-replace rename preserves an existing empty target and the complete source",
+  () => {
+    const root = scratch();
+    const source = join(root, "stage");
+    const target = join(root, "existing");
+    mkdirSync(source, { mode: 0o700 });
+    mkdirSync(target, { mode: 0o700 });
+    writeFileSync(join(source, "keep"), "original");
+    const before = lstatSync(target);
+    expect(publishDirectoryExclusive(source, target)).toBe(false);
+    expect(lstatSync(target).ino).toBe(before.ino);
+    expect(readdirSync(target)).toEqual([]);
+    expect(readFileSync(join(source, "keep"), "utf8")).toBe("original");
+  }
+);
+fixtureTest(
+  "outer archive checksum pins precisely the opened bytes parsed, even when the pathname is replaced",
+  () => {
+    const root = scratch();
+    const first = fixtureArchive(root);
+    const second = fixtureArchive(root, "5.0.0-next.2");
+    const replacement = readFileSync(second.archive);
+    const destination = join(root, "accepted");
+    const result = extractArchive({
+      archive: first.archive,
+      checksum: first.checksum,
+      destination,
+      version: "5.0.0-next.1",
+      signatures: () => {},
+      afterArchiveOpen: () => {
+        renameSync(first.archive, join(root, "retained-original.gz"));
+        writeFileSync(first.archive, replacement);
+      },
+    });
+    expect(result.identity.version).toBe("5.0.0-next.1");
+    expect(digest(first.archive)).toBe(second.checksum);
+    const source = join(root, "negative.gz");
+    const original = readFileSync(join(root, "retained-original.gz"));
+    writeFileSync(source, original);
+    const corrupted = Buffer.from(original);
+    corrupted[0] = (corrupted[0] ?? 0) ^ 1;
+    expect(() =>
+      extractArchive({
+        archive: source,
+        checksum: first.checksum,
+        destination: join(root, "never-written"),
+        version: "5.0.0-next.1",
+        signatures: () => {},
+        afterArchiveOpen: () => {
+          writeFileSync(source, corrupted);
+          renameSync(source, join(root, "retained-corrupt.gz"));
+          writeFileSync(source, original);
+        },
+      })
+    ).toThrow("Archive checksum");
+    expect(existsSync(join(root, "never-written"))).toBe(false);
+    expect(digest(source)).toBe(first.checksum);
+  }
+);

@@ -6,6 +6,24 @@ intended canonical URL; a successful local build does not mean the site is deplo
 
 ## Develop and verify
 
+For a Hack-routed preview, run from the repository root:
+
+```bash
+hack up docs --profile docs --branch docs-preview --detach
+hack open docs --branch docs-preview
+```
+
+This opt-in service runs the pinned Bun and Node tools in a container, installs
+the frozen site lockfile, builds with webpack, and serves the production build.
+Dependencies and Next build output
+live in branch-owned volumes. Hack supplies local HTTPS routing; no host port or
+public deployment is created. Inspect startup with
+`hack logs docs --profile docs --branch docs-preview --compose --no-follow`.
+Stop this preview with `hack down --profile docs --branch docs-preview`.
+The service is capped at two CPUs and 6 GB memory, with a 3 GB Node heap.
+Restart the service after source changes to rebuild the preview. This avoids
+development-server compilation and HMR overhead while reviewing the whole corpus.
+
 Use the repository's pinned Bun 1.4.2. Site dependencies and `site/bun.lock` are
 independent of the CLI workspace; do not change the root Bun pin for Next.js.
 Next.js also requires a supported Node.js installation (20.9 or newer).

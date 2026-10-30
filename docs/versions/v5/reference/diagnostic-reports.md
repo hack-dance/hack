@@ -895,6 +895,7 @@ Source: `packages/config-compiler/generated/native-config.ts:33 (HostEnvTargets)
 
 | Name | Exact type / choices | Pinned source |
 | --- | --- | --- |
+| `WorkloadKind` | `"service" \| "job"` | `packages/config-compiler/generated/native-config.ts:74 (WorkloadKind)` |
 | `CheckStatus` | `"ok" \| "warn" \| "error"` | `src/commands/doctor.ts:190 (CheckStatus)` |
 | `HackLocalRouteReport` | `HackLocalRouteReport.current \| HackLocalRouteReport.repairable \| HackLocalRouteReport.refused (serializer variants)` | `src/lib/native-hack-local-route.ts:711 (reportHackLocalRoute)` |
 | `HackLocalRouteRefusal` | `\| "invalid-receipt" \| "pending-receipt" \| "relay-not-verified" \| "dnsmasq-config-missing" \| "unreadable-config" \| "uninspected-config-source" \| "no-managed-line" \| "unmanaged-line" \| "foreign-target" \| "foreign-resolver" \| "old-target-live" \| "non-interactive" \| "declined" \| "authorization-failed" \| "busy" \| "restart-unavailable" \| "inputs-changed" \| "no-receipt"` | `src/lib/native-hack-local-route.ts:71 (HackLocalRouteRefusal)` |

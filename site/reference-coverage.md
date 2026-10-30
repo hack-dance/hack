@@ -10,7 +10,7 @@ The public site uses v4.2.4 (`91b14bf0abb17602142425de0d02628a3e8a2615`) and pub
 | MCP registered tools | 10 | 15 | `reference/mcp-fields`; 74/102 per-tool input rows, prompt args, common results, projections and 24 log event/entry field rows per version. Open nested results remain explicit. |
 | Authored native schema properties | — | 168 | `reference/authored-schema-fields`: 153 project +15 local; types/refs, containing-object requiredness, defaults and constraints. Shape is not runtime admission. |
 | Recursive public command leaves | 84 | 92 | Independent static source audit; 284/335 own option occurrences and 536/611 effective occurrences including global/built-in flags. Parent options are not inherited. The command/output supplement adds all three v4 and six v5 missing leaf sections; generic placeholder differences resolve the apparent flag mismatches. |
-| Diagnostic/setup/public report rows | 74 | 296 | 12/63 object variants and 1/22 scalar or collection aliases after excluding the opaque private Plan closure; `reference/diagnostic-reports`. |
+| Diagnostic/setup/public report rows | 74 | 296 | 12/63 object variants and 1/23 scalar or collection aliases after excluding the opaque private Plan closure; `reference/diagnostic-reports`. |
 | Project/env metadata declarations | 22 | 22 | Version-pinned source declarations plus typed CLI projection tables; `reference/project-env-reports`. |
 
 These are distinct inventories, not an overall completion percentage. A schema row or matching token is not a demonstrated scenario, handler default, client qualification or full nested payload contract.

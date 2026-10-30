@@ -314,9 +314,9 @@ Summary rows contain project_id:string|null; name:string; repo_root/dev_host:str
 
 runtime_status is running/stopped/missing/unknown/not_configured/unavailable in this version.
 
-Full rows additionally contain project_dir:string|null; ownership:compatibility object|null with mode/owner_type/owner_id/managed_by; defined_services/extensions_enabled/features:string[]|null; service_hosts:string-to-string-array map|null; runtime_configured:boolean|null; normalized runtime|null; branch_runtime array of branch:string plus runtime; sessions/worktrees/lifecycle as described above; kind:registered/unregistered. The ownership data is descriptive, not authorization for hosted features.
+Full and summary rows are separate projections. Full rows share project_id/name/repo_root/dev_host/status/runtime_status, but omit the summary-only defined_service_count, host_process_count, container_count, running_container_count, branch_count and session_count. Full rows contain project_dir:string|null; ownership:compatibility object|null with mode/owner_type/owner_id/managed_by; defined_services/extensions_enabled/features:string[]|null; service_hosts:string-to-string-array map|null; runtime_configured:boolean|null; normalized runtime|null; branch_runtime array of branch:string plus runtime; sessions/worktrees/lifecycle as described above; kind:registered/unregistered. The ownership data is descriptive, not authorization for hosted features.
 
-input_diagnostic, when present, contains code and message strings for authored/legacy input selection. It is omitted on normal rows; v4 does not emit it.
+Either v5 projection can add input_diagnostic; when present, it contains code and message strings for authored/legacy input selection. It is omitted on normal rows; v4 does not emit it.
 
 ## Managed YAML classification values
 

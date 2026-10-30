@@ -97,7 +97,7 @@ The legacy project file is `.hack/hack.config.json`. Requiredness below is relat
 
 ### Aliases and selection
 
-Prefer `env.defaultOverlay` for the default overlay. The reader checks `env.defaultOverlay` before `env.default_overlay`; nested env selection precedes legacy `defaultEnvConfig`, which in turn precedes `default_env_config`. These nested fields are read even though the legacy generated schema does not enumerate the `env` object. `worktree.autoBranch` is an alias of `worktree.auto_branch`. Use one spelling rather than conflicting aliases.
+Prefer `env.defaultOverlay` for the default overlay. The reader checks `env.defaultOverlay` before `env.default_overlay`; nested env selection precedes legacy `defaultEnvConfig`, which in turn precedes `default_env_config`. These nested fields are read even though the legacy generated schema does not enumerate the `env` object. `worktree.autoBranch` is an alias of `worktree.auto_branch`; a non-null snake_case value is selected before the camelCase alias, then parsed as a boolean. Use one spelling rather than conflicting aliases.
 
 ### Effective fallbacks
 

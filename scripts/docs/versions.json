@@ -1004,6 +1004,14 @@
       {
         "slug": "reference/overview",
         "title": "Reference and contracts"
+      },
+      {
+        "slug": "reference/configuration-fields",
+        "title": "Configuration fields"
+      },
+      {
+        "slug": "reference/mcp-fields",
+        "title": "MCP fields and results"
       }
     ]
   },
@@ -3382,6 +3390,14 @@
       {
         "slug": "reference/overview",
         "title": "Reference and contracts"
+      },
+      {
+        "slug": "reference/configuration-fields",
+        "title": "Configuration fields"
+      },
+      {
+        "slug": "reference/mcp-fields",
+        "title": "MCP fields and results"
       }
     ]
   }

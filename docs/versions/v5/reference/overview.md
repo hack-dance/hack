@@ -31,6 +31,10 @@ inputs, command translation and results. [MCP logs](../../reference/mcp-logs.md)
 explains finite cutoffs, cursor behavior and backend failures. Use those contracts
 when integrating an agent; internal runtime protocols are not public MCP APIs.
 
+## Field references
+
+[Configuration fields](configuration-fields.md) lists the version-specific project JSON, environment YAML and branch registry. [MCP fields and results](mcp-fields.md) lists every registered tool's input declarations, result fields and log event types.
+
 ## Coverage limits
 
 This first versioned pass preserves generated command documentation and separates

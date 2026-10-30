@@ -24,6 +24,10 @@ provide the v4 consumer interface. Public MCP implementation is preserved at the
 Later v5 compiler schemas and MCP reference pages are not substitutes for the v4
 contract. This archived corpus has no generated complete API/type catalog.
 
+## Field references
+
+[Configuration fields](configuration-fields.md) lists the version-specific project JSON, environment YAML and branch registry. [MCP fields and results](mcp-fields.md) lists every registered tool's input declarations, result fields and log event types.
+
 ## Coverage limits
 
 This first versioned pass preserves generated command documentation and separates

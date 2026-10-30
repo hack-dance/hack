@@ -179,7 +179,7 @@ test("doctor remediation plan mentions env migration when requested for a legacy
     });
 
     expect(lines).toEqual([
-      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.",
+      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, and daemon drift where needed.",
       "2. Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent.",
       "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.",
     ]);
@@ -197,7 +197,7 @@ test("doctor remediation plan skips env migration when modern env files already 
     });
 
     expect(lines).toEqual([
-      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.",
+      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, and daemon drift where needed.",
       "2. Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent.",
       "3. Skip env migration because this project already uses hack.env.*.yaml.",
     ]);
@@ -270,10 +270,7 @@ test("doctor guidance keeps global integration recovery read-only", () => {
   });
 
   expect(guidance.configurationRepair).toEqual([]);
-  expect(guidance.followUp[0]).toBe(
-    "Inspect global integration paths: hack setup sync --global --check"
-  );
-  expect(guidance.followUp[1]).toContain("reported global targets");
+  expect(guidance.followUp).toEqual([]);
 });
 
 test("doctor audits global agent guidance without a project", async () => {
@@ -805,8 +802,5 @@ test("doctor does not turn an all-scope inventory into an automatic repair", () 
     ],
   });
   expect(guidance.configurationRepair).toEqual([]);
-  expect(guidance.followUp[0]).toBe(
-    "Inspect integration paths: hack setup sync --all-scopes --check"
-  );
-  expect(guidance.followUp[1]).toContain("authorized project/global scope");
+  expect(guidance.followUp).toEqual([]);
 });

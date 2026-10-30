@@ -344,8 +344,8 @@ test("manifest-declared components agree with the matrix", async () => {
   ).toEqual(["manifest-disagreement"]);
 
   const hiddenRules = replaceCell("cursor", "rules", {
-    status: "unsupported",
-    openGate: null,
+    status: "untested",
+    openGate: "Observe the selected client loading this capability.",
   });
   expect(
     codesFor(
@@ -370,12 +370,12 @@ test("manifest-declared components agree with the matrix", async () => {
     )
   ).toEqual(["missing-cell"]);
 
-  const ungated = replaceCell("claude", "hooks", { openGate: null });
+  const ungated = replaceCell("claude", "skillDiscovery", { openGate: null });
   expect(
     codesFor(
       classificationIssues({ cells: ungated, manifests, exists: repoExists }),
       "claude",
-      "hooks"
+      "skillDiscovery"
     )
   ).toEqual(["open-gate-missing"]);
 });

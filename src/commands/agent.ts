@@ -12,10 +12,6 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import {
-  inspectAgentIntegrationFreshness,
-  renderAgentIntegrationFreshnessNotice,
-} from "../cli/integration-sync.ts";
 import { optPath } from "../cli/options.ts";
 import { canPrompt } from "../lib/interactivity.ts";
 import { openUrl } from "../lib/os.ts";
@@ -28,7 +24,8 @@ const primeOptions = [
     name: "check",
     type: "boolean",
     long: "--check",
-    description: "Include a read-only project and global integration inventory",
+    description:
+      "Deprecated compatibility flag; prints the primer without inspecting integrations",
   } as const),
 ] as const;
 type PrimeArgs = CommandArgs<typeof primeOptions, readonly []>;
@@ -101,24 +98,14 @@ export const agentCommand = defineCommand({
   ],
 } as const);
 
-async function handleAgentPrime({
-  ctx,
-  args,
+function handleAgentPrime({
+  ctx: _ctx,
+  args: _args,
 }: {
   readonly ctx: CliContext;
   readonly args: PrimeArgs;
-}): Promise<number> {
-  if (!args.options.check) {
-    process.stdout.write(`${renderAgentPrimer()}\n`);
-    return 0;
-  }
-  const project = await findProjectContext(ctx.cwd);
-  const report = await inspectAgentIntegrationFreshness({
-    projectRoot: project?.projectRoot ?? null,
-  });
-  process.stdout.write(
-    `${renderAgentIntegrationFreshnessNotice({ report })}\n\n${renderAgentPrimer()}`
-  );
+}): number {
+  process.stdout.write(`${renderAgentPrimer()}\n`);
   return 0;
 }
 

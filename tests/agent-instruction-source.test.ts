@@ -1,5 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +17,6 @@ import {
   INSTRUCTION_SECTIONS,
   type InstructionSurface,
 } from "../src/agents/instruction-source.ts";
-import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../src/agents/integration-revision.ts";
 import { renderAgentPrimer } from "../src/agents/primer.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
@@ -176,69 +174,28 @@ test("active contributor guidance and examples do not advertise retired Tickets"
   expect(await Bun.file("examples/tickets/README.md").exists()).toBe(false);
 });
 
-test("all generated surfaces keep freshness checks scoped and optional", () => {
-  for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
-    expect(rendered, `surface "${surface}" lacks freshness status`).toContain(
-      "Integration freshness"
-    );
-    expect(rendered).toContain("authorized project scope");
-    expect(rendered).not.toContain("hack setup sync --all-scopes --check");
-    expect(rendered).toContain("hack setup sync --all-scopes");
-    expect(rendered).toContain("restart only if");
-    expect(rendered).not.toContain("At session start, audit");
-  }
-});
-
-test("checked-in agent examples use the current integration contract", async () => {
-  const maintenance = INSTRUCTION_SECTIONS.find(
-    (section) => section.id === "maintenance"
-  );
-  expect(maintenance).toBeDefined();
-  const freshness = INSTRUCTION_SECTIONS.find(
-    (section) => section.id === "freshness"
-  );
-  expect(freshness).toBeDefined();
-
-  for (const path of [
-    "examples/basic/AGENTS.md",
-    "examples/basic/CLAUDE.md",
-    ".codex/skills/hack-cli/SKILL.md",
-    ".cursor/rules/hack.mdc",
-  ]) {
-    const content = await Bun.file(path).text();
-    expect(content).toContain(
-      `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``
-    );
-    for (const bullet of [
-      ...(maintenance?.bullets ?? []),
-      ...(freshness?.bullets.slice(1) ?? []),
-    ]) {
-      expect(content, `${path} lacks current maintenance guidance`).toContain(
-        bullet
-      );
-    }
-  }
-
-  const cliGuide = await Bun.file("docs/cli.md").text();
-  expect(cliGuide).not.toContain(
-    "`hack doctor --fix` never inspect or rewrite"
-  );
-});
-
-test("agent integration content revision changes with canonical guidance", () => {
-  const revision = createHash("sha256")
-    .update(
-      JSON.stringify(
-        INSTRUCTION_SECTIONS.filter((section) => section.id !== "freshness")
-      )
-    )
-    .digest("hex")
-    .slice(0, 12);
-  expect(HACK_AGENT_INTEGRATION_CONTENT_REVISION).toBe(revision);
+test("rendered guidance retires automatic instructions and freshness", () => {
   for (const rendered of Object.values(RENDERED_SURFACES)) {
+    expect(rendered).not.toContain("Integration freshness");
+    expect(rendered).not.toContain("hack setup sync");
+    expect(rendered).toContain("does not inject project instructions");
     expect(rendered).toContain(
-      `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``
+      "Existing customized and legacy files are preserved"
     );
+  }
+});
+
+test("optional plugin uses current guidance without updating contributor or historical examples", async () => {
+  const content = await Bun.file(
+    "plugins/hack/skills/hack-cli/SKILL.md"
+  ).text();
+  expect(content).toContain("explicit opt-ins");
+  expect(content).not.toContain("Integration freshness");
+});
+
+test("rendered guidance has no runtime freshness marker requirement", () => {
+  for (const rendered of Object.values(RENDERED_SURFACES)) {
+    expect(rendered).not.toContain("Content revision:");
   }
 });
 
@@ -257,41 +214,16 @@ test("all surfaces contain the canonical bullets for their tagged sections", () 
   expect(misses).toEqual([]);
 });
 
-test("agent setup guidance keeps the plugin default and the no-write rule", () => {
-  const agentSetup = INSTRUCTION_SECTIONS.find(
+test("agent guidance retains explicit skills and independently selected MCP", () => {
+  const section = INSTRUCTION_SECTIONS.find(
     (section) => section.id === "agent-setup"
   );
-  expect(agentSetup).toBeDefined();
-  const bullets = agentSetup?.bullets ?? [];
-  const pluginDefault = bullets.find((bullet) =>
-    /^Default integration: the optional `hack` plugin\b/.test(bullet)
-  );
-  expect(pluginDefault, "agent-setup lacks the plugin default").toBeDefined();
-  expect(pluginDefault).toContain("ships no MCP server");
-  expect(pluginDefault).toContain("Hack commands never install plugins");
-
-  const noWrite = bullets.find((bullet) =>
-    /^Setup and onboarding never write\b/.test(bullet)
-  );
-  expect(noWrite, "agent-setup lacks the no-write rule").toBeDefined();
-  for (const target of [
-    "AGENTS.md",
-    "CLAUDE.md",
-    "rule files",
-    "repository skill copies",
-  ]) {
-    expect(noWrite).toContain(target);
-  }
-  expect(noWrite).toMatch(/unless the user asks for them\.$/);
-
-  for (const surface of agentSetup?.surfaces ?? []) {
-    const rendered = RENDERED_SURFACES[surface];
-    expect(rendered, `surface "${surface}"`).toContain(pluginDefault ?? "");
-    expect(rendered, `surface "${surface}"`).toContain(noWrite ?? "");
-  }
-  expect(agentSetup?.surfaces).toEqual(
-    expect.arrayContaining(["docs", "skill", "primer"])
-  );
+  expect(section).toBeDefined();
+  const text = section?.bullets.join("\n");
+  expect(text).toContain("invoke its skills");
+  expect(text).toContain("no automatic hooks, rules or MCP server");
+  expect(text).toContain("verified executable and candidate bundle selection");
+  expect(text).toContain("never injects AGENTS.md or CLAUDE.md");
 });
 
 test("linked worktree guidance is present in every surface", () => {

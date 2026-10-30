@@ -48,7 +48,14 @@ export type SweepResult = {
     readonly resource: ComposeResource;
     readonly error: string;
   }[];
+  /** Resource kinds that could not be listed, so were not checked at all. */
+  readonly unlisted: readonly ComposeResource["kind"][];
 };
+
+/** True when the sweep checked every kind and removed everything it owned. */
+export function sweepComplete(sweep: SweepResult): boolean {
+  return sweep.failed.length === 0 && sweep.unlisted.length === 0;
+}
 
 /** Default runner: spawn the docker CLI with a bounded timeout. */
 export const runDocker: DockerRunner = async (args) => {
@@ -140,10 +147,16 @@ export async function listComposeResources(opts: {
   readonly docker: DockerRunner;
   readonly kind: ComposeResource["kind"];
 }): Promise<ComposeResource[] | null> {
-  const format = `{{.ID}}\t{{.Name}}\t{{.Label "${COMPOSE_PROJECT_LABEL}"}}`;
+  // Volumes have no ID placeholder; their name is the removal identifier.
+  const identity = {
+    container: "{{.ID}}\t{{.Names}}",
+    network: "{{.ID}}\t{{.Name}}",
+    volume: "{{.Name}}\t{{.Name}}",
+  }[opts.kind];
+  const format = `${identity}\t{{.Label "${COMPOSE_PROJECT_LABEL}"}}`;
   const args =
     opts.kind === "container"
-      ? ["ps", "-a", "--format", format.replace("{{.Name}}", "{{.Names}}")]
+      ? ["ps", "-a", "--format", format]
       : [opts.kind, "ls", "--format", format];
   const result = await opts.docker([
     ...args,
@@ -205,15 +218,20 @@ export async function sweepOwnedComposeResources(opts: {
 }): Promise<SweepResult> {
   const removed: ComposeResource[] = [];
   const failed: { resource: ComposeResource; error: string }[] = [];
+  const unlisted: ComposeResource["kind"][] = [];
   if (opts.names.size === 0) {
-    return { removed, failed };
+    return { removed, failed, unlisted };
   }
   for (const kind of ["container", "network", "volume"] as const) {
     const resources = await listComposeResources({
       docker: opts.docker,
       kind,
     });
-    for (const resource of resources ?? []) {
+    if (resources === null) {
+      unlisted.push(kind);
+      continue;
+    }
+    for (const resource of resources) {
       if (
         !isOwnedComposeProject({ project: resource.project, names: opts.names })
       ) {
@@ -231,7 +249,7 @@ export async function sweepOwnedComposeResources(opts: {
       }
     }
   }
-  return { removed, failed };
+  return { removed, failed, unlisted };
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -274,7 +292,8 @@ export async function recoverStaleOwnership(opts: {
       names: new Set(journal.names),
     });
     recovered.push(result);
-    if (result.failed.length === 0) {
+    // Keep the journal until every kind was listed and every removal worked.
+    if (sweepComplete(result)) {
       await rm(path, { force: true });
     }
   }

@@ -28,44 +28,76 @@ afterAll(async () => {
 type Kind = "container" | "network" | "volume";
 type FakeResource = { kind: Kind; id: string; name: string; project: string };
 
-/** In-memory docker that understands the ls/ps and rm calls the harness makes. */
-function fakeDocker(initial: FakeResource[]): {
+/**
+ * In-memory docker that understands the ls/ps and rm calls the harness makes.
+ * It renders the requested --format template like the real CLI, including
+ * rejecting `{{.ID}}` for volumes (volumes have no ID; they are removed by
+ * name). `available: false` simulates an unreachable daemon.
+ */
+function fakeDocker(
+  initial: FakeResource[],
+  options: { available?: boolean } = {}
+): {
   docker: DockerRunner;
   resources: FakeResource[];
   calls: string[][];
 } {
   const resources = [...initial];
   const calls: string[][] = [];
-  const list = (kind: Kind) => ({
-    exitCode: 0,
-    stdout: resources
-      .filter((resource) => resource.kind === kind)
-      .map(
-        (resource) => `${resource.id}\t${resource.name}\t${resource.project}`
-      )
-      .join("\n"),
-    stderr: "",
-  });
-  const remove = (kind: Kind, id: string) => {
+  const unavailable = {
+    exitCode: 1,
+    stdout: "",
+    stderr: "Cannot connect to the Docker daemon",
+  };
+  const list = (kind: Kind, format: string) => {
+    if (kind === "volume" && format.includes("{{.ID}}")) {
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr:
+          'template: :1:2: executing "" at <.ID>: can\'t evaluate field ID',
+      };
+    }
+    return {
+      exitCode: 0,
+      stdout: resources
+        .filter((resource) => resource.kind === kind)
+        .map((resource) =>
+          format
+            .replace("{{.ID}}", resource.id)
+            .replaceAll(/\{\{\.Names?\}\}/g, resource.name)
+            .replace(/\{\{\.Label "[^"]+"\}\}/, resource.project)
+        )
+        .join("\n"),
+      stderr: "",
+    };
+  };
+  const remove = (kind: Kind, ref: string) => {
     const index = resources.findIndex(
-      (resource) => resource.kind === kind && resource.id === id
+      (resource) =>
+        resource.kind === kind &&
+        (kind === "volume" ? resource.name : resource.id) === ref
     );
     if (index < 0) {
       return { exitCode: 1, stdout: "", stderr: `no such ${kind}` };
     }
     resources.splice(index, 1);
-    return { exitCode: 0, stdout: id, stderr: "" };
+    return { exitCode: 0, stdout: ref, stderr: "" };
   };
   const docker: DockerRunner = async (args) => {
     calls.push([...args]);
+    if (options.available === false) {
+      return unavailable;
+    }
+    const format = args[args.indexOf("--format") + 1] ?? "";
     if (args[0] === "ps") {
-      return list("container");
+      return list("container", format);
     }
     if (args[0] === "rm") {
       return remove("container", args.at(-1) ?? "");
     }
     const kind = args[0] as Kind;
-    return args[1] === "ls" ? list(kind) : remove(kind, args[2] ?? "");
+    return args[1] === "ls" ? list(kind, format) : remove(kind, args[2] ?? "");
   };
   return { docker, resources, calls };
 }
@@ -124,11 +156,12 @@ describe("e2e docker ownership", () => {
       names: new Set(["e2e-abc1"]),
     });
     expect(result.failed).toEqual([]);
+    expect(result.unlisted).toEqual([]);
     expect(result.removed.map((resource) => resource.id)).toEqual([
       "c1",
       "net-e2e-abc1",
       "net-e2e-abc1--feat",
-      "v1",
+      "e2e-abc1_data",
     ]);
     expect(fake.resources.map((resource) => resource.project)).toEqual([
       "e2e-other",
@@ -219,6 +252,29 @@ describe("e2e docker ownership", () => {
         "e2e-live",
       ]);
       expect((await readdir(dir)).sort()).toEqual(["222.json"]);
+    } finally {
+      process.env.HACK_E2E_OWNERSHIP_DIR = journalDir;
+    }
+  });
+
+  test("keeps a dead run's journal when docker cannot be listed", async () => {
+    const dir = join(journalDir, "unavailable");
+    process.env.HACK_E2E_OWNERSHIP_DIR = dir;
+    try {
+      await Bun.write(
+        join(dir, "333.json"),
+        JSON.stringify({ pid: 333, names: ["e2e-dead"] })
+      );
+      const { recovered } = await recoverStaleOwnership({
+        docker: fakeDocker([], { available: false }).docker,
+        isAlive: () => false,
+      });
+      expect(recovered[0]?.unlisted).toEqual([
+        "container",
+        "network",
+        "volume",
+      ]);
+      expect(await readdir(dir)).toEqual(["333.json"]);
     } finally {
       process.env.HACK_E2E_OWNERSHIP_DIR = journalDir;
     }

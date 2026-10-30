@@ -11,6 +11,7 @@ import {
   ownedFixtureNames,
   runDocker,
   type SweepResult,
+  sweepComplete,
   sweepOwnedComposeResources,
 } from "./docker-ownership.ts";
 
@@ -636,7 +637,11 @@ export async function checkScenarioDockerLeaks(opts: {
   readonly names: ReadonlySet<string>;
 }): Promise<ScenarioDockerLeakCheck | null> {
   if (opts.names.size === 0) {
-    return { leaked: [], sweep: { removed: [], failed: [] }, remaining: [] };
+    return {
+      leaked: [],
+      sweep: { removed: [], failed: [], unlisted: [] },
+      remaining: [],
+    };
   }
   const leaked = await listOwnedNetworks(opts);
   if (leaked === null) {
@@ -651,7 +656,7 @@ export async function checkScenarioDockerLeaks(opts: {
 export function describeDockerLeak(
   check: ScenarioDockerLeakCheck
 ): string | null {
-  if (check.leaked.length === 0 && check.sweep.failed.length === 0) {
+  if (check.leaked.length === 0 && sweepComplete(check.sweep)) {
     return null;
   }
   const lines: string[] = [];
@@ -668,6 +673,11 @@ export function describeDockerLeak(
   for (const failure of check.sweep.failed) {
     lines.push(
       `harness sweep could not remove ${describeResources([failure.resource])}: ${failure.error}`
+    );
+  }
+  if (check.sweep.unlisted.length > 0) {
+    lines.push(
+      `harness sweep could not list: ${check.sweep.unlisted.join(", ")}`
     );
   }
   if (check.remaining.length > 0) {

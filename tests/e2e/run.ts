@@ -6,6 +6,7 @@ import {
   ownedFixtureNames,
   recoverStaleOwnership,
   runDocker,
+  sweepComplete,
   sweepOwnedComposeResources,
 } from "./docker-ownership.ts";
 import { runIsolationCanary, runScenarios, type Scenario } from "./harness.ts";
@@ -224,7 +225,7 @@ async function finishDockerRun(opts: {
     `LEAK: this run left Docker networks: ${describeResources(owned)}\n`
   );
   const sweep = await sweepOwnedComposeResources({ docker: runDocker, names });
-  if (sweep.failed.length === 0) {
+  if (sweepComplete(sweep)) {
     await clearOwnershipJournal();
   }
   return true;

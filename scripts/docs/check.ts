@@ -30,7 +30,7 @@ for (const target of [
   }
 }
 if (
-  (await rewriteTarget("core.md#commands", source)) !== "/docs/core#commands"
+  (await rewriteTarget("core.md#commands", source)) !== "/docs/v4/core#commands"
 ) {
   throw new Error("Canonical doc links must use site routes");
 }
@@ -65,4 +65,30 @@ if (
 }
 console.log(
   "Manifest source containment and Markdown schema boundaries passed."
+);
+
+for (const version of ["v4", "v5"]) {
+  const corpus = await Bun.file(
+    resolve(repositoryRoot, `site/public/${version}/llms-full.txt`)
+  ).text();
+  const other = version === "v4" ? "v5" : "v4";
+  if (
+    corpus.includes(`https://hack.foo/docs/${other}/`) ||
+    /dogfooding/i.test(corpus)
+  )
+    throw new Error(`Mixed or obsolete public corpus: ${version}`);
+  const index = await Bun.file(
+    resolve(repositoryRoot, `site/public/${version}/llms.txt`)
+  ).text();
+  for (const route of ["install", "getting-started", "agent-handoff"])
+    if (!index.includes(`/docs/${version}/${route}`))
+      throw new Error(`Missing entry point: ${version}/${route}`);
+}
+if (
+  (await Bun.file(resolve(repositoryRoot, "site/public/llms.txt")).text()) !==
+  (await Bun.file(resolve(repositoryRoot, "site/public/v5/llms.txt")).text())
+)
+  throw new Error("Default agent index must select v5");
+console.log(
+  "Version-isolated exports, entry points and default version passed."
 );

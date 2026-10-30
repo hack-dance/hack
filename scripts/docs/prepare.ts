@@ -1,6 +1,8 @@
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { documents } from "./manifest";
+import versions from "./versions.json";
+let activeRevision = versions.v5.revision;
+let activeFiles: readonly string[] = versions.v5.publicFiles;
 
 export const repositoryRoot = resolve(import.meta.dir, "../..");
 const canonicalDocsRoot = resolve(repositoryRoot, "docs");
@@ -11,12 +13,7 @@ const definitions = /^(\s{0,3}\[[^\]\n]+\]:\s*)(\S+)(.*)$/gm;
 const privatePath =
   /(?:^|\/)(?:_docs|\.hack-local|\.claude|\.codex|test-execution|node_modules|_internal|internal|evidence)(?:\/|$)/i;
 const external = /^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i;
-const routes = new Map<string, string>(
-  documents.map(([file, slug]) => [
-    resolvePublicSource(file),
-    `/docs${slug === "index" ? "" : `/${slug}`}`,
-  ])
-);
+const routes = new Map<string, string>();
 
 /** Reject invalid manifest paths before any source file is opened. */
 export function resolvePublicSource(file: string): string {
@@ -62,19 +59,10 @@ export async function rewriteTarget(
   if (routes.has(absolute)) {
     return `${routes.get(absolute)}${fragment}`;
   }
-  const tracked = Bun.spawnSync(
-    ["git", "ls-files", "--error-unmatch", "--", local],
-    { cwd: repositoryRoot, stdout: "ignore", stderr: "ignore", timeout: 5000 }
-  );
-  if (tracked.exitCode !== 0) {
-    throw new Error(`Missing or untracked public link: ${local}`);
-  }
-  const actual = await realpath(absolute);
-  if (actual !== absolute) {
-    throw new Error(`Public link follows a symlink: ${local}`);
-  }
+  if (!activeFiles.includes(local))
+    throw new Error(`Missing public source at pinned revision: ${local}`);
   const encoded = local.split("/").map(encodeURIComponent).join("/");
-  return `https://github.com/hack-dance/hack/blob/next/${encoded}${fragment}`;
+  return `https://github.com/hack-dance/hack/blob/${activeRevision}/${encoded}${fragment}`;
 }
 
 async function rewriteLinks(content: string, source: string): Promise<string> {
@@ -148,86 +136,104 @@ async function writeDocuments(
 
 export async function prepare(check = false): Promise<void> {
   const staged = new Map<string, string>();
-  const corpus: string[] = [];
-  const index = [
-    "# Hack",
-    "",
-    "Local-first CLI documentation. Stable Compose setup comes first; native v5 is experimental.",
-    "",
-  ];
-  for (const [file, slug, title] of documents) {
-    if (!/^[a-z\d]+[a-z\d-]*(?:\/[a-z\d]+[a-z\d-]*)*$/.test(slug)) {
-      throw new Error(`Invalid public document: ${file}`);
-    }
-    const source = resolvePublicSource(file);
-    if ((await realpath(source)) !== source) {
-      throw new Error(`Public source follows a symlink: ${file}`);
-    }
-    const text = await rewriteLinks(await Bun.file(source).text(), source);
-    const destination = `${slug}.md`;
-    if (staged.has(destination)) {
-      throw new Error(`Duplicate route: ${slug}`);
+  const exports = new Map<string, string>();
+  for (const version of ["v5", "v4"] as const) {
+    const manifest = versions[version];
+    activeRevision = manifest.revision;
+    activeFiles = manifest.publicFiles;
+    routes.clear();
+    for (const entry of manifest.entries)
+      routes.set(
+        resolvePublicSource(entry.file),
+        `/docs/${version}${entry.slug === "index" ? "" : "/" + entry.slug}`
+      );
+    for (const { slug } of manifest.editorial)
+      routes.set(
+        resolvePublicSource(`docs/site/${slug}.md`),
+        `/docs/${version}${slug === "index" ? "" : "/" + slug}`
+      );
+    const index = [
+      `# Hack ${manifest.label}`,
+      "",
+      `Source revision: ${manifest.revision}`,
+      "",
+    ];
+    const corpus: string[] = [];
+    const entries = manifest.entries.filter(
+      (entry) => !["index", "getting-started"].includes(entry.slug)
+    );
+    const pages = [
+      ...entries.map((entry) => ({ ...entry, editorial: false })),
+      ...manifest.editorial.map(({ slug, title }) => ({
+        file: `docs/site/${slug}.md`,
+        slug,
+        title,
+        snapshot: `docs/versions/${version}/${slug}.md`,
+        sha256: "",
+        editorial: true,
+      })),
+    ];
+    for (const entry of pages) {
+      const snapshot = resolvePublicSource(entry.snapshot);
+      if ((await realpath(snapshot)) !== snapshot)
+        throw new Error(`Snapshot follows symlink: ${entry.snapshot}`);
+      const raw = await Bun.file(snapshot).text();
+      if (
+        !entry.editorial &&
+        new Bun.CryptoHasher("sha256").update(raw).digest("hex") !==
+          entry.sha256
+      )
+        throw new Error(`Source snapshot changed: ${entry.snapshot}`);
+      const text = (
+        await rewriteLinks(raw, resolvePublicSource(entry.file))
+      ).replace(/dogfooding/gi, "native runtime use");
+      const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : "/" + entry.slug}`;
+      const provenance = entry.editorial
+        ? `Editorial source: ${entry.snapshot}; based on ${manifest.revision}`
+        : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}`;
+      staged.set(
+        `${version}/${entry.slug}.md`,
+        `---\ntitle: ${JSON.stringify(entry.title)}\n---\n\n${text.replace(heading, "").trim()}\n\n---\n\nSource: [${manifest.label} · ${entry.file}](https://github.com/hack-dance/hack/blob/${manifest.revision}/${entry.editorial ? "README.md" : entry.file}).\n`
+      );
+      index.push(`- [${entry.title}](${url})`);
+      corpus.push(`<!-- ${provenance}; URL: ${url} -->\n${text}`);
     }
     staged.set(
-      destination,
-      `---\ntitle: ${JSON.stringify(title)}\n---\n\n${text.replace(heading, "").trim()}\n`
-    );
-    const url = `https://hack.foo${routes.get(source)}`;
-    index.push(`- [${title}](${url})`);
-    corpus.push(`<!-- Source: ${file}; URL: ${url} -->\n${text}`);
-  }
-  staged.set(
-    "meta.json",
-    JSON.stringify(
-      {
-        title: "Hack",
+      `${version}/meta.json`,
+      JSON.stringify({
+        title: manifest.label,
         pages: [
           "index",
-          "guides",
+          "install",
+          "getting-started",
           "core",
           "env",
           "lifecycle",
           "sessions",
+          "agent-handoff",
+          "guides",
           "integrations",
-          "agent-guidance",
           "cli",
           "architecture",
           "reference",
         ],
-      },
-      null,
-      2
-    )
-  );
-  staged.set(
-    "guides/meta.json",
-    JSON.stringify(
-      {
-        title: "Guides",
-        pages: documents
-          .filter(([, slug]) => slug.startsWith("guides/"))
-          .map(([, slug]) => slug.slice(7)),
-      },
-      null,
-      2
-    )
-  );
-  staged.set(
-    "reference/meta.json",
-    JSON.stringify(
-      {
-        title: "Reference",
-        pages: ["cli", "native-config-import", "native-authored-commands"],
-      },
-      null,
-      2
-    )
-  );
+      })
+    );
+    for (const folder of ["guides", "reference"])
+      staged.set(
+        `${version}/${folder}/meta.json`,
+        JSON.stringify({
+          title: folder === "guides" ? "Guides" : "Reference",
+          pages: pages
+            .filter((entry) => entry.slug.startsWith(folder + "/"))
+            .map((entry) => entry.slug.slice(folder.length + 1)),
+        })
+      );
+    exports.set(`${version}/llms.txt`, index.join("\n") + "\n");
+    exports.set(`${version}/llms-full.txt`, corpus.join("\n\n---\n\n") + "\n");
+  }
+  staged.set("meta.json", JSON.stringify({ pages: ["v5", "v4"] }));
   await writeDocuments(staged, check);
-  const exports = new Map([
-    ["llms.txt", `${index.join("\n")}\n`],
-    ["llms-full.txt", `${corpus.join("\n\n---\n\n")}\n`],
-  ]);
   for (const [name, text] of exports) {
     await writeOrCheck(
       resolve(repositoryRoot, "site/public", name),
@@ -235,8 +241,14 @@ export async function prepare(check = false): Promise<void> {
       check
     );
   }
+  for (const name of ["llms.txt", "llms-full.txt"])
+    await writeOrCheck(
+      resolve(repositoryRoot, "site/public", name),
+      exports.get(`v5/${name}`)!,
+      check
+    );
   console.log(
-    `${check ? "Checked" : "Staged"} ${documents.length} allowlisted public documents, navigation and LLM corpus.`
+    `${check ? "Checked" : "Staged"} versioned allowlisted public documents, navigation and LLM corpus.`
   );
 }
 if (import.meta.main) {

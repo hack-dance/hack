@@ -34,7 +34,7 @@ export default function Home() {
             Docker-compatible engine and the stable CLI.
           </p>
           <p>
-            <Link href="/docs/guides/getting-started">Install and get started</Link>
+            <Link href="/docs/getting-started">Install and get started</Link>
           </p>
         </section>
 
@@ -58,18 +58,6 @@ export default function Home() {
               <span>Commands and options.</span>
             </li>
           </ul>
-        </section>
-
-        <section aria-labelledby="home-native">
-          <h2 id="home-native">Experimental / native v5</h2>
-          <p>
-            The native v5 candidate has a separate installation and project-adoption
-            flow. Installing a prerelease does not migrate a project or prove
-            runtime parity.
-          </p>
-          <p>
-            <Link href="/docs/guides/v5-dogfooding">Explore v5 alongside stable</Link>
-          </p>
         </section>
 
         <footer>

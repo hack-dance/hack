@@ -1,13 +1,15 @@
-import { DocsLayout } from "fumadocs-ui/layouts/docs";
-import { source } from "@/lib/source";
+import { sources } from "@/lib/source";
+import { VersionedLayout } from "@/components/docs-layout";
 export default function Layout({ children }: { children: React.ReactNode }) {
   return (
-    <DocsLayout
-      githubUrl="https://github.com/hack-dance/hack"
-      nav={{ title: "hack.foo", url: "/" }}
-      tree={source.pageTree}
+    <VersionedLayout
+      trees={{ v4: sources.v4.pageTree, v5: sources.v5.pageTree }}
+      paths={{
+        v4: sources.v4.getPages().map((p) => p.url),
+        v5: sources.v5.getPages().map((p) => p.url),
+      }}
     >
       {children}
-    </DocsLayout>
+    </VersionedLayout>
   );
 }

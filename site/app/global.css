@@ -9,7 +9,8 @@ body {
   font-family: var(--font-sans);
 }
 .home {
-  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-family:
+    ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 1rem;
   line-height: 1.75;
   overflow-wrap: anywhere;
@@ -104,4 +105,19 @@ body {
 a:focus-visible {
   outline: 2px solid currentColor;
   outline-offset: 4px;
+}
+
+.docs-version {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+}
+.docs-version select {
+  border: 1px solid var(--color-fd-border);
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  background: var(--color-fd-background);
+  color: inherit;
 }

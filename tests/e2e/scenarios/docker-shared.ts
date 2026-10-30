@@ -1,5 +1,6 @@
 import { join } from "node:path";
 
+import { branchComposeProject } from "../docker-ownership.ts";
 import type { MonorepoFixture } from "../fixture.ts";
 import { runCommand, type ScenarioContext } from "../harness.ts";
 
@@ -40,7 +41,9 @@ export async function requireDockerPreconditions(opts: {
  * Always-run cleanup for docker scenarios: `hack down` for the primary (and
  * optional branch) instance, then a raw `docker compose down` sweep so a
  * broken CLI path can never leak containers. Fixture project names are
- * random (e2e-<hex>) so this can never collide with real projects.
+ * random (e2e-<hex>) so this can never collide with real projects. The
+ * harness then fails the scenario if any owned network is still present and
+ * sweeps it (see docker-ownership.ts).
  */
 export async function downBestEffort(opts: {
   readonly ctx: ScenarioContext;
@@ -62,7 +65,9 @@ export async function downBestEffort(opts: {
 
   const composeProjects = [
     opts.fixture.name,
-    ...(opts.branches ?? []).map((branch) => `${opts.fixture.name}-${branch}`),
+    ...(opts.branches ?? []).map((branch) =>
+      branchComposeProject({ name: opts.fixture.name, branch })
+    ),
   ];
   for (const composeProject of composeProjects) {
     await runCommand({

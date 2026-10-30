@@ -13,11 +13,15 @@ export default async function Page({ params }: Props) {
   const version = slug[0];
   if (version !== "v4" && version !== "v5") {
     if (/^v\d/.test(version!)) notFound();
-    const legacy = ["guides/v5-dogfooding", "guides/getting-started"].includes(
-      slug.join("/")
-    )
-      ? "getting-started"
-      : slug.join("/");
+    const legacy =
+      (
+        {
+          "guides/v5-dogfooding": "getting-started",
+          "guides/getting-started": "getting-started",
+          "agent-guidance": "agent-handoff",
+          "guides/global-settings": "reference/overview",
+        } as Record<string, string>
+      )[slug.join("/")] ?? slug.join("/");
     redirect(`/docs/v5/${legacy}`);
   }
   const page = sources[version].getPage(slug.slice(1));
@@ -47,11 +51,15 @@ export async function generateMetadata({ params }: Props) {
   const version = slug[0];
   if (version !== "v4" && version !== "v5") {
     if (/^v\d/.test(version!)) notFound();
-    const legacy = ["guides/v5-dogfooding", "guides/getting-started"].includes(
-      slug.join("/")
-    )
-      ? "getting-started"
-      : slug.join("/");
+    const legacy =
+      (
+        {
+          "guides/v5-dogfooding": "getting-started",
+          "guides/getting-started": "getting-started",
+          "agent-guidance": "agent-handoff",
+          "guides/global-settings": "reference/overview",
+        } as Record<string, string>
+      )[slug.join("/")] ?? slug.join("/");
     redirect(`/docs/v5/${legacy}`);
   }
   const page = sources[version].getPage(slug.slice(1));

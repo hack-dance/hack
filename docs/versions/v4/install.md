@@ -20,3 +20,17 @@ hack version
 Homebrew follows the current stable formula; it does not pin v4.2.4. For a historical binary, inspect the [v4.2.4 release](https://github.com/hack-dance/hack/releases/tag/v4.2.4) and choose the asset for your platform. Verify the installed version before following these archived docs.
 
 Continue with [Getting started](getting-started.md).
+
+## Set up local Compose routing
+
+Before starting a Compose project on a new development host:
+
+```sh
+hack global install
+```
+
+Read the prompts. This configures shared local routing, DNS and certificate
+trust and can require native approval. Confirm the Docker-compatible engine is
+running. Do not expect a remote host's local names or trust to appear on your
+laptop automatically. Follow the matching project guide if setup reports a
+missing prerequisite. This documentation does not perform these host changes.

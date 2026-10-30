@@ -30,8 +30,8 @@ export default function Home() {
           </p>
           <p>
             Run projects and branches side by side, each at its own local URL.
-            The supported setup uses Docker Compose. Start with a running
-            Docker-compatible engine and the stable CLI.
+            The setup guide explains the runtime and platform prerequisites
+            before you start.
           </p>
           <p>
             <Link href="/docs/getting-started">Install and get started</Link>

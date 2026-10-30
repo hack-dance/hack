@@ -74,3 +74,19 @@ await read("/llms-full.txt");
 console.log(
   `Versioned HTTP smoke passed: ${total} docs, isolated searches/exports, default redirect and unknown-version refusals.`
 );
+
+for (const [old, target] of [
+  ["agent-guidance", "agent-handoff"],
+  ["guides/global-settings", "reference/overview"],
+  ["guides/getting-started", "getting-started"],
+  ["guides/v5-dogfooding", "getting-started"],
+]) {
+  const response = await fetch(new URL(`/docs/${old}`, base), {
+    redirect: "manual",
+  });
+  if (
+    ![307, 308].includes(response.status) ||
+    !response.headers.get("location")?.endsWith(`/docs/v5/${target}`)
+  )
+    throw new Error(`Legacy redirect failed: ${old}`);
+}

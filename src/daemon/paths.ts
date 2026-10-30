@@ -27,18 +27,27 @@ export function resolveDaemonPaths({
   readonly home?: string;
 }): DaemonPaths {
   const explicitHome = resolveExplicitHome({ home });
-  const baseHome = explicitHome ?? resolveUserHomeDir();
   const hackDir = explicitHome
     ? resolve(explicitHome, GLOBAL_HACK_DIR_NAME)
     : resolveGlobalHackDir();
   const root = resolve(hackDir, GLOBAL_DAEMON_DIR_NAME);
-  const launchAgentsDir = resolve(baseHome, "Library", "LaunchAgents");
   return {
     root,
     socketPath: resolve(root, GLOBAL_DAEMON_SOCKET_FILENAME),
     pidPath: resolve(root, GLOBAL_DAEMON_PID_FILENAME),
     logPath: resolve(root, GLOBAL_DAEMON_LOG_FILENAME),
-    launchdPlistPath: resolve(launchAgentsDir, DAEMON_LAUNCHD_PLIST_FILENAME),
+    // Resolved on access: daemon state only needs the hack dir (which an
+    // absolute HACK_HOME supplies), so an unusable HOME must fail launchd
+    // operations alone, not every daemon client.
+    get launchdPlistPath() {
+      const baseHome = explicitHome ?? resolveUserHomeDir();
+      return resolve(
+        baseHome,
+        "Library",
+        "LaunchAgents",
+        DAEMON_LAUNCHD_PLIST_FILENAME
+      );
+    },
     launchdStdoutPath: resolve(root, "hackd.stdout.log"),
     launchdStderrPath: resolve(root, "hackd.stderr.log"),
   };

@@ -8,6 +8,7 @@ import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
 } from "@lib/config-paths.ts";
+import { resolveUserHomeDir } from "@lib/home-dir.ts";
 import { readProjectsRegistry } from "@lib/projects-registry.ts";
 import {
   GLOBAL_CONFIG_FILENAME,
@@ -266,4 +267,56 @@ test("resolveGlobalHackDir treats empty HACK_HOME as unset", () => {
   expect(resolveGlobalHackDir()).toBe(
     resolve("/tmp/hack-home", GLOBAL_HACK_DIR_NAME)
   );
+});
+
+test("resolveDaemonPaths honors an absolute HACK_HOME even without a usable HOME", () => {
+  process.env.HACK_HOME = "/tmp/hack-isolated";
+  process.env.HOME = "relative-home";
+
+  // Daemon state comes from HACK_HOME alone; only the launchd plist needs a
+  // home, and it is resolved lazily (refusing if no absolute home exists).
+  const paths = resolveDaemonPaths({});
+  const root = resolve("/tmp/hack-isolated", GLOBAL_DAEMON_DIR_NAME);
+  expect(paths.root).toBe(root);
+  expect(paths.socketPath.startsWith(`${root}/`)).toBe(true);
+  expect(paths.pidPath.startsWith(`${root}/`)).toBe(true);
+  expect(paths.launchdPlistPath.startsWith(`${resolveUserHomeDir()}/`)).toBe(
+    true
+  );
+});
+
+test("daemon state resolves under HACK_HOME in a process started with a relative HOME", async () => {
+  // Bun's os.homedir() echoes the HOME a process was started with, so this
+  // needs a real child process to reproduce (HACK-1357 review).
+  const cwd = await makeTempDir("hack-rel-home-cwd-");
+  const hackHome = await makeTempDir("hack-rel-home-state-");
+  const pathsModule = resolve(import.meta.dir, "../src/daemon/paths.ts");
+  const script = `
+    const { resolveDaemonPaths } = await import(${JSON.stringify(pathsModule)});
+    const paths = resolveDaemonPaths({});
+    let plist = "ok";
+    try { void paths.launchdPlistPath; } catch (error) { plist = String(error); }
+    console.log(JSON.stringify({ socketPath: paths.socketPath, plist }));
+  `;
+  const proc = Bun.spawn([process.execPath, "-e", script], {
+    cwd,
+    env: { ...process.env, HOME: "relative-home", HACK_HOME: hackHome },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(0);
+  const result = JSON.parse(stdout.trim()) as {
+    readonly socketPath: string;
+    readonly plist: string;
+  };
+  expect(
+    result.socketPath.startsWith(resolve(hackHome, GLOBAL_DAEMON_DIR_NAME))
+  ).toBe(true);
+  expect(result.plist).toMatch(/HOME is empty or not an absolute path/);
 });

@@ -69,6 +69,27 @@ console.log(
 );
 
 for (const version of ["v4", "v5"]) {
+  const cli = await Bun.file(
+    resolve(repositoryRoot, `site/content/docs/${version}/reference/cli.md`)
+  ).text();
+  if (
+    /^## `hack (gateway|node|remote|dispatch|internal|the|ssh|x)(?:\s|`)/m.test(
+      cli
+    ) ||
+    /^## (Beta|Internal|Fun|Extensions)$/m.test(cli)
+  ) {
+    throw new Error(`Excluded CLI surface published: ${version}`);
+  }
+  for (const section of [
+    "## `hack logs ",
+    "## `hack env list`",
+    "## `hack setup sync`",
+    "## `hack branch`",
+  ]) {
+    if (!cli.includes(section)) {
+      throw new Error(`Public CLI section lost: ${version}/${section}`);
+    }
+  }
   const corpus = await Bun.file(
     resolve(repositoryRoot, `site/public/${version}/llms-full.txt`)
   ).text();

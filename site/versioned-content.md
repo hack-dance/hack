@@ -51,3 +51,5 @@ covered separately. Raw engine rows, dynamic application maps, shared error.deta
 and the explicitly opaque compiler plan boundary remain open; these
 pages do not turn private protocols into public APIs or claim runtime/cloud/client
 qualification from source review.
+
+The published generated CLI reference is curated to the declared public slice: unsupported/retired roots and Internal/Fun/Extensions/Beta groups are omitted, while the hashed historical originals remain intact. The public supplement completes that slice; publication checks reject excluded headings and retain supported logs/env/setup/branch sections.

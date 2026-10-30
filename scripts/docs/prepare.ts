@@ -1,5 +1,6 @@
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { curateCliReference } from "./curate-cli";
 import versions from "./versions.json";
 
 let activeRevision = versions.v5.revision;
@@ -198,6 +199,7 @@ async function stageVersion(
       await rewriteLinks(raw, resolvePublicSource(entry.file))
     ).replace(/dogfooding/gi, "native runtime use");
     if (entry.slug === "reference/cli") {
+      text = curateCliReference(text);
       text = text.replace(
         "commands with `--json` emit a `{ok, data, error}` envelope on stdout.",
         `JSON shapes vary by command and backend. See [Command and output contracts](${documentRoute(version, "reference/command-contracts")}) for envelopes, bare reports and streamed records.`

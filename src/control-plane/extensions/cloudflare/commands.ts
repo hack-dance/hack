@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { GLOBAL_CLOUDFLARE_DIR_NAME } from "../../../constants.ts";
 import {
@@ -15,6 +14,7 @@ import {
   writeTextFileIfChanged,
 } from "../../../lib/fs.ts";
 import { getString, isRecord } from "../../../lib/guards.ts";
+import { resolveUserHomeDir } from "../../../lib/home-dir.ts";
 import { display } from "../../../ui/display.ts";
 import type { ControlPlaneConfig } from "../../sdk/config.ts";
 import { readControlPlaneConfig } from "../../sdk/config.ts";
@@ -979,7 +979,7 @@ function resolveOutPath(opts: {
 }): string {
   const raw = opts.raw.trim();
   if (raw.startsWith("~/")) {
-    return resolve(homedir(), raw.slice(2));
+    return resolve(resolveUserHomeDir(), raw.slice(2));
   }
   return resolve(opts.cwd, raw);
 }
@@ -1092,6 +1092,10 @@ async function findTunnelId(opts: {
 async function resolveCredentialsFile(opts: {
   readonly tunnelId: string;
 }): Promise<string | undefined> {
-  const candidate = resolve(homedir(), ".cloudflared", `${opts.tunnelId}.json`);
+  const candidate = resolve(
+    resolveUserHomeDir(),
+    ".cloudflared",
+    `${opts.tunnelId}.json`
+  );
   return (await pathExists(candidate)) ? candidate : undefined;
 }

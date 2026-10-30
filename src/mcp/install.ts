@@ -2,6 +2,7 @@ import { dirname, resolve } from "node:path";
 
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
+import { readHomeEnv } from "../lib/home-dir.ts";
 
 const CODEX_SERVER_BLOCK_PATTERN =
   /^\s*\[mcp_servers\.hack\][\s\S]*?(?=^\s*\[|\s*$)/m;
@@ -387,7 +388,8 @@ function resolveConfigPath(opts: {
   if (opts.scope === "user" && !home) {
     return {
       ok: false,
-      message: "HOME is not set; cannot resolve user config path.",
+      message:
+        "HOME is not set to an absolute path; cannot resolve user config path.",
     };
   }
 
@@ -453,6 +455,5 @@ function createOkParseResult(opts: {
 }
 
 function resolveHomeDir(): string | null {
-  const home = (process.env.HOME ?? "").trim();
-  return home.length > 0 ? home : null;
+  return readHomeEnv();
 }

@@ -41,6 +41,7 @@ import {
 } from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
 import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
+import { resolveUserHomeDir } from "./home-dir.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
 
 const PROJECT_ENV_CONFIG_VERSION = 1 as const;
@@ -2538,12 +2539,11 @@ function resolveConfiguredProjectPath(opts: {
   readonly configuredPath: string;
 }): string {
   const raw = opts.configuredPath.trim();
-  const home = (process.env.HOME ?? "").trim();
   if (raw === "~") {
-    return home;
+    return resolveUserHomeDir();
   }
   if (raw.startsWith("~/")) {
-    return resolve(home, raw.slice(2));
+    return resolve(resolveUserHomeDir(), raw.slice(2));
   }
   if (raw.startsWith("/")) {
     return raw;

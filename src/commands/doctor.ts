@@ -1,5 +1,4 @@
 import { lookup } from "node:dns/promises";
-import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
@@ -69,6 +68,7 @@ import {
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
+import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
 import {
   confirmSafe,
   isExplicitlyNonInteractive,
@@ -3005,7 +3005,7 @@ export async function inspectDoctorAgentIntegrations(opts: {
   readonly projectRoot: string | null;
   readonly homeDir?: string;
 }): Promise<{ readonly status: "current" | "stale" }> {
-  const home = (opts.homeDir ?? process.env.HOME ?? homedir()).trim();
+  const home = normalizeHomeDir(opts.homeDir) ?? resolveUserHomeDir();
   const paths = [
     ...(opts.projectRoot
       ? [

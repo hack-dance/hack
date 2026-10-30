@@ -1,7 +1,30 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
+import type { Stats } from "node:fs";
 import { closeSync, constants, openSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { canonical, requireThat } from "./integrity.ts";
+
+type DirectoryIdentity = Pick<
+  Stats,
+  "dev" | "ino" | "uid" | "mode" | "isDirectory"
+>;
+/** Only the current invocation's recorded private directory can qualify as a loser stage. */
+export function isFreshInitializerStage(
+  created: DirectoryIdentity,
+  observed: DirectoryIdentity,
+  uid: number | undefined
+) {
+  return (
+    created.isDirectory() &&
+    observed.isDirectory() &&
+    created.uid === uid &&
+    observed.uid === uid &&
+    created.dev === observed.dev &&
+    created.ino === observed.ino &&
+    (created.mode & 0o7777) === 0o700 &&
+    (observed.mode & 0o7777) === 0o700
+  );
+}
 
 /** An effect happened but its containing directory did not reach the fsync boundary. */
 export class PublicationUncertain extends Error {

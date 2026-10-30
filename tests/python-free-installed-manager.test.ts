@@ -222,6 +222,13 @@ test.skipIf(!supported)(
       expect(Bun.which("python3", { PATH: path })).toBeNull();
       expect(Bun.which("bun", { PATH: path })).toBeNull();
       const launcher = join(channel, "bin/hack-next");
+      const manage = (args: string[]) =>
+        Bun.spawnSync([launcher, "--manager", ...args], {
+          env,
+          timeout: 30_000,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
       expect(
         Bun.spawnSync([launcher, "--manager", "--help"], {
           env,
@@ -313,7 +320,7 @@ test.skipIf(!supported)(
         expect(rejected.exitCode).toBe(1);
         expect(readFileSync(join(channel, ".selection.json"))).toEqual(before);
       }
-      const upgraded = run([
+      const upgraded = manage([
         "upgrade",
         "--version",
         "5.0.0-next.2",
@@ -324,7 +331,7 @@ test.skipIf(!supported)(
       ]);
       expect(upgraded.stderr.toString()).toBe("");
       expect(upgraded.exitCode).toBe(0);
-      expect(run(["rollback"]).stdout.toString()).toContain(
+      expect(manage(["rollback"]).stdout.toString()).toContain(
         '"selected":"5.0.0-next.1"'
       );
       const status = Bun.spawnSync([launcher, "--manager", "status"], {
@@ -333,7 +340,7 @@ test.skipIf(!supported)(
       });
       expect(status.exitCode).toBe(0);
       expect(status.stdout.toString()).toContain('"selected":"5.0.0-next.1"');
-      expect(run(["stable"]).exitCode).toBe(0);
+      expect(manage(["stable"]).exitCode).toBe(0);
       expect(run(["run"]).stderr.toString()).toContain("No candidate selected");
       expect(
         Bun.spawnSync([join(path, "hack")], {

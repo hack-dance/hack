@@ -11,7 +11,10 @@ import { join } from "node:path";
 import { curlTransferFlags } from "../scripts/installer/bootstrap.ts";
 import { download, officialArchive } from "../scripts/installer/download.ts";
 import { hash, jsonBytes } from "../scripts/installer/integrity.ts";
-import { TransferBudget } from "../scripts/installer/transfer-budget.ts";
+import {
+  TransferBudget,
+  TransferCleanupUncertain,
+} from "../scripts/installer/transfer-budget.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -203,6 +206,9 @@ test("official release download binds exact assets, immutable tag and metadata; 
 });
 
 class FixtureClock {
+  get activeCount() {
+    return this.jobs.filter((job) => job.active).length;
+  }
   now = 0;
   private readonly jobs: {
     due: number;
@@ -357,3 +363,266 @@ test("curl's production low-speed and total-budget flags accept progressing loop
     await server.stop(true);
   }
 }, 10_000);
+
+for (const scenario of [
+  "redirect",
+  "read-error",
+  "stalled-read",
+  "cleanup-rejection",
+] as const) {
+  test(`bounded cancellation refuses uncertain ${scenario} settlement and preserves the primary failure`, async () => {
+    const root = scratch();
+    const clock = new FixtureClock();
+    const budget = new TransferBudget({
+      inactivityMs: 30,
+      totalMs: 100,
+      cleanupMs: 5,
+      schedule: clock.schedule,
+    });
+    let cancellations = 0;
+    let rejectLate: ((reason: unknown) => void) | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        if (scenario === "read-error" || scenario === "cleanup-rejection") {
+          controller.enqueue(Uint8Array.of(1, 2));
+        }
+      },
+      cancel() {
+        cancellations++;
+        if (scenario === "cleanup-rejection") {
+          return Promise.reject(new Error("fixture cancellation rejection"));
+        }
+        return new Promise<void>((_resolve, reject) => {
+          rejectLate = reject;
+        });
+      },
+    });
+    const response =
+      scenario === "redirect"
+        ? new Response(stream, {
+            status: 302,
+            headers: { location: "https://github.com/next" },
+          })
+        : new Response(stream);
+    const mock = spyOn(globalThis, "fetch").mockResolvedValue(response);
+    try {
+      const settled = download(
+        "https://github.com/first",
+        join(root, "target"),
+        1,
+        budget
+      ).then(
+        () => ({ error: undefined as unknown }),
+        (error) => ({ error })
+      );
+      await drain();
+      if (scenario === "stalled-read") {
+        clock.advance(31);
+        await drain();
+      }
+      if (scenario !== "cleanup-rejection") {
+        clock.advance(5);
+      }
+      const { error } = await settled;
+      expect(error).toBeInstanceOf(TransferCleanupUncertain);
+      expect(String(error)).toContain("settlement is uncertain");
+      expect(cancellations).toBe(1);
+      expect(mock).toHaveBeenCalledTimes(1);
+      if (scenario === "read-error" || scenario === "cleanup-rejection") {
+        expect(String((error as Error).cause)).toContain("size budget");
+      }
+      if (scenario === "stalled-read") {
+        expect(String((error as Error).cause)).toContain("inactivity budget");
+      }
+      if (scenario === "redirect") {
+        expect(existsSync(join(root, "target"))).toBe(false);
+      }
+      rejectLate?.(
+        new Error("fixture producer rejected after cleanup deadline")
+      );
+      await drain();
+    } finally {
+      budget.close();
+      mock.mockRestore();
+    }
+    expect(clock.activeCount).toBe(0);
+  });
+}
+
+test("a redirect proceeds only after actual cancellation settlement, and genuine EOF still succeeds", async () => {
+  const root = scratch();
+  const clock = new FixtureClock();
+  const budget = new TransferBudget({
+    inactivityMs: 30,
+    totalMs: 100,
+    cleanupMs: 5,
+    schedule: clock.schedule,
+  });
+  let cancelled = false;
+  let calls = 0;
+  const mock = spyOn(globalThis, "fetch").mockImplementation(
+    fetchMock(() => {
+      if (++calls === 1) {
+        return Promise.resolve(
+          new Response(
+            new ReadableStream({
+              cancel() {
+                cancelled = true;
+              },
+            }),
+            { status: 302, headers: { location: "https://github.com/next" } }
+          )
+        );
+      }
+      expect(cancelled).toBe(true);
+      return Promise.resolve(new Response("ok"));
+    })
+  );
+  try {
+    await download("https://github.com/first", join(root, "target"), 2, budget);
+    expect(readFileSync(join(root, "target"), "utf8")).toBe("ok");
+    expect(calls).toBe(2);
+  } finally {
+    budget.close();
+    mock.mockRestore();
+  }
+  expect(clock.activeCount).toBe(0);
+});
+
+function officialSequenceFixture() {
+  const version = "5.0.0-next.9";
+  const tag = `v${version}`;
+  const revision = "a".repeat(40);
+  const name = `hack-${version}-darwin-arm64-native.tar.gz`;
+  const base = `https://github.com/hack-dance/hack/releases/download/${tag}/`;
+  const archive = Buffer.from(
+    "bounded archive bytes; parser controls are separate"
+  );
+  const responses: Record<string, Buffer> = {
+    [`https://api.github.com/repos/hack-dance/hack/releases/tags/${tag}`]:
+      jsonBytes({
+        tag_name: tag,
+        prerelease: true,
+        draft: false,
+        assets: [name, "prerelease.json", "SHA256SUMS"].map((name) => ({
+          name,
+          browser_download_url: base + name,
+        })),
+      }),
+    [`${base}prerelease.json`]: jsonBytes({
+      schema: "hack.prerelease/v1",
+      version,
+      tag,
+      source_revision: revision,
+      platform: "darwin-arm64",
+    }),
+    [`https://api.github.com/repos/hack-dance/hack/git/ref/tags/${tag}`]:
+      jsonBytes({
+        ref: `refs/tags/${tag}`,
+        object: { type: "commit", sha: revision },
+      }),
+    [`${base}SHA256SUMS`]: Buffer.from(`${hash(archive)}  ${name}\n`),
+    [base + name]: archive,
+  };
+  return { version, name, archive, responses };
+}
+for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
+  test(`five-file official sequence shares a monotonic total and bounded cleanup: ${scenario}`, async () => {
+    const fixture = officialSequenceFixture();
+    const root = scratch();
+    const clock = new FixtureClock();
+    const budget = new TransferBudget({
+      inactivityMs: 30,
+      totalMs: 100,
+      cleanupMs: 5,
+      schedule: clock.schedule,
+    });
+    let calls = 0;
+    let cancellations = 0;
+    const signals: unknown[] = [];
+    const mock = spyOn(globalThis, "fetch").mockImplementation(
+      fetchMock((url, options) => {
+        calls++;
+        signals.push(options?.signal);
+        const bytes = fixture.responses[String(url)];
+        if (!bytes) {
+          throw new Error("Unexpected official fixture URL");
+        }
+        if (scenario === "total") {
+          clock.advance(25);
+        }
+        if (scenario === "success") {
+          clock.advance(15);
+        }
+        if (
+          (scenario === "stall" && calls === 2) ||
+          (scenario === "cleanup" && calls === 5)
+        ) {
+          return Promise.resolve(
+            new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  if (scenario === "cleanup") {
+                    controller.enqueue(fixture.archive);
+                  }
+                },
+                cancel() {
+                  cancellations++;
+                  if (scenario === "cleanup") {
+                    return new Promise<void>(() => {});
+                  }
+                },
+              })
+            )
+          );
+        }
+        return Promise.resolve(new Response(bytes.toString("utf8")));
+      })
+    );
+    try {
+      const settled = officialArchive(root, fixture.version, budget).then(
+        (value) => ({ value, error: undefined as unknown }),
+        (error) => ({ value: undefined, error })
+      );
+      await drain();
+      if (scenario === "stall" || scenario === "cleanup") {
+        clock.advance(31);
+        await drain();
+        if (scenario === "cleanup") {
+          clock.advance(5);
+        }
+      }
+      const result = await settled;
+      expect(new Set(signals).size).toBe(1);
+      if (scenario === "success") {
+        expect(result.error).toBeUndefined();
+        expect(calls).toBe(5);
+        expect(clock.now).toBe(75);
+        expect(readFileSync(result.value?.archive as string)).toEqual(
+          fixture.archive
+        );
+      } else {
+        expect(result.value).toBeUndefined();
+        expect(String(result.error)).toContain(
+          scenario === "total"
+            ? "total transfer budget"
+            : scenario === "stall"
+              ? "inactivity budget"
+              : "settlement is uncertain"
+        );
+        expect(calls).toBe(
+          scenario === "total" ? 4 : scenario === "stall" ? 2 : 5
+        );
+      }
+      if (scenario === "cleanup") {
+        expect(cancellations).toBe(1);
+        expect(readFileSync(join(root, fixture.name))).toEqual(fixture.archive);
+        expect(result.error).toBeInstanceOf(TransferCleanupUncertain);
+      }
+    } finally {
+      budget.close();
+      mock.mockRestore();
+    }
+    expect(clock.activeCount).toBe(0);
+  });
+}

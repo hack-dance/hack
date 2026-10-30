@@ -37,7 +37,11 @@ import {
   versionNumber,
   writeFile,
 } from "./integrity.ts";
-import { publishAndSync, publishDirectoryExclusive } from "./publication.ts";
+import {
+  isFreshInitializerStage,
+  publishAndSync,
+  publishDirectoryExclusive,
+} from "./publication.ts";
 
 const JOURNAL = ".manager-upgrade.json";
 const STAGE = /^\.stage-[0-9a-f]{32}$(?![\s\S])/;
@@ -142,6 +146,67 @@ export class Channel {
       );
     }
   }
+  /** Unlocked admission reads identity/owned structure only; receipts and payload hashes require lock(). */
+  private initializationPreflight() {
+    const info = owned(this.root, true, 0o700);
+    this.refuseLegacy();
+    const marker = privateJson(this.path(".channel.json"));
+    exact(marker, [
+      "schema",
+      "root",
+      "uid",
+      "device",
+      "inode",
+      "manager_sha256",
+      "launcher_sha256",
+    ]);
+    requireThat(
+      marker.schema === "hack.prerelease-install/v2" &&
+        marker.root === this.root &&
+        marker.uid === process.getuid?.() &&
+        marker.device === info.dev &&
+        marker.inode === info.ino &&
+        typeof marker.manager_sha256 === "string" &&
+        SHA256.test(marker.manager_sha256) &&
+        typeof marker.launcher_sha256 === "string" &&
+        SHA256.test(marker.launcher_sha256),
+      "Foreign or malformed installation marker; use a separate --root."
+    );
+    owned(this.path("manager"), false, 0o500);
+    owned(this.path("bin"), true, 0o700);
+    owned(this.path("bin/hack-next"), false, 0o755);
+    owned(this.path("versions"), true, 0o700);
+    owned(this.path(".manager.lock"), false, 0o600);
+  }
+  /** Only called after a confirmed competing winner; failures/crashes never enter this path. */
+  private removeFreshLoser(stage: string, created: ReturnType<typeof owned>) {
+    this.hooks.checkpoint?.("init-loser");
+    let observed: ReturnType<typeof lstatSync>;
+    try {
+      observed = lstatSync(stage);
+    } catch (error) {
+      throw new Error(
+        `Losing initializer stage was not removed: its identity is unavailable at ${stage}. No other stage was touched.`,
+        { cause: error }
+      );
+    }
+    requireThat(
+      isFreshInitializerStage(created, observed, process.getuid?.()),
+      `Losing initializer stage retained because its type, ownership, mode or identity changed: ${stage}`
+    );
+    try {
+      publishAndSync(
+        stage,
+        () => rmSync(stage, { recursive: true }),
+        () => syncDirectory(dirname(stage))
+      );
+    } catch (error) {
+      throw new Error(
+        `Losing initializer cleanup did not establish complete durable removal at ${stage}; inspect the remaining stage. No other stage was touched.`,
+        { cause: error }
+      );
+    }
+  }
   /** Publish a complete private sibling once, never replace/adopt an existing root.
    * Crashes before rename retain inert sibling stages; retries do not delete or adopt them.
    * Crashes after rename expose a complete channel. The parent must be owned, canonical,
@@ -155,7 +220,7 @@ export class Channel {
         lexists(this.path(".channel.json")),
         "Refusing to adopt an existing installation root, including an empty or incomplete root; use a separate --root."
       );
-      this.validate();
+      this.initializationPreflight();
       return;
     }
     const parent = dirname(this.root);
@@ -206,7 +271,7 @@ export class Channel {
     );
     const published = publishDirectoryExclusive(stage, this.root);
     if (!published) {
-      // A competing initializer may have won. Validate its complete result, never overwrite it.
+      // A competing initializer won. Preflight only; authoritative validation follows kernel locking.
       requireThat(
         lexists(this.root),
         `Atomic no-replace initialization failed; preserved stage: ${stage}`
@@ -217,7 +282,8 @@ export class Channel {
         lexists(this.path(".channel.json")),
         `A competing existing/foreign root was not adopted; use a separate --root. Preserved stage: ${stage}`
       );
-      this.validate();
+      this.initializationPreflight();
+      this.removeFreshLoser(stage, created);
       return;
     }
     publishAndSync(
@@ -230,7 +296,7 @@ export class Channel {
         syncDirectory(parent);
       }
     );
-    this.validate();
+    this.initializationPreflight();
   }
   /** Kernel flock is shared for launches, exclusive for mutations, and never waits. */
   lock(shared = false, managerUpgrade = false) {

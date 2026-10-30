@@ -32,7 +32,10 @@ import {
   SHA256,
   versionNumber,
 } from "../scripts/installer/integrity.ts";
-import { publishDirectoryExclusive } from "../scripts/installer/publication.ts";
+import {
+  isFreshInitializerStage,
+  publishDirectoryExclusive,
+} from "../scripts/installer/publication.ts";
 
 // Filesystem fixtures may span several bounded subprocesses; the suite default is only 5 s.
 const fixtureTest = (name: string, run: () => void | Promise<void>) =>
@@ -499,7 +502,7 @@ describe("reviewed initialization and durability boundaries", () => {
     }
   );
   fixtureTest(
-    "concurrent initializers publish exactly one complete root and retain the losing stage",
+    "concurrent initializers publish exactly one complete root and remove only their fresh losing stage",
     async () => {
       const root = scratch();
       const source = join(root, "source");
@@ -535,7 +538,7 @@ describe("reviewed initialization and durability boundaries", () => {
         result.validate();
         expect(
           readdirSync(root).filter((name) => name.includes(".init-"))
-        ).toHaveLength(1);
+        ).toHaveLength(0);
       } finally {
         for (const child of children) {
           if (child.exitCode === null) {
@@ -840,5 +843,154 @@ fixtureTest(
     ).toThrow("Archive checksum");
     expect(existsSync(join(root, "never-written"))).toBe(false);
     expect(digest(source)).toBe(first.checksum);
+  }
+);
+fixtureTest(
+  "existing-root preflight does not validate unlocked; kernel admission still refuses a changed manager",
+  () => {
+    const { channel, source } = fixture();
+    const existing = new Channel(channel.root, source);
+    const full = spyOn(existing, "validate");
+    const release = channel.lock();
+    try {
+      chmodSync(join(channel.root, "manager"), 0o700);
+      writeFileSync(
+        join(channel.root, "manager"),
+        "temporarily changed by the lock owner"
+      );
+      chmodSync(join(channel.root, "manager"), 0o500);
+      existing.initialize();
+      expect(full).not.toHaveBeenCalled();
+      expect(() => existing.lock()).toThrow("active");
+      expect(full).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+    expect(() => existing.lock()).toThrow("manager or launcher changed");
+    expect(full).toHaveBeenCalledTimes(1);
+    full.mockRestore();
+  }
+);
+fixtureTest(
+  "confirmed loser removes only its recorded fresh stage and validates the winner only under lock",
+  () => {
+    const root = scratch();
+    const source = join(root, "source");
+    writeFileSync(source, "fixture-manager");
+    const target = join(root, "channel");
+    const historical = join(root, `.channel.init-${"a".repeat(32)}`);
+    mkdirSync(historical, { mode: 0o700 });
+    writeFileSync(join(historical, "keep"), "historical original");
+    let fresh = "";
+    const first = new Channel(target, source, {
+      checkpoint(point) {
+        if (point === "init-ready") {
+          fresh = join(
+            root,
+            readdirSync(root).find(
+              (name) =>
+                name.startsWith(".channel.init-") &&
+                join(root, name) !== historical
+            ) as string
+          );
+          new Channel(target, source).initialize();
+        }
+      },
+    });
+    const full = spyOn(first, "validate");
+    first.initialize();
+    expect(full).not.toHaveBeenCalled();
+    expect(existsSync(fresh)).toBe(false);
+    expect(readFileSync(join(historical, "keep"), "utf8")).toBe(
+      "historical original"
+    );
+    const release = first.lock();
+    release();
+    expect(full).toHaveBeenCalledTimes(1);
+    full.mockRestore();
+  }
+);
+for (const replacement of ["directory", "file", "symlink"] as const) {
+  fixtureTest(
+    `loser cleanup preserves a ${replacement} replacement and the original staged bytes`,
+    () => {
+      const root = scratch();
+      const source = join(root, "source");
+      writeFileSync(source, "fixture-manager");
+      const target = join(root, "channel");
+      const external = join(root, "unowned-by-initializer");
+      mkdirSync(external, { mode: 0o700 });
+      writeFileSync(join(external, "keep"), "replacement original");
+      let fresh = "";
+      const saved = join(root, "original-stage-preserved");
+      const first = new Channel(target, source, {
+        checkpoint(point) {
+          if (point === "init-ready") {
+            fresh = join(
+              root,
+              readdirSync(root).find((name) =>
+                name.startsWith(".channel.init-")
+              ) as string
+            );
+            new Channel(target, source).initialize();
+          }
+          if (point === "init-loser") {
+            renameSync(fresh, saved);
+            if (replacement === "directory") {
+              mkdirSync(fresh, { mode: 0o700 });
+              writeFileSync(join(fresh, "keep"), "foreign replacement");
+            } else if (replacement === "file") {
+              writeFileSync(fresh, "foreign replacement");
+            } else {
+              symlinkSync(external, fresh);
+            }
+          }
+        },
+      });
+      expect(() => first.initialize()).toThrow(
+        "retained because its type, ownership, mode or identity changed"
+      );
+      expect(existsSync(fresh)).toBe(true);
+      expect(readFileSync(join(saved, "manager"), "utf8")).toBe(
+        "fixture-manager"
+      );
+      expect(readFileSync(join(external, "keep"), "utf8")).toBe(
+        "replacement original"
+      );
+      if (replacement === "directory") {
+        expect(readFileSync(join(fresh, "keep"), "utf8")).toBe(
+          "foreign replacement"
+        );
+      }
+      if (replacement === "file") {
+        expect(readFileSync(fresh, "utf8")).toBe("foreign replacement");
+      }
+      const winner = new Channel(target, source);
+      const release = winner.lock();
+      release();
+    }
+  );
+}
+fixtureTest(
+  "fresh-stage identity gate rejects a foreign UID without changing filesystem ownership",
+  () => {
+    const root = scratch();
+    const observed = lstatSync(root);
+    const uid = process.getuid?.();
+    expect(isFreshInitializerStage(observed, observed, uid)).toBe(true);
+    expect(
+      isFreshInitializerStage(
+        observed,
+        { ...observed, isDirectory: () => true, uid: observed.uid + 1 },
+        uid
+      )
+    ).toBe(false);
+    expect(
+      isFreshInitializerStage(
+        { ...observed, isDirectory: () => true, uid: observed.uid + 1 },
+        observed,
+        uid
+      )
+    ).toBe(false);
   }
 );

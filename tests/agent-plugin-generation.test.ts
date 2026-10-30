@@ -993,6 +993,11 @@ test("install guidance branches on installed schema and real release assets with
   expect(fresh).toContain("report that the Python-free route is unavailable");
   expect(fresh).toContain("Do not silently install Python");
   expect(fresh).toContain("next.5");
+  const reading = skill.split("## Further reading")[1] ?? "";
+  expect(reading).toContain("[Legacy v1/Python candidate installation guide]");
+  expect(reading).toContain("not v2 standalone instructions");
+  expect(reading).toContain("verify actual release asset availability");
+  expect(reading).not.toContain("[Candidate installation guide]");
   expect(fresh).not.toMatch(/https:\/\/[^\s]+\/hack-next-install\.sh/);
   const legacy =
     skill

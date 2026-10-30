@@ -38,8 +38,9 @@ unreviewed download through a shell. Managed containers use the slim path in
 
 ## Native prerelease alongside stable
 
-Read the candidate installation guide (see Further reading) and inspect the actual
-installed channel schema and selected release's published asset inventory. Do not
+Inspect the actual installed channel schema and selected release's published
+asset inventory. The linked legacy v1/Python guide is not v2 standalone
+installation guidance. Do not
 infer channel layout from a skill version, a package version, or the presence of a
 launcher alone. Read the owned channel's \`.channel.json\` without modifying it.
 A source checkout is not evidence that installer assets have been published.
@@ -142,6 +143,6 @@ browser access is a separate check from a successful CLI HTTPS request.
 ## Further reading
 
 - [Hack repository and releases](https://github.com/hack-dance/hack)
-- [Candidate installation guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md)
+- [Legacy v1/Python candidate installation guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md) — not v2 standalone instructions; verify actual release asset availability as described above.
 `;
 }

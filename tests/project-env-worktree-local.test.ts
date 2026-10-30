@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -19,6 +20,7 @@ import {
   resolveProjectEnvConfig,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
+import { resolvePrimaryLocalProjectDir } from "../src/lib/worktree-local-config.ts";
 
 const tempDirs = new Set<string>();
 const envKeys = [
@@ -26,14 +28,19 @@ const envKeys = [
   "HACK_EXECUTION_MODE",
   "HACK_WORKTREE_INHERIT_LOCAL",
   "HACK_ENV_SECRET_KEY",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_NOSYSTEM",
+  "PATH",
 ];
 let savedEnv: Array<string | undefined> = [];
 
 beforeEach(() => {
   savedEnv = envKeys.map((key) => process.env[key]);
-  for (const key of envKeys) {
+  for (const key of envKeys.slice(0, 4)) {
     delete process.env[key];
   }
+  // Isolate the code under test from host Git configuration as well.
+  Object.assign(process.env, gitIsolationEnv);
 });
 
 afterEach(async () => {
@@ -51,8 +58,22 @@ afterEach(async () => {
   tempDirs.clear();
 });
 
+const gitIsolationEnv = {
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+};
+
 async function git(cwd: string, args: string[]): Promise<void> {
-  const result = Bun.spawnSync(["git", "-C", cwd, ...args], {
+  const isolation = [
+    "-c",
+    "commit.gpgsign=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "init.templateDir=",
+  ];
+  const result = Bun.spawnSync(["git", "-C", cwd, ...isolation, ...args], {
+    env: { ...process.env, ...gitIsolationEnv },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -360,4 +381,146 @@ test("inherited secure values use existing primary key fallback", async () => {
     "fake-test-only-value"
   );
   expect(await snapshot(primary)).toEqual(before);
+});
+
+test("unreadable primary local files fail closed without exposing contents", async () => {
+  if (process.getuid?.() === 0) {
+    return;
+  }
+  const { primary, options } = await fixture();
+  const path = resolve(primary, ".hack/hack.env.qa.local.yaml");
+  await chmod(path, 0o000);
+  try {
+    const error = await resolveProjectEnvConfig(options).then(
+      () => null,
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(
+      `Cannot read primary local env file: ${path}`
+    );
+  } finally {
+    await chmod(path, 0o600);
+  }
+});
+
+async function runHack(cwd: string, args: string[], sandbox: string) {
+  const proc = Bun.spawn(
+    ["bun", resolve(import.meta.dir, "../index.ts"), ...args],
+    {
+      cwd,
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: resolve(sandbox, "global.config.json"),
+        HACK_NO_INTERACTIVE: "1",
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { exitCode, output: `${stdout}\n${stderr}` };
+}
+
+test("env set/unset --local in an inherited-only worktree edit only checkout YAML", async () => {
+  const { sandbox, primary, linked } = await fixture();
+  for (const root of [primary, linked]) {
+    await rm(resolve(root, ".hack/hack.env.default.yaml"));
+    await rm(resolve(root, ".hack/hack.env.qa.yaml"));
+  }
+  await writeFile(
+    resolve(linked, ".hack/docker-compose.yml"),
+    "services:\n  api:\n    image: busybox\n"
+  );
+  const primaryBefore = await snapshot(primary);
+  const localPath = resolve(linked, ".hack/hack.env.local.yaml");
+
+  const set = await runHack(
+    linked,
+    ["env", "set", "--local", "FAKE_CLI", "fake-cli-value"],
+    sandbox
+  );
+  expect(set.output).not.toContain("fake-cli-value");
+  expect(set.exitCode).toBe(0);
+  expect(await readFile(localPath, "utf8")).toContain("FAKE_CLI");
+  expect(await readdir(resolve(linked, ".hack"))).not.toContain(".env");
+  expect(await snapshot(primary)).toEqual(primaryBefore);
+
+  const unset = await runHack(
+    linked,
+    ["env", "unset", "--local", "FAKE_CLI"],
+    sandbox
+  );
+  expect(unset.exitCode).toBe(0);
+  expect(await readFile(localPath, "utf8")).not.toContain("FAKE_CLI");
+  expect(await readdir(resolve(linked, ".hack"))).not.toContain(".env");
+  expect(await snapshot(primary)).toEqual(primaryBefore);
+}, 30_000);
+
+test.each([
+  "removed",
+  "opted-out",
+])("materialization from inherited-only inputs is stale once %s", async (mode) => {
+  const { primary, linked, options } = await fixture();
+  for (const root of [primary, linked]) {
+    await rm(resolve(root, ".hack/hack.env.default.yaml"));
+    await rm(resolve(root, ".hack/hack.env.qa.yaml"));
+  }
+  await materializeProjectEnv(options);
+  expect((await inspectProjectEnvMaterialization(options)).status).toBe("ok");
+  if (mode === "removed") {
+    await rm(resolve(primary, ".hack/hack.env.local.yaml"));
+    await rm(resolve(primary, ".hack/hack.env.qa.local.yaml"));
+  } else {
+    process.env.HACK_WORKTREE_INHERIT_LOCAL = "0";
+  }
+  expect(await resolveProjectEnvConfig(options)).toBeNull();
+  const inspected = await inspectProjectEnvMaterialization(options);
+  expect(inspected.status).toBe("warn");
+  expect(inspected.message).toContain("no env inputs remain; materialized");
+});
+
+/** Put a logging `git` shim first on PATH to count subprocesses. */
+async function countGitCalls(sandbox: string): Promise<() => Promise<number>> {
+  const realGit = Bun.which("git");
+  if (!realGit) {
+    throw new Error("git is required for this test");
+  }
+  const bin = resolve(sandbox, "bin");
+  const log = resolve(sandbox, "git-calls.log");
+  await mkdir(bin, { recursive: true });
+  await writeFile(log, "");
+  await writeFile(
+    resolve(bin, "git"),
+    `#!/bin/sh\necho call >> "${log}"\nexec "${realGit}" "$@"\n`
+  );
+  await chmod(resolve(bin, "git"), 0o755);
+  process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
+  return async () =>
+    (await readFile(log, "utf8")).split("\n").filter(Boolean).length;
+}
+
+test("opt-outs skip all Git work and verification uses three Git calls", async () => {
+  const { sandbox, primary, linked, options } = await fixture();
+  const calls = await countGitCalls(sandbox);
+  process.env.HACK_WORKTREE_INHERIT_LOCAL = "0";
+  expect(await resolvePrimaryLocalProjectDir(options)).toBeNull();
+  Reflect.deleteProperty(process.env, "HACK_WORKTREE_INHERIT_LOCAL");
+  const configPath = resolve(linked, ".hack/hack.config.json");
+  await writeFile(
+    configPath,
+    JSON.stringify({ worktree: { inherit_local: false } })
+  );
+  expect(await resolvePrimaryLocalProjectDir(options)).toBeNull();
+  expect(await calls()).toBe(0);
+  await writeFile(configPath, "{}");
+  expect(await resolvePrimaryLocalProjectDir(options)).toBe(
+    resolve(primary, ".hack")
+  );
+  expect(await calls()).toBe(3);
 });

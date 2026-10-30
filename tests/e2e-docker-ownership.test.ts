@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
-import { readdir, rm } from "node:fs/promises";
+import { readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -313,5 +313,27 @@ describe("e2e docker ownership", () => {
     expect(second.journalCleared).toBe(true);
     expect(busy.resources).toEqual([]);
     expect(await Bun.file(journal).exists()).toBe(false);
+  });
+
+  test("recovery skips a journal removed after it was listed", async () => {
+    const dir = join(journalDir, "vanishing");
+    process.env.HACK_E2E_OWNERSHIP_DIR = dir;
+    try {
+      await Bun.write(
+        join(dir, "444.json"),
+        JSON.stringify({ pid: 444, names: ["e2e-dead"] })
+      );
+      // A dangling entry reads like a journal another run deleted mid-scan.
+      await symlink(join(dir, "gone.json.missing"), join(dir, "555.json"));
+      const fake = fakeDocker([network("e2e-dead")]);
+      const { recovered } = await recoverStaleOwnership({
+        docker: fake.docker,
+        isAlive: () => false,
+      });
+      expect(recovered).toHaveLength(1);
+      expect(fake.resources).toEqual([]);
+    } finally {
+      process.env.HACK_E2E_OWNERSHIP_DIR = journalDir;
+    }
   });
 });

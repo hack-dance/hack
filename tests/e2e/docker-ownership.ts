@@ -298,7 +298,8 @@ export async function recoverStaleOwnership(opts: {
       continue;
     }
     const path = join(dir, entry);
-    const journal = parseJournal(await Bun.file(path).text());
+    const text = await readJournal(path);
+    const journal = text === null ? null : parseJournal(text);
     if (journal === null || journal.pid === process.pid) {
       continue;
     }
@@ -316,6 +317,18 @@ export async function recoverStaleOwnership(opts: {
     }
   }
   return { recovered };
+}
+
+/** Journal text, or null when another run removed it after readdir. */
+async function readJournal(path: string): Promise<string | null> {
+  try {
+    return await Bun.file(path).text();
+  } catch (error: unknown) {
+    if ((error as { code?: string }).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
 }
 
 function parseJournal(

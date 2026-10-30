@@ -160,7 +160,7 @@ export async function prepare(check = false): Promise<void> {
     ];
     const corpus: string[] = [];
     const entries = manifest.entries.filter(
-      (entry) => !["index", "getting-started"].includes(entry.slug)
+      (entry) => !manifest.editorial.some((page) => page.slug === entry.slug)
     );
     const pages = [
       ...entries.map((entry) => ({ ...entry, editorial: false })),

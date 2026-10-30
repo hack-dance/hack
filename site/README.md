@@ -51,37 +51,17 @@ There is no publish or deploy command. Production builds explicitly use Next's
 supported webpack builder. Upstream Fumadocs cache-analysis and CSS `::highlight`
 optimizer warnings can appear; a passing build does not establish their resolution.
 
-## Canonical source and privacy boundary
+## Sources, versions and curation
 
-Edit Markdown in `docs/`, not `site/content/`. The site follows the existing
-schema.stream architecture: canonical Markdown → generated Fumadocs content →
-Next.js pages. The implementation and dependency versions are specific to Hack.
+Read [versioned-content.md](versioned-content.md) for source refs, original snapshot
+hashes, editorial adaptations, navigation and verification boundaries.
+`scripts/docs/versions.json` is the version-specific publication allowlist.
+Only its entries feed Fumadocs/search/LLM exports; no recursive archive discovery
+is used. `docs:prepare` owns ignored generated content and exports. Edit the
+explicit editorial source for the desired version, preserve original snapshots,
+and run corpus, type, build and live smoke checks.
 
-`scripts/docs/manifest.ts` is the complete public-source allowlist. There is no
-recursive repository or archive discovery. `docs:prepare` regenerates only its
-owned ignored `site/content/docs` directory and `site/public/llms*.txt`. Navigation,
-search, sitemap and the LLM corpus derive from the same staged documents. New pages
-require deliberate manifest review. Private `_docs/`, internal evidence, native
-qualification logs and transcript stores must never be added.
-
-Links to allowlisted documents become `/docs/...` routes. Existing tracked public
-repository files outside the site remain GitHub links on `next`; these links can
-move as that branch changes. Missing/untracked targets, traversal outside the
-repository, symlink targets and links into private evidence directories fail the
-staging step. Code examples are not rewritten. `docs:check` compares every staged
-file against canonical input and checks negative boundary controls. It checks local
-link targets, not remote availability or application/runtime acceptance.
-
-## Versions and release claims
-
-Stable Compose setup is the first path. Native v5 and SmolVM candidate documentation
-is experimental; install success, unit tests or this site build do not prove native
-loaded acceptance or parity. No page should infer a release's availability from a
-local checkout or package version alone.
-
-Dependencies were checked against the official npm registry on 2026-10-28. Next
-16.4.3 is above the patched 16.4.1 floor in the
-[October 14 security update](https://nextjs.org/blog/nextjs-security-update-october-14-2026).
-React 19.3.1, Fumadocs core/UI 16.17.8 and MDX 15.4.10 use their current compatible
-releases. Recheck official advisories and package peer requirements when updating;
-do not reuse another site's older pins, analytics or domain redirects.
+The homepage design remains independent of version selection. `/docs` defaults to
+v5; the docs navigation selects v4 or v5. Versioned source snapshots describe their
+pinned revision, not every current development change. No successful site build
+establishes runtime acceptance or public deployment.

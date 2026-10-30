@@ -26,7 +26,9 @@ let total = 0;
 for (const version of ["v4", "v5"] as const) {
   const m = versions[version];
   const pages = [
-    ...m.entries.filter((e) => e.slug !== "index"),
+    ...m.entries.filter(
+      (e) => !m.editorial.some((page) => page.slug === e.slug)
+    ),
     ...m.editorial,
   ];
   for (const { slug } of pages) {

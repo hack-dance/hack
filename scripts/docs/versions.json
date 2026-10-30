@@ -996,6 +996,10 @@
       {
         "slug": "guides/cloud-environments",
         "title": "Cloud and remote environments"
+      },
+      {
+        "slug": "guides/codex-managed-environments",
+        "title": "Managed environments"
       }
     ]
   },
@@ -3352,6 +3356,10 @@
       {
         "slug": "guides/cloud-environments",
         "title": "Cloud and remote environments"
+      },
+      {
+        "slug": "guides/codex-managed-environments",
+        "title": "Managed environments"
       }
     ]
   }

@@ -22,7 +22,7 @@ and contributing. `docs/core.md` explains the project model and basic commands.
 Contributor dependency-inventory instructions no longer interrupt the user index;
 the existing script remains available in the repository.
 
-`scripts/docs/manifest.ts` remains the explicit 25-document publication allowlist.
+`scripts/docs/versions.json` now defines separate explicit publication allowlists; the earlier 25-document manifest is historical.
 Canonical Markdown is staged into Fumadocs, search and LLM exports. Internal plans,
 benchmark receipts and historical design notes stay outside that allowlist. Stable
 Compose setup leads; native v5 installation and project adoption remain separate

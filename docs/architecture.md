@@ -327,7 +327,8 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
 - `<repo>/.hack/`
   - `docker-compose.yml`
   - `hack.config.json`
-  - `hack.branches.json` (optional)
+  - `hack.branches.json` (optional committed branch registry; written only by `hack branch add`/
+    `remove`, never by runtime commands)
   - `.gitignore` (committed, self-healing on `init`/`up`; covers machine-local generated files —
     `.internal/`, `.branch/`, `.env`, `.env.state.json`, and `hack.env*.local.yaml`. The retired
     `tickets/` path stays ignored only to contain legacy machine-local caches during upgrades. If
@@ -341,6 +342,7 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
   - `.internal/compose.env.override.yml`
   - `.internal/compose.runtime.override.yml`
   - `.internal/extra-hosts.json`
+  - `.internal/branch-usage.json` (machine-local branch `last_used_at`, written by runtime commands)
   - `.internal/lifecycle/state.json` and `.internal/lifecycle/*.log`
   - `.branch/compose.<branch>.override.yml`
   - `.branch/compose.<branch>.runtime.override.yml`

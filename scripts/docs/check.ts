@@ -3,10 +3,12 @@ import { agentCompatibilityCommands, curateCliReference } from "./curate-cli";
 import {
   prepare,
   repositoryRoot,
+  resolveEditorialSource,
   resolvePublicSource,
   rewriteTarget,
 } from "./prepare";
 import { isVersionedSearchUrl } from "./version-boundary";
+import versions from "./versions.json";
 
 await prepare(true);
 // Boundary checks: traversal, private evidence, untracked input must never become a link.
@@ -123,7 +125,36 @@ console.log(
 );
 
 /** Keep retiring instruction management out of the recommended v5 corpus. */
-function assertExplicitAgentContent(text: string): void {
+const branchRevision = "af71a8407d14a0dd27f7073a43010fff3a4bd219";
+const branchSlug = "guides/agent-setup-v5-branch";
+const branchLabel = "Unreleased PR531 v5 branch";
+const branchCommands = [
+  '"$V5_CLI" setup codex --path /absolute/project',
+  '"$V5_CLI" mcp install --codex --scope project --path /absolute/project',
+];
+
+function isBranchSource(
+  slug: string,
+  revision: string,
+  label: string
+): boolean {
+  return (
+    slug === branchSlug && revision === branchRevision && label === branchLabel
+  );
+}
+
+function assertExplicitAgentContent(input: string, branch = false): void {
+  let text = input;
+  if (branch) {
+    text = text
+      .split("\n")
+      .filter((line) => !branchCommands.includes(line))
+      .join("\n");
+  }
+  text = text.replace(/\$\{?V5_CLI\}?/g, "hack");
+  if (/--(?:docs|agents-md|claude-md|install-missing)(?:[\s=]|$)/m.test(text)) {
+    throw new Error("Instruction-write flag promoted");
+  }
   if (
     /(?:^|[\s`"'|])(?:[^\s`"'|]*\/)?hack(?:-cli|-next|-v5)?["']?\s+(?:agent prime|setup (?:cursor|claude|codex|agents|sync|mcp)|mcp install)(?=[\s`]|$)/m.test(
       text
@@ -139,9 +170,33 @@ function assertExplicitAgentContent(text: string): void {
 }
 
 const v5Root = resolve(repositoryRoot, "site/content/docs/v5");
+const branchMetadata = versions.v5.editorial.find(
+  (page) => page.slug === branchSlug
+);
+if (
+  !(
+    branchMetadata &&
+    "sourceRevision" in branchMetadata &&
+    "sourceLabel" in branchMetadata &&
+    isBranchSource(
+      branchMetadata.slug,
+      branchMetadata.sourceRevision ?? "",
+      branchMetadata.sourceLabel ?? ""
+    )
+  )
+) {
+  throw new Error("Branch guide manifest must identify the reviewed source");
+}
 for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: v5Root })) {
   const text = await Bun.file(resolve(v5Root, file)).text();
-  assertExplicitAgentContent(text);
+  assertExplicitAgentContent(
+    text,
+    file === `${branchSlug}.md` &&
+      text.includes(
+        `blob/${branchRevision}/docs/reference/agent-client-capabilities.md`
+      ) &&
+      text.includes(branchLabel)
+  );
   if (
     file === "reference/agent-compatibility.md" &&
     (text.includes("```") || text.includes("~~~"))
@@ -153,9 +208,16 @@ for (const file of [
   "site/public/v5/llms-full.txt",
   "site/public/llms-full.txt",
 ]) {
-  assertExplicitAgentContent(
-    await Bun.file(resolve(repositoryRoot, file)).text()
-  );
+  const corpus = await Bun.file(resolve(repositoryRoot, file)).text();
+  for (const segment of corpus.split(
+    /(?=<!-- (?:Editorial source:|Original:))/
+  )) {
+    const header = segment.split("\n")[0] ?? "";
+    const branch = header.includes(
+      `docs/versions/v5/${branchSlug}.md; based on ${branchRevision}; source label: ${branchLabel}; URL: https://hack.foo/docs/v5/${branchSlug} -->`
+    );
+    assertExplicitAgentContent(segment, branch);
+  }
 }
 const integrations = await Bun.file(resolve(v5Root, "integrations.md")).text();
 for (const fact of [
@@ -189,6 +251,91 @@ for (const skill of [
 }
 
 // Positive controls preserve unrelated runtime contracts and factual archaeology.
+const sourceDefaults = { revision: branchRevision, label: branchLabel };
+resolveEditorialSource(
+  {
+    sourceRevision: branchRevision,
+    sourceLabel: branchLabel,
+    sourceFile: "docs/reference/agent-client-capabilities.md",
+  },
+  sourceDefaults
+);
+for (const invalid of [
+  {
+    sourceRevision: "bad",
+    sourceLabel: branchLabel,
+    sourceFile: "docs/core.md",
+  },
+  { sourceRevision: branchRevision },
+  {
+    sourceRevision: branchRevision,
+    sourceLabel: branchLabel,
+    sourceFile: "docs/../private.md",
+  },
+]) {
+  let rejected = false;
+  try {
+    resolveEditorialSource(invalid, sourceDefaults);
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) {
+    throw new Error("Invalid editorial provenance accepted");
+  }
+}
+for (const command of branchCommands) {
+  assertExplicitAgentContent(command, true);
+  let rejected = false;
+  try {
+    assertExplicitAgentContent(command);
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) {
+    throw new Error("Branch opt-in leaked into released corpus");
+  }
+}
+for (const source of [
+  [branchSlug, "28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc", branchLabel],
+  ["integrations", branchRevision, branchLabel],
+  [branchSlug, branchRevision, "Released next.5"],
+]) {
+  if (isBranchSource(source[0] ?? "", source[1] ?? "", source[2] ?? "")) {
+    throw new Error("Mismatched branch source accepted");
+  }
+}
+for (const bad of [
+  '"$V5_CLI" setup sync',
+  '"$V5_CLI" mcp install --codex',
+  '"$V5_CLI" mcp install --codex --scope project --path /absolute/project --docs',
+  "$V5_CLI setup sync",
+  "${V5_CLI} setup agents",
+  "/absolute/bundle/hack-cli mcp install --codex --scope project --path /absolute/project",
+]) {
+  let rejected = false;
+  try {
+    assertExplicitAgentContent(bad, true);
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) {
+    throw new Error("Branch guard accepted retired or unscoped setup");
+  }
+}
+const branchPage = await Bun.file(resolve(v5Root, `${branchSlug}.md`)).text();
+const branchIndex = await Bun.file(
+  resolve(repositoryRoot, "site/public/v5/llms.txt")
+).text();
+if (
+  !(
+    branchPage.includes(branchRevision) &&
+    branchPage.includes(branchLabel) &&
+    branchIndex.includes(`— ${branchLabel}; source ${branchRevision}`)
+  )
+) {
+  throw new Error("Unreleased branch provenance missing from publication");
+}
+
 assertExplicitAgentContent(
   "Env injection; lifecycle definition freshness; hooks for application startup."
 );

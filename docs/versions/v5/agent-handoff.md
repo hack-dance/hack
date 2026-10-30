@@ -1,5 +1,7 @@
 # Give an agent the right context
 
+[Agent setup on the v5 branch (unreleased PR531)](guides/agent-setup-v5-branch.md) documents the newer opt-in model at its exact source revision. The runtime docs remain pinned to next.5. Use the same actual selected documentation host for that guide; do not infer that a public PR is a deployed release.
+
 Read this version's [LLM index](/v5/llms.txt) or [full corpus](/v5/llms-full.txt). They contain only the
 selected version's allowlisted public docs. Use these canonical URLs when the
 public site is deployed; for local review use the same paths on the preview host:

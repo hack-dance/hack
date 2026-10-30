@@ -82,3 +82,5 @@ Publication checks exercise both versions, reject retiring command/flag/tutorial
 patterns in staged v5 pages and full LLM exports, preserve unrelated runtime
 language, and require the explicit plugin/MCP artifact boundaries. All original
 manifest hashes are checked even when an editorial override replaces a page.
+
+The agent-setup-v5-branch guide is an explicit per-page source exception: unreleased PR531 at af71a8407d14a0dd27f7073a43010fff3a4bd219. Its title, footer and LLM index/export identify that source. Default v5 runtime/reference content stays pinned to released next.5; v4 and all original snapshot hashes remain unchanged. Only the two reviewed opt-in setup examples are allowed on this guide; retiring automatic instruction management remains excluded. This adds no release, installed-client or runtime acceptance claim.

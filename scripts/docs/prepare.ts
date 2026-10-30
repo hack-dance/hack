@@ -141,6 +141,45 @@ function documentRoute(version: string, slug: string): string {
   return `/docs/${version}${slug === "index" ? "" : `/${slug}`}`;
 }
 
+interface EditorialSource {
+  readonly slug?: string;
+  readonly title?: string;
+  readonly sourceRevision?: string;
+  readonly sourceLabel?: string;
+  readonly sourceFile?: string;
+}
+
+/** An explicit editorial source labels one page, never the runtime corpus. */
+export function resolveEditorialSource(
+  page: EditorialSource,
+  defaults: { readonly revision: string; readonly label: string }
+): { revision: string; label: string; file: string; explicit: boolean } {
+  const { sourceRevision, sourceLabel, sourceFile } = page;
+  if (
+    sourceRevision === undefined &&
+    sourceLabel === undefined &&
+    sourceFile === undefined
+  ) {
+    return { ...defaults, file: "README.md", explicit: false };
+  }
+  if (
+    typeof sourceRevision !== "string" ||
+    !/^[a-f0-9]{40}$/.test(sourceRevision) ||
+    typeof sourceLabel !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9 .()-]{0,119}$/.test(sourceLabel) ||
+    typeof sourceFile !== "string"
+  ) {
+    throw new Error("Invalid editorial source provenance");
+  }
+  resolvePublicSource(sourceFile);
+  return {
+    revision: sourceRevision,
+    label: sourceLabel,
+    file: sourceFile,
+    explicit: true,
+  };
+}
+
 async function readSnapshot(
   file: string,
   expectedHash?: string
@@ -171,6 +210,13 @@ function publishedCliText(text: string, version: "v4" | "v5"): string {
     "commands with `--json` emit a `{ok, data, error}` envelope on stdout.",
     `JSON shapes vary by command and backend. See [Command and output contracts](${documentRoute(version, "reference/command-contracts")}) for envelopes, bare reports and streamed records.`
   );
+}
+
+function editorialProvenanceLabel(source: {
+  explicit: boolean;
+  label: string;
+}): string {
+  return source.explicit ? `; source label: ${source.label}` : "";
 }
 
 async function stageVersion(
@@ -207,14 +253,24 @@ async function stageVersion(
     (entry) => !manifest.editorial.some((page) => page.slug === entry.slug)
   );
   const pages = [
-    ...entries.map((entry) => ({ ...entry, editorial: false })),
-    ...manifest.editorial.map(({ slug, title }) => ({
-      file: `docs/site/${slug}.md`,
-      slug,
-      title,
-      snapshot: `docs/versions/${version}/${slug}.md`,
+    ...entries.map((entry) => ({
+      ...entry,
+      editorial: false,
+      source: {
+        revision: manifest.revision,
+        label: manifest.label,
+        file: entry.file,
+        explicit: false,
+      },
+    })),
+    ...manifest.editorial.map((page) => ({
+      file: `docs/site/${page.slug}.md`,
+      slug: page.slug,
+      title: page.title,
+      snapshot: `docs/versions/${version}/${page.slug}.md`,
       sha256: "",
       editorial: true,
+      source: resolveEditorialSource(page, manifest),
     })),
   ];
   for (const entry of pages) {
@@ -230,13 +286,15 @@ async function stageVersion(
     }
     const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`;
     const provenance = entry.editorial
-      ? `Editorial source: ${entry.snapshot}; based on ${manifest.revision}`
+      ? `Editorial source: ${entry.snapshot}; based on ${entry.source.revision}${editorialProvenanceLabel(entry.source)}`
       : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}`;
     staged.set(
       `${version}/${entry.slug}.md`,
-      `---\ntitle: ${JSON.stringify(entry.title)}\n---\n\n${text.replace(heading, "").trim()}\n\n---\n\nSource: [${manifest.label} · ${entry.file}](https://github.com/hack-dance/hack/blob/${manifest.revision}/${entry.editorial ? "README.md" : entry.file}).\n`
+      `---\ntitle: ${JSON.stringify(entry.title)}\n---\n\n${text.replace(heading, "").trim()}\n\n---\n\nSource: [${entry.source.label} · ${entry.source.explicit ? entry.source.file : entry.file}](https://github.com/hack-dance/hack/blob/${entry.source.revision}/${entry.source.file}).\n`
     );
-    index.push(`- [${entry.title}](${url})`);
+    index.push(
+      `- [${entry.title}](${url})${entry.source.explicit ? ` — ${entry.source.label}; source ${entry.source.revision}` : ""}`
+    );
     corpus.push(`<!-- ${provenance}; URL: ${url} -->\n${text}`);
   }
   staged.set(

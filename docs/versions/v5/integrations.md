@@ -1,5 +1,7 @@
 # Use Hack with an agent
 
+For the separately published, unreleased PR531 source, see [Agent setup on the v5 branch](guides/agent-setup-v5-branch.md). That guide identifies its own revision; the next.5 runtime and artifact facts on this page remain unchanged.
+
 With shell access, an agent can use the CLI directly. Complete [Install](install.md), select the intended executable and give the agent this version's [documentation index](/v5/llms.txt) or [full corpus](/v5/llms-full.txt).
 
 For a local review, replace the public host below with the actual preview host **before** copying the task. Keep the /v5/ path so the agent reads the selected version. After publication, use the public host shown.

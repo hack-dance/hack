@@ -3454,6 +3454,13 @@
       {
         "slug": "guides/native-candidate",
         "title": "Native candidate limits"
+      },
+      {
+        "slug": "guides/agent-setup-v5-branch",
+        "title": "Agent setup on the v5 branch (unreleased PR531)",
+        "sourceRevision": "af71a8407d14a0dd27f7073a43010fff3a4bd219",
+        "sourceLabel": "Unreleased PR531 v5 branch",
+        "sourceFile": "docs/reference/agent-client-capabilities.md"
       }
     ]
   }

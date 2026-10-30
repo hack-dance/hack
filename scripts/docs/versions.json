@@ -1000,6 +1000,10 @@
       {
         "slug": "guides/codex-managed-environments",
         "title": "Managed environments"
+      },
+      {
+        "slug": "reference/overview",
+        "title": "Reference and contracts"
       }
     ]
   },
@@ -1153,6 +1157,20 @@
         "title": "Native authored commands",
         "snapshot": "docs/versions/v5/originals/docs/reference/native-authored-commands.md",
         "sha256": "2e129fd8c3f1f9d970372dd3a37809c93dccfd76b38c0ffb28d0104ec81b3d98"
+      },
+      {
+        "file": "docs/reference/mcp-tools.md",
+        "slug": "reference/mcp-tools",
+        "title": "MCP tools",
+        "snapshot": "docs/versions/v5/originals/docs/reference/mcp-tools.md",
+        "sha256": "1ddff50767cb160ee3c6cd33a394aabd8120ab1e2c1269a53e240227872b878c"
+      },
+      {
+        "file": "docs/reference/mcp-logs.md",
+        "slug": "reference/mcp-logs",
+        "title": "MCP logs",
+        "snapshot": "docs/versions/v5/originals/docs/reference/mcp-logs.md",
+        "sha256": "8d0333799aa9a72e68009e912de255d681aac5bb06ab28bbd7718e2e1540d7cb"
       }
     ],
     "publicFiles": [
@@ -3360,6 +3378,10 @@
       {
         "slug": "guides/codex-managed-environments",
         "title": "Managed environments"
+      },
+      {
+        "slug": "reference/overview",
+        "title": "Reference and contracts"
       }
     ]
   }

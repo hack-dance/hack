@@ -30,6 +30,6 @@ matching optional client setup.
 ## Find details or diagnose a problem
 
 Use the [CLI overview](../cli.md) to choose a command, the
-[command reference](../reference/cli.md) for flags, and
+[command reference](../reference/cli.md) for flags, [contracts](reference/overview.md) for schemas and agent interfaces, and
 [Architecture](../architecture.md) for the runtime model.
 Run `hack doctor` on the machine running Hack and follow the specific diagnosis.

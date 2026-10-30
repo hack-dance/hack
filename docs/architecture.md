@@ -181,6 +181,11 @@ sequenceDiagram
 - **compose**: fast, direct `docker compose logs`
 - **loki**: searchable history + LogQL filters
 
+Follow mode uses compose unless `logs.follow_backend` is `loki`. Loki follow tails over a
+WebSocket and only streams recent and new lines, so a short-lived service that already exited
+can show nothing. If no line arrives within 5 seconds, `hack logs` prints a stderr hint
+pointing to `hack logs --loki --no-follow --since 24h` (history) and `hack logs --compose`.
+
 NDJSON streaming (`hack logs --json`) emits `start`, `log`, `error`, and `end` events for MCP/TUI
 consumers.
 

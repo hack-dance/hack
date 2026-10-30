@@ -51,10 +51,22 @@ export function buildLogSelector(opts: {
   return `{${parts.join(",")}}`;
 }
 
+/**
+ * Quote a value as a LogQL double-quoted string literal. Loki unquotes these
+ * with Go's `strconv.Unquote`, so each backslash and quote needs exactly one
+ * escaping backslash (and control characters need their escape sequence).
+ */
 function quoteLogql(value: string): string {
-  return `"${value.replaceAll("\\\\", "\\\\\\\\").replaceAll('"', '\\\\"')}"`;
+  const escaped = value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("\n", "\\n")
+    .replaceAll("\r", "\\r")
+    .replaceAll("\t", "\\t");
+  return `"${escaped}"`;
 }
 
+/** Escape RE2 metacharacters with a single backslash; quoteLogql adds the string-literal layer. */
 function escapeRegex(value: string): string {
-  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\\\$&");
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

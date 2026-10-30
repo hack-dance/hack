@@ -18,7 +18,7 @@ async function read(path: string): Promise<string> {
   return response.text();
 }
 const home = await read("/");
-if (!home.includes("Your machine is the platform.")) {
+if (!home.includes("hack.foo") || !home.includes("Run the whole project")) {
   throw new Error("Home positioning missing");
 }
 const routes = documents.map(

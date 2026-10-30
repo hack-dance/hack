@@ -41,6 +41,43 @@ const laterIncompleteMissingLockStages = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "pre-ready-retirement",
+    module: "Retirement",
+    states: 10_965,
+    invariant: "Safe",
+    action: "RequestHostStop",
+    fields: ["unsafeSettlement = TRUE", "stopRequested = TRUE"],
+    additionalControls: [
+      {
+        name: "unproved-removal",
+        negative: true,
+        fields: ["unsafeRemoval = TRUE", "stopRequested = TRUE"],
+      },
+      {
+        name: "stale-inputs",
+        negative: true,
+        fields: ["unsafeFreshness = TRUE", "stopRequested = TRUE"],
+      },
+      {
+        name: "foreign-session",
+        negative: true,
+        fields: ["unsafeSession = TRUE", "stopRequested = TRUE"],
+      },
+      {
+        name: "stale-claim",
+        negative: true,
+        fields: ["unsafeClaim = TRUE", "stopRequested = TRUE"],
+      },
+      {
+        name: "unconfirmed-host-exit",
+        negative: true,
+        action: "Retire",
+        fields: ["unsafeRetire = TRUE", "retired = TRUE"],
+      },
+      { name: "liveness", negative: false, states: 395 },
+    ],
+  },
+  {
     name: "native-persistent-enrollment",
     module: "Enrollment",
     states: 38,

@@ -10,6 +10,7 @@ const excludedRoots = new Set([
 ]);
 const excludedGroups = new Set([
   "## Beta",
+  "## Experimental (unsupported)",
   "## Internal",
   "## Fun",
   "## Extensions",

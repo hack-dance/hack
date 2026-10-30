@@ -76,7 +76,9 @@ for (const version of ["v4", "v5"]) {
     /^## `hack (gateway|node|remote|dispatch|internal|the|ssh|x)(?:\s|`)/m.test(
       cli
     ) ||
-    /^## (Beta|Internal|Fun|Extensions)$/m.test(cli)
+    /^## (Beta|Experimental \(unsupported\)|Internal|Fun|Extensions)$/m.test(
+      cli
+    )
   ) {
     throw new Error(`Excluded CLI surface published: ${version}`);
   }

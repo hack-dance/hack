@@ -5,6 +5,7 @@ import {
   resolvePublicSource,
   rewriteTarget,
 } from "./prepare";
+import { isVersionedSearchUrl } from "./version-boundary";
 
 await prepare(true);
 // Boundary checks: traversal, private evidence, untracked input must never become a link.
@@ -95,4 +96,35 @@ if (
 }
 console.log(
   "Version-isolated exports, entry points and default version passed."
+);
+
+for (const version of ["v4", "v5"] as const) {
+  const other = version === "v4" ? "v5" : "v4";
+  for (const url of [
+    `/docs/${version}`,
+    `/docs/${version}#setup`,
+    `/docs/${version}/install`,
+    `/docs/${version}/env#keys`,
+  ]) {
+    if (!isVersionedSearchUrl(url, version)) {
+      throw new Error(`Rejected valid search URL: ${url}`);
+    }
+  }
+  for (const url of [
+    `/docs/${other}`,
+    `/docs/${other}/install`,
+    `/docs/${version}0`,
+    `/docs/${version}-other`,
+    `/docs/${version}/../${other}/env`,
+    `//example.com/docs/${version}`,
+    `https://example.com/docs/${version}`,
+    null,
+  ]) {
+    if (isVersionedSearchUrl(url, version)) {
+      throw new Error(`Accepted escaping search URL: ${url}`);
+    }
+  }
+}
+console.log(
+  "Search index/anchor acceptance and cross-version negative controls passed."
 );

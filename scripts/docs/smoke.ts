@@ -1,3 +1,4 @@
+import { isVersionedSearchUrl } from "./version-boundary";
 import versions from "./versions.json";
 
 const base = new URL(process.argv[2] ?? "http://127.0.0.1:3000");
@@ -51,9 +52,7 @@ for (const version of ["v4", "v5"] as const) {
   );
   if (
     !(Array.isArray(results) && results.length) ||
-    results.some(
-      (r) => typeof r.url !== "string" || !r.url.startsWith(`/docs/${version}/`)
-    )
+    results.some((r) => !isVersionedSearchUrl(r.url, version))
   ) {
     throw new Error(`Search isolation failed: ${version}`);
   }

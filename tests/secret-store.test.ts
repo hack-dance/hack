@@ -7,11 +7,12 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   provisionEncryptedFileKey,
   resolveSecretStore,
+  resolveSecretStoreDescriptor,
 } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -301,6 +302,46 @@ test("encrypted_file backend returns recovery guidance when key material is miss
   expect(persisted).toContain('"ciphertext"');
   await expect(access(keyPath)).rejects.toThrow();
 });
+
+// HACK-1357: "~" paths must never resolve under the cwd when HOME is empty
+// or relative. Only the descriptor is resolved; nothing is read or written.
+for (const [label, home] of [
+  ["empty", ""],
+  ["relative", "relative-home"],
+] as const) {
+  test(`encrypted_file "~" paths stay out of the cwd with ${label} HOME`, async () => {
+    const previousHackHome = process.env.HACK_HOME;
+    Reflect.deleteProperty(process.env, "HACK_HOME");
+    try {
+      for (const path of [
+        "~",
+        "~/hack-1357-secrets.enc.json",
+        "relative.json",
+      ]) {
+        await writeGlobalConfig({
+          value: {
+            controlPlane: {
+              secrets: { backend: "encrypted_file", encryptedFile: { path } },
+            },
+          },
+        });
+        process.env.HOME = home;
+        const descriptor = await resolveSecretStoreDescriptor({
+          projectName: "app",
+        });
+        const location = descriptor.location;
+        expect(location.startsWith("/")).toBe(true);
+        expect(
+          location === process.cwd() || location.startsWith(`${process.cwd()}/`)
+        ).toBe(false);
+        expect(location.startsWith(homedir())).toBe(true);
+        process.env.HOME = tempDir ?? "";
+      }
+    } finally {
+      restoreEnv("HACK_HOME", previousHackHome);
+    }
+  });
+}
 
 async function writeGlobalConfig(input: {
   readonly value: Record<string, unknown>;

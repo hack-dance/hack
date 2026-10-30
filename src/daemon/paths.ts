@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import {
@@ -10,6 +9,7 @@ import {
   GLOBAL_HACK_DIR_NAME,
 } from "../constants.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
 
 export interface DaemonPaths {
   readonly root: string;
@@ -26,9 +26,10 @@ export function resolveDaemonPaths({
 }: {
   readonly home?: string;
 }): DaemonPaths {
-  const baseHome = (home ?? process.env.HOME ?? homedir()).trim();
-  const hackDir = home
-    ? resolve(baseHome, GLOBAL_HACK_DIR_NAME)
+  const explicitHome = resolveExplicitHome({ home });
+  const baseHome = explicitHome ?? resolveUserHomeDir();
+  const hackDir = explicitHome
+    ? resolve(explicitHome, GLOBAL_HACK_DIR_NAME)
     : resolveGlobalHackDir();
   const root = resolve(hackDir, GLOBAL_DAEMON_DIR_NAME);
   const launchAgentsDir = resolve(baseHome, "Library", "LaunchAgents");
@@ -41,4 +42,21 @@ export function resolveDaemonPaths({
     launchdStdoutPath: resolve(root, "hackd.stdout.log"),
     launchdStderrPath: resolve(root, "hackd.stderr.log"),
   };
+}
+
+function resolveExplicitHome({
+  home,
+}: {
+  readonly home: string | undefined;
+}): string | null {
+  if (home === undefined || home.trim().length === 0) {
+    return null;
+  }
+  const normalized = normalizeHomeDir(home);
+  if (!normalized) {
+    throw new Error(
+      `Daemon home must be an absolute path (got ${JSON.stringify(home)}).`
+    );
+  }
+  return normalized;
 }

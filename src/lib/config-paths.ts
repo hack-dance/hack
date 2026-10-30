@@ -1,25 +1,25 @@
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import { GLOBAL_CONFIG_FILENAME, GLOBAL_HACK_DIR_NAME } from "../constants.ts";
+import { readHackHomeOverride, resolveUserHomeDir } from "./home-dir.ts";
 
 /**
  * Resolve the global hack home directory (`~/.hack` by default).
  *
  * Resolution order:
- * 1. `HACK_HOME` env var (trimmed, non-empty) — used as-is, resolved to an
- *    absolute path. This override exists for tests and isolated environments
- *    that need to redirect ALL global state (registry, caddy assets, daemon
- *    state, secrets) without overriding `HOME`.
- * 2. `resolve(HOME ?? homedir(), ".hack")` — the default behavior.
+ * 1. `HACK_HOME` env var (trimmed, non-empty) — used as-is. It must be an
+ *    absolute path; a relative value throws. This override exists for tests
+ *    and isolated environments that need to redirect ALL global state
+ *    (registry, caddy assets, daemon state, secrets) without overriding `HOME`.
+ * 2. `<home>/.hack`, where an empty or relative `HOME` is treated as unset
+ *    (see {@link resolveUserHomeDir}). Never resolves against the cwd.
  */
 export function resolveGlobalHackDir(): string {
-  const override = (process.env.HACK_HOME ?? "").trim();
-  if (override.length > 0) {
-    return resolve(override);
+  const override = readHackHomeOverride();
+  if (override) {
+    return override;
   }
-  const home = (process.env.HOME ?? homedir()).trim();
-  return resolve(home, GLOBAL_HACK_DIR_NAME);
+  return resolve(resolveUserHomeDir(), GLOBAL_HACK_DIR_NAME);
 }
 
 /**

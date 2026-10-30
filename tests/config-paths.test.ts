@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { resolveDaemonPaths } from "@daemon/paths.ts";
@@ -167,4 +167,103 @@ test("projects registry is read from under HACK_HOME when set", async () => {
   const registry = await readProjectsRegistry();
   expect(registry.projects).toHaveLength(1);
   expect(registry.projects[0]?.id).toBe("test-project-id");
+});
+
+// HACK-1357: an empty or relative HOME/HACK_HOME must never make global state
+// (registry, daemon socket/pid, secret key material) resolve under the cwd.
+function expectOutsideCwd(path: string): void {
+  expect(path.startsWith("/")).toBe(true);
+  expect(path === process.cwd() || path.startsWith(`${process.cwd()}/`)).toBe(
+    false
+  );
+}
+
+for (const [label, home] of [
+  ["empty", ""],
+  ["whitespace", "   "],
+  ["relative", "relative-home"],
+  ["dot-relative", "./relative-home"],
+] as const) {
+  test(`resolveGlobalHackDir treats ${label} HOME as unset`, () => {
+    Reflect.deleteProperty(process.env, "HACK_HOME");
+    process.env.HOME = home;
+
+    const dir = resolveGlobalHackDir();
+    expectOutsideCwd(dir);
+    expect(dir).toBe(resolve(homedir(), GLOBAL_HACK_DIR_NAME));
+  });
+
+  test(`resolveGlobalConfigPath stays out of the cwd with ${label} HOME`, () => {
+    Reflect.deleteProperty(process.env, "HACK_HOME");
+    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+    process.env.HOME = home;
+
+    expectOutsideCwd(resolveGlobalConfigPath());
+  });
+
+  test(`resolveDaemonPaths stays out of the cwd with ${label} HOME`, () => {
+    Reflect.deleteProperty(process.env, "HACK_HOME");
+    process.env.HOME = home;
+
+    const paths = resolveDaemonPaths({});
+    expect(paths.root).toBe(
+      resolve(homedir(), GLOBAL_HACK_DIR_NAME, GLOBAL_DAEMON_DIR_NAME)
+    );
+    for (const path of Object.values(paths)) {
+      expectOutsideCwd(path);
+    }
+  });
+}
+
+test("resolveDaemonPaths treats an empty explicit home as unset", () => {
+  Reflect.deleteProperty(process.env, "HACK_HOME");
+  process.env.HOME = "/tmp/hack-home";
+
+  const paths = resolveDaemonPaths({ home: "" });
+  expect(paths.root).toBe(
+    resolve("/tmp/hack-home", GLOBAL_HACK_DIR_NAME, GLOBAL_DAEMON_DIR_NAME)
+  );
+  expect(
+    paths.launchdPlistPath.startsWith("/tmp/hack-home/Library/LaunchAgents/")
+  ).toBe(true);
+});
+
+test("resolveDaemonPaths refuses a relative explicit home", () => {
+  process.env.HOME = "/tmp/hack-home";
+
+  expect(() => resolveDaemonPaths({ home: "relative-home" })).toThrow(
+    /absolute path/
+  );
+});
+
+for (const [label, hackHome] of [
+  ["relative", "relative-hack-home"],
+  ["dot-relative", "./relative-hack-home"],
+] as const) {
+  test(`resolveGlobalHackDir refuses ${label} HACK_HOME`, () => {
+    process.env.HACK_HOME = hackHome;
+    process.env.HOME = "/tmp/hack-home";
+
+    expect(() => resolveGlobalHackDir()).toThrow(
+      /HACK_HOME must be an absolute path/
+    );
+  });
+
+  test(`resolveDaemonPaths refuses ${label} HACK_HOME`, () => {
+    process.env.HACK_HOME = hackHome;
+    process.env.HOME = "/tmp/hack-home";
+
+    expect(() => resolveDaemonPaths({})).toThrow(
+      /HACK_HOME must be an absolute path/
+    );
+  });
+}
+
+test("resolveGlobalHackDir treats empty HACK_HOME as unset", () => {
+  process.env.HACK_HOME = "";
+  process.env.HOME = "/tmp/hack-home";
+
+  expect(resolveGlobalHackDir()).toBe(
+    resolve("/tmp/hack-home", GLOBAL_HACK_DIR_NAME)
+  );
 });

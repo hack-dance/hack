@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 
 import { DAEMON_LAUNCHD_LABEL } from "../constants.ts";
@@ -11,6 +10,7 @@ import {
   writeTextFile,
 } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { resolveUserHomeDir } from "../lib/home-dir.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
 import type { DaemonPaths } from "./paths.ts";
 
@@ -115,7 +115,7 @@ export async function installLaunchdService({
       error: "Could not resolve hack binary path for launchd service",
     };
   }
-  const home = process.env.HOME ?? homedir();
+  const home = resolveUserHomeDir();
 
   const plistContent = renderLaunchdPlist({
     hackBinPath,

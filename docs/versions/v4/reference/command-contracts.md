@@ -257,7 +257,7 @@ Thrown usage errors with an explicit `--json` token become E_USAGE; other thrown
 | global status | bare generated_at/caddy/logging/networks/gateway/summary | exits 0 even if summary health false; gateway is retained unsupported data, excluded from public contract |
 | daemon status | bare report below | running returns 0; starting/stale/unavailable may return 1 |
 | host ps | bare {generatedAt,snapshotAvailable,commands,lifecycle} | timestamp string, availability boolean; nested telemetry remains specialized |
-| setup sync | shared envelope; action:check/sync/remove, dryRun:boolean, installMissing:boolean, counts:partial status-to-number map, targets:integration result array | check failures can exit 1 despite ok:true |
+| setup sync | human status list; no JSON option at this pin | v5 JSON/target report and install-missing must not be backported |
 | session panes/capture/tail | JSON-lines events below | no shared envelope |
 | update | command-owned object with ok:boolean, string error on failure | error is not shared error.{code,message}; success varies by check/install outcome; exit follows ok |
 

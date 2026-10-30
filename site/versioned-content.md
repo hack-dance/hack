@@ -46,7 +46,8 @@ leaves and v5 next.5 has 92 in the declared supported slice; the supplements add
 three and six deeper leaf sections respectively. Initial flag display differences
 were generic value placeholders, not missing registered flags. The v5 authored
 schema reference lists all 168 project/local property declarations. See
-`reference-coverage.md` for counts, exclusions and limits. Engine-specific nested
-results, specialized diagnostics and dynamic application maps remain open; these
+`reference-coverage.md` for counts, exclusions and limits. Owned diagnostic, provisioning, telemetry, project and env report fields are
+covered separately. Raw engine rows, dynamic application maps, shared error.detail
+and the explicitly opaque compiler plan boundary remain open; these
 pages do not turn private protocols into public APIs or claim runtime/cloud/client
 qualification from source review.

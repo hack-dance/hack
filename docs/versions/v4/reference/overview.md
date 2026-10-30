@@ -28,6 +28,10 @@ contract. This archived corpus has no generated complete API/type catalog.
 
 [Configuration fields](configuration-fields.md) lists the version-specific project JSON, environment YAML and branch registry. [MCP fields and results](mcp-fields.md) lists every registered tool's input declarations, result fields and log event types.
 
+[Project and env reports](project-env-reports.md) details the owned inventory, metadata, raw env-list and restart-wrapper projections. Raw CLI env reports are not value-free MCP projections.
+
+[Diagnostic and setup reports](diagnostic-reports.md) lists the owned doctor, setup, update and host telemetry types, plus the public candidate-report wrappers where present. Private compiler Plan internals are excluded.
+
 ## Coverage limits
 
 This first versioned pass preserves generated command documentation and separates

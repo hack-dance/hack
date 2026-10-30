@@ -1016,6 +1016,14 @@
       {
         "slug": "reference/command-contracts",
         "title": "Command and output contracts"
+      },
+      {
+        "slug": "reference/project-env-reports",
+        "title": "Project and env reports"
+      },
+      {
+        "slug": "reference/diagnostic-reports",
+        "title": "Diagnostic and setup reports"
       }
     ]
   },
@@ -3410,6 +3418,14 @@
       {
         "slug": "reference/command-contracts",
         "title": "Command and output contracts"
+      },
+      {
+        "slug": "reference/project-env-reports",
+        "title": "Project and env reports"
+      },
+      {
+        "slug": "reference/diagnostic-reports",
+        "title": "Diagnostic and setup reports"
       }
     ]
   }

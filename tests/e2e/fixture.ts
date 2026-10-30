@@ -6,6 +6,7 @@ import {
   HACK_DIR_GITIGNORE_END_MARKER,
   HACK_DIR_GITIGNORE_ENTRIES,
 } from "../../src/templates.ts";
+import { recordOwnedFixture } from "./docker-ownership.ts";
 import { runCommand } from "./harness.ts";
 
 /**
@@ -53,9 +54,15 @@ export type LifecycleFixtureOptions = {
   readonly downBeforeFailure?: boolean;
 };
 
-/** Random, collision-proof project slug (also used for dev_host). */
+/**
+ * Random, collision-proof project slug (also used for dev_host). The name is
+ * recorded as owned by this run, so the harness may remove its Docker
+ * resources (see docker-ownership.ts).
+ */
 export function randomProjectName(): string {
-  return `e2e-${Math.random().toString(16).slice(2, 10)}`;
+  const name = `e2e-${Math.random().toString(16).slice(2, 10)}`;
+  recordOwnedFixture({ name });
+  return name;
 }
 
 /**
@@ -74,6 +81,8 @@ export async function createMonorepoFixture(opts: {
   readonly withHackGitignore?: boolean;
 }): Promise<MonorepoFixture> {
   const name = opts.name ?? randomProjectName();
+  // Record ownership before anything can create Docker resources for it.
+  recordOwnedFixture({ name });
   const devHost = `${name}.hack`;
   const root = join(opts.parentDir, name);
   const hackDir = join(root, ".hack");

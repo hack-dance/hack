@@ -1,3 +1,10 @@
+## [4.2.6](https://github.com/hack-dance/hack/compare/v4.2.5...v4.2.6) (2026-10-30)
+
+### Bug Fixes
+
+* **env:** inherit primary checkout local env overlays in linked worktrees ([#529](https://github.com/hack-dance/hack/issues/529)) ([736544e](https://github.com/hack-dance/hack/commit/736544efc8c16e743dc6158df9f19072811fba7b))
+* never resolve global state under the cwd for empty or relative HOME/HACK_HOME (HACK-1357) ([#527](https://github.com/hack-dance/hack/issues/527)) ([98ab4e7](https://github.com/hack-dance/hack/commit/98ab4e706f052eb677a5fccdc5b0a101a377ec26))
+
 ## [4.2.5](https://github.com/hack-dance/hack/compare/v4.2.4...v4.2.5) (2026-10-30)
 
 ### Bug Fixes

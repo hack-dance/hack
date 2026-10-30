@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import { isCancel, select, text } from "@clack/prompts";
@@ -41,6 +40,7 @@ import {
 } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
 import { pathExists, readTextFile, writeTextFile } from "../lib/fs.ts";
+import { resolveUserHomeDir } from "../lib/home-dir.ts";
 import { canPrompt } from "../lib/interactivity.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
@@ -295,7 +295,7 @@ async function resolveTmuxConfigPaths(): Promise<{
   readonly homeConfig: string;
   readonly existingConfigs: readonly string[];
 }> {
-  const home = homedir();
+  const home = resolveUserHomeDir();
   const xdgConfig = resolve(home, ".config/tmux/tmux.conf");
   const homeConfig = resolve(home, ".tmux.conf");
   const candidates = [xdgConfig, homeConfig];

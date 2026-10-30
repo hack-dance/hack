@@ -20,12 +20,16 @@ import type {
 import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
+let originalGlobalConfigPath: string | undefined;
 
 beforeEach(async () => {
+  originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
   tempDir = await mkdtemp(join(tmpdir(), "hack-views-"));
+  process.env.HACK_GLOBAL_CONFIG_PATH = join(tempDir, "global.config.json");
 });
 
 afterEach(async () => {
+  restoreEnv("HACK_GLOBAL_CONFIG_PATH", originalGlobalConfigPath);
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;

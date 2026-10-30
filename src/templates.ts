@@ -431,6 +431,7 @@ export function renderProjectConfigSchemaJson(): string {
         additionalProperties: true,
         properties: {
           auto_branch: { type: "boolean" },
+          inherit_local: { type: "boolean" },
         },
       },
       sessions: {

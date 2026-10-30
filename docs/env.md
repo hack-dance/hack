@@ -117,12 +117,27 @@ Hack resolves env in this order:
 
 1. load `.hack/hack.env.default.yaml`
 2. if `--env=<name>` is selected, load `.hack/hack.env.<name>.yaml`
-3. load `.hack/hack.env.local.yaml`
-4. if `--env=<name>` is selected, load `.hack/hack.env.<name>.local.yaml`
-5. merge `values.global`
-6. if a service scope is requested, merge `values.<service>` on top
+3. in a linked git worktree, load the primary checkout's `.hack/hack.env.local.yaml`
+4. if `--env=<name>` is selected, load the primary checkout's `.hack/hack.env.<name>.local.yaml`
+5. load this checkout's `.hack/hack.env.local.yaml`
+6. if `--env=<name>` is selected, load this checkout's `.hack/hack.env.<name>.local.yaml`
+7. merge `values.global`
+8. if a service scope is requested, merge `values.<service>` on top
 
 Worktree-local overrides win over shared repo overlays. Service values override global values.
+Primary local overlays are read live, without copying or creating files. Checkout-local
+overrides always win over primary local overlays; `hack env set --local` writes only to
+the current checkout. Inheritance is disabled by `CI=1` or `CI=true`,
+`HACK_EXECUTION_MODE=slim` or `codex`, `HACK_WORKTREE_INHERIT_LOCAL=0` (also
+`false`, `off`, or `no`), or `"worktree": { "inherit_local": false }` in
+`.hack/hack.config.json`. Symlinked primary project directories are ignored;
+symlinked, non-regular, or unreadable primary local files are rejected, and an
+unreadable `.hack/hack.config.json` in a linked worktree is an error rather than a
+silent opt-in. Checkout paths containing newlines never inherit. A worktree
+whose only env input is an inherited overlay still uses the YAML commands. If every
+input of a materialized `.hack/.env` later disappears (including by opting out),
+`hack doctor` reports the output as obsolete.
+
 Host execution applies `host` values last. This includes `hack host exec`, `hack host shell`,
 and lifecycle hooks/processes, which all run on the host rather than in Compose.
 

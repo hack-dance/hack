@@ -43,6 +43,12 @@ import { getRecord, getString, isRecord } from "./guards.ts";
 import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
 import { resolveUserHomeDir } from "./home-dir.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
+import {
+  hasPrimaryLocalInputs,
+  readPrimaryLocalFile,
+  resolvePrimaryLocalProjectDir,
+  validatePrimaryLocalFile,
+} from "./worktree-local-config.ts";
 
 const PROJECT_ENV_CONFIG_VERSION = 1 as const;
 const PROJECT_ENV_SECRETS_PROVIDER = "project_key" as const;
@@ -462,7 +468,7 @@ export async function projectEnvConfigExists(opts: {
   }
 
   const entries = await readdir(opts.projectDir, { withFileTypes: true });
-  return entries.some((entry) => {
+  const hasLocalConfig = entries.some((entry) => {
     if (!entry.isFile()) {
       return false;
     }
@@ -473,6 +479,15 @@ export async function projectEnvConfigExists(opts: {
       return false;
     }
     return entry.name !== PROJECT_ENV_CONFIG_DEFAULT_FILENAME;
+  });
+  if (hasLocalConfig) {
+    return true;
+  }
+
+  // Inherited-only linked worktrees still route to the modern YAML commands.
+  return await hasPrimaryLocalInputs({
+    projectRoot: dirname(opts.projectDir),
+    projectDir: opts.projectDir,
   });
 }
 
@@ -512,8 +527,9 @@ export async function listProjectEnvOverlayNames(opts: {
 async function readProjectEnvConfigFile(opts: {
   readonly path: string;
   readonly environment: string;
+  readonly readText?: (path: string) => Promise<string | null>;
 }): Promise<ProjectEnvConfigReadResult> {
-  const text = await readTextFile(opts.path);
+  const text = await (opts.readText ?? readTextFile)(opts.path);
   if (text === null) {
     return {
       path: opts.path,
@@ -747,44 +763,52 @@ export async function resolveProjectEnvConfig(opts: {
           environment: selection.effectiveEnv ?? "default",
         });
 
-  if (
-    !(
-      defaultRead.exists ||
-      (overlayRead?.exists ?? false) ||
-      localDefaultRead.exists ||
-      (localOverlayRead?.exists ?? false)
-    )
-  ) {
+  const primaryDir = await resolvePrimaryLocalProjectDir(opts);
+  const inheritedReads: ProjectEnvConfigReadResult[] = [];
+  if (primaryDir !== null) {
+    const primaryDefaultPath = await resolveProjectEnvEffectiveLocalConfigPath({
+      projectRoot: dirname(primaryDir),
+      projectDir: primaryDir,
+      envName: null,
+    });
+    const paths = [{ path: primaryDefaultPath, environment: "default" }];
+    if (selection.effectiveEnv !== null) {
+      paths.push({
+        path: resolveProjectEnvLocalConfigPath({
+          projectDir: primaryDir,
+          envName: selection.effectiveEnv,
+        }),
+        environment: selection.effectiveEnv,
+      });
+    }
+    for (const input of paths) {
+      await validatePrimaryLocalFile(input.path);
+      const read = await readProjectEnvConfigFile({
+        ...input,
+        readText: readPrimaryLocalFile,
+      });
+      if (read.parseError) {
+        throw new Error(`Failed to parse primary local env file: ${read.path}`);
+      }
+      inheritedReads.push(read);
+    }
+  }
+  const reads = [
+    defaultRead,
+    overlayRead,
+    ...inheritedReads,
+    localDefaultRead,
+    localOverlayRead,
+  ];
+  if (!reads.some((read) => read?.exists)) {
     return null;
   }
-
-  if (defaultRead.parseError) {
-    throw new Error(
-      `Failed to parse ${defaultRead.path}: ${defaultRead.parseError}`
-    );
+  for (const read of reads) {
+    if (read?.parseError) {
+      throw new Error(`Failed to parse ${read.path}: ${read.parseError}`);
+    }
   }
-  if (overlayRead?.parseError) {
-    throw new Error(
-      `Failed to parse ${overlayRead.path}: ${overlayRead.parseError}`
-    );
-  }
-  if (localDefaultRead.parseError) {
-    throw new Error(
-      `Failed to parse ${localDefaultRead.path}: ${localDefaultRead.parseError}`
-    );
-  }
-  if (localOverlayRead?.parseError) {
-    throw new Error(
-      `Failed to parse ${localOverlayRead.path}: ${localOverlayRead.parseError}`
-    );
-  }
-
-  const envLayers = [
-    defaultRead.exists ? defaultRead.config : null,
-    overlayRead?.exists ? overlayRead.config : null,
-    localDefaultRead.exists ? localDefaultRead.config : null,
-    localOverlayRead?.exists ? localOverlayRead.config : null,
-  ];
+  const envLayers = reads.map((read) => (read?.exists ? read.config : null));
   const merged = mergeProjectEnvConfigLayers({
     layers: envLayers,
     environment: selection.effectiveEnv ?? "default",
@@ -851,6 +875,11 @@ export async function resolveProjectEnvConfig(opts: {
   const files = [selection.defaultPath];
   if (selection.overlayPath && overlayRead?.exists) {
     files.push(selection.overlayPath);
+  }
+  for (const read of inheritedReads) {
+    if (read.exists) {
+      files.push(read.path);
+    }
   }
   if (localDefaultRead.exists) {
     files.push(selection.localDefaultPath);
@@ -1256,12 +1285,23 @@ export async function inspectProjectEnvMaterialization(opts: {
     serviceNames: opts.serviceNames,
   });
   if (!resolved) {
+    // Every recorded input is gone (e.g. inheritance disabled or removed).
+    if (Object.keys(stateRead.state.inputs).length === 0) {
+      return {
+        envPath,
+        statePath,
+        status: "ok",
+        message: "No modern env config files found",
+        issues: [],
+      };
+    }
+    const issue = `no env inputs remain; materialized ${envPath} is obsolete`;
     return {
       envPath,
       statePath,
-      status: "ok",
-      message: "No modern env config files found",
-      issues: [],
+      status: "warn",
+      message: `${issue} (remove ${envPath} and ${statePath}, or restore inputs and run: hack env materialize)`,
+      issues: [issue],
     };
   }
 

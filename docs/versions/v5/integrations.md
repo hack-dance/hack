@@ -2,6 +2,8 @@
 
 With shell access, an agent can use the CLI directly. Complete [Install](install.md), select the intended executable and give the agent this version's [documentation index](/v5/llms.txt) or [full corpus](/v5/llms-full.txt).
 
+For a local review, replace the public host below with the actual preview host **before** copying the task. Keep the /v5/ path so the agent reads the selected version. After publication, use the public host shown.
+
 A copyable task introduction:
 
 ~~~text
@@ -38,7 +40,7 @@ The `hack` bundle ships these seven skills; select only the guidance you want:
 | hack-install | Installation and executable/channel selection |
 | hack-remote | Prepare a project on another host or in a cloud environment; it does not enable unsupported node/gateway commands |
 
-**Released next.5 caveat:** the [skill bodies](https://github.com/hack-dance/hack/blob/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/plugins/hack/skills), including hack-cli, still recommend freshness checks, sync and standalone exports. Its Codex manifest declares skills only, but the sibling [Claude manifest](https://github.com/hack-dance/hack/blob/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/plugins/hack/.claude-plugin/plugin.json) selects SessionStart/PreCompact primer hooks and the [Cursor manifest](https://github.com/hack-dance/hack/blob/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/plugins/hack/.cursor-plugin/plugin.json) selects rules. Review these artifacts before enabling them. The intended hook-free model has not shipped in this pin; use the CLI and versioned docs if you do not want that behavior. See the short [compatibility boundary](reference/agent-compatibility.md).
+**Released next.5 caveat:** the [skill bodies](https://github.com/hack-dance/hack/tree/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/plugins/hack/skills), including hack-cli, still recommend freshness checks, sync and standalone exports. Its Codex manifest declares skills only, but the sibling [Claude manifest](https://github.com/hack-dance/hack/blob/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/plugins/hack/.claude-plugin/plugin.json) selects SessionStart/PreCompact primer hooks and the [Cursor manifest](https://github.com/hack-dance/hack/blob/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/plugins/hack/.cursor-plugin/plugin.json) selects rules. Review these artifacts before enabling them. The intended hook-free model has not shipped in this pin; use the CLI and versioned docs if you do not want that behavior. See the short [compatibility boundary](reference/agent-compatibility.md).
 
 Clients supporting individual opt-in skills can use a separately reviewed skill and its references. That choice does not require policy-file exports, global settings or automatic skill updates. For project setup, see [Give an agent an explicit task](guides/agent-first-setup.md).
 

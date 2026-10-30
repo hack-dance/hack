@@ -125,7 +125,7 @@ console.log(
 /** Keep retiring instruction management out of the recommended v5 corpus. */
 function assertExplicitAgentContent(text: string): void {
   if (
-    /hack (?:agent prime|setup (?:cursor|claude|codex|agents|sync|mcp)|mcp install)(?=[\s`])/m.test(
+    /(?:^|[\s`"'|])(?:[^\s`"'|]*\/)?hack(?:-cli|-next|-v5)?["']?\s+(?:agent prime|setup (?:cursor|claude|codex|agents|sync|mcp)|mcp install)(?=[\s`])/m.test(
       text
     ) ||
     /hack init[^\n]*--with/.test(text) ||
@@ -167,6 +167,8 @@ for (const fact of [
   "--bundle",
   "--cli",
   "--runtime-directory",
+  "actual preview host",
+  "/tree/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/plugins/hack/skills",
 ]) {
   if (!integrations.includes(fact)) {
     throw new Error(`Agent interface source boundary lost: ${fact}`);
@@ -199,6 +201,9 @@ for (const bad of [
   "| `--agents-md` | Write repository guidance |",
   "### SetupSyncTargetResult",
   "hack init --with codex",
+  "/absolute/bundle/hack-cli mcp install --claude --scope user",
+  '"$HOME/.hack-next/bin/hack-next" mcp install --codex',
+  "/absolute/bundle/hack-v5 setup sync",
 ]) {
   let rejected = false;
   try {
@@ -210,6 +215,44 @@ for (const bad of [
     throw new Error(`Agent curation accepted a promotional fixture: ${bad}`);
   }
 }
+
+/** The v5 entry pages must not inherit the stable Compose quick-start recipe. */
+function assertNativeOnboarding(text: string): void {
+  if (
+    /(?:up[^\n]*--detach|logs[^\n]*--pretty|(?:up|down|restart)[^\n]*--json)/.test(
+      text
+    ) ||
+    /defaults to a branch instance/.test(text)
+  ) {
+    throw new Error("Compose defaults promoted as native onboarding");
+  }
+}
+for (const file of ["core.md", "guides/init-project.md"]) {
+  const text = await Bun.file(resolve(v5Root, file)).text();
+  assertNativeOnboarding(text);
+  for (const boundary of ["Native preparation", "Getting started", "v4"]) {
+    if (!text.includes(boundary)) {
+      throw new Error(`Native entry boundary missing: ${file}/${boundary}`);
+    }
+  }
+}
+for (const bad of [
+  "hack up --detach",
+  "hack logs --pretty",
+  "hack restart --json",
+  "hack up defaults to a branch instance",
+]) {
+  let rejected = false;
+  try {
+    assertNativeOnboarding(bad);
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) {
+    throw new Error(`Native onboarding accepted a Compose fixture: ${bad}`);
+  }
+}
+assertNativeOnboarding("Env delivery and lifecycle definition freshness.");
 // Exercise both publication branches against identical synthetic source sections.
 for (const command of agentCompatibilityCommands) {
   const fixture = `## \`hack ${command}\`\n\nPinned compatibility body\n\n## \`hack logs [service]\`\n\nRuntime logs\n`;

@@ -3450,6 +3450,10 @@
       {
         "slug": "reference/agent-compatibility",
         "title": "Historical agent compatibility"
+      },
+      {
+        "slug": "guides/native-candidate",
+        "title": "Native candidate limits"
       }
     ]
   }

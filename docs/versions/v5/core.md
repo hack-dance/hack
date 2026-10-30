@@ -1,40 +1,27 @@
-# Core Docs
+# Native project basics
 
-Core docs are the default path through `hack`.
+This v5 corpus describes the published next.5 native candidate. Complete [Install](install.md) and [Native preparation](guides/native-candidate.md), select that candidate's explicit launcher, then follow [Getting started](getting-started.md).
 
-This section stays focused on local project orchestration: initialize a repo, run it on an isolated
-network, reach it on stable local hostnames, manage env and lifecycle, and keep working sessions
-alive. You do not need gateway, remote nodes, or extension setup to use this path.
+For the stable Compose workflow, select v4 in the documentation version selector. Detached startup, pretty/following logs and Compose lifecycle JSON examples are not the native startup path.
 
-## Start here
+## Project, service and run
 
-- [Initialize a project](guides/init-project.md), or give an agent an [explicit setup task](guides/agent-first-setup.md)
-- [Architecture](../architecture.md)
-- [Env & secrets](../env.md)
-- [Lifecycle](../lifecycle.md)
-- [Sessions](../sessions.md)
-- [macOS certificate trust](../guides/macos-certificate-trust.md)
-- [CLI overview](cli.md) — supported command surface and agent/scripted ergonomics
+A project holds the configuration for its services, jobs and environment. Native execution uses a saved run with explicit ownership and a prepared provider pool. Installing the CLI does not adopt Compose resources or prove application compatibility.
 
-## Day-to-day core workflows
+[Authored commands](../reference/native-authored-commands.md) defines the admitted forms. The basic path is whole-project foreground startup, saved-run status and a finite service log snapshot. Keep the foreground owner attached until owned shutdown completes. Do not infer authored-native instance selection from Compose's linked-worktree branch defaults.
 
-- Install + quick start: [root README](../README.md)
-- Local runtime checks:
-  - `hack up --detach`
-  - `hack open`
-  - `hack logs --pretty`
-  - `hack status` / `hack ps`
-  - `hack down` / `hack restart`
-- If runtime state looks wrong, run `hack doctor`, then `hack doctor --fix` before manual repair.
-- `hack up`/`down`/`restart`/`doctor` accept `--json` for a stable `{ok, data | error: {code,
-  message}}` envelope with `E_*` error codes, and a global `--no-interactive` (or
-  `HACK_NO_INTERACTIVE=1`) so scripted/agent runs never block on prompts.
-- In a linked git worktree, `hack up` defaults to a branch instance named after the worktree's git
-  branch (`worktree.auto_branch`), and the secret key is inherited automatically from the primary
-  checkout via the shared git common dir. A detached linked worktree has no branch name to derive;
-  pass `--branch <name>`, or set `worktree.auto_branch=false` when intentionally targeting the base
-  instance.
+## Observe before repairing
 
-## Reference
+Use the selected executable for status and diagnosis. Check the application's health as well as the CLI report. A warning or old timestamp does not authorize mutation.
 
-Use [Reference](../reference.md) for the full command table and extension authoring.
+Choose a repair only after identifying its owning contract in [Getting started](getting-started.md), [Native preparation](guides/native-candidate.md) or [Authored commands](../reference/native-authored-commands.md). There is no general instruction to run every doctor repair.
+
+## Related concepts
+
+- [Project setup](guides/init-project.md)
+- [Environment and secrets](../env.md): delivery and backend limits
+- [Lifecycle](../lifecycle.md): application hooks and process ownership
+- [Command contracts](reference/command-contracts.md): output shapes and backend distinctions
+- [Explicit agent setup](guides/agent-first-setup.md)
+
+Env delivery and lifecycle definition freshness remain runtime contracts; they are separate from retiring agent instruction management.

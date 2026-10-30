@@ -55,3 +55,5 @@ Publication checks exercise both versions, reject retiring command/flag/tutorial
 patterns in staged v5 pages and full LLM exports, preserve unrelated runtime
 language, and require the explicit plugin/MCP artifact boundaries. All original
 manifest hashes are checked even when an editorial override replaces a page.
+
+Independent source review corrections: native-candidate is now an explicit editorial\noverride too; its MCP install/remove/reinstall passage is excluded while its original\nhash is retained. Core and project setup lead with native preparation/executable\nselection and refer Compose onboarding to v4. The copyable agent handoff requires\nsubstituting the actual preview host before publication; directory source links use\nthe pinned GitHub tree route. Publication controls include absolute/channel CLI\nspellings and native-versus-Compose entry-page negative controls.\n

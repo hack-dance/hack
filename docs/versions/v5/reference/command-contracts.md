@@ -4,9 +4,11 @@ Pinned source: `28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc`. This supplements the 
 
 ## Scope and coverage
 
-The recursive public inventory has **92 leaves**, **335 leaf-owned option occurrences**, and **611 effective option occurrences**, including three global/built-in flags per leaf. The six additional leaf sections below complete the pinned generated reference within this public scope. No declared effective flags or short aliases are missing from matching sections; generic value placeholders explain initial spelling-only differences. Counts are occurrences, not unique names. Parent namespaces are not leaves.
+The pinned source inventory has **92 leaves**, **335 leaf-owned option occurrences**, and **611 effective option occurrences**. The recommended v5 publication selection retains **84 leaves**, **288 own option occurrences** and **540 effective occurrences** (three global/built-in flags per leaf). Eight retiring agent-setup leaves and init's optional handoff flag are intentionally excluded; they remain available in the released source. The six additional leaf sections below complete the pinned generated reference within the retained command scope. No declared effective flags or short aliases are missing from matching sections; generic value placeholders explain initial spelling-only differences. Counts are occurrences, not unique names. Parent namespaces are not leaves.
 
 Retired gateway/node/remote/dispatch, hosted account/team/Tickets, internal helpers, extension dispatch and fun commands are excluded. SSH remote access is excluded. Retained fields within local commands do not establish support for retired backends.
+
+The [historical agent compatibility boundary](agent-compatibility.md) lists the excluded availability and pinned sources. Publication omission does not mean a new runtime removal ships in next.5.
 
 ## Global flags and parsing
 
@@ -136,7 +138,7 @@ Source: `src/commands/env.ts:437 (backendUseSpec)`. No command alias is declared
 | `hack usage` | `--project <name>`; `--details`; `--include-global`; `--watch`; `--interval <value>`; `--no-host`; `--json` | Present |
 | `hack projects prune` | `--project <name>`; `--include-global`; `--dry-run`; `--json` | Present |
 | `hack project owner show` | `--path, -p <dir>`; `--project <name>`; `--json` | Missing; drafted above |
-| `hack init` | `--path, -p <dir>`; `--manual`; `--auto`; `--name <slug>`; `--dev-host <host>`; `--oauth`; `--oauth-tld <tld>`; `--no-discovery`; `--with <claude\|codex>` | Present |
+| `hack init` | `--path, -p <dir>`; `--manual`; `--auto`; `--name <slug>`; `--dev-host <host>`; `--oauth`; `--oauth-tld <tld>`; `--no-discovery` | Present |
 | `hack up [services...]` | `--path, -p <dir>`; `--project <name>`; `--env <name\|base\|default>`; `--branch <name>`; `--detach, -d`; `--profile <name[,name...]>`; `--target <auto\|local\|remote>`; `--json` | Present |
 | `hack down` | `--path, -p <dir>`; `--project <name>`; `--env <name\|base\|default>`; `--branch <name>`; `--profile <name[,name...]>`; `--target <auto\|local\|remote>`; `--prune-caches`; `--yes`; `--json`; `--recover` | Present |
 | `hack restart [services...]` | `--path, -p <dir>`; `--project <name>`; `--env <name\|base\|default>`; `--branch <name>`; `--profile <name[,name...]>`; `--target <auto\|local\|remote>`; `--json`; `--recover-frontend`; `--expect-finalization-attempt <32-hex>`; `--expect-frontend-pid <pid>` | Present |
@@ -187,15 +189,8 @@ Source: `src/commands/env.ts:437 (backendUseSpec)`. No command alias is declared
 | `hack config import` | `--dry-run`; `--path, -p <dir>`; `--json` | Present |
 | `hack config adopt` | `--stop`; `--dry-run`; `--rollback`; `--recover`; `--branch <value>`; `--path, -p <dir>`; `--json` | Present |
 | `hack mcp serve` | none | Present |
-| `hack mcp install` | `--bundle <directory>`; `--cli <executable>`; `--runtime-directory <directory>`; `--scope <user\|project>`; `--path, -p <dir>`; `--all`; `--cursor`; `--claude`; `--codex`; `--docs`; `--agents-md`; `--claude-md` | Present |
 | `hack mcp print` | `--bundle <directory>`; `--cli <executable>`; `--runtime-directory <directory>`; `--scope <user\|project>`; `--path, -p <dir>`; `--all`; `--cursor`; `--claude`; `--codex` | Present |
 | `hack setup tmux` | `--check`; `--remove` | Present |
-| `hack setup cursor` | `--path, -p <dir>`; `--global`; `--check`; `--remove` | Present |
-| `hack setup claude` | `--path, -p <dir>`; `--global`; `--check`; `--remove` | Present |
-| `hack setup codex` | `--path, -p <dir>`; `--global`; `--check`; `--remove` | Present |
-| `hack setup agents` | `--path, -p <dir>`; `--all`; `--agents-md`; `--claude-md`; `--check`; `--remove` | Present |
-| `hack setup sync` | `--path, -p <dir>`; `--global`; `--all-scopes`; `--install-missing`; `--check`; `--remove`; `--json` | Present |
-| `hack setup mcp` | `--path, -p <dir>`; `--global`; `--all`; `--cursor`; `--claude`; `--codex`; `--check`; `--remove` | Present |
 | `hack session list` | none | Present |
 | `hack session start [project]` | `--up`; `--new`; `--name <value>`; `--detach, -d`; `--env <name\|base\|default>`; `--service <global\|service>` | Present |
 | `hack session stop <workspace>` | none | Present |
@@ -204,7 +199,6 @@ Source: `src/commands/env.ts:437 (backendUseSpec)`. No command alias is declared
 | `hack session panes <workspace>` | `--json`; `--pretty` | Present |
 | `hack session capture <workspace>` | `--target <target>`; `--lines <n>`; `--json`; `--pretty` | Present |
 | `hack session tail <workspace>` | `--target <target>`; `--lines <n>`; `--interval-ms <ms>`; `--max-ms <ms>`; `--json`; `--pretty` | Present |
-| `hack agent prime` | `--check` | Present |
 | `hack agent patterns` | none | Present |
 | `hack agent init` | `--path, -p <dir>`; `--client, -c <cursor\|claude\|codex\|print>` | Present |
 | `hack agent onboard` | `--path, -p <dir>` | Present |
@@ -264,9 +258,7 @@ This table preserves declarations/descriptions that state defaults. Other handle
 | `hack host shell` / `--target <host\|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `hack config validate` / `--env <name\|base\|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `hack config plan` / `--env <name\|base\|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
-| `hack mcp install` / `--scope <user\|project>` | Write MCP config to user or project scope Flag-present fallback: `user`. |
 | `hack mcp print` / `--scope <user\|project>` | Write MCP config to user or project scope Flag-present fallback: `user`. |
-| `hack setup sync` / `--install-missing` | Also create missing integrations in the selected scope (default: refresh only installed Hack-owned files) |
 | `hack session start [project]` / `--new` | Create an isolated workspace instead of reusing the default project workspace |
 | `hack session start [project]` / `--env <name\|base\|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `hack session exec <workspace> <command>` / `--env <name\|base\|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
@@ -338,7 +330,6 @@ Thrown usage errors with an explicit `--json` token become E_USAGE; other thrown
 | global status | bare generated_at/caddy/logging/networks/gateway/summary | exits 0 even if summary health false; gateway is retained unsupported data, excluded from public contract |
 | daemon status | bare report below | running returns 0; starting/stale/unavailable may return 1 |
 | host ps | bare {generatedAt,snapshotAvailable,commands,lifecycle} | timestamp string, availability boolean; nested telemetry remains specialized |
-| setup sync | shared envelope; action:check/sync/remove, dryRun:boolean, installMissing:boolean, counts:partial status-to-number map, targets:integration result array | check failures can exit 1 despite ok:true |
 | session panes/capture/tail | JSON-lines events below | no shared envelope |
 | update | command-owned object with ok:boolean, string error on failure | error is not shared error.{code,message}; success varies by check/install outcome; exit follows ok |
 
@@ -399,7 +390,7 @@ All events have type start/log/error/end, ts:string (ISO), session:string. Pane 
 
 ## Remaining limits
 
-Leaf/flag presence is reconciled. Handler defaults outside the reviewed tables are not an exhaustive semantic audit. Engine rows, optional diagnostic subtypes, listing metadata, setup target results, update success variants, nested env variants and candidate reports remain bounded open/specialized shapes. No closed schema, backend parity, client-loading proof or installed runtime acceptance is claimed. Config-file/MCP field work remains in the separate audit. Private compiler/daemon/guest/provider protocols and retired APIs are excluded.
+Leaf/flag presence is reconciled. Handler defaults outside the reviewed tables are not an exhaustive semantic audit. Engine rows, optional diagnostic subtypes, listing metadata, update success variants, nested env variants and candidate reports remain bounded open/specialized shapes. No closed schema, backend parity, client-loading proof or installed runtime acceptance is claimed. Config-file/MCP field work remains in the separate audit. Private compiler/daemon/guest/provider protocols and retired APIs are excluded.
 
 ## v5 native support limits
 

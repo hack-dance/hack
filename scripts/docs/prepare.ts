@@ -151,6 +151,17 @@ async function stageVersion(
   activeFiles = manifest.publicFiles;
   routes.clear();
   for (const entry of manifest.entries) {
+    // Editorial replacement must not weaken the preserved-original hash gate.
+    const original = resolvePublicSource(entry.snapshot);
+    if ((await realpath(original)) !== original) {
+      throw new Error(`Snapshot follows symlink: ${entry.snapshot}`);
+    }
+    const raw = await Bun.file(original).text();
+    if (
+      new Bun.CryptoHasher("sha256").update(raw).digest("hex") !== entry.sha256
+    ) {
+      throw new Error(`Source snapshot changed: ${entry.snapshot}`);
+    }
     routes.set(
       resolvePublicSource(entry.file),
       documentRoute(version, entry.slug)
@@ -199,7 +210,13 @@ async function stageVersion(
       await rewriteLinks(raw, resolvePublicSource(entry.file))
     ).replace(/dogfooding/gi, "native runtime use");
     if (entry.slug === "reference/cli") {
-      text = curateCliReference(text);
+      text = curateCliReference(text, { version });
+      if (version === "v5") {
+        text = text.replace(
+          "# hack CLI reference",
+          `# hack CLI reference\n\nThis editorial command selection omits guidance-writing and primer setup from the default reference. Those commands still exist at next.5: see [Agent compatibility reference](${documentRoute(version, "reference/agent-compatibility")}). This is a publication choice, not a shipped runtime removal.`
+        );
+      }
       text = text.replace(
         "commands with `--json` emit a `{ok, data, error}` envelope on stdout.",
         `JSON shapes vary by command and backend. See [Command and output contracts](${documentRoute(version, "reference/command-contracts")}) for envelopes, bare reports and streamed records.`

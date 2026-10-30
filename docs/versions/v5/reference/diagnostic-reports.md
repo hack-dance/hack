@@ -1,6 +1,8 @@
-# Diagnostic and setup reports
+# Diagnostic reports
 
 Pinned source: `28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc`. Consumer-visible JSON projections only. R = required; optional means omitted, never implicitly null. A listed null union is emitted as null. Arrays may be empty unless stated otherwise. Source admission is not runtime/provider qualification. All examples are synthetic; paths and values are placeholders.
+
+The retiring setup-sync report is intentionally excluded from this recommended v5 reference. Its [historical availability](agent-compatibility.md) remains documented against next.5; this is not a shipped runtime removal.
 
 ## Report and exit rules
 
@@ -10,7 +12,6 @@ Update JSON is its own UpdateOutput union. Handled ok:false has a string error a
 
 Host ps emits a bare HostPsReport and returns 0 after gathering observations, including when the process snapshot is unavailable. It does not return an envelope. snapshotAvailable:false and nullable live metrics mean unknown observation, not proof of stopped processes. Command records carry no argv, environment or output. Record parsing strips unrecognized properties. All current serializer fields are documented below despite its broad inferred/Record return types.
 
-Next.5 setup sync emits `{ok:true,data:SetupSyncData}` for a completed report; exit is computed separately. check exits 1 on refreshed/installed/removed/preserved/error; missing and unchanged do not fail. sync/remove exit 1 only on error. Counts contain only encountered status keys; absent keys are omitted, not null or guaranteed zero. dryRun is action===check. Check reports what would change, never proves a write occurred. Missing targets are left missing unless install-missing requests creation/planning. A preserved result keeps customized/unrecognized content unchanged; reason/message are optional in the record type, not nullable. Successful sync is not proof that an agent loaded the integration.
 
 Next.5 update refuses the explicitly selected native candidate with its handled ok:false/error:string result. No broader native self-update capability is implied.
 
@@ -21,20 +22,6 @@ supersededRoots appears only on the superseded Caddy roots check and only when i
 hackLocalRoute appears on the native hack.local route check. current maps to doctor ok; repairable/refused map to warn. The serializer emits the three precise variants below: paths are descriptive strings, receiptState is nullable, and oldLine/newLine are validated managed-form lines, not arbitrary file contents. The exact check id is native hack.local route; failed dependency inspection can produce a warning check with hackLocalRoute omitted. This is not a private receipt contract.
 
 envKey appears only on the env key check (id: env key), and remains omitted if inspection cannot produce that projection. findings are ordered most severe first; aggregate status is their highest severity. A clean result has one env-key-ok or env-key-absent finding. subject is a fixed label or project-relative subject; remedy is a string suggestion or null. env-key-ok and env-key-absent have status ok and remedy null. Symlink/not-regular/unreadable/tracked/public-path findings are error; weak-permissions/wrong-owner/wrong-length/low-entropy are warn. Neither bytes nor absolute key paths are exposed; doctor never runs the remedy. EnvKeyCandidate/inspection inputs are private and omitted here.
-
-## Setup status variants
-
-| Status | Meaning | check exit contribution | sync/remove exit contribution |
-| --- | --- | --- | --- |
-| refreshed | existing owned content changed / would change | 1 | 0 |
-| unchanged | already current | 0 | 0 |
-| installed | missing content created / would be created with install-missing | 1 | 0 |
-| preserved | customized, unknown, unreadable or non-regular content retained | 1 | 0 |
-| missing | no integration present; not created | 0 | 0 |
-| removed | owned/retired content removed / would remove | 1 | 0 |
-| error | target could not be checked/updated | 1 | 1 |
-
-Targets are finite named integrations, not a map of arbitrary files. Project scope includes agent docs; global scope additionally includes the shared CLI skill. scope-root is an error target when a scope root cannot be resolved; its path is an empty string. retired-artifact results are emitted only when present (absent artifacts are filtered); a reported removed status during check is prospective. MCP helper present maps to unchanged; removed maps to removed; missing/noop map to missing; invalid/unreadable maps to error. A user-owned doc with no Hack section is missing, whereas malformed markers are preserved/customized-content. The current producer includes reason/message on preserved rows; reason is otherwise omitted. Message also appears on error and selected removal outcomes. These emission rules are stronger than the optional properties in SetupSyncTargetResult; consumers should retain the optional record contract. The target list enum does not promise every target occurs in every scope/report.
 
 ## Host telemetry interpretation
 
@@ -72,12 +59,6 @@ Doctor warning fragment (a completed warning is not an error exit):
 
 ~~~json
 {"id":"env key","status":"warn","detail":"<fixed diagnostic>","durationMs":1,"envKey":{"status":"warn","findings":[{"code":"env-key-weak-permissions","status":"warn","subject":"<relative-subject>","remedy":"<suggested action>"}]}}
-~~~
-
-Setup check can report a prospective install while returning exit 1:
-
-~~~json
-{"ok":true,"data":{"action":"check","dryRun":true,"installMissing":true,"counts":{"installed":1},"targets":[{"scope":"project","target":"cursor-rules","path":"<integration-path>","status":"installed"}]}}
 ~~~
 
 Refused import report (exit 1, no candidate material):
@@ -218,43 +199,6 @@ Source: `src/lib/doctor-env-key.ts:43 (EnvKeyFinding)`.
 | `status` | `EnvKeyFindingStatus` | required |
 | `subject` | `string` | required |
 | `remedy` | `string \| null` | required |
-
-
-### SetupSyncResult
-
-Source: `src/commands/setup.ts:900 (buildSetupSyncJsonData)`.
-
-| Field | Type | Presence |
-| --- | --- | --- |
-| `ok` | `true` | required |
-| `data` | `SetupSyncData` | required |
-
-
-### SetupSyncData
-
-Source: `src/commands/setup.ts:900 (buildSetupSyncJsonData)`.
-
-| Field | Type | Presence |
-| --- | --- | --- |
-| `action` | `SetupSyncAction` | required |
-| `dryRun` | `boolean` | required |
-| `installMissing` | `boolean` | required |
-| `counts` | `Partial<Record<SetupSyncStatus, number>>` | required |
-| `targets` | `SetupSyncTargetResult[]` | required |
-
-
-### SetupSyncTargetResult
-
-Source: `src/agents/setup-sync.ts:99 (SetupSyncTargetResult)`.
-
-| Field | Type | Presence |
-| --- | --- | --- |
-| `scope` | `SetupSyncScope` | required |
-| `target` | `SetupSyncTarget` | required |
-| `path` | `string` | required |
-| `status` | `SetupSyncStatus` | required |
-| `reason` | `IntegrationPreservedReason` | optional; omitted when absent |
-| `message` | `string` | optional; omitted when absent |
 
 
 ### UpdateOutput — variant 1.target
@@ -901,11 +845,6 @@ Source: `packages/config-compiler/generated/native-config.ts:33 (HostEnvTargets)
 | `HackLocalRouteRefusal` | `\| "invalid-receipt" \| "pending-receipt" \| "relay-not-verified" \| "dnsmasq-config-missing" \| "unreadable-config" \| "uninspected-config-source" \| "no-managed-line" \| "unmanaged-line" \| "foreign-target" \| "foreign-resolver" \| "old-target-live" \| "non-interactive" \| "declined" \| "authorization-failed" \| "busy" \| "restart-unavailable" \| "inputs-changed" \| "no-receipt"` | `src/lib/native-hack-local-route.ts:71 (HackLocalRouteRefusal)` |
 | `EnvKeyDiagnosticCode` | `\| "env-key-ok" \| "env-key-absent" \| "env-key-symlink" \| "env-key-not-regular" \| "env-key-unreadable" \| "env-key-weak-permissions" \| "env-key-wrong-owner" \| "env-key-tracked" \| "env-key-public-path" \| "env-key-wrong-length" \| "env-key-low-entropy"` | `src/lib/doctor-env-key.ts:28 (EnvKeyDiagnosticCode)` |
 | `EnvKeyFindingStatus` | `"ok" \| "warn" \| "error"` | `src/lib/doctor-env-key.ts:41 (EnvKeyFindingStatus)` |
-| `SetupSyncAction` | `"sync" \| "check" \| "remove"` | `src/agents/setup-sync.ts:67 (SetupSyncAction)` |
-| `SetupSyncScope` | `"project" \| "global"` | `src/agents/setup-sync.ts:69 (SetupSyncScope)` |
-| `SetupSyncTarget` | `\| "cursor-rules" \| "claude-hooks" \| "claude-hack-init-skill" \| "codex-hack-cli-skill" \| "codex-hack-init-skill" \| "shared-hack-cli-skill" \| "cursor-mcp" \| "claude-mcp" \| "codex-mcp" \| "agents-md" \| "claude-md" \| "retired-artifact" \| "scope-root"` | `src/agents/setup-sync.ts:71 (SetupSyncTarget)` |
-| `SetupSyncStatus` | `\| "refreshed" \| "unchanged" \| "installed" \| "preserved" \| "missing" \| "removed" \| "error"` | `src/agents/setup-sync.ts:90 (SetupSyncStatus)` |
-| `IntegrationPreservedReason` | `\| "customized-content" \| "missing-ownership-marker" \| "not-a-regular-file" \| "unreadable"` | `src/agents/integration-ownership.ts:32 (IntegrationPreservedReason)` |
 | `NativeConfigDocumentRole` | `\| "project" \| "primary_local" \| "checkout_local" \| "request"` | `src/lib/native-config-compiler.ts:77 (NativeConfigDocumentRole)` |
 | `ImportDocument` | `\| "config" \| "compose" \| "primary_local" \| "checkout_local"` | `src/lib/native-config-import-parser.ts:13 (ImportDocument)` |
 | `EndpointProtocol` | `"http" \| "https" \| "tcp"` | `packages/config-compiler/generated/native-config.ts:14 (EndpointProtocol)` |

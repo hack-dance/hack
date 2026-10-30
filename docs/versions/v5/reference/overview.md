@@ -37,7 +37,9 @@ when integrating an agent; internal runtime protocols are not public MCP APIs.
 
 [Project and env reports](project-env-reports.md) details the owned inventory, metadata, raw env-list and restart-wrapper projections. Raw CLI env reports are not value-free MCP projections.
 
-[Diagnostic and setup reports](diagnostic-reports.md) lists the owned doctor, setup, update and host telemetry types, plus the public candidate-report wrappers where present. Private compiler Plan internals are excluded.
+[Diagnostic reports](diagnostic-reports.md) lists the owned doctor, update and host telemetry types, plus the public candidate-report wrappers where present. Private compiler Plan internals are excluded.
+
+[Historical agent compatibility](agent-compatibility.md) records retiring instruction-management availability at next.5 without promoting it as onboarding. [Explicit agent interfaces](../integrations.md) is the recommended setup path.
 
 ## Coverage limits
 

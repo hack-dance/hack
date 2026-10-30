@@ -27,3 +27,31 @@ Canonical Markdown is staged into Fumadocs, search and LLM exports. Internal pla
 benchmark receipts and historical design notes stay outside that allowlist. Stable
 Compose setup leads; native v5 installation and project adoption remain separate
 and experimental. A site build is not a runtime acceptance or release claim.
+
+## Explicit-agent v5 publication choice
+
+The recommended v5 setup is CLI plus versioned docs, with separately selected
+skills or MCP. Editorial overrides replace the pinned integrations, agent-first,
+project-setup, core and CLI-overview tutorials. The new integrations page links
+the reviewed next.5 native marketplace and manifests, names the exact seven
+skills, and distinguishes local source registration from client installation.
+The official OpenAI packaging guide supplies the local marketplace registration
+command and client-directory route; no client loading was performed here.
+
+Next.5 is not a hook-free artifact: its Codex manifest selects skills, whose text
+still includes guidance-maintenance recommendations; Claude selects primer hooks
+and Cursor selects rules. Core removal is a separate, pending dependency. The
+short historical compatibility page records shipped availability and source
+links without a runnable repair/export tutorial.
+
+Eight agent-management leaves and init's optional handoff flag are intentionally
+omitted from the recommended v5 command reference and LLM corpus. Setup-sync
+report types are also excluded from that slice. V4 and every hashed original
+remain intact; this editorial choice does not assert runtime removal in next.5.
+Env injection, lifecycle definition freshness and runtime ownership are unrelated
+and remain documented.
+
+Publication checks exercise both versions, reject retiring command/flag/tutorial
+patterns in staged v5 pages and full LLM exports, preserve unrelated runtime
+language, and require the explicit plugin/MCP artifact boundaries. All original
+manifest hashes are checked even when an editorial override replaces a page.

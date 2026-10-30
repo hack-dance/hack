@@ -3425,7 +3425,31 @@
       },
       {
         "slug": "reference/diagnostic-reports",
-        "title": "Diagnostic and setup reports"
+        "title": "Diagnostic reports"
+      },
+      {
+        "slug": "integrations",
+        "title": "Agent interfaces"
+      },
+      {
+        "slug": "guides/agent-first-setup",
+        "title": "Explicit agent setup"
+      },
+      {
+        "slug": "guides/init-project",
+        "title": "Project setup"
+      },
+      {
+        "slug": "cli",
+        "title": "CLI overview"
+      },
+      {
+        "slug": "core",
+        "title": "Core concepts"
+      },
+      {
+        "slug": "reference/agent-compatibility",
+        "title": "Historical agent compatibility"
       }
     ]
   }

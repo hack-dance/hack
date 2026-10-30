@@ -42,7 +42,8 @@ host. No cloud resources, credentials or provider settings were changed.
 
 The pinned generated reference is supplemented by explicit command/output,
 configuration-field and MCP-field references for each version. v4 has 84 public
-leaves and v5 next.5 has 92 in the declared supported slice; the supplements add
+leaves. The pinned v5 source inventory has 92; its recommended publication selection
+has 84 after eight retiring agent-management leaves are excluded; the supplements add
 three and six deeper leaf sections respectively. Initial flag display differences
 were generic value placeholders, not missing registered flags. The v5 authored
 schema reference lists all 168 project/local property declarations. See
@@ -52,4 +53,32 @@ and the explicitly opaque compiler plan boundary remain open; these
 pages do not turn private protocols into public APIs or claim runtime/cloud/client
 qualification from source review.
 
-The published generated CLI reference is curated to the declared public slice: unsupported/retired roots and Internal/Fun/Extensions/Beta groups are omitted, while the hashed historical originals remain intact. The public supplement completes that slice; publication checks reject excluded headings and retain supported logs/env/setup/branch sections.
+The published generated CLI reference is curated to the declared public slice: unsupported/retired roots and Internal/Fun/Extensions/Beta groups are omitted, while the hashed historical originals remain intact. The public supplement completes that slice; publication checks reject excluded headings and retain logs/env/branch sections and version-specific setup boundaries.
+
+## Explicit-agent v5 publication choice
+
+The recommended v5 setup is CLI plus versioned docs, with separately selected
+skills or MCP. Editorial overrides replace the pinned integrations, agent-first,
+project-setup, core and CLI-overview tutorials. The new integrations page links
+the reviewed next.5 native marketplace and manifests, names the exact seven
+skills, and distinguishes local source registration from client installation.
+The official OpenAI packaging guide supplies the local marketplace registration
+command and client-directory route; no client loading was performed here.
+
+Next.5 is not a hook-free artifact: its Codex manifest selects skills, whose text
+still includes guidance-maintenance recommendations; Claude selects primer hooks
+and Cursor selects rules. Core removal is a separate, pending dependency. The
+short historical compatibility page records shipped availability and source
+links without a runnable repair/export tutorial.
+
+Eight agent-management leaves and init's optional handoff flag are intentionally
+omitted from the recommended v5 command reference and LLM corpus. Setup-sync
+report types are also excluded from that slice. V4 and every hashed original
+remain intact; this editorial choice does not assert runtime removal in next.5.
+Env injection, lifecycle definition freshness and runtime ownership are unrelated
+and remain documented.
+
+Publication checks exercise both versions, reject retiring command/flag/tutorial
+patterns in staged v5 pages and full LLM exports, preserve unrelated runtime
+language, and require the explicit plugin/MCP artifact boundaries. All original
+manifest hashes are checked even when an editorial override replaces a page.

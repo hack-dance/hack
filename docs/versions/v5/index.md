@@ -24,8 +24,8 @@ Start with [Install](install.md), then [Getting started](getting-started.md).
 ## Work with an agent
 
 [Agent handoff](agent-handoff.md) supplies this version's documentation exports
-and setup instructions. [Agent integrations](../integrations.md) describes the
-matching optional client setup.
+and an explicit context handoff. [Agent integrations](../integrations.md) describes the
+optional client choices and shipped compatibility limits.
 
 ## Find details or diagnose a problem
 

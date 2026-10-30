@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { agentCompatibilityCommands, curateCliReference } from "./curate-cli";
 import {
   prepare,
   repositoryRoot,
@@ -85,7 +86,7 @@ for (const version of ["v4", "v5"]) {
   for (const section of [
     "## `hack logs ",
     "## `hack env list`",
-    "## `hack setup sync`",
+    version === "v4" ? "## `hack setup sync`" : "## `hack setup tmux`",
     "## `hack branch`",
   ]) {
     if (!cli.includes(section)) {
@@ -120,6 +121,102 @@ if (
 console.log(
   "Version-isolated exports, entry points and default version passed."
 );
+
+/** Keep retiring instruction management out of the recommended v5 corpus. */
+function assertExplicitAgentContent(text: string): void {
+  if (
+    /hack (?:agent prime|setup (?:cursor|claude|codex|agents|sync|mcp)|mcp install)(?=[\s`])/m.test(
+      text
+    ) ||
+    /hack init[^\n]*--with/.test(text) ||
+    /^\| `--(?:docs|agents-md|claude-md|install-missing|with)(?:[\s`])/m.test(
+      text
+    ) ||
+    /### SetupSync|^\| `SetupSync/m.test(text)
+  ) {
+    throw new Error("Retiring agent setup promoted in the v5 publication");
+  }
+}
+
+const v5Root = resolve(repositoryRoot, "site/content/docs/v5");
+for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: v5Root })) {
+  const text = await Bun.file(resolve(v5Root, file)).text();
+  assertExplicitAgentContent(text);
+  if (
+    file === "reference/agent-compatibility.md" &&
+    (text.includes("```") || text.includes("~~~"))
+  ) {
+    throw new Error("Agent compatibility must not become a runnable tutorial");
+  }
+}
+for (const file of ["site/public/v5/llms-full.txt", "site/public/llms-full.txt"]) {
+  assertExplicitAgentContent(await Bun.file(resolve(repositoryRoot, file)).text());
+}
+const integrations = await Bun.file(resolve(v5Root, "integrations.md")).text();
+for (const fact of [
+  "codex plugin marketplace add /absolute/path/to/reviewed-checkout",
+  "Registration does not install or load the plugin",
+  "SessionStart/PreCompact",
+  "has not shipped in this pin",
+  "hack-mcp",
+  "--bundle",
+  "--cli",
+  "--runtime-directory",
+]) {
+  if (!integrations.includes(fact)) {
+    throw new Error(`Agent interface source boundary lost: ${fact}`);
+  }
+}
+for (const skill of [
+  "hack-cli",
+  "hack-branches",
+  "hack-env",
+  "hack-diagnose",
+  "hack-init",
+  "hack-install",
+  "hack-remote",
+]) {
+  if (!integrations.includes(`| ${skill} |`)) {
+    throw new Error(`Shipped skill missing: ${skill}`);
+  }
+}
+
+// Positive controls preserve unrelated runtime contracts and factual archaeology.
+assertExplicitAgentContent(
+  "Env injection; lifecycle definition freshness; hooks for application startup."
+);
+assertExplicitAgentContent(
+  "The pinned source still declares `setup sync`; it is not the onboarding path."
+);
+for (const bad of [
+  "Run `hack setup sync --all-scopes` after upgrading.",
+  "```sh\nhack agent prime --check\n```",
+  "| `--agents-md` | Write repository guidance |",
+  "### SetupSyncTargetResult",
+  "hack init --with codex",
+]) {
+  let rejected = false;
+  try {
+    assertExplicitAgentContent(bad);
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) {
+    throw new Error(`Agent curation accepted a promotional fixture: ${bad}`);
+  }
+}
+// Exercise both publication branches against identical synthetic source sections.
+for (const command of agentCompatibilityCommands) {
+  const fixture = `## \`hack ${command}\`\n\nPinned compatibility body\n\n## \`hack logs [service]\`\n\nRuntime logs\n`;
+  if (
+    !curateCliReference(fixture, { version: "v4" }).includes(command) ||
+    curateCliReference(fixture, { version: "v5" }).includes(command) ||
+    !curateCliReference(fixture, { version: "v5" }).includes("Runtime logs")
+  ) {
+    throw new Error(`Version-specific agent command curation failed: ${command}`);
+  }
+}
+console.log("Explicit-agent publication and legacy/runtime controls passed.");
 
 for (const version of ["v4", "v5"] as const) {
   const other = version === "v4" ? "v5" : "v4";

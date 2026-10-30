@@ -17,6 +17,7 @@ export function VersionedLayout({
   return (
     <DocsLayout
       githubUrl="https://github.com/hack-dance/hack"
+      key={version}
       nav={{ title: "hack.foo", url: "/" }}
       sidebar={{
         banner: (

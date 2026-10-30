@@ -136,108 +136,119 @@ async function writeDocuments(
   }
 }
 
+function documentRoute(version: string, slug: string): string {
+  return `/docs/${version}${slug === "index" ? "" : `/${slug}`}`;
+}
+
+async function stageVersion(
+  version: "v4" | "v5",
+  staged: Map<string, string>,
+  exports: Map<string, string>
+): Promise<void> {
+  const manifest = versions[version];
+  activeRevision = manifest.revision;
+  activeFiles = manifest.publicFiles;
+  routes.clear();
+  for (const entry of manifest.entries) {
+    routes.set(
+      resolvePublicSource(entry.file),
+      documentRoute(version, entry.slug)
+    );
+  }
+  for (const { slug } of manifest.editorial) {
+    routes.set(
+      resolvePublicSource(`docs/site/${slug}.md`),
+      documentRoute(version, slug)
+    );
+  }
+  const index = [
+    `# Hack ${manifest.label}`,
+    "",
+    `Source revision: ${manifest.revision}`,
+    "",
+  ];
+  const corpus: string[] = [];
+  const entries = manifest.entries.filter(
+    (entry) => !manifest.editorial.some((page) => page.slug === entry.slug)
+  );
+  const pages = [
+    ...entries.map((entry) => ({ ...entry, editorial: false })),
+    ...manifest.editorial.map(({ slug, title }) => ({
+      file: `docs/site/${slug}.md`,
+      slug,
+      title,
+      snapshot: `docs/versions/${version}/${slug}.md`,
+      sha256: "",
+      editorial: true,
+    })),
+  ];
+  for (const entry of pages) {
+    const snapshot = resolvePublicSource(entry.snapshot);
+    if ((await realpath(snapshot)) !== snapshot) {
+      throw new Error(`Snapshot follows symlink: ${entry.snapshot}`);
+    }
+    const raw = await Bun.file(snapshot).text();
+    if (
+      !entry.editorial &&
+      new Bun.CryptoHasher("sha256").update(raw).digest("hex") !== entry.sha256
+    ) {
+      throw new Error(`Source snapshot changed: ${entry.snapshot}`);
+    }
+    const text = (
+      await rewriteLinks(raw, resolvePublicSource(entry.file))
+    ).replace(/dogfooding/gi, "native runtime use");
+    const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`;
+    const provenance = entry.editorial
+      ? `Editorial source: ${entry.snapshot}; based on ${manifest.revision}`
+      : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}`;
+    staged.set(
+      `${version}/${entry.slug}.md`,
+      `---\ntitle: ${JSON.stringify(entry.title)}\n---\n\n${text.replace(heading, "").trim()}\n\n---\n\nSource: [${manifest.label} · ${entry.file}](https://github.com/hack-dance/hack/blob/${manifest.revision}/${entry.editorial ? "README.md" : entry.file}).\n`
+    );
+    index.push(`- [${entry.title}](${url})`);
+    corpus.push(`<!-- ${provenance}; URL: ${url} -->\n${text}`);
+  }
+  staged.set(
+    `${version}/meta.json`,
+    JSON.stringify({
+      title: manifest.label,
+      pages: [
+        "index",
+        "install",
+        "getting-started",
+        "core",
+        "env",
+        "lifecycle",
+        "sessions",
+        "agent-handoff",
+        "guides",
+        "integrations",
+        "cli",
+        "architecture",
+        "reference",
+      ],
+    })
+  );
+  for (const folder of ["guides", "reference"]) {
+    staged.set(
+      `${version}/${folder}/meta.json`,
+      JSON.stringify({
+        title: folder === "guides" ? "Guides" : "Reference",
+        pages: pages
+          .filter((entry) => entry.slug.startsWith(`${folder}/`))
+          .map((entry) => entry.slug.slice(folder.length + 1)),
+      })
+    );
+  }
+  exports.set(`${version}/llms.txt`, `${index.join("\n")}\n`);
+  exports.set(`${version}/llms-full.txt`, `${corpus.join("\n\n---\n\n")}\n`);
+}
+
 export async function prepare(check = false): Promise<void> {
   const staged = new Map<string, string>();
   const exports = new Map<string, string>();
   for (const version of ["v5", "v4"] as const) {
-    const manifest = versions[version];
-    activeRevision = manifest.revision;
-    activeFiles = manifest.publicFiles;
-    routes.clear();
-    for (const entry of manifest.entries) {
-      routes.set(
-        resolvePublicSource(entry.file),
-        `/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`
-      );
-    }
-    for (const { slug } of manifest.editorial) {
-      routes.set(
-        resolvePublicSource(`docs/site/${slug}.md`),
-        `/docs/${version}${slug === "index" ? "" : `/${slug}`}`
-      );
-    }
-    const index = [
-      `# Hack ${manifest.label}`,
-      "",
-      `Source revision: ${manifest.revision}`,
-      "",
-    ];
-    const corpus: string[] = [];
-    const entries = manifest.entries.filter(
-      (entry) => !manifest.editorial.some((page) => page.slug === entry.slug)
-    );
-    const pages = [
-      ...entries.map((entry) => ({ ...entry, editorial: false })),
-      ...manifest.editorial.map(({ slug, title }) => ({
-        file: `docs/site/${slug}.md`,
-        slug,
-        title,
-        snapshot: `docs/versions/${version}/${slug}.md`,
-        sha256: "",
-        editorial: true,
-      })),
-    ];
-    for (const entry of pages) {
-      const snapshot = resolvePublicSource(entry.snapshot);
-      if ((await realpath(snapshot)) !== snapshot) {
-        throw new Error(`Snapshot follows symlink: ${entry.snapshot}`);
-      }
-      const raw = await Bun.file(snapshot).text();
-      if (
-        !entry.editorial &&
-        new Bun.CryptoHasher("sha256").update(raw).digest("hex") !==
-          entry.sha256
-      ) {
-        throw new Error(`Source snapshot changed: ${entry.snapshot}`);
-      }
-      const text = (
-        await rewriteLinks(raw, resolvePublicSource(entry.file))
-      ).replace(/dogfooding/gi, "native runtime use");
-      const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`;
-      const provenance = entry.editorial
-        ? `Editorial source: ${entry.snapshot}; based on ${manifest.revision}`
-        : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}`;
-      staged.set(
-        `${version}/${entry.slug}.md`,
-        `---\ntitle: ${JSON.stringify(entry.title)}\n---\n\n${text.replace(heading, "").trim()}\n\n---\n\nSource: [${manifest.label} · ${entry.file}](https://github.com/hack-dance/hack/blob/${manifest.revision}/${entry.editorial ? "README.md" : entry.file}).\n`
-      );
-      index.push(`- [${entry.title}](${url})`);
-      corpus.push(`<!-- ${provenance}; URL: ${url} -->\n${text}`);
-    }
-    staged.set(
-      `${version}/meta.json`,
-      JSON.stringify({
-        title: manifest.label,
-        pages: [
-          "index",
-          "install",
-          "getting-started",
-          "core",
-          "env",
-          "lifecycle",
-          "sessions",
-          "agent-handoff",
-          "guides",
-          "integrations",
-          "cli",
-          "architecture",
-          "reference",
-        ],
-      })
-    );
-    for (const folder of ["guides", "reference"]) {
-      staged.set(
-        `${version}/${folder}/meta.json`,
-        JSON.stringify({
-          title: folder === "guides" ? "Guides" : "Reference",
-          pages: pages
-            .filter((entry) => entry.slug.startsWith(`${folder}/`))
-            .map((entry) => entry.slug.slice(folder.length + 1)),
-        })
-      );
-    }
-    exports.set(`${version}/llms.txt`, `${index.join("\n")}\n`);
-    exports.set(`${version}/llms-full.txt`, `${corpus.join("\n\n---\n\n")}\n`);
+    await stageVersion(version, staged, exports);
   }
   staged.set("meta.json", JSON.stringify({ pages: ["v5", "v4"] }));
   await writeDocuments(staged, check);

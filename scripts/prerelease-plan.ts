@@ -9,6 +9,14 @@ import {
   parseNativeStorageToolManifest,
 } from "../src/backends/native-authored-storage-tool.ts";
 import { nativeCandidateMcpPayload } from "../src/mcp/candidate-payload.ts";
+import { buildPrereleaseManager } from "./build-prerelease-manager.ts";
+import {
+  BOOTSTRAP_ASSET,
+  INSTALLER_SUMS,
+  MANAGER_ASSET,
+  renderBootstrap,
+} from "./installer/bootstrap.ts";
+import { digest } from "./installer/integrity.ts";
 
 export const PRERELEASE_ENVIRONMENT = "v5-prerelease";
 /**
@@ -114,6 +122,9 @@ export function createPrereleasePlan({
       `hack-${version}-${PRERELEASE_PLATFORM}-native.tar.gz`,
       "prerelease.json",
       "SHA256SUMS",
+      MANAGER_ASSET,
+      BOOTSTRAP_ASSET,
+      INSTALLER_SUMS,
     ],
   };
 }
@@ -465,10 +476,12 @@ export async function packagePrerelease({
   plan,
   bundle,
   output,
+  buildManager = buildPrereleaseManager,
 }: {
   readonly plan: PrereleasePlan;
   readonly bundle: string;
   readonly output: string;
+  readonly buildManager?: (output: string) => Promise<void>;
 }) {
   if (!(await lstat(bundle)).isDirectory()) {
     throw new Error("Native bundle root must be a directory, not an alias");
@@ -529,6 +542,7 @@ export async function packagePrerelease({
   await run(
     [
       "tar",
+      "--format=ustar",
       "-czf",
       join(output, plan.archive),
       "-C",
@@ -545,6 +559,18 @@ export async function packagePrerelease({
   await Bun.write(
     join(output, "SHA256SUMS"),
     await renderChecksums({ root: output, names: [plan.archive] })
+  );
+  await buildManager(join(output, MANAGER_ASSET));
+  await Bun.write(
+    join(output, BOOTSTRAP_ASSET),
+    renderBootstrap(plan.version, digest(join(output, MANAGER_ASSET)))
+  );
+  await Bun.write(
+    join(output, INSTALLER_SUMS),
+    await renderChecksums({
+      root: output,
+      names: [MANAGER_ASSET, BOOTSTRAP_ASSET],
+    })
   );
 }
 
@@ -625,7 +651,7 @@ export async function verifyReleaseAssets({
     JSON.stringify([...plan.assets].sort())
   ) {
     throw new Error(
-      "Expected exactly the archive, metadata and outer checksum release assets"
+      "Expected exactly the candidate and standalone installer release assets"
     );
   }
   for (const name of plan.assets) {
@@ -633,6 +659,17 @@ export async function verifyReleaseAssets({
     if (!entry.isFile() || entry.nlink !== 1) {
       throw new Error("Release assets must be regular files");
     }
+  }
+  if (
+    (await Bun.file(join(output, BOOTSTRAP_ASSET)).text()) !==
+      renderBootstrap(plan.version, digest(join(output, MANAGER_ASSET))) ||
+    (await Bun.file(join(output, INSTALLER_SUMS)).text()) !==
+      (await renderChecksums({
+        root: output,
+        names: [MANAGER_ASSET, BOOTSTRAP_ASSET],
+      }))
+  ) {
+    throw new Error("Standalone installer bytes or checksum manifest changed");
   }
   const expected = prereleaseMetadata({
     version: plan.version,

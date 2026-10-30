@@ -194,9 +194,15 @@ async function stageVersion(
     ) {
       throw new Error(`Source snapshot changed: ${entry.snapshot}`);
     }
-    const text = (
+    let text = (
       await rewriteLinks(raw, resolvePublicSource(entry.file))
     ).replace(/dogfooding/gi, "native runtime use");
+    if (entry.slug === "reference/cli") {
+      text = text.replace(
+        "commands with `--json` emit a `{ok, data, error}` envelope on stdout.",
+        `JSON shapes vary by command and backend. See [Command and output contracts](${documentRoute(version, "reference/command-contracts")}) for envelopes, bare reports and streamed records.`
+      );
+    }
     const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`;
     const provenance = entry.editorial
       ? `Editorial source: ${entry.snapshot}; based on ${manifest.revision}`

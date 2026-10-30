@@ -1,7 +1,7 @@
 # Reference and contracts
 
 Start with the [CLI overview](../../cli.md) to choose a command and the
-[generated command reference](../../reference/cli.md) for usage and flags.
+[generated command reference](../../reference/cli.md) for usage and flags. [Command and output contracts](command-contracts.md) adds the deeper leaf sections, complete public flag inventory and command-specific JSON/log records.
 Read [Run and inspect](../guides/run-project.md) for a task sequence rather than
 using a flag list as an installation guide.
 

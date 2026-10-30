@@ -1012,6 +1012,10 @@
       {
         "slug": "reference/mcp-fields",
         "title": "MCP fields and results"
+      },
+      {
+        "slug": "reference/command-contracts",
+        "title": "Command and output contracts"
       }
     ]
   },
@@ -3402,6 +3406,10 @@
       {
         "slug": "reference/authored-schema-fields",
         "title": "Authored schema fields"
+      },
+      {
+        "slug": "reference/command-contracts",
+        "title": "Command and output contracts"
       }
     ]
   }

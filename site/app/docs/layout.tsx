@@ -4,7 +4,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   return (
     <DocsLayout
       githubUrl="https://github.com/hack-dance/hack"
-      nav={{ title: "hack", url: "/" }}
+      nav={{ title: "hack.foo", url: "/" }}
       tree={source.pageTree}
     >
       {children}

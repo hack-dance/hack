@@ -1,47 +1,49 @@
 # Hack documentation
 
-Hack manages local project services, environment variables, secrets, HTTPS routing,
-logs and sessions. Start with [Getting started](guides/getting-started.md),
-[Core docs](core.md) or the
-[Agent-first setup guide](guides/agent-first-setup.md).
+Hack runs a project's services, environment, secrets, local HTTPS and logs from
+configuration kept in the repository. Use the same project setup across teammates,
+agents and parallel worktrees.
 
-## Guides and reference
+## Run your first project
 
-- [Project setup](guides/init-project.md)
-- [Environment and secrets](env.md)
-- [Lifecycle hooks and startup](lifecycle.md)
-- [Persistent sessions](sessions.md)
-- [Worktrees, watchers and dependency caches](guides/development-runtime-safety.md)
-- [Global settings](guides/global-settings.md)
-- [macOS browser connectivity](guides/macos-browser-network.md) and [certificate trust](guides/macos-certificate-trust.md)
-- [Managed container environments](guides/codex-managed-environments.md)
-- [Dogfooding the v5 candidate alongside v4](guides/v5-dogfooding.md)
-- [CLI overview](cli.md) and [generated command reference](reference/cli.md)
-- [Architecture](architecture.md)
-- [Agent integrations](integrations.md) and [guidance maintenance](agent-guidance.md)
-- [Extensions and reference](reference.md)
+Start with [Getting started](guides/getting-started.md): install the stable CLI,
+set up local routing, initialize a repository and run it with `hack up --detach`.
+The supported setup uses Docker Compose. No hosted Hack account is required.
 
-Remote/gateway/node/dispatch and the retained macOS app are unsupported. Historical
-setup guides and internal plans are excluded from the public documentation.
+Already have a project? Follow [Project setup](guides/init-project.md), or use
+[Agent setup](guides/agent-first-setup.md) to let an agent help configure it.
 
-## Contributing
+## Work on a project
 
-Read [AGENTS.md](../AGENTS.md) and the repository skills in `.ai/skills/` for
-contributor workflows. Public docs describe supported behavior; private planning,
-review notes and historical evidence belong in the gitignored `_docs/` directory.
-That local archive is not included in a fresh clone.
+- [Core concepts](core.md) — projects, services, instances and local URLs.
+- [Environment and secrets](env.md) — share configuration and keep the decryption key separate.
+- [Lifecycle](lifecycle.md) — start project helpers, tunnels and hooks with the project.
+- [Sessions](sessions.md) — keep a project workspace available between terminal visits.
+- [Worktrees and watchers](guides/development-runtime-safety.md) — run branches side by side.
+- [Managed environments](guides/codex-managed-environments.md) — reuse project setup on another machine or in a managed container, with its required runtime and credentials.
+- [Agent integrations](integrations.md) — optional client plugins and setup helpers.
 
-The command reference is generated with `bun run docs:cli-reference`. Agent-facing
-setup content is generated from `src/agents/instruction-source.ts` and
-`src/agents/onboarding-prompt.ts`. End-to-end checks live in `tests/e2e/`.
+## Find a command or fix setup
 
-### Dependabot alert inventory
+- [CLI overview](cli.md) explains which command to use; the [command reference](reference/cli.md) lists flags.
+- [Global settings](guides/global-settings.md) covers shared configuration.
+- [macOS connectivity](guides/macos-browser-network.md) and [certificate trust](guides/macos-certificate-trust.md) explain local URL problems.
+- [Architecture](architecture.md) explains how the pieces fit together.
 
-To plan dependency updates, list open Dependabot alerts with
-`bun scripts/dependabot-inventory.ts` (add `--repo owner/name` for another repository,
-or `--json` for machine-readable output). The script prints each alert's package,
-ecosystem, severity, manifest path and first patched version ("fixed-in"), sorted by
-severity. It sends only `GET` requests through your existing `gh` authentication,
-writes no files and changes no alerts or dependencies. Make the dependency updates in
-separate, reviewed changes. You need read access to the repository's Dependabot
-alerts.
+If something is wrong, start with `hack doctor` and follow the diagnosis for that
+project. Review the effect of a repair before applying it.
+
+## Try the experimental v5 runtime
+
+[Run v5 alongside stable Hack](guides/v5-dogfooding.md). The native candidate uses
+a separate installation and explicit project adoption. A successful installation
+does not establish application compatibility or runtime parity. The guide links
+to installation steps, current limits and verification commands.
+
+## Contribute
+
+Read [AGENTS.md](../AGENTS.md) for contributor workflows and
+[Agent guidance](agent-guidance.md) for generated client instructions.
+The [reference index](reference.md) links to deeper contracts in the repository.
+Public docs describe supported behavior; internal plans and historical evidence
+are not part of the public site.

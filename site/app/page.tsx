@@ -1,77 +1,82 @@
 import Link from "next/link";
+
 export default function Home() {
   return (
     <main className="home">
-      <nav aria-label="Main">
-        <strong>hack</strong>
-        <Link href="/docs">Docs</Link>
-        <a href="https://github.com/hack-dance/hack">GitHub</a>
-      </nav>
-      <p>LOCAL DEVELOPMENT, TOGETHER</p>
-      <h1>Your machine is the platform.</h1>
-      <p className="intro">
-        One command runs the whole project — services, env, secrets, TLS, logs —
-        at its own local HTTPS URL.
-      </p>
-      <div className="actions">
-        <Link className="primary" href="/docs/guides/getting-started">
-          Get started
-        </Link>
-        <Link className="secondary" href="/docs/core">
-          Explore the CLI
-        </Link>
-      </div>
-      <pre>
-        <code>{"cd your-project\nhack init\nhack up --detach\nhack open"}</code>
-      </pre>
-      <section aria-label="What Hack manages" className="grid">
-        <article>
-          <h2>A URL for every project</h2>
-          <p>
-            Local HTTPS and per-service domains, with shared routing
-            infrastructure.
-          </p>
-        </article>
-        <article>
-          <h2>Env that travels with the repo</h2>
-          <p>
-            Committed configuration and encrypted secrets. Keep the decryption
-            key separate.
-          </p>
-        </article>
-        <article>
-          <h2>Parallel everything</h2>
-          <p>
-            Branch instances and linked worktrees let projects run side by side.
-          </p>
-        </article>
-      </section>
-      <section>
-        <h2>Start with stable. Explore v5 deliberately.</h2>
-        <p>
-          Docker Compose is the supported setup guide. The v5 native candidate
-          is experimental, with separate installation and explicit project
-          adoption.
-        </p>
-        <div className="actions">
-          <Link className="secondary" href="/docs/guides/getting-started">
-            Stable setup
+      <a className="home-skip" href="#home-index">
+        Skip to the index
+      </a>
+
+      <header className="home-opening">
+        <h1>
+          <Link href="/docs" aria-label="hack.foo — documentation">
+            hack.foo
           </Link>
-          <Link className="secondary" href="/docs/guides/v5-dogfooding">
-            v5 dogfooding guide
-          </Link>
-        </div>
-      </section>
-      <footer>
-        <p>
-          Local-first CLI. Optional agent integrations. No hosted account
-          required.
-        </p>
-        <p>
-          <a href="/llms.txt">LLM index</a> ·{" "}
+        </h1>
+      </header>
+
+      <div className="home-index" id="home-index" tabIndex={-1}>
+        <nav aria-label="Homepage">
+          <Link href="/docs">Documentation</Link>
+          <a href="https://github.com/hack-dance/hack">Source on GitHub</a>
+        </nav>
+
+        <section aria-labelledby="home-about">
+          <h2 id="home-about">Run the whole project</h2>
+          <p>
+            Services, environment, secrets, local HTTPS and logs belong to the
+            same project. Hack runs them from <code>.hack/</code> configuration
+            kept in your repository.
+          </p>
+          <p>
+            Run projects and branches side by side, each at its own local URL.
+            The supported setup uses Docker Compose. Start with a running
+            Docker-compatible engine and the stable CLI.
+          </p>
+          <p>
+            <Link href="/docs/guides/getting-started">Install and get started</Link>
+          </p>
+        </section>
+
+        <section aria-labelledby="home-docs">
+          <h2 id="home-docs">Index</h2>
+          <ul className="home-docs">
+            <li>
+              <Link href="/docs/core">Core workflows</Link>
+              <span>Set up, run and inspect a project.</span>
+            </li>
+            <li>
+              <Link href="/docs/env">Environment &amp; secrets</Link>
+              <span>Configuration and encrypted values.</span>
+            </li>
+            <li>
+              <Link href="/docs/lifecycle">Lifecycle</Link>
+              <span>Startup hooks and host processes.</span>
+            </li>
+            <li>
+              <Link href="/docs/reference/cli">CLI reference</Link>
+              <span>Commands and options.</span>
+            </li>
+          </ul>
+        </section>
+
+        <section aria-labelledby="home-native">
+          <h2 id="home-native">Experimental / native v5</h2>
+          <p>
+            The native v5 candidate has a separate installation and project-adoption
+            flow. Installing a prerelease does not migrate a project or prove
+            runtime parity.
+          </p>
+          <p>
+            <Link href="/docs/guides/v5-dogfooding">Explore v5 alongside stable</Link>
+          </p>
+        </section>
+
+        <footer>
+          <a href="/llms.txt">LLM index</a>
           <a href="/llms-full.txt">Public Markdown corpus</a>
-        </p>
-      </footer>
+        </footer>
+      </div>
     </main>
   );
 }

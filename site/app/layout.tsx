@@ -4,11 +4,11 @@ import "./global.css";
 export const metadata: Metadata = {
   metadataBase: new URL("https://hack.foo"),
   title: {
-    default: "Hack — your machine is the platform",
+    default: "hack.foo — local project environments",
     template: "%s | Hack",
   },
   description:
-    "Run local project services, env, secrets, HTTPS, logs and sessions together.",
+    "Run project services, environment, secrets, local HTTPS and logs from configuration kept in your repository.",
 };
 export default function Layout({ children }: { children: React.ReactNode }) {
   return (

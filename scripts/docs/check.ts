@@ -117,6 +117,7 @@ for (const version of ["v4", "v5"] as const) {
     `/docs/${version}-other`,
     `/docs/${version}/../${other}/env`,
     `//example.com/docs/${version}`,
+    `/\\example.com/docs/${version}`,
     `https://example.com/docs/${version}`,
     null,
   ]) {

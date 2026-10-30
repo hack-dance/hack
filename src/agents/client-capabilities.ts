@@ -137,8 +137,7 @@ export const AGENT_CLIENT_CAPABILITY_DEFINITIONS: readonly AgentClientCapability
     {
       capability: "hooks",
       label: "Hooks",
-      meaning:
-        "The client runs plugin-shipped hooks; Hack hooks may only run `hack agent prime`.",
+      meaning: "The client runs plugin-shipped hooks; Hack v5 declares none.",
     },
     {
       capability: "pluginMcp",
@@ -166,6 +165,9 @@ export const AGENT_CLIENT_CAPABILITY_DEFINITIONS: readonly AgentClientCapability
   ];
 
 const SOURCE_SHA = "ec56769bdc046f5b64e621eb04613cfb00a65ced";
+/** Frozen declaration-removal revision; schema evidence, not fresh client loading. */
+const EXPLICIT_INTEGRATIONS_SOURCE_SHA =
+  "5c066d6cca0d26212b1b46681111c4a393b0cd0b";
 /** Base of the change that moved plugin MCP into the `hack-mcp` package. */
 const MCP_PACKAGE_SOURCE_SHA = "3e261d517ed78fbf55c786682ee95291021cba63";
 const MCP_PACKAGE_NOTE =
@@ -299,7 +301,7 @@ export const AGENT_CLIENT_CAPABILITY_MATRIX: readonly ClientCapabilityCell[] = [
     evidenceClass: "schema",
     evidenceRef: "plugins/hack/.claude-plugin/plugin.json",
     observedClientVersion: CLAUDE_VERSION,
-    sourceSha: SOURCE_SHA,
+    sourceSha: EXPLICIT_INTEGRATIONS_SOURCE_SHA,
     hostLabel: HOST,
     note: "Hack v5 ships explicitly invoked skills; no automatic session hooks.",
     openGate: null,
@@ -422,7 +424,7 @@ export const AGENT_CLIENT_CAPABILITY_MATRIX: readonly ClientCapabilityCell[] = [
     evidenceClass: "schema",
     evidenceRef: "plugins/hack/.cursor-plugin/plugin.json",
     observedClientVersion: CURSOR_VERSION,
-    sourceSha: SOURCE_SHA,
+    sourceSha: EXPLICIT_INTEGRATIONS_SOURCE_SHA,
     hostLabel: HOST,
     note: "Hack v5 ships explicitly invoked skills; no injected rules.",
     openGate: null,

@@ -455,6 +455,38 @@ test("committed reference section matches the generator output", async () => {
   ).toBe("bun run scripts/generate-agent-client-capabilities.ts");
 });
 
+test("docs-owner projected parity update preserves prose and is idempotent", async () => {
+  const doc = await Bun.file(referencePath).text();
+  const section = renderAgentClientCapabilitySection();
+  const projected = replaceGeneratedSection({ document: doc, section });
+  expect(extractGeneratedSection(projected)).toBe(section);
+  expect(replaceGeneratedSection({ document: projected, section })).toBe(
+    projected
+  );
+  expect(projected.slice(0, projected.indexOf(GENERATED_BEGIN))).toBe(
+    doc.slice(0, doc.indexOf(GENERATED_BEGIN))
+  );
+  expect(projected.slice(projected.indexOf(GENERATED_END))).toBe(
+    doc.slice(doc.indexOf(GENERATED_END))
+  );
+  for (const [client, capability] of [
+    ["claude", "hooks"],
+    ["cursor", "rules"],
+  ] as const) {
+    const cell = AGENT_CLIENT_CAPABILITY_MATRIX.find(
+      (candidate) =>
+        candidate.client === client && candidate.capability === capability
+    );
+    expect(cell).toMatchObject({
+      status: "unsupported",
+      evidenceClass: "schema",
+      sourceSha: "5c066d6cca0d26212b1b46681111c4a393b0cd0b",
+      openGate: null,
+    });
+  }
+  expect(section).not.toContain("Hack hooks may only run");
+});
+
 test("negative control: a reclassified cell makes the committed section stale", async () => {
   const doc = await Bun.file(referencePath).text();
   const reclassified = replaceCell("claude", "skillDiscovery", {

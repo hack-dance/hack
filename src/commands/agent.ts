@@ -104,9 +104,9 @@ function handleAgentPrime({
 }: {
   readonly ctx: CliContext;
   readonly args: PrimeArgs;
-}): number {
+}): Promise<number> {
   process.stdout.write(`${renderAgentPrimer()}\n`);
-  return 0;
+  return Promise.resolve(0);
 }
 
 function handleAgentPatterns({

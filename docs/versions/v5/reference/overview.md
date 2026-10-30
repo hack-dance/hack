@@ -20,7 +20,7 @@ field in another version.
 
 The pinned compiler publishes [project schema](https://github.com/hack-dance/hack/blob/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/packages/config-compiler/generated/hack.project.schema.json)
 and [local override schema](https://github.com/hack-dance/hack/blob/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/packages/config-compiler/generated/hack.local.schema.json).
-These define document shapes and types. Semantic validation, supported runtime
+[Authored schema fields](authored-schema-fields.md) lists every declared property and variant. These define document shapes and types. Semantic validation, supported runtime
 features and admission checks are separate; schema membership alone does not
 establish that the native backend can execute a feature.
 

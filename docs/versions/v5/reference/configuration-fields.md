@@ -100,7 +100,7 @@ The legacy project file is `.hack/hack.config.json`. Requiredness below is relat
 
 ### Aliases and selection
 
-Prefer `env.defaultOverlay` for the default overlay. The reader also accepts `env.default_overlay`; nested env selection precedes legacy `defaultEnvConfig`/`default_env_config`. These nested fields are read even though the legacy generated schema does not enumerate the `env` object. `worktree.autoBranch` is an alias of `worktree.auto_branch`. Use one spelling rather than conflicting aliases.
+Prefer `env.defaultOverlay` for the default overlay. The reader checks `env.defaultOverlay` before `env.default_overlay`; nested env selection precedes legacy `defaultEnvConfig`, which in turn precedes `default_env_config`. These nested fields are read even though the legacy generated schema does not enumerate the `env` object. `worktree.autoBranch` is an alias of `worktree.auto_branch`. Use one spelling rather than conflicting aliases.
 
 `worktree.inheritLocal` is also read as an alias of `worktree.inherit_local` in this version. It controls eligible local configuration inheritance in the legacy linked-worktree path; it does not make every ignored file or native state inheritable.
 
@@ -121,7 +121,7 @@ Log preferences are not forced backend selection. Follow mode prefers Compose; s
 
 ### Hooks and processes
 
-`startup` accepts string shorthand or objects. Startup objects accept `run` or `command`, optional `name`/`cwd`, and `persistent` (false by default). `lifecycle.up.before/after` and `lifecycle.down.before/after` are hook arrays; their command-object variants require `command`. Do not transfer the startup-only `run` spelling to every hook. `lifecycle.processes` names long-lived processes and requires `name` and `command`. `singleton.ports` contains unique positive ports; `singleton.onConflict` selects `adopt` or `fail`. Read [Lifecycle](../../lifecycle.md) for working-directory origins, ordering, ownership and failure behavior.
+`startup` accepts string shorthand or objects. Startup objects require at least one of `run` or `command`. The reader prefers `run` and drops entries whose selected command is empty. They accept optional `name`/`cwd`, and `persistent` (false by default). `lifecycle.up.before/after` and `lifecycle.down.before/after` are hook arrays; their command-object variants require `command`. Do not transfer the startup-only `run` spelling to every hook. `lifecycle.processes` names long-lived processes and requires `name` and `command`. `singleton.ports` contains unique positive ports; `singleton.onConflict` selects `adopt` or `fail`. Read [Lifecycle](../../lifecycle.md) for working-directory origins, ordering, ownership and failure behavior.
 
 ### Scope exclusions
 

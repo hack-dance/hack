@@ -2,7 +2,7 @@
 
 Exact tool inputs for v4.2.4. Start with [Agent integrations](../../integrations.md) for setup. These are MCP JSON input names, not CLI flag spellings.
 
-Registration does not establish backend compatibility. In particular, the native candidate has a narrower admission contract; a retained Compose tool is not an alternative native lifecycle API. A successful command result is not application health or readiness.
+Registration does not establish backend compatibility. A successful command result is not application health or readiness.
 
 ## Input rules
 
@@ -117,8 +117,8 @@ Tool-specific emitted data fields:
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `data.events` | `source-defined` | Present in source shape |
-| `data.count` | `source-defined` | Present in source shape |
+| `data.events` | `LogStreamEvent[]` | Present in source shape |
+| `data.count` | `number` | Present in source shape |
 
 
 ## `hack.project.logs.tail`
@@ -148,10 +148,10 @@ Tool-specific emitted data fields:
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `data.events` | `source-defined` | Present in source shape |
-| `data.count` | `source-defined` | Present in source shape |
-| `data.stop_reason` | `source-defined` | Present in source shape |
-| `data.duration_ms` | `source-defined` | Present in source shape |
+| `data.events` | `LogStreamEvent[]` | Present in source shape |
+| `data.count` | `number` | Present in source shape |
+| `data.stop_reason` | `string (collector stop reason)` | Present in source shape |
+| `data.duration_ms` | `number` | Present in source shape |
 
 
 ## `hack.project.open`
@@ -202,10 +202,10 @@ The emitted MCP transport subset is `content[]` with `type`/`text`, `structuredC
 | Field | Type | Presence |
 | --- | --- | --- |
 | `structuredContent.ok` | `boolean` | Required |
-| `structuredContent.command` | `string-or-enum` | Required |
+| `structuredContent.command` | `string` | Required |
 | `structuredContent.exitCode` | `number` | Required |
-| `structuredContent.stdout` | `string-or-enum` | Required |
-| `structuredContent.stderr` | `string-or-enum` | Required |
+| `structuredContent.stdout` | `string` | Required |
+| `structuredContent.stderr` | `string` | Required |
 | `structuredContent.data` | `unknown` | Optional |
 
 

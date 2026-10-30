@@ -10,7 +10,7 @@ Schema-optional selectors can still have conditional requirements. `hack.project
 
 Run timeout defaults to 120000 ms. Init uses a 180000 ms child timeout and exposes no timeout input. Log tail collection defaults to 200 events and 5000 ms. These are handler fallbacks, not schema defaults. An omitted log `tail` can be forwarded to the CLI, which has its own default.
 
-Exec also defaults to 120000 ms. Positive-integer limits are tail/maxEvents ≤10000, maxMs ≤60000, timeoutMs ≤600000. Identifier helpers impose a 253-character maximum and distinct service/profile, branch and env-key patterns. The MCP env-key grammar is broader than CLI uppercase keys; later CLI refusal is possible. See [MCP tools](../../reference/mcp-tools.md) for exact validation and typed pre-spawn failures.
+`hack.project.exec` requires a nonempty `cmd` array (at least one entry); run allows cmd to be omitted. Exec also defaults to 120000 ms. Positive-integer limits are tail/maxEvents ≤10000, maxMs ≤60000, timeoutMs ≤600000. Identifier helpers impose a 253-character maximum and distinct service/profile, branch and env-key patterns. The MCP env-key grammar is broader than CLI uppercase keys; later CLI refusal is possible. See [MCP tools](../../reference/mcp-tools.md) for exact validation and typed pre-spawn failures.
 
 ## `hack.projects.list`
 
@@ -96,8 +96,8 @@ Tool-specific emitted data fields:
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `data.limits` | `source-defined` | Present in source shape |
-| `data.limits.timeoutMs` | `source-defined` | Present in source shape |
+| `data.limits` | `object` | Present in source shape |
+| `data.limits.timeoutMs` | `number` | Present in source shape |
 
 
 ## `hack.project.logs.snapshot`
@@ -125,11 +125,11 @@ Tool-specific emitted data fields:
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `data.events` | `source-defined` | Present in source shape |
-| `data.count` | `source-defined` | Present in source shape |
-| `data.cutoff` | `source-defined` | Present in source shape |
-| `data.limits` | `source-defined` | Present in source shape |
-| `data.limits.tail` | `source-defined` | Present in source shape |
+| `data.events` | `LogStreamEvent[]` | Present in source shape |
+| `data.count` | `number` | Present in source shape |
+| `data.cutoff` | `null or {bound, limit}` | Present in source shape |
+| `data.limits` | `object` | Present in source shape |
+| `data.limits.tail` | `number or null` | Present in source shape |
 
 
 ## `hack.project.logs.tail`
@@ -159,15 +159,15 @@ Tool-specific emitted data fields:
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `data.events` | `source-defined` | Present in source shape |
-| `data.count` | `source-defined` | Present in source shape |
-| `data.cutoff` | `source-defined` | Present in source shape |
-| `data.stop_reason` | `source-defined` | Present in source shape |
-| `data.duration_ms` | `source-defined` | Present in source shape |
-| `data.limits` | `source-defined` | Present in source shape |
-| `data.limits.tail` | `source-defined` | Present in source shape |
-| `data.limits.maxEvents` | `source-defined` | Present in source shape |
-| `data.limits.maxMs` | `source-defined` | Present in source shape |
+| `data.events` | `LogStreamEvent[]` | Present in source shape |
+| `data.count` | `number` | Present in source shape |
+| `data.cutoff` | `null or {bound, limit}` | Present in source shape |
+| `data.stop_reason` | `string (collector stop reason)` | Present in source shape |
+| `data.duration_ms` | `number` | Present in source shape |
+| `data.limits` | `object` | Present in source shape |
+| `data.limits.tail` | `number or null` | Present in source shape |
+| `data.limits.maxEvents` | `number` | Present in source shape |
+| `data.limits.maxMs` | `number` | Present in source shape |
 
 
 ## `hack.project.open`
@@ -221,9 +221,9 @@ Tool-specific emitted data fields:
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `data.limits` | `source-defined` | Present in source shape |
-| `data.limits.timeoutMs` | `source-defined` | Present in source shape |
-| `data.limits.outputBytes` | `source-defined` | Present in source shape |
+| `data.limits` | `object` | Present in source shape |
+| `data.limits.timeoutMs` | `number` | Present in source shape |
+| `data.limits.outputBytes` | `number` | Present in source shape |
 
 
 ## `hack.project.doctor`
@@ -250,7 +250,7 @@ Tool-specific emitted data fields:
 | `env` | Optional | `string; identifier rules` | See identifier and input rules. |
 | `service` | Optional | `string; identifier rules` | See identifier and input rules. |
 | `key` | Required | `string; env-key rules` | See identifier and input rules. |
-| `target` | Optional | `string-or-enum` | Env view: host (default) or compose |
+| `target` | Optional | `"host" or "compose"` | Env view: host (default) or compose |
 
 
 ## `hack.project.env.keys`
@@ -299,10 +299,10 @@ The emitted MCP transport subset is `content[]` with `type`/`text`, `structuredC
 | --- | --- | --- |
 | `structuredContent.ok` | `boolean` | Required |
 | `structuredContent.outputTruncated` | `boolean` | Optional |
-| `structuredContent.command` | `string-or-enum` | Required |
+| `structuredContent.command` | `string` | Required |
 | `structuredContent.exitCode` | `number` | Required |
-| `structuredContent.stdout` | `string-or-enum` | Required |
-| `structuredContent.stderr` | `string-or-enum` | Required |
+| `structuredContent.stdout` | `string` | Required |
+| `structuredContent.stderr` | `string` | Required |
 | `structuredContent.data` | `unknown` | Optional |
 | `structuredContent.spawned` | `literal false` | Optional |
 | `structuredContent.error` | `object` | Optional |
@@ -316,70 +316,70 @@ Run returns `data.limits.timeoutMs`; exec additionally reports an 8 MiB shared c
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `key` | `string \\| null` | Present (may be nullable) |
-| `available` | `boolean \\| null` | Present (may be nullable) |
-| `secret` | `boolean \\| null` | Present (may be nullable) |
-| `format` | `string \\| null` | Present (may be nullable) |
-| `environment` | `string \\| null` | Present (may be nullable) |
-| `requested_scope` | `string \\| null` | Present (may be nullable) |
-| `effective_scope` | `string \\| null` | Present (may be nullable) |
-| `target` | `string \\| null` | Present (may be nullable) |
-| `delivered_to` | `readonly string[] \\| null` | Present (may be nullable) |
-| `source` | `string \\| null` | Present (may be nullable) |
-| `precedence` | `readonly string[] \\| null` | Present (may be nullable) |
+| `key` | `string \\| null` | Required; null only if the type includes null |
+| `available` | `boolean \\| null` | Required; null only if the type includes null |
+| `secret` | `boolean \\| null` | Required; null only if the type includes null |
+| `format` | `string \\| null` | Required; null only if the type includes null |
+| `environment` | `string \\| null` | Required; null only if the type includes null |
+| `requested_scope` | `string \\| null` | Required; null only if the type includes null |
+| `effective_scope` | `string \\| null` | Required; null only if the type includes null |
+| `target` | `string \\| null` | Required; null only if the type includes null |
+| `delivered_to` | `readonly string[] \\| null` | Required; null only if the type includes null |
+| `source` | `string \\| null` | Required; null only if the type includes null |
+| `precedence` | `readonly string[] \\| null` | Required; null only if the type includes null |
 
 
 ### `McpEnvKeyEntry`
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `key` | `string` | Present (may be nullable) |
-| `secret` | `boolean` | Present (may be nullable) |
-| `required` | `boolean \\| null` | Present (may be nullable) |
-| `source` | `string \\| null` | Present (may be nullable) |
-| `resolved_from` | `string \\| null` | Present (may be nullable) |
-| `services` | `readonly string[] \\| null` | Present (may be nullable) |
+| `key` | `string` | Required; null only if the type includes null |
+| `secret` | `boolean` | Required; null only if the type includes null |
+| `required` | `boolean \\| null` | Required; null only if the type includes null |
+| `source` | `string \\| null` | Required; null only if the type includes null |
+| `resolved_from` | `string \\| null` | Required; null only if the type includes null |
+| `services` | `readonly string[] \\| null` | Required; null only if the type includes null |
 
 
 ### `McpEnvKeysData`
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `format` | `string \\| null` | Present (may be nullable) |
-| `environment` | `string \\| null` | Present (may be nullable) |
-| `selected_scope` | `string \\| null` | Present (may be nullable) |
-| `scopes` | `readonly string[] \\| null` | Present (may be nullable) |
-| `keys` | `readonly McpEnvKeyEntry[]` | Present (may be nullable) |
-| `missing_required` | `readonly string[]` | Present (may be nullable) |
+| `format` | `string \\| null` | Required; null only if the type includes null |
+| `environment` | `string \\| null` | Required; null only if the type includes null |
+| `selected_scope` | `string \\| null` | Required; null only if the type includes null |
+| `scopes` | `readonly string[] \\| null` | Required; null only if the type includes null |
+| `keys` | `readonly McpEnvKeyEntry[]` | Required; null only if the type includes null |
+| `missing_required` | `readonly string[]` | Required; null only if the type includes null |
 
 
 ### `McpInstanceService`
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `service` | `string` | Present (may be nullable) |
-| `containers` | `number` | Present (may be nullable) |
-| `running` | `number` | Present (may be nullable) |
+| `service` | `string` | Required; null only if the type includes null |
+| `containers` | `number` | Required; null only if the type includes null |
+| `running` | `number` | Required; null only if the type includes null |
 
 
 ### `McpProjectInstance`
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `branch` | `string \\| null` | Present (may be nullable) |
-| `compose_project` | `string \\| null` | Present (may be nullable) |
-| `working_dir` | `string \\| null` | Present (may be nullable) |
-| `services` | `readonly McpInstanceService[]` | Present (may be nullable) |
+| `branch` | `string \\| null` | Required; null only if the type includes null |
+| `compose_project` | `string \\| null` | Required; null only if the type includes null |
+| `working_dir` | `string \\| null` | Required; null only if the type includes null |
+| `services` | `readonly McpInstanceService[]` | Required; null only if the type includes null |
 
 
 ### `McpInstancesData`
 
 | Field | Type | Presence |
 | --- | --- | --- |
-| `project` | `string` | Present (may be nullable) |
-| `found` | `boolean` | Present (may be nullable) |
-| `runtime_ok` | `boolean \\| null` | Present (may be nullable) |
-| `instances` | `readonly McpProjectInstance[]` | Present (may be nullable) |
+| `project` | `string` | Required; null only if the type includes null |
+| `found` | `boolean` | Required; null only if the type includes null |
+| `runtime_ok` | `boolean \\| null` | Required; null only if the type includes null |
+| `instances` | `readonly McpProjectInstance[]` | Required; null only if the type includes null |
 
 
 The env projections withhold values, ciphertext and raw backend output. Projection null is different from a missing key. Instances describe discovered containers, not all configured branches. Doctor can return a nested CLI report under `data.data`; specialized engine and diagnostic subobjects remain open and are not exhaustively typed here.

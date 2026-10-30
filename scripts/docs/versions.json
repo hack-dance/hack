@@ -3398,6 +3398,10 @@
       {
         "slug": "reference/mcp-fields",
         "title": "MCP fields and results"
+      },
+      {
+        "slug": "reference/authored-schema-fields",
+        "title": "Authored schema fields"
       }
     ]
   }

@@ -75,20 +75,24 @@ for (const version of ["v4", "v5"]) {
   if (
     corpus.includes(`https://hack.foo/docs/${other}/`) ||
     /dogfooding/i.test(corpus)
-  )
+  ) {
     throw new Error(`Mixed or obsolete public corpus: ${version}`);
+  }
   const index = await Bun.file(
     resolve(repositoryRoot, `site/public/${version}/llms.txt`)
   ).text();
-  for (const route of ["install", "getting-started", "agent-handoff"])
-    if (!index.includes(`/docs/${version}/${route}`))
+  for (const route of ["install", "getting-started", "agent-handoff"]) {
+    if (!index.includes(`/docs/${version}/${route}`)) {
       throw new Error(`Missing entry point: ${version}/${route}`);
+    }
+  }
 }
 if (
   (await Bun.file(resolve(repositoryRoot, "site/public/llms.txt")).text()) !==
   (await Bun.file(resolve(repositoryRoot, "site/public/v5/llms.txt")).text())
-)
+) {
   throw new Error("Default agent index must select v5");
+}
 console.log(
   "Version-isolated exports, entry points and default version passed."
 );

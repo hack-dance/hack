@@ -1,5 +1,5 @@
-import { Providers } from "@/components/providers";
 import type { Metadata } from "next";
+import { Providers } from "@/components/providers";
 import "./global.css";
 export const metadata: Metadata = {
   metadataBase: new URL("https://hack.foo"),

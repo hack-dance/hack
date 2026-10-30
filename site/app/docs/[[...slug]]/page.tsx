@@ -1,18 +1,22 @@
 import { DocsBody, DocsPage, DocsTitle } from "fumadocs-ui/layouts/docs/page";
 import defaultComponents from "fumadocs-ui/mdx";
-import { redirect } from "next/navigation";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { sources } from "@/lib/source";
 
+const versionPattern = /^v\d/;
 interface Props {
   params: Promise<{ slug?: string[] }>;
 }
 export default async function Page({ params }: Props) {
   const slug = (await params).slug ?? [];
-  if (!slug.length) redirect("/docs/v5");
+  if (!slug.length) {
+    redirect("/docs/v5");
+  }
   const version = slug[0];
   if (version !== "v4" && version !== "v5") {
-    if (/^v\d/.test(version!)) notFound();
+    if (versionPattern.test(version ?? "")) {
+      notFound();
+    }
     const legacy =
       (
         {
@@ -47,10 +51,14 @@ export function generateStaticParams() {
 }
 export async function generateMetadata({ params }: Props) {
   const slug = (await params).slug ?? [];
-  if (!slug.length) redirect("/docs/v5");
+  if (!slug.length) {
+    redirect("/docs/v5");
+  }
   const version = slug[0];
   if (version !== "v4" && version !== "v5") {
-    if (/^v\d/.test(version!)) notFound();
+    if (versionPattern.test(version ?? "")) {
+      notFound();
+    }
     const legacy =
       (
         {

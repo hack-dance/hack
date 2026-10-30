@@ -9,7 +9,7 @@ export default function Home() {
 
       <header className="home-opening">
         <h1>
-          <Link href="/docs" aria-label="hack.foo — documentation">
+          <Link aria-label="hack.foo — documentation" href="/docs">
             hack.foo
           </Link>
         </h1>

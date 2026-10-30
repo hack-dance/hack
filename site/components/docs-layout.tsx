@@ -1,6 +1,6 @@
 "use client";
-import { DocsLayout } from "fumadocs-ui/layouts/docs";
 import type { Root } from "fumadocs-core/page-tree";
+import { DocsLayout } from "fumadocs-ui/layouts/docs";
 import { usePathname, useRouter } from "next/navigation";
 export function VersionedLayout({
   children,
@@ -16,16 +16,14 @@ export function VersionedLayout({
   const version = path.startsWith("/docs/v4") ? "v4" : "v5";
   return (
     <DocsLayout
-      tree={trees[version]}
-      nav={{ title: "hack.foo", url: "/" }}
       githubUrl="https://github.com/hack-dance/hack"
+      nav={{ title: "hack.foo", url: "/" }}
       sidebar={{
         banner: (
           <label className="docs-version">
             Docs version{" "}
             <select
               aria-label="Docs version"
-              value={version}
               onChange={(e) =>
                 router.push(
                   paths[e.target.value as "v4" | "v5"].includes(
@@ -38,6 +36,7 @@ export function VersionedLayout({
                     : `/docs/${e.target.value}`
                 )
               }
+              value={version}
             >
               <option value="v5">v5</option>
               <option value="v4">v4</option>
@@ -45,6 +44,7 @@ export function VersionedLayout({
           </label>
         ),
       }}
+      tree={trees[version]}
     >
       {children}
     </DocsLayout>

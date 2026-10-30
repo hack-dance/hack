@@ -1,6 +1,7 @@
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import versions from "./versions.json";
+
 let activeRevision = versions.v5.revision;
 let activeFiles: readonly string[] = versions.v5.publicFiles;
 
@@ -33,11 +34,10 @@ export function resolvePublicSource(file: string): string {
 }
 
 /** Local links may point to staged docs or existing tracked public repository files. */
-export async function rewriteTarget(
-  target: string,
-  source: string
-): Promise<string> {
-  if (/^\/(?:v4|v5)\/llms(?:-full)?\.txt$/.test(target)) return target;
+export function rewriteTarget(target: string, source: string): string {
+  if (/^\/(?:v4|v5)\/llms(?:-full)?\.txt$/.test(target)) {
+    return target;
+  }
   if (external.test(target)) {
     if (
       /^(?:javascript|data|file):/i.test(target) ||
@@ -60,8 +60,9 @@ export async function rewriteTarget(
   if (routes.has(absolute)) {
     return `${routes.get(absolute)}${fragment}`;
   }
-  if (!activeFiles.includes(local))
+  if (!activeFiles.includes(local)) {
     throw new Error(`Missing public source at pinned revision: ${local}`);
+  }
   const encoded = local.split("/").map(encodeURIComponent).join("/");
   return `https://github.com/hack-dance/hack/blob/${activeRevision}/${encoded}${fragment}`;
 }
@@ -143,16 +144,18 @@ export async function prepare(check = false): Promise<void> {
     activeRevision = manifest.revision;
     activeFiles = manifest.publicFiles;
     routes.clear();
-    for (const entry of manifest.entries)
+    for (const entry of manifest.entries) {
       routes.set(
         resolvePublicSource(entry.file),
-        `/docs/${version}${entry.slug === "index" ? "" : "/" + entry.slug}`
+        `/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`
       );
-    for (const { slug } of manifest.editorial)
+    }
+    for (const { slug } of manifest.editorial) {
       routes.set(
         resolvePublicSource(`docs/site/${slug}.md`),
-        `/docs/${version}${slug === "index" ? "" : "/" + slug}`
+        `/docs/${version}${slug === "index" ? "" : `/${slug}`}`
       );
+    }
     const index = [
       `# Hack ${manifest.label}`,
       "",
@@ -176,19 +179,21 @@ export async function prepare(check = false): Promise<void> {
     ];
     for (const entry of pages) {
       const snapshot = resolvePublicSource(entry.snapshot);
-      if ((await realpath(snapshot)) !== snapshot)
+      if ((await realpath(snapshot)) !== snapshot) {
         throw new Error(`Snapshot follows symlink: ${entry.snapshot}`);
+      }
       const raw = await Bun.file(snapshot).text();
       if (
         !entry.editorial &&
         new Bun.CryptoHasher("sha256").update(raw).digest("hex") !==
           entry.sha256
-      )
+      ) {
         throw new Error(`Source snapshot changed: ${entry.snapshot}`);
+      }
       const text = (
         await rewriteLinks(raw, resolvePublicSource(entry.file))
       ).replace(/dogfooding/gi, "native runtime use");
-      const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : "/" + entry.slug}`;
+      const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`;
       const provenance = entry.editorial
         ? `Editorial source: ${entry.snapshot}; based on ${manifest.revision}`
         : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}`;
@@ -220,18 +225,19 @@ export async function prepare(check = false): Promise<void> {
         ],
       })
     );
-    for (const folder of ["guides", "reference"])
+    for (const folder of ["guides", "reference"]) {
       staged.set(
         `${version}/${folder}/meta.json`,
         JSON.stringify({
           title: folder === "guides" ? "Guides" : "Reference",
           pages: pages
-            .filter((entry) => entry.slug.startsWith(folder + "/"))
+            .filter((entry) => entry.slug.startsWith(`${folder}/`))
             .map((entry) => entry.slug.slice(folder.length + 1)),
         })
       );
-    exports.set(`${version}/llms.txt`, index.join("\n") + "\n");
-    exports.set(`${version}/llms-full.txt`, corpus.join("\n\n---\n\n") + "\n");
+    }
+    exports.set(`${version}/llms.txt`, `${index.join("\n")}\n`);
+    exports.set(`${version}/llms-full.txt`, `${corpus.join("\n\n---\n\n")}\n`);
   }
   staged.set("meta.json", JSON.stringify({ pages: ["v5", "v4"] }));
   await writeDocuments(staged, check);
@@ -242,12 +248,13 @@ export async function prepare(check = false): Promise<void> {
       check
     );
   }
-  for (const name of ["llms.txt", "llms-full.txt"])
+  for (const name of ["llms.txt", "llms-full.txt"]) {
     await writeOrCheck(
       resolve(repositoryRoot, "site/public", name),
-      exports.get(`v5/${name}`)!,
+      exports.get(`v5/${name}`) ?? "",
       check
     );
+  }
   console.log(
     `${check ? "Checked" : "Staged"} versioned allowlisted public documents, navigation and LLM corpus.`
   );

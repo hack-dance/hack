@@ -1,10 +1,9 @@
 import { resolve } from "node:path";
 
 import { isCancel, select } from "@clack/prompts";
-
+import { RETIRED_AGENT_PRIMER_MESSAGE } from "../agents/explicit-integrations.ts";
 import { renderAgentInitPatterns } from "../agents/init-patterns.ts";
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
-import { renderAgentPrimer } from "../agents/primer.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -25,7 +24,7 @@ const primeOptions = [
     type: "boolean",
     long: "--check",
     description:
-      "Deprecated compatibility flag; prints the primer without inspecting integrations",
+      "Deprecated compatibility flag; prints only the legacy-hook retirement notice",
   } as const),
 ] as const;
 type PrimeArgs = CommandArgs<typeof primeOptions, readonly []>;
@@ -50,7 +49,7 @@ type InitArgs = CommandArgs<typeof initOptions, readonly []>;
 
 const primeSpec = defineCommand({
   name: "prime",
-  summary: "Print agent primer text",
+  summary: "Print retirement notice for legacy agent hooks",
   group: "Agents",
   options: primeOptions,
   positionals: [],
@@ -105,7 +104,7 @@ function handleAgentPrime({
   readonly ctx: CliContext;
   readonly args: PrimeArgs;
 }): Promise<number> {
-  process.stdout.write(`${renderAgentPrimer()}\n`);
+  process.stdout.write(`${RETIRED_AGENT_PRIMER_MESSAGE}\n`);
   return Promise.resolve(0);
 }
 

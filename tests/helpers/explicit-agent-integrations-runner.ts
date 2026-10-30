@@ -27,6 +27,17 @@ for (const base of [home, repo]) {
   for (const path of originals) {
     await Bun.write(join(base, path), `original: ${path}\n`);
   }
+  await Bun.write(
+    join(base, ".claude/settings.local.json"),
+    JSON.stringify({
+      custom: "preserve",
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: "command", command: "hack agent prime" }] },
+        ],
+      },
+    })
+  );
 }
 // A real generated render plus a customization must never be refreshed or adopted.
 const globalSkill = join(home, ".codex/skills/hack-cli/SKILL.md");
@@ -73,11 +84,33 @@ for (const args of retired) {
     `${args.join(" ")} changed agent files`
   );
 }
-assert.equal(await runCli(["agent", "prime", "--check"]), 0);
+for (const flags of [[], ["--check"]]) {
+  let notice = "";
+  const write = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    notice += String(chunk);
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    assert.equal(await runCli(["agent", "prime", ...flags]), 0);
+  } finally {
+    process.stdout.write = write;
+  }
+  assert.match(notice, /automatic agent primer is retired in v5/);
+  assert.match(notice, /explicitly invoked Hack plugin skills or opt-in MCP/);
+  assert.ok(
+    notice.length < 250,
+    "legacy hooks must not inject full instructions"
+  );
+  assert.doesNotMatch(
+    notice,
+    /hack CLI primer|Product boundary|hack up --detach/
+  );
+}
 assert.deepEqual(
   await snapshotFileHashes({ roots }),
   baseline,
-  "primer audited or changed surfaces"
+  "legacy hook command changed surfaces"
 );
 assert.equal(await runCli(["setup", "codex"]), 0);
 assert.match(

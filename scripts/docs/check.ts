@@ -149,8 +149,13 @@ for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: v5Root })) {
     throw new Error("Agent compatibility must not become a runnable tutorial");
   }
 }
-for (const file of ["site/public/v5/llms-full.txt", "site/public/llms-full.txt"]) {
-  assertExplicitAgentContent(await Bun.file(resolve(repositoryRoot, file)).text());
+for (const file of [
+  "site/public/v5/llms-full.txt",
+  "site/public/llms-full.txt",
+]) {
+  assertExplicitAgentContent(
+    await Bun.file(resolve(repositoryRoot, file)).text()
+  );
 }
 const integrations = await Bun.file(resolve(v5Root, "integrations.md")).text();
 for (const fact of [
@@ -213,7 +218,9 @@ for (const command of agentCompatibilityCommands) {
     curateCliReference(fixture, { version: "v5" }).includes(command) ||
     !curateCliReference(fixture, { version: "v5" }).includes("Runtime logs")
   ) {
-    throw new Error(`Version-specific agent command curation failed: ${command}`);
+    throw new Error(
+      `Version-specific agent command curation failed: ${command}`
+    );
   }
 }
 console.log("Explicit-agent publication and legacy/runtime controls passed.");

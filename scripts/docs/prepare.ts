@@ -141,6 +141,38 @@ function documentRoute(version: string, slug: string): string {
   return `/docs/${version}${slug === "index" ? "" : `/${slug}`}`;
 }
 
+async function readSnapshot(
+  file: string,
+  expectedHash?: string
+): Promise<string> {
+  const path = resolvePublicSource(file);
+  if ((await realpath(path)) !== path) {
+    throw new Error(`Snapshot follows symlink: ${file}`);
+  }
+  const raw = await Bun.file(path).text();
+  if (
+    expectedHash !== undefined &&
+    new Bun.CryptoHasher("sha256").update(raw).digest("hex") !== expectedHash
+  ) {
+    throw new Error(`Source snapshot changed: ${file}`);
+  }
+  return raw;
+}
+
+function publishedCliText(text: string, version: "v4" | "v5"): string {
+  let curated = curateCliReference(text, { version });
+  if (version === "v5") {
+    curated = curated.replace(
+      "# hack CLI reference",
+      `# hack CLI reference\n\nThis editorial command selection omits guidance-writing and primer setup from the default reference. Those commands still exist at next.5: see [Agent compatibility reference](${documentRoute(version, "reference/agent-compatibility")}). This is a publication choice, not a shipped runtime removal.`
+    );
+  }
+  return curated.replace(
+    "commands with `--json` emit a `{ok, data, error}` envelope on stdout.",
+    `JSON shapes vary by command and backend. See [Command and output contracts](${documentRoute(version, "reference/command-contracts")}) for envelopes, bare reports and streamed records.`
+  );
+}
+
 async function stageVersion(
   version: "v4" | "v5",
   staged: Map<string, string>,
@@ -152,16 +184,7 @@ async function stageVersion(
   routes.clear();
   for (const entry of manifest.entries) {
     // Editorial replacement must not weaken the preserved-original hash gate.
-    const original = resolvePublicSource(entry.snapshot);
-    if ((await realpath(original)) !== original) {
-      throw new Error(`Snapshot follows symlink: ${entry.snapshot}`);
-    }
-    const raw = await Bun.file(original).text();
-    if (
-      new Bun.CryptoHasher("sha256").update(raw).digest("hex") !== entry.sha256
-    ) {
-      throw new Error(`Source snapshot changed: ${entry.snapshot}`);
-    }
+    await readSnapshot(entry.snapshot, entry.sha256);
     routes.set(
       resolvePublicSource(entry.file),
       documentRoute(version, entry.slug)
@@ -195,32 +218,15 @@ async function stageVersion(
     })),
   ];
   for (const entry of pages) {
-    const snapshot = resolvePublicSource(entry.snapshot);
-    if ((await realpath(snapshot)) !== snapshot) {
-      throw new Error(`Snapshot follows symlink: ${entry.snapshot}`);
-    }
-    const raw = await Bun.file(snapshot).text();
-    if (
-      !entry.editorial &&
-      new Bun.CryptoHasher("sha256").update(raw).digest("hex") !== entry.sha256
-    ) {
-      throw new Error(`Source snapshot changed: ${entry.snapshot}`);
-    }
+    const raw = await readSnapshot(
+      entry.snapshot,
+      entry.editorial ? undefined : entry.sha256
+    );
     let text = (
       await rewriteLinks(raw, resolvePublicSource(entry.file))
     ).replace(/dogfooding/gi, "native runtime use");
     if (entry.slug === "reference/cli") {
-      text = curateCliReference(text, { version });
-      if (version === "v5") {
-        text = text.replace(
-          "# hack CLI reference",
-          `# hack CLI reference\n\nThis editorial command selection omits guidance-writing and primer setup from the default reference. Those commands still exist at next.5: see [Agent compatibility reference](${documentRoute(version, "reference/agent-compatibility")}). This is a publication choice, not a shipped runtime removal.`
-        );
-      }
-      text = text.replace(
-        "commands with `--json` emit a `{ok, data, error}` envelope on stdout.",
-        `JSON shapes vary by command and backend. See [Command and output contracts](${documentRoute(version, "reference/command-contracts")}) for envelopes, bare reports and streamed records.`
-      );
+      text = publishedCliText(text, version);
     }
     const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`;
     const provenance = entry.editorial

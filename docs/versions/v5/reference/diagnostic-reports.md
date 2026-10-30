@@ -52,7 +52,7 @@ These leaves exist only at next.5 and remain experimental. validate --file print
 
 The CLI prints only its returned result. The helper-only envelope is stripped before serialization. routing_inputs_required is an intermediate probe signal: project preparation consumes it and resolves routing again; it is not added to these final report tables. Compiler request/handshake, raw authored input, private candidates, environment metadata input envelopes, guest/provider DTOs and journals are not public CLI report objects.
 
-The CLI wrapper exposes plan as an opaque compiler-owned Record<string,unknown>. Its internal producer Plan DTO is not a stable public API here. Authored document shapes are documented separately in [Authored schema fields](authored-schema-fields.md); the explicit CLI wrapper fields below remain separate report contracts.
+The CLI wrapper exposes plan as an opaque compiler-owned `Record<string, unknown>`. Its internal producer Plan DTO is not a stable public API here. Authored document shapes are documented separately in [Authored schema fields](authored-schema-fields.md); the explicit CLI wrapper fields below remain separate report contracts.
 
 NativeConfigDiagnostic.code is a nonempty string; ImportField.code is declared string. Neither is a declared closed enum. NativeConfigDiagnostic line/column are positive safe integers, pointer is a JSON pointer (empty for document root); compile diagnostics may omit document, while resolved and environment/file planning diagnostics require a recognized document role. Messages are strings, never permission to run suggested actions.
 

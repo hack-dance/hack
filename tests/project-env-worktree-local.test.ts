@@ -17,6 +17,7 @@ import { resolve } from "node:path";
 import {
   inspectProjectEnvMaterialization,
   materializeProjectEnv,
+  projectEnvConfigExists,
   resolveProjectEnvConfig,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
@@ -98,13 +99,13 @@ async function writeLayer(
   );
 }
 
-async function fixture() {
+async function fixture(opts: { readonly nested?: string } = {}) {
   const sandbox = await realpath(
     await mkdtemp(resolve(tmpdir(), "hack-env-local-test-"))
   );
   tempDirs.add(sandbox);
-  const primary = resolve(sandbox, "primary");
-  const linked = resolve(sandbox, "linked");
+  const primary = resolve(sandbox, opts.nested ?? "", "primary");
+  const linked = resolve(sandbox, opts.nested ?? "", "linked");
   await mkdir(resolve(primary, ".hack"), { recursive: true });
   await writeFile(resolve(primary, ".hack", "hack.config.json"), "{}");
   await writeFile(
@@ -523,4 +524,105 @@ test("opt-outs skip all Git work and verification uses three Git calls", async (
     resolve(primary, ".hack")
   );
   expect(await calls()).toBe(3);
+});
+
+const runningAsRoot = process.getuid?.() === 0;
+
+test.skipIf(runningAsRoot)(
+  "inaccessible primary project directories fail closed with the path only",
+  async () => {
+    const { primary, options } = await fixture();
+    const dir = resolve(primary, ".hack");
+    await chmod(dir, 0o000);
+    try {
+      await expect(resolveProjectEnvConfig(options)).rejects.toThrow(
+        `Cannot read primary local env file: ${resolve(dir, "hack.env.local.yaml")}`
+      );
+    } finally {
+      await chmod(dir, 0o755);
+    }
+  }
+);
+
+test.skipIf(runningAsRoot).each(["hack.config.json", "hack.toml"])(
+  "unreadable %s fails closed before any Git work",
+  async (name) => {
+    const { sandbox, linked, options } = await fixture();
+    const path = resolve(linked, ".hack", name);
+    if (name === "hack.toml") {
+      await rm(resolve(linked, ".hack/hack.config.json"));
+      await writeFile(path, "[worktree]\ninherit_local = false\n");
+    } else {
+      await writeFile(
+        path,
+        JSON.stringify({ worktree: { inherit_local: false } })
+      );
+    }
+    await chmod(path, 0o000);
+    const calls = await countGitCalls(sandbox);
+    try {
+      await expect(resolveProjectEnvConfig(options)).rejects.toThrow(
+        `Cannot read project config: ${path}`
+      );
+      expect(await calls()).toBe(0);
+    } finally {
+      await chmod(path, 0o644);
+    }
+  }
+);
+
+test.each([
+  "symlink",
+  "directory",
+])("a %s-only primary overlay routes env set --local to YAML commands", async (kind) => {
+  const { sandbox, primary, linked } = await fixture();
+  for (const root of [primary, linked]) {
+    await rm(resolve(root, ".hack/hack.env.default.yaml"));
+    await rm(resolve(root, ".hack/hack.env.qa.yaml"));
+  }
+  await rm(resolve(primary, ".hack/hack.env.qa.local.yaml"));
+  const overlay = resolve(primary, ".hack/hack.env.local.yaml");
+  if (kind === "symlink") {
+    const target = resolve(sandbox, "redirected.yaml");
+    await rename(overlay, target);
+    await symlink(target, overlay);
+  } else {
+    await rm(overlay);
+    await mkdir(overlay);
+  }
+  await writeFile(
+    resolve(linked, ".hack/docker-compose.yml"),
+    "services:\n  api:\n    image: busybox\n"
+  );
+  expect(
+    await projectEnvConfigExists({ projectDir: resolve(linked, ".hack") })
+  ).toBe(true);
+  const primaryBefore = await snapshot(primary);
+  for (const args of [
+    ["env", "set", "--local", "FAKE_CLI", "fake-cli-value"],
+    ["env", "unset", "--local", "FAKE_CLI"],
+  ]) {
+    const result = await runHack(linked, args, sandbox);
+    expect(result.output).not.toContain("fake-cli-value");
+    expect(await readdir(resolve(linked, ".hack"))).not.toContain(".env");
+    if (result.exitCode !== 0) {
+      expect(result.output).toContain(
+        `Refusing redirected or non-regular primary local env file: ${overlay}`
+      );
+    }
+  }
+  expect(await snapshot(primary)).toEqual(primaryBefore);
+}, 30_000);
+
+test("newline-containing checkout paths cleanly disable inheritance", async () => {
+  const { primary, linked, options } = await fixture({ nested: "line\nbreak" });
+  const before = await Promise.all([snapshot(primary), snapshot(linked)]);
+  const resolved = await resolveProjectEnvConfig(options);
+  expect(resolved?.globalEnv).toEqual({
+    BASE: "fake-base",
+    ORDER: "fake-tracked-overlay",
+  });
+  expect(await Promise.all([snapshot(primary), snapshot(linked)])).toEqual(
+    before
+  );
 });

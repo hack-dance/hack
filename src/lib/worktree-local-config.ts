@@ -1,5 +1,9 @@
 import { lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
+import {
+  PROJECT_CONFIG_FILENAME,
+  PROJECT_CONFIG_LEGACY_FILENAME,
+} from "../constants.ts";
 import { isSlimExecutionMode } from "./execution-mode.ts";
 import { listGitWorktrees } from "./git-worktree.ts";
 import { readProjectConfig } from "./project.ts";
@@ -20,7 +24,11 @@ type GitCheckoutDirs = {
   readonly gitDir: string;
 };
 
-/** One rev-parse per checkout yields both identity paths (common dir, git dir). */
+/**
+ * One rev-parse per checkout yields both identity paths (common dir, git dir).
+ * Output is line-framed (as is `worktree list --porcelain`), so paths containing
+ * newlines fail verification and inheritance stays off.
+ */
 async function readGitCheckoutDirs(opts: {
   readonly repoRoot: string;
 }): Promise<GitCheckoutDirs | null> {
@@ -116,6 +124,14 @@ export async function resolvePrimaryLocalProjectDir(opts: {
   ) {
     return null;
   }
+  // Primary checkouts never inherit; only a `.git` file marks a linked worktree.
+  const marker = await lstat(resolve(opts.projectRoot, ".git")).catch(
+    () => null
+  );
+  if (!marker?.isFile()) {
+    return null;
+  }
+  await assertProjectConfigReadable({ projectDir: opts.projectDir });
   const cfg = await readProjectConfig({
     ...opts,
     projectDirName: name,
@@ -130,7 +146,7 @@ export async function resolvePrimaryLocalProjectDir(opts: {
   if (!primaryRoot) {
     return null;
   }
-  // An unreadable config hides any opt-out, so a linked worktree fails closed.
+  // An invalid config hides any opt-out, so a linked worktree fails closed.
   if (cfg.parseError) {
     throw new Error("Cannot inherit local env with invalid project config");
   }
@@ -140,6 +156,29 @@ export async function resolvePrimaryLocalProjectDir(opts: {
     return null;
   }
   return candidate;
+}
+
+/**
+ * The config loader treats unreadable files as absent, which would hide a
+ * `worktree.inherit_local: false` opt-out; fail closed instead (path only).
+ */
+async function assertProjectConfigReadable(opts: {
+  readonly projectDir: string;
+}): Promise<void> {
+  for (const name of [
+    PROJECT_CONFIG_FILENAME,
+    PROJECT_CONFIG_LEGACY_FILENAME,
+  ]) {
+    const path = resolve(opts.projectDir, name);
+    try {
+      await readFile(path);
+      return;
+    } catch (error: unknown) {
+      if (!isEnoent(error)) {
+        throw new Error(`Cannot read project config: ${path}`);
+      }
+    }
+  }
 }
 
 /** Whether the primary checkout holds any local overlay this checkout could inherit. */
@@ -152,12 +191,11 @@ export async function hasPrimaryLocalInputs(opts: {
     return false;
   }
   const entries = await readdir(primaryDir, { withFileTypes: true });
+  // Match by name only: a symlinked or non-regular overlay must still route to
+  // the YAML commands so resolution can reject it instead of falling back to .env.
   return entries.some(
     (entry) =>
-      entry.isFile() &&
-      (entry.name === "hack.env.local.yaml" ||
-        (entry.name.startsWith("hack.env.") &&
-          entry.name.endsWith(".local.yaml")))
+      entry.name.startsWith("hack.env.") && entry.name.endsWith(".local.yaml")
   );
 }
 
@@ -171,8 +209,12 @@ export async function readPrimaryLocalFile(
     if (isEnoent(error)) {
       return null;
     }
-    throw new Error(`Cannot read primary local env file: ${path}`);
+    throw primaryLocalReadError(path);
   }
+}
+
+function primaryLocalReadError(path: string): Error {
+  return new Error(`Cannot read primary local env file: ${path}`);
 }
 
 function isEnoent(error: unknown): boolean {
@@ -184,15 +226,24 @@ function isEnoent(error: unknown): boolean {
   );
 }
 
-/** Inherited files must be regular files with no symlink redirection. */
+/**
+ * Inherited files must be regular files with no symlink redirection. Any
+ * filesystem error other than a missing file fails closed with the path only
+ * (macOS realpath raises EACCES for unreadable files).
+ */
 export async function validatePrimaryLocalFile(path: string): Promise<void> {
-  const info = await lstat(path).catch((error: unknown) => {
+  const failClosed = (error: unknown): null => {
     if (isEnoent(error)) {
       return null;
     }
-    throw new Error(`Cannot inspect primary local env file: ${path}`);
-  });
-  if (info && (!info.isFile() || (await realpath(path)) !== resolve(path))) {
+    throw primaryLocalReadError(path);
+  };
+  const info = await lstat(path).catch(failClosed);
+  if (!info) {
+    return;
+  }
+  const real = info.isFile() ? await realpath(path).catch(failClosed) : "";
+  if (real !== null && real !== resolve(path)) {
     throw new Error(
       `Refusing redirected or non-regular primary local env file: ${path}`
     );

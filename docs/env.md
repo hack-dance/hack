@@ -131,7 +131,9 @@ the current checkout. Inheritance is disabled by `CI=1` or `CI=true`,
 `HACK_EXECUTION_MODE=slim` or `codex`, `HACK_WORKTREE_INHERIT_LOCAL=0` (also
 `false`, `off`, or `no`), or `"worktree": { "inherit_local": false }` in
 `.hack/hack.config.json`. Symlinked primary project directories are ignored;
-symlinked, non-regular, or unreadable primary local files are rejected. A worktree
+symlinked, non-regular, or unreadable primary local files are rejected, and an
+unreadable `.hack/hack.config.json` in a linked worktree is an error rather than a
+silent opt-in. Checkout paths containing newlines never inherit. A worktree
 whose only env input is an inherited overlay still uses the YAML commands. If every
 input of a materialized `.hack/.env` later disappears (including by opting out),
 `hack doctor` reports the output as obsolete.

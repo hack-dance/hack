@@ -301,7 +301,8 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
 
 ## Files and directories
 
-- `~/.hack/` (default; override the whole root with `HACK_HOME`)
+- `~/.hack/` (default; override the whole root with `HACK_HOME`, which must be an absolute path.
+  An empty or relative `HOME` is treated as unset, so global state never lands under the cwd.)
   - `hack.config.json` (global config: control-plane defaults, gateway bind/port/allowWrites,
     extension settings)
   - `daemon/hackd.sock`

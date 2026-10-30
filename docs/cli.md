@@ -322,7 +322,8 @@ caches. Keep `.hack/.gitignore` committed. If generated files ever leak into git
 `.branch/compose.<branch>.runtime.override.yml` for branch instances. See [Architecture](architecture.md)
 for the full file map.
 
-The global config root defaults to `~/.hack`; override it with `HACK_HOME`.
+The global config root defaults to `~/.hack`; override it with `HACK_HOME` (an absolute path;
+a relative value is refused). An empty or relative `HOME` falls back to the OS home directory.
 
 ## Lifecycle
 

@@ -6,6 +6,7 @@ import {
 } from "../constants.ts";
 import { isSlimExecutionMode } from "./execution-mode.ts";
 import { listGitWorktrees } from "./git-worktree.ts";
+import { isRecord } from "./guards.ts";
 import { readProjectConfig } from "./project.ts";
 import { exec } from "./shell.ts";
 
@@ -131,7 +132,6 @@ export async function resolvePrimaryLocalProjectDir(opts: {
   if (!marker?.isFile()) {
     return null;
   }
-  await assertProjectConfigReadable({ projectDir: opts.projectDir });
   const cfg = await readProjectConfig({
     ...opts,
     projectDirName: name,
@@ -146,13 +146,15 @@ export async function resolvePrimaryLocalProjectDir(opts: {
   if (!primaryRoot) {
     return null;
   }
-  // An invalid config hides any opt-out, so a linked worktree fails closed.
-  if (cfg.parseError) {
-    throw new Error("Cannot inherit local env with invalid project config");
-  }
+  await assertProjectConfigReadable({ projectDir: opts.projectDir });
   const candidate = resolve(primaryRoot, name);
   const info = await lstat(candidate).catch(() => null);
-  if (!info?.isDirectory() || (await realpath(candidate)) !== candidate) {
+  if (
+    !info?.isDirectory() ||
+    (await realpath(candidate).catch(() => {
+      throw primaryLocalReadError(candidate);
+    })) !== candidate
+  ) {
     return null;
   }
   return candidate;
@@ -170,14 +172,28 @@ async function assertProjectConfigReadable(opts: {
     PROJECT_CONFIG_LEGACY_FILENAME,
   ]) {
     const path = resolve(opts.projectDir, name);
+    let text: string;
     try {
-      await readFile(path);
-      return;
+      text = await readFile(path, "utf8");
     } catch (error: unknown) {
       if (!isEnoent(error)) {
         throw new Error(`Cannot read project config: ${path}`);
       }
+      continue;
     }
+    let parsed: unknown;
+    try {
+      parsed =
+        name === PROJECT_CONFIG_FILENAME
+          ? JSON.parse(text)
+          : Bun.TOML.parse(text);
+    } catch {
+      throw new Error("Cannot inherit local env with invalid project config");
+    }
+    if (!isRecord(parsed)) {
+      throw new Error("Cannot inherit local env with invalid project config");
+    }
+    return;
   }
 }
 

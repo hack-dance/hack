@@ -251,6 +251,39 @@ test.each([
   });
 });
 
+test.each([
+  "hack.config.json",
+  "hack.toml",
+])("unrelated field errors in %s do not block env resolution", async (name) => {
+  const { primary, linked, options } = await fixture();
+  await rm(resolve(linked, ".hack/hack.config.json"));
+  await writeFile(
+    resolve(linked, ".hack", name),
+    name === "hack.config.json"
+      ? JSON.stringify({ open: { prefer: "bogus" } })
+      : '[open]\nprefer = "bogus"\n'
+  );
+  expect((await resolveProjectEnvConfig(options))?.globalEnv.ORDER).toBe(
+    "fake-primary-overlay"
+  );
+  await rm(resolve(primary, ".hack/hack.env.local.yaml"));
+  await rm(resolve(primary, ".hack/hack.env.qa.local.yaml"));
+  expect((await resolveProjectEnvConfig(options))?.globalEnv.ORDER).toBe(
+    "fake-tracked-overlay"
+  );
+});
+
+test.each([
+  "{",
+  "[]",
+])("invalid project config %s fails closed", async (text) => {
+  const { linked, options } = await fixture();
+  await writeFile(resolve(linked, ".hack/hack.config.json"), text);
+  await expect(resolveProjectEnvConfig(options)).rejects.toThrow(
+    "Cannot inherit local env with invalid project config"
+  );
+});
+
 test("primary checkout keeps its own local behavior", async () => {
   const { primary, options } = await fixture();
   const resolved = await resolveProjectEnvConfig({
@@ -536,7 +569,7 @@ test.skipIf(runningAsRoot)(
     await chmod(dir, 0o000);
     try {
       await expect(resolveProjectEnvConfig(options)).rejects.toThrow(
-        `Cannot read primary local env file: ${resolve(dir, "hack.env.local.yaml")}`
+        `Cannot read primary local env file: ${dir}`
       );
     } finally {
       await chmod(dir, 0o755);
@@ -545,7 +578,7 @@ test.skipIf(runningAsRoot)(
 );
 
 test.skipIf(runningAsRoot).each(["hack.config.json", "hack.toml"])(
-  "unreadable %s fails closed before any Git work",
+  "unreadable %s fails closed after verifying the worktree family",
   async (name) => {
     const { sandbox, linked, options } = await fixture();
     const path = resolve(linked, ".hack", name);
@@ -564,9 +597,32 @@ test.skipIf(runningAsRoot).each(["hack.config.json", "hack.toml"])(
       await expect(resolveProjectEnvConfig(options)).rejects.toThrow(
         `Cannot read project config: ${path}`
       );
-      expect(await calls()).toBe(0);
+      expect(await calls()).toBe(3);
     } finally {
       await chmod(path, 0o644);
+    }
+  }
+);
+
+test.skipIf(runningAsRoot)(
+  "a separate-git-dir checkout does not inherit or validate unrelated config",
+  async () => {
+    const { primary, sandbox, options } = await fixture();
+    const gitDir = resolve(sandbox, "separate.git");
+    await rename(resolve(primary, ".git"), gitDir);
+    await writeFile(resolve(primary, ".git"), `gitdir: ${gitDir}\n`);
+    const configPath = resolve(primary, ".hack/hack.config.json");
+    await chmod(configPath, 0o000);
+    try {
+      expect(
+        await resolvePrimaryLocalProjectDir({
+          ...options,
+          projectRoot: primary,
+          projectDir: resolve(primary, ".hack"),
+        })
+      ).toBeNull();
+    } finally {
+      await chmod(configPath, 0o644);
     }
   }
 );

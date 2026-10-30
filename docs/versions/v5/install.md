@@ -26,16 +26,13 @@ The candidate is invoked explicitly:
 
 It uses the native backend by default. It leaves the stable Homebrew executable in place. Follow [Getting started](getting-started.md) to choose a runtime path.
 
-## Set up local Compose routing
+## Prepare the native runtime
 
-Before starting a Compose project on a new development host:
+The published next.5 launcher enforces native selection. Setting
+`HACK_RUNTIME_BACKEND=compose` before this launcher does not select Compose.
+Choose v4 in Docs version for stable Compose installation and local routing.
 
-```sh
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" global install
-```
-
-Read the prompts. This configures shared local routing, DNS and certificate
-trust and can require native approval. Confirm the Docker-compatible engine is
-running. Do not expect a remote host's local names or trust to appear on your
-laptop automatically. Follow the matching project guide if setup reports a
-missing prerequisite. This documentation does not perform these host changes.
+For native use, follow [Native preparation](../guides/native-candidate.md) for the
+provider, pinned image, source sharing and routing. Confirm the supported project
+subset before adoption. DNS, trust and source-sharing changes require the native
+approvals described there. Installation alone does not perform that preparation.

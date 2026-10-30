@@ -1,21 +1,25 @@
 # Work on another branch
 
-Start from a configured repository. Read [worktree behavior](../../guides/development-runtime-safety.md)
-for this version before choosing shared or isolated files.
+A git worktree separates source edits. The published native command slice does not
+automatically infer its namespace from that branch. Prepare the supported source
+share and configuration before selecting an explicit namespace:
 
 ```sh
 git worktree add ../project-review -b review-work
 cd ../project-review
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" up --detach
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" open
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" ps
+"$HOME/.hack-next/bin/hack-next" --branch review-work up
 ```
 
-Linked worktrees normally select a branch instance automatically. Confirm the
-selected instance and URL in the output; detached worktrees need an explicit
-`--branch` choice. Stop the instance from its owning checkout when finished.
-A separate branch environment does not automatically isolate external databases,
-shared bind-mounted files or credentials.
+Keep that foreground owner open. Inspect and stop the same namespace from another
+terminal:
 
-Coordinate with people and agents: name the checkout/branch, assign service and
-file ownership, and keep one owner for lifecycle operations against an instance.
+```sh
+"$HOME/.hack-next/bin/hack-next" --branch review-work ps
+"$HOME/.hack-next/bin/hack-next" --branch review-work down
+```
+
+Preparation and project selection must refer to the new checkout. This is not
+automatic source-share enrollment. External databases, shared files and credentials
+may remain shared. Coordinate a single lifecycle owner with people and agents.
+Choose v4 for automatic Compose worktree instances; see the
+[native command matrix](../../reference/native-authored-commands.md) for this version.

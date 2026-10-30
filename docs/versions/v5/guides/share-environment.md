@@ -4,8 +4,7 @@ Read [Environment and secrets](../../env.md) before choosing a backend. Commit
 shareable configuration; keep decryption keys and local overrides separate.
 
 ```sh
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" env list
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" env explain API_URL --service web --target compose
+"$HOME/.hack-next/bin/hack-next" env list
 ```
 
 Inspect masked values and provenance rather than printing credentials. Scope

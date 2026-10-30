@@ -1,22 +1,21 @@
 # Choose where a command runs
 
-These examples use the Compose backend. Use the candidate launcher explicitly, and stop stable Hack processes before sharing its Compose home. Native commands have a separate preparation and support contract.
-
-Use `exec` when the target service is already running. Use `run` for a one-off
-command in a fresh service container. Use `host exec` for a command that must run
-on the current host with resolved project environment.
+Use the explicit candidate launcher for this version. Installing it does not
+replace the stable `hack` executable. Its native `exec` command runs a
+noninteractive command in an existing selected service:
 
 ```sh
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" exec web -- node --version
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" run web node --version
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" host exec --scope web -- node --version
+"$HOME/.hack-next/bin/hack-next" --path /absolute/prepared-project exec web -- node --version < /dev/null
 ```
 
-Replace `web` and the command with your project's actual service and tool. These
-examples report the installed Node version in three different execution contexts;
-they do not install Node. The host path needs Node on the host. Inspect service
-prerequisites and the matching [reference](../../reference/cli.md) before running
-migrations or other data-changing commands.
+This assumes a prepared native project, a running `web` service and Node installed
+in that workload. It reports the workload's Node version; it does not install
+anything. Closed stdin and no TTY are required by the native contract.
 
-An agent uses the same execution model. Ask it to read project instructions, select
-the intended host and instance, and inspect state before starting new work.
+For one-off containers, Compose host commands or interactive sessions, choose v4
+and follow its separate execution-context guide. Do not substitute bare `hack`
+into a candidate recipe: it can select a different version and home.
+
+An agent should identify the version, host, project and native generation before
+executing a command. Data-changing commands such as migrations need their own
+project-specific authorization and checks. See [native command support](../../reference/native-authored-commands.md).

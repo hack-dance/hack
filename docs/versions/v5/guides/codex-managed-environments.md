@@ -39,17 +39,17 @@ profile, and do not print the key or decrypted environment as a diagnostic.
 Provider setup and agent phases may have different secret lifetimes: verify the
 actual task phase instead of assuming setup exports survive.
 
-Inspect masked configuration, then exercise a harmless project command:
+On a compatible, explicitly prepared Mac, inspect the selected candidate itself:
 
 ```sh
-hack env list
-hack host exec --scope api -- bun --version
+"$HOME/.hack-next/bin/hack-next" --version
+"$HOME/.hack-next/bin/hack-next" --path /absolute/prepared-project ps
 ```
 
-This assumes the selected compatible CLI is `hack` on PATH and the project declares
-an `api` scope with Bun available on that host. Replace those details with the
-project's real tool and scope. Verify application access separately; a masked env
-listing does not prove credentials work.
+These are native observations after provider/project preparation, not portable
+Linux examples. For a Linux agent's env resolution and host commands, choose v4
+and its portable guide. Keep application health and actual service access separate
+from version/status observations.
 
 Set `HACK_NO_INTERACTIVE=1` for scripted work and inspect explicit failures rather
 than waiting for a terminal prompt. Restart required services after snapshot

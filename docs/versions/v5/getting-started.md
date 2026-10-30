@@ -1,49 +1,46 @@
 # Getting started
 
-Complete [Install](install.md) first. These examples use the Compose backend. Use the candidate launcher explicitly, and stop stable Hack processes before sharing its Compose home. Native commands have a separate preparation and support contract.
+Complete [Install](install.md) and [Native preparation](../guides/native-candidate.md)
+first. This version documents the published next.5 native candidate. For Compose,
+choose v4 in Docs version; this launcher's backend cannot be overridden to Compose.
 
-## Prepare one repository
+## Prepare one project
 
-Use a repository you own. Check its README, toolchain and required services before
-starting it. For an existing Compose app, review its Compose files and let
-[Project setup](../guides/init-project.md) guide the configuration. For a project
-without Compose, initialize Hack and define the services it needs; Hack does not
-guess an application deployment from source code alone.
+Use the provider pool, image, private native home and explicit source-sharing
+contract from Native preparation. Review the supported authored project subset in
+[Authored commands](../reference/native-authored-commands.md). A Compose repository
+is not automatically adopted, and installing the CLI does not migrate data.
 
-```sh
-cd your-project
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" init
-```
+Work from the explicitly prepared repository. Do not run the following commands
+against an unprepared application or infer that every Compose feature is supported.
 
-Review the generated `.hack/` configuration. Keep keys and local machine state out
-of git. Set up shared local routing using the version's Install instructions before
-expecting HTTPS URLs to work.
-
-## Start, inspect and stop
+## Start and observe
 
 ```sh
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" up --detach
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" open
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" ps
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" logs --no-follow --tail 50
+"$HOME/.hack-next/bin/hack-next" --path /absolute/prepared-project up
 ```
 
-Expected: the declared services start, `open` finds the instance URL, and `ps`
-shows service state. Visit the app and run its normal health check; a URL or a
-running container alone does not prove the app works. If startup fails, read its
-error and run `HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" doctor` before trying again.
+This is foreground startup: keep the terminal open. In another terminal, inspect
+the same saved project and read a finite log snapshot (replace `web` with its real
+service name):
 
 ```sh
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" down
+"$HOME/.hack-next/bin/hack-next" --path /absolute/prepared-project ps
+"$HOME/.hack-next/bin/hack-next" --path /absolute/prepared-project logs web --no-follow --tail 100
 ```
 
-Stop releases project-owned runtime processes. It is not an instruction to delete
-application data or prune shared caches. See [Run and inspect](guides/run-project.md)
-for selected services and log history.
+Expected: current service state and finite service output from the selected native
+run. Visit the endpoint established during routing preparation and run the app's
+own health checks. CLI status does not prove application compatibility.
 
-## Native runtime
+## Stop
 
-Native execution needs separate provider, image, source-sharing and routing
-preparation plus explicit project adoption. Follow [Native preparation](../guides/native-candidate.md)
-and its command support matrix before using that backend. Installing a candidate
-does not boot a VM, migrate volumes or prove application compatibility.
+Ctrl-C in the foreground terminal requests owned shutdown. Alternatively:
+
+```sh
+"$HOME/.hack-next/bin/hack-next" --path /absolute/prepared-project down
+```
+
+Inspect failures before retrying. `--detach`, following logs, service subsets and
+other unsupported forms must not be borrowed from v4 Compose examples. See the
+version's support matrix for the exact admitted commands and recovery boundaries.

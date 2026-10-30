@@ -1,3 +1,9 @@
+## [4.2.5](https://github.com/hack-dance/hack/compare/v4.2.4...v4.2.5) (2026-10-30)
+
+### Bug Fixes
+
+* **logs:** escape LogQL selector regex once and hint on empty Loki follow (HACK-1344) ([#526](https://github.com/hack-dance/hack/issues/526)) ([3312658](https://github.com/hack-dance/hack/commit/3312658f77e74b8b5c2da41f6cc324ad4e949c6b))
+
 ## [4.2.4](https://github.com/hack-dance/hack/compare/v4.2.3...v4.2.4) (2026-10-27)
 
 ### Bug Fixes

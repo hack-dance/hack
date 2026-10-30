@@ -249,7 +249,8 @@ Thrown usage errors with an explicit `--json` token become E_USAGE; other thrown
 | projects prune | shared envelope, preview/apply variants below | dry-run reports candidates; apply reports removals |
 | project owner show | bare ownership object above | success 0 |
 | env backend status/use | bare strategy objects above | success 0 |
-| env list/apply | bare modern-YAML or legacy report below | apply is not a universal transaction receipt |
+| env list | bare modern-YAML or legacy report below | raw report may include values |
+| env apply | forwards restart service --path repo with selected env/JSON flags | returns child restart output and exit code, not an env-list report; native subset/JSON limits still apply |
 | env explain | bare value-free explanation below | inspect available/scope; no value |
 | doctor | shared envelope with checks[], summary:string[], counts.{ok,warn,error}:numbers | can emit ok:true and exit 1 when checks contain errors |
 | usage | bare projects[], total nullable, host[], host_total nullable, runtime_ok:boolean, runtime_error nullable; details adds containers[] | failures exit 1; optional error string. No samples exits 0 with warning:no_usage_samples. Watch uses the interactive redraw path even with JSON selected; do not treat watch as a JSON report stream. |
@@ -274,7 +275,7 @@ Daemon status fields: status, running, api_ok, api_reachable, api_compatible, pr
 
 Env explain: key:string, available/secret:boolean, format:project_env_config_v1/legacy_env_contract; environment/effective_scope/source:string|null; requested_scope:string, target:host/compose, delivered_to/precedence:string[]. It emits no value.
 
-Env list/apply: project and env_selection (requested/default/effective selections, overlay_path, overlay_exists). Modern YAML adds format:project_env_config_v1, selected_scope, scopes, files, unknown_scopes, status/storage descriptions, vars[], missing_required. Legacy reports have storage/status, materialization and key projections. Rows in vars[] contain key/required/source/services/resolved_from/storage/value. Secret values are masked unless show-secrets is explicitly selected; ordinary plaintext is not thereby hidden. Modern reports include materialized when show-secrets is selected, otherwise materialized_keys. Legacy reports additionally contain warnings[] (kind/key/overlay_path/services/message). CLI reports differ from MCP's narrower value-free keys projection. Nested modern/legacy variants remain versioned report shapes; application values are not new stable reference keys.
+Env list: project and env_selection (requested/default/effective selections, overlay_path, overlay_exists). Modern YAML adds format:project_env_config_v1, selected_scope, scopes, files, unknown_scopes, status/storage descriptions, vars[], missing_required. Legacy reports have storage/status, materialization and key projections. Rows in vars[] contain key/required/source/services/resolved_from/storage/value. Secret values are masked unless show-secrets is explicitly selected; ordinary plaintext is not thereby hidden. Modern reports include materialized when show-secrets is selected, otherwise materialized_keys. Legacy reports additionally contain warnings[] (kind/key/overlay_path/services/message). CLI reports differ from MCP's narrower value-free keys projection. Nested modern/legacy variants remain versioned report shapes; application values are not new stable reference keys.
 
 ## Compose/Loki log records
 

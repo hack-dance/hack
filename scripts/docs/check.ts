@@ -125,7 +125,7 @@ console.log(
 /** Keep retiring instruction management out of the recommended v5 corpus. */
 function assertExplicitAgentContent(text: string): void {
   if (
-    /(?:^|[\s`"'|])(?:[^\s`"'|]*\/)?hack(?:-cli|-next|-v5)?["']?\s+(?:agent prime|setup (?:cursor|claude|codex|agents|sync|mcp)|mcp install)(?=[\s`])/m.test(
+    /(?:^|[\s`"'|])(?:[^\s`"'|]*\/)?hack(?:-cli|-next|-v5)?["']?\s+(?:agent prime|setup (?:cursor|claude|codex|agents|sync|mcp)|mcp install)(?=[\s`]|$)/m.test(
       text
     ) ||
     /hack init[^\n]*--with/.test(text) ||

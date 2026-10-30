@@ -14,6 +14,7 @@ const {
   isOwnedComposeProject,
   recordOwnedFixture,
   recoverStaleOwnership,
+  settleRunOwnership,
   sweepOwnedComposeResources,
 } = await import("./e2e/docker-ownership.ts");
 const { checkScenarioDockerLeaks, describeDockerLeak, runScenarios } =
@@ -278,5 +279,39 @@ describe("e2e docker ownership", () => {
     } finally {
       process.env.HACK_E2E_OWNERSHIP_DIR = journalDir;
     }
+  });
+
+  test("end of run keeps the journal until the full sweep succeeds", async () => {
+    recordOwnedFixture({ name: "e2e-5e771e" });
+    const journal = join(journalDir, `${process.pid}.json`);
+    const volume: FakeResource = {
+      kind: "volume",
+      id: "e2e-5e771e_data",
+      name: "e2e-5e771e_data",
+      project: "e2e-5e771e",
+    };
+    const busy = fakeDocker([volume]);
+    const realDocker = busy.docker;
+    const refuseVolumeRm: DockerRunner = async (args) =>
+      args[0] === "volume" && args[1] === "rm"
+        ? { exitCode: 1, stdout: "", stderr: "volume is in use" }
+        : await realDocker(args);
+    const first = await settleRunOwnership({ docker: refuseVolumeRm });
+    expect(first.journalCleared).toBe(false);
+    expect(first.sweep.failed.map((failure) => failure.resource.name)).toEqual([
+      "e2e-5e771e_data",
+    ]);
+    expect(await Bun.file(journal).exists()).toBe(true);
+
+    const down = await settleRunOwnership({
+      docker: fakeDocker([volume], { available: false }).docker,
+    });
+    expect(down.journalCleared).toBe(false);
+    expect(await Bun.file(journal).exists()).toBe(true);
+
+    const second = await settleRunOwnership({ docker: realDocker });
+    expect(second.journalCleared).toBe(true);
+    expect(busy.resources).toEqual([]);
+    expect(await Bun.file(journal).exists()).toBe(false);
   });
 });

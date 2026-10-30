@@ -1,12 +1,11 @@
 import {
-  clearOwnershipJournal,
   describeResources,
   listFixtureNetworks,
   listOwnedNetworks,
   ownedFixtureNames,
   recoverStaleOwnership,
   runDocker,
-  sweepComplete,
+  settleRunOwnership,
   sweepOwnedComposeResources,
 } from "./docker-ownership.ts";
 import { runIsolationCanary, runScenarios, type Scenario } from "./harness.ts";
@@ -202,7 +201,10 @@ function installInterruptCleanup(): void {
 
 /**
  * After all scenarios: count fixture networks again and fail the run when
- * any network owned by this run is still present (sweeping it first).
+ * any network owned by this run is still present. A full sweep of the run's
+ * owned resources always follows; the ownership journal is cleared only when
+ * that sweep listed every resource kind and every removal succeeded, so a
+ * later run can still reclaim anything left.
  */
 async function finishDockerRun(opts: {
   readonly networksBefore: number | null;
@@ -212,23 +214,25 @@ async function finishDockerRun(opts: {
   const after = await listFixtureNetworks({ docker: runDocker });
   if (owned === null || after === null || opts.networksBefore === null) {
     process.stdout.write("\nnetwork check skipped: docker network ls failed\n");
-    return false;
+  } else {
+    process.stdout.write(
+      `\nfixture networks: before=${opts.networksBefore} after=${after.length} left by this run=${owned.length}\n`
+    );
   }
-  process.stdout.write(
-    `\nfixture networks: before=${opts.networksBefore} after=${after.length} left by this run=${owned.length}\n`
-  );
-  if (owned.length === 0) {
-    await clearOwnershipJournal();
-    return false;
+  if (owned !== null && owned.length > 0) {
+    process.stdout.write(
+      `LEAK: this run left Docker networks: ${describeResources(owned)}\n`
+    );
   }
-  process.stdout.write(
-    `LEAK: this run left Docker networks: ${describeResources(owned)}\n`
-  );
-  const sweep = await sweepOwnedComposeResources({ docker: runDocker, names });
-  if (sweepComplete(sweep)) {
-    await clearOwnershipJournal();
+  const { sweep, journalCleared } = await settleRunOwnership({
+    docker: runDocker,
+  });
+  if (!journalCleared) {
+    process.stdout.write(
+      `ownership journal kept for a later run: sweep incomplete (could not list: ${sweep.unlisted.join(", ") || "none"}; failed removals: ${describeResources(sweep.failed.map((failure) => failure.resource)) || "none"})\n`
+    );
   }
-  return true;
+  return owned !== null && owned.length > 0;
 }
 
 await main();

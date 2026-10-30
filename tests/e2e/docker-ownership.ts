@@ -140,6 +140,24 @@ export async function clearOwnershipJournal(): Promise<void> {
 }
 
 /**
+ * End of run: sweep everything this process owns and clear its journal only
+ * when the sweep listed every resource kind and every removal succeeded.
+ */
+export async function settleRunOwnership(opts: {
+  readonly docker: DockerRunner;
+}): Promise<{ readonly sweep: SweepResult; readonly journalCleared: boolean }> {
+  const sweep = await sweepOwnedComposeResources({
+    docker: opts.docker,
+    names: ownedFixtureNames(),
+  });
+  const journalCleared = sweepComplete(sweep);
+  if (journalCleared) {
+    await clearOwnershipJournal();
+  }
+  return { sweep, journalCleared };
+}
+
+/**
  * List Compose-labelled resources of one kind. Returns null when docker is
  * unavailable, so callers can distinguish "none" from "could not look".
  */

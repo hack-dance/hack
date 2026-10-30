@@ -964,3 +964,48 @@ test("shipped skill inventory matches the generator and the integration doc", as
   }
   expect(doc).not.toContain("both skills");
 }, 15_000);
+
+test("install guidance branches on installed schema and real release assets without a Python default", () => {
+  const skill = renderHackInstallSkill();
+  const v2 =
+    skill
+      .split("### Standalone v2 channel")[1]
+      ?.split("### New Python-free installation")[0] ?? "";
+  expect(v2).toContain("hack.prerelease-install/v2");
+  expect(v2).toContain("<verified-root>/bin/hack-next");
+  expect(v2).not.toContain("manager.py");
+  const operations = [...v2.matchAll(/"\$candidate" --manager (\w+)/g)].map(
+    (match) => match[1]
+  );
+  expect(operations).toEqual(["status", "upgrade", "rollback", "stable"]);
+  expect(v2).toContain('export PATH="$HOME/.hack-next/bin:$PATH"');
+  const fresh =
+    skill
+      .split("### New Python-free installation")[1]
+      ?.split("### Legacy v1 channel")[0] ?? "";
+  for (const asset of [
+    "hack-next-install.sh",
+    "hack-next-manager-darwin-arm64",
+    "INSTALLER-SHA256SUMS",
+  ]) {
+    expect(fresh).toContain(asset);
+  }
+  expect(fresh).toContain("report that the Python-free route is unavailable");
+  expect(fresh).toContain("Do not silently install Python");
+  expect(fresh).toContain("next.5");
+  expect(fresh).not.toMatch(/https:\/\/[^\s]+\/hack-next-install\.sh/);
+  const legacy =
+    skill
+      .split("### Legacy v1 channel")[1]
+      ?.split("## Plugin and MCP selection")[0] ?? "";
+  expect(legacy).toContain("hack.prerelease-install/v1");
+  expect(legacy).toContain(
+    "explicitly accepts the legacy Python-dependent path"
+  );
+  expect(legacy).toContain("separate root");
+  expect(skill).toContain(
+    "verified executable in a separately scoped integration"
+  );
+  expect(skill).toContain("Never use a stable MCP tool to mutate a candidate");
+  expect(skill).toContain("does not establish that every optional setup or");
+});

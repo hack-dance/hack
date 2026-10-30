@@ -42,6 +42,10 @@ import {
 import { getRecord, getString, isRecord } from "./guards.ts";
 import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
+import {
+  resolvePrimaryLocalProjectDir,
+  validatePrimaryLocalFile,
+} from "./worktree-local-config.ts";
 
 const PROJECT_ENV_CONFIG_VERSION = 1 as const;
 const PROJECT_ENV_SECRETS_PROVIDER = "project_key" as const;
@@ -746,44 +750,49 @@ export async function resolveProjectEnvConfig(opts: {
           environment: selection.effectiveEnv ?? "default",
         });
 
-  if (
-    !(
-      defaultRead.exists ||
-      (overlayRead?.exists ?? false) ||
-      localDefaultRead.exists ||
-      (localOverlayRead?.exists ?? false)
-    )
-  ) {
+  const primaryDir = await resolvePrimaryLocalProjectDir(opts);
+  const inheritedReads: ProjectEnvConfigReadResult[] = [];
+  if (primaryDir !== null) {
+    const primaryDefaultPath = await resolveProjectEnvEffectiveLocalConfigPath({
+      projectRoot: dirname(primaryDir),
+      projectDir: primaryDir,
+      envName: null,
+    });
+    const paths = [{ path: primaryDefaultPath, environment: "default" }];
+    if (selection.effectiveEnv !== null) {
+      paths.push({
+        path: resolveProjectEnvLocalConfigPath({
+          projectDir: primaryDir,
+          envName: selection.effectiveEnv,
+        }),
+        environment: selection.effectiveEnv,
+      });
+    }
+    for (const input of paths) {
+      await validatePrimaryLocalFile(input.path);
+      const read = await readProjectEnvConfigFile(input);
+      if (read.parseError) {
+        throw new Error(`Failed to parse primary local env file: ${read.path}`);
+      }
+      inheritedReads.push(read);
+    }
+  }
+  const reads = [
+    defaultRead,
+    overlayRead,
+    ...inheritedReads,
+    localDefaultRead,
+    localOverlayRead,
+  ];
+  if (!reads.some((read) => read?.exists)) {
     return null;
   }
-
-  if (defaultRead.parseError) {
-    throw new Error(
-      `Failed to parse ${defaultRead.path}: ${defaultRead.parseError}`
-    );
+  for (const read of reads) {
+    if (read?.parseError) {
+      throw new Error(`Failed to parse ${read.path}: ${read.parseError}`);
+    }
   }
-  if (overlayRead?.parseError) {
-    throw new Error(
-      `Failed to parse ${overlayRead.path}: ${overlayRead.parseError}`
-    );
-  }
-  if (localDefaultRead.parseError) {
-    throw new Error(
-      `Failed to parse ${localDefaultRead.path}: ${localDefaultRead.parseError}`
-    );
-  }
-  if (localOverlayRead?.parseError) {
-    throw new Error(
-      `Failed to parse ${localOverlayRead.path}: ${localOverlayRead.parseError}`
-    );
-  }
-
-  const envLayers = [
-    defaultRead.exists ? defaultRead.config : null,
-    overlayRead?.exists ? overlayRead.config : null,
-    localDefaultRead.exists ? localDefaultRead.config : null,
-    localOverlayRead?.exists ? localOverlayRead.config : null,
-  ];
+  const envLayers = reads.map((read) => (read?.exists ? read.config : null));
   const merged = mergeProjectEnvConfigLayers({
     layers: envLayers,
     environment: selection.effectiveEnv ?? "default",
@@ -850,6 +859,11 @@ export async function resolveProjectEnvConfig(opts: {
   const files = [selection.defaultPath];
   if (selection.overlayPath && overlayRead?.exists) {
     files.push(selection.overlayPath);
+  }
+  for (const read of inheritedReads) {
+    if (read.exists) {
+      files.push(read.path);
+    }
   }
   if (localDefaultRead.exists) {
     files.push(selection.localDefaultPath);

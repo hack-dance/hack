@@ -1,3 +1,9 @@
+## [4.2.7](https://github.com/hack-dance/hack/compare/v4.2.6...v4.2.7) (2026-10-31)
+
+### Bug Fixes
+
+* keep branch usage out of the tracked tree (HACK-1351) ([#530](https://github.com/hack-dance/hack/issues/530)) ([83d71ac](https://github.com/hack-dance/hack/commit/83d71ac7319c130398aad4be965ea5be936d7c70))
+
 ## [4.2.6](https://github.com/hack-dance/hack/compare/v4.2.5...v4.2.6) (2026-10-30)
 
 ### Bug Fixes

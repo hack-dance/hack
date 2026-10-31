@@ -37,6 +37,7 @@ export const worktreeParallelUpScenario: Scenario = {
     const fixture = await createMonorepoFixture({
       parentDir: ctx.tempRoot,
       withHackConfig: true,
+      withHackGitignore: true,
     });
     const worktreePath = await addLinkedWorktree({ fixture, branch: BRANCH });
 
@@ -63,6 +64,8 @@ export const worktreeParallelUpScenario: Scenario = {
         message:
           "hack up --detach in the linked worktree (branch instance) should succeed",
       });
+      await expectCleanGitStatus({ cwd: worktreePath, after: "worktree up" });
+      await expectCleanGitStatus({ cwd: fixture.root, after: "worktree up" });
 
       const primaryUrl = await resolveOpenUrl({ ctx, cwd: fixture.root });
       const worktreeUrl = await resolveOpenUrl({ ctx, cwd: worktreePath });
@@ -87,6 +90,7 @@ export const worktreeParallelUpScenario: Scenario = {
         ctx,
         cwd: worktreePath,
       });
+      await expectCleanGitStatus({ cwd: worktreePath, after: "worktree exec" });
       expect({
         that:
           primaryMetadata?.branch === null &&
@@ -196,6 +200,7 @@ export const worktreeParallelUpScenario: Scenario = {
         codes: [0],
         message: "hack down in the worktree should stop the branch instance",
       });
+      await expectCleanGitStatus({ cwd: worktreePath, after: "worktree down" });
       const downPrimary = await ctx.cli({
         args: ["down"],
         cwd: fixture.root,
@@ -211,6 +216,26 @@ export const worktreeParallelUpScenario: Scenario = {
     }
   },
 };
+
+/**
+ * Runtime commands must keep volatile state (branch usage timestamps,
+ * generated compose files) out of the tracked tree: a linked worktree's
+ * `git status` stays empty across `up`, `exec` and `down` (HACK-1351).
+ */
+async function expectCleanGitStatus(opts: {
+  readonly cwd: string;
+  readonly after: string;
+}): Promise<void> {
+  const status = await runCommand({
+    argv: ["git", "status", "--porcelain", "--untracked-files=all"],
+    cwd: opts.cwd,
+  });
+  expect({
+    that: status.exitCode === 0 && status.stdout.trim().length === 0,
+    message: `git status --porcelain in ${opts.cwd} should be empty after ${opts.after}`,
+    result: status,
+  });
+}
 
 async function readContainerIds(opts: {
   readonly cwd: string;

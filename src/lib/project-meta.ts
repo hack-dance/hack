@@ -3,6 +3,7 @@ import { YAML } from "bun";
 import type { MuxSession } from "../mux/mux-backend.ts";
 import { getMuxBackends } from "../mux/mux-resolver.ts";
 import { parseSessionBase } from "../mux/session-names.ts";
+import { mergeBranchUsage, readBranchUsage } from "./branch-usage.ts";
 import type { BranchEntry } from "./branches.ts";
 import { readBranchesFile } from "./branches.ts";
 import { pathExists, readTextFile } from "./fs.ts";
@@ -272,11 +273,14 @@ function parseGitWorktreePorcelain(text: string): readonly GitWorktreeMeta[] {
 export async function resolveHackBranchesMeta(opts: {
   readonly projectDir: string;
 }): Promise<HackBranchesMeta> {
-  const read = await readBranchesFile({ projectDir: opts.projectDir });
+  const [read, usage] = await Promise.all([
+    readBranchesFile({ projectDir: opts.projectDir }),
+    readBranchUsage({ projectDir: opts.projectDir }),
+  ]);
   return {
     path: read.path,
     parseError: read.parseError ?? null,
-    branches: read.file.branches,
+    branches: mergeBranchUsage({ branches: read.file.branches, usage }),
   };
 }
 

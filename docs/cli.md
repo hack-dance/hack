@@ -189,6 +189,19 @@ Opt out:
 
 The primary checkout is unchanged: no `--branch` means the base instance.
 
+### Branch registry and usage
+
+Runtime commands never write tracked files. `hack up/down/restart/run/exec/logs` record when a
+branch instance was last used in machine-local `.hack/.internal/branch-usage.json` (ignored by the
+committed `.hack/.gitignore`, one per checkout), so `git status` stays clean in a linked worktree.
+
+`.hack/hack.branches.json` is the optional, committed branch registry. Only `hack branch add` and
+`hack branch remove` create or change it, and they record identity (`name`, `slug`, `note`,
+`created_at`) but no usage timestamp. Existing registries that already carry `last_used_at` are left
+as they are: runtime commands stop rewriting them, and `hack branch list` and `hack projects`
+show the machine-local time when this checkout has one, falling back to the committed value. You
+can delete the old `last_used_at` fields by hand at any time.
+
 ### Disposable cache volumes
 
 Compose preserves named volumes on ordinary `down`, which is correct for application data but can

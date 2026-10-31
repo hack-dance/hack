@@ -1,6 +1,11 @@
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import {
+  HACK_DIR_GITIGNORE_BEGIN_MARKER,
+  HACK_DIR_GITIGNORE_END_MARKER,
+  HACK_DIR_GITIGNORE_ENTRIES,
+} from "../../src/templates.ts";
 import { recordOwnedFixture } from "./docker-ownership.ts";
 import { runCommand } from "./harness.ts";
 
@@ -69,6 +74,11 @@ export async function createMonorepoFixture(opts: {
   readonly name?: string;
   readonly lifecycle?: LifecycleFixtureOptions;
   readonly oauthEnabled?: boolean;
+  /**
+   * Also commit the canonical `.hack/.gitignore` that `hack init` writes, so
+   * scenarios can assert that runtime commands leave `git status` clean.
+   */
+  readonly withHackGitignore?: boolean;
 }): Promise<MonorepoFixture> {
   const name = opts.name ?? randomProjectName();
   // Record ownership before anything can create Docker resources for it.
@@ -100,6 +110,17 @@ export async function createMonorepoFixture(opts: {
       lifecycle: opts.lifecycle,
       oauthEnabled: opts.oauthEnabled,
     });
+    if (opts.withHackGitignore === true) {
+      await Bun.write(
+        join(hackDir, ".gitignore"),
+        [
+          HACK_DIR_GITIGNORE_BEGIN_MARKER,
+          ...HACK_DIR_GITIGNORE_ENTRIES,
+          HACK_DIR_GITIGNORE_END_MARKER,
+          "",
+        ].join("\n")
+      );
+    }
   }
 
   await gitInitAndCommit({ root });

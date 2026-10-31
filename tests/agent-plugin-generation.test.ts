@@ -15,7 +15,6 @@ import {
   renderMcpPluginManifests,
   renderMcpServers,
   renderPluginReferences,
-  renderPluginRule,
   renderPluginSkill,
 } from "../scripts/generate-agent-plugins.ts";
 import {
@@ -193,11 +192,11 @@ test("the hack package is skills-only and hack-mcp carries the only MCP declarat
     join(repoRoot, "plugins/hack/.claude-plugin/plugin.json")
   );
   expect(claude.skills).toBe("./skills/");
-  expect(claude.hooks).toBe("./hooks/claude-hooks.json");
+  expect(claude).not.toHaveProperty("hooks");
   const cursor = await readJsonObject(
     join(repoRoot, "plugins/hack/.cursor-plugin/plugin.json")
   );
-  expect(cursor.rules).toBe("./rules/");
+  expect(cursor).not.toHaveProperty("rules");
 });
 
 test("negative control: re-adding MCP to the skills package fails the shape check and generation", async () => {
@@ -434,10 +433,10 @@ test("bundled skills and rule match current canonical guidance", async () => {
   expect(await Bun.file(join(root, "skills/hack-remote/SKILL.md")).text()).toBe(
     renderHackRemoteSkill()
   );
-  expect(await Bun.file(join(root, "rules/hack.mdc")).text()).toBe(
-    renderPluginRule()
+  expect(await Bun.file(join(root, "rules/hack.mdc")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "hooks/claude-hooks.json")).exists()).toBe(
+    false
   );
-  expect(renderPluginRule()).toContain("alwaysApply: false");
   const pkg = await Bun.file(join(repoRoot, "package.json")).json();
   for (const client of ["codex", "claude", "cursor"]) {
     const manifest = await Bun.file(
@@ -556,7 +555,8 @@ test("release preparation updates both manifests and rendered guidance after bum
   const skill = await Bun.file(
     join(tempDir, "plugins/hack/skills/hack-cli/SKILL.md")
   ).text();
-  expect(skill).toContain("hack CLI v9.8.7");
+  expect(skill).toContain("does not inject project instructions");
+  expect(skill).not.toContain("Integration freshness");
   expect(skill).not.toContain("hack CLI v0.0.1");
 }, 15_000);
 
@@ -776,8 +776,6 @@ test("generated guidance surfaces never pin models, override permissions or run 
     "plugins/hack/.codex-plugin/plugin.json",
     "plugins/hack/.claude-plugin/plugin.json",
     "plugins/hack/.cursor-plugin/plugin.json",
-    "plugins/hack/hooks/claude-hooks.json",
-    "plugins/hack/rules/hack.mdc",
     "plugins/hack/skills/hack-cli/SKILL.md",
     ".claude-plugin/marketplace.json",
     ".cursor-plugin/marketplace.json",
@@ -794,8 +792,8 @@ test("generated guidance surfaces never pin models, override permissions or run 
   expect(
     await Bun.file(
       join(repoRoot, "plugins/hack/hooks/claude-hooks.json")
-    ).text()
-  ).toContain(HOOK_COMMAND);
+    ).exists()
+  ).toBe(false);
 });
 
 test("policy scan counts only parsed files and fails closed on unparsed config", () => {

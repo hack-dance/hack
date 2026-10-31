@@ -774,7 +774,7 @@ for (const name of [".env.default", ".env.local", ".env.staging.local"]) {
     await expectMigrationRefusal({
       repo,
       code: "E_CONFIG_INVALID",
-      reason: `${name} would become the default or a machine-local env layer`,
+      reason: `${JSON.stringify(name)} would become the default or a machine-local env layer`,
       hidden: [KEPT_VALUE, STAGING_VALUE],
     });
   });
@@ -1004,7 +1004,8 @@ test("the migration refuses a legacy .env.<name> whose name is not an overlay na
     resolve(repo.projectDir, ".env"),
     `KEPT_SETTING=${KEPT_VALUE}\n`
   );
-  for (const name of [".env.staging.old", ".env.Prod"]) {
+  // A control character in a file name must not break the one-line refusal.
+  for (const name of [".env.staging.old", ".env.Prod", ".env.bad\nname"]) {
     await writeFile(
       resolve(repo.projectDir, name),
       `SHARED_SETTING=${STAGING_VALUE}\n`
@@ -1013,7 +1014,7 @@ test("the migration refuses a legacy .env.<name> whose name is not an overlay na
   await expectMigrationRefusal({
     repo,
     code: "E_CONFIG_INVALID",
-    reason: "2 legacy .env.<name> files in",
+    reason: '".env.bad\\nname", ".env.Prod", ".env.staging.old" in',
     hidden: [KEPT_VALUE, STAGING_VALUE],
   });
 });

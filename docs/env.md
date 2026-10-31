@@ -1047,7 +1047,8 @@ files, when:
   rather than an overlay (`E_CONFIG_INVALID`). Rename or remove it;
 - a legacy `.hack/.env.<name>` file has a name that is not an overlay name (lowercase
   letters, digits and single dashes), such as `.env.staging.old` or `.env.Prod`
-  (`E_CONFIG_INVALID`). The error counts such files. Rename or remove them. Template and
+  (`E_CONFIG_INVALID`). The error names such files. Rename or remove them; a renamed
+  overlay is then selected by its new name (`--env <new-name>`). Template and
   backup copies (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.bak`,
   `.env.backup`, `.env.old`, `.env.orig`) are not overlays: they are neither migrated
   nor offered for cleanup;

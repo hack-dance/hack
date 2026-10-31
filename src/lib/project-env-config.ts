@@ -5216,6 +5216,16 @@ async function assertUntrackedMigrationLocalLayer(opts: {
  * Refuses, before anything is written, names that are not overlay names or
  * that would land on the default or a machine-local layer.
  */
+/**
+ * Names legacy overlay files for a refusal. File names are not values, but
+ * each is JSON-quoted so a control character cannot break the one-line message.
+ */
+function legacyOverlayFileList(names: readonly string[]): string {
+  return names
+    .map((name) => JSON.stringify(`${PROJECT_ENV_FILENAME}.${name}`))
+    .join(", ");
+}
+
 async function selectLegacyDotenvOverlays(opts: {
   readonly projectDir: string;
 }): Promise<readonly string[]> {
@@ -5238,14 +5248,14 @@ async function selectLegacyDotenvOverlays(opts: {
   if (invalidOverlays.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `${countLabel({ count: invalidOverlays.length, noun: "legacy .env.<name> file" })} in ${opts.projectDir} ${invalidOverlays.length === 1 ? "has" : "have"} a name that is not an overlay name (lowercase letters, digits and single dashes). Rename or remove ${invalidOverlays.length === 1 ? "it" : "them"}, then retry.`,
+      reason: `${legacyOverlayFileList(invalidOverlays)} in ${opts.projectDir} ${invalidOverlays.length === 1 ? "is not named" : "are not named"} like an overlay (lowercase letters, digits and single dashes). Rename ${invalidOverlays.length === 1 ? "it" : "them"} (and select the overlay by its new name with --env) or remove ${invalidOverlays.length === 1 ? "it" : "them"}, then retry.`,
     });
   }
   const reservedOverlays = overlayNames.filter(isReservedLegacyOverlayName);
   if (reservedOverlays.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `${reservedOverlays.map((name) => `${PROJECT_ENV_FILENAME}.${name}`).join(", ")} would become the default or a machine-local env layer rather than an overlay. Rename it to another overlay name or remove it, then retry.`,
+      reason: `${legacyOverlayFileList(reservedOverlays)} would become the default or a machine-local env layer rather than an overlay. Rename it to another overlay name or remove it, then retry.`,
     });
   }
   return overlayNames;

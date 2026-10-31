@@ -106,3 +106,17 @@ test("the hook formats staged paths with brackets, spaces and quotes and commits
   }
   expect(mustGit(repo, ["status", "--porcelain"])).toBe("");
 });
+
+test("the hook rejects the commit when Biome reports an error it cannot fix", async () => {
+  const repo = await scratchRepo();
+  const path = "site/app/docs/[[...slug]]/page.tsx";
+  await Bun.write(join(repo, path), 'export const value = eval("1");\n');
+  mustGit(repo, ["add", "--all"]);
+
+  const commit = git(repo, ["commit", "--quiet", "-m", "test: lint error"]);
+  expect(commit.exitCode).not.toBe(0);
+  expect(commit.output).toContain("noGlobalEval");
+  expect(
+    git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]).exitCode
+  ).not.toBe(0);
+});

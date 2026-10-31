@@ -14,7 +14,7 @@ fi
 # path (HACK-1665). Nested configs such as `site/biome.jsonc` still apply per file.
 BIOME="$(git rev-parse --show-toplevel)/node_modules/.bin/biome"
 if [ ! -x "$BIOME" ]; then
-  echo "pre-commit: Biome is not installed at $BIOME. Run: bun install --frozen-lockfile"
+  echo "pre-commit: Biome is not installed at $BIOME. Run: bun install --frozen-lockfile" >&2
   exit 1
 fi
 

@@ -342,19 +342,10 @@ export function createLifecycleProcessController(opts: {
         name: sessionName,
         cwd: opts.project.projectRoot,
         lifecycleOwnerToken: ownershipToken,
+        ...(backendName === "tmux" ? { env: opts.env } : {}),
       });
       if (!created.ok) {
         throw new Error(`Failed to create lifecycle session: ${sessionName}`);
-      }
-      if (backendName === "tmux") {
-        for (const [key, value] of Object.entries(opts.env)) {
-          await exec(
-            ["tmux", "set-environment", "-t", sessionName, key, value],
-            {
-              stdin: "ignore",
-            }
-          );
-        }
       }
     } catch (error: unknown) {
       await removeLifecycleStateEntryIfOwned({

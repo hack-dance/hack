@@ -8,15 +8,23 @@ export async function writeLifecycleMuxFixture(root: string): Promise<string> {
   const path = join(root, "tmux");
   const source = `#!${process.execPath}
 import { readFile, writeFile, appendFile, unlink } from "node:fs/promises";
-const args=process.argv.slice(2), file=process.env.HACK_TEST_MUX_STATE;
+let args=process.argv.slice(2);
+const file=process.env.HACK_TEST_MUX_STATE;
 if (!file) process.exit(92);
 await appendFile(file+".calls",JSON.stringify(args)+"\\n");
+if(args.join(" ")==="start-server ; source-file -") {
+ const source=await Bun.stdin.text();
+ const words=source.match(${String.raw`/"(?:\\.|[^"\\])*"/g`});
+ if(!words)process.exit(93);
+ args=words.map(word=>JSON.parse(word.replaceAll(String.fromCharCode(92)+"$","$")));
+}
 const selected=(flag)=>args[args.indexOf(flag)+1];
 let state=await readFile(file,"utf8").then(JSON.parse).catch(()=>null);
 switch(args[0]) {
 case "new-session":
  if(state) process.exit(91);
  state={name:selected("-s"),cwd:selected("-c"),token:"",windows:{}};
+ for(let i=0;i<args.length;i++)if(args[i]==="-e"&&args[i+1]?.startsWith("HACK_LIFECYCLE_OWNER_TOKEN="))state.token=args[i+1].slice("HACK_LIFECYCLE_OWNER_TOKEN=".length);
  await writeFile(file,JSON.stringify(state)); break;
 case "set-option":
  if(!state)process.exit(91);state.token=args.at(-1);await writeFile(file,JSON.stringify(state));break;

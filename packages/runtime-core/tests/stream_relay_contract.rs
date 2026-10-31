@@ -20,6 +20,99 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const BINARY: &str = concat!(env!("OUT_DIR"), "/stream-relay-host");
 
+fn control_pipe(command: &mut Command, payload: &[u8]) {
+    use std::os::fd::FromRawFd;
+    let mut fds = [-1; 2];
+    // SAFETY: two writable descriptor slots; successful pipe returns unique owned ends.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let (reader, mut writer) =
+        unsafe { (fs::File::from_raw_fd(fds[0]), fs::File::from_raw_fd(fds[1])) };
+    writer.write_all(payload).unwrap();
+    drop(writer);
+    command.stdin(Stdio::from(reader));
+}
+
+#[test]
+fn control_pipe_refuses_missing_short_malformed_and_extra_bytes_and_legacy_argv() {
+    for unix in [false, true] {
+        for payload in [
+            vec![],
+            vec![b'a'; 31],
+            vec![b'g'; 32],
+            vec![0; 32],
+            vec![b'a'; 33],
+        ] {
+            let mut command = Command::new(BINARY);
+            command.args([
+                if unix { "--publish-unix" } else { "--publish" },
+                if unix { "/unused/frontend" } else { "0" },
+                "/unused/upstream",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "1000",
+                "--control",
+                "/unused/control",
+                "--control-fd",
+                "0",
+            ]);
+            control_pipe(&mut command, &payload);
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(64));
+            assert!(output.stdout.is_empty());
+        }
+    }
+    for tail in [
+        vec!["--control-fd", "999999"],
+        vec!["--control-fd", "invalid"],
+        vec!["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+    ] {
+        let output = Command::new(BINARY)
+            .args([
+                "--publish",
+                "0",
+                "/unused/upstream",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "1000",
+                "--control",
+                "/unused/control",
+            ])
+            .args(tail)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(64));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn control_pipe_requires_eof_and_bounds_a_stalled_writer() {
+    let mut child = Command::new(BINARY)
+        .args([
+            "--publish",
+            "0",
+            "/unused/upstream",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "1000",
+            "--control",
+            "/unused/control",
+            "--control-fd",
+            "0",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut writer = child.stdin.take().unwrap();
+    writer
+        .write_all(b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .unwrap();
+    let start = Instant::now();
+    let output = child.wait_with_output().unwrap();
+    drop(writer);
+    assert_eq!(output.status.code(), Some(64));
+    assert!(output.stdout.is_empty());
+    assert!(start.elapsed() < Duration::from_secs(3));
+}
+
 /// Creates a new scratch root `/tmp/<prefix>-<pid>-<n>`. A name left behind by
 /// an earlier run whose PID is now reused is skipped, so a stale directory
 /// never fails a fresh test.
@@ -820,7 +913,8 @@ fn try_frontend_publisher(
         command
             .arg("--control")
             .arg(root.join("control.sock"))
-            .arg(control_token);
+            .args(["--control-fd", "0"]);
+        control_pipe(&mut command, control_token.as_bytes());
     }
     let mut startup = PublisherStartup { child: None, root };
     startup.child = Some(command.stdout(Stdio::piped()).spawn().unwrap());
@@ -1325,10 +1419,10 @@ fn control_startup_refuses_occupied_and_nonprivate_paths_without_retaining_publi
                 .arg(&upstream)
                 .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000", "--control"])
                 .arg(&control)
-                .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                .stdin(Stdio::null())
+                .args(["--control-fd", "0"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            control_pipe(&mut command, b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
             let child = command.spawn().unwrap();
             let pid = child.id();
             let output = child.wait_with_output().unwrap();

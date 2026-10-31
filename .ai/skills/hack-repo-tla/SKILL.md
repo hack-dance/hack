@@ -18,6 +18,25 @@ Use a small executable model to answer a concrete correctness question. Follow t
 - For source modeling or changes to variables/actions, read [model-review.md](references/model-review.md). Retain memory, ownership, persistence, and failure details when they affect the property under investigation.
 - For recorded runs, read [trace-mapping.md](references/trace-mapping.md). Trace replay checks the supplied observations, not all possible executions.
 
+## Release-critical coverage and statecharts
+
+Before a release-readiness claim, inventory the maintained models and the uncovered
+critical states in [v5 model coverage](../../../docs/reference/v5-model-coverage.md).
+Use [statecharts and model boundaries](references/statecharts.md) to document the
+same state/guard/action vocabulary. A diagram is a review aid, not a checked spec.
+Keep cancellation, genuine EOF, known producer exit and process-group absence
+separate; completion of a canceled read alone does not prove a producer stopped.
+Expose concurrent claims, partial publication, crash windows, stale incarnations,
+upgrade/rollback compatibility and retained uncertainty when they affect authority.
+
+Current upstream guidance was reviewed on 2026-10-28. TLC's official latest stable
+release remains 1.7.4; do not select a milestone or nightly from a search snippet.
+Apalache's official stable release is 0.62.4, checksum-pinned by the local helper.
+A pin update is not evidence that a model is supported by that checker. Record the
+actual executable/version, Java runtime, options and result for each checked model.
+Do not replace project memory/persistence/error semantics with generic upstream
+abstractions, install a global skill, or alter global security policy.
+
 ## Check and connect to code
 
 1. Write or update the `.tla` and matching `.cfg` together. Every action must specify the next value of every modeled variable, directly or through `UNCHANGED`. Start with safety; add fairness only when justified by the actual scheduler/protocol.

@@ -5566,7 +5566,9 @@ async function discoverLegacyOverlayNames(opts: {
   const names = new Set<string>();
   const entries = await readdir(opts.projectDir, { withFileTypes: true });
   for (const entry of entries) {
-    if (!entry.isFile()) {
+    // A symlinked overlay is an overlay too: skipping it would switch formats
+    // without its values. What it points at is checked when it is read.
+    if (!(entry.isFile() || entry.isSymbolicLink())) {
       continue;
     }
     if (!entry.name.startsWith(`${PROJECT_ENV_FILENAME}.`)) {

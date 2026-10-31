@@ -1133,3 +1133,49 @@ test("the migration creates machine-local layers as private 0600 files", async (
     expect({ name, mode }).toEqual({ name, mode: 0o600 });
   }
 });
+
+test("the migration carries a symlinked legacy overlay's values and refuses one it cannot read", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const target = resolve(repo.root, "shared-staging.env");
+  const targetText = `KEPT_SETTING=${KEPT_VALUE}-linked\n`;
+  await writeFile(target, targetText);
+  const link = resolve(repo.projectDir, ".env.staging");
+  await symlink(target, link);
+
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.migratedOverlays).toContain("staging");
+  expect(
+    await readFile(
+      resolve(repo.projectDir, "hack.env.staging.local.yaml"),
+      "utf8"
+    )
+  ).toContain(`${KEPT_VALUE}-linked`);
+  expect(migrated.cleanupCandidates).toContain(link);
+  expect(await readFile(target, "utf8")).toBe(targetText);
+
+  for (const place of [
+    (root: string) => resolve(root, "missing"),
+    (root: string) => root,
+  ]) {
+    const unusable = await createLegacyRepo();
+    await symlink(
+      place(unusable.root),
+      resolve(unusable.projectDir, ".env.staging")
+    );
+    const before = await hackDirEntries(unusable);
+    const error = await migrateLegacyRepo(unusable, {
+      migrateUndeclaredDotenv: true,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+    expect((error as LegacyDotenvMigrationRefusalError).code).toBe(
+      "E_PERMISSION"
+    );
+    expect(await hackDirEntries(unusable)).toEqual(before);
+  }
+});

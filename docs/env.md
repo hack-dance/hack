@@ -1061,7 +1061,9 @@ files, when:
   example because `.hack/.gitignore` is read-only and lacks Hack's managed block
   (`E_PATH_CONFLICT`). Make `.hack/.gitignore` writable, or ignore the path, and retry;
 - a legacy `.hack/.env` or overlay file exists but cannot be read, for example mode 000
-  or a dangling symlink (`E_PERMISSION`), so its values would be lost.
+  or a dangling symlink (`E_PERMISSION`), so its values would be lost. A symlinked overlay
+  that resolves to a readable file is migrated like a regular one; cleanup removes only the
+  link, never its target.
 
 Without `hack.env.json`, nothing lists values kept in a secret backend, so none are
 migrated: set them again with `hack env set --secret` after the migration. In that case `.hack/hack.config.json`, and

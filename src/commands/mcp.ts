@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { autocompleteMultiselect, isCancel } from "@clack/prompts";
+import { RETIRED_AGENT_AUTOMATION_MESSAGE } from "../agents/explicit-integrations.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -9,8 +10,6 @@ import {
 } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
-import type { AgentDocTarget } from "../mcp/agent-docs.ts";
-import { upsertAgentDocs } from "../mcp/agent-docs.ts";
 import {
   type McpBundleSelection,
   prepareMcpBundleLaunch,
@@ -61,21 +60,21 @@ const optDocs = defineOption({
   name: "docs",
   type: "boolean",
   long: "--docs",
-  description: "Update AGENTS.md and CLAUDE.md with hack usage",
+  description: "Retired: instruction injection is unavailable",
 } as const);
 
 const optAgentsMd = defineOption({
   name: "agentsMd",
   type: "boolean",
   long: "--agents-md",
-  description: "Update AGENTS.md with hack usage",
+  description: "Retired: instruction injection is unavailable",
 } as const);
 
 const optClaudeMd = defineOption({
   name: "claudeMd",
   type: "boolean",
   long: "--claude-md",
-  description: "Update CLAUDE.md with hack usage",
+  description: "Retired: instruction injection is unavailable",
 } as const);
 
 const optBundle = defineOption({
@@ -187,6 +186,9 @@ async function handleMcpInstall({
   readonly ctx: CliContext;
   readonly args: InstallArgs;
 }): Promise<number> {
+  if (args.options.docs || args.options.agentsMd || args.options.claudeMd) {
+    throw new CliUsageError(RETIRED_AGENT_AUTOMATION_MESSAGE);
+  }
   const scope = parseScope({ value: args.options.scope });
   const projectRoot = resolveProjectRoot({
     ctx,
@@ -210,26 +212,7 @@ async function handleMcpInstall({
     bundle: selectBundle({ ctx, args }),
   });
 
-  let exitCode = logMcpInstallResults({ results });
-
-  const docTargets = resolveDocTargets({
-    scope,
-    docs: args.options.docs === true,
-    agentsMd: args.options.agentsMd === true,
-    claudeMd: args.options.claudeMd === true,
-  });
-  if (docTargets.length > 0) {
-    exitCode = Math.max(
-      exitCode,
-      await upsertAgentDocsForMcpInstall({
-        ctx,
-        pathOpt: args.options.path,
-        targets: docTargets,
-      })
-    );
-  }
-
-  return exitCode;
+  return logMcpInstallResults({ results });
 }
 
 function logMcpInstallResults(opts: {
@@ -256,43 +239,6 @@ function logMcpInstallResults(opts: {
       message: `Updated ${result.target} MCP config at ${result.path ?? "unknown path"}`,
     });
   }
-  return exitCode;
-}
-
-async function upsertAgentDocsForMcpInstall(opts: {
-  readonly ctx: CliContext;
-  readonly pathOpt: string | undefined;
-  readonly targets: readonly AgentDocTarget[];
-}): Promise<number> {
-  const docsRoot = resolveDocsRoot({
-    ctx: opts.ctx,
-    pathOpt: opts.pathOpt,
-  });
-  const results = await upsertAgentDocs({
-    projectRoot: docsRoot,
-    targets: opts.targets,
-  });
-
-  let exitCode = 0;
-  for (const result of results) {
-    if (result.status === "error") {
-      logger.error({
-        message: result.message ?? `Failed to update ${result.path}`,
-      });
-      exitCode = 1;
-      continue;
-    }
-
-    if (result.status === "noop") {
-      logger.info({ message: `No changes for ${result.path}` });
-      continue;
-    }
-
-    logger.success({
-      message: `${result.status === "created" ? "Created" : "Updated"} ${result.path}`,
-    });
-  }
-
   return exitCode;
 }
 
@@ -371,13 +317,6 @@ function resolveProjectRoot(opts: {
   return resolve(opts.ctx.cwd, opts.pathOpt ?? ".");
 }
 
-function resolveDocsRoot(opts: {
-  readonly ctx: CliContext;
-  readonly pathOpt: string | undefined;
-}): string {
-  return resolve(opts.ctx.cwd, opts.pathOpt ?? ".");
-}
-
 async function resolveTargets(opts: {
   readonly all: boolean;
   readonly cursor: boolean;
@@ -430,46 +369,6 @@ function dedupeTargets(opts: {
 }): McpTarget[] {
   const seen = new Set<McpTarget>();
   const out: McpTarget[] = [];
-  for (const target of opts.targets) {
-    if (seen.has(target)) {
-      continue;
-    }
-    seen.add(target);
-    out.push(target);
-  }
-  return out;
-}
-
-function resolveDocTargets(opts: {
-  readonly scope: McpInstallScope;
-  readonly docs: boolean;
-  readonly agentsMd: boolean;
-  readonly claudeMd: boolean;
-}): AgentDocTarget[] {
-  if (opts.scope === "user") {
-    return [];
-  }
-
-  const targets: AgentDocTarget[] = [];
-  if (opts.docs || opts.agentsMd) {
-    targets.push("agents");
-  }
-  if (opts.docs || opts.claudeMd) {
-    targets.push("claude");
-  }
-
-  if (targets.length === 0) {
-    return ["agents", "claude"];
-  }
-
-  return dedupeDocTargets({ targets });
-}
-
-function dedupeDocTargets(opts: {
-  readonly targets: readonly AgentDocTarget[];
-}): AgentDocTarget[] {
-  const seen = new Set<AgentDocTarget>();
-  const out: AgentDocTarget[] = [];
   for (const target of opts.targets) {
     if (seen.has(target)) {
       continue;

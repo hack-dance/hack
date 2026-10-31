@@ -1,323 +1,76 @@
 import { join } from "node:path";
-
 import { createMonorepoFixture } from "../fixture.ts";
 import { expect, expectExit, type Scenario } from "../harness.ts";
 
-const MARKER_START = "<!-- hack:agent-docs:start -->";
-const MARKER_END = "<!-- hack:agent-docs:end -->";
-
-/**
- * Drift enforcement loop for agent docs:
- * upsert → check clean → corrupt the marker content → check reports STALE
- * with a non-zero exit → sync repairs → check clean again.
- *
- * Ordinary commands leave drift untouched; only explicit setup commands write.
- */
+/** Legacy automation commands refuse without adopting or repairing any instructions. */
 export const agentDocsSyncScenario: Scenario = {
   name: "agent-docs-sync",
   tier: "local",
-  summary: "setup sync --check detects stale AGENTS.md content and repairs",
+  summary: "retired agent automation preserves legacy and customized files",
   run: async (ctx) => {
     const fixture = await createMonorepoFixture({
       parentDir: ctx.tempRoot,
       withHackConfig: true,
     });
-    const agentsPath = join(fixture.root, "AGENTS.md");
-    const isolatedUserEnv = { HOME: ctx.hackHome };
-
-    const upsert = await ctx.cli({
-      args: ["setup", "agents", "--agents-md"],
-      cwd: fixture.root,
-    });
-    expectExit({
-      result: upsert,
-      codes: [0],
-      message: "hack setup agents --agents-md should create AGENTS.md",
-    });
-    const created = await Bun.file(agentsPath).text();
-    expect({
-      that: created.includes(MARKER_START) && created.includes(MARKER_END),
-      message: "AGENTS.md should contain the hack agent-docs markers",
-      result: upsert,
-    });
-
-    const cleanCheck = await ctx.cli({
-      args: ["setup", "agents", "--agents-md", "--check"],
-      cwd: fixture.root,
-    });
-    expectExit({
-      result: cleanCheck,
-      codes: [0],
-      message: "check right after upsert should report clean (exit 0)",
-    });
-
-    const corrupted = created.replace(
-      MARKER_START,
-      `${MARKER_START}\nSTALE-INJECTED-BY-E2E: this line drifts the managed content.`
-    );
-    expect({
-      that: corrupted !== created,
-      message: "failed to corrupt the marker region (marker not found)",
-    });
-    await Bun.write(agentsPath, corrupted);
-
-    const staleCheck = await ctx.cli({
-      args: ["setup", "agents", "--agents-md", "--check"],
-      cwd: fixture.root,
-    });
-    expect({
-      that: staleCheck.exitCode !== 0,
-      message:
-        "check must exit non-zero when marker content drifted from the current render",
-      result: staleCheck,
-    });
-    expect({
-      that:
-        staleCheck.combined.toLowerCase().includes("stale") ||
-        staleCheck.combined.toLowerCase().includes("out of date"),
-      message: "check output should describe the drift as stale/out of date",
-      result: staleCheck,
-    });
-
-    const plainPrime = await ctx.cli({
-      args: ["agent", "prime"],
-      cwd: fixture.root,
-      env: isolatedUserEnv,
-    });
-    expectExit({
-      result: plainPrime,
-      codes: [0],
-      message: "plain primer renders despite drift",
-    });
-    expect({
-      that:
-        !(
-          plainPrime.stdout.includes("Hack integration inventory:") ||
-          plainPrime.stdout.includes("WARNING:")
-        ) && (await Bun.file(agentsPath).text()) === corrupted,
-      message: "plain primer must not audit or repair stale integrations",
-      result: plainPrime,
-    });
-
-    const stalePrime = await ctx.cli({
+    const paths = [
+      "AGENTS.md",
+      "CLAUDE.md",
+      ".cursor/rules/hack.mdc",
+      ".claude/settings.json",
+      ".codex/skills/hack-cli/SKILL.md",
+    ];
+    for (const path of paths) {
+      await Bun.write(join(fixture.root, path), `custom legacy: ${path}\n`);
+    }
+    for (const args of [
+      ["setup", "agents"],
+      ["setup", "agents", "--check"],
+      ["setup", "agents", "--remove"],
+      ["setup", "sync", "--all-scopes"],
+      ["setup", "sync", "--install-missing"],
+      ["setup", "claude"],
+      ["setup", "cursor"],
+      ["mcp", "install", "--codex", "--docs"],
+    ]) {
+      const result = await ctx.cli({
+        args,
+        cwd: fixture.root,
+        env: { HOME: ctx.hackHome },
+      });
+      expectExit({
+        result,
+        codes: [1],
+        message: "retired automation must refuse",
+      });
+      expect({
+        that: result.combined.includes("retired in v5"),
+        message: "retirement must be explicit",
+        result,
+      });
+      for (const path of paths) {
+        expect({
+          that:
+            (await Bun.file(join(fixture.root, path)).text()) ===
+            `custom legacy: ${path}\n`,
+          message: `existing file must be preserved: ${path}`,
+          result,
+        });
+      }
+    }
+    const primer = await ctx.cli({
       args: ["agent", "prime", "--check"],
       cwd: fixture.root,
-      env: isolatedUserEnv,
+      env: { HOME: ctx.hackHome },
     });
     expectExit({
-      result: stalePrime,
+      result: primer,
       codes: [0],
-      message: "agent primer should still render while integrations are stale",
+      message: "explicit primer remains printable",
     });
     expect({
-      that:
-        stalePrime.stdout.includes(
-          "Hack integration inventory: review needed"
-        ) &&
-        stalePrime.stdout.includes("hack setup sync --all-scopes") &&
-        stalePrime.stdout.includes("restart only if"),
-      message:
-        "agent primer should expose stale project/global guidance upfront",
-      result: stalePrime,
-    });
-
-    const repair = await ctx.cli({
-      args: ["setup", "agents", "--agents-md"],
-      cwd: fixture.root,
-    });
-    expectExit({
-      result: repair,
-      codes: [0],
-      message: "hack setup agents --agents-md should repair stale content",
-    });
-    const repaired = await Bun.file(agentsPath).text();
-    expect({
-      that: !repaired.includes("STALE-INJECTED-BY-E2E"),
-      message: "repair should replace the drifted marker content",
-      result: repair,
-    });
-
-    const finalCheck = await ctx.cli({
-      args: ["setup", "agents", "--agents-md", "--check"],
-      cwd: fixture.root,
-    });
-    expectExit({
-      result: finalCheck,
-      codes: [0],
-      message: "check after repair should report clean (exit 0)",
-    });
-
-    const globalSkillPath = join(
-      ctx.hackHome,
-      ".codex",
-      "skills",
-      "hack-cli",
-      "SKILL.md"
-    );
-    // Refresh-only by default (HACK-1132): sync must not create missing
-    // integrations in either scope.
-    const refreshOnly = await ctx.cli({
-      args: ["setup", "sync", "--all-scopes"],
-      cwd: fixture.root,
-      env: isolatedUserEnv,
-    });
-    expectExit({
-      result: refreshOnly,
-      codes: [0],
-      message: "refresh-only hack setup sync should succeed",
-    });
-    expect({
-      that: !(
-        (await Bun.file(globalSkillPath).exists()) ||
-        (await Bun.file(join(fixture.root, "CLAUDE.md")).exists())
-      ),
-      message: "refresh-only hack setup sync must not create missing targets",
-      result: refreshOnly,
-    });
-
-    const fullSync = await ctx.cli({
-      args: ["setup", "sync", "--all-scopes", "--install-missing"],
-      cwd: fixture.root,
-      env: isolatedUserEnv,
-    });
-    expectExit({
-      result: fullSync,
-      codes: [0],
-      message: "hack setup sync --install-missing should succeed",
-    });
-    const fullSyncCheck = await ctx.cli({
-      args: ["setup", "sync", "--all-scopes", "--check"],
-      cwd: fixture.root,
-      env: isolatedUserEnv,
-    });
-    expectExit({
-      result: fullSyncCheck,
-      codes: [0],
-      message:
-        "hack setup sync --check right after hack setup sync should be clean",
-    });
-
-    const globalPrime = await ctx.cli({
-      args: ["agent", "prime", "--check"],
-      cwd: ctx.hackHome,
-      env: isolatedUserEnv,
-    });
-    expectExit({
-      result: globalPrime,
-      codes: [0],
-      message: "global inventory works outside a project",
-    });
-    expect({
-      that: globalPrime.stdout.includes(
-        "Hack agent integration freshness: current"
-      ),
-      message:
-        "outside-project inventory must inspect installed global integrations",
-      result: globalPrime,
-    });
-    const globalSkill = await Bun.file(globalSkillPath).text();
-    await Bun.write(globalSkillPath, `${globalSkill}\nSTALE-GLOBAL-PROBE\n`);
-    const staleGlobalPrime = await ctx.cli({
-      args: ["agent", "prime", "--check"],
-      cwd: ctx.hackHome,
-      env: isolatedUserEnv,
-    });
-    expect({
-      that:
-        staleGlobalPrime.stdout.includes(
-          "Hack integration inventory: review needed"
-        ) &&
-        staleGlobalPrime.stdout.includes(
-          "Inspect affected paths: hack setup sync --global --check"
-        ) &&
-        (await Bun.file(globalSkillPath).text()).includes("STALE-GLOBAL-PROBE"),
-      message: "global inventory reports drift without repairing it",
-      result: staleGlobalPrime,
-    });
-    await Bun.write(globalSkillPath, globalSkill);
-
-    const currentPrime = await ctx.cli({
-      args: ["agent", "prime", "--check"],
-      cwd: fixture.root,
-      env: isolatedUserEnv,
-    });
-    expectExit({
-      result: currentPrime,
-      codes: [0],
-      message: "agent primer should render after project/global repair",
-    });
-    expect({
-      that: currentPrime.stdout.includes(
-        "Hack agent integration freshness: current"
-      ),
-      message: "agent primer should report current guidance after repair",
-      result: currentPrime,
-    });
-
-    const syncedAgents = await Bun.file(agentsPath).text();
-    expect({
-      that: syncedAgents.includes("Integration freshness"),
-      message: "synced agent docs should be freshness-stamped",
-    });
-
-    await Bun.write(
-      agentsPath,
-      `${syncedAgents}\n<!-- hack:tickets:start -->\nRetired ticket guidance\n<!-- hack:tickets:end -->\n`
-    );
-    const legacyPrime = await ctx.cli({
-      args: ["agent", "prime", "--check"],
-      cwd: fixture.root,
-      env: isolatedUserEnv,
-    });
-    expect({
-      that: legacyPrime.stdout.includes(
-        "Hack integration inventory: review needed"
-      ),
-      message: "agent primer should report retained legacy artifacts as stale",
-      result: legacyPrime,
-    });
-
-    const legacyCleanup = await ctx.cli({
-      args: ["setup", "sync", "--all-scopes"],
-      cwd: fixture.root,
-      env: isolatedUserEnv,
-    });
-    expectExit({
-      result: legacyCleanup,
-      codes: [0],
-      message: "explicit setup sync should remove retired instruction blocks",
-    });
-    const cleanedAgents = await Bun.file(agentsPath).text();
-    expect({
-      that: !cleanedAgents.includes("hack:tickets"),
-      message: "explicit setup sync should remove retired ticket guidance",
-      result: legacyCleanup,
-    });
-
-    await Bun.write(
-      agentsPath,
-      cleanedAgents.replace(
-        MARKER_START,
-        `${MARKER_START}\nSTALE-ORDINARY-COMMAND-PROBE`
-      )
-    );
-    const ordinaryCommand = await ctx.cli({
-      args: ["config", "get", "name"],
-      cwd: fixture.root,
-      env: isolatedUserEnv,
-    });
-    expectExit({
-      result: ordinaryCommand,
-      codes: [0],
-      message:
-        "a normal project command should still succeed with stale guidance",
-    });
-    expect({
-      that: (await Bun.file(agentsPath).text()).includes(
-        "STALE-ORDINARY-COMMAND-PROBE"
-      ),
-      message: "ordinary commands must not rewrite stale agent integrations",
-      result: ordinaryCommand,
+      that: !primer.combined.includes("Hack integration inventory:"),
+      message: "primer must not audit freshness",
+      result: primer,
     });
   },
 };

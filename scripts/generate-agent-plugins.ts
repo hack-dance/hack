@@ -2,7 +2,6 @@ import { readdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { renderHackCliSkill } from "../src/agents/codex-skill.ts";
-import { renderCursorRules } from "../src/agents/cursor.ts";
 import {
   FOCUSED_SKILLS,
   type FocusedSkillName,
@@ -53,10 +52,6 @@ export async function generateAgentPlugins({
       path: resolve(pluginRoot, "skills", "hack-remote", "SKILL.md"),
       content: renderHackRemoteSkill(),
     },
-    {
-      path: resolve(pluginRoot, "rules", "hack.mdc"),
-      content: renderPluginRule(),
-    },
   ] as const;
 
   for (const skill of generatedSkills) {
@@ -76,6 +71,8 @@ export async function generateAgentPlugins({
         "The hack plugin is skills-only; declare MCP in the hack-mcp package"
       );
     }
+    Reflect.deleteProperty(manifest, "hooks");
+    Reflect.deleteProperty(manifest, "rules");
     manifest.version = version;
     await writeFormattedJson({ path: manifestPath, value: manifest });
   }
@@ -99,7 +96,7 @@ export async function generateAgentPlugins({
   });
 }
 
-/** Default plugin: skills, Claude primer hooks and a Cursor rule; no MCP. */
+/** Default plugin: explicitly invoked skills; no MCP. */
 export const HACK_PLUGIN_NAME = "hack";
 
 /** Opt-in companion plugin that only declares the Hack MCP server. */
@@ -112,8 +109,13 @@ const SKILLS_PACKAGE_MANIFESTS = [
   ".cursor-plugin/plugin.json",
 ] as const;
 
-/** MCP declarations the skills package shipped before hack-mcp existed. */
-const RETIRED_SKILLS_PACKAGE_FILES = [".mcp.json", "mcp.json"] as const;
+/** Retired product package assets only; never paths in installed client homes. */
+const RETIRED_SKILLS_PACKAGE_FILES = [
+  ".mcp.json",
+  "mcp.json",
+  "hooks/claude-hooks.json",
+  "rules/hack.mdc",
+] as const;
 
 /**
  * The single source of truth for the MCP launch Hack packages as a plugin:
@@ -401,17 +403,6 @@ async function writeSkillReferences({
     await Bun.$`mkdir -p ${dirname(path)}`;
     await Bun.write(path, content);
   }
-}
-
-export function renderPluginRule(): string {
-  return [
-    "---",
-    "description: Use Hack for local services, environments, logs, and project onboarding when working with a Hack-managed project.",
-    "alwaysApply: false",
-    "---",
-    "",
-    renderCursorRules(),
-  ].join("\n");
 }
 
 if (import.meta.main) {

@@ -57,7 +57,7 @@ Matrix version 3, latest observation 2026-10-18. Older cells retain their record
 | --- | --- |
 | Packaging | The client accepts, installs and enables the default `hack` plugin package in a session. |
 | Skill discovery | A fresh session discovers the plugin's bundled skills (hack-cli, hack-branches, hack-env, hack-diagnose, hack-init, hack-install, hack-remote). |
-| Hooks | The client runs plugin-shipped hooks; Hack hooks may only run `hack agent prime`. |
+| Hooks | The client runs plugin-shipped hooks; Hack v5 declares none. |
 | Plugin MCP | The client starts the `hack mcp serve` server declared by the opt-in `hack-mcp` plugin and lists its tools. The default `hack` plugin ships no MCP. |
 | Standalone MCP | The client loads an MCP entry written by `hack mcp install` (stdio or a selected MCP bundle) without the plugin. |
 | Rules | The client loads a plugin-shipped rule file. |
@@ -69,10 +69,10 @@ Matrix version 3, latest observation 2026-10-18. Older cells retain their record
 | --- | --- | --- | --- | --- |
 | Packaging | untested | untested | untested | untested |
 | Skill discovery | untested | untested | untested | untested |
-| Hooks | unsupported | untested | unsupported | unsupported |
+| Hooks | unsupported | unsupported | unsupported | unsupported |
 | Plugin MCP | untested | untested | untested | untested |
 | Standalone MCP | untested | untested | untested | verified |
-| Rules | unsupported | unsupported | untested | unsupported |
+| Rules | unsupported | unsupported | unsupported | unsupported |
 | UI | untested | unsupported | unsupported | unsupported |
 
 ### Cells
@@ -88,7 +88,7 @@ Matrix version 3, latest observation 2026-10-18. Older cells retain their record
 | codex | UI | untested | schema | `plugins/hack/.codex-plugin/plugin.json` | codex-cli 0.162.1 | `macos-arm64-contributor` | `ec56769bdc04` | Manifest declares an `interface` block (display name, default prompts, brand color); rendering was not observed. | Observe the installed plugin's presentation in the Codex UI for this client version. |
 | claude | Packaging | untested | schema | `plugins/hack/.claude-plugin/plugin.json` | Claude Code 2.1.296 | `macos-arm64-contributor` | `ec56769bdc04` | Manifest is generated and parsed by tests/agent-plugin-generation.test.ts; no client installed it. | Install the plugin into an isolated client home, start a fresh session and observe the component load; a marketplace listing or manifest parse does not count. |
 | claude | Skill discovery | untested | schema | `plugins/hack/.claude-plugin/plugin.json` | Claude Code 2.1.296 | `macos-arm64-contributor` | `ec56769bdc04` | Manifest declares `skills: ./skills/`; skill content matches the canonical renderers. | Install the plugin into an isolated client home, start a fresh session and observe the component load; a marketplace listing or manifest parse does not count. |
-| claude | Hooks | untested | schema | `plugins/hack/hooks/claude-hooks.json` | Claude Code 2.1.296 | `macos-arm64-contributor` | `ec56769bdc04` | SessionStart and PreCompact hooks run only `hack agent prime`; the generation test enforces that command allowlist. | Install the plugin into an isolated client home, start a fresh session and observe the component load; a marketplace listing or manifest parse does not count. |
+| claude | Hooks | unsupported | schema | `plugins/hack/.claude-plugin/plugin.json` | Claude Code 2.1.296 | `macos-arm64-contributor` | `5c066d6cca0d` | Hack v5 ships explicitly invoked skills; no automatic session hooks. | none |
 | claude | Plugin MCP | untested | schema | `plugins/hack-mcp/.mcp.json` | Claude Code 2.1.296 | `macos-arm64-contributor` | `3e261d517ed7` | The opt-in `hack-mcp` manifest points `mcpServers` at `.mcp.json` (`hack mcp serve`); the default `hack` plugin declares no MCP. No plugin session started the server. | Install the plugin into an isolated client home, start a fresh session and observe the component load; a marketplace listing or manifest parse does not count. |
 | claude | Standalone MCP | untested | isolated-fixture | `tests/mcp-bundle-client.test.ts` | Claude Code 2.1.296 | `macos-arm64-contributor` | `ec56769bdc04` | The opt-in fixture failed at this version: in an isolated HOME, `claude mcp get hack` reports the project-scoped server as pending approval instead of connected, so no connection or tool call was observed. Project approval is a native trust gate and must not be bypassed. | Qualify Claude standalone MCP without bypassing project approval (for example, user scope in an isolated HOME) and pass the fixture end to end. |
 | claude | Rules | unsupported | source-read | `plugins/hack/.claude-plugin/plugin.json` | Claude Code 2.1.296 | `macos-arm64-contributor` | `ec56769bdc04` | Hack ships no Claude plugin rule file. Project CLAUDE.md snippets are standalone setup, not a plugin component. | none |
@@ -98,7 +98,7 @@ Matrix version 3, latest observation 2026-10-18. Older cells retain their record
 | cursor | Hooks | unsupported | source-read | `plugins/hack/.cursor-plugin/plugin.json` | Cursor 3.24.12 | `macos-arm64-contributor` | `ec56769bdc04` | Hack ships no Cursor plugin hooks; the manifest declares no `hooks` key. | none |
 | cursor | Plugin MCP | untested | schema | `plugins/hack-mcp/.mcp.json` | Cursor 3.24.12 | `macos-arm64-contributor` | `3e261d517ed7` | The opt-in `hack-mcp` manifest points `mcpServers` at `.mcp.json` (`hack mcp serve`); the default `hack` plugin declares no MCP. No plugin session started the server. | Install the plugin into an isolated client home, start a fresh session and observe the component load; a marketplace listing or manifest parse does not count. |
 | cursor | Standalone MCP | untested | schema | `tests/mcp-install.test.ts` | Cursor 3.24.12 | `macos-arm64-contributor` | `ec56769bdc04` | Tests check the `.cursor/mcp.json` entry Hack writes; Cursor itself never loaded it in a fixture. | Add an isolated Cursor fixture that loads the written entry and lists Hack tools. |
-| cursor | Rules | untested | schema | `plugins/hack/rules/hack.mdc` | Cursor 3.24.12 | `macos-arm64-contributor` | `ec56769bdc04` | Agent-selectable rule (`alwaysApply: false`) matches the canonical renderer; loading was not observed. | Install the plugin into an isolated client home, start a fresh session and observe the component load; a marketplace listing or manifest parse does not count. |
+| cursor | Rules | unsupported | schema | `plugins/hack/.cursor-plugin/plugin.json` | Cursor 3.24.12 | `macos-arm64-contributor` | `5c066d6cca0d` | Hack v5 ships explicitly invoked skills; no injected rules. | none |
 | cursor | UI | unsupported | source-read | `plugins/hack/.cursor-plugin/plugin.json` | Cursor 3.24.12 | `macos-arm64-contributor` | `ec56769bdc04` | Manifest declares no presentation metadata. Codex UI metadata implies nothing for Cursor. | none |
 | standalone | Packaging | untested | schema | `plugins/hack/plugin.json` | none | `macos-arm64-contributor` | `ec56769bdc04` | Portable agent-plugins manifest is derived from the Codex manifest; no portable consumer was observed. | Name a portable consumer and observe it install the package. |
 | standalone | Skill discovery | untested | source-read | `plugins/hack/plugin.json` | none | `macos-arm64-contributor` | `ec56769bdc04` | The portable manifest declares no component paths; discovery of `skills/` by convention is unverified. | Name a portable consumer and observe skill discovery in a fresh session. |

@@ -1,35 +1,16 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-
 import { isCancel, select, text } from "@clack/prompts";
+import { RETIRED_AGENT_AUTOMATION_MESSAGE } from "../agents/explicit-integrations.ts";
 
 /** Regex to remove leading newlines from text. */
 const LEADING_NEWLINES_PATTERN = /^\n+/;
 
 import {
-  checkClaudeHooks,
-  installClaudeHooks,
-  removeClaudeHooks,
-} from "../agents/claude.ts";
-import {
   checkCodexSkill,
   installCodexSkill,
   removeCodexSkill,
 } from "../agents/codex-skill.ts";
-import {
-  checkCursorRules,
-  installCursorRules,
-  removeCursorRules,
-} from "../agents/cursor.ts";
-import {
-  isSetupSyncFailure,
-  runSetupSyncScope,
-  type SetupSyncAction,
-  type SetupSyncStatus,
-  type SetupSyncTarget,
-  type SetupSyncTargetResult,
-  setupSyncExitCode,
-} from "../agents/setup-sync.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -38,24 +19,16 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optJson, optPath } from "../cli/options.ts";
-import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { pathExists, readTextFile, writeTextFile } from "../lib/fs.ts";
 import { canPrompt } from "../lib/interactivity.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
-import type { AgentDocTarget } from "../mcp/agent-docs.ts";
-import {
-  checkAgentDocs,
-  removeAgentDocs,
-  upsertAgentDocs,
-} from "../mcp/agent-docs.ts";
 import type { McpInstallScope, McpTarget } from "../mcp/install.ts";
 import {
   checkMcpConfig,
   installMcpConfig,
   removeMcpConfig,
 } from "../mcp/install.ts";
-import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
 import { handleSetupMigrate, setupMigrateSpec } from "./setup-migrate.ts";
 
@@ -119,8 +92,7 @@ const optInstallMissing = defineOption({
   name: "installMissing",
   type: "boolean",
   long: "--install-missing",
-  description:
-    "Also create missing integrations in the selected scope (default: refresh only installed Hack-owned files)",
+  description: "Retired compatibility flag; sync always refuses",
 } as const);
 
 const optAgentsMd = defineOption({
@@ -170,11 +142,7 @@ const setupMcpOptions = [
 ] as const;
 
 type SetupTmuxArgs = CommandArgs<typeof setupTmuxOptions, readonly []>;
-type SetupCursorArgs = CommandArgs<typeof setupCursorOptions, readonly []>;
-type SetupClaudeArgs = CommandArgs<typeof setupClaudeOptions, readonly []>;
 type SetupCodexArgs = CommandArgs<typeof setupCodexOptions, readonly []>;
-type SetupAgentsArgs = CommandArgs<typeof setupAgentsOptions, readonly []>;
-type SetupSyncArgs = CommandArgs<typeof setupSyncOptions, readonly []>;
 type SetupMcpArgs = CommandArgs<typeof setupMcpOptions, readonly []>;
 
 const tmuxSpec = defineCommand({
@@ -188,7 +156,7 @@ const tmuxSpec = defineCommand({
 
 const cursorSpec = defineCommand({
   name: "cursor",
-  summary: "Install Cursor rules for hack CLI usage",
+  summary: "Retired: automatic Cursor rules are unavailable",
   group: "Agents",
   options: setupCursorOptions,
   positionals: [],
@@ -197,7 +165,7 @@ const cursorSpec = defineCommand({
 
 const claudeSpec = defineCommand({
   name: "claude",
-  summary: "Install Claude Code hooks for hack CLI usage",
+  summary: "Retired: automatic Claude hooks are unavailable",
   group: "Agents",
   options: setupClaudeOptions,
   positionals: [],
@@ -215,7 +183,7 @@ const codexSpec = defineCommand({
 
 const agentsSpec = defineCommand({
   name: "agents",
-  summary: "Install AGENTS.md / CLAUDE.md snippets for hack CLI usage",
+  summary: "Retired: instruction injection is unavailable",
   group: "Agents",
   options: setupAgentsOptions,
   positionals: [],
@@ -224,7 +192,7 @@ const agentsSpec = defineCommand({
 
 const syncSpec = defineCommand({
   name: "sync",
-  summary: "Refresh installed Hack-owned agent integrations",
+  summary: "Retired: automatic integration sync is unavailable",
   group: "Agents",
   options: setupSyncOptions,
   positionals: [],
@@ -242,7 +210,7 @@ const mcpSpec = defineCommand({
 
 export const setupCommand = defineCommand({
   name: "setup",
-  summary: "Install integrations for coding agents",
+  summary: "Explicit opt-in skills and MCP; legacy automation is retired",
   group: "Agents",
   options: [],
   positionals: [],
@@ -515,64 +483,12 @@ async function resolveTmuxConfigToEdit(opts: {
     : customPath;
 }
 
-async function handleSetupCursor({
-  ctx,
-  args,
-}: {
-  readonly ctx: CliContext;
-  readonly args: SetupCursorArgs;
-}): Promise<number> {
-  const action = resolveAction(args.options);
-  const scope = resolveScope({ global: args.options.global === true });
-  const projectRoot =
-    scope === "project"
-      ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
-      : undefined;
-
-  let result: Awaited<ReturnType<typeof checkCursorRules>>;
-  if (action === "check") {
-    result = await checkCursorRules({ scope, projectRoot });
-  } else if (action === "remove") {
-    result = await removeCursorRules({ scope, projectRoot });
-  } else {
-    result = await installCursorRules({ scope, projectRoot });
-  }
-
-  return logSingleResult({
-    action,
-    okMessage: "Cursor integration",
-    result,
-  });
+function handleSetupCursor(): Promise<number> {
+  throw new CliUsageError(RETIRED_AGENT_AUTOMATION_MESSAGE);
 }
 
-async function handleSetupClaude({
-  ctx,
-  args,
-}: {
-  readonly ctx: CliContext;
-  readonly args: SetupClaudeArgs;
-}): Promise<number> {
-  const action = resolveAction(args.options);
-  const scope = resolveScope({ global: args.options.global === true });
-  const projectRoot =
-    scope === "project"
-      ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
-      : undefined;
-
-  let result: Awaited<ReturnType<typeof checkClaudeHooks>>;
-  if (action === "check") {
-    result = await checkClaudeHooks({ scope, projectRoot });
-  } else if (action === "remove") {
-    result = await removeClaudeHooks({ scope, projectRoot });
-  } else {
-    result = await installClaudeHooks({ scope, projectRoot });
-  }
-
-  return logSingleResult({
-    action,
-    okMessage: "Claude integration",
-    result,
-  });
+function handleSetupClaude(): Promise<number> {
+  throw new CliUsageError(RETIRED_AGENT_AUTOMATION_MESSAGE);
 }
 
 async function handleSetupCodex({
@@ -605,322 +521,12 @@ async function handleSetupCodex({
   });
 }
 
-async function handleSetupAgents({
-  ctx,
-  args,
-}: {
-  readonly ctx: CliContext;
-  readonly args: SetupAgentsArgs;
-}): Promise<number> {
-  const action = resolveAction(args.options);
-  const projectRoot = await resolveSetupRoot({
-    ctx,
-    pathOpt: args.options.path,
-  });
-  const targets = resolveDocTargets({
-    all: args.options.all === true,
-    agentsMd: args.options.agentsMd === true,
-    claudeMd: args.options.claudeMd === true,
-  });
-
-  const resolvedTargets =
-    targets.length > 0 ? targets : (["agents", "claude"] as const);
-
-  if (action === "check") {
-    const results = await checkAgentDocs({
-      projectRoot,
-      targets: resolvedTargets,
-    });
-    return logMultiResults({
-      action,
-      okMessage: "Agent docs",
-      results,
-    });
-  }
-
-  if (action === "remove") {
-    const results = await removeAgentDocs({
-      projectRoot,
-      targets: resolvedTargets,
-    });
-    return logMultiResults({
-      action,
-      okMessage: "Agent docs",
-      results,
-    });
-  }
-
-  const results = await upsertAgentDocs({
-    projectRoot,
-    targets: resolvedTargets,
-  });
-  return logMultiResults({
-    action,
-    okMessage: "Agent docs",
-    results,
-  });
+function handleSetupAgents(): Promise<number> {
+  throw new CliUsageError(RETIRED_AGENT_AUTOMATION_MESSAGE);
 }
 
-type SetupSyncScopeResult = {
-  readonly exitCode: number;
-  readonly item: DisplayStatusItem;
-};
-
-const SETUP_SYNC_TARGET_LABELS: Readonly<Record<SetupSyncTarget, string>> = {
-  "cursor-rules": "Cursor rules",
-  "claude-hooks": "Claude hooks",
-  "claude-hack-init-skill": "Claude hack-init skill",
-  "codex-hack-cli-skill": "Codex hack-cli skill",
-  "codex-hack-init-skill": "Codex hack-init skill",
-  "shared-hack-cli-skill": "Shared Hack skill",
-  "cursor-mcp": "Cursor MCP config",
-  "claude-mcp": "Claude MCP config",
-  "codex-mcp": "Codex MCP config",
-  "agents-md": "AGENTS.md",
-  "claude-md": "CLAUDE.md",
-  "retired-artifact": "Retired agent artifact",
-  "scope-root": "Scope",
-};
-
-/** How `--check` words a status that `sync` would produce. */
-const SETUP_SYNC_CHECK_WORDS: Readonly<
-  Partial<Record<SetupSyncStatus, string>>
-> = {
-  refreshed: "stale",
-  installed: "not installed (would install)",
-  removed: "retired (would remove)",
-};
-
-/**
- * Collapse one scope's per-target results into a compact status row. Paths
- * and reasons are expanded only for errors, preserved files, and (with
- * `--check`) targets that sync would change.
- */
-export function buildSetupSyncScopeResult(input: {
-  readonly action: SetupSyncAction;
-  readonly scope: "Project" | "Global";
-  readonly results: readonly SetupSyncTargetResult[];
-}): SetupSyncScopeResult {
-  const { action, results } = input;
-  const failures = results.filter((result) =>
-    isSetupSyncFailure({ action, status: result.status })
-  );
-  const errorCount = countSetupSyncStatus({ results, status: "error" });
-  const preserved = countSetupSyncStatus({ results, status: "preserved" });
-
-  let status: DisplayStatusItem["status"] = "ok";
-  if (errorCount > 0) {
-    status = "error";
-  } else if (failures.length > 0 || preserved > 0) {
-    status = "warn";
-  }
-
-  const detailLines = results
-    .filter(
-      (result) =>
-        result.status === "error" ||
-        result.status === "preserved" ||
-        failures.includes(result)
-    )
-    .map((result) => describeSetupSyncResult({ action, result }));
-  if (
-    action === "sync" &&
-    countSetupSyncStatus({ results, status: "missing" }) > 0
-  ) {
-    detailLines.push(
-      "Missing integrations were skipped; add --install-missing to create them."
-    );
-  }
-
-  return {
-    exitCode: setupSyncExitCode({ action, results }),
-    item: {
-      label: input.scope,
-      status,
-      meta: buildSetupSyncMeta({ action, results, failures }),
-      detail: detailLines.length > 0 ? detailLines.join("\n") : undefined,
-    },
-  };
-}
-
-function countSetupSyncStatus(opts: {
-  readonly results: readonly SetupSyncTargetResult[];
-  readonly status: SetupSyncStatus;
-}): number {
-  return opts.results.filter((result) => result.status === opts.status).length;
-}
-
-function buildSetupSyncMeta(opts: {
-  readonly action: SetupSyncAction;
-  readonly results: readonly SetupSyncTargetResult[];
-  readonly failures: readonly SetupSyncTargetResult[];
-}): string {
-  const count = (status: SetupSyncStatus): number =>
-    countSetupSyncStatus({ results: opts.results, status });
-  const preserved = count("preserved");
-  const preservedSuffix = preserved > 0 ? `, ${preserved} preserved` : "";
-  const missing = count("missing");
-
-  if (opts.action === "remove") {
-    return `${count("removed")} removed${preservedSuffix}`;
-  }
-  if (opts.action === "check") {
-    const considered = opts.results.length - missing;
-    const current =
-      opts.failures.length === 0
-        ? `${count("unchanged")} current`
-        : `${count("unchanged")}/${considered} current`;
-    return missing > 0 ? `${current}, ${missing} not installed` : current;
-  }
-
-  const changed = [
-    { status: "refreshed", word: "refreshed" },
-    { status: "installed", word: "installed" },
-    { status: "removed", word: "retired removed" },
-  ] as const;
-  const parts = changed
-    .filter((entry) => count(entry.status) > 0)
-    .map((entry) => `${count(entry.status)} ${entry.word}`);
-  let head = parts.join(", ");
-  if (parts.length === 0) {
-    head = count("unchanged") > 0 ? "already current" : "nothing to refresh";
-  }
-  const missingSuffix = missing > 0 ? `, ${missing} missing (skipped)` : "";
-  return `${head}${preservedSuffix}${missingSuffix}`;
-}
-
-function describeSetupSyncResult(opts: {
-  readonly action: SetupSyncAction;
-  readonly result: SetupSyncTargetResult;
-}): string {
-  const { action, result } = opts;
-  const label = SETUP_SYNC_TARGET_LABELS[result.target];
-  const location = result.path ? ` at ${result.path}` : "";
-  if (result.status === "preserved") {
-    const reason = result.message ? ` ${result.message}` : "";
-    return `${label}: preserved${location}.${reason}`;
-  }
-  if (result.status === "error") {
-    return result.message
-      ? `${label}: ${result.message}`
-      : `${label}: error${location}`;
-  }
-  const word =
-    action === "check"
-      ? (SETUP_SYNC_CHECK_WORDS[result.status] ?? result.status)
-      : result.status;
-  return `${label}: ${word}${location}`;
-}
-
-async function handleSetupSync({
-  ctx,
-  args,
-}: {
-  readonly ctx: CliContext;
-  readonly args: SetupSyncArgs;
-}): Promise<number> {
-  const resolved = resolveAction(args.options);
-  const installMissing = args.options.installMissing === true;
-  if (resolved === "remove" && installMissing) {
-    throw new CliUsageError(
-      "Use either --install-missing or --remove, not both."
-    );
-  }
-  const action: SetupSyncAction = resolved === "install" ? "sync" : resolved;
-  const scopes = resolveSyncScopes({
-    global: args.options.global === true,
-    allScopes: args.options.allScopes === true,
-  });
-
-  const results: SetupSyncTargetResult[] = [];
-  const scopeResults: SetupSyncScopeResult[] = [];
-  if (scopes.includes("project")) {
-    const projectRoot = await resolveSetupRoot({
-      ctx,
-      pathOpt: args.options.path,
-    });
-    const projectResults = await runSetupSyncScope({
-      action,
-      scope: "project",
-      root: projectRoot,
-      installMissing,
-    });
-    results.push(...projectResults);
-    scopeResults.push(
-      buildSetupSyncScopeResult({
-        action,
-        scope: "Project",
-        results: projectResults,
-      })
-    );
-  }
-  if (scopes.includes("user")) {
-    const globalResults = await runSetupSyncScope({
-      action,
-      scope: "global",
-      root: process.env.HOME ?? "",
-      installMissing,
-    });
-    results.push(...globalResults);
-    scopeResults.push(
-      buildSetupSyncScopeResult({
-        action,
-        scope: "Global",
-        results: globalResults,
-      })
-    );
-  }
-
-  const exitCode = setupSyncExitCode({ action, results });
-  if (args.options.json === true) {
-    emitCliResult({
-      result: okResult({
-        data: buildSetupSyncJsonData({ action, installMissing, results }),
-      }),
-    });
-    return exitCode;
-  }
-
-  const titles: Readonly<Record<SetupSyncAction, string>> = {
-    check: "Agent integrations",
-    sync: "Agent integrations refreshed",
-    remove: "Agent integrations removed",
-  };
-  await display.statusList({
-    title: titles[action],
-    items: scopeResults.map((result) => result.item),
-  });
-  return exitCode;
-}
-
-/**
- * Machine-readable `hack setup sync --json` payload: one entry per target.
- * With `--check`, each status is what `sync` would report (`dryRun: true`).
- * The envelope is `ok` whenever the action ran; the exit code carries
- * failure, as with `hack doctor --json`.
- */
-export function buildSetupSyncJsonData(opts: {
-  readonly action: SetupSyncAction;
-  readonly installMissing: boolean;
-  readonly results: readonly SetupSyncTargetResult[];
-}): {
-  readonly action: SetupSyncAction;
-  readonly dryRun: boolean;
-  readonly installMissing: boolean;
-  readonly counts: Readonly<Partial<Record<SetupSyncStatus, number>>>;
-  readonly targets: readonly SetupSyncTargetResult[];
-} {
-  const counts: Partial<Record<SetupSyncStatus, number>> = {};
-  for (const result of opts.results) {
-    counts[result.status] = (counts[result.status] ?? 0) + 1;
-  }
-  return {
-    action: opts.action,
-    dryRun: opts.action === "check",
-    installMissing: opts.installMissing,
-    counts,
-    targets: opts.results,
-  };
+function handleSetupSync(): Promise<number> {
+  throw new CliUsageError(RETIRED_AGENT_AUTOMATION_MESSAGE);
 }
 
 async function handleSetupMcp({
@@ -1010,19 +616,6 @@ function resolveScope(opts: { readonly global: boolean }): "project" | "user" {
   return opts.global ? "user" : "project";
 }
 
-function resolveSyncScopes(opts: {
-  readonly global: boolean;
-  readonly allScopes: boolean;
-}): readonly ("project" | "user")[] {
-  if (opts.allScopes) {
-    return ["project", "user"];
-  }
-  if (opts.global) {
-    return ["user"];
-  }
-  return ["project"];
-}
-
 function resolveMcpScope(opts: { readonly global: boolean }): McpInstallScope {
   return opts.global ? "user" : "project";
 }
@@ -1050,22 +643,9 @@ function resolveMcpTargets(opts: {
   if (targets.length > 0) {
     return targets;
   }
-  return ["cursor", "claude", "codex"];
-}
-
-function resolveDocTargets(opts: {
-  readonly all: boolean;
-  readonly agentsMd: boolean;
-  readonly claudeMd: boolean;
-}): AgentDocTarget[] {
-  const targets: AgentDocTarget[] = [];
-  if (opts.all || opts.agentsMd) {
-    targets.push("agents");
-  }
-  if (opts.all || opts.claudeMd) {
-    targets.push("claude");
-  }
-  return targets;
+  throw new CliUsageError(
+    "Select an MCP client with --cursor, --claude or --codex, or explicitly pass --all."
+  );
 }
 
 function logSingleResult(opts: {

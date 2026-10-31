@@ -42,10 +42,8 @@ type FreezeCommand = {
  * onboarding prompt for the existing setup (exit 0). `doctor` exits 1 for the
  * unreachable Docker and missing global install, and `--fix` runs only its
  * Docker-free remediations (see `freezeEnv`). `setup sync --check` exits 1
- * because the customized guidance is reported as preserved; it must not
- * repair it. Refresh-only `setup sync --all-scopes` (HACK-1132) exits 0: every
- * seeded file is customized or lacks a Hack section, so nothing is refreshed
- * and nothing missing is created. The plugin migration preview is read-only,
+ * because agent sync is retired; `setup sync --all-scopes` also refuses.
+ * Neither command repairs, creates or removes instruction surfaces. The plugin migration preview is read-only,
  * and an explicit apply with every replacement check skipped still removes
  * nothing, because no seeded file is Hack-owned (HACK-1132).
  */
@@ -114,7 +112,7 @@ const FREEZE_COMMANDS: readonly FreezeCommand[] = [
     label: "setup sync --all-scopes",
     fixture: "project",
     args: ["setup", "sync", "--all-scopes"],
-    codes: [[0], [0]],
+    codes: [[1], [1]],
   },
   {
     label: "setup migrate --all-scopes",
@@ -151,8 +149,8 @@ type FreezeState = {
  * Negative control for agent guidance writes (HACK-1124, HACK-1132,
  * HACK-1155): default setup, onboarding, agent and doctor flows leave an
  * isolated HOME's client config and a repo's customized guidance
- * byte-identical, twice in a row. An explicit `setup agents` export is the
- * positive control: it changes only its documented target.
+ * byte-identical, twice in a row. A test-owned sentinel mutation is the
+ * positive control for the snapshot oracle.
  *
  * Every call overrides HOME and HACK_HOME with scenario temp dirs; the
  * contributor's real HOME is never read or written.
@@ -293,8 +291,8 @@ async function expectFrozen(opts: {
 }
 
 /**
- * Positive control: the explicit AGENTS.md export must write exactly
- * AGENTS.md, proving the hash and git-status probes can see a real write.
+ * Positive control: a deliberate fixture-only edit proves the hash and
+ * git-status probes can detect a write. No retired installer is invoked.
  */
 async function runPositiveControl(opts: {
   readonly state: FreezeState;
@@ -302,16 +300,10 @@ async function runPositiveControl(opts: {
   const { state } = opts;
   const project = state.fixtures.project;
   const target = join(project.root, "AGENTS.md");
-  const result = await state.ctx.cli({
-    args: ["setup", "agents", "--agents-md"],
-    cwd: project.root,
-    env: state.env,
-  });
-  expectExit({
-    result,
-    codes: [0],
-    message: "explicit setup agents --agents-md should succeed",
-  });
+  await Bun.write(
+    target,
+    `${await Bun.file(target).text()}\nfixture mutation control\n`
+  );
   const diff = diffFileHashes({
     before: state.baseline,
     after: await snapshotFileHashes({ roots: state.roots }),
@@ -322,8 +314,7 @@ async function runPositiveControl(opts: {
       diff.changed[0] === target &&
       diff.added.length === 0 &&
       diff.removed.length === 0,
-    message: `explicit setup agents --agents-md should change only ${target}: changed=[${diff.changed.join(", ")}] added=[${diff.added.join(", ")}] removed=[${diff.removed.join(", ")}]`,
-    result,
+    message: `fixture control should change only ${target}: changed=[${diff.changed.join(", ")}] added=[${diff.added.join(", ")}] removed=[${diff.removed.join(", ")}]`,
   });
   const outside = (await gitStatusPaths({ root: project.root })).filter(
     (line) => !line.path.startsWith(".hack/")
@@ -332,10 +323,9 @@ async function runPositiveControl(opts: {
     that:
       outside.length === 1 &&
       outside[0]?.path === relative(project.root, target),
-    message: `explicit export should leave only AGENTS.md modified outside .hack/: ${outside.map((line) => line.raw).join(", ")}`,
-    result,
+    message: `fixture control should leave only AGENTS.md modified outside .hack/: ${outside.map((line) => line.raw).join(", ")}`,
   });
-  state.ctx.log("positive control: setup agents --agents-md changed AGENTS.md");
+  state.ctx.log("positive control: test-owned edit changed AGENTS.md");
 }
 
 type StatusLine = { readonly raw: string; readonly path: string };

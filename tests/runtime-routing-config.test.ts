@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import { YAML } from "bun";
 
 type ComposeService = {
-  readonly command?: string;
+  readonly command?: string | readonly string[];
+  readonly build?: { readonly context?: string };
+  readonly cpus?: number;
+  readonly mem_limit?: string;
   readonly profiles?: readonly string[];
   readonly volumes?: readonly string[];
   readonly privileged?: boolean;
@@ -27,7 +30,11 @@ test("repo runtime keeps local dependencies and an opt-in isolated toolchain", a
   const compose = await readComposeConfig();
 
   expect(compose.name).toBe("hack-cli");
-  expect(Object.keys(compose.services ?? {})).toEqual(["deps", "toolchain"]);
+  expect(Object.keys(compose.services ?? {})).toEqual([
+    "docs",
+    "deps",
+    "toolchain",
+  ]);
 
   const deps = compose.services?.deps;
   expect(deps?.command).toBe("bun install");
@@ -44,4 +51,26 @@ test("repo runtime keeps local dependencies and an opt-in isolated toolchain", a
   expect(
     toolchain?.volumes?.some((mount) => mount.includes("docker.sock"))
   ).toBe(false);
+});
+
+test("repo docs preview is opt-in, bounded and routed without host ports", async () => {
+  const docs = (await readComposeConfig()).services?.docs;
+
+  expect(docs?.profiles).toEqual(["docs"]);
+  expect(docs?.build?.context).toBe("./docs");
+  expect(docs?.cpus).toBe(2);
+  expect(docs?.mem_limit).toBe("6g");
+  expect(docs?.ports).toBeUndefined();
+  expect(docs?.privileged).toBeUndefined();
+  expect(docs?.networks).toEqual(["hack-dev", "default"]);
+  expect(docs?.labels).toEqual({
+    caddy: "docs.hack-cli.hack",
+    "caddy.reverse_proxy": "{{upstreams 3000}}",
+    "caddy.tls": "internal",
+  });
+  expect(docs?.volumes).toEqual([
+    "..:/app",
+    "docs_dependencies:/app/site/node_modules",
+    "docs_build:/app/site/.next",
+  ]);
 });

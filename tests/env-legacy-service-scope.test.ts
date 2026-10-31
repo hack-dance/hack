@@ -348,6 +348,34 @@ for (const entry of UNUSABLE_LAYER_ENTRIES) {
   }, 60_000);
 }
 
+for (const entry of UNUSABLE_LAYER_ENTRIES) {
+  test(`env list and explain refuse a ${entry.kind} ${entry.name} instead of reading .hack/.env`, async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `KEPT_SETTING=${KEPT_VALUE}\n`
+    );
+    const path = await placeLayerEntry(repo, entry);
+    const before = await hackDirEntries(repo);
+    const refusal = `E_PATH_CONFLICT: Refusing to choose the env format: ${path} is not a regular file`;
+    // An overlay layer is read only when that overlay is selected.
+    const envArgs =
+      entry.name === "hack.env.staging.yaml" ? ["--env", "staging"] : [];
+
+    for (const args of [
+      ["env", "list"],
+      ["env", "explain", "KEPT_SETTING"],
+    ]) {
+      const run = await runCli({
+        repo,
+        args: [...args, ...envArgs, "--path", repo.projectRoot],
+      });
+      expectRefusal(run, refusal, { lines: 1 });
+    }
+    expect(await hackDirEntries(repo)).toEqual(before);
+  }, 60_000);
+}
+
 test("a symlinked overlay that resolves to a regular layer selects the env layers", async () => {
   const repo = await createLegacyRepo();
   const target = resolve(repo.root, "shared-staging.yaml");

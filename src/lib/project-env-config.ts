@@ -985,12 +985,43 @@ export async function listProjectEnvOverlayNames(opts: {
 }
 
 /** Strict planning reads distinguish missing paths from failed/non-file layers. */
+/**
+ * Read a selected layer for the CLI and runtime paths. Only an absent entry
+ * (ENOENT on lstat) is an absent layer. An entry that exists but is not a
+ * readable regular file (a dangling symlink, a link to a directory, a
+ * directory, an unreadable file) refuses closed, so a broken layer never
+ * makes a read silently fall back to the legacy `.hack/.env` format.
+ */
+async function readLenientProjectEnvLayerText(opts: {
+  readonly path: string;
+}): Promise<string | null> {
+  const text = await readTextFile(opts.path);
+  if (text !== null) {
+    return text;
+  }
+  try {
+    await lstat(opts.path);
+  } catch (error: unknown) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw new ClosedCliError(`Cannot read the env layer ${opts.path}.`);
+  }
+  const target = await stat(opts.path).catch(() => null);
+  if (!target?.isFile()) {
+    throw new ProjectEnvLayerPathConflictError({ path: opts.path });
+  }
+  throw new ClosedCliError(
+    `Cannot read the env layer ${opts.path}. Check its permissions, then retry.`
+  );
+}
+
 async function readProjectEnvLayerText(opts: {
   readonly path: string;
   readonly strictRead?: boolean;
 }): Promise<string | null> {
   if (!opts.strictRead) {
-    return await readTextFile(opts.path);
+    return await readLenientProjectEnvLayerText({ path: opts.path });
   }
   try {
     const selected = await stat(opts.path);

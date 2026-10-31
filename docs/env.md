@@ -1075,7 +1075,10 @@ looking for `.hack/hack.env.*.yaml` entries, `hack.env.default.yaml` included. A
 file, or a symlink to one, counts as an env layer. Any other entry with a layer name, such
 as a dangling symlink or a directory, is refused with `E_PATH_CONFLICT` and nothing is
 written; it never silently selects the legacy `.hack/.env`. Replace or remove the entry,
-then retry.
+then retry. Reads refuse the same way: `hack env list`, `hack env explain` and runtime
+env injection stop with `E_PATH_CONFLICT` on a selected layer entry that is not a regular
+file (such as a dangling `hack.env.default.yaml`), and with a closed one-line error on one
+that cannot be read, instead of falling back to the legacy file.
 
 ## Compatibility notes
 

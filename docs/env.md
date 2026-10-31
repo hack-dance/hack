@@ -1028,7 +1028,8 @@ A repo that has no `.hack/hack.env.json` is migrated as well. Its values live on
 API keys, so the migration keeps them out of tracked files: each `.hack/.env` entry
 becomes a plaintext global value in the gitignored machine-local layer
 `hack.env.local.yaml`, and each overlay entry that differs from `.hack/.env` becomes a
-global value in `hack.env.<overlay>.local.yaml`. The tracked `hack.env.default.yaml`, and
+global value in `hack.env.<overlay>.local.yaml`. These machine-local layers are created
+as private (mode 0600) files and never replace an existing entry. The tracked `hack.env.default.yaml`, and
 `hack.env.<overlay>.yaml` for each migrated overlay, are written with no values, so the
 repo switches to env layers. Teammates do not receive these values through git; share
 the ones they need with `hack env set` (plain settings) or `hack env set --secret`
@@ -1055,7 +1056,12 @@ files, when:
   to one, means the repo already uses env layers: `hack doctor` reports that and writes
   nothing, never through the link;
 - git tracks a machine-local layer it would write, or, in a git checkout, git cannot
-  report whether it does (`E_PATH_CONFLICT`).
+  report whether it does (`E_PATH_CONFLICT`);
+- in a git checkout, git does not ignore a machine-local layer it would write, for
+  example because `.hack/.gitignore` is read-only and lacks Hack's managed block
+  (`E_PATH_CONFLICT`). Make `.hack/.gitignore` writable, or ignore the path, and retry;
+- a legacy `.hack/.env` or overlay file exists but cannot be read, for example mode 000
+  or a dangling symlink (`E_PERMISSION`), so its values would be lost.
 
 Without `hack.env.json`, nothing lists values kept in a secret backend, so none are
 migrated: set them again with `hack env set --secret` after the migration. In that case `.hack/hack.config.json`, and

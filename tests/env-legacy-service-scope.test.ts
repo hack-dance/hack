@@ -1054,3 +1054,82 @@ test("the migration leaves template and backup copies alone and never offers a g
   expect(entries).not.toContain("hack.env.example.yaml");
   expect(entries).not.toContain("hack.env.bak.yaml");
 }, 60_000);
+
+test.skipIf(RUNS_AS_ROOT)(
+  "the migration refuses an unreadable legacy file instead of migrating it as empty",
+  async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `KEPT_SETTING=${KEPT_VALUE}\n`
+    );
+    const staging = resolve(repo.projectDir, ".env.staging");
+    await writeFile(staging, `KEPT_SETTING=${STAGING_VALUE}\n`);
+    await chmod(staging, 0o000);
+    const before = await hackDirEntries(repo);
+    try {
+      const error = await migrateLegacyRepo(repo, {
+        migrateUndeclaredDotenv: true,
+      }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+      const refusal = error as LegacyDotenvMigrationRefusalError;
+      expect(refusal.code).toBe("E_PERMISSION");
+      expect(refusal.message).toContain(`${staging} exists but cannot be read`);
+      expect(refusal.message).not.toContain(KEPT_VALUE);
+      expect(await hackDirEntries(repo)).toEqual(before);
+    } finally {
+      await chmod(staging, 0o600);
+    }
+    expect(await readFile(staging, "utf8")).toBe(
+      `KEPT_SETTING=${STAGING_VALUE}\n`
+    );
+  }
+);
+
+test.skipIf(RUNS_AS_ROOT)(
+  "the migration refuses when a read-only .hack/.gitignore leaves the machine-local layer unignored",
+  async () => {
+    const repo = await createLegacyRepo();
+    await git({ repo, args: ["init", "-q"] });
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `KEPT_SETTING=${KEPT_VALUE}\n`
+    );
+    const gitignore = resolve(repo.projectDir, ".gitignore");
+    await writeFile(gitignore, "# no managed block\n");
+    await chmod(gitignore, 0o444);
+    try {
+      await expectMigrationRefusal({
+        repo,
+        code: "E_PATH_CONFLICT",
+        reason: `git does not ignore the machine-local env layer ${resolve(repo.projectDir, "hack.env.local.yaml")}`,
+        hidden: [KEPT_VALUE],
+      });
+    } finally {
+      await chmod(gitignore, 0o644);
+    }
+  },
+  60_000
+);
+
+test("the migration creates machine-local layers as private 0600 files", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `KEPT_SETTING=${STAGING_VALUE}\n`
+  );
+  const previous = process.umask(0o022);
+  try {
+    await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  } finally {
+    process.umask(previous);
+  }
+  for (const name of ["hack.env.local.yaml", "hack.env.staging.local.yaml"]) {
+    const mode = (await lstat(resolve(repo.projectDir, name))).mode & 0o777;
+    expect({ name, mode }).toEqual({ name, mode: 0o600 });
+  }
+});

@@ -39,6 +39,7 @@ import {
   mergeManagedGitignoreBlock,
   pathExists,
   readAtomicWriteTargetText,
+  readOptionalTextFile,
   readTextFile,
   writeTextFile,
   writeTextFileAtomicIfChanged,
@@ -3552,14 +3553,44 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+function serializeProjectEnvConfig(config: ProjectEnvConfig): string {
+  const yaml = YAML.stringify(config, null, 2);
+  return yaml.endsWith("\n") ? yaml : `${yaml}\n`;
+}
+
+/**
+ * Creates a machine-local layer of the `.env`-only migration as a private
+ * (0600) file, published only where no entry exists. An existing entry,
+ * including a symlink, refuses; nothing is replaced or followed.
+ */
+async function publishMigrationLocalLayer(opts: {
+  readonly projectDir: string;
+  readonly write: PlannedEnvLayerWrite;
+}): Promise<void> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  const refusal = () =>
+    new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `${opts.write.path} already exists or is not a regular file path.`,
+    });
+  const published = await publishPrivateFileExclusive({
+    path: opts.write.path,
+    text: serializeProjectEnvConfig(opts.write.config),
+    directories: [opts.projectDir],
+    refusal,
+  });
+  if (!published) {
+    throw refusal();
+  }
+}
+
 async function writeProjectEnvConfigFile(opts: {
   readonly path: string;
   readonly config: ProjectEnvConfig;
   /** Compare-and-swap guard; see `writeTextFileAtomicIfChanged`. */
   readonly expectedExisting?: string | null;
 }): Promise<boolean> {
-  const yaml = YAML.stringify(opts.config, null, 2);
-  const text = yaml.endsWith("\n") ? yaml : `${yaml}\n`;
+  const text = serializeProjectEnvConfig(opts.config);
   await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
   // Rename-committed: an interrupted mutation leaves the previous layer intact.
   return (
@@ -5078,7 +5109,7 @@ export async function migrateLegacyProjectEnv(opts: {
  */
 export class LegacyDotenvMigrationRefusalError extends HackCliError {
   constructor(opts: {
-    readonly code: "E_CONFIG_INVALID" | "E_PATH_CONFLICT";
+    readonly code: "E_CONFIG_INVALID" | "E_PATH_CONFLICT" | "E_PERMISSION";
     readonly reason: string;
   }) {
     super({
@@ -5218,6 +5249,31 @@ async function selectLegacyDotenvOverlays(opts: {
     });
   }
   return overlayNames;
+}
+
+/**
+ * In a git checkout, a machine-local layer the migration writes must be
+ * ignored by git, or its plaintext values could be committed. Unknown status
+ * inside a checkout refuses too. Outside a checkout nothing can be committed.
+ */
+async function assertIgnoredMigrationLocalLayer(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<void> {
+  const ignored = await isGitIgnoredProjectEnvPath(opts);
+  if (ignored === true) {
+    return;
+  }
+  if (
+    ignored === null &&
+    !(await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+  ) {
+    return;
+  }
+  throw new LegacyDotenvMigrationRefusalError({
+    code: "E_PATH_CONFLICT",
+    reason: `git does not ignore the machine-local env layer ${opts.path}, so migrated values could be committed. Make .hack/.gitignore writable (or ignore that path), then retry.`,
+  });
 }
 
 /**
@@ -5384,12 +5440,28 @@ async function migrateUndeclaredLegacyDotenv(opts: {
       projectDir: opts.projectDir,
     });
   }
+  // The managed block may not have been written (a read-only .gitignore), so
+  // check the outcome, not the attempt.
+  for (const write of localWrites) {
+    await assertIgnoredMigrationLocalLayer({
+      projectRoot: opts.projectRoot,
+      path: write.path,
+    });
+  }
 
   // Machine-local layers first, so the tracked layers switch the format only
   // once the values have a home.
   const wroteFiles: string[] = [];
   try {
-    for (const write of [...localWrites, ...trackedWrites]) {
+    for (const write of localWrites) {
+      // Created 0600 from the start: the values were in a private .env.
+      await publishMigrationLocalLayer({
+        projectDir: opts.projectDir,
+        write,
+      });
+      wroteFiles.push(write.path);
+    }
+    for (const write of trackedWrites) {
       if (
         await writeProjectEnvConfigFile({
           path: write.path,
@@ -5453,12 +5525,22 @@ async function migrateUndeclaredLegacyDotenv(opts: {
   };
 }
 
-/** Entries of a legacy dotenv file; an absent file has none. */
+/**
+ * Entries of a legacy dotenv file; an absent file has none. One that exists
+ * but cannot be read (for example mode 000, or a dangling symlink) refuses:
+ * reading it as empty would drop its values and then offer it for deletion.
+ */
 async function readLegacyDotenvFile(opts: {
   readonly path: string;
 }): Promise<Record<string, string>> {
-  const text = await readTextFile(opts.path);
-  return text === null ? {} : parseDotEnv(text);
+  const read = await readOptionalTextFile(opts.path);
+  if (read.kind === "unreadable") {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PERMISSION",
+      reason: `${opts.path} exists but cannot be read. Make it a readable regular file, then retry.`,
+    });
+  }
+  return read.kind === "absent" ? {} : parseDotEnv(read.text);
 }
 
 export async function removeLegacyProjectEnvArtifacts(opts: {

@@ -35,6 +35,7 @@ import {
   ensureDir,
   ensureDirForWrite,
   ensureGitignoreEntry,
+  ensureRealDirectoryForWrite,
   mergeManagedGitignoreBlock,
   pathExists,
   readAtomicWriteTargetText,
@@ -83,7 +84,10 @@ import {
   assertLegacyProjectInputFamily,
   ProjectInputSelectionError,
 } from "./project-input-selection.ts";
-import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
+import {
+  ProjectsRegistryLockTimeoutError,
+  withProjectsRegistryLock,
+} from "./projects-registry-lock.ts";
 import {
   isNativeManagedLocalTracked,
   resolvePrimaryLocalProjectDir,
@@ -596,12 +600,13 @@ export const HACK_DIR_GITIGNORE_REFUSAL =
 
 /**
  * Refusal to read or write `.hack/.gitignore` through a symlink or a
- * non-regular entry. Names no path or contents. Closed: the CLI prints its
- * message as one line, never with a stack.
+ * non-regular entry (for example a directory). Names no path or contents.
+ * Closed with `E_PATH_CONFLICT`: the CLI prints it as one `CODE: message`
+ * line, never with a stack, and `--json` reports the same code.
  */
-export class HackDirGitignoreRefusalError extends ClosedCliError {
+export class HackDirGitignoreRefusalError extends HackCliError {
   constructor() {
-    super(HACK_DIR_GITIGNORE_REFUSAL);
+    super({ code: "E_PATH_CONFLICT", message: HACK_DIR_GITIGNORE_REFUSAL });
     this.name = "HackDirGitignoreRefusalError";
   }
 }
@@ -1552,10 +1557,68 @@ function nativeEnvValuesError(): Error {
   );
 }
 
-function nativeEnvMetadataError(): Error {
-  return new Error(
+const NATIVE_ENV_DIAGNOSTIC_PROPERTY = "diagnosticCause";
+const NATIVE_ENV_DIAGNOSTIC_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+const NATIVE_ENV_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const NATIVE_ENV_DIAGNOSTIC =
+  /^[A-Za-z][A-Za-z0-9]{0,63}(?::[A-Z][A-Z0-9_]{0,63})?$/;
+
+/**
+ * Closed metadata refusal. It keeps only a value-free diagnostic of what failed:
+ * the underlying error's class name and identifier-shaped code (for example
+ * `HackCliError:E_CONFIG_INVALID` or `Error:ENOENT`), never its message, paths,
+ * bytes or values. The diagnostic is a non-enumerable own property rather than
+ * `cause`, so serializers, reports and the public message stay unchanged.
+ */
+function nativeEnvMetadataError(diagnostic = "NativeEnvMetadataError"): Error {
+  const refusal = new Error(
     "Cannot resolve native managed env metadata: selected inputs are invalid, unreadable, unstable or oversized; values omitted."
   );
+  Object.defineProperty(refusal, NATIVE_ENV_DIAGNOSTIC_PROPERTY, {
+    value: diagnostic,
+    enumerable: false,
+  });
+  return refusal;
+}
+
+/** Refuse with the cause's value-free diagnostic; a nested refusal keeps its own. */
+function nativeEnvMetadataRefusal(cause: unknown): Error {
+  return nativeEnvMetadataError(
+    nativeEnvMetadataDiagnostic(cause) ?? valueFreeErrorDiagnostic(cause)
+  );
+}
+
+function valueFreeErrorDiagnostic(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return error === null ? "null" : typeof error;
+  }
+  const name = NATIVE_ENV_DIAGNOSTIC_NAME.test(error.name)
+    ? error.name
+    : "Error";
+  const code: unknown = Reflect.get(error, "code");
+  return typeof code === "string" && NATIVE_ENV_DIAGNOSTIC_CODE.test(code)
+    ? `${name}:${code}`
+    : name;
+}
+
+/**
+ * Read the value-free diagnostic of a native metadata refusal, for tests and
+ * debugging. Returns undefined for any other error or a malformed diagnostic.
+ */
+export function nativeEnvMetadataDiagnostic(
+  error: unknown
+): string | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+  const diagnostic: unknown = Reflect.get(
+    error,
+    NATIVE_ENV_DIAGNOSTIC_PROPERTY
+  );
+  return typeof diagnostic === "string" &&
+    NATIVE_ENV_DIAGNOSTIC.test(diagnostic)
+    ? diagnostic
+    : undefined;
 }
 
 function validateNativeHostTargets(
@@ -1895,7 +1958,7 @@ export async function resolveProjectEnvMetadataForNativeSelection(
     ) {
       throw error;
     }
-    throw nativeEnvMetadataError();
+    throw nativeEnvMetadataRefusal(error);
   }
 }
 
@@ -3400,6 +3463,7 @@ async function readExistingProjectEnvKeyFileText(opts: {
 /**
  * Takes the project's hydration lock: `.internal/env-hydrate.lock`, created
  * exclusively (no symlink follow, mode 0600) and holding the owner's PID.
+ * `.internal` itself must be a real directory (or absent, then created).
  *
  * An existing lock is never removed or taken over, because a second process
  * cannot prove the first one is gone without racing a third. It refuses as
@@ -3413,7 +3477,9 @@ async function acquireProjectEnvHydrationLock(opts: {
   readonly lockPath: string;
   readonly refuse: ProjectEnvHydrationRefuse;
 }): Promise<() => Promise<void>> {
-  await ensureDirForWrite(dirname(opts.lockPath));
+  // A symlinked or non-directory `.internal` (including a dangling link) is
+  // refused as E_PATH_CONFLICT; the lock is never created through it.
+  await ensureRealDirectoryForWrite(dirname(opts.lockPath));
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   try {
     await createPrivateFileExclusive({
@@ -4050,9 +4116,10 @@ export async function ensureProjectEnvSecretKey(opts: {
   // git common dir serializes creation; under it the full lookup runs again
   // and adopts a key another checkout created meanwhile.
   let started = false;
+  const lockPath = `${sharedLocation.path}.lock`;
   try {
     return await withProjectsRegistryLock({
-      lockPath: `${sharedLocation.path}.lock`,
+      lockPath,
       label: "project env key",
       run: async () => {
         started = true;
@@ -4062,6 +4129,12 @@ export async function ensureProjectEnvSecretKey(opts: {
   } catch (error: unknown) {
     if (started) {
       throw error;
+    }
+    if (error instanceof ProjectsRegistryLockTimeoutError) {
+      throw new ProjectEnvKeyLockTimeoutError({
+        lockPath,
+        recoveryBusy: error.recoveryBusy,
+      });
     }
     if (!isProjectEnvKeyLockUnavailable(error)) {
       // Any other filesystem failure the user must fix (a full disk or quota,
@@ -4078,6 +4151,29 @@ export async function ensureProjectEnvSecretKey(opts: {
     // The git dir cannot hold a lock (for example it is read-only): create
     // the key unserialized, as before; the writer's own fallbacks apply.
     return await ensureProjectEnvSecretKeyUnlocked(opts);
+  }
+}
+
+/**
+ * The project env key lock stayed held for the whole bounded wait: another
+ * hack command is creating the key, or a lock was left behind by a process
+ * whose PID is now reused (which is never reclaimed automatically), or an
+ * interrupted recovery left its guard. Closed (`E_LOCKED`) and value-free: it
+ * names the lock path and the remedy only. Nothing was written.
+ */
+export class ProjectEnvKeyLockTimeoutError extends HackCliError {
+  constructor(opts: {
+    readonly lockPath: string;
+    readonly recoveryBusy: boolean;
+  }) {
+    const stale = opts.recoveryBusy
+      ? `${opts.lockPath} and the directory ${opts.lockPath}.recovery`
+      : opts.lockPath;
+    super({
+      code: "E_LOCKED",
+      message: `Timed out waiting for the project env key lock ${opts.lockPath}; nothing was written. Another hack command may be creating the key: retry when it finishes. If no other hack command is running, the lock is stale: remove ${stale}, then retry.`,
+    });
+    this.name = "ProjectEnvKeyLockTimeoutError";
   }
 }
 

@@ -1805,9 +1805,9 @@ hack mcp install [options]
 | `--cursor` | Target Cursor MCP config |
 | `--claude` | Target Claude CLI MCP config |
 | `--codex` | Target Codex MCP config |
-| `--docs` | Update AGENTS.md and CLAUDE.md with hack usage |
-| `--agents-md` | Update AGENTS.md with hack usage |
-| `--claude-md` | Update CLAUDE.md with hack usage |
+| `--docs` | Retired: instruction injection is unavailable |
+| `--agents-md` | Retired: instruction injection is unavailable |
+| `--claude-md` | Retired: instruction injection is unavailable |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1842,7 +1842,7 @@ hack mcp print [options]
 
 ## `hack setup`
 
-Install integrations for coding agents
+Explicit opt-in skills and MCP; legacy automation is retired
 
 ### Usage
 
@@ -1855,12 +1855,12 @@ hack setup <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack setup tmux` | Install the recommended tmux binding for hack workspaces |
-| `hack setup cursor` | Install Cursor rules for hack CLI usage |
-| `hack setup claude` | Install Claude Code hooks for hack CLI usage |
+| `hack setup cursor` | Retired: automatic Cursor rules are unavailable |
+| `hack setup claude` | Retired: automatic Claude hooks are unavailable |
 | `hack setup codex` | Install Codex skill for hack CLI usage |
-| `hack setup agents` | Install AGENTS.md / CLAUDE.md snippets for hack CLI usage |
-| `hack setup sync` | Refresh installed Hack-owned agent integrations |
-| `hack setup migrate` | Preview, apply or roll back moving standalone agent files to the hack plugin |
+| `hack setup agents` | Retired: instruction injection is unavailable |
+| `hack setup sync` | Retired: automatic integration sync is unavailable |
+| `hack setup migrate` | Migrate standalone skills to the hack plugin; preserve Cursor rules |
 | `hack setup mcp` | Install MCP configs for hack CLI usage (no-shell only) |
 
 ### Options
@@ -1893,7 +1893,7 @@ hack setup tmux [options]
 
 ## `hack setup cursor`
 
-Install Cursor rules for hack CLI usage
+Retired: automatic Cursor rules are unavailable
 
 ### Usage
 
@@ -1915,7 +1915,7 @@ hack setup cursor [options]
 
 ## `hack setup claude`
 
-Install Claude Code hooks for hack CLI usage
+Retired: automatic Claude hooks are unavailable
 
 ### Usage
 
@@ -1959,7 +1959,7 @@ hack setup codex [options]
 
 ## `hack setup agents`
 
-Install AGENTS.md / CLAUDE.md snippets for hack CLI usage
+Retired: instruction injection is unavailable
 
 ### Usage
 
@@ -1983,7 +1983,7 @@ hack setup agents [options]
 
 ## `hack setup sync`
 
-Refresh installed Hack-owned agent integrations
+Retired: automatic integration sync is unavailable
 
 ### Usage
 
@@ -1998,7 +1998,7 @@ hack setup sync [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--global` | Use global (user) scope instead of project scope |
 | `--all-scopes` | Target both project and global (user) scopes |
-| `--install-missing` | Also create missing integrations in the selected scope (default: refresh only installed Hack-owned files) |
+| `--install-missing` | Retired compatibility flag; sync always refuses |
 | `--check` | Check whether integration is installed |
 | `--remove` | Remove integration files/config |
 | `--json` | Output JSON (machine-readable) |
@@ -2008,7 +2008,7 @@ hack setup sync [options]
 
 ## `hack setup migrate`
 
-Preview, apply or roll back moving standalone agent files to the hack plugin
+Migrate standalone skills to the hack plugin; preserve Cursor rules
 
 ### Usage
 
@@ -2075,7 +2075,7 @@ hack agent <subcommand> [options]
 
 | Command | Summary |
 | --- | --- |
-| `hack agent prime` | Print agent primer text |
+| `hack agent prime` | Print retirement notice for legacy agent hooks |
 | `hack agent patterns` | Print agent init patterns guide |
 | `hack agent init` | Print agent init prompt |
 | `hack agent onboard` | Print the project onboarding prompt (agent-assisted setup) |
@@ -2090,7 +2090,7 @@ hack agent <subcommand> [options]
 
 ## `hack agent prime`
 
-Print agent primer text
+Print retirement notice for legacy agent hooks
 
 ### Usage
 
@@ -2102,7 +2102,7 @@ hack agent prime [options]
 
 | Option | Description |
 | --- | --- |
-| `--check` | Include a read-only project and global integration inventory |
+| `--check` | Deprecated compatibility flag; prints only the legacy-hook retirement notice |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

@@ -32,8 +32,9 @@ afterEach(async () => {
   }
 });
 
-test("shared Hack skill installs current ticket-free guidance and detects drift", async () => {
+test("explicit shared skill installation renders opt-in guidance; drift checks never refresh it", async () => {
   expect((await checkSharedHackSkill()).status).toBe("missing");
+  expect(await Bun.file(sharedSkillPath()).exists()).toBe(false);
 
   const installed = await installSharedHackSkill();
   expect(installed.status).toBe("created");
@@ -48,18 +49,35 @@ test("shared Hack skill installs current ticket-free guidance and detects drift"
   );
 
   const content = await Bun.file(installed.path).text();
-  expect(content).toContain("Integration freshness");
+  expect(content).toContain("Agent tools are explicit opt-ins:");
+  expect(content).toContain("then invoke its skills");
+  expect(content).toContain("no automatic hooks, rules or MCP server");
+  expect(content).toContain("does not inject project instructions");
+  expect(content).toContain(
+    "Existing customized and legacy files are preserved"
+  );
+  expect(content).not.toContain("Integration freshness");
+  expect(content).not.toContain("Content revision:");
+  expect(content).not.toContain("hack setup sync");
   expect(content).not.toMatch(/hack[ -]?tickets/i);
   expect((await checkSharedHackSkill()).status).toBe("noop");
+  expect(await Bun.file(installed.path).text()).toBe(content);
 
-  await Bun.write(
-    installed.path,
-    content.replace("Integration freshness", "Old rules")
+  const drifted = content.replace(
+    "Agent tools are explicit opt-ins:",
+    "Local customization: preserve these rules:"
   );
+  expect(drifted).not.toBe(content);
+  await Bun.write(installed.path, drifted);
   const stale = await checkSharedHackSkill();
   expect(stale.status).toBe("stale");
   expect(stale.message).toContain("only the authorized integration");
   expect(stale.message).not.toContain("Run: hack setup sync");
+  expect(await Bun.file(installed.path).text()).toBe(drifted);
+  expect((await checkSharedHackSkill()).status).toBe("stale");
+  expect(await Bun.file(installed.path).text()).toBe(drifted);
+  expect((await installSharedHackSkill()).status).toBe("preserved");
+  expect(await Bun.file(installed.path).text()).toBe(drifted);
 });
 
 /** The shared/Codex `hack-cli` render shipped in v1.1.0. */

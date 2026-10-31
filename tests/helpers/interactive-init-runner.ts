@@ -42,8 +42,6 @@ const io: InitInteractiveIo = {
     `name: ${input.projectSlug}\nservices: {}\n`,
   agentPrompts: {
     note: () => undefined,
-    confirm: async ({ initialValue }) => initialValue,
-    multiselect: async () => [],
   },
 };
 

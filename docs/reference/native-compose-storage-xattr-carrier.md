@@ -392,8 +392,11 @@ original completion state. It does not acquire a PID from the durable record.
 The carrier uses held regular capture files, not pipes. Version 2 therefore names
 its capture evidence `held-files-quiescent`, never EOF. The original exit callback,
 strict ESRCH group absence, held file/path identity, both synchronized bounded
-captures and their hashes precede settlement publication. EPERM/EIO and unknown
-exit or capture disposition refuse. Settlement publication shares one finite
+captures and their hashes precede settlement publication. Only ESRCH proves group
+absence: a group probe answering EPERM (which macOS can return just after the
+group's last member exits) is not absence, so observation continues to the same
+budget and refuses there if ESRCH never follows. EIO and unknown exit or capture
+disposition refuse. Settlement publication shares one finite
 15-second post-command budget with group observation and its identity reads;
 timeout/cancellation remain refused results and cannot grant a subsequent daemon
 command. These budgets must outlast an ordinary multi-second host stall: a stalled
@@ -415,13 +418,30 @@ Budgets are layered and all finite:
   the start deadline but capped in total at 16 × the storage budget or 1 hour,
   whichever is smaller. A guard proof that would start after the cap is spent is
   refused before it runs, and one that ends past it refuses as `storage-budget`.
-- Inside a carrier every Docker probe and command keeps a fixed cap, clipped to
-  the carrier's remaining budget: 15 seconds for reads, target observation and
-  helper create/start, and 10 seconds for helper removal and cleanup reads, which
-  are not clipped. A recorded command's 15-second settlement budget follows its
-  exit.
+- Inside a carrier every Docker probe and command is bounded by the carrier's
+  remaining budget (`nativeComposeStorageProbeTimeoutMs`), not by a fixed cap:
+  - Volume create and helper create/start get the whole remaining budget, so a
+    slow but healthy helper start on a loaded host completes while budget
+    remains, and a hung one times out exactly at the carrier's end. This holds
+    for recorded original commands too (the readonly `verify` proofs that
+    `exec` and `up` run): the child, its publication handshake and its identity
+    reads share that one bound.
+  - Reads and target observation get the remaining budget, at most 60 seconds
+    (the ownership probe's own ceiling).
+  - Helper removal and cleanup reads run even after the carrier's deadline, so
+    they are never clipped to it. Each has its own bound: the remaining budget
+    clamped to 10–60 seconds. A hung engine therefore cannot stall cleanup.
+
+  Earlier fixed caps (15 seconds for reads, target observation and helper
+  create/start; 10 seconds for cleanup) refused healthy `docker start -ai`
+  helpers on loaded hosted runners as `storage-helper-start`/`probe-timeout`
+  while most of the 90-second budget remained (HACK-1369). A timeout that ends
+  before the carrier's deadline still reports `probe-timeout`; one that reaches
+  it reports `storage-budget`. A recorded command's 15-second settlement budget
+  follows its exit.
 - An unrecorded command (an identity read or a legacy root/seed command) waits
-  at most three seconds for its process group to become absent after exit. Like
+  at most three seconds for its process group to become absent after exit,
+  including while the group probe answers EPERM (HACK-1463). Like
   the handshake and settlement budgets, this deadline is monotonic
   (`performance.now`), so a wall-clock step cannot shorten or extend it.
   Exhaustion refuses as `probe-budget`.
@@ -433,8 +453,10 @@ that end. A refusal with its own observed reason keeps that reason even when it
 is caught after the deadline, including when a recorded command or its command
 record replaces it with a fixed refusal. Such reasons include a helper policy
 refusal, `helper-policy-stability` for a re-inspected carrier whose creation
-time or policy changed, and `private-state` for a saved material binding that
-changed during a carrier step. Cancellation
+time, policy or stopped state changed, and `private-state` for a saved material
+binding that changed during a carrier step or before a verification's deferred
+evidence retirement, or for an original command owner vetoed before that
+retirement. Cancellation
 keeps `probe-cancel`. The reason changes no check, retention or recovery rule.
 
 Only the original in-memory writer can advance its exact sequence. Publication

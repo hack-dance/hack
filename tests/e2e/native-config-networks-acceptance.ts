@@ -11,6 +11,7 @@ import {
   realpath,
   symlink,
 } from "node:fs/promises";
+import { constants as osConstants } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Readable } from "node:stream";
 import type {
@@ -1048,10 +1049,14 @@ export async function runNativeNetworkFixtureCommand(opts: {
     }, timeout);
     const exited = new Promise<number>((resolveExit, reject) => {
       launched.once("error", reject);
-      launched.once("exit", (code) => {
+      launched.once("exit", (code, signal) => {
         // Reap descendants of this just-launched detached group; no stale PID reclamation.
         kill();
-        resolveExit(code ?? 128);
+        // A signaled command reports 128 + its signal number, as a shell
+        // does, so the signal stays visible (143 is SIGTERM) (HACK-1428).
+        resolveExit(
+          code ?? 128 + (signal === null ? 0 : osConstants.signals[signal])
+        );
       });
     });
     const stdoutCapture = capture(launched.stdout, output);

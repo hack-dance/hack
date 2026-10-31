@@ -1,0 +1,132 @@
+# Maintaining agent guidance
+
+Hack owns Hack-specific instructions. User and project policy continues to own model
+selection, general coding standards, work-unit planning, evolution, and writeback.
+Do not ship provider model pins or copy global instruction packs into this plugin.
+`tests/agent-plugin-generation.test.ts` enforces this for the generated guidance
+surfaces (`plugins/hack`, `plugins/hack-mcp`, the client marketplace manifests, `.agents`, and the
+example agent configuration): no model, model-override or reasoning-effort keys, no
+permission, approval or sandbox overrides, no output-style settings, and hooks that
+run only `hack agent prime`. See [model-policy ownership](reference/agent-client-capabilities.md#model-policy-ownership).
+
+## Sources and installed surfaces
+
+| Source | Consumers |
+| --- | --- |
+| Root `AGENTS.md` | Contributor baseline; root `CLAUDE.md` imports it |
+| `apps/macos/AGENTS.md` | Explicit maintenance of the unsupported native app |
+| `.ai/skills/` | Contributor quality, verification, work units, performance and TLA+ workflows |
+| `src/agents/instruction-source.ts` | Project AGENTS/CLAUDE snippets, standalone/shared Hack skill, Cursor rules, session primer, native plugin skill/rule |
+| `src/agents/onboarding-prompt.ts` | The one onboarding builder: `hack agent onboard`, `hack agent init`, init handoff, and MCP onboarding prompt (same core, per-entry framing only) |
+| `src/agents/hack-init-skill.ts` | Thin Claude/Codex/plugin adapter that fetches onboarding guidance |
+| `src/agents/init-patterns.ts`, `init-assistant.ts` | Repo inventory embedded by the onboarding builder, and pattern hints |
+| `src/agents/install-skill.ts`, `remote-bootstrap-skill.ts` | Plugin installation/channel selection and fresh-host/cloud setup skills |
+| `src/agents/focused-skills.ts` | Plugin `hack-branches`, `hack-env` and `hack-diagnose` skills, composed from canonical section ids, and the plugin `hack-cli` routing description |
+| `src/agents/error-code-reference.ts` | `hack-diagnose` error-code reference, rendered from the exported `HACK_ERROR_CODES` registry in `src/lib/cli-result.ts` |
+| `scripts/generate-agent-plugins.ts` | Skills-only `hack` plugin (portable manifest, three client compatibility manifests, seven skills, Cursor rule) and the complete opt-in `hack-mcp` plugin |
+
+The `hack` plugin is skills-only: the generator refuses a client manifest that
+declares `mcpServers` and removes stale `.mcp.json`/`mcp.json` files from it. Each
+portable plugin manifest derives identity and effective OpenAI presentation from
+its package's `.codex-plugin/plugin.json`. Every `hack-mcp` file renders from
+code; its `.mcp.json` and portable `mcp.json` (with an explicit transport) both
+come from `HACK_MCP_SERVER`, so launch selection stays identical. These
+plugin workflow skills complement the existing standalone setup; personal local
+plugin installation does not synchronize skills into a cloud repository.
+
+Consumer examples live under `examples/basic/`. Do not replace the root contributor
+baseline with a generated consumer snippet. Provider metadata and hook configuration
+belong to their client adapters; shared behavior belongs to the canonical sources.
+
+## Editing and verification
+
+1. Change the canonical source. Keep recurring primers shorter than full reference
+   skills. Preserve scope, native approval, secret-handling, ownership, and publishing
+   gates while removing redundant confirmation and optional-warning completion gates.
+2. When canonical instruction sections change, update their SHA-256 content fingerprint
+   in `src/agents/integration-revision.ts`; its test verifies the first 12 hex characters
+   of the serialized non-freshness sections. CLI version alone is not a content revision.
+3. Render only repository targets: the checked-in Codex skills, Cursor rule, Claude
+   onboarding skill, and `examples/basic` snippets. Use their renderer/install functions
+   with explicit project roots. Run `bun run generate:agent-plugins` for the bundle.
+   Do not run a user/global integration sync to update source-controlled examples.
+4. Run instruction-source, onboarding, hack-init-skill, shared-agent-skill, and plugin
+   generation tests. Run normal typecheck/check/test gates for behavior changes. New
+   packaging needs fresh client loading proof beyond a successful marketplace listing.
+   Record that proof, or the open gate, in `src/agents/client-capabilities.ts` and
+   run `bun run docs:agent-client-capabilities` to regenerate the
+   [capability matrix](reference/agent-client-capabilities.md).
+5. Release preparation regenerates plugin assets after the version bump. Verify the
+   published bundle and installed executable separately.
+
+## Audit decisions
+
+- Claude imports the contributor baseline instead of carrying a divergent copy.
+- Removed whole-repository format-on-every-edit hooks; run the pinned formatter on
+  changed files and retain normal quality gates.
+- Removed duplicated generic macOS/SwiftUI skill packs and retired hosted Neon guidance.
+  The retained app's constraints are scoped to `apps/macos/AGENTS.md`; they are not
+  default CLI instructions or consumer plugin payloads.
+- Default onboarding does not recommend unsupported remote/node/gateway/dispatch flows.
+  Existing experimental code remains available only for explicit work.
+- Partial adoption, successful one-shot containers, and optional integrations are
+  represented consistently across prompts, skills, examples, and docs.
+- Secret values never belong in agent-visible command arguments or prompts. Native
+  trust approvals, exact development-origin checks, publishing gates, and resource
+  ownership remain required.
+- Plugin installation is optional and does not migrate or delete standalone guidance.
+  Verify replacement components before explicitly removing scoped duplicates, and
+  preserve customized files. See [integration setup](integrations.md).
+- Historical Factory validation artifacts describe past runs; they are evidence, not
+  current contributor policy. Do not rewrite history to resemble the current workflow.
+
+## Packaged references and skill candidates
+
+Plugin skills can ship markdown references at `skills/<skill>/references/*.md`.
+Register each one in `src/agents/skill-references.ts` (skill, file, render); the
+generator writes it with a recomputable content revision and links it from the
+plugin's SKILL.md. Standalone `hack setup` installs ship no references, so their
+`hack-cli` render stays unlinked. References must resolve inside the installed
+package and work offline: relative links stay inside `plugins/hack`, never point
+at repository `docs/` or absolute paths, and external URLs appear only under a
+"Further reading" heading. `tests/skill-references.test.ts` enforces this.
+
+The first reference is the `hack-cli` pattern catalogue, rendered from the typed
+register in `src/agents/pattern-catalogue.ts`. It keeps all twelve HACK-P cards
+(HACK-1145..HACK-1156). A card that is not supported names its missing contract
+and domain owner; the disposition does not waive that owner's runtime gates.
+`tests/pattern-catalogue.test.ts` checks completeness, CLI_SPEC command
+resolution and the banned-recipe scan.
+
+A card's `example` field names a static example project under
+`examples/patterns/` (today HACK-P01 and HACK-P02). The field is contributor
+reference only and is not rendered, because the plugin ships without the
+repository's `examples/` tree. `tests/pattern-examples.test.ts` checks that each
+reference resolves and every fixture belongs to one card. It also validates
+each fixture's `hack.config.json` against the project schema and parser, the
+P01 Compose file against the `locked-v1` dependency cache contract, and the P02
+toolchain service against its card. Every `hack` command in a fixture README
+must resolve in CLI_SPEC and name a declared service and profile. These checks
+are static: they do not start containers or qualify the runtime gates.
+
+The focused plugin skills `hack-branches`, `hack-env` and `hack-diagnose` list
+canonical section ids in `src/agents/focused-skills.ts` and carry no prose of
+their own; composition fails on an unknown id. A section with no surface tags
+renders only in the focused skills that name it. Each trigger phrase belongs to
+one plugin skill, and the plugin `hack-cli` description hands branch, env and
+diagnosis intents to them; the standalone `hack-cli` keeps broad routing because
+those installs ship no focused skills. The `hack-diagnose` error-code reference
+renders from `HACK_ERROR_CODES` in `src/lib/cli-result.ts`.
+`tests/focused-skills.test.ts` checks section ids, CLI_SPEC resolution,
+error-code parity and trigger overlap.
+
+Skill candidates and where their patterns live now:
+
+| Candidate | Decision | Patterns live in | Promotion owner and missing contract |
+| --- | --- | --- | --- |
+| lifecycle | Defer | `hack-cli` "Lifecycle + startup"; catalogue HACK-P01, P04, P05, P06 | WU29: identity-aware adoption and ownership-safe shared host lifecycles |
+| cleanup | Defer | `hack-cli` "Lifecycle + startup" (`--prune-caches`); catalogue HACK-P09, P10 | WU12/WU30: reference-aware retention and cache provenance |
+| checks | Defer | `hack-cli` "Running things"; catalogue HACK-P02, P10, P11 | WU11: qualified portable toolchain fixture with a distinct trigger |
+| sessions | Defer | `hack-cli` "Workspaces" and [sessions](sessions.md) | WU18: trigger evaluations showing `hack-cli` misroutes session work |
+| hack-run | Defer | `hack-cli` "Running things" | WU26: decides between a hack-run skill and references |
+| hack-feedback | Defer | Not shipped | WU25: privacy-reviewed feedback drafts |

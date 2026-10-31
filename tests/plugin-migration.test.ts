@@ -359,17 +359,80 @@ test("project-scope plugin config does not verify user-scope duplicates", async 
   expect(await snapshotTree()).toEqual(before);
 });
 
-test("an explicit skip satisfies Cursor, which Hack cannot inspect", async () => {
-  await put(join(repo(), ".cursor/rules/hack.mdc"), renderCursorRules());
+test("Cursor rules are preserved even with an explicit skip because the plugin ships no rules", async () => {
+  for (const scope of ["project", "global"] as const) {
+    const root = scope === "project" ? repo() : home();
+    const path = join(root, ".cursor/rules/hack.mdc");
+    const original = renderCursorRules();
+    await put(path, original);
+    for (const skipPluginCheck of [[], ["cursor"]] as const) {
+      const request = input({
+        scopes: [{ scope, root }],
+        clients: ["cursor"],
+        skipPluginCheck,
+      });
+      const before = await snapshotTree();
+      const plan = await planPluginMigration(request);
+      expect(plan.entries).toHaveLength(1);
+      expect(plan.entries[0]).toMatchObject({
+        action: "preserve",
+        reason: "no-plugin-replacement",
+      });
+      expect(plan.entries[0]?.message).toContain("ships no replacement rules");
+      const result = await applyPluginMigration({
+        ...request,
+        backupDir: backupDir(),
+      });
+      expect(result.status).toBe("nothing-to-migrate");
+      expect(await readFile(path, "utf8")).toBe(original);
+      expect(await snapshotTree()).toEqual(before);
+    }
+  }
+});
 
-  const unskipped = await planPluginMigration(input({ clients: ["cursor"] }));
-  expect(actions(unskipped)).toEqual({ "project:cursor-rules": "blocked" });
-
-  const skipped = await planPluginMigration(
-    input({ clients: ["cursor"], skipPluginCheck: ["cursor"] })
+test("version-1 Cursor rule backups still restore exactly and refuse custom conflicts", async () => {
+  const path = join(repo(), ".cursor/rules/hack.mdc");
+  const bytes = Buffer.from(renderCursorRules());
+  const manifestPath = join(backupDir(), "historical-cursor.json");
+  await put(
+    manifestPath,
+    JSON.stringify({
+      version: 1,
+      kind: "hack-plugin-migration",
+      id: "historical-cursor",
+      createdAt: "2026-10-01T00:00:00Z",
+      state: "applied",
+      entries: [
+        {
+          scope: "project",
+          root: repo(),
+          target: "cursor-rules",
+          relativePath: ".cursor/rules/hack.mdc",
+          path,
+          sha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+          mode: 0o640,
+          contentBase64: bytes.toString("base64"),
+        },
+      ],
+    })
   );
-  expect(checks(skipped)).toEqual({ "project:cursor": "skipped" });
-  expect(actions(skipped)).toEqual({ "project:cursor-rules": "remove" });
+  const restored = await rollbackPluginMigration({ manifestPath });
+  expect(restored.status).toBe("rolled-back");
+  expect(restored.status === "rolled-back" && restored.results[0]?.status).toBe(
+    "restored"
+  );
+  expect(await readFile(path)).toEqual(bytes);
+  expect((await stat(path)).mode & 0o777).toBe(0o640);
+  const again = await rollbackPluginMigration({ manifestPath });
+  expect(again.status === "rolled-back" && again.results[0]?.status).toBe(
+    "already-present"
+  );
+  await put(path, "custom rule: preserve\n");
+  const conflict = await rollbackPluginMigration({ manifestPath });
+  expect(conflict.status === "rolled-back" && conflict.results[0]?.status).toBe(
+    "conflict"
+  );
+  expect(await readFile(path, "utf8")).toBe("custom rule: preserve\n");
 });
 
 test("client selection limits targets; shared skill follows Claude or Codex", async () => {

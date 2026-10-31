@@ -29,8 +29,9 @@ import { logger } from "../ui/logger.ts";
 
 /**
  * `hack setup migrate`: preview (default, read-only), `--apply`, or
- * `--rollback-manifest <manifest>` for moving from standalone Hack skill and rule
- * files to the skills-only `hack` plugin. See `plugin-migration.ts` for the
+ * `--rollback-manifest <manifest>` for moving standalone Hack skills to the
+ * skills-only `hack` plugin. Cursor rules have no replacement and are preserved.
+ * Historical rule backups can still be rolled back. See `plugin-migration.ts` for the
  * ownership, verification and backup contract.
  */
 
@@ -113,7 +114,7 @@ type SetupMigrateArgs = CommandArgs<typeof setupMigrateOptions, readonly []>;
 export const setupMigrateSpec = defineCommand({
   name: "migrate",
   summary:
-    "Preview, apply or roll back moving standalone agent files to the hack plugin",
+    "Migrate standalone skills to the hack plugin; preserve Cursor rules",
   group: "Agents",
   options: setupMigrateOptions,
   positionals: [],

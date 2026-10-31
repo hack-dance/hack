@@ -28,6 +28,21 @@ awaited checks/stop operations or crashes between individual binding removals.
 Those windows require finer models and executable interruption tests; they remain
 release-coverage gaps rather than properties closed by this model.
 
+There is also an explicit **post-stop interference coverage gap** within the
+current abstraction. `RequestHostStop` checks matching source/session and absence
+of hard cancellation at the stop-request boundary. It leaves the phase failed,
+so `ReplaceSource`, `ReplaceSession` or `HardCancel` can still occur after that
+request and before `Retire`, including after host-exit confirmation. `Retire`
+requires the requested stop, producer settlement, matching removal proof and
+confirmed host exit; it does not revalidate the current source/session or hard
+cancellation state. `Safe` checks the recorded unsafe flags, not an additional
+predicate forbidding retirement after that post-stop interference. Consequently
+the positive exploration and existing controls do not establish such a fence.
+A finer contract/predicate, discriminating controls and executable interruption
+evidence remain required before claiming that post-stop replacement or hard
+cancellation cannot lead to binding retirement. This note does not change the
+model or diagnose an implementation defect.
+
 The positive instance exhausts 10,965 states. Six independent guard-removal controls
 must violate Safe at RequestHostStop or Retire with the named unsafe flag in that
 same state. The registry rejects parse failures, unrelated counterexamples, wrong
@@ -40,7 +55,7 @@ state counts and incomplete positive exploration.
 | Acquire / stale claimant refusal | Native authored admission and hook-owner claim; existing graph-admission/registry-writer tests and stale-claim control. A scalar exclusive claim is an assumption here, not a proof of the lock implementation. |
 | MarkProducerSettled | `native-project-process.ts` finalizer, onSettled, original group absence; `native-authored-project-start.ts` pre-Ready processSettled guard in local5c4ae64c. One-shot EPERM control retains despite a later real ESRCH. Removing the settlement guard changes expected retained to removed. |
 | Inspect / RefreshHardInputs | Exact expected-review Removed receipt and all-resource/null-observation checks; unchanged host selection reacquired under hard signal. Foreign/live/hard-canceled cases retain. Removing refresh changes expected removed to retained. |
-| RequestHostStop | Existing exact host-session token/identity checks; all applicable preconditions remain necessary. Source changes or an unknown/foreign session never grant new authority. |
+| RequestHostStop | Existing exact host-session token/identity checks; all applicable preconditions remain necessary at the request boundary. Post-stop source/session replacement or hard cancellation before Retire is the uncovered fence described above. |
 | ConfirmHostExit / Retire | Await host stop/close before retiring hook/start/source bindings. Unknown host completion cannot establish removal. The unconfirmed-host-exit model control checks this gap; an equivalent injected executable host-close control remains a required coverage follow-up. |
 | Crash / Recover | Retain uncertain intent, never reconstruct authority from a missing path/PID. Full durable recovery is delegated to native-frontend-recovery and real crash/ownership tests; this model omits filesystems, PIDs, boot epochs and resource observations. |
 

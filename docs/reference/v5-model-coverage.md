@@ -16,7 +16,8 @@ pass. See [model contracts](../../tests/models/tla/README.md) and
 
 TLC 1.7.4 remains the official latest stable release checked on this date; its
 SHA256 stays pinned. Apalache 0.62.4 is the reviewed current stable optional tool;
-its local installer pin is updated separately. Do not infer Apalache support from
+it remains unrun for this coverage, and its local installer pin is updated
+separately. Do not infer Apalache support from
 a TLC result. Record the actual checker, JVM, bounds and result. Current upstream
 references: [TLC releases](https://github.com/tlaplus/tlaplus/releases/latest),
 [TLA+ AgentSkills](https://github.com/tlaplus/AgentSkills),
@@ -36,7 +37,7 @@ must be attached to the eventual exact integration revision.
 | Property and critical states | Model coverage | Implementation/regression boundary | Remaining qualification |
 | --- | --- | --- | --- |
 | Exclusive claims; competing writers; partial owner publication | graph-admission, registry-writer, publication-journal, missing-publication-lock, native-frontend-recovery | Admission/registry locks, pending publication and exact saved owner; related runtime ownership tests | Real filesystems, boot/incarnation identity and unsupported writers remain independent. |
-| Canceled/expired startup; reader cancellation versus EOF; producer/group uncertainty | pre-ready-retirement, authority-lifetime, native-file-material | Native graph finalizer/onSettled, exact Removed, hard-signal freshness, host stop/close; local pre-Ready retained/removed regressions | Physical guest acceptance; current root aggregate; explicit executable unknown host-close control; async proof-to-stop and partial binding-retirement crash windows. |
+| Canceled/expired startup; reader cancellation versus EOF; producer/group uncertainty | pre-ready-retirement, authority-lifetime, native-file-material | Native graph finalizer/onSettled, exact Removed, hard-signal freshness, host stop/close; local pre-Ready retained/removed regressions | Physical guest acceptance; current root aggregate; explicit executable unknown host-close control; async proof-to-stop and partial binding-retirement crash windows; post-stop source/session replacement or hard cancellation before Retire (Retire does not recheck these inputs; Safe has no post-stop interference predicate). |
 | Crash between reserve, publish, sync and release; stale recovery | native-frontend-recovery, publication, publication-journal, native-storage-witness | Durable intent/enrolled/released records, fresh lease and expected binding; recovery and sync-failure tests | Fsync guarantees, process-kill windows, real restarted provider observations. No missing-path authority. |
 | Data lifetime independent of compute; replaced/aliased metadata | native-persistent-enrollment, native-storage-witness, native-file-material | Existing-only enrollment, exact birth/witness and reference fencing; copied-label/replacement tests | Real SQL/content retention, external writer assumptions, allocated-byte evidence. |
 | Concurrent stop/publication; route claim and relay lifetime | native-route-stop, shared-https-lifetime, previous-boot-shared-https, relay-lifecycle-barrier, relay-authorization, relay-staging, relay-fence | Fenced route removal, relay owner, ready/removed protocol, authenticated observations | Native DNS/TLS/browser behavior; old-boot uncertainty and external routing. |

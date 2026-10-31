@@ -29,6 +29,7 @@ import {
   ProjectEnvLayerPathConflictError,
   projectEnvConfigExistsForMutation,
   resolveProjectEnvConfig,
+  selectProjectEnvValues,
 } from "../src/lib/project-env-config.ts";
 import { resolveEnvMeta } from "../src/lib/project-meta.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -1180,3 +1181,64 @@ test("the migration carries a symlinked legacy overlay's values and refuses one 
     expect(await hackDirEntries(unusable)).toEqual(before);
   }
 });
+
+test("the migration refuses when Compose uses a legacy file it would leave out", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: .env.sample\n"
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env.sample"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: 'Compose env_file uses ".env.sample"',
+    hidden: [KEPT_VALUE],
+  });
+});
+
+test("after the migration, a migrated key's service override takes effect only with --local", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  const apiValue = async (): Promise<string | undefined> => {
+    const resolved = await resolveProjectEnvConfig({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      serviceNames: ["api"],
+    });
+    if (!resolved) {
+      throw new Error("expected env layers");
+    }
+    return selectProjectEnvValues({ resolved, scopeName: "api" }).KEPT_SETTING;
+  };
+  const set = async (extra: readonly string[]): Promise<void> => {
+    const run = await runCli({
+      repo,
+      args: [
+        "env",
+        "set",
+        "KEPT_SETTING",
+        "--service",
+        "api",
+        ...extra,
+        "--value-stdin",
+        "--path",
+        repo.projectRoot,
+      ],
+      stdin: `${NEW_VALUE}\n`,
+    });
+    expect(run.exitCode).toBe(0);
+  };
+
+  await set([]);
+  expect(await apiValue()).toBe(KEPT_VALUE);
+  await set(["--local"]);
+  expect(await apiValue()).toBe(NEW_VALUE);
+}, 60_000);

@@ -5226,6 +5226,44 @@ function legacyOverlayFileList(names: readonly string[]): string {
     .join(", ");
 }
 
+function isExcludedLegacyDotenvName(name: string): boolean {
+  return (
+    name === LEGACY_DOTENV_STATE_OVERLAY ||
+    LEGACY_DOTENV_NON_OVERLAY_NAMES.has(name)
+  );
+}
+
+/**
+ * Refuses when Compose uses a `.hack/.env.<name>` file the migration leaves
+ * out: its values reach no layer, and the Compose repair that follows removes
+ * every `.hack/.env*` reference, so the next launch would lose them.
+ */
+async function assertComposeUsesNoExcludedLegacyDotenv(opts: {
+  readonly projectDir: string;
+}): Promise<void> {
+  const references = await inspectLegacyComposeEnvFileReferences({
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+    projectDir: opts.projectDir,
+  });
+  const excluded = [
+    ...new Set(
+      references
+        .map((reference) =>
+          basename(reference.resolvedPath).slice(
+            `${PROJECT_ENV_FILENAME}.`.length
+          )
+        )
+        .filter(isExcludedLegacyDotenvName)
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+  if (excluded.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose env_file uses ${legacyOverlayFileList(excluded)}, which the migration does not carry over, so those values would be lost. Rename the file to an overlay name or move it out of .hack, update env_file to match, then retry.`,
+    });
+  }
+}
+
 async function selectLegacyDotenvOverlays(opts: {
   readonly projectDir: string;
 }): Promise<readonly string[]> {
@@ -5233,11 +5271,7 @@ async function selectLegacyDotenvOverlays(opts: {
   // overlays: they are neither migrated nor offered for cleanup.
   const overlayNames = (
     await discoverLegacyOverlayNames({ projectDir: opts.projectDir })
-  ).filter(
-    (name) =>
-      name !== LEGACY_DOTENV_STATE_OVERLAY &&
-      !LEGACY_DOTENV_NON_OVERLAY_NAMES.has(name)
-  );
+  ).filter((name) => !isExcludedLegacyDotenvName(name));
   const invalidOverlays = overlayNames.filter(
     (name) =>
       !(
@@ -5374,6 +5408,9 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     });
   }
   const overlayNames = await selectLegacyDotenvOverlays({
+    projectDir: opts.projectDir,
+  });
+  await assertComposeUsesNoExcludedLegacyDotenv({
     projectDir: opts.projectDir,
   });
 

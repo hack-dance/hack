@@ -1052,6 +1052,9 @@ files, when:
   backup copies (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.bak`,
   `.env.backup`, `.env.old`, `.env.orig`) are not overlays: they are neither migrated
   nor offered for cleanup;
+- Compose `env_file` uses one of those template or backup copies (`E_CONFIG_INVALID`), so
+  its values would be lost. Rename the file to an overlay name or move it out of `.hack`,
+  and update `env_file` to match;
 - an entry named like an env layer (`.hack/hack.env.*.yaml`) is a dangling symlink, a
   directory or another non-file (`E_PATH_CONFLICT`). A regular layer file, or a symlink
   to one, means the repo already uses env layers: `hack doctor` reports that and writes
@@ -1089,6 +1092,12 @@ project, `hack env set` and `hack env unset` change only that global value, so t
 the same way in both formats). `--service global`, or no `--service`, still works. Migrate to
 env layers first with `hack doctor --migrate-env-config`, which also converts a project that
 has only `.hack/.env` (see above), then set or unset the service-scoped value.
+
+Values migrated from `.hack/.env` live in the machine-local layer, and a later layer wins
+over a more specific scope in an earlier one. So to override a migrated key for one service,
+add `--local`: `hack env set KEY --service api --local`. Without it the new value goes to the
+tracked default layer, where the migrated global value in `hack.env.local.yaml` still wins
+and the command has no effect on the runtime value.
 
 `hack env set` and `hack env unset` choose between the env layers and the legacy file by
 looking for `.hack/hack.env.*.yaml` entries, `hack.env.default.yaml` included. A regular

@@ -1,13 +1,15 @@
 import { test as boundedTest, expect, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS } from "../src/lib/compose-startup-budget.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import * as admission from "../src/lib/native-compose-adoption-compiler.ts";
 import { LegacyComposeAdoptedGenerationError } from "../src/lib/native-compose-adoption-generation.ts";
 import { legacyComposePublicationRefusal } from "../src/lib/native-compose-adoption-publication-diagnostics.ts";
 import { runLegacyComposeRetainedRoutingOperation } from "../src/lib/native-compose-adoption-routing-execution.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import {
   type RetainedRoutingStoreTimeoutMs,
   ROUTING_CANARY,
@@ -16,19 +18,43 @@ import {
   retainedRoutingFixtureLifetime,
 } from "./helpers/retained-routing-adoption.ts";
 
-/** The compound lifecycle test's per-test budget and its store proof deadline:
- * the product's 60 s cap. */
-const COMPOUND_BUDGET_MS = 60_000;
-let h: Awaited<ReturnType<typeof retainedRoutingFixture>>;
+/** The compound tests' store proof deadline: the product's 60 s cap. */
+const COMPOUND_STORE_TIMEOUT_MS = 60_000;
+/** The caller deadline of each compound operation: the product's own default
+ * (`hack up`/`down` pass the 90 s Compose startup budget to `withMutation`). */
+const COMPOUND_OPERATION_DEADLINE_MS = DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
+/** A compound test's budget: six `COMPOUND_OPERATION_DEADLINE_MS` (540 s), for at
+ * most five caller-bounded operations plus preparation, publication and the
+ * lease or rollback. It must not be shorter than the bounds of the operations it
+ * runs in sequence: a 60 s budget let suite load end a slow but unchanged run
+ * before its operations' own deadlines, and the timed-out fixture then failed every
+ * later test in this file as an unknown lifetime. A hosted run takes about 40 s. */
+const COMPOUND_TEST_BUDGET_MS = 540_000;
+/** A single-operation regression test's budget: two operation deadlines (180 s),
+ * for preparation, the one caller-bounded operation and a publication. */
+const SINGLE_OPERATION_TEST_BUDGET_MS = 180_000;
+/** A synthetic clock advance past the harness's 15 s default operation deadline
+ * but well inside the product's default caller deadline: a slow but unchanged
+ * operation. */
+const SLOW_OPERATION_ADVANCE_MS = 16_000;
+type RoutingFixture = Awaited<ReturnType<typeof retainedRoutingFixture>>;
+type RoutingFixtureLifetime = ReturnType<typeof retainedRoutingFixtureLifetime>;
+let h: RoutingFixture;
 let fixtureActive = false;
 let fixtureUncertain = false;
-const test = (
+/**
+ * The file's fixture gate. A case refuses while an earlier case's fixture is
+ * still active or its lifetime is unknown, because that fixture's global
+ * doubles may still be installed. `run` calls `restored()` only once every
+ * global double and root it created is restored; otherwise the gate stays
+ * closed and every later gated case in this file refuses.
+ */
+const gatedTest = (
   name: string,
-  run: () => Promise<void>,
-  opts: { readonly timeoutMs?: 30_000 | 60_000 } = {}
-) => {
-  const timeoutMs = opts.timeoutMs ?? 30_000;
-  return boundedTest(
+  run: (restored: () => void) => Promise<void>,
+  timeoutMs: number
+) =>
+  boundedTest(
     name,
     async () => {
       if (fixtureActive || fixtureUncertain) {
@@ -38,52 +64,95 @@ const test = (
         );
       }
       fixtureActive = true;
+      let isRestored = false;
+      try {
+        await run(() => {
+          isRestored = true;
+        });
+      } finally {
+        if (isRestored) {
+          fixtureActive = false;
+        } else {
+          fixtureUncertain = true;
+        }
+      }
+    },
+    timeoutMs
+  );
+/**
+ * Ends a gated case's fixture. With a known lifetime it runs the full
+ * teardown. With an unknown lifetime it keeps the spies and root for the
+ * unsettled work but still restores HACK_HOME, so later files never inherit
+ * the fixture home (HACK-1327). `failure` is set whenever not everything was
+ * restored.
+ */
+async function endRoutingFixture(
+  lifetime: RoutingFixtureLifetime,
+  fixture: RoutingFixture | undefined
+): Promise<{ readonly restored: boolean; readonly failure?: unknown }> {
+  if (!lifetime.canRestore()) {
+    fixture?.releaseEnvironment();
+    return {
+      restored: false,
+      failure: new Error(
+        "Retained routing fixture lifetime is unknown; values omitted."
+      ),
+    };
+  }
+  if (fixture === undefined) {
+    // Setup did not issue a complete fixture; do not reuse its global context.
+    lifetime.retain();
+    return {
+      restored: false,
+      failure: new Error(
+        "Retained routing fixture setup is incomplete; values omitted."
+      ),
+    };
+  }
+  try {
+    await fixture.cleanup();
+    return { restored: true };
+  } catch (error: unknown) {
+    lifetime.retain();
+    return { restored: false, failure: error };
+  }
+}
+const test = (
+  name: string,
+  run: () => Promise<void>,
+  opts: {
+    readonly timeoutMs?:
+      | 30_000
+      | 60_000
+      | typeof SINGLE_OPERATION_TEST_BUDGET_MS
+      | typeof COMPOUND_TEST_BUDGET_MS;
+  } = {}
+) => {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  return gatedTest(
+    name,
+    async (restored) => {
       const lifetime = retainedRoutingFixtureLifetime(Date.now() + timeoutMs);
-      let issued = false;
+      let fixture: RoutingFixture | undefined;
       let failed = false;
       let failure: unknown;
       try {
         h = await retainedRoutingFixture(lifetime);
-        issued = true;
+        fixture = h;
         await run();
       } catch (error: unknown) {
         failed = true;
         failure = error;
-      } finally {
-        if (!lifetime.canRestore()) {
-          fixtureUncertain = true;
-          if (!failed) {
-            failed = true;
-            failure = new Error(
-              "Retained routing fixture lifetime is unknown; values omitted."
-            );
-          }
-        } else if (issued) {
-          try {
-            await h.cleanup();
-            fixtureActive = false;
-          } catch (error: unknown) {
-            lifetime.retain();
-            fixtureUncertain = true;
-            if (!failed) {
-              failed = true;
-              failure = error;
-            }
-          }
-        } else {
-          // Setup did not issue a complete fixture; do not reuse its global context.
-          lifetime.retain();
-          fixtureUncertain = true;
-          if (!failed) {
-            failed = true;
-            failure = new Error(
-              "Retained routing fixture setup is incomplete; values omitted."
-            );
-          }
-        }
+      }
+      const end = await endRoutingFixture(lifetime, fixture);
+      if (end.restored) {
+        restored();
       }
       if (failed) {
         throw failure;
+      }
+      if (!end.restored) {
+        throw end.failure;
       }
     },
     timeoutMs
@@ -214,8 +283,10 @@ test("publication diagnostics distinguish compiler refusal after switching from 
 });
 /** Per-phase timing for the compound lifecycle tests. Each marker logs the elapsed
  * and per-phase ms with the probe counts, and `attribute` names the phase in
- * progress when a failure (such as a proof-deadline overrun) surfaces. Only timings
- * and counts are added to the already value-free diagnostic; values stay omitted. */
+ * progress and the last operation's timing (including whether its caller deadline
+ * had expired) when a failure (such as a proof-deadline overrun) surfaces. Only
+ * timings, counts and the refusal code are added to the already value-free
+ * diagnostic; values stay omitted. */
 function compoundPhases(fixture: string) {
   const started = Date.now();
   let lastPhase = "enter";
@@ -249,7 +320,7 @@ function compoundPhases(fixture: string) {
     attribute: (error: unknown) => {
       const now = Date.now();
       return new Error(
-        `${fixture} failed ${now - lastPhaseAt} ms after phase "${lastPhase}" (${now - started} ms elapsed of ${COMPOUND_BUDGET_MS} ms budget): ${String(error)}`,
+        `${fixture} failed ${now - lastPhaseAt} ms after phase "${lastPhase}" (${now - started} ms elapsed of ${COMPOUND_TEST_BUDGET_MS} ms budget; last operation ${JSON.stringify(h.lastOperation() ?? null)}): ${String(error)}`,
         { cause: error }
       );
     },
@@ -264,7 +335,10 @@ async function publishStoppedV14(
   expect(generation.report.adoption_generation_version).toBe(14);
   expect((await h.receipt()).routingHandoff).toBe("held");
   expect(
-    await h.operation(store, generation, "stop", { preparation: true })
+    await h.operation(store, generation, "stop", {
+      preparation: true,
+      deadlineMs: COMPOUND_OPERATION_DEADLINE_MS,
+    })
   ).toBe(0);
   phase("preparation-stop-return");
   await store.publish({ generation, binary: h.compiler });
@@ -310,7 +384,14 @@ function volumeInspections() {
 // 37999833592). It is split into the two tests below, each on a fresh fixture: the
 // first covers publication, the lifecycle operations and the saved lease; the
 // second covers rollback after a lifecycle cycle. Both open their store at the 60 s
-// product cap. The deadline-refusal controls in this file keep the 15 s default.
+// product cap and give each operation the product's default caller deadline. With
+// the harness's former fixed 15 s operation deadline, the fourth lifecycle operation
+// under suite load expired it and the product's fail-closed deadline guard refused
+// as E_LEGACY_ADOPTION_CHANGED (HACK-1283, run 39289575897); no binding had changed.
+// Each retained routing operation also costs more than the one before it, because
+// every route-claim scan rereads every prior attempt in the fixture's fresh home.
+// Their per-test budget is `COMPOUND_TEST_BUDGET_MS`. The deadline-refusal controls
+// in this file keep the 15 s default.
 test(
   "v14 keeps original resources and data through stop/publication/up/down/up and saved open",
   async () => {
@@ -319,15 +400,21 @@ test(
     );
     phase("prepare-enter");
     const { store, generation } = await prepare({
-      timeoutMs: COMPOUND_BUDGET_MS,
+      timeoutMs: COMPOUND_STORE_TIMEOUT_MS,
     });
     phase("prepare-return");
     try {
       const active = await publishStoppedV14(phase, store, generation);
-      for (const operation of ["start", "stop", "start", "stop"] as const) {
-        expect(await h.operation(store, active, operation)).toBe(0);
+      for (const [index, operation] of (
+        ["start", "stop", "start", "stop"] as const
+      ).entries()) {
+        expect(
+          await h.operation(store, active, operation, {
+            deadlineMs: COMPOUND_OPERATION_DEADLINE_MS,
+          })
+        ).toBe(0);
+        phase(`lifecycle-${index + 1}-${operation}-return`);
       }
-      phase("four-lifecycle-operations-return");
       await store.withLease({
         generation: active,
         run: async (input) => {
@@ -351,7 +438,7 @@ test(
     // One full cold preparation/publication, four lifecycle operations and a saved lease.
     // Canonical bracketed scans add four probes per stable binding observation.
   },
-  { timeoutMs: COMPOUND_BUDGET_MS }
+  { timeoutMs: COMPOUND_TEST_BUDGET_MS }
 );
 test(
   "v14 rollback after publication and one up/down restores originals and keeps data and the routing hold",
@@ -361,15 +448,19 @@ test(
     );
     phase("prepare-enter");
     const { store, generation } = await prepare({
-      timeoutMs: COMPOUND_BUDGET_MS,
+      timeoutMs: COMPOUND_STORE_TIMEOUT_MS,
     });
     phase("prepare-return");
     try {
       const active = await publishStoppedV14(phase, store, generation);
       for (const operation of ["start", "stop"] as const) {
-        expect(await h.operation(store, active, operation)).toBe(0);
+        expect(
+          await h.operation(store, active, operation, {
+            deadlineMs: COMPOUND_OPERATION_DEADLINE_MS,
+          })
+        ).toBe(0);
+        phase(`lifecycle-${operation}-return`);
       }
-      phase("lifecycle-cycle-return");
       await store.rollback();
       phase("rollback-return");
       expect(
@@ -393,7 +484,116 @@ test(
     // One full cold preparation/publication, one lifecycle cycle and rollback.
     // Canonical bracketed scans add four probes per stable binding observation.
   },
-  { timeoutMs: COMPOUND_BUDGET_MS }
+  { timeoutMs: COMPOUND_TEST_BUDGET_MS }
+);
+/** Runs one harness operation while a synthetic clock jumps
+ * `SLOW_OPERATION_ADVANCE_MS` ahead after the operation's first probe, so the
+ * operation is slow by the product's own clock but otherwise unchanged. */
+async function slowOperation(run: () => Promise<number>): Promise<number> {
+  const realNow = Date.now;
+  let offset = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+  h.hooks.afterProbe = async () => {
+    offset = SLOW_OPERATION_ADVANCE_MS;
+  };
+  try {
+    return await run();
+  } finally {
+    h.hooks.afterProbe = undefined;
+    clock.mockRestore();
+  }
+}
+test(
+  "HACK-1283: an unchanged operation slower than 15 s completes under the product's default caller deadline",
+  async () => {
+    const { store, generation } = await prepare({
+      timeoutMs: COMPOUND_STORE_TIMEOUT_MS,
+    });
+    try {
+      expect(
+        await slowOperation(() =>
+          h.operation(store, generation, "stop", {
+            preparation: true,
+            deadlineMs: COMPOUND_OPERATION_DEADLINE_MS,
+          })
+        )
+      ).toBe(0);
+      expect(h.lastOperation()).toMatchObject({
+        outcome: "returned",
+        deadlineMs: COMPOUND_OPERATION_DEADLINE_MS,
+        deadlineExpired: false,
+        bindingUnchanged: true,
+      });
+      expect(h.lastOperation()?.elapsedMs).toBeGreaterThanOrEqual(
+        SLOW_OPERATION_ADVANCE_MS
+      );
+      expect(h.effects).toHaveLength(1);
+      expect((await h.receipt()).pendingOperation).toBeNull();
+      await store.publish({ generation, binary: h.compiler });
+      expect((await h.receipt()).publication?.phase).toBe("active");
+    } finally {
+      await store.close();
+    }
+  },
+  { timeoutMs: SINGLE_OPERATION_TEST_BUDGET_MS }
+);
+test(
+  "HACK-1283: the same slow operation under the 15 s default refuses as DEADLINE, not CHANGED, when only its deadline expired",
+  async () => {
+    const { store, generation } = await prepare({
+      timeoutMs: COMPOUND_STORE_TIMEOUT_MS,
+    });
+    try {
+      await red(
+        slowOperation(() =>
+          h.operation(store, generation, "stop", { preparation: true })
+        )
+      );
+      expect(h.lastOperation()).toMatchObject({
+        outcome: "refused",
+        code: "E_LEGACY_ADOPTION_DEADLINE",
+        deadlineMs: 15_000,
+        deadlineExpired: true,
+        // Nothing in the synthetic binding moved, so HACK-1340 reports the deadline.
+        bindingUnchanged: true,
+      });
+      expect((await h.receipt()).routingHandoff).toBe("held");
+    } finally {
+      await store.close();
+    }
+  },
+  { timeoutMs: SINGLE_OPERATION_TEST_BUDGET_MS }
+);
+test(
+  "HACK-1283: a real binding change still refuses as CHANGED within the product's default caller deadline",
+  async () => {
+    const { store, generation } = await prepare({
+      timeoutMs: COMPOUND_STORE_TIMEOUT_MS,
+    });
+    try {
+      h.hooks.afterEffect = async () => {
+        h.model.volumeBirth = "2026-02-02T01:02:03Z";
+      };
+      await red(
+        h.operation(store, generation, "stop", {
+          preparation: true,
+          deadlineMs: COMPOUND_OPERATION_DEADLINE_MS,
+        })
+      );
+      expect(h.lastOperation()).toMatchObject({
+        outcome: "refused",
+        code: "E_LEGACY_ADOPTION_CHANGED",
+        deadlineMs: COMPOUND_OPERATION_DEADLINE_MS,
+        deadlineExpired: false,
+        bindingUnchanged: false,
+      });
+      expect(h.effects).toHaveLength(1);
+    } finally {
+      h.hooks.afterEffect = undefined;
+      await store.close();
+    }
+  },
+  { timeoutMs: SINGLE_OPERATION_TEST_BUDGET_MS }
 );
 test("read-only routing phase refuses volume birth drift at its complete final binding", async () => {
   const { store, generation } = await prepare();
@@ -703,6 +903,49 @@ boundedTest(
     expect(lifetime.canRestore()).toBe(false);
   },
   1000
+);
+gatedTest(
+  "a refused teardown still restores HACK_HOME so later files never inherit the fixture home",
+  async (restored) => {
+    // This case installs the fixture's global doubles, so it must hold the
+    // file's fixture gate: as a plain test it could run while an earlier
+    // fixture's lifetime is unknown, and a later case would not see this one
+    // still open (HACK-1455).
+    expect(fixtureActive).toBe(true);
+    expect(fixtureUncertain).toBe(false);
+    const before = process.env.HACK_HOME;
+    // Stands in for another fixture's spy that is kept on purpose while its
+    // settlement is unknown: this case must restore only its own spies.
+    const foreign = spyOn(privateState, "readPrivate");
+    try {
+      const lifetime = retainedRoutingFixtureLifetime(Date.now() + 5000);
+      const fixture = await retainedRoutingFixture(lifetime);
+      try {
+        expect(process.env.HACK_HOME).toBe(fixture.home);
+        lifetime.retain();
+        // The gated runner's own teardown path for an unknown lifetime.
+        const end = await endRoutingFixture(lifetime, fixture);
+        expect(end.restored).toBe(false);
+        expect(end.failure).toBeInstanceOf(Error);
+        expect<string | undefined>(process.env.HACK_HOME).toBe(before);
+        expect(fixture.doublesInstalled()).toBe(true);
+        process.env.HACK_HOME = fixture.home;
+        await expect(fixture.cleanup()).rejects.toThrow();
+        expect<string | undefined>(process.env.HACK_HOME).toBe(before);
+        expect(fixture.doublesInstalled()).toBe(true);
+      } finally {
+        restoreEnv("HACK_HOME", before);
+        fixture.restoreDoubles();
+        await rm(fixture.outer, { recursive: true, force: true });
+        restored();
+      }
+      expect(fixture.doublesInstalled()).toBe(false);
+      expect(privateState.readPrivate).toBe(foreign);
+    } finally {
+      foreign.mockRestore();
+    }
+  },
+  5000
 );
 boundedTest(
   "known callback settlement permits fixture teardown before its unchanged deadline",
@@ -1214,6 +1457,160 @@ test("save-active repeats full volume authority after its scoped routing observa
     if (h.canRestore()) {
       Reflect.deleteProperty(h.hooks, "afterProbe");
     }
+    await store.close();
+  }
+});
+/** Every synthetic binding fact except the running state, which a stop
+ * legitimately changes. Compared, never reported. */
+function bindingFacts() {
+  const { running: _running, ...facts } = h.model;
+  return JSON.stringify(facts);
+}
+/** The closed refusal code of a rejected retained operation. */
+async function refusalCode(
+  value: Promise<unknown>
+): Promise<LegacyComposeAdoptedGenerationError["code"]> {
+  try {
+    await value;
+  } catch (error: unknown) {
+    expect(error).toBeInstanceOf(LegacyComposeAdoptedGenerationError);
+    expect(String(error)).toMatch(/values omitted/i);
+    expect(String(error)).not.toContain(ROUTING_CANARY);
+    expect(String(error)).not.toContain(h.root);
+    if (error instanceof LegacyComposeAdoptedGenerationError) {
+      return error.code;
+    }
+  }
+  throw new Error("unexpected synthetic success");
+}
+// HACK-1340: the harness gives each operation a 15 s caller deadline. A
+// synthetic clock jumps past it after the operation's first probe, so the
+// operation is slow by the product's own clock while nothing it observes moves.
+test("HACK-1340: an unchanged retained v14 operation past its caller deadline refuses as a deadline, not a binding change", async () => {
+  const { store, generation } = await prepare();
+  const realNow = Date.now;
+  let offset = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+  const before = bindingFacts();
+  try {
+    h.hooks.afterProbe = async () => {
+      offset = 16_000;
+    };
+    const code = await refusalCode(
+      h.operation(store, generation, "stop", { preparation: true })
+    );
+    expect(offset).toBe(16_000);
+    expect(bindingFacts()).toBe(before);
+    expect(code).toBe("E_LEGACY_ADOPTION_DEADLINE");
+    expect(new LegacyComposeAdoptedGenerationError(code).message).toBe(
+      "Legacy adoption operation reached its caller deadline before it could finish; values omitted."
+    );
+    expect((await h.receipt()).routingHandoff).toBe("held");
+  } finally {
+    h.hooks.afterProbe = undefined;
+    clock.mockRestore();
+    await store.close();
+  }
+});
+test("HACK-1340: a real binding drift within the caller deadline still refuses as a binding change", async () => {
+  const { store, generation } = await prepare();
+  const before = bindingFacts();
+  try {
+    h.hooks.afterEffect = async () => {
+      h.model.volumeBirth = "2026-02-02T01:02:03Z";
+    };
+    const code = await refusalCode(
+      h.operation(store, generation, "stop", { preparation: true })
+    );
+    expect(bindingFacts()).not.toBe(before);
+    expect(code).toBe("E_LEGACY_ADOPTION_CHANGED");
+    expect(h.effects).toHaveLength(1);
+    expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
+  } finally {
+    h.hooks.afterEffect = undefined;
+    await store.close();
+  }
+});
+// HACK-1391: the two deadline guards of a retained v14 operation, each proven on
+// its own. The caller-deadline catch in `mutateRetainedContainers` keeps an
+// observed drift's code even when the drift is reported after the deadline, and
+// `requireMutationDeadline` issues the deadline code, not a drift, when the
+// callback's revocation fence finds the deadline passed.
+test("HACK-1391: a binding drift reported after the caller deadline keeps its binding-change code", async () => {
+  const { store, generation } = await prepare();
+  const realNow = Date.now;
+  let offset = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+  const before = bindingFacts();
+  let driftedReads = 0;
+  try {
+    h.hooks.afterEffect = async () => {
+      h.model.volumeBirth = "2026-02-02T01:02:03Z";
+    };
+    h.hooks.afterProbe = async (args) => {
+      // The first read of the drifted volume returns the changed birth; the
+      // clock then passes the deadline before the store compares it (the
+      // bracketed scan may reread the volume once more before comparing).
+      if (
+        h.effects.length === 1 &&
+        args[0] === "volume" &&
+        args[1] === "inspect" &&
+        ++driftedReads === 1
+      ) {
+        offset = SLOW_OPERATION_ADVANCE_MS;
+      }
+    };
+    const code = await refusalCode(
+      h.operation(store, generation, "stop", { preparation: true })
+    );
+    expect(driftedReads).toBeGreaterThanOrEqual(1);
+    expect(bindingFacts()).not.toBe(before);
+    expect(h.lastOperation()).toMatchObject({
+      outcome: "refused",
+      deadlineExpired: true,
+      bindingUnchanged: false,
+    });
+    expect(code).toBe("E_LEGACY_ADOPTION_CHANGED");
+    expect(h.effects).toHaveLength(1);
+    expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
+  } finally {
+    h.hooks.afterEffect = undefined;
+    h.hooks.afterProbe = undefined;
+    clock.mockRestore();
+    await store.close();
+  }
+});
+test("HACK-1391: the callback revocation fence past the caller deadline refuses as a deadline, not a binding change", async () => {
+  const { store, generation } = await prepare();
+  const realNow = Date.now;
+  let offset = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+  const before = bindingFacts();
+  let fenced = false;
+  try {
+    const deadline = Date.now() + 15_000;
+    const code = await refusalCode(
+      store.withPreparationStop({
+        generation,
+        binary: h.compiler,
+        deadline,
+        run: async (input) => {
+          // No probe or check runs between the jump and the fence, so only
+          // `requireMutationDeadline` can refuse here.
+          offset = SLOW_OPERATION_ADVANCE_MS;
+          fenced = true;
+          input.assertActive();
+          return 0;
+        },
+      })
+    );
+    expect(fenced).toBe(true);
+    expect(bindingFacts()).toBe(before);
+    expect(code).toBe("E_LEGACY_ADOPTION_DEADLINE");
+    expect(h.effects).toHaveLength(0);
+    expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
+  } finally {
+    clock.mockRestore();
     await store.close();
   }
 });

@@ -14,6 +14,8 @@ export interface ExecResult {
 export interface ExecOptions {
   readonly cwd?: string;
   readonly env?: Record<string, string>;
+  /** Inherited variables to drop from the child env (before `env` applies). */
+  readonly unsetEnvKeys?: readonly string[];
   readonly stdin?: "inherit" | "pipe" | "ignore";
   readonly timeoutMs?: number;
 }
@@ -46,7 +48,7 @@ export async function exec(
 ): Promise<ExecResult> {
   const proc = Bun.spawn([...cmd], {
     cwd: opts.cwd,
-    env: buildSpawnEnv(opts.env),
+    env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),
     stdin: opts.stdin ?? "inherit",
     stdout: "pipe",
     stderr: "pipe",

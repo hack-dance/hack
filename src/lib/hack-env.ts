@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import {
   PROJECT_ENV_CONTRACT_FILENAME,
@@ -6,7 +6,9 @@ import {
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
+import { withEnvLayerLock } from "./env-layer-lock.ts";
 import { readTextFile } from "./fs.ts";
+import { ensureHackGitInfoExclude } from "./git-info-exclude.ts";
 import { getString, isRecord } from "./guards.ts";
 import {
   readPrivateEnvFile,
@@ -501,43 +503,84 @@ export function resolveEnvSecretKey(opts: {
   return envName.length > 0 ? `env.${envName}.${opts.key}` : opts.key;
 }
 
+/**
+ * Sets one key in a project dotenv file (`.hack/.env` or `.hack/.env.<name>`)
+ * with a private atomic write. Before writing, best-effort, it keeps the project dir's
+ * machine-local files out of `git status` through the repository's
+ * `info/exclude` (see `ensureHackGitInfoExclude`); it never writes the
+ * working tree for that.
+ *
+ * Concurrency: the read, merge and write run under the file's env layer lock
+ * (`withEnvLayerLock`), so concurrent sets and removals of different keys all
+ * survive; a writer that waits longer than the bounded wait refuses closed
+ * without writing.
+ */
 export async function upsertDotEnvValue(opts: {
   readonly envFile: string;
   readonly key: string;
   readonly value: string;
+  /** Bounded wait for the layer lock; tests only. */
+  readonly layerLockTimeoutMs?: number;
 }): Promise<{ readonly changed: boolean }> {
-  const existingText =
-    (await readPrivateEnvFile({ envFile: opts.envFile })) ?? "";
-  const env = parseDotEnv(existingText);
-  const nextEnv: Record<string, string> = { ...env, [opts.key]: opts.value };
-  const nextText = serializeDotEnvStable(nextEnv);
-  return await writePrivateEnvFileIfChanged({
-    envFile: opts.envFile,
-    text: nextText,
+  // Refuse a symlinked file or `.hack` before the lock creates anything.
+  await readPrivateEnvFile({ envFile: opts.envFile });
+  return await withEnvLayerLock({
+    layerPath: opts.envFile,
+    timeoutMs: opts.layerLockTimeoutMs,
+    run: async () => {
+      const existingText =
+        (await readPrivateEnvFile({ envFile: opts.envFile })) ?? "";
+      const env = parseDotEnv(existingText);
+      const nextEnv: Record<string, string> = {
+        ...env,
+        [opts.key]: opts.value,
+      };
+      const nextText = serializeDotEnvStable(nextEnv);
+      // After the read, so a refused (for example symlinked) file never spawns git.
+      await ensureHackGitInfoExclude({ projectDir: dirname(opts.envFile) });
+      return await writePrivateEnvFileIfChanged({
+        envFile: opts.envFile,
+        text: nextText,
+      });
+    },
   });
 }
 
+/** Removes one key from a project dotenv file; locked like {@link upsertDotEnvValue}. */
 export async function removeDotEnvKey(opts: {
   readonly envFile: string;
   readonly key: string;
+  /** Bounded wait for the layer lock; tests only. */
+  readonly layerLockTimeoutMs?: number;
 }): Promise<{ readonly changed: boolean }> {
-  const existingText =
-    (await readPrivateEnvFile({ envFile: opts.envFile })) ?? "";
-  const env = parseDotEnv(existingText);
-  if (!(opts.key in env)) {
+  const preflight = await readPrivateEnvFile({ envFile: opts.envFile });
+  if (preflight === null || !(opts.key in parseDotEnv(preflight))) {
+    // Nothing to remove: take no lock and create nothing.
     return { changed: false };
   }
-  const nextEnv: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (key === opts.key) {
-      continue;
-    }
-    nextEnv[key] = value;
-  }
-  const nextText = serializeDotEnvStable(nextEnv);
-  return await writePrivateEnvFileIfChanged({
-    envFile: opts.envFile,
-    text: nextText,
+  return await withEnvLayerLock({
+    layerPath: opts.envFile,
+    timeoutMs: opts.layerLockTimeoutMs,
+    run: async () => {
+      const existingText =
+        (await readPrivateEnvFile({ envFile: opts.envFile })) ?? "";
+      const env = parseDotEnv(existingText);
+      if (!(opts.key in env)) {
+        return { changed: false };
+      }
+      const nextEnv: Record<string, string> = {};
+      for (const [key, value] of Object.entries(env)) {
+        if (key === opts.key) {
+          continue;
+        }
+        nextEnv[key] = value;
+      }
+      const nextText = serializeDotEnvStable(nextEnv);
+      return await writePrivateEnvFileIfChanged({
+        envFile: opts.envFile,
+        text: nextText,
+      });
+    },
   });
 }
 

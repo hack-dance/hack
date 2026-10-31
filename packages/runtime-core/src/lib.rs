@@ -4,6 +4,10 @@
 pub mod node;
 pub mod project;
 pub mod provider;
+#[cfg(test)]
+mod test_root;
+#[cfg(test)]
+pub(crate) use test_root::{private_test_root, unique_test_root};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -15,6 +19,10 @@ pub const CANDIDATE_VERSION: &str = "5.0.0-dev.6";
 mod error;
 mod error_stop_diagnostics;
 pub use error::CandidateError;
+#[cfg(test)]
+mod test_scratch;
+#[cfg(test)]
+pub(crate) use test_scratch::next_test_scratch;
 
 #[derive(Debug, Serialize)]
 pub struct Candidate {

@@ -35,6 +35,35 @@ function decode(value: unknown): Buffer {
 export const NATIVE_RUN_SELECTION_REFUSAL =
   "Native `hack run` uses the running project's environment and profiles, and the requested --env or --profile does not match them. Omit --env and --profile, or pass exactly the selection `hack up` started with. No command ran.";
 
+/** The closed `E_USAGE` refusal of an empty native `run --env` or `--profile`. */
+export const NATIVE_RUN_EMPTY_SELECTION_REFUSAL =
+  "Native `hack run` does not accept an empty --env or --profile value. Omit the option to use the running selection, or pass the env or profiles `hack up` started with. No command ran.";
+
+/**
+ * Refuse an empty native `run --env` or `--profile` value before it is
+ * resolved. Elsewhere an empty `--env` means base layers and an empty
+ * `--profile` means no profiles, but a native run never changes the running
+ * selection, so an empty value could only silently mean "inherit" or an
+ * explicit empty selection. Whitespace and comma-only values count as empty.
+ * A profile list is empty only when every entry is: an empty entry beside a
+ * real one is dropped, so `--profile "web,"` asks for `web`. On the native
+ * backend `hack run` calls this before any project dispatch.
+ */
+export function requireNonEmptyNativeRunOptions(opts: {
+  readonly env: string | undefined;
+  readonly profile: string | undefined;
+}): void {
+  const emptyEnv = opts.env?.trim() === "";
+  const emptyProfile =
+    opts.profile?.split(",").every((part) => part.trim() === "") === true;
+  if (emptyEnv || emptyProfile) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
+    });
+  }
+}
+
 /**
  * The selection a native one-off asks for. An omitted field inherits the
  * running selection; a given field must equal it exactly. Profiles compare as
@@ -56,10 +85,11 @@ export function requireNativeRunSelection(opts: {
   readonly selection?: NativeRunSelection;
 }): void {
   const { run, selection } = opts;
+  // A legacy mapping without a recorded env has `effectiveEnvName` undefined,
+  // which never equals a given selection (a string or the base `null`).
   const envDiffers =
     selection?.envName !== undefined &&
-    (run.effectiveEnvName === undefined ||
-      selection.envName !== run.effectiveEnvName);
+    selection.envName !== run.effectiveEnvName;
   const profilesDiffer =
     selection?.profiles !== undefined &&
     (run.profiles === undefined ||

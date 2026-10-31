@@ -33,8 +33,24 @@ For native setup use root `mise.toml`, the Bun pin in `package.json`, and
 `bun install --frozen-lockfile`. Native gates are `bun run typecheck`, `bun run check`,
 `bun run test`. Focused CLI checks: `bun run --cwd packages/cli typecheck` and
 `bun run --cwd packages/cli check`; lint changed tests/scripts explicitly with
-`bunx ultracite check <paths>`. Rust default gates are `bun run check:local` and
-`bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
+`bunx ultracite check <paths>`. These entry points first run
+`bun run check:bun-version`, which fails when the running Bun differs from the
+`packageManager` pin that CI installs. A Bun ahead of mise's shims on `PATH`
+(for example mise's `latest` install) bypasses the checkout's `mise.toml`; use
+`mise x bun@<pin> -- bun run <script>` instead. `HACK_ALLOW_BUN_VERSION_MISMATCH=1`
+proceeds with a warning for a deliberate experiment; such a result is not CI evidence.
+Raw `bun test <paths>` does not run the guard.
+
+CI's "Config compiler" job also runs compiled-bundle CLI checks
+(`scripts/check-config-compiler-cli.ts`, `scripts/check-native-*-plan-cli.ts`,
+`scripts/check-native-config-import-cli.ts`) that `bun run test` does not. For
+compiler, native planning or config-import changes, run them locally after
+`bun run build` and `bun run build:config-compiler` with
+`bun run check:native-plan-cli`. `tests/native-plan-cli-wiring.test.ts` fails when a
+new `scripts/check-native-*-plan-cli.ts` is missing from that command or from CI.
+CI also lints those scripts and runs their transport tests; lint changed ones explicitly.
+
+Rust default gates are `bun run check:local` and `bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
 changes; the toolchain Rust tasks already enable all features. Keep default coverage.
 
 Before a full CLI suite, explicitly prepare the ignored compiler with
@@ -46,6 +62,25 @@ environment filtering; no fallback, build or download occurs during preflight.
 Host and container `dist` remain separate. This checks compatibility, not exact
 source provenance. Raw `bun test <paths>` remains available for focused tests;
 it bypasses the suite preflight and does not prepare compiler-dependent fixtures.
+
+All test files share one Bun process. `bunfig.toml` preloads
+[the global-state guard](../../../tests/helpers/global-state-guard-preload.ts) for
+every `bun test` run: a test or file that leaves the environment, cwd, umask,
+exit code, a guarded global function or a process listener changed fails with a
+`[global-state-guard]` message naming the file. The guard restores the
+environment, cwd, umask and exit code so later files run clean; it keeps
+replaced functions, which may still protect unsettled work. It keeps a test's
+leftover listeners until its file ends, then puts the file's listeners back, so
+a later `process.emit` is not blamed for them. Removing a leftover `SIGINT` or
+`SIGTERM` handler also drops whatever cleanup it would have run, so stop what
+it owns in the file's own teardown. Fix the named file's restore
+(`try`/`finally` or `afterEach`), not the later failures. To emit a real signal
+in a test, use `withOwnedProcessListeners` from
+`tests/helpers/owned-process-listeners.ts`; it puts the listeners it took off
+back even when the test times out, with `once` listeners kept `once`.
+Restore environment keys with `restoreEnv` from `tests/helpers/env.ts`: Bun keeps
+a deleted `HTTP_PROXY`-style key for `fetch` and `Bun.spawn` without `env`, and
+the guard reports that as `native env <KEY> changed`.
 
 For release workflow edits, run the pinned syntax/context check also enforced by CI:
 `mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/prerelease.yml .github/workflows/bun-crash-experiment.yml`.
@@ -70,10 +105,27 @@ untracked candidate additions. Keep private artifacts excluded from the index.
 | Native authored command slices | `tests/native-authored-command.test.ts` (unsupported matrix), `tests/native-authored-command-dispatch.test.ts`, `tests/native-authored-project-{start,run,observe,logs,exec,recovery}.test.ts` and the [command contract](../../../docs/reference/native-authored-commands.md); the dispatch "source CLI" cases need the prepared compiler (`bun run build:config-compiler` or absolute `HACK_CONFIG_COMPILER_BINARY`) and fail without it; `native-authored-project-start` and `native-authored-project-exec` are nondeterministic on a local macOS host, so a single local pass or failure is not proof; live acceptance runs host-serialized on one prepared macOS provider slot |
 | Native VM/routing/reclamation | [candidate guide](../../../docs/guides/native-candidate.md), relevant acceptance gate and isolated host fixture; Linux checks cannot qualify macOS effects |
 | Resource/performance claims | [performance skill](../hack-repo-performance/SKILL.md), matched workload and measured boundaries |
-| Bun runtime crashes | Read-only history: `bun run ci:bun-crash-census -- --since <UTC> --until <UTC>` (failed `test` job logs; `--scan-passing` for all). Matched reproduction: the gated [experiment](../../../.github/workflows/bun-crash-experiment.yml), which spends hosted macOS minutes and needs an explicit go-ahead; never loop on a shared host. Its default `focused` mode loops `tests/native-https-owner.test.ts` (where both original segfaults happened); `full` needs a budget of at least 40 minutes because one full suite takes 30-35. A run never starts unless its estimate fits the remaining budget, so read `summary.json` for the verdict and per-mode crash, failure and skipped-for-budget counts. Both share [the classifier](../../../scripts/lib/bun-crash-classify.ts) |
+| Bun runtime crashes | Read-only history: `bun run ci:bun-crash-census -- --since <UTC> --until <UTC>` (failed test-suite job logs: every `test shard i/n` job, or the `test` job of a run from before the split, since `test` is now the logless fan-in; `--scan-passing` for all; `--job NAME` selects by exact name or a `*` pattern such as `"test shard *"`; a `warning:` line means no job matched or a selected job ran no Bun, so its zero is not evidence). Matched reproduction: the gated [experiment](../../../.github/workflows/bun-crash-experiment.yml), which spends hosted macOS minutes and needs an explicit go-ahead; never loop on a shared host. Its default `focused` mode loops `tests/native-https-owner.test.ts` (where both original segfaults happened); `full` needs a budget of at least 40 minutes because one full suite takes 30-35. A run never starts unless its estimate fits the remaining budget, so read `summary.json` for the verdict and per-mode crash, failure and skipped-for-budget counts. Both share [the classifier](../../../scripts/lib/bun-crash-classify.ts) |
 
 Read [CI](../../../.github/workflows/ci.yml) for current hosted gates. A local pass
-does not mean CI ran. Existing unsupported remote/gateway/native-app checks are
+does not mean CI ran.
+
+Hosted CI runs the `bun run test` file set on four `test shard i/4` jobs;
+the required `test` check is their fan-in and passes only when every shard did.
+[`scripts/test-shard-plan.ts`](../../../scripts/test-shard-plan.ts) splits the files
+by the durations in `scripts/test-shard-durations.json`. A file with no recorded
+duration is planned at 5 s. Each shard runs each of its files in its own
+`bun test ./<file>` process and prints a start line and a result line per file.
+It stops a file after 12 min, and stops the shard at 30 min or on cancellation.
+When it stops early it names the running file, the files not started and the
+slowest files. Each shard first checks that the four shards cover the files
+`git ls-files` lists exactly once. To reproduce one shard locally, run
+`bun scripts/test-shard.ts plan --shard=i/4` or
+`bun scripts/test-shard.ts run --shard=i/4`. To check the split after adding
+or moving tests, run `bun scripts/test-shard.ts verify --count=4`. To refresh the
+durations, download the `test-shard-durations-<i>` artifacts and run
+`bun scripts/test-shard.ts update-durations --source=<run> <files>`. A per-file
+process does not share module state with other files, unlike one `bun test` run. Existing unsupported remote/gateway/native-app checks are
 not default local-product requirements; use them only for explicitly scoped work.
 
 ## Verify the verifier

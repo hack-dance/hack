@@ -27,15 +27,26 @@ import { renderHackInitSkill } from "../src/agents/hack-init-skill.ts";
 import { renderHackInstallSkill } from "../src/agents/install-skill.ts";
 import { renderHackRemoteSkill } from "../src/agents/remote-bootstrap-skill.ts";
 import { isRecord } from "../src/lib/guards.ts";
+import { fixtureChildren } from "./helpers/fixture-children.ts";
 
 const repoRoot = join(import.meta.dir, "..");
 
 let tempDir: string | null = null;
+/**
+ * The release test's `prepare-release` child. `Bun.spawn` runs a child whose
+ * `cwd` is `null` in the current directory, the checkout, so a call that
+ * outlived its timed-out test once rewrote the repository's release-version
+ * files (HACK-1343). `afterEach` resets `tempDir` first, so a later spawn is
+ * refused, closed, and then kills and awaits a child that is still running.
+ */
+const children = fixtureChildren("agent-plugin-generation release fixture");
 
 afterEach(async () => {
-  if (tempDir) {
-    await rm(tempDir, { recursive: true, force: true });
-    tempDir = null;
+  const removed = tempDir;
+  tempDir = null;
+  await children.stopAll();
+  if (removed) {
+    await rm(removed, { recursive: true, force: true });
   }
 });
 
@@ -523,19 +534,12 @@ test("release preparation updates both manifests and rendered guidance after bum
     join(tempDir, "package.json"),
     JSON.stringify({ version: "0.0.1", workspaces: [] })
   );
-  const child = Bun.spawn(
-    [process.execPath, "scripts/prepare-release.ts", "--version=9.8.7"],
-    {
-      cwd: tempDir,
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  );
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
+  // Read the fixture at spawn time: once afterEach has reset it, this refuses
+  // instead of running prepare-release in the checkout.
+  const { exitCode, stdout, stderr } = await children.run({
+    cmd: [process.execPath, "scripts/prepare-release.ts", "--version=9.8.7"],
+    cwd: tempDir,
+  });
   expect(exitCode, stdout + stderr).toBe(0);
   for (const name of [HACK_PLUGIN_NAME, HACK_MCP_PLUGIN_NAME]) {
     for (const client of ["codex", "claude", "cursor"]) {
@@ -970,3 +974,53 @@ test("shipped skill inventory matches the generator and the integration doc", as
   }
   expect(doc).not.toContain("both skills");
 }, 15_000);
+
+test("install guidance branches on installed schema and real release assets without a Python default", () => {
+  const skill = renderHackInstallSkill();
+  const v2 =
+    skill
+      .split("### Standalone v2 channel")[1]
+      ?.split("### New Python-free installation")[0] ?? "";
+  expect(v2).toContain("hack.prerelease-install/v2");
+  expect(v2).toContain("<verified-root>/bin/hack-next");
+  expect(v2).not.toContain("manager.py");
+  const operations = [...v2.matchAll(/"\$candidate" --manager (\w+)/g)].map(
+    (match) => match[1]
+  );
+  expect(operations).toEqual(["status", "upgrade", "rollback", "stable"]);
+  expect(v2).toContain('export PATH="$HOME/.hack-next/bin:$PATH"');
+  const fresh =
+    skill
+      .split("### New Python-free installation")[1]
+      ?.split("### Legacy v1 channel")[0] ?? "";
+  for (const asset of [
+    "hack-next-install.sh",
+    "hack-next-manager-darwin-arm64",
+    "INSTALLER-SHA256SUMS",
+  ]) {
+    expect(fresh).toContain(asset);
+  }
+  expect(fresh).toContain("report that the Python-free route is unavailable");
+  expect(fresh).toContain("Do not silently install Python");
+  expect(fresh).toContain("next.5");
+  const reading = skill.split("## Further reading")[1] ?? "";
+  expect(reading).toContain("[Legacy v1/Python candidate installation guide]");
+  expect(reading).toContain("not v2 standalone instructions");
+  expect(reading).toContain("verify actual release asset availability");
+  expect(reading).not.toContain("[Candidate installation guide]");
+  expect(fresh).not.toMatch(/https:\/\/[^\s]+\/hack-next-install\.sh/);
+  const legacy =
+    skill
+      .split("### Legacy v1 channel")[1]
+      ?.split("## Plugin and MCP selection")[0] ?? "";
+  expect(legacy).toContain("hack.prerelease-install/v1");
+  expect(legacy).toContain(
+    "explicitly accepts the legacy Python-dependent path"
+  );
+  expect(legacy).toContain("separate root");
+  expect(skill).toContain(
+    "verified executable in a separately scoped integration"
+  );
+  expect(skill).toContain("Never use a stable MCP tool to mutate a candidate");
+  expect(skill).toContain("does not establish that every optional setup or");
+});

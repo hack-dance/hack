@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { isolatedDockerClientEnv } from "./docker-client.ts";
+import { requireFixtureRoot } from "./fixture-root.ts";
 
 /**
  * The only test-runner variables a spawned source CLI inherits. Everything else
@@ -17,10 +18,15 @@ export function privateCliHome(root: string): string {
 }
 
 export type PrivateCliEnvOptions = {
-  /** Fixture directory that owns the private HOME and Docker client config. */
+  /**
+   * Fixture directory that owns the private HOME and Docker client config. It
+   * must be an absolute path: an empty or relative root is refused, closed,
+   * instead of being resolved against the current directory (the checkout).
+   */
   readonly root: string;
   /**
-   * HOME for the child. It must be the fixture root or a path inside it.
+   * HOME for the child. It must be an absolute path that is the fixture root
+   * or inside it.
    * Defaults to `<root>/user-home`. It is created when absent, and its mode
    * is set to 0700 either way.
    */
@@ -50,8 +56,10 @@ export type PrivateCliEnvOptions = {
 export function privateCliEnv(
   opts: PrivateCliEnvOptions
 ): Record<string, string> {
-  const root = resolve(opts.root);
-  const home = resolve(opts.home ?? privateCliHome(root));
+  const root = resolve(requireFixtureRoot(opts.root, "privateCliEnv"));
+  const home = resolve(
+    requireFixtureRoot(opts.home ?? privateCliHome(root), "privateCliEnv home")
+  );
   const inside = relative(root, home);
   if (inside.startsWith("..") || isAbsolute(inside)) {
     throw new Error("privateCliEnv: HOME must be inside the fixture root.");

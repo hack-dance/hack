@@ -13,8 +13,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createNativeComposeStartDeadline } from "../src/lib/compose-startup-budget.ts";
 import {
   assertNativeComposeEffectOwned,
+  nativeComposeGuardStorageProof,
   runOneOff,
 } from "../src/lib/native-compose-command.ts";
 import {
@@ -56,6 +58,7 @@ import {
 } from "../src/lib/native-compose-storage-witness-xattr-carrier.ts";
 import { encodeNativeComposeStorageXattrResponse } from "../src/lib/native-compose-storage-witness-xattr-codec.ts";
 import { runNativeComposeStorageXattrHelper } from "../src/lib/native-compose-storage-witness-xattr-helper.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { commandReaderFixture } from "./helpers/native-compose-storage-command-fixture.ts";
 
 const engineId = "d".repeat(64);
@@ -77,6 +80,25 @@ const artifact: NativeComposeStorageXattrArtifact = {
   helperHash: "e".repeat(64),
   kernelAbi: 1,
 };
+/**
+ * Bun timeout for store cases that drive a full durable generation lifecycle
+ * (publish, enroll, verify, retire) in process. They wait on no timer: the
+ * fake carrier answers at once. Their cost is a fixed amount of durable store
+ * file work, mostly system time: the second `up` of the same-birth case alone
+ * makes about 13.5k lstat, 3.7k realpath and 3.9k open calls, the same count
+ * on every run (19k, 13k and 4.5k before HACK-1440). It can still take tens
+ * of seconds on a host whose load is several times its CPU count, so this
+ * budget is a hang guard, not a speed assertion (HACK-1422).
+ */
+const STORE_CASE_BUDGET_MS = 180_000;
+/**
+ * Wall-clock lifetime of the fake carrier. Every carrier is captured inside a
+ * case, so its deadline is always later than that case's Bun budget: a slow
+ * host fails the case as a clean timeout, never by exhausting the carrier
+ * deadline, which refuses with the storage witness error and would change the
+ * asserted outcome (HACK-1422).
+ */
+const FAKE_CARRIER_LIFETIME_MS = 2 * STORE_CASE_BUDGET_MS;
 const roots: string[] = [];
 const stores: NativeComposeGenerationStore[] = [];
 let commandReaderCases = 0,
@@ -297,7 +319,7 @@ function fake(store: NativeComposeGenerationStore) {
     artifact,
     ports,
     signal: controller.signal,
-    deadline: Date.now() + 60_000,
+    deadline: Date.now() + FAKE_CARRIER_LIFETIME_MS,
   });
   return { state, ports, carrier, calls, attributes, controller };
 }
@@ -659,6 +681,59 @@ test("completion publication refusal retains its first boundary after complete h
   expect(saved.storageWitnessesPending).toBe(true);
   expect(saved.storageWitnesses?.[0]?.state).toBe("expected");
 });
+
+test.each([
+  ["unset", undefined, 90_000],
+  ["configured", "240000", 240_000],
+] as const)(
+  "command storage carriers use the %s named storage budget, never a short start budget",
+  async (_label, configured, expected) => {
+    const { store, transport } = await rememberedActive();
+    const command = commandPorts(transport);
+    const deadlines: { readonly deadline: number; readonly from: number }[] =
+      [];
+    const carrier = command.ports.carrier;
+    const ports = {
+      ...command.ports,
+      carrier: async (opts: {
+        readonly signal: AbortSignal;
+        readonly deadline: number;
+      }) => {
+        deadlines.push({ deadline: opts.deadline, from: Date.now() });
+        return await carrier(opts);
+      },
+    };
+    const oldStartup = process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS;
+    const oldStorage = process.env.HACK_NATIVE_STORAGE_TIMEOUT_MS;
+    restoreEnv("HACK_COMPOSE_STARTUP_TIMEOUT_MS", "15000");
+    restoreEnv("HACK_NATIVE_STORAGE_TIMEOUT_MS", configured);
+    try {
+      await store.withMutation(async (mutation) => {
+        const before = Date.now();
+        const storage = await prepareNativeComposeCommandStorage({
+          store,
+          mutation,
+          operation: "up",
+          selected: [selection],
+          signal: transport.controller.signal,
+          ports,
+        });
+        expect(storage).not.toBeNull();
+        expect(deadlines.length).toBeGreaterThanOrEqual(2);
+        for (const { deadline, from } of deadlines) {
+          // Each carrier deadline is taken when it is created, from the storage
+          // budget alone: never the 15 s start budget the command was given.
+          expect(deadline).toBeGreaterThanOrEqual(before + expected);
+          expect(deadline).toBeLessThanOrEqual(from + expected);
+        }
+      });
+    } finally {
+      restoreEnv("HACK_COMPOSE_STARTUP_TIMEOUT_MS", oldStartup);
+      restoreEnv("HACK_NATIVE_STORAGE_TIMEOUT_MS", oldStorage);
+    }
+  },
+  STORE_CASE_BUDGET_MS
+);
 
 test.each([
   "up",
@@ -1839,6 +1914,88 @@ test("runEffect captures the original fresh carrier factory across a long phase 
   }
 });
 
+test(
+  "a guard storage proof extends the start deadline by its carrier proof only, never by its freshness checks",
+  async () => {
+    const { store, transport, generation } = await rememberedActive();
+    const command = commandPorts(transport);
+    // Fake monotonic clock: each freshness check takes 7 s, each carrier 3 s.
+    let monotonic = 0;
+    let excluding = 0;
+    let armed = false;
+    const steps: string[] = [];
+    const createCarrier = command.ports.carrier;
+    command.ports.carrier = async (opts) => {
+      if (armed) {
+        steps.push(excluding > 0 ? "carrier-excluded" : "carrier-counted");
+        monotonic += 3000;
+      }
+      return await createCarrier(opts);
+    };
+    await store.withMutation(async (mutation) => {
+      const storage = await prepareNativeComposeCommandStorage({
+        store,
+        mutation,
+        operation: "up",
+        selected: [selection],
+        signal: transport.controller.signal,
+        ports: command.ports,
+        assertFresh: async () => {
+          if (armed) {
+            steps.push(excluding > 0 ? "fresh-excluded" : "fresh-counted");
+            monotonic += 7000;
+          }
+        },
+      });
+      if (!storage) {
+        throw new Error("Expected retained storage");
+      }
+      const start = createNativeComposeStartDeadline({
+        timeoutMs: 10_000,
+        storageTimeoutMs: 90_000,
+        wallNow: () => 1_000_000,
+        monotonicNow: () => monotonic,
+      });
+      const excludeStorage = <T>(work: () => Promise<T>): Promise<T> =>
+        start.excludeStorage(async () => {
+          excluding += 1;
+          try {
+            return await work();
+          } finally {
+            excluding -= 1;
+          }
+        });
+      let adjacentAnswers = 0;
+      armed = true;
+      await nativeComposeGuardStorageProof({
+        verify: storage.verify,
+        generation,
+        excludeStorage,
+        takeAdjacentProof: () => {
+          adjacentAnswers += 1;
+          return false;
+        },
+      })();
+      armed = false;
+      expect(adjacentAnswers).toBe(1);
+      // The enrolled volume's carrier proof is the only excluded span.
+      expect(steps).toEqual([
+        "fresh-counted",
+        "carrier-excluded",
+        "fresh-counted",
+      ]);
+      // Only that carrier's 3 s moved the deadline; the guard's 14 s of
+      // freshness checks consumed the start budget.
+      expect(start.deadline()).toBe(1_000_000 + 10_000 + 3000);
+    });
+    // Admission's proof plus the guard's: each verified the retained witness.
+    expect(
+      helperOperations(transport).filter((call) => call === "verify")
+    ).toHaveLength(2);
+  },
+  STORE_CASE_BUDGET_MS
+);
+
 test("durable tagged Expected precedes one cold provision/seed and fresh proof before workload", async () => {
   const { store, transport, reference } = await active();
   expect(reference).toMatchObject({
@@ -2094,76 +2251,84 @@ test.each(
   );
 });
 
-test("post-workload marker loss refuses completion, retaining exact pending generation", async () => {
-  const { store, transport, generation } = await active();
-  transport.calls.length = 0;
-  await store.withMutation(async (mutation) => {
-    await expect(
-      mutation.runEffect({
-        generation,
-        operation: "up",
-        assertOwned: async () => {},
-        assertFresh: async () => {},
-        storageWitnesses: {
-          kind: "directory-xattr",
-          engineId,
-          carrier: transport.carrier,
-        },
-        effect: async () => {
-          transport.calls.push("workload");
-          transport.attributes.clear();
-          return { value: 0, outcome: "complete" };
-        },
-      })
-    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
-  });
-  expect(transport.calls).toContain("workload");
-  expect((await store.loadCurrent()).pending?.generationId).toBe(
-    generation.generationId
-  );
-  expect((await store.loadCurrent()).storageWitnesses?.[0]?.state).toBe(
-    "enrolled"
-  );
-  expect(transport.calls).not.toContain("seed");
-});
+test(
+  "post-workload marker loss refuses completion, retaining exact pending generation",
+  async () => {
+    const { store, transport, generation } = await active();
+    transport.calls.length = 0;
+    await store.withMutation(async (mutation) => {
+      await expect(
+        mutation.runEffect({
+          generation,
+          operation: "up",
+          assertOwned: async () => {},
+          assertFresh: async () => {},
+          storageWitnesses: {
+            kind: "directory-xattr",
+            engineId,
+            carrier: transport.carrier,
+          },
+          effect: async () => {
+            transport.calls.push("workload");
+            transport.attributes.clear();
+            return { value: 0, outcome: "complete" };
+          },
+        })
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+    });
+    expect(transport.calls).toContain("workload");
+    expect((await store.loadCurrent()).pending?.generationId).toBe(
+      generation.generationId
+    );
+    expect((await store.loadCurrent()).storageWitnesses?.[0]?.state).toBe(
+      "enrolled"
+    );
+    expect(transport.calls).not.toContain("seed");
+  },
+  STORE_CASE_BUDGET_MS
+);
 
-test("same-birth root replacement while awaiting the final reader cannot publish ready from its pinned old directory", async () => {
-  const { store, transport, generation } = await active();
-  let exchanged = false;
-  await store.withMutation(async (mutation) => {
-    await expect(
-      mutation.runEffect({
-        generation,
-        operation: "up",
-        assertOwned: async () => {},
-        assertFresh: async () => {},
-        storageWitnesses: {
-          kind: "directory-xattr",
-          engineId,
-          carrier: transport.carrier,
-        },
-        beforeComplete: async () => {
-          transport.state.afterInvoke = (input) => {
-            if (!exchanged && input.request.operation === "verify") {
-              exchanged = true;
-              transport.state.root = { ...transport.state.root, inode: "43" };
-              transport.attributes.clear();
-            }
-          };
-        },
-        effect: async () => ({ value: 0, outcome: "complete" }),
-      })
-    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
-  });
-  expect(exchanged).toBe(true);
-  expect(transport.state.volume).toEqual(volume);
-  expect((await store.loadCurrent()).pending?.generationId).toBe(
-    generation.generationId
-  );
-  expect((await store.loadCurrent()).storageWitnesses?.[0]?.state).toBe(
-    "enrolled"
-  );
-});
+test(
+  "same-birth root replacement while awaiting the final reader cannot publish ready from its pinned old directory",
+  async () => {
+    const { store, transport, generation } = await active();
+    let exchanged = false;
+    await store.withMutation(async (mutation) => {
+      await expect(
+        mutation.runEffect({
+          generation,
+          operation: "up",
+          assertOwned: async () => {},
+          assertFresh: async () => {},
+          storageWitnesses: {
+            kind: "directory-xattr",
+            engineId,
+            carrier: transport.carrier,
+          },
+          beforeComplete: async () => {
+            transport.state.afterInvoke = (input) => {
+              if (!exchanged && input.request.operation === "verify") {
+                exchanged = true;
+                transport.state.root = { ...transport.state.root, inode: "43" };
+                transport.attributes.clear();
+              }
+            };
+          },
+          effect: async () => ({ value: 0, outcome: "complete" }),
+        })
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+    });
+    expect(exchanged).toBe(true);
+    expect(transport.state.volume).toEqual(volume);
+    expect((await store.loadCurrent()).pending?.generationId).toBe(
+      generation.generationId
+    );
+    expect((await store.loadCurrent()).storageWitnesses?.[0]?.state).toBe(
+      "enrolled"
+    );
+  },
+  STORE_CASE_BUDGET_MS
+);
 
 test("known finite refused marker read clears only its proven absent helper intent and never repairs the witness", async () => {
   const { store, transport, generation, reference } = await active();
@@ -2237,96 +2402,100 @@ test.each([
   "changed-created",
   "created-uncertain",
   "cleanup",
-] as const)("unknown enrolled helper %s blocks replay and saved retirement without changing the main material receipt", async (failure) => {
-  const { store, transport, generation, reference } = await active();
-  transport.state.failure = failure;
-  transport.calls.length = 0;
-  let workload = 0;
-  await store.withMutation(async (mutation) => {
-    await expect(
-      mutation.runEffect({
+] as const)(
+  "unknown enrolled helper %s blocks replay and saved retirement without changing the main material receipt",
+  async (failure) => {
+    const { store, transport, generation, reference } = await active();
+    transport.state.failure = failure;
+    transport.calls.length = 0;
+    let workload = 0;
+    await store.withMutation(async (mutation) => {
+      await expect(
+        mutation.runEffect({
+          generation,
+          operation: "run",
+          assertFresh: async () => {},
+          assertOwned: async () => {},
+          storageWitnesses: {
+            kind: "directory-xattr",
+            engineId,
+            carrier: transport.carrier,
+          },
+          effect: async () => {
+            workload++;
+            return { value: 0, outcome: "complete" };
+          },
+        })
+      ).rejects.toThrow("values omitted");
+    });
+    expect(workload).toBe(0);
+    const unknown = await store.loadCurrent();
+    expect(unknown.generation?.generationId).toBe(generation.generationId);
+    expect(unknown.pending).toBeNull();
+    expect(unknown.storageWitnessesPending).toBe(true);
+    expect(unknown.storageWitnesses?.[0]).toMatchObject({
+      state: "enrolled",
+      reference,
+    });
+    const observed = [...transport.calls];
+    await store.withMutation(async (mutation) => {
+      if (failure === "no-created") {
+        const foreignGeneration = await publish(mutation);
+        await expect(
+          mutation.runEffect({
+            generation: foreignGeneration,
+            operation: "down",
+            recoverPending: true,
+            assertOwned: async () => {},
+            effect: async () => {
+              workload++;
+              return { value: 0, outcome: "complete" };
+            },
+          })
+        ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+      }
+      for (const operation of ["up", "down"] as const) {
+        await expect(
+          mutation.runEffect({
+            generation,
+            operation,
+            assertFresh: async () => {},
+            assertOwned: async () => {},
+            effect: async () => {
+              workload++;
+              return { value: 0, outcome: "complete" };
+            },
+          })
+        ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+      }
+      const stopped = await mutation.runEffect({
         generation,
-        operation: "run",
+        operation: "down",
+        recoverPending: true,
         assertFresh: async () => {},
         assertOwned: async () => {},
-        storageWitnesses: {
-          kind: "directory-xattr",
-          engineId,
-          carrier: transport.carrier,
-        },
         effect: async () => {
           workload++;
           return { value: 0, outcome: "complete" };
         },
-      })
-    ).rejects.toThrow("values omitted");
-  });
-  expect(workload).toBe(0);
-  const unknown = await store.loadCurrent();
-  expect(unknown.generation?.generationId).toBe(generation.generationId);
-  expect(unknown.pending).toBeNull();
-  expect(unknown.storageWitnessesPending).toBe(true);
-  expect(unknown.storageWitnesses?.[0]).toMatchObject({
-    state: "enrolled",
-    reference,
-  });
-  const observed = [...transport.calls];
-  await store.withMutation(async (mutation) => {
-    if (failure === "no-created") {
-      const foreignGeneration = await publish(mutation);
-      await expect(
-        mutation.runEffect({
-          generation: foreignGeneration,
-          operation: "down",
-          recoverPending: true,
-          assertOwned: async () => {},
-          effect: async () => {
-            workload++;
-            return { value: 0, outcome: "complete" };
-          },
-        })
-      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
-    }
-    for (const operation of ["up", "down"] as const) {
-      await expect(
-        mutation.runEffect({
-          generation,
-          operation,
-          assertFresh: async () => {},
-          assertOwned: async () => {},
-          effect: async () => {
-            workload++;
-            return { value: 0, outcome: "complete" };
-          },
-        })
-      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
-    }
-    const stopped = await mutation.runEffect({
-      generation,
-      operation: "down",
-      recoverPending: true,
-      assertFresh: async () => {},
-      assertOwned: async () => {},
-      effect: async () => {
-        workload++;
-        return { value: 0, outcome: "complete" };
-      },
-      beforeComplete: async () => {
-        throw new Error("Unknown helper cannot retire claims");
-      },
+        beforeComplete: async () => {
+          throw new Error("Unknown helper cannot retire claims");
+        },
+      });
+      expect(stopped).toEqual({ value: 0, outcome: "uncertain" });
     });
-    expect(stopped).toEqual({ value: 0, outcome: "uncertain" });
-  });
-  expect(workload).toBe(1);
-  expect(transport.calls).toEqual(observed);
-  const retained = await store.loadCurrent();
-  expect(retained.pending?.generationId).toBe(generation.generationId);
-  expect(retained.storageWitnessesPending).toBe(true);
-  expect(retained.storageWitnesses?.[0]).toMatchObject({
-    state: "enrolled",
-    reference,
-  });
-});
+    expect(workload).toBe(1);
+    expect(transport.calls).toEqual(observed);
+    const retained = await store.loadCurrent();
+    expect(retained.pending?.generationId).toBe(generation.generationId);
+    expect(retained.storageWitnessesPending).toBe(true);
+    expect(retained.storageWitnesses?.[0]).toMatchObject({
+      state: "enrolled",
+      reference,
+    });
+  },
+  STORE_CASE_BUDGET_MS
+);
 
 test("retirement rereads the original receipt after its final carrier-journal await", async () => {
   const { store, generation } = await active();

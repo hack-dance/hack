@@ -272,15 +272,33 @@ fn restart_does_not_own_or_duplicate_supervisor() {
     let request = n.submit("restart", "tree", 10_000, 1200);
     let accepted = n.ask(&request);
     let id = accepted["job_id"].as_str().unwrap();
-    n.until(|| n.receipt(id).child_pid.is_some());
-    let original = n.receipt(id);
+    // Judge the first receipt that names the child: a second read could land after
+    // the 1.2 s timeout under load and see a later, legitimately terminal state.
+    let mut first = None;
+    n.until(|| {
+        let receipt = n.receipt(id);
+        let named = receipt.child_pid.is_some();
+        first = named.then_some(receipt);
+        named
+    });
+    let original = first.unwrap();
+    assert_eq!(original.state, "running", "{original:?}");
+    assert!(original.child_identity.is_some(), "{original:?}");
+    // The restart may land before or after the timeout fires, and the supervisor may
+    // observe its killed leader before waitid publishes the exit (HACK-1418). Every
+    // interleaving must end as the original supervisor's own timeout.
     n.stop();
     std::thread::sleep(Duration::from_millis(250));
     n.start();
     assert_eq!(n.ask(&request), accepted);
     let result = n.terminal(id);
     assert_eq!(result.state, "timed_out", "{result:?}");
+    assert_eq!(result.detail, None, "{result:?}");
+    assert_eq!(result.signal, Some(libc::SIGKILL), "{result:?}");
     assert_eq!(result.supervisor_pid, original.supervisor_pid);
+    assert_eq!(result.supervisor_identity, original.supervisor_identity);
+    assert_eq!(result.child_pid, original.child_pid);
+    assert_eq!(result.child_identity, original.child_identity);
     assert_eq!(result.starts, 1);
 }
 #[test]

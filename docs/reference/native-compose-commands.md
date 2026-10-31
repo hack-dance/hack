@@ -35,7 +35,17 @@ fallback.
 
 The first command slice supports whole-project detached `up`, `restart`, `run`,
 `down`, `ps`, plain `logs`, and `exec`. Startup uses the existing configurable
-Compose startup budget. Compose owns dependency startup, restart, and exec
+Compose startup budget (`HACK_COMPOSE_STARTUP_TIMEOUT_MS`) for builds, container
+start, readiness and route verification. Storage preparation, enrollment and
+every storage proof use the separate per-carrier storage budget
+(`HACK_NATIVE_STORAGE_TIMEOUT_MS`, default 90 seconds); proofs in the build and
+pre-spawn guards extend the start deadline by their own elapsed time instead of
+consuming it. That excluded time is capped per start phase at 16 × the storage
+budget or 1 hour, whichever is smaller: the deadline moves at most that far, a
+guard proof that would start after the cap is refused before it runs, and one
+that ends past it refuses the phase as `storage-budget`. The phase thus ends
+within the start budget, plus the cap, plus at most one in-flight guard proof.
+Compose owns dependency startup, restart, and exec
 health checks. Hack checks the exact proposed generation: each service must be
 running, healthy when it declares a health check, and each initializer job must
 have exited successfully. An older healthy container does not satisfy a new
@@ -277,6 +287,21 @@ Hack does not kill a guessed guest PID or automatically stop the application on
 client cancellation. Explicit owned `down` stops the containing instance while
 retaining persistent data.
 
+When the instance has enrolled persistent storage, saved `exec` proves that
+storage before and after the guest command. The opening proof may reuse the
+proof that command storage preparation just made under the same lease; the
+closing proof after the command always runs fresh. Each proof has its own
+`HACK_NATIVE_STORAGE_TIMEOUT_MS` carrier budget. The closing proof is
+fail-closed: if it refuses (including a storage probe timeout, reported as
+`E_COMPOSE_FAILED` with a `storage-*` stage), `exec` fails with that refusal even
+though the guest command already ran and printed its output, and the command's
+exit code is not reported. A storage result that cannot be proven after the
+command must not look like a clean exec. The refusal keeps ownership and saved
+state unchanged, and the next admission proves storage again. Retrying `exec`
+runs the guest command again, so check its effects first when it is not
+idempotent. A cancelled `exec` keeps its known exit code and starts no closing
+proof.
+
 `ps.pending` describes journaled engine mutations, not guest exec sessions. A
 cancelled `exec` can therefore have no pending engine operation even when its guest
 completion is unknown. An interrupted `run` retains its exact one-off and pending
@@ -337,8 +362,19 @@ expectation admission/write, journal, enrollment read, provision, root discovery
 seed, verification, closing root proof, completion write and publication. Carrier
 transport additionally distinguishes target, create, policy, start, response and
 cleanup; policy reasons identify shape, command, labels, host policy, mount
-cardinality, program/storage mounts and policy stability. Unknown errors remain
-`unclassified`. Diagnostics contain no paths, resource names, helper replies,
+cardinality, program/storage mounts and policy stability. A re-inspected carrier
+whose creation time, policy or stopped state changed reports
+`helper-policy-stability`, and a saved material binding that changed during a
+carrier step, or before a verification's deferred evidence retirement, reports
+`private-state`, as does an original command owner vetoed before that
+retirement. A policy or state refusal keeps its reason even when it is
+caught after the carrier's deadline. A timeout,
+budget or otherwise unclassified refusal that finds its carrier's storage budget
+exhausted, and not cancelled, reports `storage-budget`, which names
+`HACK_NATIVE_STORAGE_TIMEOUT_MS`; a start phase
+that spends its whole-phase storage cap reports the same reason at
+`guard-storage`. Unknown errors
+remain `unclassified`. Diagnostics contain no paths, resource names, helper replies,
 error messages or causes. They add no observation, retry, repair or cleanup and
 do not change pending-state, deadline or effect admission rules. A stage names
 the first captured boundary; it does not establish the cause of older failures

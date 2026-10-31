@@ -3,16 +3,26 @@
  * Read-only census of Bun crashes in hosted CI history.
  *
  * For a `--since`/`--until` window it lists every run of the CI workflow, reads
- * the `test` job of every run attempt, downloads only failed-job logs (all
+ * the test-suite jobs of every run attempt, downloads only failed-job logs (all
  * completed logs with `--scan-passing`) into an owned temporary directory, and
  * classifies each with the shared classifier used by `scripts/bun-crash-loop.ts`.
+ *
+ * By default the test-suite jobs are every `test shard i/n` job of a run. Since
+ * HACK-1381 the `test` job is only the required fan-in: it runs no Bun, so its
+ * log holds nothing to classify. A run with no shard job predates the split, so
+ * its `test` job ran the suite and is read instead. `--job NAME` selects jobs by
+ * exact name, or by a pattern where `*` matches any text
+ * (`--job "test shard *"`). The report warns when no job matched, or when a
+ * selected job shows no Bun setup in its log or workflow block, because a zero
+ * crash count from such a job is not evidence.
  *
  * It uses the caller's existing `gh` authentication and never handles a token.
  * It is strictly read-only: no reruns, comments, labels or uploads. It prints
  * counts, closed tokens, versions and numeric run/job ids only, never log bodies.
  *
  * Bun version per job comes from the `Setup Bun` input in the job log when a log
- * is read, and otherwise from the workflow file at the run's head commit. For a
+ * is read, and otherwise from the workflow file at the run's head commit, which
+ * is fetched once per commit and resolved per job name. For a
  * pull-request run the job actually used the merge commit's workflow, so a stale
  * pull-request head can attribute a job to the older pin; `versionSources` shows
  * how many jobs each source covers.
@@ -62,6 +72,18 @@ export interface JobRecord {
   readonly reason: BunRunReason | null;
 }
 
+/**
+ * A closed warning. Each one means the census could not see the Bun output a
+ * zero crash count needs, so the totals are not evidence by themselves.
+ */
+export type CensusWarning =
+  | { readonly kind: "no_jobs_matched" }
+  | {
+      readonly kind: "no_bun_setup";
+      readonly jobs: number;
+      readonly selected: number;
+    };
+
 export interface CrashingJob {
   readonly runId: number;
   readonly attempt: number;
@@ -85,7 +107,17 @@ export interface VersionTotals {
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const WORKFLOW_FILE = /^[A-Za-z0-9_.-]{1,100}\.ya?ml$/;
-const JOB_NAME = /^[A-Za-z0-9_. -]{1,100}$/;
+const JOB_NAME = /^[A-Za-z0-9_. /*-]{1,100}$/;
+/** A shard job of the hosted test suite (`.github/workflows/ci.yml`, HACK-1381). */
+const TEST_SHARD_JOB = /^test shard \d+\/\d+$/;
+/** Before the suite was sharded this job ran it; now it is the logless fan-in. */
+const LEGACY_TEST_JOB = "test";
+const WORKFLOW_JOB_KEY = /^ {2}([A-Za-z0-9_-]+):\s*$/;
+const WORKFLOW_JOB_NAME = /^ {4}name:\s*(.+?)\s*$/;
+const WORKFLOW_EXPRESSION = /\$\{\{.*?\}\}/;
+const WORKFLOW_BUN_VERSION = /^\s+bun-version:\s*["']?([^"'\s]+)["']?\s*$/;
+/** A YAML comment after a value: `#` preceded by whitespace, to end of line. */
+const YAML_TRAILING_COMMENT = /\s+#.*$/;
 const SHA = /^[0-9a-f]{40}$/;
 /** The runs endpoint returns at most 1000 results for one `created` query. */
 const MAX_WINDOW_RUNS = 1000;
@@ -107,29 +139,123 @@ const positiveInteger = (value: unknown): number | null =>
     ? value
     : null;
 
+const escapeRegExp = (text: string): string =>
+  text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+/** Whether a job display name matches a `--job` value (`*` matches any text). */
+export function jobNameMatches(pattern: string, name: string): boolean {
+  return new RegExp(
+    `^${pattern.split("*").map(escapeRegExp).join(".*")}$`
+  ).test(name);
+}
+
 /**
- * The `bun-version` given to the named job in a workflow file, or null. The
- * job block runs from `  <job>:` to the next two-space-indented key.
+ * Whether a workflow job with key `key` and an optional `name:` template has
+ * the display name `name`. A `${{ ... }}` expression in the template matches
+ * any non-empty text, so `test shard ${{ matrix.shard }}/4` names
+ * `test shard 2/4`.
+ */
+function workflowJobNamed(opts: {
+  readonly key: string;
+  readonly template: string | null;
+  readonly name: string;
+}): boolean {
+  if (opts.template === null) {
+    return opts.key === opts.name;
+  }
+  const template = opts.template.replace(/^(["'])(.*)\1$/, "$2");
+  return new RegExp(
+    `^${template.split(WORKFLOW_EXPRESSION).map(escapeRegExp).join(".+")}$`
+  ).test(opts.name);
+}
+
+/**
+ * The `bun-version` given to the job with display name `job` in a workflow
+ * file, or null. A job block runs from its two-space-indented key under
+ * `jobs:` to the next one. Its display name is its `name:` template, or its
+ * key when it has none, so `test shard 2/4` finds the `test-shard` matrix job.
+ * A job with no `bun-version`, such as the `test` fan-in, returns null.
+ * The `jobs:` line may carry a trailing comment (`jobs: # all jobs`).
+ * Column-0 `#` comments inside `jobs:` are skipped; any other column-0 line is
+ * the next top-level key and ends the jobs. Blank lines need no skip: they
+ * start with no non-space character and match no key, `name:` or
+ * `bun-version`, so they neither end the jobs nor change a block.
  */
 export function workflowJobBunVersion(
   workflow: string,
   job: string
 ): string | null {
   const lines = workflow.split(/\r?\n/);
-  const start = lines.findIndex((line) => line.trimEnd() === `  ${job}:`);
-  if (start === -1) {
+  const jobsAt = lines.findIndex(
+    (line) => line.replace(YAML_TRAILING_COMMENT, "").trimEnd() === "jobs:"
+  );
+  if (jobsAt === -1) {
     return null;
   }
-  for (const line of lines.slice(start + 1)) {
-    if (/^ {2}\S/.test(line)) {
-      return null;
+  const blocks: { readonly key: string; readonly lines: string[] }[] = [];
+  for (const line of lines.slice(jobsAt + 1)) {
+    if (line.startsWith("#")) {
+      continue;
     }
-    const match = /^\s+bun-version:\s*["']?([^"'\s]+)["']?\s*$/.exec(line);
+    if (/^\S/.test(line)) {
+      break;
+    }
+    const key = WORKFLOW_JOB_KEY.exec(line)?.[1];
+    if (key) {
+      blocks.push({ key, lines: [] });
+    } else {
+      blocks.at(-1)?.lines.push(line);
+    }
+  }
+  const block = blocks.find((candidate) =>
+    workflowJobNamed({
+      key: candidate.key,
+      template:
+        candidate.lines
+          .map((line) => WORKFLOW_JOB_NAME.exec(line)?.[1])
+          .find((value) => value !== undefined) ?? null,
+      name: job,
+    })
+  );
+  for (const line of block?.lines ?? []) {
+    const match = WORKFLOW_BUN_VERSION.exec(line);
     if (match) {
       return closedBunVersion(match[1]);
     }
   }
   return null;
+}
+
+/**
+ * Which job names of one run the census reads. With no `--job`, the run's
+ * `test shard i/n` jobs, or its `test` job when it has no shard job (a run
+ * from before the split, whose `test` job ran the suite).
+ */
+export function suiteJobSelector(opts: {
+  readonly job: string | null;
+  readonly runJobNames: readonly string[];
+}): (name: string) => boolean {
+  const { job } = opts;
+  if (job !== null) {
+    return (name) => jobNameMatches(job, name);
+  }
+  if (opts.runJobNames.some((name) => TEST_SHARD_JOB.test(name))) {
+    return (name) => TEST_SHARD_JOB.test(name);
+  }
+  return (name) => name === LEGACY_TEST_JOB;
+}
+
+/** The warnings for a finished census; see {@link CensusWarning}. */
+export function censusWarnings(records: readonly JobRecord[]): CensusWarning[] {
+  if (records.length === 0) {
+    return [{ kind: "no_jobs_matched" }];
+  }
+  const withoutBun = records.filter(
+    (entry) => entry.versionSource === "unknown"
+  ).length;
+  return withoutBun === 0
+    ? []
+    : [{ kind: "no_bun_setup", jobs: withoutBun, selected: records.length }];
 }
 
 export function emptyTotals(bunVersion: string): VersionTotals {
@@ -200,7 +326,8 @@ export function aggregateCensus(
 export interface CensusOptions {
   readonly repository: string;
   readonly workflow: string;
-  readonly job: string;
+  /** Null reads the test-suite jobs; see {@link suiteJobSelector}. */
+  readonly job: string | null;
   readonly since: string;
   readonly until: string;
   readonly scanPassing: boolean;
@@ -211,6 +338,7 @@ export interface CensusResult {
   readonly runs: number;
   readonly records: readonly JobRecord[];
   readonly totals: readonly VersionTotals[];
+  readonly warnings: readonly CensusWarning[];
 }
 
 async function mapConcurrent<T, R>(
@@ -334,12 +462,11 @@ export async function runCensus(
     }
   }
 
-  const workflowVersions = new Map<string, Promise<string | null>>();
-  const workflowVersion = (sha: string | null): Promise<string | null> => {
-    if (sha === null) {
-      return Promise.resolve(null);
-    }
-    const cached = workflowVersions.get(sha);
+  // One contents GET per head sha: every job of every run at that sha resolves
+  // its Bun version from the same decoded workflow text.
+  const workflowTexts = new Map<string, Promise<string | null>>();
+  const workflowText = (sha: string): Promise<string | null> => {
+    const cached = workflowTexts.get(sha);
     if (cached) {
       return cached;
     }
@@ -347,22 +474,39 @@ export async function runCensus(
       .json(
         `repos/${repo}/contents/.github/workflows/${options.workflow}?ref=${sha}`
       )
-      .then((value) => {
-        if (
-          typeof value !== "object" ||
-          value === null ||
-          !("content" in value) ||
-          typeof value.content !== "string"
-        ) {
-          return null;
-        }
-        return workflowJobBunVersion(
-          Buffer.from(value.content, "base64").toString("utf8"),
-          options.job
-        );
-      })
+      .then((value) =>
+        typeof value === "object" &&
+        value !== null &&
+        "content" in value &&
+        typeof value.content === "string"
+          ? Buffer.from(value.content, "base64").toString("utf8")
+          : null
+      )
       .catch(() => null);
-    workflowVersions.set(sha, pending);
+    workflowTexts.set(sha, pending);
+    return pending;
+  };
+
+  // Keyed by (sha, job display name), never sha alone: jobs at one sha differ
+  // (the `test` fan-in has no Bun, each shard has the pin), so a sha-only key
+  // would hand the first job's version to every job a wildcard selector reads.
+  const workflowVersions = new Map<string, Promise<string | null>>();
+  const workflowVersion = (
+    sha: string | null,
+    job: string
+  ): Promise<string | null> => {
+    if (sha === null) {
+      return Promise.resolve(null);
+    }
+    const cacheKey = `${sha}\n${job}`;
+    const cached = workflowVersions.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+    const pending = workflowText(sha).then((text) =>
+      text === null ? null : workflowJobBunVersion(text, job)
+    );
+    workflowVersions.set(cacheKey, pending);
     return pending;
   };
 
@@ -372,16 +516,24 @@ export async function runCensus(
     async (run) => {
       const seen = new Set<number>();
       const records: JobRecord[] = [];
-      const lines = await gh.lines(
-        `repos/${repo}/actions/runs/${run.id}/jobs?filter=all&per_page=100`,
-        ".jobs[] | {id, name, run_attempt, status, conclusion}"
-      );
-      for (const line of lines) {
-        const job = parseLine(line);
+      const jobs = (
+        await gh.lines(
+          `repos/${repo}/actions/runs/${run.id}/jobs?filter=all&per_page=100`,
+          ".jobs[] | {id, name, run_attempt, status, conclusion}"
+        )
+      ).map(parseLine);
+      const selected = suiteJobSelector({
+        job: options.job,
+        runJobNames: jobs.flatMap((job) =>
+          typeof job.name === "string" ? [job.name] : []
+        ),
+      });
+      for (const job of jobs) {
         const jobId = positiveInteger(job.id);
         const attempt = positiveInteger(job.run_attempt);
         if (
-          job.name !== options.job ||
+          typeof job.name !== "string" ||
+          !selected(job.name) ||
           job.status !== "completed" ||
           job.conclusion === "skipped" ||
           jobId === null ||
@@ -399,7 +551,7 @@ export async function runCensus(
             : null;
         const fromWorkflow = scanned?.bunVersion
           ? null
-          : await workflowVersion(run.headSha);
+          : await workflowVersion(run.headSha, job.name);
         records.push({
           runId: run.id,
           attempt,
@@ -414,8 +566,25 @@ export async function runCensus(
     }
   );
   const records = perRun.flat();
-  return { runs: runs.length, records, totals: aggregateCensus(records) };
+  return {
+    runs: runs.length,
+    records,
+    totals: aggregateCensus(records),
+    warnings: censusWarnings(records),
+  };
 }
+
+/** One closed, value-free line for a warning. */
+export function renderCensusWarning(warning: CensusWarning): string {
+  if (warning.kind === "no_jobs_matched") {
+    return "warning: no completed job matched the job selector, so zero crashes is not evidence; check --job against the workflow's job names";
+  }
+  return `warning: ${warning.jobs} of ${warning.selected} selected jobs show no Bun setup in their log or workflow, so their crash count is not evidence; the test job is a fan-in that runs no Bun since HACK-1381, so omit --job to read the test shard jobs`;
+}
+
+/** The report's `job=` value: the quoted selector, or `default`. */
+const jobLabel = (job: string | null): string =>
+  job === null ? "default" : JSON.stringify(job);
 
 /** Closed, value-free text report. */
 export function renderCensus(opts: {
@@ -424,7 +593,7 @@ export function renderCensus(opts: {
 }): string {
   const { options, result } = opts;
   const lines = [
-    `Bun crash census repo=${options.repository} workflow=${options.workflow} job=${options.job} since=${options.since} until=${options.until} runs=${result.runs} jobs=${result.records.length} scan_passing=${options.scanPassing}`,
+    `Bun crash census repo=${options.repository} workflow=${options.workflow} job=${jobLabel(options.job)} since=${options.since} until=${options.until} runs=${result.runs} jobs=${result.records.length} scan_passing=${options.scanPassing}`,
   ];
   for (const totals of result.totals) {
     const sources = Object.entries(totals.versionSources)
@@ -439,6 +608,7 @@ export function renderCensus(opts: {
       );
     }
   }
+  lines.push(...result.warnings.map(renderCensusWarning));
   return `${lines.join("\n")}\n`;
 }
 
@@ -495,12 +665,12 @@ export function parseCensusArguments(argv: readonly string[]): CensusOptions & {
   }
   const repository = values.get("repo") ?? "hack-dance/hack";
   const workflow = values.get("workflow") ?? "ci.yml";
-  const job = values.get("job") ?? "test";
+  const job = values.get("job") ?? null;
   if (
     !(
       REPOSITORY.test(repository) &&
       WORKFLOW_FILE.test(workflow) &&
-      JOB_NAME.test(job)
+      (job === null || JOB_NAME.test(job))
     )
   ) {
     throw new CensusError("Invalid argument");
@@ -583,9 +753,12 @@ async function main(): Promise<void> {
     const result = await runCensus(options, ghCliReader, workDir);
     process.stdout.write(
       json
-        ? `${JSON.stringify({ options, runs: result.runs, totals: result.totals }, null, 2)}\n`
+        ? `${JSON.stringify({ options, runs: result.runs, totals: result.totals, warnings: result.warnings }, null, 2)}\n`
         : renderCensus({ options, result })
     );
+    for (const warning of result.warnings) {
+      process.stderr.write(`${renderCensusWarning(warning)}\n`);
+    }
   } finally {
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", interrupt);

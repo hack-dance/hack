@@ -16,11 +16,16 @@ import { join } from "node:path";
 import { YAML } from "bun";
 import { buildDoctorRemediationPlanLines } from "../src/commands/doctor.ts";
 import {
+  ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+  adoptedComposeEnvOverrideNextStep,
   composeEnvAtRestRepairs,
   composeEnvOverridePath,
   describeComposeEnvAtRest,
+  INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+  INTERRUPTED_PREPARATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
   inspectComposeEnvAtRest,
   inspectComposeEnvOverrideAtRest,
+  PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
 } from "../src/lib/compose-env-at-rest.ts";
@@ -243,27 +248,25 @@ test("inspection and removal act only on literal or unverifiable overrides", asy
   expect(removed.removed).toBe(true);
   expect(await lstat(path).catch(() => null)).toBeNull();
 
-  // A symlink is never followed: it is unverifiable, removed only on request,
-  // and its target is untouched.
+  // A symlink is never followed and never removed, even on request: it is
+  // refused (HACK-1316), and both it and its target are left in place.
   const target = join(root, "target.yml");
   await writeFile(target, `A: ${CANARY}\n`);
   await symlink(target, path);
-  const linked = await removePlaintextComposeEnvOverride({ projectDir });
-  expect(linked).toEqual({
-    removed: false,
-    state: { kind: "unverifiable", path },
-    adoptionBound: false,
-    asidesRemoved: 0,
-  });
-  expect(
-    (
+  for (const includeUnverifiable of [false, true]) {
+    expect(
       await removePlaintextComposeEnvOverride({
         projectDir,
-        includeUnverifiable: true,
+        includeUnverifiable,
       })
-    ).removed
-  ).toBe(true);
-  expect(await lstat(path).catch(() => null)).toBeNull();
+    ).toEqual({
+      removed: false,
+      state: { kind: "refused", path },
+      adoptionBound: false,
+      asidesRemoved: 0,
+    });
+  }
+  expect((await lstat(path)).isSymbolicLink()).toBe(true);
   expect(await readFile(target, "utf8")).toContain(CANARY);
 });
 
@@ -374,6 +377,7 @@ test("doctor descriptions are ok for absent and reference-only files", () => {
       report: {
         override,
         adoptionBound: false,
+        adoptionPending: false,
         asides: { stale: 0, fresh: 0 },
       },
       projectDirName: ".hack",
@@ -483,6 +487,9 @@ test("an override that an adoption state may pin is kept by removal and reported
   expect(await readFile(path, "utf8")).toBe(literalText());
   const report = await inspectComposeEnvAtRest({ projectDir });
   expect(report.adoptionBound).toBe(true);
+  // Unreadable state is bound but not known to be pending, so the next step
+  // stays the plain rollback.
+  expect(report.adoptionPending).toBe(false);
   expect(composeEnvAtRestRepairs(report).override).toBe(false);
   const described = describeComposeEnvAtRest({
     report,
@@ -491,6 +498,7 @@ test("an override that an adoption state may pin is kept by removal and reported
   expect(described.status).toBe("warn");
   expect(described.message).toContain("pins this file");
   expect(described.message).toContain("hack config adopt --rollback");
+  expect(described.message).not.toContain("--recover --rollback");
   expect(described.message).not.toContain(CANARY);
 
   // Without the adoption state the same file is removed.
@@ -498,4 +506,218 @@ test("an override that an adoption state may pin is kept by removal and reported
   const removed = await removePlaintextComposeEnvOverride({ projectDir });
   expect(removed).toMatchObject({ removed: true, adoptionBound: false });
   expect(await lstat(path).catch(() => null)).toBeNull();
+});
+
+test("doctor names explicit recovery rollback for an override that a pending adoption pins (HACK-1391)", () => {
+  const path = "/unused";
+  for (const kind of ["plaintext", "unverifiable"] as const) {
+    const override =
+      kind === "plaintext"
+        ? { kind, path, values: 2, services: 1 }
+        : { kind, path };
+    const pending = describeComposeEnvAtRest({
+      report: {
+        override,
+        adoptionBound: true,
+        adoptionPending: "switch",
+        asides: { stale: 0, fresh: 0 },
+      },
+      projectDirName: ".hack",
+    });
+    expect(pending.status).toBe("warn");
+    expect(pending.message).toContain("pins this file");
+    expect(pending.message).toContain("hack config adopt --recover --rollback");
+    // Plain rollback and `hack down` refuse while the adoption is pending, so
+    // neither is the next step.
+    expect(pending.message).not.toContain("'hack config adopt --rollback'");
+    expect(pending.message).not.toContain("stop the adopted containers");
+    expect(pending.message).toContain(
+      PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+    );
+    expect(
+      adoptedComposeEnvOverrideNextStep({ adoptionPending: "switch" })
+    ).toBe(PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP);
+    expect(adoptedComposeEnvOverrideNextStep({ adoptionPending: false })).toBe(
+      ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+    );
+    const settled = describeComposeEnvAtRest({
+      report: {
+        override,
+        adoptionBound: true,
+        adoptionPending: false,
+        asides: { stale: 0, fresh: 0 },
+      },
+      projectDirName: ".hack",
+    });
+    expect(settled.message).toContain(ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP);
+    expect(settled.message).not.toContain("--recover --rollback");
+  }
+});
+
+test("doctor names the recovery each interrupted adoption kind accepts first (HACK-1414)", () => {
+  const path = "/unused";
+  const describe = (
+    adoptionPending: "preparation-stop" | "retained-operation"
+  ) =>
+    describeComposeEnvAtRest({
+      report: {
+        override: { kind: "plaintext", path, values: 2, services: 1 },
+        adoptionBound: true,
+        adoptionPending,
+        asides: { stale: 0, fresh: 0 },
+      },
+      projectDirName: ".hack",
+    }).message;
+  // An interrupted preparation stop has no switch yet: `--recover --rollback`
+  // refuses there, and only `--recover --stop` moves it on.
+  const preparation = describe("preparation-stop");
+  expect(preparation).toContain(
+    INTERRUPTED_PREPARATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+  );
+  expect(preparation).toMatch(
+    /first retry the interrupted adoption stop with 'hack config adopt --recover --stop'.*Release that switch with 'hack config adopt --recover --rollback'/
+  );
+  expect(preparation).not.toContain(
+    PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+  );
+  expect(preparation).not.toContain("'hack config adopt --rollback'");
+  // An interrupted retained command of an active adoption: rollback of either
+  // kind refuses until `hack down --recover` settles it.
+  const operation = describe("retained-operation");
+  expect(operation).toContain(
+    INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+  );
+  expect(operation).toContain(
+    "first settle the interrupted adopted command with 'hack down --recover'"
+  );
+  expect(operation).not.toContain("--recover --rollback");
+  expect(operation).not.toContain("--recover --stop");
+});
+
+/** Names and contents of every entry in a directory outside the project. */
+async function snapshotDirectory(
+  directory: string
+): Promise<Record<string, string>> {
+  const names = (await readdir(directory)).sort();
+  return Object.fromEntries(
+    await Promise.all(
+      names.map(async (name) => [
+        name,
+        await readFile(join(directory, name), "utf8"),
+      ])
+    )
+  );
+}
+
+/**
+ * HACK-1316: a symlinked `.hack` or `.hack/.internal` points outside the
+ * project, at a directory that holds a file named like the override (not one
+ * Hack can verify, the reported case) and a stale-aged aside. Inspection, the
+ * `--fix` removal, the aside sweep and the writer all refuse it, closed and
+ * value-free, and nothing behind the link is listed, read or changed.
+ */
+for (const linked of [".hack", ".hack/.internal"] as const) {
+  test(`a symlinked ${linked} is refused by inspection, removal, the sweep and the writer, and nothing behind it changes (HACK-1316)`, async () => {
+    const behind = join(root, "outside", ".internal");
+    await mkdir(behind, { recursive: true });
+    await writeFile(join(behind, "compose.env.override.yml"), `${CANARY}\n`);
+    await writeFile(join(behind, ASIDE), literalText());
+    let dir = projectDir;
+    if (linked === ".hack") {
+      await mkdir(join(root, "linked-root"));
+      dir = join(root, "linked-root", ".hack");
+      await symlink(join(root, "outside"), dir);
+    } else {
+      await symlink(behind, join(projectDir, ".internal"));
+    }
+    const before = await snapshotDirectory(behind);
+    // Old enough that a sweep through the link would take the aside.
+    const later = () => Date.now() + 61_000;
+    const path = composeEnvOverridePath({ projectDir: dir });
+
+    const report = await inspectComposeEnvAtRest({
+      projectDir: dir,
+      now: later,
+    });
+    expect(report).toEqual({
+      override: { kind: "refused", path },
+      adoptionBound: false,
+      adoptionPending: false,
+      asides: { stale: 0, fresh: 0 },
+    });
+    expect(composeEnvAtRestRepairs(report)).toEqual({
+      override: false,
+      asides: false,
+    });
+    const described = describeComposeEnvAtRest({
+      report,
+      projectDirName: ".hack",
+    });
+    expect(described).toEqual({
+      status: "warn",
+      message:
+        "Refused to inspect .hack/.internal/compose.env.override.yml: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Hack does not follow or change it, and 'hack doctor --fix' leaves it in place (values omitted). Replace it with a regular file or directory.",
+    });
+
+    expect(
+      await removePlaintextComposeEnvOverride({
+        projectDir: dir,
+        includeUnverifiable: true,
+        now: later,
+      })
+    ).toEqual({
+      removed: false,
+      state: { kind: "refused", path },
+      adoptionBound: false,
+      asidesRemoved: 0,
+    });
+    const references =
+      renderComposeEnvReferenceOverride({
+        targetServices: ["web"],
+        globalEnv: {},
+        serviceEnv,
+      })?.text ?? "";
+    const refusal = await writeComposeEnvOverride({
+      projectDir: dir,
+      text: references,
+      now: later,
+    }).catch((error: unknown) => error);
+    expect(String(refusal)).toBe(
+      "Error: Refused the generated Compose env override: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Replace it with a regular file or directory and retry; values omitted."
+    );
+
+    expect(await snapshotDirectory(behind)).toEqual(before);
+    expect(JSON.stringify([report, described, String(refusal)])).not.toContain(
+      CANARY
+    );
+    expect(described.message).not.toContain(root);
+  });
+}
+
+/**
+ * HACK-1316: the writer refuses a symlinked `.hack` before its `mkdir`, so a
+ * link to an outside directory without `.internal` gains nothing; the later
+ * read and replace checks alone would refuse only after creating it.
+ */
+test("the writer refuses a symlinked .hack before creating .internal behind it (HACK-1316)", async () => {
+  const outside = join(root, "outside");
+  await mkdir(outside);
+  await mkdir(join(root, "linked-root"));
+  const dir = join(root, "linked-root", ".hack");
+  await symlink(outside, dir);
+  const references =
+    renderComposeEnvReferenceOverride({
+      targetServices: ["web"],
+      globalEnv: {},
+      serviceEnv,
+    })?.text ?? "";
+
+  const refusal = await writeComposeEnvOverride({
+    projectDir: dir,
+    text: references,
+  }).catch((error: unknown) => error);
+  expect(String(refusal)).toBe(
+    "Error: Refused the generated Compose env override: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Replace it with a regular file or directory and retry; values omitted."
+  );
+  expect(await readdir(outside)).toEqual([]);
 });

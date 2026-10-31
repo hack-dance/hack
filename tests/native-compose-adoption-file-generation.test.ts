@@ -18,6 +18,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS } from "../src/lib/compose-startup-budget.ts";
 import { acquireLegacyComposeAdoptionBinding } from "../src/lib/native-compose-adoption-binding.ts";
 import { openLegacyComposeAdoptedGenerationStore } from "../src/lib/native-compose-adoption-generation.ts";
 import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption-preview.ts";
@@ -25,8 +26,8 @@ import { restoreEnv } from "./helpers/env.ts";
 import { retainedRoutingFixtureLifetime } from "./helpers/retained-routing-adoption.ts";
 
 // The two compound workflows include preparation, publication, multiple bounded
-// operations and saved rollback; their outer budget is separate from each 15s
-// product mutation limit. Unknown callbacks/children permanently retain globals.
+// operations and saved rollback; their outer budget is separate from each
+// operation's caller deadline. Unknown callbacks/children permanently retain globals.
 let lifetime: ReturnType<typeof retainedRoutingFixtureLifetime> | undefined;
 let uncertain = false;
 let spawnSpy: ReturnType<typeof spyOn<typeof Bun, "spawn">> | undefined;
@@ -69,6 +70,7 @@ let root: string;
 let projectRoot: string;
 let binary: string;
 let priorPath: string | undefined;
+let pathReplaced = false;
 let fixture: {
   running: boolean;
   failed: boolean;
@@ -167,9 +169,20 @@ else {const source=JSON.parse(await Bun.stdin.text());const {schema_version,...p
 `
   );
   await chmod(binary, 0o700);
+  pathReplaced = true;
   process.env.PATH = root;
 });
-afterEach(async () => {
+/**
+ * The per-case teardown, run from `afterEach`. PATH is restored even when the
+ * lifetime is unknown: a PATH left pointing at this fixture root hides git and
+ * bun from every later file in the Bun process (HACK-1327). The root and spawn
+ * spy stay retained, and later cases in this file refuse.
+ */
+async function releaseRetainedFileFixture() {
+  if (pathReplaced) {
+    pathReplaced = false;
+    restoreEnv("PATH", priorPath);
+  }
   if (!lifetime?.canRestore()) {
     uncertain = true;
     throw new Error(
@@ -178,8 +191,29 @@ afterEach(async () => {
   }
   spawnSpy?.mockRestore();
   spawnSpy = undefined;
-  restoreEnv("PATH", priorPath);
   await rm(root, { recursive: true, force: true });
+}
+afterEach(releaseRetainedFileFixture);
+test("an unknown lifetime still restores PATH before the teardown refuses", async () => {
+  expect(process.env.PATH).toBe(root);
+  const owned = lifetime;
+  const refused = retainedRoutingFixtureLifetime(Date.now() + 5000);
+  refused.retain();
+  lifetime = refused;
+  try {
+    await expect(releaseRetainedFileFixture()).rejects.toThrow(
+      "Retained-file fixture callback or child is unsettled"
+    );
+    expect(uncertain).toBe(true);
+    expect<string | undefined>(process.env.PATH).toBe(priorPath);
+    // The refusal kept the spawn spy for the unsettled work.
+    expect(Bun.spawn).not.toBe(originalSpawn);
+  } finally {
+    // Only this case's synthetic lifetime was unknown; its own lifetime ends
+    // normally in afterEach, which restores the spy and removes the root.
+    uncertain = false;
+    lifetime = owned;
+  }
 });
 async function save() {
   await writeFile(join(root, "fixture.json"), JSON.stringify(fixture));
@@ -228,85 +262,99 @@ async function effect(operation: "start" | "stop" | "restart") {
   return current.failed ? 7 : 0;
 }
 
-test("file8 earns explicit preparation, stopped publication, retained lifecycle and rollback without changing material", async () => {
-  const original = await readFile(join(projectRoot, "material/config"));
-  const { store, generation } = await prepared();
-  try {
-    expect(generation.report.adoption_generation_version).toBe(8);
-    expect((await state()).adoption_receipt_version).toBe(8);
-    expect(JSON.stringify(generation)).not.toContain(CANARY);
-    await store.withPreparationStop({
-      generation,
-      binary,
-      deadline: Date.now() + 15_000,
-      run: async (input) => {
-        await input.assertFresh();
-        return await effect("stop");
-      },
-    });
-    await store.publish({ generation, binary });
-    const active = await store.loadActive();
-    if (!active) {
-      throw new Error("active generation missing");
-    }
-    expect(
-      await store.withMutation({
-        generation: active,
-        operation: "start",
-        services: [],
+/** The compound file8 test gives each operation the product's own caller
+ * deadline: `hack config adopt --stop` and `hack up`/`down` pass the Compose
+ * startup budget. A shorter harness deadline let suite load expire a slow but
+ * unchanged operation (HACK-1340). */
+const COMPOUND_OPERATION_DEADLINE_MS = DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
+/** Six operation deadlines: the preparation stop and three lifecycle
+ * operations, plus preparation, publication and rollback. The test budget must
+ * not be shorter than the operations it runs in sequence. */
+const COMPOUND_TEST_BUDGET_MS = 6 * COMPOUND_OPERATION_DEADLINE_MS;
+
+test(
+  "file8 earns explicit preparation, stopped publication, retained lifecycle and rollback without changing material",
+  async () => {
+    const original = await readFile(join(projectRoot, "material/config"));
+    const { store, generation } = await prepared();
+    try {
+      expect(generation.report.adoption_generation_version).toBe(8);
+      expect((await state()).adoption_receipt_version).toBe(8);
+      expect(JSON.stringify(generation)).not.toContain(CANARY);
+      await store.withPreparationStop({
+        generation,
         binary,
-        deadline: Date.now() + 15_000,
-        run: async (input) => {
-          await input.assertFresh();
-          expect(JSON.stringify(input)).toBe("{}");
-          return await effect("start");
-        },
-      })
-    ).toBe(0);
-    expect(
-      await store.withMutation({
-        generation: active,
-        operation: "restart",
-        services: [],
-        binary,
-        deadline: Date.now() + 15_000,
-        run: async (input) => {
-          await input.assertFresh();
-          return await effect("restart");
-        },
-      })
-    ).toBe(0);
-    expect(
-      await store.withMutation({
-        generation: active,
-        operation: "stop",
-        services: [],
-        binary,
-        deadline: Date.now() + 15_000,
+        deadline: Date.now() + COMPOUND_OPERATION_DEADLINE_MS,
         run: async (input) => {
           await input.assertFresh();
           return await effect("stop");
         },
-      })
-    ).toBe(0);
-    await store.rollback();
-    expect((await state()).publication.phase).toBe("rolled-back");
-    expect((await state()).pendingOperation).toBeNull();
-    expect(await readFile(join(projectRoot, "material/config"))).toEqual(
-      original
-    );
-    expect(
-      (await commands()).every(
-        (args) =>
-          !["rm", "create", "up", "down", "build", "pull"].includes(
-            args[1] ?? ""
-          )
-      )
-    ).toBe(true);
-  } finally {
-    await store.close();
-  }
-}, 60_000);
+      });
+      await store.publish({ generation, binary });
+      const active = await store.loadActive();
+      if (!active) {
+        throw new Error("active generation missing");
+      }
+      expect(
+        await store.withMutation({
+          generation: active,
+          operation: "start",
+          services: [],
+          binary,
+          deadline: Date.now() + COMPOUND_OPERATION_DEADLINE_MS,
+          run: async (input) => {
+            await input.assertFresh();
+            expect(JSON.stringify(input)).toBe("{}");
+            return await effect("start");
+          },
+        })
+      ).toBe(0);
+      expect(
+        await store.withMutation({
+          generation: active,
+          operation: "restart",
+          services: [],
+          binary,
+          deadline: Date.now() + COMPOUND_OPERATION_DEADLINE_MS,
+          run: async (input) => {
+            await input.assertFresh();
+            return await effect("restart");
+          },
+        })
+      ).toBe(0);
+      expect(
+        await store.withMutation({
+          generation: active,
+          operation: "stop",
+          services: [],
+          binary,
+          deadline: Date.now() + COMPOUND_OPERATION_DEADLINE_MS,
+          run: async (input) => {
+            await input.assertFresh();
+            return await effect("stop");
+          },
+        })
+      ).toBe(0);
+      await store.rollback();
+      expect((await state()).publication.phase).toBe("rolled-back");
+      expect((await state()).pendingOperation).toBeNull();
+      expect(await readFile(join(projectRoot, "material/config"))).toEqual(
+        original
+      );
+      expect(
+        (await commands()).every(
+          (args) =>
+            !["rm", "create", "up", "down", "build", "pull"].includes(
+              args[1] ?? ""
+            )
+        )
+      ).toBe(true);
+    } finally {
+      await store.close();
+    }
+  },
+  COMPOUND_TEST_BUDGET_MS
+);
 
 test("file8 refuses foreign receipt families and extra proof fields before engine observation", async () => {
   const { store, generation } = await prepared();

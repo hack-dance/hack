@@ -1,4 +1,10 @@
-import { afterEach, beforeEach, test as boundedTest, expect } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  test as boundedTest,
+  expect,
+  spyOn,
+} from "bun:test";
 import {
   chmod,
   link,
@@ -15,6 +21,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP } from "../src/commands/config-adopt.ts";
 import { checkComposeEnvOverrideAtRest } from "../src/commands/doctor.ts";
 import {
   resolveModernComposeEnvOverrides,
@@ -27,6 +34,7 @@ import {
   inspectComposeEnvAtRest,
   removePlaintextComposeEnvOverride,
 } from "../src/lib/compose-env-at-rest.ts";
+import * as composeManagedEnv from "../src/lib/compose-managed-env.ts";
 import {
   renderComposeEnvReferenceOverride,
   renderManagedComposeEnvOverride,
@@ -1311,7 +1319,8 @@ boundedTest(
             return 0;
           },
         }),
-        "E_LEGACY_ADOPTION_CHANGED"
+        // Nothing drifted: expiry is not reported as a binding change (HACK-1340).
+        "E_LEGACY_ADOPTION_DEADLINE"
       );
       expect((await readReceipt()).pendingOperation.operation).toBe("stop");
     } finally {
@@ -1476,7 +1485,7 @@ for (const stage of ["per-effect freshness", "final observation"] as const) {
               return 0;
             },
           }),
-          "E_LEGACY_ADOPTION_CHANGED"
+          "E_LEGACY_ADOPTION_DEADLINE"
         );
         expect(reachedCallback).toBe(true);
         expect(Date.now()).toBeLessThan(deadline + 1500);
@@ -1910,7 +1919,9 @@ boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
   30_000
 );
 
-async function managedGenerated(form: "literal" | "reference" = "literal") {
+/** Current writers keep references at rest; "literal" models a file an earlier
+ * Hack version left, which neither adoption nor its publication may pin. */
+async function managedGenerated(form: "literal" | "reference" = "reference") {
   const composeText = await readFile(
     join(projectRoot, ".hack/docker-compose.yml"),
     "utf8"
@@ -1991,6 +2002,7 @@ test("v3 saved adoption consumes canonical original generated sources without en
   Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
   await trackedManagedCheckout();
   const files = await managedGenerated();
+  const envOverride = await readFile(files[2] ?? "", "utf8");
   await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
   await setProjectEnvValue({
     projectRoot,
@@ -2004,14 +2016,12 @@ test("v3 saved adoption consumes canonical original generated sources without en
   const binary = await managedEnvCompilerFixture(
     join(root, "managed-compiler")
   );
-  // `hack config adopt` and its preview now refuse an earlier version's
-  // literal override (HACK-1273); the store below models a generation that an
-  // earlier version prepared over it.
+  // The current writer's reference form; an earlier version's literal form
+  // can be neither prepared through the CLI nor published (HACK-1273/1318).
+  expect(envOverride).not.toContain(CANARY);
   expect(
-    (await previewLegacyComposeAdoption({ projectRoot, binary })).fields.map(
-      (field) => field.code
-    )
-  ).toEqual([LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE]);
+    (await previewLegacyComposeAdoption({ projectRoot, binary })).complete
+  ).toBe(true);
   const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
   try {
     const generation = await store.prepare({ binary });
@@ -2058,7 +2068,7 @@ test("v3 saved adoption consumes canonical original generated sources without en
       });
       await savedStore.rollback();
       expect(await readFile(files[0] ?? "", "utf8")).toContain("name: fixture");
-      expect(await readFile(files[2] ?? "", "utf8")).toContain(CANARY);
+      expect(await readFile(files[2] ?? "", "utf8")).toBe(envOverride);
       expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
         "rolled-back"
       );
@@ -2074,7 +2084,7 @@ test("an adoption bound to an earlier version's literal env override keeps it lo
   Reflect.deleteProperty(process.env, "CI");
   Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
   await trackedManagedCheckout();
-  const files = await managedGenerated();
+  const files = await managedGenerated("literal");
   const override = files[2] ?? "";
   const projectDir = join(projectRoot, ".hack");
   await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
@@ -2090,12 +2100,19 @@ test("an adoption bound to an earlier version's literal env override keeps it lo
   const binary = await managedEnvCompilerFixture(
     join(root, "managed-compiler")
   );
-  // Models an adoption that an earlier version made over its literal file.
+  // Models an adoption that an earlier version published over its literal
+  // file: that version had no publication check, so the bound form reads as
+  // references during this one publish only (HACK-1318 now refuses it).
   const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  const earlierVersion = spyOn(
+    composeManagedEnv,
+    "classifyComposeEnvOverrideText"
+  ).mockReturnValue({ kind: "references" });
   try {
     const generation = await store.prepare({ binary });
     await store.publish({ generation, binary });
   } finally {
+    earlierVersion.mockRestore();
     await store.close();
   }
   const pinned = await lstat(override);
@@ -2157,51 +2174,270 @@ test("an adoption bound to an earlier version's literal env override keeps it lo
   expect(await lstat(override).catch(() => null)).toBeNull();
 });
 
-test("CLI adoption and its preview refuse a literal env override before preparation or engine probes (HACK-1273)", async () => {
-  await managedGenerated();
-  for (const flags of [
-    [],
-    ["--dry-run"],
-    ["--stop"],
-    ["--dry-run", "--json"],
-  ]) {
-    const child = Bun.spawn(
-      [
-        process.execPath,
-        join(import.meta.dir, "../index.ts"),
-        "config",
-        "adopt",
-        "--path",
-        projectRoot,
-        ...flags,
-      ],
-      {
-        env: privateCliEnv({
-          root,
-          env: { HACK_HOME: join(root, "isolated-home") },
-        }),
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-      }
+/**
+ * A tracked managed checkout with a secret key, a managed value and a compiler
+ * that the CLI adopts end to end once its env override is in reference form.
+ * A refusal over the literal form can then come only from the literal check,
+ * not from an incomplete fixture.
+ */
+async function adoptableManagedFixture(form: "literal" | "reference") {
+  Reflect.deleteProperty(process.env, "CI");
+  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  await trackedManagedCheckout();
+  const files = await managedGenerated(form);
+  await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-cli-key");
+  await setProjectEnvValue({
+    projectRoot,
+    projectDir: join(projectRoot, ".hack"),
+    envName: null,
+    scope: "global",
+    key: "MANAGED",
+    value: CANARY,
+    secret: true,
+  });
+  const binary = await managedEnvCompilerFixture(
+    join(root, "managed-compiler")
+  );
+  return { override: files[2] ?? "", binary };
+}
+async function adoptCli(flags: readonly string[], binary: string) {
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      join(import.meta.dir, "../index.ts"),
+      "config",
+      "adopt",
+      "--path",
+      projectRoot,
+      ...flags,
+    ],
+    {
+      env: privateCliEnv({
+        root,
+        env: {
+          HACK_HOME: join(root, "isolated-home"),
+          HACK_CONFIG_COMPILER_BINARY: binary,
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { code, stdout, output: stdout + stderr };
+}
+
+boundedTest(
+  "CLI adoption and its preview refuse a literal env override that the same fixture otherwise adopts (HACK-1273)",
+  async () => {
+    const { override, binary } = await adoptableManagedFixture("literal");
+    for (const flags of [
+      [],
+      ["--dry-run"],
+      ["--stop"],
+      ["--dry-run", "--json"],
+    ]) {
+      const result = await adoptCli(flags, binary);
+      expect(result.code).not.toBe(0);
+      expect(result.output).toContain(
+        flags.includes("--json")
+          ? LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE
+          : "Run 'hack up' once so Hack rewrites it with references only"
+      );
+      expect(result.output).not.toContain(CANARY);
+      expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+      expect(await Bun.file(stateRoot()).exists()).toBe(false);
+    }
+    // Control: once the current writer rewrites the override with references
+    // (what `hack up` does), the same fixture adopts. Each refusal above came
+    // from the literal check.
+    await writeFile(
+      override,
+      renderComposeEnvReferenceOverride({
+        targetServices: ["db"],
+        globalEnv: { MANAGED: CANARY, EMPTY: "" },
+        serviceEnv: { db: { MANAGED: CANARY, EMPTY: "" } },
+      })?.text ?? ""
     );
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    expect(code).not.toBe(0);
-    const output = stdout + stderr;
-    expect(output).toContain(
-      flags.includes("--json")
-        ? LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE
-        : "Run 'hack up' once so Hack rewrites it with references only"
+    const adopted = await adoptCli(["--json"], binary);
+    expect(adopted.code).toBe(0);
+    expect(JSON.parse(adopted.stdout)).toMatchObject({ status: "active" });
+    expect(adopted.output).not.toContain(CANARY);
+    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+      "active"
     );
-    expect(output).not.toContain(CANARY);
-    expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
-    expect(await Bun.file(stateRoot()).exists()).toBe(false);
-  }
-});
+  },
+  90_000
+);
+
+boundedTest(
+  "CLI recovery neither publishes nor completes a preparation bound to an earlier version's literal env override (HACK-1318)",
+  async () => {
+    const { override, binary } = await adoptableManagedFixture("literal");
+    const original = await originalSnapshots();
+    // Models a preparation that an earlier version made over its literal
+    // file, left with an interrupted preparation stop. The store itself does
+    // not refuse preparing it; only the CLI's new-preparation check does.
+    const store = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+    });
+    try {
+      const generation = await store.prepare({ binary });
+      expect(
+        await store.withPreparationStop({
+          generation,
+          binary,
+          run: async () => 7,
+        })
+      ).toBe(7);
+    } finally {
+      await store.close();
+    }
+    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+      "pending"
+    );
+    const pinned = await lstat(override);
+    // Interrupted preparation stop, before any switch (HACK-1414): rollback,
+    // explicit or plain, refuses and changes nothing, so doctor must name
+    // `--recover --stop` first, not `--recover --rollback`.
+    const interrupted = await readReceipt();
+    expect(interrupted.pendingOperation).not.toBeNull();
+    expect(interrupted.publication).toBeNull();
+    for (const flags of [
+      ["--recover", "--rollback", "--json"],
+      ["--rollback", "--json"],
+    ]) {
+      const refused = await adoptCli(flags, binary);
+      expect(refused.code).not.toBe(0);
+      expect(refused.output).not.toContain(CANARY);
+      expect(await readReceipt()).toEqual(interrupted);
+    }
+    expect(
+      await inspectComposeEnvAtRest({ projectDir: join(projectRoot, ".hack") })
+    ).toMatchObject({
+      override: { kind: "plaintext" },
+      adoptionBound: true,
+      adoptionPending: "preparation-stop",
+    });
+    const beforeStop = await checkComposeEnvOverrideAtRest({
+      startDir: projectRoot,
+    });
+    expect(beforeStop.status).toBe("warn");
+    expect(beforeStop.message).toContain(
+      "first retry the interrupted adoption stop with 'hack config adopt --recover --stop'"
+    );
+    expect(beforeStop.message).not.toContain(
+      "release the pending adoption switch with"
+    );
+    expect(beforeStop.message).not.toContain(CANARY);
+    // `--recover --stop` retries the stop and then publishes; plain
+    // `--recover` completes the journaled switch. Both refuse before any
+    // original moves and name the release step.
+    for (const flags of [
+      ["--recover", "--stop", "--json"],
+      ["--recover", "--json"],
+    ]) {
+      const result = await adoptCli(flags, binary);
+      expect(result.code).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        ok: false,
+        error: {
+          code: "E_CONFIG_INVALID",
+          message: new LegacyComposeAdoptedGenerationError(
+            "E_LEGACY_ADOPTION_LITERAL_ENV"
+          ).message,
+          detail: {
+            legacy_adoption_publication_refusal: {
+              stage: "publication-inputs",
+              reason: "literal-env-override",
+            },
+          },
+        },
+      });
+      expect(result.output).toContain("hack config adopt --recover --rollback");
+      expect(result.output).not.toContain(CANARY);
+      const receipt = await readReceipt();
+      expect(receipt.pendingOperation).toBeNull();
+      expect(receipt.publication).toMatchObject({
+        phase: "switching",
+        native: null,
+      });
+      await expectOriginals(original);
+      expect((await lstat(override)).ino).toBe(pinned.ino);
+    }
+    // A second `--recover --stop` no longer reaches the publication boundary:
+    // the switch is already journaled, so the retried preparation stop refuses
+    // it as a pending publication (the generic busy code) without the
+    // literal-env message or a publication diagnostic (HACK-1391). Plain
+    // `--recover` (the busy text's "interrupted-lock recovery") completes the
+    // switch, which refuses the literal override, so the message names the
+    // release step instead (HACK-1414).
+    const repeated = await adoptCli(["--recover", "--stop", "--json"], binary);
+    expect(repeated.code).not.toBe(0);
+    expect(JSON.parse(repeated.stdout)).toEqual({
+      ok: false,
+      error: {
+        code: "E_CONFIG_INVALID",
+        message: `${
+          new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_BUSY")
+            .message
+        } ${PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP}`,
+      },
+    });
+    expect(repeated.output).toContain("hack config adopt --recover --rollback");
+    expect(repeated.output).not.toContain("'hack config adopt --recover' to");
+    expect(repeated.output).not.toContain(CANARY);
+    expect((await readReceipt()).publication).toMatchObject({
+      phase: "switching",
+      native: null,
+    });
+    // Doctor's next step for the pinned literal override must be a command
+    // this pending state accepts: explicit recovery rollback, not plain
+    // rollback or `hack down`, which it refuses (HACK-1391).
+    const report = await inspectComposeEnvAtRest({
+      projectDir: join(projectRoot, ".hack"),
+    });
+    expect(report).toMatchObject({
+      override: { kind: "plaintext" },
+      adoptionBound: true,
+      adoptionPending: "switch",
+    });
+    const checked = await checkComposeEnvOverrideAtRest({
+      startDir: projectRoot,
+    });
+    expect(checked.status).toBe("warn");
+    expect(checked.message).toContain("pins this file");
+    expect(checked.message).toContain("hack config adopt --recover --rollback");
+    expect(checked.message).not.toContain("'hack config adopt --rollback'");
+    expect(checked.message).not.toContain("stop the adopted containers");
+    expect(checked.message).not.toContain(CANARY);
+    // The named step releases the switch; nothing pins the file afterwards.
+    const released = await adoptCli(
+      ["--recover", "--rollback", "--json"],
+      binary
+    );
+    expect(released.code).toBe(0);
+    expect(JSON.parse(released.stdout)).toMatchObject({
+      status: "rolled-back",
+    });
+    await expectOriginals(original);
+    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+      "rolled-back"
+    );
+    expect(
+      await removePlaintextComposeEnvOverride({
+        projectDir: join(projectRoot, ".hack"),
+        includeUnverifiable: true,
+      })
+    ).toMatchObject({ removed: true, adoptionBound: false });
+  },
+  90_000
+);
 
 test("v3 value-free env override binds the engine config hash computed with the values (HACK-1273)", async () => {
   Reflect.deleteProperty(process.env, "CI");

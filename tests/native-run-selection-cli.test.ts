@@ -9,7 +9,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { NATIVE_RUN_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
+import {
+  NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
+  NATIVE_RUN_SELECTION_REFUSAL,
+} from "../src/backends/native-project-one-off.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
@@ -259,3 +262,81 @@ for (const request of [
     expect(await nativeCalls(f.root)).toEqual([]);
   }, 30_000);
 }
+
+/**
+ * HACK-1338: an empty `--env` or `--profile` is a closed usage error, never a
+ * silent "inherit" or an explicit empty selection. The fixture runs with no
+ * profiles and the base env, so without this rule `--env ""` (base) and
+ * `--profile ""` (no profiles) would match the running selection and run.
+ */
+for (const request of [
+  { name: "an empty --env", args: ["--env", ""] },
+  { name: "an empty --env=", args: ["--env="] },
+  { name: "a whitespace --env", args: ["--env", "  "] },
+  { name: "an empty --profile", args: ["--profile", ""] },
+  { name: "a comma-only --profile", args: ["--profile", " , "] },
+]) {
+  test(`run with ${request.name} refuses with one closed line and no runtime request`, async () => {
+    const f = await fixture({ profiles: [], effectiveEnvName: null });
+    const result = await cli({
+      fixture: f,
+      args: ["run", ...request.args, "toolchain", "bun", "--version"],
+    });
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr.trim()).toBe(
+      `ERROR: E_USAGE: ${NATIVE_RUN_EMPTY_SELECTION_REFUSAL}`
+    );
+    expect(result.stderr).not.toMatch(STACK_FRAME);
+    expect(await nativeCalls(f.root)).toEqual([]);
+  }, 30_000);
+}
+
+/**
+ * HACK-1371: a profile list is empty only when every entry is. An empty entry
+ * beside a real profile is dropped, so the list is compared with the running
+ * selection like any other: it runs when the real entries match and refuses
+ * with the mismatch refusal (not the empty one) when they differ.
+ */
+for (const profile of ["toolchain,", ",toolchain", " , toolchain , "]) {
+  test(`run --profile ${JSON.stringify(profile)} keeps its real entry and runs`, async () => {
+    const f = await fixture({ profiles: ["toolchain"] });
+    const result = await cli({
+      fixture: f,
+      args: ["run", "--profile", profile, "toolchain", "bun", "--version"],
+    });
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe(CHILD_STDOUT);
+    expect(operations(await nativeCalls(f.root))).toEqual([
+      "refresh-dependencies",
+      "run-selection",
+      "run-service",
+    ]);
+  }, 30_000);
+}
+
+test('run --profile "web," with a different running profile refuses as a mismatch', async () => {
+  const f = await fixture({ profiles: ["toolchain"] });
+  const result = await cli({
+    fixture: f,
+    args: ["run", "--profile", "web,", "toolchain", "bun", "--version"],
+  });
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toBe(
+    `ERROR: E_USAGE: ${NATIVE_RUN_SELECTION_REFUSAL}\n`
+  );
+  expect(await nativeCalls(f.root)).toEqual([]);
+}, 30_000);
+
+test("run without --env or --profile still inherits the running selection", async () => {
+  const f = await fixture({ profiles: [], effectiveEnvName: null });
+  const result = await cli({
+    fixture: f,
+    args: ["run", "toolchain", "bun", "--version"],
+  });
+  expect(result.code).toBe(0);
+  expect(result.stdout).toBe(CHILD_STDOUT);
+  expect(operations(await nativeCalls(f.root))).toContain("run-service");
+}, 30_000);

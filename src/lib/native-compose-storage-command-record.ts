@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { rename } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
+import { copyNativeComposeEffectRefusal } from "./native-compose-effect-diagnostics.ts";
 import type { NativeComposeMaterialBinding } from "./native-compose-generation.ts";
 import {
   type HeldDirectory,
@@ -382,6 +383,17 @@ type OwnerState = {
 export type NativeComposeStorageCommandOwner = Readonly<Record<never, never>>;
 export type NativeComposeStorageArmedCommand = Readonly<Record<never, never>>;
 const owners = new WeakMap<NativeComposeStorageCommandOwner, OwnerState>();
+/** The same fixed refusal. Only an issued owner boundary of `source`, such as an
+ * owner check's saved-state refusal, is kept for the effect diagnostic; it grants
+ * nothing and changes no check, invalidation or retention. */
+function refuseFrom(source: unknown): never {
+  try {
+    return refuse();
+  } catch (error) {
+    copyNativeComposeEffectRefusal(source, error as Error);
+    throw error;
+  }
+}
 const commands = new WeakMap<
   NativeComposeStorageArmedCommand,
   {
@@ -439,9 +451,9 @@ async function publish(owner: OwnerState, record: RecordV2): Promise<void> {
     owner.saved = saved;
     owner.record = record;
     owner.published(saved.info);
-  } catch {
+  } catch (error) {
     owner.active = false;
-    return refuse();
+    return refuseFrom(error);
   } finally {
     owner.busy = false;
   }
@@ -490,8 +502,8 @@ export async function createNativeComposeStorageCommandOwner(opts: {
     });
     published(saved.info);
     return handle;
-  } catch {
-    return refuse();
+  } catch (error) {
+    return refuseFrom(error);
   }
 }
 export async function armNativeComposeStorageCommand(opts: {

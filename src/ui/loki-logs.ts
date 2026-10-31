@@ -1,5 +1,9 @@
 // biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: Loki transport helpers intentionally keep query and stream parsing stateful and local.
 import { isRecord } from "../lib/guards.ts";
+import {
+  type LokiSnapshotOutcome,
+  resolveLokiQueryWindow,
+} from "../lib/logs.ts";
 import { formatPrettyLogLine } from "./log-format.ts";
 import { parseLokiLogLine, writeJsonLogLine } from "./log-json.ts";
 import type { LogStreamContext } from "./log-stream.ts";
@@ -22,7 +26,35 @@ export interface LokiLogsParams {
   readonly start?: Date;
   readonly end?: Date;
   readonly streamContext?: LogStreamContext;
+  /**
+   * Snapshot only: when Loki returns no entries, write nothing (not even the
+   * NDJSON start/end events) and report `deferred` so the caller can answer
+   * from another backend.
+   */
+  readonly deferEmpty?: boolean;
+  /**
+   * Follow only: call `notify` once when the tail has been open for `afterMs`
+   * without receiving any entry. Following continues either way.
+   */
+  readonly noEntriesNotice?: {
+    readonly afterMs: number;
+    readonly notify: () => void;
+    /**
+     * Schedules `fn` after `afterMs` and returns a cancel function. Defaults
+     * to `setTimeout`/`clearTimeout`; tests inject a hand-driven timer so the
+     * notice and its cancellation are checked without real delays.
+     */
+    readonly schedule?: NoticeScheduler;
+  };
 }
+
+/** Schedules `fn` after `afterMs`; the returned function cancels it. */
+export type NoticeScheduler = (fn: () => void, afterMs: number) => () => void;
+
+const defaultNoticeScheduler: NoticeScheduler = (fn, afterMs) => {
+  const handle = setTimeout(fn, afterMs);
+  return () => clearTimeout(handle);
+};
 
 type LokiLabelSet = Record<string, string>;
 
@@ -107,7 +139,52 @@ export async function lokiLogs(opts: LokiLogsParams): Promise<number> {
     return await lokiTail(opts);
   }
 
+  return (await lokiSnapshot(opts)).exitCode;
+}
+
+/**
+ * Query a bounded snapshot of Loki logs (`query_range`, newest first, limited
+ * to `tail` entries) and print it oldest first.
+ *
+ * With `deferEmpty`, an empty result writes nothing and returns
+ * `deferred: true`; see {@link LokiLogsParams.deferEmpty}.
+ */
+export async function lokiSnapshot(
+  opts: LokiLogsParams
+): Promise<LokiSnapshotOutcome> {
   return await lokiQueryRange(opts);
+}
+
+/**
+ * Build the Loki `query_range` URL for a snapshot. Pure: the time window comes
+ * from {@link resolveLokiQueryWindow} with the supplied `now`.
+ */
+export function buildLokiQueryRangeUrl(opts: {
+  readonly baseUrl: string;
+  readonly query: string;
+  readonly tail: number;
+  readonly start?: Date;
+  readonly end?: Date;
+  readonly now: Date;
+}): URL {
+  const window = resolveLokiQueryWindow({
+    start: opts.start,
+    end: opts.end,
+    now: opts.now,
+  });
+  const url = new URL(
+    `${normalizeBaseUrl(opts.baseUrl)}/loki/api/v1/query_range`
+  );
+  url.searchParams.set("query", opts.query);
+  url.searchParams.set("direction", "BACKWARD");
+  url.searchParams.set("limit", String(opts.tail));
+  url.searchParams.set("start", toUnixNs(window.start));
+  url.searchParams.set("end", toUnixNs(window.end));
+  return url;
+}
+
+function toUnixNs(date: Date): string {
+  return (BigInt(date.getTime()) * 1_000_000n).toString();
 }
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -142,20 +219,24 @@ function linePrefix(opts: {
   return `${project}/${service}`;
 }
 
-async function lokiQueryRange(opts: LokiLogsParams): Promise<number> {
+async function lokiQueryRange(
+  opts: LokiLogsParams
+): Promise<LokiSnapshotOutcome> {
   const baseUrl = normalizeBaseUrl(opts.baseUrl);
+  const failed: LokiSnapshotOutcome = {
+    exitCode: 1,
+    entryCount: 0,
+    deferred: false,
+  };
 
-  const endDate = opts.end ?? new Date();
-  const endNs = BigInt(endDate.getTime()) * 1_000_000n;
-  const startDate = opts.start ?? new Date(endDate.getTime() - 15 * 60 * 1000);
-  const startNs = BigInt(startDate.getTime()) * 1_000_000n;
-
-  const url = new URL(`${baseUrl}/loki/api/v1/query_range`);
-  url.searchParams.set("query", opts.query);
-  url.searchParams.set("direction", "BACKWARD");
-  url.searchParams.set("limit", String(opts.tail));
-  url.searchParams.set("start", startNs.toString());
-  url.searchParams.set("end", endNs.toString());
+  const url = buildLokiQueryRangeUrl({
+    baseUrl,
+    query: opts.query,
+    tail: opts.tail,
+    start: opts.start,
+    end: opts.end,
+    now: new Date(),
+  });
 
   let res: Response;
   try {
@@ -182,7 +263,7 @@ async function lokiQueryRange(opts: LokiLogsParams): Promise<number> {
     process.stderr.write(
       "Tip: run `hack global install` (or `hack global up`) and ensure Loki is reachable.\n"
     );
-    return 1;
+    return failed;
   }
   if (!res.ok) {
     if (opts.json && opts.streamContext) {
@@ -202,7 +283,7 @@ async function lokiQueryRange(opts: LokiLogsParams): Promise<number> {
     process.stderr.write(
       `Failed to query Loki (${res.status}): ${await res.text()}\n`
     );
-    return 1;
+    return failed;
   }
 
   const json: unknown = await res.json();
@@ -223,7 +304,7 @@ async function lokiQueryRange(opts: LokiLogsParams): Promise<number> {
       });
     }
     process.stderr.write("Failed to parse Loki query response.\n");
-    return 1;
+    return failed;
   }
 
   if (parsed.status !== "success") {
@@ -242,15 +323,10 @@ async function lokiQueryRange(opts: LokiLogsParams): Promise<number> {
       });
     }
     process.stderr.write(`Loki error: ${parsed.error ?? "unknown error"}\n`);
-    return 1;
+    return failed;
   }
 
   const streams = parsed.data?.result ?? [];
-  if (opts.json && opts.streamContext) {
-    writeLogStreamEvent({
-      event: buildLogStreamStartEvent({ context: opts.streamContext }),
-    });
-  }
   const entries: Array<{
     readonly labels: LokiLabelSet;
     readonly tsNs: string;
@@ -260,6 +336,15 @@ async function lokiQueryRange(opts: LokiLogsParams): Promise<number> {
     for (const [tsNs, line] of s.values) {
       entries.push({ labels: s.stream, tsNs, line });
     }
+  }
+  if (entries.length === 0 && opts.deferEmpty) {
+    return { exitCode: 0, entryCount: 0, deferred: true };
+  }
+
+  if (opts.json && opts.streamContext) {
+    writeLogStreamEvent({
+      event: buildLogStreamStartEvent({ context: opts.streamContext }),
+    });
   }
 
   // query_range BACKWARD returns newest→oldest; print oldest→newest for readability
@@ -297,7 +382,7 @@ async function lokiQueryRange(opts: LokiLogsParams): Promise<number> {
     });
   }
 
-  return 0;
+  return { exitCode: 0, entryCount: entries.length, deferred: false };
 }
 
 async function lokiTail(opts: LokiLogsParams): Promise<number> {
@@ -316,8 +401,16 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
 
   let closed = false;
   let exitCode = 0;
+  let cancelNoEntriesTimer: (() => void) | undefined;
+  const clearNoEntriesTimer = () => {
+    if (cancelNoEntriesTimer !== undefined) {
+      cancelNoEntriesTimer();
+      cancelNoEntriesTimer = undefined;
+    }
+  };
 
   const stop = () => {
+    clearNoEntriesTimer();
     if (closed) {
       return;
     }
@@ -328,10 +421,6 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
       // ignore
     }
   };
-
-  process.once("SIGINT", () => {
-    stop();
-  });
 
   ws.addEventListener("error", () => {
     exitCode = 1;
@@ -345,6 +434,19 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
     }
     stop();
   });
+
+  const noEntriesNotice = opts.noEntriesNotice;
+  if (noEntriesNotice) {
+    const schedule = noEntriesNotice.schedule ?? defaultNoticeScheduler;
+    ws.addEventListener("open", () => {
+      cancelNoEntriesTimer = schedule(() => {
+        cancelNoEntriesTimer = undefined;
+        if (!closed) {
+          noEntriesNotice.notify();
+        }
+      }, noEntriesNotice.afterMs);
+    });
+  }
 
   if (opts.json && opts.streamContext) {
     writeLogStreamEvent({
@@ -370,6 +472,7 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
         showProjectPrefix: opts.showProjectPrefix,
       });
       for (const [tsNs, line] of s.values) {
+        clearNoEntriesTimer();
         if (opts.json) {
           const entry = parseLokiLogLine({
             labels: s.stream,
@@ -393,23 +496,35 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
     }
   });
 
-  await new Promise<void>((resolve) => {
+  const closedSocket = new Promise<void>((resolve) => {
     ws.addEventListener("close", () => {
       closed = true;
+      clearNoEntriesTimer();
       resolve();
     });
   });
 
-  if (opts.json && opts.streamContext) {
-    writeLogStreamEvent({
-      event: buildLogStreamEndEvent({
-        context: opts.streamContext,
-        reason: exitCode === 0 ? "closed" : "error",
-      }),
-    });
+  // Installed only while the tail is open and removed on every exit path. A
+  // `once` listener that never fires would otherwise outlive the follow and
+  // the next SIGINT in the process would run a stale stop (HACK-1392).
+  const onSigInt = () => {
+    stop();
+  };
+  process.once("SIGINT", onSigInt);
+  try {
+    await closedSocket;
+    if (opts.json && opts.streamContext) {
+      writeLogStreamEvent({
+        event: buildLogStreamEndEvent({
+          context: opts.streamContext,
+          reason: exitCode === 0 ? "closed" : "error",
+        }),
+      });
+    }
+    return exitCode;
+  } finally {
+    process.off("SIGINT", onSigInt);
   }
-
-  return exitCode;
 }
 
 function safeJsonParse(text: string): unknown {

@@ -232,6 +232,59 @@ beforeAll(async () => {
     services: ["api"],
   });
   await chmod(join(lockedCompose, ".hack", "docker-compose.yml"), 0o000);
+  // Faults the shared project input guards raise before any input is read:
+  // an unparseable legacy adoption receipt, and a project directory the
+  // inspector cannot search (its mode is dropped inside the test).
+  const adoptionUnsafe = join(root, "adoption-unsafe");
+  await writeProject({
+    repo: adoptionUnsafe,
+    name: "adopt",
+    services: ["api"],
+  });
+  const adoptionState = join(
+    adoptionUnsafe,
+    ".hack",
+    ".internal",
+    "legacy-compose-adoption-v1"
+  );
+  await mkdir(adoptionState, { recursive: true, mode: 0o700 });
+  await writeFile(join(adoptionState, "receipt.json"), "{not json", {
+    mode: 0o600,
+  });
+  await writeProject({
+    repo: join(root, "unsearchable"),
+    name: "unsearchable",
+    services: ["api"],
+  });
+  // Never adopted: .hack/.internal exists only so its mode can be dropped.
+  await mkdir(join(root, "unsearchable", ".hack", ".internal"));
+  // Never adopted and without .hack/.internal: the most common real layout.
+  await writeProject({
+    repo: join(root, "unsearchable-no-internal"),
+    name: "unsearchable-no-internal",
+    services: ["api"],
+  });
+  // Native and legacy inputs side by side (a conflicting project family).
+  const nativeConflict = join(root, "native-conflict");
+  await writeProject({
+    repo: nativeConflict,
+    name: "native",
+    services: ["api"],
+  });
+  await writeFile(join(nativeConflict, ".hack", "hack.project.json"), "{}\n");
+  // A regular file where the project directory belongs.
+  const fileProjectDir = join(root, "file-project-dir");
+  await mkdir(fileProjectDir, { recursive: true });
+  await writeFile(join(fileProjectDir, ".hack"), "not a directory\n");
+  // A valid .hack project whose legacy .dev input directory cannot be checked:
+  // a regular file where .dev belongs, and a .dev directory whose mode is
+  // dropped inside the test.
+  const devFile = join(root, "dev-file");
+  await writeProject({ repo: devFile, name: "devfile", services: ["api"] });
+  await writeFile(join(devFile, ".dev"), "not a directory\n");
+  const devLocked = join(root, "dev-locked");
+  await writeProject({ repo: devLocked, name: "devlocked", services: ["api"] });
+  await mkdir(join(devLocked, ".dev"), { recursive: true });
 
   await mkdir(join(root, "outside"), { recursive: true });
 
@@ -636,6 +689,107 @@ describe("paired CLI/MCP target fixtures", () => {
   );
 
   test(
+    "project input guard refusals are closed refusals, not detail-less errors",
+    async () => {
+      // An unsafe legacy adoption state used to escape as a detail-less
+      // E_CONFIG_INVALID, which the adapter turned into data: null.
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "adoption-unsafe") }),
+        "adoption_state_unsafe"
+      );
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "native-conflict") }),
+        "project_inputs_unsupported"
+      );
+      // A file where `.hack` belongs is an input access failure.
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "file-project-dir") }),
+        "input_unreadable"
+      );
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  // Root can search a mode-000 or mode-0644 directory, so this fault cannot be
+  // produced.
+  test.skipIf(process.getuid?.() === 0)(
+    "an unsearchable .hack or .hack/.internal is a closed refusal without the path",
+    async () => {
+      // HACK-1415: every case the proof matrix names runs on both surfaces,
+      // on a project that never used adoption. HACK-1426: the first case is
+      // a .hack at mode 000 with no .hack/.internal at all.
+      for (const [project, dir, mode] of [
+        ["unsearchable-no-internal", ".hack", 0o000],
+        ["unsearchable", ".hack", 0o000],
+        ["unsearchable", ".hack", 0o644],
+        ["unsearchable", ".hack/.internal", 0o000],
+        ["unsearchable", ".hack/.internal", 0o644],
+      ] as const) {
+        const path = join(fixture.root, project);
+        const locked = join(path, dir);
+        await chmod(locked, mode);
+        try {
+          // An unsearchable project directory is a permission fault (#402's
+          // `permission` selection kind), not unsafe adoption state.
+          expect({
+            project,
+            dir,
+            mode,
+            result: await inspectBoth({ path }),
+          }).toEqual({
+            project,
+            dir,
+            mode,
+            result: targetRefusalEnvelope({
+              reason: "input_permission_denied",
+            }),
+          });
+          const cli = await runCli({ path });
+          expect(JSON.stringify(cli.envelope)).not.toContain(fixture.root);
+          expect(JSON.stringify(cli.envelope)).not.toContain("EACCES");
+        } finally {
+          await chmod(locked, 0o755);
+        }
+      }
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
+    "a .dev file beside a valid .hack is a closed refusal without the path",
+    async () => {
+      // The input presence check used to escape as a detail-less E_UNEXPECTED.
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "dev-file") }),
+        "input_unreadable"
+      );
+      const cli = await runCli({ path: join(fixture.root, "dev-file") });
+      expect(JSON.stringify(cli.envelope)).not.toContain(fixture.root);
+      expect(JSON.stringify(cli.envelope)).not.toContain("ENOTDIR");
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  // Root can search a mode-000 directory, so this fault cannot be produced.
+  test.skipIf(process.getuid?.() === 0)(
+    "an unsearchable .dev beside a valid .hack is a closed refusal without the path",
+    async () => {
+      const path = join(fixture.root, "dev-locked");
+      const devDir = join(path, ".dev");
+      await chmod(devDir, 0o000);
+      try {
+        expectRefusal(await inspectBoth({ path }), "input_permission_denied");
+        const cli = await runCli({ path });
+        expect(JSON.stringify(cli.envelope)).not.toContain(fixture.root);
+        expect(JSON.stringify(cli.envelope)).not.toContain("EACCES");
+      } finally {
+        await chmod(devDir, 0o755);
+      }
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
     "two registrations that own one checkout are refused as ambiguous",
     async () => {
       expectRefusal(
@@ -885,6 +1039,81 @@ describe("target inspector domain", () => {
     expect(result).toEqual(
       targetRefusalEnvelope({ reason: "generation_changed_during_read" })
     );
+  });
+
+  test("the permission-denied refusal names the permission fix, not adoption recovery", () => {
+    // HACK-1390: a project that never used adoption must not be told to run
+    // adoption recovery when its project directories cannot be searched. The
+    // message does not depend on the user, so this also runs as root
+    // (HACK-1415).
+    const message = TARGET_REFUSALS.input_permission_denied.message;
+    expect(message).toContain("permission denied. Fix the permissions first");
+    expect(message).toContain("chmod u+rwx .hack");
+    expect(message.toLowerCase()).not.toContain("adoption");
+  });
+
+  // Root can search a mode-000 or mode-0644 directory, so this fault cannot be
+  // produced.
+  test.skipIf(process.getuid?.() === 0)(
+    "an unsearchable .hack or .hack/.internal is a permission refusal, not unsafe adoption state",
+    async () => {
+      for (const [dir, mode] of [
+        [".hack", 0o000],
+        [".hack", 0o644],
+        [".hack/.internal", 0o000],
+        [".hack/.internal", 0o644],
+      ] as const) {
+        const repo = await mkdtemp(join(fixture.root, "never-adopted-"));
+        await writeProject({ repo, name: "never-adopted", services: ["api"] });
+        await mkdir(join(repo, ".hack", ".internal"), { recursive: true });
+        const locked = join(repo, dir);
+        await chmod(locked, mode);
+        try {
+          const result = await inspectTarget({
+            cwd: fixture.root,
+            registryPath: join(fixture.state, "projects.json"),
+            selector: { path: repo },
+          });
+          expect({ dir, mode, result }).toEqual({
+            dir,
+            mode,
+            result: targetRefusalEnvelope({
+              reason: "input_permission_denied",
+            }),
+          });
+          expect(JSON.stringify(result)).not.toContain(repo);
+          expect(JSON.stringify(result)).not.toContain("EACCES");
+        } finally {
+          await chmod(locked, 0o755);
+        }
+      }
+    }
+  );
+
+  test("the MCP argv carries every selector as one --name=value token", () => {
+    // The paired cases build the direct CLI argv with this same helper, so a
+    // dropped selector would change both sides alike. Pin the argv literally.
+    expect(
+      buildTargetInspectArgs({
+        projectName: "alpha",
+        path: "/x",
+        branch: "feature/login",
+        service: "api",
+        env: "staging",
+        expectGeneration: "cfg-v0:0123456789abcdef0123456789abcdef",
+      })
+    ).toEqual([
+      "project",
+      "target",
+      "--json",
+      "--project=alpha",
+      "--path=/x",
+      "--branch=feature/login",
+      "--service=api",
+      "--env=staging",
+      "--expect-generation=cfg-v0:0123456789abcdef0123456789abcdef",
+    ]);
+    expect(buildTargetInspectArgs({})).toEqual(["project", "target", "--json"]);
   });
 
   test("selectors are validated before any project lookup", async () => {

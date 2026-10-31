@@ -54,6 +54,7 @@ import {
 import {
   type NativeRunSelection,
   nativeProjectOneOff,
+  requireNonEmptyNativeRunOptions,
 } from "../backends/native-project-one-off.ts";
 import {
   retireNativeRecoveredPublisher,
@@ -200,6 +201,7 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -220,9 +222,15 @@ import {
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   buildLogSelector,
+  LOKI_FOLLOW_EMPTY_NOTICE_DELAY_MS,
+  type LogsCommandSelectors,
+  type LogsCommandTarget,
+  renderEmptyLokiFollowNotice,
   resolveShouldTryLoki,
   resolveUseLoki,
+  runLokiSnapshotWithFallback,
 } from "../lib/logs.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import { refuseNativeComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
@@ -253,6 +261,7 @@ import {
 import {
   discoverComposeServiceNames,
   ensureHackDirGitignore,
+  HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
@@ -294,6 +303,7 @@ import {
   resolveSecretStore,
 } from "../lib/secret-store.ts";
 import { exec, findExecutableInPath, run as runShell } from "../lib/shell.ts";
+import { assertComposeSpawnEnvFits } from "../lib/spawn-env-limit.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import {
   buildWorktreeRetargetWarning,
@@ -1330,11 +1340,19 @@ export async function resolveModernComposeEnvOverrides(opts: {
 
   // Values travel only through the Compose process env; the file on disk holds
   // `${NAME}` references (see src/lib/compose-env-at-rest.ts).
+  // Global values share one reference across services (HACK-1317), so the
+  // Compose environment grows with distinct values, not services times keys.
   const override = renderComposeEnvReferenceOverride({
     targetServices: opts.targetServices,
     globalEnv: modern.globalEnv,
     serviceEnv: modern.serviceEnv,
+    effectiveScopes: modern.effectiveMetadata,
   });
+  const composeEnv = override
+    ? { ...modern.globalEnv, ...override.env }
+    : modern.globalEnv;
+  // Fail closed before any write or spawn when Compose could not start.
+  assertComposeSpawnEnvFits({ env: composeEnv });
   if (override === null) {
     await scrubPlaintextComposeEnvOverride({
       projectDir: opts.project.projectDir,
@@ -1348,14 +1366,14 @@ export async function resolveModernComposeEnvOverrides(opts: {
     };
   }
 
-  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
   const overridePath = await writeComposeEnvOverride({
     projectDir: opts.project.projectDir,
     text: override.text,
   });
   return {
     composeFiles: [overridePath],
-    env: { ...modern.globalEnv, ...override.env },
+    env: composeEnv,
     lifecycleEnv,
     preflightEnvByService,
     effectiveEnvName: modern.selection.effectiveEnv,
@@ -1499,6 +1517,7 @@ async function resolveComposeEnvOverrides(opts: {
     }
   }
 
+  assertComposeSpawnEnvFits({ env: resolved.envForCompose });
   if (Object.keys(overrideServices).length === 0) {
     await scrubPlaintextComposeEnvOverride({
       projectDir: opts.project.projectDir,
@@ -1515,7 +1534,7 @@ async function resolveComposeEnvOverrides(opts: {
   const override = { services: overrideServices };
   const yaml = YAML.stringify(override, null, 2);
   const text = ensureTrailingNewline(cleanupYaml(yaml));
-  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
   const overridePath = await writeComposeEnvOverride({
     projectDir: opts.project.projectDir,
     text,
@@ -2055,7 +2074,7 @@ async function resolveBranchComposeFiles(opts: {
     return [opts.project.composeFile];
   }
 
-  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
   const overrideDir = resolve(opts.project.projectDir, ".branch");
   await ensureDir(overrideDir);
   const overridePath = resolve(
@@ -2093,7 +2112,7 @@ export async function resolveRuntimeHostMetadataOverride(opts: {
     return null;
   }
 
-  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
   const overrideDir = resolve(
     opts.project.projectDir,
     opts.branch ? ".branch" : ".internal"
@@ -2411,7 +2430,7 @@ async function writeInternalComposeOverride(opts: {
   readonly projectDir: string;
   readonly text: string;
 }): Promise<string> {
-  await ensureHackDirGitignore({ projectDir: opts.projectDir });
+  await ensureHackGitInfoExclude({ projectDir: opts.projectDir });
   const overrideDir = resolve(opts.projectDir, ".internal");
   await ensureDir(overrideDir);
   const overridePath = resolve(overrideDir, "compose.override.yml");
@@ -3025,6 +3044,23 @@ async function promptInitUseDiscovery(opts: {
   return useDiscovery;
 }
 
+/**
+ * `hack init` step for the committed `.hack/.gitignore`. Interactive init
+ * reaches an existing file when the user confirms overwriting the scaffold;
+ * a read-only one that lacks the managed block is left unchanged (see
+ * `ensureHackDirGitignore`) and reported with the same fixed warning that
+ * `hack doctor` and the machine-local env writes print, instead of silently.
+ * Init still succeeds: the scaffold does not depend on the file.
+ */
+async function ensureInitHackDirGitignore(opts: {
+  readonly hackDir: string;
+}): Promise<void> {
+  const result = await ensureHackDirGitignore({ projectDir: opts.hackDir });
+  if (result.readOnly) {
+    logger.warn({ message: HACK_DIR_GITIGNORE_READ_ONLY_WARNING });
+  }
+}
+
 async function ensureInitHackDir(opts: {
   readonly io: InitInteractiveIo;
   readonly hackDir: string;
@@ -3173,7 +3209,7 @@ export async function handleInit({
   // Committed, hack-owned ignore file for machine-local generated files
   // (.internal/, .branch/, .env, env state, env-local overrides).
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  await ensureHackDirGitignore({ projectDir: hackDir });
+  await ensureInitHackDirGitignore({ hackDir });
 
   await writeInitScaffoldFile({
     repoRoot,
@@ -3346,7 +3382,7 @@ async function handleInitAuto({
   // Committed, hack-owned ignore file for machine-local generated files
   // (.internal/, .branch/, .env, env state, env-local overrides).
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  await ensureHackDirGitignore({ projectDir: hackDir });
+  await ensureInitHackDirGitignore({ hackDir });
 
   await writeInitScaffoldFile({
     repoRoot,
@@ -4817,15 +4853,6 @@ async function requireProjectContext(startDir: string) {
   return ctx;
 }
 
-class MissingProjectContextError extends Error {
-  constructor() {
-    super(
-      `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`
-    );
-    this.name = "MissingProjectContextError";
-  }
-}
-
 type RemoteLifecycleAction = "up" | "down" | "restart";
 
 /**
@@ -5308,18 +5335,16 @@ async function runUpCommand({
       projectOpt: args.options.project,
     });
   } catch (error: unknown) {
-    if (error instanceof MissingProjectContextError) {
-      if (json) {
-        return emitLifecycleResult({
-          result: errorResult({
-            code: "E_PROJECT_NOT_FOUND",
-            message: error.message,
-          }),
-          exitCode: 1,
-        });
-      }
-      logger.error({ message: error.message });
-      return 1;
+    // Without --json the error reaches the CLI's closed-error renderer, like
+    // `down` and `restart`: one `E_PROJECT_NOT_FOUND: ...` line, no stack.
+    if (json && error instanceof MissingProjectContextError) {
+      return emitLifecycleResult({
+        result: errorResult({
+          code: "E_PROJECT_NOT_FOUND",
+          message: error.message,
+        }),
+        exitCode: 1,
+      });
     }
     throw error;
   }
@@ -5368,9 +5393,11 @@ async function runUpCommand({
     return remoteUpCode;
   }
   await maybeSyncOauthAliasesInCompose({ project });
-  // Self-heal the committed .hack/.gitignore so machine-local generated files
-  // (.internal/, .branch/, .env, env state) never leak into git history.
-  await ensureHackDirGitignore({ projectDir: project.projectDir });
+  // Keep machine-local generated files (.internal/, .branch/, .env, env
+  // state) out of git status without writing into the user's tree: the rules
+  // go into the repository's info/exclude. Only init and doctor --fix write
+  // the committed .hack/.gitignore (HACK-1278).
+  await ensureHackGitInfoExclude({ projectDir: project.projectDir });
 
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
@@ -7472,6 +7499,7 @@ async function handlePs({
 /**
  * Compose runs need the Compose operation; a native one-off instead carries its
  * `--env`/`--profile` request. Omitted options inherit the running selection;
+ * an empty value was already refused by {@link refuseEmptyNativeRunSelection};
  * given options must match it exactly, which the native backend checks before
  * any runtime request (no implicit restart).
  */
@@ -7492,6 +7520,23 @@ function runBackendSelection(
   };
 }
 
+/**
+ * On the native backend an empty `--env` or `--profile` is a usage error before
+ * any dispatch, so authored, adopted and legacy projects all refuse it with the
+ * same E_USAGE line, not the authored path's broader
+ * E_NATIVE_PROJECT_UNSUPPORTED. The Compose backend keeps its meaning: there
+ * an empty `--env` selects the base layers.
+ */
+function refuseEmptyNativeRunSelection(args: RunArgs): void {
+  if (process.env.HACK_RUNTIME_BACKEND !== "native") {
+    return;
+  }
+  requireNonEmptyNativeRunOptions({
+    env: args.options.env,
+    profile: args.options.profile,
+  });
+}
+
 async function handleRun({
   ctx,
   args,
@@ -7499,6 +7544,7 @@ async function handleRun({
   readonly ctx: CliContext;
   readonly args: RunArgs;
 }): Promise<number> {
+  refuseEmptyNativeRunSelection(args);
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -8079,6 +8125,15 @@ async function runLogsWithLoki(opts: {
   readonly queryOpt: string | undefined;
   readonly since: string | undefined;
   readonly until: string | undefined;
+  readonly wantsLokiExplicit: boolean;
+  /** Project selection repeated in suggested `hack logs --compose` commands. */
+  readonly target: LogsCommandTarget;
+  /** `--tail` as passed; undefined when the user left the default. */
+  readonly tailOpt: number | undefined;
+  readonly profiles: readonly string[];
+  readonly pretty: boolean;
+  /** Compose snapshot used when an implicit Loki snapshot comes back empty. */
+  readonly runCompose: () => Promise<number>;
 }): Promise<number> {
   if (isSlimExecutionMode()) {
     process.stderr.write(
@@ -8120,17 +8175,59 @@ async function runLogsWithLoki(opts: {
     projectNameForPrefix: opts.projectNameForPrefix,
     services,
   });
+  // Every selector the user passed, so an empty-result hint suggests the same
+  // selection on the compose backend (HACK-1379).
+  const selectors: LogsCommandSelectors = {
+    services,
+    tail: opts.tailOpt,
+    profiles: opts.profiles,
+    pretty: opts.pretty,
+    json: opts.json,
+    query: opts.queryOpt,
+    since: opts.since,
+    until: opts.until,
+  };
 
-  return await lokiLogBackend.run({
+  const lokiOptions = {
     baseUrl: opts.baseUrl,
     query,
-    follow: opts.follow,
     tail: opts.tail,
     format: opts.format,
     showProjectPrefix: true,
     streamContext,
     start: opts.timeRange.start ?? undefined,
     end: opts.timeRange.end ?? undefined,
+  };
+  if (opts.follow) {
+    return await lokiLogBackend.run({
+      ...lokiOptions,
+      follow: true,
+      noEntriesNotice: {
+        afterMs: LOKI_FOLLOW_EMPTY_NOTICE_DELAY_MS,
+        notify: () => {
+          process.stderr.write(
+            `${renderEmptyLokiFollowNotice({
+              query,
+              target: opts.target,
+              selectors,
+            })}\n`
+          );
+        },
+      },
+    });
+  }
+
+  return await runLokiSnapshotWithFallback({
+    wantsLokiExplicit: opts.wantsLokiExplicit,
+    query,
+    target: opts.target,
+    selectors,
+    runLoki: async ({ deferEmpty }) =>
+      await lokiLogBackend.snapshot({ ...lokiOptions, deferEmpty }),
+    runCompose: opts.runCompose,
+    writeNotice: (line) => {
+      process.stderr.write(`${line}\n`);
+    },
   });
 }
 
@@ -8443,6 +8540,22 @@ async function handleLogs({
     lokiReachable,
   });
 
+  const runCompose = async (): Promise<number> =>
+    await runLogsWithCompose({
+      project,
+      projectNameForPrefix,
+      composeProject: branch ? projectNameForPrefix : undefined,
+      branch,
+      json,
+      follow,
+      tail,
+      service: typeof service === "string" ? service : undefined,
+      profiles,
+      format,
+      since: args.options.since,
+      until: args.options.until,
+    });
+
   if (useLoki) {
     return await runLogsWithLoki({
       baseUrl,
@@ -8459,24 +8572,21 @@ async function handleLogs({
       queryOpt: args.options.query,
       since: args.options.since,
       until: args.options.until,
+      wantsLokiExplicit,
+      target: {
+        path: args.options.path,
+        project: args.options.project,
+        branch: args.options.branch,
+      },
+      tailOpt: args.options.tail,
+      profiles,
+      pretty: args.options.pretty === true,
+      runCompose,
     });
   }
 
   // Fallback to docker compose logs when Loki isn't available.
-  return await runLogsWithCompose({
-    project,
-    projectNameForPrefix,
-    composeProject: branch ? projectNameForPrefix : undefined,
-    branch,
-    json,
-    follow,
-    tail,
-    service: typeof service === "string" ? service : undefined,
-    profiles,
-    format,
-    since: args.options.since,
-    until: args.options.until,
-  });
+  return await runCompose();
 }
 
 /** An omitted option stays omitted so native dispatch can distinguish it from an explicit empty list. */

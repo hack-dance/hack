@@ -82,9 +82,30 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "The selected env overlay cannot supply keys the command requires; the detail lists names only.",
     readFirst: "`hack env explain <key> --service <service>`",
   },
+  E_ENV_TOO_LARGE: {
+    meaning:
+      "The Compose environment exceeds the platform limit for a new process (ARG_MAX, or MAX_ARG_STRLEN for one variable), so Compose was not started; the detail has byte counts only.",
+    readFirst: "`hack env list --json`",
+  },
   E_PERMISSION: {
-    meaning: "A filesystem or runtime permission was denied.",
+    meaning:
+      "A filesystem or runtime permission was denied, or a file Hack must write is on a read-only filesystem.",
     readFirst: "`hack doctor --json`",
+  },
+  E_NO_SPACE: {
+    meaning:
+      "A file Hack must write could not be written because the disk is full or the disk quota is exceeded.",
+    readFirst: "`df -h <path from the message>`",
+  },
+  E_PATH_CONFLICT: {
+    meaning:
+      "A path Hack must read or write is the wrong kind of entry: a file where a directory is needed, or a directory or special file where a regular file is needed.",
+    readFirst: "`ls -ld <path from the message>`",
+  },
+  E_LOCKED: {
+    meaning:
+      "A lock Hack needs stayed held for the whole bounded wait, by another Hack command or by a stale lock Hack cannot prove abandoned; nothing guarded by it was written.",
+    readFirst: "`ls -l <lock path from the message>`",
   },
   E_INTERACTIVE_REQUIRED: {
     meaning:

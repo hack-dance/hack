@@ -48,6 +48,13 @@ import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
  * - Release removes one holder. Only when no holder remains is an owned helper
  *   stopped, through its birth-verified process tree. Adopted helpers are
  *   never signalled.
+ * - `stopped` means the exit of every member of the captured tree was
+ *   observed within one bounded wait: TERM grace, then
+ *   {@link SHARED_HOST_KILL_CONFIRM_MS} after KILL. Exit is observed when the
+ *   PID is gone from the census or is a zombie (exited, not yet reaped).
+ *   Anything still running under that PID, even with a different birth time,
+ *   is not exit. When the wait ends without that proof, the result is
+ *   `stop-unconfirmed` and the claim is kept.
  *
  * Diagnostics are closed: every failure is one of {@link SharedHostFailure}
  * with a fixed message that never includes paths, argv, env or response
@@ -231,6 +238,16 @@ const MAX_CLAIM_BYTES = 8192;
 const MAX_IDENTITY_BYTES = 4096;
 const MAX_HOLDERS = 256;
 const STOP_POLL_MS = 50;
+/** TERM grace used by {@link releaseSharedHostHelper} when `graceMs` is omitted. */
+export const SHARED_HOST_RELEASE_GRACE_MS = 2000;
+/** TERM grace used when a start fails and Hack stops the helper it started. */
+const FAILED_START_GRACE_MS = 1000;
+/**
+ * How long a stop waits, after KILL, to observe the exit of every member of
+ * the captured tree before it reports `unconfirmed`. The whole stop is bounded
+ * by the TERM grace plus this wait (plus one census per poll).
+ */
+export const SHARED_HOST_KILL_CONFIRM_MS = 1000;
 /**
  * Exec gate: the helper argv runs only after the starter writes `open`. EOF
  * (starter lost before its claim was durable) exits without running it. `exec`
@@ -514,13 +531,37 @@ async function readCensus(
   return rows.filter((row) => !row.zombie);
 }
 
-function isLive(
+/**
+ * The liveness rule for a claimed process: the census shows this exact PID
+ * and birth, and the row is not a zombie. A zombie has exited (see
+ * {@link readCensus}), so it never counts as running. This is the one
+ * predicate Hack and its fixtures use, so a Linux zombie waiting for a slow
+ * reaper reads the same way everywhere.
+ */
+export function isSharedHostProcessRunning(
   census: readonly ProcessIdentityRow[],
-  claim: { readonly pid: number; readonly birth: string }
+  identity: { readonly pid: number; readonly birth: string }
 ): boolean {
   return census.some(
-    (row) => row.pid === claim.pid && row.birth === claim.birth
+    (row) =>
+      row.pid === identity.pid && row.birth === identity.birth && !row.zombie
   );
+}
+
+const isLive = isSharedHostProcessRunning;
+
+/**
+ * Exit of a signalled tree member is observed only when its PID is gone from
+ * the census or is a zombie. The same PID running with another birth time is
+ * not proof: Linux `lstart` can drift with the wall clock, so it may be the
+ * same process. PID reuse inside one stop wait is not plausible, so this
+ * costs nothing but an honest `unconfirmed` in that case.
+ */
+function exitObserved(
+  census: readonly ProcessIdentityRow[],
+  member: ProcessIdentityRow
+): boolean {
+  return !census.some((row) => row.pid === member.pid && !row.zombie);
 }
 
 async function readBounded(response: Response): Promise<string | null> {
@@ -630,10 +671,15 @@ function classifyIdentity(
 }
 
 /**
- * Stop a birth-verified process tree: TERM, bounded grace, then KILL for the
- * members that still carry their captured birth time. Nothing is signalled
- * when the root no longer matches its claim. A member that has exited counts
- * as stopped even before its parent reaps it (see {@link readCensus}).
+ * Stop a birth-verified process tree: TERM, `graceMs` to observe every
+ * member's exit, then KILL for the members still running (each signal
+ * re-checks the birth time) and {@link SHARED_HOST_KILL_CONFIRM_MS} more.
+ * Nothing is signalled when the root no longer matches its claim.
+ *
+ * `stopped` is returned only after a census observed every member exited
+ * (see {@link exitObserved}); a zombie counts as exited, a running PID never
+ * does. A census that fails during the wait proves nothing, so polling goes
+ * on until the deadline. Otherwise the result is `unconfirmed`.
  */
 export async function stopVerifiedSharedHostProcess(opts: {
   readonly pid: number;
@@ -655,26 +701,27 @@ export async function stopVerifiedSharedHostProcess(opts: {
     if (live === null) {
       return null;
     }
-    return tree.filter((row) => isLive(live, row));
+    return tree.filter((row) => !exitObserved(live, row));
+  };
+  const awaitExit = async (waitMs: number) => {
+    const deadline = performance.now() + waitMs;
+    let left = await remaining();
+    while ((left === null || left.length > 0) && performance.now() < deadline) {
+      await delay(STOP_POLL_MS);
+      left = await remaining();
+    }
+    return left;
   };
   await processes.signalTree(tree, "SIGTERM");
-  const termDeadline = performance.now() + opts.graceMs;
-  let left = await remaining();
-  while (left !== null && left.length > 0 && performance.now() < termDeadline) {
-    await delay(STOP_POLL_MS);
-    left = await remaining();
-  }
-  if (left !== null && left.length === 0) {
+  const afterTerm = await awaitExit(opts.graceMs);
+  if (afterTerm !== null && afterTerm.length === 0) {
     return "stopped";
   }
-  await processes.signalTree(left ?? tree, "SIGKILL");
-  const killDeadline = performance.now() + 1000;
-  left = await remaining();
-  while (left !== null && left.length > 0 && performance.now() < killDeadline) {
-    await delay(STOP_POLL_MS);
-    left = await remaining();
-  }
-  return left !== null && left.length === 0 ? "stopped" : "unconfirmed";
+  await processes.signalTree(afterTerm ?? tree, "SIGKILL");
+  const afterKill = await awaitExit(SHARED_HOST_KILL_CONFIRM_MS);
+  return afterKill !== null && afterKill.length === 0
+    ? "stopped"
+    : "unconfirmed";
 }
 
 function withHolder(holders: readonly string[], holder: string): string[] {
@@ -794,7 +841,7 @@ async function stopFailedStart(opts: {
 }): Promise<void> {
   const stopped = await stopVerifiedSharedHostProcess({
     ...opts.owned,
-    graceMs: 1000,
+    graceMs: FAILED_START_GRACE_MS,
   });
   if (stopped === "stopped" || stopped === "absent") {
     await removeClaim(opts.context.spec);
@@ -1227,7 +1274,7 @@ async function releaseLocked(opts: {
   const stopped = await stopVerifiedSharedHostProcess({
     pid: claim.pid,
     birth: claim.birth,
-    graceMs: opts.graceMs ?? 2000,
+    graceMs: opts.graceMs ?? SHARED_HOST_RELEASE_GRACE_MS,
     processes: opts.processes,
   });
   switch (stopped) {

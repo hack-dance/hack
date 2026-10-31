@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import io
 import json
+import math
 from pathlib import Path
 import re
 import tempfile
@@ -15,7 +16,8 @@ SPEC = importlib.util.spec_from_file_location("application_benchmark_protocol", 
 protocol_check = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(protocol_check)
 
-PROTOCOL = json.loads((ROOT / "scripts/application-benchmark-protocol.json").read_text())
+PROTOCOL_TEXT = (ROOT / "scripts/application-benchmark-protocol.json").read_text()
+PROTOCOL = json.loads(PROTOCOL_TEXT)
 PROTOCOL_DOC = (ROOT / "docs/reference/application-benchmark-protocol.md").read_text()
 PERFORMANCE_DOC = (ROOT / "docs/performance.md").read_text()
 MARKER = "PRIVATE-MARKER-9f2c"
@@ -96,6 +98,14 @@ def evaluate_file(summary):
         path = Path(directory) / "summary.json"
         path.write_text(json.dumps(summary))
         return run_cli(["--evaluate", str(path)])
+
+
+def run_cli_text(text, flag):
+    """Run the CLI on raw JSON text, as a protocol (`--protocol`) or a summary (`--evaluate`)."""
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "input.json"
+        path.write_text(text)
+        return run_cli([flag, str(path)])
 
 
 def node_paths(node, prefix=(), list_limit=None):
@@ -224,6 +234,20 @@ class FrozenProtocolTest(unittest.TestCase):
                       f"{limit['witness_target_seconds']} s", "HACK-1169"):
             self.assertIn(value, PERFORMANCE_DOC)
         self.assertIn("application-benchmark-protocol.md", PERFORMANCE_DOC)
+
+    def test_document_states_the_number_bound_and_its_codes(self):
+        # The page writes the bound as ±(2ⁿ − 1); every such bound must be MAX_JSON_NUMBER.
+        superscripts = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
+        bounds = re.findall(r"±\(2([⁰¹²³⁴⁵⁶⁷⁸⁹]+) − 1\)", PROTOCOL_DOC)
+        self.assertTrue(bounds)
+        # A bound written any other way would escape the check above.
+        self.assertEqual(PROTOCOL_DOC.count("±("), len(bounds))
+        for exponent in bounds:
+            self.assertEqual(2 ** int(exponent.translate(superscripts)) - 1, protocol_check.MAX_JSON_NUMBER)
+        for code in ("protocol_number_out_of_range", "summary_number_out_of_range", "protocol_key_duplicate",
+                     "summary_key_duplicate", "summary_revision_mismatch", "summary_workload_unknown"):
+            self.assertIn(code, protocol_check.DIAGNOSTICS)
+            self.assertIn(f"`{code}`", PROTOCOL_DOC)
 
 
 def _recast_as_compose(item):
@@ -515,6 +539,23 @@ class BudgetEvaluationTest(unittest.TestCase):
         summary["lanes"]["candidate"]["info_latency_ms"] = entry([50] * 56 + [101] * 4)
         self.assertEqual(verdicts(self.judge(summary), "info_latency_ms"), ["fail"])
 
+    def test_window_mean_is_correctly_rounded_on_every_interpreter(self):
+        # Built-in sum() gives 0.009999999999999998 here before Python 3.12, which would
+        # pass the exclusive 1% idle ceiling; on 3.12+ it differs from the exact mean on
+        # the second list. Both must judge from the correctly rounded mean.
+        self.assertEqual(protocol_check.window_mean([0.01] * 10), 0.01)
+        large = [1000000000000000.2, 0.001, 0.007, 0.1, 0.01, 3.0, 1.0, 0.0, 0.007, 1000000000000000.2]
+        exact = math.fsum(large) / len(large)
+        self.assertEqual(protocol_check.window_mean(large), exact)
+        # A stricter extra budget whose exclusive ceiling is that exact mean must fail.
+        strict = mutated(lambda d: d["budgets"]["absolute"].append(
+            {"metric": "probe_window_mean", "statistic": "window_mean", "max": exact, "inclusive": False}))
+        self.assertEqual(protocol_check.validate_protocol(strict), [])
+        summary = small_summary()
+        summary["lanes"]["candidate"]["probe_window_mean"] = entry(large)
+        _, records = protocol_check.evaluate(strict, summary)
+        self.assertEqual(verdicts(records, "probe_window_mean"), ["fail"])
+
     def test_a_not_applicable_baseline_with_a_reason_is_skipped_and_missing_lanes_are_inconclusive(self):
         summary = small_summary()
         summary["lanes"]["hack-4.1.1"]["warm_startup_seconds"] = not_applicable()
@@ -603,7 +644,8 @@ class BudgetEvaluationTest(unittest.TestCase):
             ("summary_entry_malformed", baseline("cpu_seconds_per_task", "flagged", -1)),
             ("summary_entry_malformed", baseline("cpu_seconds_per_task", "failed", "0")),
             ("summary_entry_malformed", baseline("cpu_seconds_per_task", "samples", [1, "2"])),
-            ("summary_entry_malformed", baseline("cpu_seconds_per_task", "samples", [float("nan")] * 10)),
+            (("summary_entry_malformed", "summary_number_out_of_range"),
+             baseline("cpu_seconds_per_task", "samples", [float("nan")] * 10)),
             ("summary_entry_malformed", baseline("cpu_seconds_per_task", "median", 1.0)),
             ("summary_entry_malformed", candidate("watcher_ack_ms", [100] * 60)),
             ("summary_lane_malformed", lambda s: s["lanes"].update(compose=[MARKER])),
@@ -618,7 +660,7 @@ class BudgetEvaluationTest(unittest.TestCase):
             summary = small_summary()
             change(summary)
             with self.subTest(code=code, summary=summary.get("workload")):
-                self.assertEqual(self.refused(summary), [code])
+                self.assertEqual(self.refused(summary), [code] if isinstance(code, str) else list(code))
 
     def test_oversized_integers_are_refused_not_a_traceback(self):
         """Python parses 10**400 exactly; converting it to a float would raise OverflowError."""
@@ -632,14 +674,132 @@ class BudgetEvaluationTest(unittest.TestCase):
             with self.subTest(case=name):
                 summary = small_summary()
                 change(summary)
-                self.assertEqual(evaluate_file(summary),
-                                 (2, {"status": "invalid", "diagnostics": ["summary_entry_malformed"]}))
+                self.assertEqual(evaluate_file(summary), (2, {"status": "invalid", "diagnostics": [
+                    "summary_entry_malformed", "summary_number_out_of_range"]}))
         summary = small_summary()
         summary["observer_cost"]["cpu_seconds_per_task"] = HUGE
-        self.assertEqual(evaluate_file(summary),
-                         (2, {"status": "invalid", "diagnostics": ["summary_observer_malformed"]}))
+        self.assertEqual(evaluate_file(summary), (2, {"status": "invalid", "diagnostics": [
+            "summary_number_out_of_range", "summary_observer_malformed"]}))
         protocol = mutated(lambda d: budget(d, "comparative", "cpu_seconds_per_task").update(max_ratio=HUGE))
         self.assertIn("comparative_budget_weakened", protocol_check.validate_protocol(protocol))
+
+    def test_every_number_anywhere_must_be_finite_and_interoperable(self):
+        # The page promises every number in a protocol or summary is within +/-(2**53 - 1).
+        # These sit where no other check would refuse them: an unread field, or a count
+        # that is only compared as a floor or against the sample list.
+        limit = 2 ** 53 - 1
+        for value in (limit + 1, -limit - 1, HUGE, float("nan"), float("inf"), -float("inf"), 1e300):
+            with self.subTest(value=repr(value)):
+                unread = mutated(lambda d: d.update(notes=[{"bytes": value}]))
+                self.assertEqual(protocol_check.validate_protocol(unread), ["protocol_number_out_of_range"])
+                floor = mutated(lambda d: d["samples"].update(p95_min_samples=value))
+                self.assertIn("protocol_number_out_of_range", protocol_check.validate_protocol(floor))
+                summary = small_summary()
+                summary["lanes"]["candidate"]["unbudgeted_metric"] = {"samples": [value]}
+                summary["notes"] = value
+                self.assertEqual(self.refused(summary), ["summary_number_out_of_range"])
+                summary = small_summary()
+                summary["lanes"]["candidate"]["info_latency_ms"]["expected"] = value
+                self.assertIn("summary_number_out_of_range", self.refused(summary))
+        self.assertEqual(protocol_check.validate_protocol(mutated(lambda d: d["samples"].update(
+            p95_min_samples=limit))), [])
+        self.assertEqual(protocol_check.validate_protocol(mutated(lambda d: d.update(
+            notes=[limit, -limit, 1e-300, True]))), [])
+        summary = small_summary()
+        summary["lanes"]["candidate"]["unbudgeted_metric"] = {"samples": [limit, -limit]}
+        self.judge(summary)
+        summary["lanes"]["candidate"]["unbudgeted_metric"]["samples"].append(limit + 1)
+        self.assertEqual(evaluate_file(summary),
+                         (2, {"status": "invalid", "diagnostics": ["summary_number_out_of_range"]}))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "protocol.json"
+            path.write_text(json.dumps(mutated(lambda d: d.update(notes=float("nan")))))
+            self.assertEqual(run_cli(["--protocol", str(path)]),
+                             (2, {"status": "invalid", "diagnostics": ["protocol_number_out_of_range"]}))
+
+    def test_a_deeply_nested_unread_field_is_scanned_without_raising(self):
+        # Far deeper than the recursion limit: a recursive walk would raise RecursionError.
+        deep = [2 ** 53]
+        for _ in range(100000):
+            deep = [deep]
+        self.assertEqual(protocol_check.validate_protocol(mutated(lambda d: d.update(notes=deep))),
+                         ["protocol_number_out_of_range"])
+
+    def test_an_out_of_range_number_is_reported_with_an_early_refusal(self):
+        # The revision and workload codes stop the check early; the number code still appears.
+        cases = {
+            "summary_revision_mismatch": lambda s: s.update(protocol_revision=2),
+            "summary_workload_unknown": lambda s: s.update(workload=MARKER),
+        }
+        for code, change in cases.items():
+            for value in (float("nan"), 2 ** 53, -HUGE):
+                with self.subTest(code=code, value=repr(value)):
+                    summary = small_summary()
+                    change(summary)
+                    summary["notes"] = value
+                    expected = sorted([code, "summary_number_out_of_range"])
+                    self.assertEqual(protocol_check.evaluate(PROTOCOL, summary), (expected, []))
+                    self.assertEqual(evaluate_file(summary), (2, {"status": "invalid", "diagnostics": expected}))
+        # The number can be the revision itself: both codes describe the same field.
+        self.assertEqual(self.refused({**small_summary(), "protocol_revision": 2 ** 53}),
+                         ["summary_number_out_of_range", "summary_revision_mismatch"])
+
+    def test_a_repeated_key_is_refused_so_no_number_is_shadowed(self):
+        # json.loads keeps the last value of a repeated key, so `NaN` here was never scanned.
+        frozen = PROTOCOL_TEXT.rstrip()
+        self.assertTrue(frozen.endswith("}"))
+        shadowed = frozen[:-1] + ', "notes": NaN, "notes": 1}'
+        self.assertEqual(run_cli_text(shadowed, "--protocol"),
+                         (2, {"status": "invalid", "diagnostics": ["protocol_key_duplicate"]}))
+        self.assertEqual(run_cli_text(frozen[:-1] + ', "notes": 1}', "--protocol")[0], 0)
+        nested = frozen.replace('"id": "candidate",', '"id": "candidate", "id": "candidate",', 1)
+        self.assertNotEqual(nested, frozen)
+        self.assertEqual(run_cli_text(nested, "--protocol"),
+                         (2, {"status": "invalid", "diagnostics": ["protocol_key_duplicate"]}))
+        summary = json.dumps(small_summary())
+        self.assertEqual(run_cli_text(summary, "--evaluate")[0], 0)
+        repeated = summary.replace('"cache_class": "warm"', '"cache_class": NaN, "cache_class": "warm"', 1)
+        self.assertNotEqual(repeated, summary)
+        self.assertEqual(run_cli_text(repeated, "--evaluate"),
+                         (2, {"status": "invalid", "diagnostics": ["summary_key_duplicate"]}))
+
+    def test_integer_literals_of_any_length_get_the_range_code_on_every_interpreter(self):
+        # Python 3.11+ refuses to convert an integer of more than 4300 digits, which made a
+        # 5000-digit literal `protocol_unreadable` there and out of range on 3.9.
+        limit = protocol_check.MAX_JSON_NUMBER
+        frozen = PROTOCOL_TEXT.rstrip()[:-1]
+        for literal in ("9" * 5000, "-" + "9" * 5000, str(limit + 1), str(10 ** 16), str(-(10 ** 16))):
+            with self.subTest(digits=len(literal)):
+                self.assertEqual(run_cli_text(frozen + ', "notes": ' + literal + "}", "--protocol"),
+                                 (2, {"status": "invalid", "diagnostics": ["protocol_number_out_of_range"]}))
+                summary = json.dumps({**small_summary(), "notes": 0}).replace('"notes": 0', '"notes": ' + literal)
+                self.assertEqual(run_cli_text(summary, "--evaluate"),
+                                 (2, {"status": "invalid", "diagnostics": ["summary_number_out_of_range"]}))
+        for literal in (str(limit), str(-limit), "0", "-0"):
+            with self.subTest(literal=literal):
+                self.assertEqual(run_cli_text(frozen + ', "notes": ' + literal + "}", "--protocol")[0], 0)
+        # A long literal in a read field gets the same codes as an exact out-of-range value there.
+        floor = PROTOCOL_TEXT.replace('"p95_min_samples": 60', '"p95_min_samples": ' + "9" * 5000, 1)
+        self.assertNotEqual(floor, PROTOCOL_TEXT)
+        exact = protocol_check.validate_protocol(mutated(lambda d: d["samples"].update(p95_min_samples=10 ** 400)))
+        self.assertEqual(run_cli_text(floor, "--protocol"), (2, {"status": "invalid", "diagnostics": exact}))
+        self.assertEqual(protocol_check._bounded_int("9" * 5000), limit + 1)
+        self.assertEqual(protocol_check._bounded_int("-" + "9" * 5000), -limit - 1)
+        self.assertEqual(protocol_check._bounded_int(str(limit)), limit)
+
+    def test_an_integer_beyond_the_conversion_limit_never_raises_in_process(self):
+        # Exact identity checks serialize values; on Python 3.11+ a 5000-digit integer
+        # cannot be serialized, which must mean "different", not an exception.
+        enormous = 10 ** 5000
+        for path in (("host", "logical_cpus"), ("lanes", 0, "commit"), ("workloads", 0, "pin"),
+                     ("samples", "p95_min_samples"), ("notes",)):
+            with self.subTest(path=path):
+                found = protocol_check.validate_protocol(replace_at(PROTOCOL, path, enormous))
+                self.assertIn("protocol_number_out_of_range", found)
+                self.assertTrue(set(found) <= protocol_check.DIAGNOSTICS)
+        summary = small_summary()
+        summary["notes"] = enormous
+        self.assertEqual(self.refused(summary), ["summary_number_out_of_range"])
 
     def test_an_overflowing_ratio_fails_and_the_report_stays_strict_json(self):
         summary = small_summary()

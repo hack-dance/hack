@@ -1,10 +1,16 @@
+import type { LokiSnapshotOutcome } from "../lib/logs.ts";
 import {
   dockerComposeLogsJson,
   dockerComposeLogsPlain,
   dockerComposeLogsPretty,
 } from "../ui/docker-logs.ts";
 import type { LogStreamContext } from "../ui/log-stream.ts";
-import { canReachLoki, lokiLogs } from "../ui/loki-logs.ts";
+import {
+  canReachLoki,
+  type LokiLogsParams,
+  lokiLogs,
+  lokiSnapshot,
+} from "../ui/loki-logs.ts";
 
 export type LogBackendName = "compose" | "loki";
 export type LogOutputFormat = "plain" | "pretty" | "json";
@@ -37,6 +43,8 @@ export interface LokiLogOptions {
   readonly start?: Date;
   readonly end?: Date;
   readonly streamContext?: LogStreamContext;
+  /** Follow only; see {@link LokiLogsParams.noEntriesNotice}. */
+  readonly noEntriesNotice?: LokiLogsParams["noEntriesNotice"];
 }
 
 export interface LogBackend<Options> {
@@ -50,7 +58,15 @@ export interface LogBackendAvailability {
 
 export type ComposeLogBackend = LogBackend<ComposeLogOptions>;
 export type LokiLogBackend = LogBackend<LokiLogOptions> &
-  LogBackendAvailability;
+  LogBackendAvailability & {
+    /**
+     * Bounded, non-follow snapshot. With `deferEmpty`, an empty result writes
+     * nothing and reports `deferred` so the caller can use another backend.
+     */
+    snapshot(
+      opts: Omit<LokiLogOptions, "follow"> & { readonly deferEmpty: boolean }
+    ): Promise<LokiSnapshotOutcome>;
+  };
 
 export const composeLogBackend: ComposeLogBackend = {
   name: "compose",
@@ -115,6 +131,22 @@ export const lokiLogBackend: LokiLogBackend = {
       streamContext: opts.streamContext,
       start: opts.start,
       end: opts.end,
+      noEntriesNotice: opts.noEntriesNotice,
+    });
+  },
+  async snapshot(opts) {
+    return await lokiSnapshot({
+      baseUrl: opts.baseUrl,
+      query: opts.query,
+      follow: false,
+      tail: opts.tail,
+      pretty: opts.format === "pretty",
+      json: opts.format === "json" ? true : undefined,
+      showProjectPrefix: opts.showProjectPrefix,
+      streamContext: opts.streamContext,
+      start: opts.start,
+      end: opts.end,
+      deferEmpty: opts.deferEmpty,
     });
   },
 };

@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import {
   type FileHandle,
-  link,
   lstat,
   mkdir,
   open,
@@ -11,11 +10,28 @@ import {
   unlink,
 } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
+import { publishFileExclusive } from "./exclusive-publish.ts";
 import { isRecord } from "./guards.ts";
 
 const WAIT_MS = 10_000;
 const OWNER_LIMIT = 128;
 const OWNER_PATTERN = /^([1-9]\d*)\n(?:[a-f0-9-]{36}\n)?$/;
+
+/**
+ * The bounded wait for a cooperative lock ran out while another live writer
+ * (or an interrupted recovery) held it. Nothing guarded by the lock ran.
+ * `recoveryBusy` is true when the recovery guard (`<lock>.recovery`) was held
+ * at the end of the wait, which only offline inspection can clear.
+ */
+export class ProjectsRegistryLockTimeoutError extends Error {
+  readonly recoveryBusy: boolean;
+
+  constructor(message: string, opts: { readonly recoveryBusy?: boolean } = {}) {
+    super(message);
+    this.name = "ProjectsRegistryLockTimeoutError";
+    this.recoveryBusy = opts.recoveryBusy ?? false;
+  }
+}
 
 interface Owner {
   readonly info: Stats;
@@ -26,6 +42,11 @@ interface Owner {
 /**
  * Serialize cooperative registry writers. A fully written owner is published by
  * an exclusive hard link, so a killed publisher never leaves an empty lock.
+ * On a filesystem without hard links (ExFAT, FAT) the owner is published by an
+ * exclusive empty reservation that the complete owner is renamed over; see
+ * `publishByExclusivePlaceholder`. There, a publisher killed between the two
+ * steps leaves an empty lock, which is never reclaimed (it names no owner) and
+ * times out until it is removed by hand.
  * Age is not authority: only ESRCH permits reclamation, under a separate guard.
  * Live/reused/inaccessible PIDs and uncertain receipts are never reclaimed.
  *
@@ -55,8 +76,9 @@ export async function withProjectsRegistryLock<T>(opts: {
     await acquire({ ...opts, candidate });
     try {
       // The descriptor stays open until release, preventing inode reuse while a
-      // caller still holds its receipt. Remove the staging name before running.
-      await unlink(candidate);
+      // caller still holds its receipt. Remove the staging name before running;
+      // the no-hard-link fallback has already renamed it into place.
+      await removeAbsentOkay(candidate);
       opts.signal?.throwIfAborted();
       return await opts.run();
     } finally {
@@ -123,8 +145,9 @@ async function acquire(opts: {
       const recovery = recoveryBusy
         ? "; recovery guard is busy (interrupted recovery requires offline inspection)"
         : "";
-      throw new Error(
-        `Timed out waiting for ${opts.label ?? "projects registry"} lock${recovery}`
+      throw new ProjectsRegistryLockTimeoutError(
+        `Timed out waiting for ${opts.label ?? "projects registry"} lock${recovery}`,
+        { recoveryBusy }
       );
     }
     // Jitter prevents a burst of CLI clients from retrying in lockstep.
@@ -135,15 +158,7 @@ async function acquire(opts: {
 }
 
 async function publish(candidate: string, path: string): Promise<boolean> {
-  try {
-    await link(candidate, path);
-    return true;
-  } catch (error) {
-    if (hasCode(error, "EEXIST")) {
-      return false;
-    }
-    throw error;
-  }
+  return await publishFileExclusive({ source: candidate, target: path });
 }
 
 function hasCode(error: unknown, code: string): boolean {

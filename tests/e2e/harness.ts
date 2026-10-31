@@ -1,7 +1,31 @@
+import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  DAEMON_LAUNCHD_LABEL,
+  DAEMON_LAUNCHD_PLIST_FILENAME,
+} from "../../src/constants.ts";
+import {
+  LAUNCHD_ALLOW_ISOLATED_ENV,
+  LAUNCHD_DISABLE_ENV,
+} from "../../src/daemon/launchd.ts";
 
 /**
  * Core end-to-end harness for the hack CLI.
@@ -219,7 +243,160 @@ export function buildCliEnv(opts: {
   env.NO_COLOR = "1";
   env.CLICOLOR = "0";
   env.TERM = "dumb";
-  return { ...env, ...(opts.extra ?? {}) };
+  return applyLaunchdGuard({ ...env, ...(opts.extra ?? {}) });
+}
+
+/**
+ * The hackd launchd service and its plist belong to the real user (HOME stays
+ * real in this harness). Every CLI invocation therefore gets two guards that
+ * a scenario's `env` cannot remove (HACK-1313):
+ *
+ * - `HACK_LAUNCHD_DISABLE=1`, which the CLI honors before any plist access or
+ *   launchctl call, with the isolated-home opt-in removed;
+ * - a `launchctl` shim first on PATH that refuses (exit 1) and records any
+ *   call naming the hackd service, so a regression in the CLI's own guard
+ *   still cannot bootstrap, kickstart or stop the real service. Other
+ *   launchctl calls pass through to `/bin/launchctl` unchanged.
+ *
+ * The plist write itself is caught after the fact by
+ * {@link fingerprintLaunchAgentPlist}, which `run.ts` compares around the run.
+ */
+function applyLaunchdGuard(
+  env: Record<string, string>
+): Record<string, string> {
+  const guard = ensureLaunchctlGuard();
+  const guarded: Record<string, string> = { ...env };
+  Reflect.deleteProperty(guarded, LAUNCHD_ALLOW_ISOLATED_ENV);
+  guarded[LAUNCHD_DISABLE_ENV] = "1";
+  guarded.PATH = guarded.PATH ? `${guard.dir}:${guarded.PATH}` : guard.dir;
+  return guarded;
+}
+
+type LaunchctlGuard = {
+  readonly dir: string;
+  readonly logPath: string;
+  readonly removeOnExit: () => void;
+};
+let launchctlGuard: LaunchctlGuard | null = null;
+
+function ensureLaunchctlGuard(): LaunchctlGuard {
+  if (launchctlGuard) {
+    return launchctlGuard;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "hack-e2e-launchctl-guard-"));
+  const logPath = join(dir, "blocked.log");
+  const shim = join(dir, "launchctl");
+  // Only the verb is recorded, never arguments.
+  writeFileSync(
+    shim,
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      `  *${DAEMON_LAUNCHD_LABEL}*)`,
+      `    printf '%s\\n' "$1" >> '${logPath}'`,
+      "    echo 'hack e2e: launchctl access to the hackd service is blocked' >&2",
+      "    exit 1",
+      "    ;;",
+      "esac",
+      'exec /bin/launchctl "$@"',
+      "",
+    ].join("\n")
+  );
+  chmodSync(shim, 0o755);
+  const removeOnExit = () => {
+    rmSync(dir, { recursive: true, force: true });
+  };
+  process.once("exit", removeOnExit);
+  launchctlGuard = { dir, logPath, removeOnExit };
+  return launchctlGuard;
+}
+
+/**
+ * Removes the launchctl guard shim and its process `exit` listener now. The
+ * e2e runner keeps one shim for its whole process; a `bun test` file that
+ * builds CLI env calls this in `afterEach`, because every test file shares
+ * one Bun process and a leftover listener would leak into later files. The
+ * next `buildCliEnv` call creates a fresh shim.
+ */
+export function releaseLaunchctlGuard(): void {
+  if (!launchctlGuard) {
+    return;
+  }
+  const { removeOnExit } = launchctlGuard;
+  launchctlGuard = null;
+  process.removeListener("exit", removeOnExit);
+  removeOnExit();
+}
+
+/**
+ * launchctl verbs the guard shim refused during this process, in call order.
+ * Any entry means a CLI invocation tried to manage the real hackd service.
+ */
+export function blockedLaunchctlCalls(): readonly string[] {
+  if (!launchctlGuard) {
+    return [];
+  }
+  try {
+    return readFileSync(launchctlGuard.logPath, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/** The real user's hackd LaunchAgent plist (HOME is not isolated here). */
+export function realHackdLaunchAgentPath(): string {
+  return resolve(
+    process.env.HOME ?? homedir(),
+    "Library",
+    "LaunchAgents",
+    DAEMON_LAUNCHD_PLIST_FILENAME
+  );
+}
+
+export type LaunchAgentFingerprint =
+  | { readonly present: false }
+  | {
+      readonly present: true;
+      readonly sha256: string;
+      readonly mtimeMs: number;
+    };
+
+/**
+ * Hash and mtime of a file, for the before/after LaunchAgents canary. The
+ * bytes are hashed and dropped: neither they nor the path's contents are
+ * ever printed.
+ */
+export async function fingerprintLaunchAgentPlist(opts: {
+  readonly path: string;
+}): Promise<LaunchAgentFingerprint> {
+  try {
+    const info = await stat(opts.path);
+    const sha256 = createHash("sha256")
+      .update(await readFile(opts.path))
+      .digest("hex");
+    return { present: true, sha256, mtimeMs: info.mtimeMs };
+  } catch {
+    return { present: false };
+  }
+}
+
+/**
+ * Null when the fingerprints match; otherwise a one-line description that
+ * names only presence, hashes and mtimes.
+ */
+export function describeLaunchAgentChange(opts: {
+  readonly before: LaunchAgentFingerprint;
+  readonly after: LaunchAgentFingerprint;
+}): string | null {
+  const render = (fingerprint: LaunchAgentFingerprint): string =>
+    fingerprint.present
+      ? `sha256=${fingerprint.sha256} mtimeMs=${fingerprint.mtimeMs}`
+      : "absent";
+  const before = render(opts.before);
+  const after = render(opts.after);
+  return before === after ? null : `${before} -> ${after}`;
 }
 
 /**

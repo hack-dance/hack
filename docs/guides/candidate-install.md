@@ -96,9 +96,14 @@ Compose testing shares state with stable Hack:
 - The candidate reads and writes the same project registry, global configuration
   and project `.hack/` files as stable `hack`. Stable v4 uses an older registry
   lock protocol, so do not run stable `hack` and the candidate against the same
-  home at the same time. Stop one before you start the other.
+  home at the same time. Stop one before you start the other, including the
+  stable `hackd` daemon; see
+  [Stop stable hackd before a Compose run](#stop-stable-hackd-before-a-compose-run).
 - `hack-next` does not set up the shared global services for you. Install or
-  change them with stable `hack global` commands.
+  change them with stable `hack global` commands before the candidate run.
+- Both backends write generated files under the project's `.hack/.internal/`.
+  Keep that directory out of Git; see
+  [Keep `.hack/.internal/` out of Git](#keep-hackinternal-out-of-git).
 - To test Compose in isolation instead, set `HACK_HOME` to a separate private
   directory. That home has no global services, so routing, container DNS and CA
   trust are not tested.
@@ -117,6 +122,74 @@ on the native backend; do not run `hack-next update` on Compose with those bundl
 The bundled `hack-v5` entrypoint follows the same rule for manual bundles:
 unset selects native and requires `HACK_NATIVE_HOME`; `compose` needs no native
 home and uses your own Hack home.
+
+### Stop stable hackd before a Compose run
+
+A Compose candidate run uses the same `~/.hack` as stable Hack, so the stable
+`hackd` daemon must not run while the candidate does. Stopping it once is not
+enough: stable `hack global up` (v4.2.0) starts `hackd` again whenever it is
+stopped, because the stable `daemon.autoStart` setting is on by default. Stable
+`hack doctor --fix` (v4.2.0) also starts a stopped `hackd`: it asks first in a
+terminal, and starts it without asking in a non-interactive run. Other
+stable commands that talk to `hackd` can also start it again. Newer candidate
+builds turn off daemon autostart in `hack-next` and the bundled `hack-v5`
+entrypoint, so the candidate does not start the stable `hackd` on its own, not
+even from a candidate `global up`, `global install` or `doctor --fix`. A
+candidate `hack doctor --fix` skips its `hackd` repair without asking, in a
+terminal or not, and prints the reason and the command to run yourself, such as
+`hack daemon start`. That command runs the stable CLI, so do not run it during a
+Compose candidate run. Older candidate bundles can start `hackd`, so use this
+order with every bundle.
+
+Use this order:
+
+```sh
+hack global up                  # stable: global services up; also restarts hackd
+hack doctor                     # stable, optional: run any doctor or --fix here
+hack daemon stop                # stable: stop hackd after global up and doctor
+pgrep -fl "hack daemon start"   # must print nothing
+HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" up --path /absolute/project
+```
+
+1. Run stable `hack global up` first, so the global Caddy and CoreDNS services run.
+2. If you want a stable `hack doctor` or `hack doctor --fix` check, run it now,
+   before you stop `hackd`. After you stop `hackd`, do not run stable
+   `hack doctor --fix` again: it asks "Start hackd now?" in a terminal and
+   starts `hackd` without asking in a non-interactive run.
+3. Then run stable `hack daemon stop`.
+4. Then check with `pgrep -fl "hack daemon start"`. If it lists a process, a
+   stable `hackd` is still running, usually one that its per-user launchd
+   service (`dance.hack.hackd`) started again. Run stable `hack daemon uninstall`
+   to unload that service and remove its plist, or run
+   `launchctl bootout "gui/$(id -u)/dance.hack.hackd"` to unload it only. Then run
+   `hack daemon stop` again and repeat the check. Do not start the candidate until
+   the check prints nothing. If you uninstalled the service, run stable
+   `hack daemon install` after the candidate run to restore it.
+
+Run no stable `hack` command against the same `~/.hack` while the candidate run
+is active, including `hack global`, `hack status`, `hack doctor` and project
+commands. Any of them can start `hackd` again or take the older registry lock.
+When you finish, stop the candidate graph with
+`HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" down --path /absolute/project`,
+then use stable `hack` again. Stable `hack global up` or `hack daemon start`
+starts `hackd` again when you need it.
+
+### Keep `.hack/.internal/` out of Git
+
+Do not commit a project's `.hack/.internal/` directory. It holds generated,
+machine-local files, such as `.hack/.internal/compose.override.yml`, and Hack
+rewrites them when project commands such as `up` run. Newer generators, including
+candidate bundles, can write different content into those files than older ones.
+If a project tracks `.hack/.internal/`, every run of a newer generator leaves its
+working tree dirty, and switching between stable Hack and the candidate can make
+the files change back and forth.
+
+Hack's committed `.hack/.gitignore` already ignores `.internal/`, but an ignore
+rule does not untrack files that are already committed. Before a candidate run,
+run stable `hack doctor` in the project. Its generated-files check lists any
+tracked `.hack/.internal/` paths. `hack doctor --fix` removes them from the Git
+index with `git rm --cached` and keeps the files on disk; commit that removal.
+See [ignore rules](../env.md#ignore-rules-committed-hackgitignore).
 
 ## Upgrade and return to a retained candidate
 

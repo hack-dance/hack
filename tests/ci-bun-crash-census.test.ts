@@ -1,15 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   aggregateCensus,
   type CensusOptions,
   type GhReader,
   type JobRecord,
+  jobNameMatches,
   parseCensusArguments,
   renderCensus,
   runCensus,
+  suiteJobSelector,
   workflowJobBunVersion,
 } from "../scripts/ci-bun-crash-census.ts";
 import {
@@ -407,12 +409,26 @@ test("census arguments are validated and closed", () => {
   ).toEqual({
     repository: "hack-dance/hack",
     workflow: "ci.yml",
-    job: "test",
+    job: null,
     since: "2026-10-01T17:35:00Z",
     until: "2026-10-11T23:43:30Z",
     scanPassing: true,
     json: false,
   });
+  const window = [
+    "--since",
+    "2026-10-01T17:35:00Z",
+    "--until",
+    "2026-10-11T23:43:30Z",
+  ];
+  // The verify skill documents `--job "test shard i/4"`; a `/` or `*` used to be refused.
+  expect(parseCensusArguments([...window, "--job", "test shard 1/4"]).job).toBe(
+    "test shard 1/4"
+  );
+  expect(parseCensusArguments([...window, "--job=test shard *"]).job).toBe(
+    "test shard *"
+  );
+  expect(parseCensusArguments([...window, "--job", "test"]).job).toBe("test");
   for (const argv of [
     [],
     ["--since", "2026-10-01", "--until", "2026-10-11T23:43:30Z"],
@@ -440,7 +456,394 @@ test("census arguments are validated and closed", () => {
       "--json",
       "--json",
     ],
+    [...window, "--job", "test;shard"],
+    [...window, "--job", "t".repeat(101)],
   ]) {
     expect(() => parseCensusArguments(argv)).toThrow();
   }
+});
+
+describe("sharded test suite (HACK-1424)", () => {
+  const SHARDED_WORKFLOW = [
+    "name: CI",
+    "on:",
+    "  push:",
+    "  pull_request:",
+    "jobs:",
+    "  test-shard:",
+    "    name: test shard ${{ matrix.shard }}/4",
+    "    steps:",
+    "      - uses: oven-sh/setup-bun@v1",
+    "        with:",
+    '          bun-version: "1.4.2"',
+    "  test:",
+    "    needs: test-shard",
+    "    if: ${{ always() }}",
+    "    steps:",
+    "      - name: Require every test shard to succeed",
+    "        run: exit 0",
+    "  quoted:",
+    '    name: "quoted ${{ matrix.os }}"',
+    "    steps:",
+    "      - with:",
+    "          bun-version: 1.3.9",
+  ].join("\n");
+
+  test("a shard job's Bun version comes from its name template; the fan-in has none", () => {
+    expect(workflowJobBunVersion(SHARDED_WORKFLOW, "test shard 3/4")).toBe(
+      "1.4.2"
+    );
+    expect(workflowJobBunVersion(SHARDED_WORKFLOW, "test")).toBeNull();
+    expect(workflowJobBunVersion(SHARDED_WORKFLOW, "test shard /4")).toBeNull();
+    expect(workflowJobBunVersion(SHARDED_WORKFLOW, "test-shard")).toBeNull();
+    expect(workflowJobBunVersion(SHARDED_WORKFLOW, "quoted macos")).toBe(
+      "1.3.9"
+    );
+    // `on:` keys are not jobs.
+    expect(workflowJobBunVersion(SHARDED_WORKFLOW, "push")).toBeNull();
+  });
+
+  test("the real CI workflow gives every shard the pinned Bun and the test fan-in none", async () => {
+    const workflow = await readFile(
+      resolve(import.meta.dir, "../.github/workflows/ci.yml"),
+      "utf8"
+    );
+    const manifest: unknown = JSON.parse(
+      await readFile(resolve(import.meta.dir, "../package.json"), "utf8")
+    );
+    const pin =
+      typeof manifest === "object" &&
+      manifest !== null &&
+      "packageManager" in manifest &&
+      typeof manifest.packageManager === "string"
+        ? manifest.packageManager.replace(/^bun@/, "")
+        : null;
+    expect(pin).toMatch(/^\d+\.\d+\.\d+$/);
+    for (const shard of [1, 2, 3, 4]) {
+      expect(workflowJobBunVersion(workflow, `test shard ${shard}/4`)).toBe(
+        pin
+      );
+    }
+    expect(workflowJobBunVersion(workflow, "test")).toBeNull();
+  });
+
+  test("job selectors: default reads shards, or the legacy test job when a run has none", () => {
+    const sharded = suiteJobSelector({
+      job: null,
+      runJobNames: ["test shard 1/4", "test shard 2/4", "test", "docker-e2e"],
+    });
+    expect(
+      ["test shard 1/4", "test shard 2/4", "test", "docker-e2e shard 1/4"].map(
+        sharded
+      )
+    ).toEqual([true, true, false, false]);
+    const legacy = suiteJobSelector({
+      job: null,
+      runJobNames: ["test", "runtime-images"],
+    });
+    expect(["test", "runtime-images"].map(legacy)).toEqual([true, false]);
+    expect(jobNameMatches("test shard *", "test shard 4/4")).toBe(true);
+    expect(jobNameMatches("test shard *", "test")).toBe(false);
+    expect(jobNameMatches("test shard 1/4", "test shard 1/4")).toBe(true);
+    expect(jobNameMatches("test shard 1/4", "test shard 1/40")).toBe(false);
+    expect(jobNameMatches("test.shard", "testXshard")).toBe(false);
+  });
+
+  const FAN_IN_FAILURE_LOG = [
+    stamp('##[group]Run if [ "$SHARD_RESULT" != "success" ]; then'),
+    stamp("test shards did not all succeed (result: failure)"),
+    stamp("##[error]Process completed with exit code 1."),
+  ].join("\n");
+  const SHA_SHARDED = "c".repeat(40);
+
+  function shardedGh() {
+    const downloads: string[] = [];
+    const logs: Record<number, string> = {
+      31: CRASH_LOG,
+      33: FAN_IN_FAILURE_LOG,
+      41: TEST_FAILURE_LOG,
+    };
+    const job = (opts: {
+      readonly id: number;
+      readonly name: string;
+      readonly conclusion: string;
+      readonly attempt?: number;
+    }): string =>
+      JSON.stringify({
+        id: opts.id,
+        name: opts.name,
+        run_attempt: opts.attempt ?? 1,
+        status: "completed",
+        conclusion: opts.conclusion,
+      });
+    const reader: GhReader = {
+      json: async (path) => {
+        if (path.includes("/runs?created=")) {
+          return { total_count: 2 };
+        }
+        if (path.endsWith(`?ref=${SHA_SHARDED}`)) {
+          return {
+            content: Buffer.from(SHARDED_WORKFLOW).toString("base64"),
+          };
+        }
+        if (path.endsWith(`?ref=${SHA_OLD}`)) {
+          return { content: workflowFor("1.3.9") };
+        }
+        throw new Error("unexpected path");
+      },
+      lines: async (path) => {
+        if (path.includes("/runs?created=")) {
+          return [
+            JSON.stringify({ id: 300, head_sha: SHA_SHARDED }),
+            JSON.stringify({ id: 400, head_sha: SHA_OLD }),
+          ];
+        }
+        if (path.includes("/runs/300/jobs?filter=all")) {
+          return [
+            job({ id: 31, name: "test shard 1/4", conclusion: "failure" }),
+            job({ id: 32, name: "test shard 2/4", conclusion: "success" }),
+            job({ id: 33, name: "test", conclusion: "failure" }),
+            job({
+              id: 34,
+              name: "docker-e2e shard 1/4",
+              conclusion: "failure",
+            }),
+          ];
+        }
+        if (path.includes("/runs/400/jobs?filter=all")) {
+          return [
+            job({ id: 41, name: "test", conclusion: "failure" }),
+            job({ id: 42, name: "test", conclusion: "success", attempt: 2 }),
+          ];
+        }
+        throw new Error("unexpected path");
+      },
+      download: async (path, destination) => {
+        const jobId = Number(/\/jobs\/(\d+)\/logs$/.exec(path)?.[1]);
+        downloads.push(path);
+        await Bun.write(destination, logs[jobId] ?? "");
+      },
+    };
+    return { reader, downloads };
+  }
+
+  test("with no --job the census reads shard jobs, skips the fan-in, and still reads pre-split runs", async () => {
+    const dir = await workDir();
+    const gh = shardedGh();
+    const defaults: CensusOptions = { ...options, job: null };
+    const result = await runCensus(defaults, gh.reader, dir);
+    expect(gh.downloads).toEqual([
+      "repos/hack-dance/hack/actions/jobs/31/logs",
+      "repos/hack-dance/hack/actions/jobs/41/logs",
+    ]);
+    expect(await readdir(dir)).toEqual([]);
+    expect(
+      result.records.map((entry) => [
+        entry.jobId,
+        entry.bunVersion,
+        entry.versionSource,
+      ])
+    ).toEqual([
+      [31, "1.3.9", "log"],
+      [32, "1.4.2", "workflow"],
+      [41, "1.4.2", "log"],
+      [42, "1.3.9", "workflow"],
+    ]);
+    expect(result.warnings).toEqual([]);
+    const text = renderCensus({ options: defaults, result });
+    expect(text).toContain(" job=default ");
+    expect(text).toContain("  crash run=300 attempt=1 job=31 reason=banner");
+    expect(text).not.toContain("warning:");
+  });
+
+  test("an explicit --job test on sharded runs warns that the fan-in has no Bun output", async () => {
+    const dir = await workDir();
+    const gh = shardedGh();
+    const fanIn: CensusOptions = { ...options, job: "test" };
+    const result = await runCensus(fanIn, gh.reader, dir);
+    expect(result.records.map((entry) => entry.jobId)).toEqual([33, 41, 42]);
+    expect(result.records[0]).toMatchObject({
+      bunVersion: "unknown",
+      versionSource: "unknown",
+      scan: "failure",
+    });
+    expect(result.warnings).toEqual([
+      { kind: "no_bun_setup", jobs: 1, selected: 3 },
+    ]);
+    const text = renderCensus({ options: fanIn, result });
+    expect(text).toContain(' job="test" ');
+    expect(text).toContain(
+      "warning: 1 of 3 selected jobs show no Bun setup in their log or workflow"
+    );
+    expect(text).not.toContain("SHARD_RESULT");
+  });
+
+  test("a selector that matches no job warns instead of reporting a silent zero", async () => {
+    const dir = await workDir();
+    const gh = shardedGh();
+    const none: CensusOptions = { ...options, job: "test shard 9/9" };
+    const result = await runCensus(none, gh.reader, dir);
+    expect(result.records).toEqual([]);
+    expect(gh.downloads).toEqual([]);
+    expect(result.warnings).toEqual([{ kind: "no_jobs_matched" }]);
+    expect(renderCensus({ options: none, result })).toContain(
+      "warning: no completed job matched the job selector"
+    );
+  });
+});
+
+describe("workflow reads (HACK-1441)", () => {
+  const WORKFLOW = [
+    "name: CI",
+    "jobs:",
+    "  lint:",
+    "    steps:",
+    "      - with:",
+    '          bun-version: "1.0.0"',
+    "",
+    "# The suite runs in four shards; `test` is their fan-in.",
+    "  test-shard:",
+    "    name: test shard ${{ matrix.shard }}/4",
+    "    steps:",
+    "      - with:",
+    '          bun-version: "1.4.2"',
+    "",
+    "#  retired:",
+    "#    bun-version: 0.9.0",
+    "  test:",
+    "    needs: test-shard",
+    "    steps:",
+    "      - run: exit 0",
+    "env:",
+    "  late:",
+    "    bun-version: 0.1.0",
+  ].join("\n");
+
+  test("blank and column-0 comment lines inside jobs: do not end the job scan", () => {
+    expect(workflowJobBunVersion(WORKFLOW, "test shard 2/4")).toBe("1.4.2");
+    expect(workflowJobBunVersion(WORKFLOW, "lint")).toBe("1.0.0");
+    expect(workflowJobBunVersion(WORKFLOW, "test")).toBeNull();
+    // A commented-out job is not a job.
+    expect(workflowJobBunVersion(WORKFLOW, "retired")).toBeNull();
+    // A column-0 key after `jobs:` still ends the jobs.
+    expect(workflowJobBunVersion(WORKFLOW, "late")).toBeNull();
+  });
+
+  test("a trailing comment on the jobs: line still opens the jobs (HACK-1462)", () => {
+    const commented = [
+      "name: CI",
+      "jobs: # all jobs",
+      "  test:",
+      "    ",
+      "    steps:",
+      "      - with:",
+      '          bun-version: "1.4.2"',
+    ].join("\n");
+    expect(workflowJobBunVersion(commented, "test")).toBe("1.4.2");
+    // `#` without leading whitespace is part of the key, not a comment.
+    expect(
+      workflowJobBunVersion(commented.replace("jobs: #", "jobs:#"), "test")
+    ).toBeNull();
+  });
+
+  const SHA_SHARED = "d".repeat(40);
+  const SHA_OTHER = "e".repeat(40);
+
+  /** Two runs at one sha and one at another; every job passed, so no log is read. */
+  function countingGh() {
+    const contentReads: string[] = [];
+    const job = (id: number, name: string, attempt = 1): string =>
+      JSON.stringify({
+        id,
+        name,
+        run_attempt: attempt,
+        status: "completed",
+        conclusion: "success",
+      });
+    const reader: GhReader = {
+      json: async (path) => {
+        if (path.includes("/runs?created=")) {
+          return { total_count: 3 };
+        }
+        if (path.includes("/contents/.github/workflows/ci.yml?ref=")) {
+          contentReads.push(path);
+          return { content: Buffer.from(WORKFLOW).toString("base64") };
+        }
+        throw new Error("unexpected path");
+      },
+      lines: async (path) => {
+        if (path.includes("/runs?created=")) {
+          return [
+            JSON.stringify({ id: 500, head_sha: SHA_SHARED }),
+            JSON.stringify({ id: 600, head_sha: SHA_SHARED }),
+            JSON.stringify({ id: 700, head_sha: SHA_OTHER }),
+          ];
+        }
+        // The fan-in is listed first, so the first version resolved at a sha is its null.
+        if (path.includes("/runs/500/jobs?filter=all")) {
+          return [
+            job(50, "test"),
+            job(51, "test shard 1/4"),
+            job(52, "test shard 2/4"),
+            job(53, "test shard 3/4"),
+            job(54, "test shard 4/4"),
+          ];
+        }
+        if (path.includes("/runs/600/jobs?filter=all")) {
+          return [job(61, "test shard 1/4"), job(62, "test shard 1/4", 2)];
+        }
+        // Here a shard is first, so a sha-only key would give the fan-in the pin.
+        if (path.includes("/runs/700/jobs?filter=all")) {
+          return [job(71, "test shard 4/4"), job(70, "test")];
+        }
+        throw new Error("unexpected path");
+      },
+      download: () => Promise.reject(new Error("no log should be read")),
+    };
+    return { reader, contentReads };
+  }
+
+  test("each job at a sha gets its own workflow version under a wildcard selector", async () => {
+    const gh = countingGh();
+    const result = await runCensus(
+      { ...options, job: "test*" },
+      gh.reader,
+      await workDir()
+    );
+    expect(
+      result.records.map((entry) => [
+        entry.jobId,
+        entry.bunVersion,
+        entry.versionSource,
+      ])
+    ).toEqual([
+      [50, "unknown", "unknown"],
+      [51, "1.4.2", "workflow"],
+      [52, "1.4.2", "workflow"],
+      [53, "1.4.2", "workflow"],
+      [54, "1.4.2", "workflow"],
+      [61, "1.4.2", "workflow"],
+      [62, "1.4.2", "workflow"],
+      [71, "1.4.2", "workflow"],
+      [70, "unknown", "unknown"],
+    ]);
+    expect(result.warnings).toEqual([
+      { kind: "no_bun_setup", jobs: 2, selected: 9 },
+    ]);
+  });
+
+  test("one sha costs one workflow fetch however many jobs and runs resolve from it", async () => {
+    for (const concurrency of [1, 3]) {
+      const gh = countingGh();
+      await runCensus(
+        { ...options, job: "test*", concurrency },
+        gh.reader,
+        await workDir()
+      );
+      expect(gh.contentReads.toSorted()).toEqual([
+        `repos/hack-dance/hack/contents/.github/workflows/ci.yml?ref=${SHA_SHARED}`,
+        `repos/hack-dance/hack/contents/.github/workflows/ci.yml?ref=${SHA_OTHER}`,
+      ]);
+    }
+  });
 });

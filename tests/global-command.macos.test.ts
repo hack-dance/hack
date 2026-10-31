@@ -52,6 +52,8 @@ let pathExistsOverrides = new Map<string, boolean>();
 let statMetadataByPath = new Map<string, string>();
 let brewExecutablePath = "/opt/homebrew/bin/brew";
 let confirmResponder: (() => boolean) | null = null;
+/** Calls that reached the mocked clack confirm (an interactive prompt). */
+let confirmCalls = 0;
 
 const clackMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -60,7 +62,10 @@ const clackMock = await registerScopedModuleMock({
     access: async () => true,
     autocompleteMultiselect: async () => [],
     cancel: () => {},
-    confirm: async () => confirmResponder?.() ?? true,
+    confirm: async () => {
+      confirmCalls += 1;
+      return confirmResponder?.() ?? true;
+    },
     multiselect: async () => [],
     isCancel: () => false,
     log: {
@@ -256,9 +261,16 @@ beforeEach(async () => {
   reachabilityByHost = {};
   idUser = "mock-user";
   confirmResponder = null;
+  confirmCalls = 0;
+  // The clack confirm mock stands in for an interactive user, so the run must
+  // look interactive: `confirmSafe` resolves TTY-less runs by policy without
+  // entering the prompt (HACK-1385), and `bun test` has no TTY.
+  restoreInteractiveTty = stubInteractiveTty();
 });
 
 afterEach(async () => {
+  restoreInteractiveTty?.();
+  restoreInteractiveTty = null;
   if (originalMcpCommand === undefined) {
     Reflect.deleteProperty(process.env, "HACK_MCP_COMMAND");
   } else {
@@ -508,6 +520,20 @@ test("global authorize installs passwordless dns recovery sudoers rule", async (
     "%u:%g:%Lp",
     "/usr/local/libexec/hack-dns-recovery",
   ]);
+});
+
+test("global authorize declines without a TTY (decline policy) and never prompts", async () => {
+  // HACK-1410: stdin and stdout are not TTYs and no opt-out is set. The
+  // decline policy answers no although the prompt's default is yes.
+  stubNoTty();
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "authorize"]);
+
+  expect(code).toBe(0);
+  expect(confirmCalls).toBe(0);
+  expect(runCalls).not.toEqual(
+    expect.arrayContaining([expect.arrayContaining(["sudo", "install"])])
+  );
 });
 
 test("global authorize refreshes an existing dns recovery sudoers rule", async () => {
@@ -799,6 +825,13 @@ test("global up uses the dns recovery helper when it is installed", async () => 
 
 test("global up falls back to brew when the helper restart fails", async () => {
   pathExistsOverrides.set("/usr/local/libexec/hack-dns-recovery", true);
+  // Non-interactive sudo path: with a TTY on stdin the failed helper restart
+  // retries with interactive sudo instead of falling back to brew. afterEach
+  // restores the original descriptor.
+  Object.defineProperty(process.stdin, "isTTY", {
+    configurable: true,
+    value: false,
+  });
   const caddyCompose = join(
     tempDir!,
     GLOBAL_HACK_DIR_NAME,
@@ -907,6 +940,51 @@ test("global up falls back to interactive sudo when stdin is tty but stdout is r
     restoreIsTty({ stream: process.stdout, descriptor: stdoutDescriptor });
   }
 });
+
+let restoreInteractiveTty: (() => void) | null = null;
+
+/**
+ * Makes stdin and stdout report a TTY for one test so `canPrompt()` is true and
+ * the mocked clack confirm is reached. Returns the restore function; a test
+ * that stubs its own values on top restores to these and `afterEach` restores
+ * the originals.
+ */
+function stubInteractiveTty(): () => void {
+  const stdinDescriptor = Object.getOwnPropertyDescriptor(
+    process.stdin,
+    "isTTY"
+  );
+  const stdoutDescriptor = Object.getOwnPropertyDescriptor(
+    process.stdout,
+    "isTTY"
+  );
+  Object.defineProperty(process.stdin, "isTTY", {
+    configurable: true,
+    value: true,
+  });
+  Object.defineProperty(process.stdout, "isTTY", {
+    configurable: true,
+    value: true,
+  });
+  return () => {
+    restoreIsTty({ stream: process.stdin, descriptor: stdinDescriptor });
+    restoreIsTty({ stream: process.stdout, descriptor: stdoutDescriptor });
+  };
+}
+
+/**
+ * Makes stdin and stdout report no TTY for the rest of one test, on top of the
+ * per-test TTY stub; `afterEach` restores the original descriptors. With no
+ * opt-out set, `canPrompt()` is false only because there is no TTY.
+ */
+function stubNoTty(): void {
+  for (const stream of [process.stdin, process.stdout]) {
+    Object.defineProperty(stream, "isTTY", {
+      configurable: true,
+      value: false,
+    });
+  }
+}
 
 /**
  * Restores a stubbed isTTY property. When the stream had no own isTTY
@@ -1238,7 +1316,17 @@ test("global trust falls back to an existing exported CA when Caddy is unavailab
   );
 });
 
-test("global trust proceeds under --no-interactive when sudo is passwordless", async () => {
+test.each([
+  { mode: "under --no-interactive", flag: ["--no-interactive"], tty: true },
+  // HACK-1410: a TTY-less run with no opt-out resolves the same way.
+  { mode: "without a TTY", flag: [], tty: false },
+])("global trust proceeds $mode when sudo is passwordless (accept-default policy)", async ({
+  flag,
+  tty,
+}) => {
+  if (!tty) {
+    stubNoTty();
+  }
   const caddyCompose = join(
     tempDir!,
     GLOBAL_HACK_DIR_NAME,
@@ -1301,7 +1389,7 @@ test("global trust proceeds under --no-interactive when sudo is passwordless", a
   };
 
   const { runCli } = await import("../src/cli/run.ts");
-  const code = await runCli(["global", "trust", "--no-interactive"]);
+  const code = await runCli(["global", "trust", ...flag]);
 
   const bundlePath = join(
     tempDir!,
@@ -1314,6 +1402,7 @@ test("global trust proceeds under --no-interactive when sudo is passwordless", a
   expect(code).toBe(0);
   // Non-interactive proceeds with the documented default (trust): the sudo
   // keychain install runs without ever calling clack's confirm prompt.
+  expect(confirmCalls).toBe(0);
   expect(runCalls).toEqual(
     expect.arrayContaining([
       [

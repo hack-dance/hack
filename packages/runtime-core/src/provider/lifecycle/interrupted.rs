@@ -164,12 +164,13 @@ mod tests {
     impl Pool {
         fn new(label: &str) -> Self {
             let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
-                "hack-interrupted-{label}-{}-{}",
+                "hack-interrupted-{label}-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                crate::next_test_scratch()
             ));
             fs::create_dir(&checkout).unwrap();
             let candidate = Candidate::discover(&checkout).unwrap();
@@ -277,6 +278,20 @@ mod tests {
 
     #[test]
     fn an_unclean_stop_after_recovery_leaves_unadopted_disks_unadopted() {
+        // The stop must find the disks this test just wrote released. In the shared parallel
+        // test process an unrelated test's pre-exec fork (`process::clean_command`) can hold a
+        // copy of such a handle until it execs, which the host-wide `lsof` scan correctly
+        // reports as `stop_uncertain`. Run the fixture alone in a child test process.
+        use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+        run_isolated(
+            "provider::lifecycle::interrupted::tests::unadopted_unclean_stop_child",
+            ISOLATED_HANG_GUARD,
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated release-check fixture launched by an_unclean_stop_after_recovery_leaves_unadopted_disks_unadopted"]
+    fn unadopted_unclean_stop_child() {
         let pool = Pool::new("unadopted");
         let mut owner = pool.owner("booting", true, false);
         pool.disks(&owner, &["storage.raw", "overlay.raw", "vm.lock"]);

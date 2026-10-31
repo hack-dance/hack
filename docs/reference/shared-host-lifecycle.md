@@ -155,12 +155,44 @@ Under the same lock, remove the holder:
 | --- | --- | --- |
 | others remain | `retained` | Claim rewritten; helper untouched. A holder that was not recorded changes nothing. |
 | none, adopted | `released-adopted` | Claim removed; the adopted process is never signalled. |
-| none, owned, live | `stopped` | TERM, bounded grace, then KILL for the captured tree; each signal re-checks the birth time. |
+| none, owned, live | `stopped` | TERM, bounded grace, then KILL for the captured tree; each signal re-checks the birth time. Claim removed only after every member's exit was observed. |
 | none, owned, stale | `stale-cleared` | Claim removed; nothing is signalled. |
 | none, owned, stop unproven | `stop-unconfirmed` | Claim kept with no holders. |
 
 A release that cannot take the lock within its timeout returns `lock-unavailable`
 and changes nothing.
+
+### What `stopped` means
+
+`stopped` is a statement about observed exits, not about signals sent. Release
+reports it only after a process census, taken after the signals, shows that every
+member of the captured tree has exited. The wait is bounded and named:
+
+1. TERM to the captured tree, then poll every 50 ms for up to `graceMs`
+   (`SHARED_HOST_RELEASE_GRACE_MS`, 2000 ms, when omitted; a failed start uses
+   1000 ms).
+2. KILL to the members still running, then poll for up to
+   `SHARED_HOST_KILL_CONFIRM_MS` (1000 ms).
+3. If a member is still running when that wait ends, the result is
+   `stop-unconfirmed` and the claim is kept, so the process stays recorded.
+
+A member's exit is observed when its PID is gone from the census or is a zombie
+(`ps` state `Z`: exited, not yet reaped). Zombie handling is the same on Linux and
+macOS. On Linux an orphaned helper (its starter died) is reaped by init or a
+subreaper, which can lag behind the stop by any amount. A process that has exited
+holds no listener or open file, so waiting for the reaper would add nothing.
+
+A PID that still runs never counts as exited, even when the census shows another
+birth time for it. Linux `lstart` can drift with the wall clock (see "Not covered
+here"), so that row may be the same helper. PID reuse inside one stop wait is not
+plausible, so the only cost is an honest `stop-unconfirmed`. A census that fails
+during the wait proves nothing either way. Polling continues until the deadline.
+
+Everything that checks whether a claimed process is running uses one predicate,
+`isSharedHostProcessRunning`: the exact PID and birth, not a zombie. The test
+fixtures use the same predicate. A zombie-blind check could see a helper that
+release had correctly reported `stopped` as still alive. That explains the
+Linux-only fixture failure tracked as HACK-1336.
 
 Hack never kills by port number, process name or pattern (`pkill`, `lsof -t | xargs
 kill`). It only signals processes in the captured tree of a birth-verified claim.
@@ -194,9 +226,10 @@ Progress events are also closed: `lock-waiting`, `lock-acquired`, `claim-stale`,
 
 `bun test tests/shared-host-lifecycle.test.ts` runs portable local fixtures. Each
 fixture is a Bun process on a loopback port with a private HOME. No Docker, real
-HOME, keychain or privileged effect is involved. The file runs in the hosted macOS
-`test` job and is registered in the hosted Linux `linux-process-lifetime` job. A
-Linux pass is a receipt only once that hosted job has run it.
+HOME, keychain or privileged effect is involved. The file runs in one of the hosted
+macOS `test shard i/4` jobs (the required `test` check passes only when every shard
+passes) and is registered in the hosted Linux `linux-process-lifetime` job. A Linux
+pass is a receipt only once that hosted job has run it.
 
 | Scenario | Asserted behavior |
 | --- | --- |
@@ -222,8 +255,13 @@ Linux pass is a receipt only once that hosted job has run it.
 | lost parent after ready | The helper stays claimed; another client reuses it; the release by both holders stops it. |
 | owned descendants | Release stops the helper and its grandchild; a bystander survives. |
 | SIGTERM ignored | Release escalates to SIGKILL after the grace period: `stopped`. |
+| SIGTERM ignored briefly | A helper that keeps running for 600 ms after TERM, with a 10 s grace: release returns `stopped` only after the helper exits through its own TERM path. No KILL is sent, and the helper is no longer running when release returns. |
+| exit observed by census | Simulated census: the helper keeps running for three polls after TERM and then shows as a zombie. Release waits for the fourth poll, sends no KILL, and reports `stopped`. |
+| running PID with a new birth | Simulated census: after TERM the PID keeps running with another birth time (`lstart` drift). Release passes the member to the KILL step, waits the whole `SHARED_HOST_KILL_CONFIRM_MS`, then reports `stop-unconfirmed` and keeps the claim. The simulated signal boundary records the KILL request. In production the KILL step re-checks each birth time, so no signal reaches that PID. |
+| census fails during the wait | Simulated census: the first three polls after TERM fail. Release keeps polling within the TERM grace, sends no KILL, and reports `stopped` when the fourth poll shows the helper gone. |
+| exit late in the kill-confirm wait | Simulated census: the helper outlives a 100 ms TERM grace and leaves the census only 80% of the way into `SHARED_HOST_KILL_CONFIRM_MS` after KILL. Release keeps polling and reports `stopped`. |
 | stop unconfirmed | With a simulated census and signal boundary (no real process can portably survive KILL), a tree that stays in the census gets TERM then KILL, gives `stop-unconfirmed` and keeps the claim with no holders. |
-| unreaped zombie | A helper whose starter is frozen with `SIGSTOP` exits on TERM and stays an unreaped zombie; release reports `stopped` and removes the claim. |
+| unreaped zombie | A helper whose starter is frozen with `SIGSTOP` exits on TERM and stays an unreaped zombie; release reports `stopped` and removes the claim, and the fixture liveness check reads the zombie as not alive. |
 | session and environment | The helper leads its own process group and does not see a runner-only variable. |
 | impostor identity | A live `ready` claim whose port is answered by another PID fails `foreign-listener`; neither process is signalled. |
 | invalid claim / no census | Malformed, other-port, group-readable and oversized claims, and an unavailable census, fail closed; nothing is spawned or signalled; the claim is kept. |
@@ -247,6 +285,7 @@ fail when that check is removed.
   move when the wall clock is changed, so a live helper's birth can change. Start
   then fails closed if the helper reports its PID in the identity answer, but a
   release would read the claim as stale and clear it without stopping the helper.
+  A drift during a stop is handled: it gives `stop-unconfirmed`, never `stopped`.
   macOS records the start time directly and is not affected.
 - Wiring into `hack.config.json`, `hack up`/`down` or the daemon, and migrating
   existing `lifecycle.singleton` configurations.

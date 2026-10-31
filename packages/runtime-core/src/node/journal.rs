@@ -1,4 +1,4 @@
-use super::{Result, error, now, private_directory, private_file};
+use super::{Result, error, existing_private_file, now, private_directory, private_file};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -6,6 +6,13 @@ use std::path::{Path, PathBuf};
 
 pub const OUTPUT_LIMIT: usize = 16 * 1024;
 const CAPACITY: i64 = 2048;
+/// How long one connection waits for another's write transaction before failing closed
+/// with `node_error` ("database is locked"). Every writer (node service, supervisors,
+/// scheduler) holds the write lock only for one in-memory receipt change and its commit,
+/// so a cancel racing a completion waits for that commit; only a commit stalled beyond
+/// this bound refuses, and the refused mutation was never recorded, so a retry with the
+/// same operation ID is safe.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,17 +164,16 @@ impl Store {
     fn open_mode(root: &Path, create: bool, read_only: bool) -> Result<Self> {
         private_directory(root, create)?;
         let root = root.canonicalize().map_err(error)?;
-        // Reject aliases before SQLite opens its journal or main file.
+        // Reject aliases before SQLite opens its journal or main file. A running
+        // supervisor commits through the same database, so its rollback journal can
+        // vanish between a check and an open: absence is decided by the open itself.
         for suffix in [
             "journal.sqlite",
             "journal.sqlite-journal",
             "journal.sqlite-wal",
             "journal.sqlite-shm",
         ] {
-            let path = root.join(suffix);
-            if path.symlink_metadata().is_ok() {
-                private_file(&path, false)?;
-            }
+            existing_private_file(&root.join(suffix))?;
         }
         private_file(&root.join("journal.sqlite"), create)?;
         let flags = if read_only {
@@ -177,9 +183,7 @@ impl Store {
         };
         let mut connection =
             Connection::open_with_flags(root.join("journal.sqlite"), flags).map_err(error)?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(2))
-            .map_err(error)?;
+        connection.busy_timeout(BUSY_TIMEOUT).map_err(error)?;
         if !read_only {
             connection
                 .execute_batch(
@@ -617,11 +621,10 @@ mod tests {
     use super::*;
     #[test]
     fn reconciliation_refuses_live_or_foreign_work_and_preserves_uncertainty_on_failure() {
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-reconcile-{}-{}",
-            std::process::id(),
-            now()
-        ));
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-reconcile",
+        );
         private_directory(&root, true).unwrap();
         let candidate = crate::Candidate::discover(&root).unwrap();
         let mut store = Store::open(&super::super::root(&candidate), true).unwrap();
@@ -724,11 +727,10 @@ mod tests {
 
     #[test]
     fn sqlite_full_rolls_back_job_and_operation_together() {
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-node-full-{}-{}",
-            std::process::id(),
-            now()
-        ));
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-node-full",
+        );
         let mut store = Store::open(&root, true).unwrap();
         let pages: i64 = store
             .connection
@@ -979,6 +981,25 @@ mod tests {
 
         // Completion holds the write lock while cancellation arrives. SQLite
         // serializes them: the cancel waits, then observes a terminal receipt.
+        // The order is a handshake, not a sleep: the completion commits only after
+        // the cancel has reported that it is blocked on this write lock, and the
+        // cancel keeps waiting until that commit. The production busy timeout is
+        // restored for the rest of the test.
+        static BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        /// Hang guard only; a scheduler stall on a loaded host must not decide the order.
+        const RACE_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+        const RETRY: std::time::Duration = std::time::Duration::from_millis(1);
+        // Each retry sleeps at least RETRY, so the cancel waits at least RACE_BOUND.
+        const ATTEMPTS: i32 = (RACE_BOUND.as_millis() / RETRY.as_millis()) as i32;
+        fn blocked_on_completion(attempt: i32) -> bool {
+            BLOCKED.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(RETRY);
+            attempt < ATTEMPTS
+        }
+        BLOCKED.store(false, std::sync::atomic::Ordering::SeqCst);
+        node.connection
+            .busy_handler(Some(blocked_on_completion))
+            .unwrap();
         supervisor
             .connection
             .execute_batch("BEGIN IMMEDIATE")
@@ -992,9 +1013,22 @@ mod tests {
             let response = node.handle(&request, uid);
             (node, request, response)
         });
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        while !BLOCKED.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                !waiting.is_finished(),
+                "cancel finished without waiting for the held completion"
+            );
+            assert!(
+                started.elapsed() < RACE_BOUND,
+                "cancel did not reach the held write lock after {:?}",
+                started.elapsed()
+            );
+            std::thread::sleep(RETRY);
+        }
         supervisor.connection.execute_batch("COMMIT").unwrap();
         let (mut node, request, response) = waiting.join().unwrap();
+        node.connection.busy_timeout(BUSY_TIMEOUT).unwrap();
         let response = response.unwrap();
         assert_eq!(response["generation"], 4);
         let terminal = snapshot(&node, first);
@@ -1088,6 +1122,41 @@ mod tests {
         assert_eq!(snapshot(&inspect, &id), receipt);
         assert_eq!(generation(&mut inspect), 2);
         drop(inspect);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_rollback_journal_deleted_between_check_and_open_reads_as_absent() {
+        use super::super::test_support::BeforeOpen;
+        let root = test_root("journal-race");
+        drop(Store::open(&root, true).unwrap());
+        let journal = root.join("journal.sqlite-journal");
+        let rollback_journal = || {
+            std::fs::write(&journal, b"").unwrap();
+            std::fs::set_permissions(
+                &journal,
+                std::os::unix::fs::PermissionsExt::from_mode(0o600),
+            )
+            .unwrap();
+        };
+        // A running supervisor's commit deletes its rollback journal after any earlier
+        // check saw it and just before the restarted node's open (HACK-1418).
+        rollback_journal();
+        let race = BeforeOpen::arm(&journal, |path| std::fs::remove_file(path).unwrap());
+        let store = Store::open(&root, false).unwrap();
+        assert!(race.fired());
+        assert!(journal.symlink_metadata().is_err());
+        drop((store, race));
+        // The same instant cannot swap in an alias: the O_NOFOLLOW open still refuses.
+        rollback_journal();
+        let outside = root.join("outside");
+        let race = BeforeOpen::arm(&journal, move |path| {
+            std::fs::remove_file(path).unwrap();
+            std::os::unix::fs::symlink(&outside, path).unwrap();
+        });
+        assert!(Store::open(&root, false).is_err());
+        assert!(race.fired());
+        drop(race);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

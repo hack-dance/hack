@@ -23,6 +23,7 @@ import {
 } from "../src/backends/native-authored-project-run.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_EXIT_DRAIN_BOUND_MS,
   NativeRuntimeRequestError,
 } from "../src/backends/native-runtime-client.ts";
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
@@ -453,28 +454,40 @@ async function joinKeeper(pidPath: string) {
     await Bun.sleep(10);
   }
 }
-test("leader exit with an inherited pipe refuses output; the exact finite keeper is joined", async () => {
-  return owned(async () => {
-    const f = await fixture(),
-      pidPath = join(f.runtime.home, "keeper.pid");
-    await Bun.write(
-      f.runtime.binary,
-      `#!${process.execPath}\nconst c=Bun.spawn([process.execPath,'--eval','await Bun.sleep(800)'],{stdin:'ignore',stdout:'inherit',stderr:'inherit'});await Bun.write(${JSON.stringify(pidPath)},String(c.pid));console.log('{}');process.exit(0);\n`
-    );
-    try {
-      await expect(
-        invokeNativeRuntime({
-          ...f,
-          cwd: f.scope.projectRoot,
-          args: f.args,
-          boundNativeAuthoredLogsDrain: true,
-        })
-      ).rejects.toThrow("did not settle");
-    } finally {
-      await joinKeeper(pidPath);
-    }
-  });
-}, 10_000);
+/** An inherited-pipe keeper its case never releases still retires after this cap. */
+const KEEPER_HOLD_CAP_MS = 60_000;
+test(
+  "leader exit with an inherited pipe refuses output; the exact finite keeper is joined",
+  async () => {
+    return owned(async () => {
+      const f = await fixture(),
+        pidPath = join(f.runtime.home, "keeper.pid"),
+        release = join(f.runtime.home, "keeper.release");
+      // The keeper holds the inherited stdout and stderr until the test releases
+      // it after the refusal, so the leader's output cannot settle to EOF and the
+      // exit-relative drain bound (NATIVE_EXIT_DRAIN_BOUND_MS) ends the drain.
+      const keeper = `import {existsSync} from 'node:fs';const end=Date.now()+${KEEPER_HOLD_CAP_MS};while(!existsSync(${JSON.stringify(release)})&&Date.now()<end)await Bun.sleep(20);`;
+      await Bun.write(
+        f.runtime.binary,
+        `#!${process.execPath}\nconst c=Bun.spawn([process.execPath,'--eval',${JSON.stringify(keeper)}],{stdin:'ignore',stdout:'inherit',stderr:'inherit'});await Bun.write(${JSON.stringify(pidPath)},String(c.pid));console.log('{}');process.exit(0);\n`
+      );
+      try {
+        await expect(
+          invokeNativeRuntime({
+            ...f,
+            cwd: f.scope.projectRoot,
+            args: f.args,
+            boundNativeAuthoredLogsDrain: true,
+          })
+        ).rejects.toThrow("did not settle");
+      } finally {
+        await Bun.write(release, "release");
+        await joinKeeper(pidPath);
+      }
+    });
+  },
+  NATIVE_EXIT_DRAIN_BOUND_MS + 15_000
+);
 
 test("cancellation after the real held-read owner closes withholds the result", async () => {
   return owned(async () => {

@@ -264,6 +264,9 @@ ordinary frontend selection yet and does not implement reactive health or hooks.
 The optional feature exposes this bounded consumer through a distinct public CLI:
 `graph native plan --source-file FILE --json`, then
 `graph native run --source-file FILE --expect-review SHA --json`.
+Selection, and so `plan`, `frontend-plan`, `run` and `serve`, refuses a selected
+workload image that is not a `sha256:` content ID (a tag or `repository@sha256:`
+digest) with the lowering's closed `native_graph_admission` code, before any state.
 `graph native inspect|cleanup --run-id RUN --json` use its versioned native journal. On macOS,
 `inspect` refuses `native_graph_unreserved` before guest access only when the run's journal
 directory is exactly absent under private state directories and no foreground owner is
@@ -1560,6 +1563,15 @@ deleted. Results report `reclaimed_bytes: 0`, and the bytes stay until the volum
 itself is removed. Docker disk usage, and therefore `graph storage-inventory`,
 does not count them. Inspect reports the recorded `retained_quarantine_bytes`
 instead.
+
+Volume incarnation is every inspected field except `CreatedAt`, plus the
+guest-observed `_data` directory identity, which each guest script re-verifies
+and the post-effect recheck observes again. The `local` driver derives
+`CreatedAt` from the volume directory's mtime, which the first quarantine's
+`mkdir hack-quarantine` changes; it is bound into the digest as evidence only.
+A volume replaced under the same name has a new `_data` directory and refuses.
+A change detected after a guest effect fails as
+`graph_cache_quarantine_unsettled` and leaves the record pending.
 
 A private record in `run/cache-quarantine/` is written before the guest effect
 (`pending`) and settled after the synchronized rename (`quarantined`). When the

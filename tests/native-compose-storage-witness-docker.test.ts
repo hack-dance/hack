@@ -1,9 +1,10 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  nativeComposeEffectReason,
   nativeComposeEffectRefusal,
   retainNativeComposeEffectRefusal,
 } from "../src/lib/native-compose-effect-diagnostics.ts";
@@ -13,7 +14,14 @@ import {
   type NativeComposeMaterialBinding,
   openNativeComposeGenerationStore,
 } from "../src/lib/native-compose-generation.ts";
-import { assertNativeComposeStorageDockerImage } from "../src/lib/native-compose-storage-witness-docker.ts";
+import { NativeComposeOwnershipError } from "../src/lib/native-compose-ownership.ts";
+import {
+  assertNativeComposeStorageBindingUnchanged,
+  assertNativeComposeStorageCarrierStable,
+  assertNativeComposeStorageCarrierStateUnchanged,
+  assertNativeComposeStorageDockerImage,
+  nativeComposeStorageCarrierBudgetReason,
+} from "../src/lib/native-compose-storage-witness-docker.ts";
 import {
   NATIVE_STORAGE_DOCKER_ARTIFACT,
   nativeComposeStorageDockerHelper,
@@ -31,7 +39,13 @@ import {
   nativeComposeStorageDockerCarrierPolicy,
   nativeComposeStorageDockerCreateArgs,
 } from "../src/lib/native-compose-storage-witness-docker-policy.ts";
-import type { NativeComposeStorageXattrInvocation } from "../src/lib/native-compose-storage-witness-xattr-carrier.ts";
+import {
+  captureNativeComposeStorageXattrCarrier,
+  checkNativeComposeStorageXattrCarrierLifetime,
+  type NativeComposeStorageXattrArtifact,
+  type NativeComposeStorageXattrInvocation,
+} from "../src/lib/native-compose-storage-witness-xattr-carrier.ts";
+import { refuseNativeComposeStorageXattr } from "../src/lib/native-compose-storage-witness-xattr-codec.ts";
 
 const roots: string[] = [],
   stores: NativeComposeGenerationStore[] = [];
@@ -1097,4 +1111,305 @@ test("policy comparison preserves all physical fields/duplicates and closes only
   expect(nativeComposeStorageDockerCarrierPolicy(checked())).toBe(before);
   fake.value.host.OomKillDisable = true;
   expect(() => nativeComposeStorageDockerCarrierPolicy(checked())).toThrow();
+});
+
+test("a carrier boundary names its exhausted storage budget, never a cancellation", () => {
+  // Fake clock: the carrier deadline is the named storage budget's end.
+  let now = 5_000_000;
+  const deadline = now + 90_000;
+  const timedOut = new NativeComposeOwnershipError(
+    "E_NATIVE_COMPOSE_PROBE_TIMEOUT"
+  );
+  const reason = (signal: AbortSignal) =>
+    nativeComposeStorageCarrierBudgetReason({
+      error: timedOut,
+      signal,
+      deadline,
+      now: () => now,
+    });
+  const live = new AbortController();
+  // Inside the budget a probe timeout keeps its own closed cause.
+  now = deadline - 1;
+  expect(reason(live.signal)).toBe("probe-timeout");
+  // A probe clipped to the remaining budget times out exactly at its end.
+  now = deadline;
+  expect(reason(live.signal)).toBe("storage-budget");
+  now = deadline + 30_000;
+  expect(reason(live.signal)).toBe("storage-budget");
+  // Cancellation is never reported as budget exhaustion.
+  const cancelled = new AbortController();
+  cancelled.abort();
+  expect(
+    nativeComposeStorageCarrierBudgetReason({
+      error: new NativeComposeOwnershipError(
+        "E_NATIVE_COMPOSE_PROBE_CANCELLED"
+      ),
+      signal: cancelled.signal,
+      deadline,
+      now: () => now,
+    })
+  ).toBe("probe-cancel");
+});
+
+test("a helper policy refusal caught after its carrier deadline keeps its policy reason", () => {
+  // Fake clock past the carrier deadline; the carrier was not cancelled.
+  const deadline = 5_000_000;
+  const late = () => deadline + 30_000;
+  const selected = input(),
+    fake = carrier(selected);
+  fake.value.host.Privileged = true;
+  const policy = (() => {
+    try {
+      checkNativeComposeStorageDockerCarrier({
+        value: fake.value,
+        input: selected,
+        program: fake.program,
+        imageIds: [selected.artifact.imageId],
+      });
+    } catch (error: unknown) {
+      return error;
+    }
+  })();
+  expect(nativeComposeEffectRefusal(policy)).toEqual({
+    stage: "storage-helper-policy",
+    reason: "helper-host-policy",
+  });
+  const live = new AbortController();
+  // The deadline expiring later does not make the policy failure a budget one.
+  expect(
+    nativeComposeStorageCarrierBudgetReason({
+      error: policy,
+      signal: live.signal,
+      deadline,
+      now: late,
+    })
+  ).toBe("helper-host-policy");
+  // A deadline-shaped refusal with no observed cause still names the budget.
+  expect(
+    nativeComposeStorageCarrierBudgetReason({
+      error: new Error("Native storage xattr proof refused; values omitted."),
+      signal: live.signal,
+      deadline,
+      now: late,
+    })
+  ).toBe("storage-budget");
+});
+
+function refusalOf(check: () => void): unknown {
+  try {
+    check();
+  } catch (error: unknown) {
+    return error;
+  }
+  return undefined;
+}
+
+test("a re-inspected carrier whose creation time or policy changed keeps a policy stability reason after its deadline", () => {
+  // Fake clock past the carrier deadline; the carrier was not cancelled.
+  const deadline = 5_000_000;
+  const live = new AbortController();
+  const selected = input();
+  const inspect = (
+    change: (value: ReturnType<typeof carrier>["value"]) => void
+  ) => {
+    const fake = carrier(selected);
+    change(fake.value);
+    return checkNativeComposeStorageDockerCarrier({
+      value: fake.value,
+      input: selected,
+      program: fake.program,
+      imageIds: [selected.artifact.imageId],
+    });
+  };
+  const created = inspect(() => {});
+  const known = {
+    createdAt: created.createdAt,
+    policy: nativeComposeStorageDockerCarrierPolicy(created),
+  };
+  // An unchanged carrier passes; its state is checked by each caller.
+  expect(() =>
+    assertNativeComposeStorageCarrierStable(
+      inspect((value) => {
+        value.state = { Status: "exited", Running: false };
+      }),
+      known
+    )
+  ).not.toThrow();
+  for (const changed of [
+    inspect((value) => {
+      value.createdAt = "2026-10-08T12:00:01Z";
+    }),
+    // An admitted equivalent form that still changes the captured policy.
+    inspect((value) => {
+      (value.host as Record<string, unknown>).Devices = null;
+    }),
+  ]) {
+    const caught = refusalOf(() =>
+      assertNativeComposeStorageCarrierStable(changed, known)
+    );
+    expect((caught as Error).message).toBe(
+      "Native storage xattr proof refused; values omitted."
+    );
+    expect(nativeComposeEffectRefusal(caught)).toEqual({
+      stage: "storage-helper-policy",
+      reason: "helper-policy-stability",
+    });
+    expect(
+      nativeComposeStorageCarrierBudgetReason({
+        error: caught,
+        signal: live.signal,
+        deadline,
+        now: () => deadline + 30_000,
+      })
+    ).toBe("helper-policy-stability");
+  }
+});
+
+test("a stopped carrier whose state changed on re-inspection keeps a policy stability reason after its deadline", () => {
+  const deadline = 5_000_000;
+  const live = new AbortController();
+  const selected = input();
+  const inspect = (state: Record<string, unknown>) => {
+    const fake = carrier(selected);
+    fake.value.state = state;
+    return checkNativeComposeStorageDockerCarrier({
+      value: fake.value,
+      input: selected,
+      program: fake.program,
+      imageIds: [selected.artifact.imageId],
+    });
+  };
+  const exited = { Status: "exited", Running: false, Pid: 0, ExitCode: 0 };
+  const stopped = inspect(exited);
+  expect(() =>
+    assertNativeComposeStorageCarrierStateUnchanged(
+      inspect({ ...exited }),
+      stopped
+    )
+  ).not.toThrow();
+  const caught = refusalOf(() =>
+    assertNativeComposeStorageCarrierStateUnchanged(
+      inspect({ ...exited, FinishedAt: "2026-10-08T12:00:01Z" }),
+      stopped
+    )
+  );
+  expect((caught as Error).message).toBe(
+    "Native storage xattr proof refused; values omitted."
+  );
+  expect(nativeComposeEffectRefusal(caught)).toEqual({
+    stage: "storage-helper-policy",
+    reason: "helper-policy-stability",
+  });
+  expect(
+    nativeComposeStorageCarrierBudgetReason({
+      error: caught,
+      signal: live.signal,
+      deadline,
+      now: () => deadline + 30_000,
+    })
+  ).toBe("helper-policy-stability");
+});
+
+// Two stages: the helper reports the stage its caller passes, never a fixed one.
+test.each([
+  "storage-helper-start",
+  "storage-provision",
+] as const)("a saved binding that changed across a carrier step keeps a private-state reason at %s after its deadline", (stage) => {
+  const deadline = 5_000_000;
+  const live = new AbortController();
+  const before = {
+    generationId: "d".repeat(32),
+    pendingToken: null,
+  } as unknown as NativeComposeMaterialBinding;
+  expect(() =>
+    assertNativeComposeStorageBindingUnchanged({
+      stage,
+      before,
+      after: structuredClone(before),
+    })
+  ).not.toThrow();
+  const caught = refusalOf(() =>
+    assertNativeComposeStorageBindingUnchanged({
+      stage,
+      before,
+      after: {
+        ...before,
+        pendingToken: "e".repeat(32),
+      } as NativeComposeMaterialBinding,
+    })
+  );
+  expect((caught as Error).message).toBe(
+    "Native storage xattr proof refused; values omitted."
+  );
+  expect(nativeComposeEffectRefusal(caught)).toEqual({
+    stage,
+    reason: "private-state",
+  });
+  expect(
+    nativeComposeStorageCarrierBudgetReason({
+      error: caught,
+      signal: live.signal,
+      deadline,
+      now: () => deadline + 30_000,
+    })
+  ).toBe("private-state");
+});
+
+test("an exhausted xattr carrier lifetime refuses with the storage budget reason", () => {
+  const artifact: NativeComposeStorageXattrArtifact = {
+    version: 1,
+    imageId: `sha256:${"a".repeat(64)}`,
+    platform: "linux/arm64",
+    bunVersion: "1.4.2",
+    bunHash: "b".repeat(64),
+    libcHash: "c".repeat(64),
+    helperHash: "e".repeat(64),
+    kernelAbi: 1,
+  };
+  const ports = {
+    inspect: async () => refuseNativeComposeStorageXattr(),
+    invoke: async () => refuseNativeComposeStorageXattr(),
+  };
+  const start = Date.now();
+  const deadline = start + 1000;
+  const live = new AbortController();
+  const carrier = captureNativeComposeStorageXattrCarrier({
+    artifact,
+    ports,
+    signal: live.signal,
+    deadline,
+  });
+  const cancelled = new AbortController();
+  const aborted = captureNativeComposeStorageXattrCarrier({
+    artifact,
+    ports,
+    signal: cancelled.signal,
+    deadline,
+  });
+  cancelled.abort();
+  const clock = spyOn(Date, "now").mockImplementation(() => deadline);
+  try {
+    const caught = (() => {
+      try {
+        checkNativeComposeStorageXattrCarrierLifetime(carrier);
+      } catch (error: unknown) {
+        return error;
+      }
+    })();
+    expect((caught as Error).message).toBe(
+      "Native storage xattr proof refused; values omitted."
+    );
+    expect(nativeComposeEffectReason(caught)).toBe("storage-budget");
+    const stopped = (() => {
+      try {
+        checkNativeComposeStorageXattrCarrierLifetime(aborted);
+      } catch (error: unknown) {
+        return error;
+      }
+    })();
+    expect(stopped).toBeInstanceOf(Error);
+    expect(nativeComposeEffectReason(stopped)).toBe("unclassified");
+  } finally {
+    clock.mockRestore();
+  }
 });

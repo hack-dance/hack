@@ -1,15 +1,34 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { ensureManagedGitignoreBlock } from "../src/lib/fs.ts";
-import { ensureHackDirGitignore } from "../src/lib/project-env-config.ts";
+import {
+  ensureHackDirGitignore,
+  HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
+  HACK_DIR_GITIGNORE_REFUSAL,
+  HackDirGitignoreRefusalError,
+  inspectHackDirGitignore,
+} from "../src/lib/project-env-config.ts";
 import {
   HACK_DIR_GITIGNORE_BEGIN_MARKER,
   HACK_DIR_GITIGNORE_END_MARKER,
   HACK_DIR_GITIGNORE_ENTRIES,
 } from "../src/templates.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const tempDirs = new Set<string>();
 
@@ -149,6 +168,214 @@ test("ensureHackDirGitignore writes the canonical managed entries", async () => 
   const second = await ensureHackDirGitignore({ projectDir });
   expect(second.changed).toBe(false);
 });
+
+test("ensureHackDirGitignore creates a new file with mode 0644", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await ensureHackDirGitignore({ projectDir });
+  expect((await stat(resolve(projectDir, ".gitignore"))).mode & 0o777).toBe(
+    0o644
+  );
+});
+
+test("ensureHackDirGitignore refuses a dangling .gitignore symlink without creating its target", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await mkdir(projectDir);
+  const outside = resolve(dir, "outside-target");
+  await symlink(outside, resolve(projectDir, ".gitignore"));
+
+  const error = await ensureHackDirGitignore({ projectDir }).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(HackDirGitignoreRefusalError);
+  expect((error as Error).message).toBe(HACK_DIR_GITIGNORE_REFUSAL);
+  expect(await lstat(outside).catch(() => null)).toBeNull();
+  expect(
+    (await lstat(resolve(projectDir, ".gitignore"))).isSymbolicLink()
+  ).toBe(true);
+});
+
+test("ensureHackDirGitignore refuses a .gitignore symlink to an outside file and leaves it unchanged", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await mkdir(projectDir);
+  const outside = resolve(dir, "outside-file");
+  await writeFile(outside, "outside\n");
+  await symlink(outside, resolve(projectDir, ".gitignore"));
+
+  await expect(ensureHackDirGitignore({ projectDir })).rejects.toBeInstanceOf(
+    HackDirGitignoreRefusalError
+  );
+  expect(await readFile(outside, "utf8")).toBe("outside\n");
+});
+
+test("ensureHackDirGitignore refuses a symlinked project dir and writes nothing through it", async () => {
+  const dir = await createTempDir();
+  const outsideDir = resolve(dir, "outside-dir");
+  await mkdir(outsideDir);
+  const projectDir = resolve(dir, ".hack");
+  await symlink(outsideDir, projectDir);
+
+  await expect(ensureHackDirGitignore({ projectDir })).rejects.toBeInstanceOf(
+    HackDirGitignoreRefusalError
+  );
+  expect(
+    await lstat(resolve(outsideDir, ".gitignore")).catch(() => null)
+  ).toBeNull();
+});
+
+test("ensureHackDirGitignore leaves a read-only outdated .gitignore unchanged instead of replacing it", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await mkdir(projectDir);
+  const path = resolve(projectDir, ".gitignore");
+  await writeFile(path, "my-own-entry\n");
+  await chmod(path, 0o444);
+  const before = await lstat(path);
+  try {
+    expect(await ensureHackDirGitignore({ projectDir })).toEqual({
+      changed: false,
+      readOnly: true,
+    });
+    const after = await lstat(path);
+    expect(await readFile(path, "utf8")).toBe("my-own-entry\n");
+    expect(after.mode & 0o777).toBe(0o444);
+    expect(after.ino).toBe(before.ino);
+    expect(await readdir(projectDir)).toEqual([".gitignore"]);
+  } finally {
+    await chmod(path, 0o644);
+  }
+});
+
+test("ensureHackDirGitignore does not report a read-only .gitignore that is already current", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await ensureHackDirGitignore({ projectDir });
+  const path = resolve(projectDir, ".gitignore");
+  const text = await readFile(path, "utf8");
+  await chmod(path, 0o444);
+  try {
+    expect(await ensureHackDirGitignore({ projectDir })).toEqual({
+      changed: false,
+      readOnly: false,
+    });
+    expect(await readFile(path, "utf8")).toBe(text);
+  } finally {
+    await chmod(path, 0o644);
+  }
+});
+
+/** Models root: `access(2)` grants root write access whatever the mode. */
+const rootWriteAccess = async (_path: string): Promise<void> => undefined;
+
+test("a 0444 .gitignore is read-only even when access(2) grants write, as it does for root", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await mkdir(projectDir);
+  const path = resolve(projectDir, ".gitignore");
+  await writeFile(path, "my-own-entry\n");
+  await chmod(path, 0o444);
+  const before = await lstat(path);
+  try {
+    expect(
+      await inspectHackDirGitignore({
+        projectDir,
+        checkWriteAccess: rootWriteAccess,
+      })
+    ).toBe("read-only");
+    expect(
+      await ensureHackDirGitignore({
+        projectDir,
+        checkWriteAccess: rootWriteAccess,
+      })
+    ).toEqual({ changed: false, readOnly: true });
+    const after = await lstat(path);
+    expect(await readFile(path, "utf8")).toBe("my-own-entry\n");
+    expect(after.mode & 0o777).toBe(0o444);
+    expect(after.ino).toBe(before.ino);
+  } finally {
+    await chmod(path, 0o644);
+  }
+});
+
+test("a .gitignore with a write bit defers to access(2): denied stays read-only, granted is updated", async () => {
+  const dir = await createTempDir();
+  const projectDir = resolve(dir, ".hack");
+  await mkdir(projectDir);
+  const path = resolve(projectDir, ".gitignore");
+  await writeFile(path, "my-own-entry\n", { mode: 0o644 });
+  await chmod(path, 0o644);
+  const denied = async (_path: string): Promise<void> => {
+    throw Object.assign(new Error("synthetic denial"), { code: "EACCES" });
+  };
+  expect(
+    await inspectHackDirGitignore({ projectDir, checkWriteAccess: denied })
+  ).toBe("read-only");
+  expect(
+    await ensureHackDirGitignore({ projectDir, checkWriteAccess: denied })
+  ).toEqual({ changed: false, readOnly: true });
+  expect(await readFile(path, "utf8")).toBe("my-own-entry\n");
+
+  expect(
+    await ensureHackDirGitignore({
+      projectDir,
+      checkWriteAccess: rootWriteAccess,
+    })
+  ).toEqual({ changed: true, readOnly: false });
+  const text = await readFile(path, "utf8");
+  expect(text.startsWith("my-own-entry\n")).toBe(true);
+  expect(text).toContain(HACK_DIR_GITIGNORE_BEGIN_MARKER);
+  expect((await lstat(path)).mode & 0o777).toBe(0o644);
+});
+
+const INTERACTIVE_INIT_RUNNER = resolve(
+  import.meta.dir,
+  "helpers",
+  "interactive-init-runner.ts"
+);
+
+test("interactive hack init that overwrites the scaffold reports a read-only outdated .gitignore and leaves it unchanged", async () => {
+  const root = await realpath(await createTempDir());
+  const repo = resolve(root, "repo");
+  const projectDir = resolve(repo, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(resolve(repo, "package.json"), '{"name":"repo"}\n');
+  const path = resolve(projectDir, ".gitignore");
+  await writeFile(path, "my-own-entry\n");
+  await chmod(path, 0o444);
+  const emptyPath = resolve(root, "empty-path");
+  await mkdir(emptyPath);
+  try {
+    const child = Bun.spawn(
+      [process.execPath, INTERACTIVE_INIT_RUNNER, repo, "none", "overwrite"],
+      {
+        cwd: resolve(import.meta.dir, ".."),
+        env: privateCliEnv({ root, env: { PATH: emptyPath } }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exitCode, stderr).toBe(0);
+    // The scaffold was overwritten, so the gitignore step ran.
+    expect(
+      await readFile(resolve(projectDir, "docker-compose.yml"), "utf8")
+    ).toBe("name: repo\nservices: {}\n");
+    expect(`${stdout}\n${stderr}`).toContain(
+      HACK_DIR_GITIGNORE_READ_ONLY_WARNING
+    );
+    expect(await readFile(path, "utf8")).toBe("my-own-entry\n");
+    expect((await lstat(path)).mode & 0o777).toBe(0o444);
+  } finally {
+    await chmod(path, 0o644);
+  }
+}, 60_000);
 
 test("ensureHackDirGitignore keeps user additions across reruns", async () => {
   const dir = await createTempDir();

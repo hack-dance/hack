@@ -132,7 +132,11 @@ resource reacquisitions use its remaining clock, including final verification.
 Fresh bounded original-ID observations and the shared process runner use one
 operation deadline and cancellation owner. Failure, drift, cancellation or
 unverified final readiness retains the pending journal; only explicit verified
-stop recovery can clear it. These rechecks do not freeze external editors or
+stop recovery can clear it. A retained operation that reaches its caller deadline
+refuses with its own fixed message ("reached its caller deadline"), not the
+source-or-binding-changed message, which only an observed drift issues
+(HACK-1340). `hack up`, `hack down` and `config adopt --stop` pass the Compose
+startup budget as that deadline. These rechecks do not freeze external editors or
 the engine atomically. Public output remains field/count/status metadata;
 capabilities and authored probe arguments are private. Prior versions 1–4 keep
 their existing execution behavior, and older upgraded owners refuse version 5
@@ -350,6 +354,10 @@ Container observations bracket the active-member read. If an original changes
 running state while all immutable facts remain verified, the mixed observation
 is discarded within the same aggregate deadline and output allowance. Foreign
 members, replaced identities and stable membership mismatches refuse immediately.
+Docker keys an endpoint that is not joined to a sandbox as `ep-<endpoint>`. This
+happens for a moment while any container starts or exits. Such a member is never
+attributed, admitted or saved: the observation is discarded and re-read within
+the same deadline, and a placeholder that persists until the deadline refuses.
 This is not an atomic daemon snapshot: delayed endpoint removal can still refuse,
 and fresh successful job completion remains the scheduler's separate decision.
 The Docker routing environment is captured for later comparison. Queries never
@@ -402,6 +410,13 @@ publication before it can select ancestor Compose inputs or write legacy files.
 An active adopted receipt remains a selection boundary even if its candidate is
 removed; missing or edited candidates refuse execution.
 
+Project commands look for an adoption before ordinary discovery. The search goes up
+from the start directory to the nearest project root or the filesystem root, as far
+as ordinary discovery goes, with no depth limit. Ordinary discovery reads an active
+adoption as native input, so an adoption the search missed would reach the native
+path. From a directory with no project, however deep, a command gets the ordinary
+missing-project error. Unsafe adoption state is still refused with `E_CONFIG_INVALID`.
+
 The distinct execution owner consumes the saved binding. It never sends these
 resources through ordinary native startup, which allocates a different Compose
 namespace and native volume names. `up --detach`, `restart` and `down` start, restart and
@@ -418,6 +433,29 @@ and clears pending execution only after verified stopped completion. OS signals,
 TTY/stdin forwarding, deadlines and process-group cleanup use the existing
 shared runner. The store's AbortSignal is a cooperative admission/recheck control;
 it does not independently terminate a caller-owned engine callback.
+
+`hack doctor` selects an active or pending adoption before ordinary discovery, which
+would refuse the project as native input. It reports the adopted project, the env key,
+tracked generated files and Compose env values at rest. Each other project check
+(runtime and lifecycle hygiene, Compose networks and backend features, `DEV_HOST`, env
+mode, materialization and overlay warnings, worktree keys and instances, the
+`.hack/.gitignore` check, Caddy hosts)
+reads inputs that the adoption owns, so doctor reports it as skipped instead of
+failing, with status `ok` and the message
+`Skipped (adopted Compose project: its inputs belong to 'hack config adopt')`.
+Doctor uses `warn` for a skip that points at something to fix, such as no `.hack/`
+found. These skips apply to every adopted project by design, so they are not warnings.
+A pending adoption is a warning that asks for explicit recovery, and the `--fix` steps
+treat it like an active one. Doctor uses the same adoption search as project
+commands, so from a directory with no adoption above it, however deep, doctor uses
+ordinary project discovery instead of failing. The
+`--fix` plan says that it leaves the adoption's inputs, retained containers and state
+alone. For the project it only removes tracked generated files from the Git index
+(the files stay on disk) and keeps an env override that the adoption pins. It leaves
+`.hack/.gitignore` unchanged; a committed `.hack.secret.key` is also added to the
+root `.gitignore`. Global repairs still run. The tracked generated files warning for
+an adopted project says that `--fix` leaves `.hack/.gitignore` unchanged, so the
+files must be kept out of later commits.
 
 ## Rollback and interruption recovery
 
@@ -496,6 +534,40 @@ and completes a pending switch. Add `--rollback` to restore a pending switch or
 rollback. Discovery and ordinary operations stay fenced while either transition
 is pending. This is cooperative publication, not an atomic freeze of arbitrary
 editors or Docker mutations.
+
+A new `hack config adopt` (with or without `--stop`) and its preview refuse a
+generated `.hack/.internal/compose.env.override.yml` that holds literal env values,
+because adoption pins its bytes and inode. Recovery acts on an existing
+preparation, so publication itself refuses instead: when the bound override holds
+literal values (a preparation an earlier version made), `--recover --stop`
+publication and `--recover` switch completion refuse at the `publication-inputs`
+boundary with the closed `literal-env-override` reason, before any original moves.
+The switch stays journaled and the fixed message names
+`hack config adopt --recover --rollback`; rollback stays allowed (HACK-1318).
+A repeated `--recover --stop` after that refusal does not reach the publication
+boundary again: the switch is already journaled, so the retried preparation stop
+refuses it as a pending publication with the generic `E_LEGACY_ADOPTION_BUSY`
+code ("busy or requires explicit interrupted-lock recovery") and no publication
+diagnostic; the literal-env message appears only on the first refusal. Plain
+`hack config adopt --recover` would complete the switch, which refuses the literal
+override, so whenever `hack config adopt` refuses as busy over a pending switch
+its message adds the step that state accepts: `--recover --rollback` when the
+bound override holds literal values, otherwise `--recover` to complete or
+`--recover --rollback` to restore (HACK-1414).
+
+`hack doctor` reports the pinned literal override and names the first command the
+pending state accepts, since `hack down` and plain `--rollback` refuse in every
+pending state (HACK-1391, HACK-1414):
+
+- A pending switch: `hack config adopt --recover --rollback`.
+- An interrupted preparation stop (before any switch, so `--recover --rollback`
+  refuses too): `hack config adopt --recover --stop`, which refuses to publish
+  over the literal override and journals the switch; then
+  `hack config adopt --recover --rollback`.
+- An interrupted retained-container command of an active adoption:
+  `hack down --recover`, then `hack config adopt --rollback`.
+
+`hack doctor --fix` keeps the pinned file and its note names the same step.
 
 Unmodified v4 clients cannot be universally fenced: they ignore future legacy
 versions and may select ancestor Compose inputs. Adoption requires the upgraded

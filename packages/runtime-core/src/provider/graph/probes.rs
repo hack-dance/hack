@@ -707,8 +707,7 @@ mod storage_tests {
     #[test]
     fn absence_observation_refuses_live_and_dangling_allocations_without_writes() {
         use std::os::unix::fs::{MetadataExt, symlink};
-        let parent = std::env::temp_dir().join(format!("probe-absence-{}", std::process::id()));
-        fs::create_dir(&parent).unwrap();
+        let parent = crate::unique_test_root(&std::env::temp_dir(), "probe-absence");
         let allocation = parent.join("allocation");
         let invoke = || {
             Command::new("/bin/sh")
@@ -759,8 +758,7 @@ mod storage_tests {
         let script = format!(
             "set -eu\numask 077\nroot=$1; action=$2; marker=probe-fixture\nif test \"$action\" = create ||{branch}"
         );
-        let parent = std::env::temp_dir().join(format!("probe-reset-{}", std::process::id()));
-        fs::create_dir(&parent).unwrap();
+        let parent = crate::unique_test_root(&std::env::temp_dir(), "probe-reset");
         let root = parent.join("allocation");
         let invoke = |action: &str| {
             Command::new("/bin/sh")

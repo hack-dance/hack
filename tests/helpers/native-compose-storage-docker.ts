@@ -119,7 +119,21 @@ if(storageArgs[0]==="container"&&storageArgs[1]==="ls"&&argument("--format")==="
 if(storageArgs[0]==="container"&&storageArgs[1]==="inspect"){
  const format=argument("--format"),selected=storageArgs.slice(storageArgs.indexOf("--format")+2),carriers=await readRows(storageCarriers);
  if(format.includes(".HostConfig")){
-  for(const id of selected){const row=carriers.find(value=>value.id===id);if(!row)process.exit(1);emit(row);}process.exit(0);
+  // Fault: the Nth helper policy inspection observes a replaced carrier (a new creation time).
+  const replaced=storageRoot+"/fault-carrier-replaced",seen=storageRoot+"/carrier-policy-inspects";
+  // Fault: the Nth helper policy inspection observes a changed state (another finish time) under
+  // the same creation time and policy.
+  const restated=storageRoot+"/fault-carrier-state-changed",restatedSeen=storageRoot+"/carrier-state-inspects";
+  for(const id of selected){const row=carriers.find(value=>value.id===id);if(!row)process.exit(1);
+   if(await Bun.file(replaced).exists()){
+    const count=Number(await Bun.file(seen).exists()?await Bun.file(seen).text():0)+1;await Bun.write(seen,String(count));
+    if(count===Number(await Bun.file(replaced).text())){emit({...row,createdAt:"2026-01-01T00:00:00.000Z"});continue;}
+   }
+   if(await Bun.file(restated).exists()){
+    const count=Number(await Bun.file(restatedSeen).exists()?await Bun.file(restatedSeen).text():0)+1;await Bun.write(restatedSeen,String(count));
+    if(count===Number(await Bun.file(restated).text())){emit({...row,state:{...row.state,FinishedAt:"2026-01-01T00:00:00.000Z"}});continue;}
+   }
+   emit(row);}process.exit(0);
  }
  if(format.includes(".Mounts")){
   const main=await workload();for(const id of selected){

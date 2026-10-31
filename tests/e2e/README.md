@@ -19,12 +19,14 @@ HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=lifecycle-session-recovery
 ```
 
 Exit codes: `0` all pass/skip, `1` any scenario failed, `2` isolation canary
-failed (nothing ran).
+failed (nothing ran) or the launchd canary saw the real hackd plist change.
 
 ## CI tiering
 
-Only the `test` job (typecheck, lint, unit tests, build) is a required status
-check on `next` and `main`. `docker-e2e`, `Config compiler`, `Candidate core`,
+Only the `test` job is a required status check on `next` and `main`. It is the
+fan-in of four `test shard i/4` jobs, which run the unit test files in parallel.
+Shard 1 also runs typecheck, lint and the build. `test` passes only when every
+shard succeeded (`scripts/test-shard-plan.ts`). `docker-e2e`, `Config compiler`, `Candidate core`,
 `Runtime state models`, `secret-scan`, `runtime-images` and
 `linux-process-lifetime` run on every push and pull request but are optional
 checks: a red result is a signal to triage, not a merge block. "Registered in
@@ -275,6 +277,10 @@ project name, the image (the cached `oven/bun:1.4.2-slim` repository digest with
 `pull_policy: never` instead of the pinned Alpine image), a declared platform
 (the daemon's architecture) and exact owner labels. Commands, mounts, dependency
 labels, gates and health checks stay as the fixture authored them.
+Owned-container queries list, then inspect. A container that a concurrent
+`hack up` recreates can disappear in between; the helper treats only a listed ID
+that Docker reports missing and `docker ps` confirms absent as removed, and
+fails on any other inspection error (HACK-1296).
 
 - P01 runs a cold and a warm `hack up --json`, a linked worktree, a `bun.lock`
   change and an installer killed mid-run under a fresh generation. Every running
@@ -622,6 +628,28 @@ executes a fail-fast canary before any scenario:
 If the canary fails, fix the `HACK_HOME` override seam
 (`src/lib/config-paths.ts`, `src/lib/projects-registry.ts`) before trusting
 any e2e result.
+
+### launchd guard (HACK-1313)
+
+`HOME` stays real in this harness, so the user's hackd launchd service and its
+plist (`~/Library/LaunchAgents/dance.hack.hackd.plist`) are within reach. A
+`hack daemon start` under a temp `HACK_HOME` once rewrote that plist to log
+into a deleted temp directory and kickstarted the real service. Three layers
+stop that now:
+
+1. The CLI never manages launchd for an isolated `HACK_HOME`
+   (`resolveLaunchdAccess` in `src/daemon/launchd.ts`). It starts hackd
+   directly under `HACK_HOME` instead.
+2. `buildCliEnv` sets `HACK_LAUNCHD_DISABLE=1`, removes the isolated-home
+   opt-in, and puts a `launchctl` shim first on `PATH`. A scenario's `env`
+   cannot override these. The shim refuses (exit 1) any call that names the
+   hackd service and records only its verb. Other `launchctl` calls pass
+   through to `/bin/launchctl`.
+3. `run.ts` records the real plist's SHA-256 and mtime before the isolation
+   canary and compares them after the last scenario. It never prints the
+   plist's contents. A changed fingerprint or any refused shim call sets exit
+   code 2. A `hack daemon install` you run outside the suite during the run
+   also trips this check.
 
 ## Tiers
 

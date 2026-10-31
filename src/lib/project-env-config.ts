@@ -4937,6 +4937,23 @@ export async function migrateLegacyProjectEnv(opts: {
       composeEnvFileReferences: [],
     };
   }
+  // Callers gate on projectEnvConfigExists, which reads a dangling default
+  // layer or a symlinked overlay as absent. Decide the format here with the
+  // mutation check: an unusable entry refuses (E_PATH_CONFLICT) instead of
+  // being replaced, and a linked regular layer means env layers are in use.
+  if (
+    await projectEnvConfigExistsForMutation({ projectDir: opts.projectDir })
+  ) {
+    return {
+      wroteFiles: [],
+      migratedOverlays: [],
+      legacyDetected: false,
+      updatedProjectConfig: false,
+      cleanupCandidates: [],
+      blockedCleanupCandidates: [],
+      composeEnvFileReferences: [],
+    };
+  }
 
   const baseResolved = await resolveHackEnv({
     projectDir: opts.projectDir,
@@ -4970,6 +4987,8 @@ export async function migrateLegacyProjectEnv(opts: {
     await writeProjectEnvConfigFile({
       path: defaultPath,
       config: defaultConfig,
+      // Create only: no layer existed at the format check above.
+      expectedExisting: null,
     })
   ) {
     wroteFiles.push(defaultPath);
@@ -5006,6 +5025,7 @@ export async function migrateLegacyProjectEnv(opts: {
       await writeProjectEnvConfigFile({
         path: overlayPath,
         config: overlayConfig,
+        expectedExisting: null,
       })
     ) {
       wroteFiles.push(overlayPath);
@@ -5074,6 +5094,40 @@ const LEGACY_DOTENV_STATE_OVERLAY = PROJECT_ENV_STATE_FILENAME.slice(
   `${PROJECT_ENV_FILENAME}.`.length
 );
 
+/** `.hack/.env.<name>` copies that are templates or backups, not overlays. */
+const LEGACY_DOTENV_NON_OVERLAY_NAMES: ReadonlySet<string> = new Set([
+  "example",
+  "sample",
+  "template",
+  "dist",
+  "bak",
+  "backup",
+  "old",
+  "orig",
+]);
+
+/** Cleanup candidates git does not track; unknown status inside a checkout is kept out. */
+async function filterUntrackedLegacyCleanupCandidates(opts: {
+  readonly projectRoot: string;
+  readonly paths: readonly string[];
+}): Promise<string[]> {
+  const kept: string[] = [];
+  for (const path of opts.paths) {
+    const tracked = await isGitTrackedProjectEnvPath({
+      projectRoot: opts.projectRoot,
+      path,
+    });
+    const untracked =
+      tracked === null
+        ? !(await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+        : !tracked;
+    if (untracked) {
+      kept.push(path);
+    }
+  }
+  return kept;
+}
+
 /**
  * Legacy overlay names whose env layers would be the default layer or a
  * machine-local layer instead of an overlay (`.env.default`, `.env.local`,
@@ -5124,6 +5178,46 @@ async function assertUntrackedMigrationLocalLayer(opts: {
       reason: `this checkout is a git repository, but git could not report whether it tracks ${opts.path}, so migrated values could be committed. Make \`git status\` work in this checkout and retry.`,
     });
   }
+}
+
+/**
+ * Legacy `.hack/.env.<name>` overlays the `.env`-only migration converts.
+ * Refuses, before anything is written, names that are not overlay names or
+ * that would land on the default or a machine-local layer.
+ */
+async function selectLegacyDotenvOverlays(opts: {
+  readonly projectDir: string;
+}): Promise<readonly string[]> {
+  // Template and backup copies (`.env.example`, `.env.bak`, ...) are not
+  // overlays: they are neither migrated nor offered for cleanup.
+  const overlayNames = (
+    await discoverLegacyOverlayNames({ projectDir: opts.projectDir })
+  ).filter(
+    (name) =>
+      name !== LEGACY_DOTENV_STATE_OVERLAY &&
+      !LEGACY_DOTENV_NON_OVERLAY_NAMES.has(name)
+  );
+  const invalidOverlays = overlayNames.filter(
+    (name) =>
+      !(
+        isReservedLegacyOverlayName(name) ||
+        NATIVE_ENV_OVERLAY_PATTERN.test(name)
+      )
+  );
+  if (invalidOverlays.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${countLabel({ count: invalidOverlays.length, noun: "legacy .env.<name> file" })} in ${opts.projectDir} ${invalidOverlays.length === 1 ? "has" : "have"} a name that is not an overlay name (lowercase letters, digits and single dashes). Rename or remove ${invalidOverlays.length === 1 ? "it" : "them"}, then retry.`,
+    });
+  }
+  const reservedOverlays = overlayNames.filter(isReservedLegacyOverlayName);
+  if (reservedOverlays.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${reservedOverlays.map((name) => `${PROJECT_ENV_FILENAME}.${name}`).join(", ")} would become the default or a machine-local env layer rather than an overlay. Rename it to another overlay name or remove it, then retry.`,
+    });
+  }
+  return overlayNames;
 }
 
 /**
@@ -5213,16 +5307,9 @@ async function migrateUndeclaredLegacyDotenv(opts: {
       reason: `env layer files already exist in ${opts.projectDir}.`,
     });
   }
-  const overlayNames = (
-    await discoverLegacyOverlayNames({ projectDir: opts.projectDir })
-  ).filter((name) => name !== LEGACY_DOTENV_STATE_OVERLAY);
-  const reservedOverlays = overlayNames.filter(isReservedLegacyOverlayName);
-  if (reservedOverlays.length > 0) {
-    throw new LegacyDotenvMigrationRefusalError({
-      code: "E_CONFIG_INVALID",
-      reason: `${reservedOverlays.map((name) => `${PROJECT_ENV_FILENAME}.${name}`).join(", ")} would become the default or a machine-local env layer rather than an overlay. Rename it to another overlay name or remove it, then retry.`,
-    });
-  }
+  const overlayNames = await selectLegacyDotenvOverlays({
+    projectDir: opts.projectDir,
+  });
 
   const legacyValues = await readValidatedLegacyDotenvFiles({
     projectDir: opts.projectDir,
@@ -5343,14 +5430,25 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     configCleanupCandidates: [],
     composeEnvFileReferences,
   });
+  // A legacy file git tracks may carry values teammates rely on; the values
+  // now live only in this machine's local layers, so it is never offered
+  // for deletion. Neither is one whose status git cannot report.
+  const allowedCleanup = await filterUntrackedLegacyCleanupCandidates({
+    projectRoot: opts.projectRoot,
+    paths: cleanupCandidates.allowed,
+  });
+  const blockedCleanup = await filterUntrackedLegacyCleanupCandidates({
+    projectRoot: opts.projectRoot,
+    paths: cleanupCandidates.blocked,
+  });
 
   return {
     wroteFiles,
     migratedOverlays: overlayNames,
     legacyDetected: true,
     updatedProjectConfig: false,
-    cleanupCandidates: cleanupCandidates.allowed,
-    blockedCleanupCandidates: cleanupCandidates.blocked,
+    cleanupCandidates: allowedCleanup,
+    blockedCleanupCandidates: blockedCleanup,
     composeEnvFileReferences,
   };
 }

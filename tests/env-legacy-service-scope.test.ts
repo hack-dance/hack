@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -29,6 +30,7 @@ import {
   projectEnvConfigExistsForMutation,
   resolveProjectEnvConfig,
 } from "../src/lib/project-env-config.ts";
+import { resolveEnvMeta } from "../src/lib/project-meta.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -873,3 +875,182 @@ test("the implicit migrations other commands run still need the hack.env.json co
   expect(migrated.wroteFiles).toEqual([]);
   expect(await hackDirEntries(repo)).toEqual(before);
 });
+
+test("the contract migration refuses a dangling default layer and never replaces it", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.json"),
+    `${JSON.stringify({
+      version: 1,
+      vars: [{ key: "KEPT_SETTING", source: "plain_env", required: false }],
+    })}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const path = await placeLayerEntry(repo, {
+    name: "hack.env.default.yaml",
+    kind: "dangling-link",
+  });
+  const before = await hackDirEntries(repo);
+  const error = await migrateLegacyRepo(repo, {}).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(ProjectEnvLayerPathConflictError);
+  expect((error as ProjectEnvLayerPathConflictError).path).toBe(path);
+  expect(await readlink(path)).toBe(
+    resolve(repo.projectDir, "missing-layer.yaml")
+  );
+  expect(await hackDirEntries(repo)).toEqual(before);
+
+  // A linked regular overlay means env layers are in use: nothing is migrated.
+  await rm(path);
+  const target = resolve(repo.root, "shared-staging.yaml");
+  await writeFile(
+    target,
+    LAYER.replace("environment: default", "environment: staging")
+  );
+  await symlink(target, resolve(repo.projectDir, "hack.env.staging.yaml"));
+  const linked = await hackDirEntries(repo);
+  const migrated = await migrateLegacyRepo(repo, {});
+  expect(migrated.legacyDetected).toBe(false);
+  expect(migrated.wroteFiles).toEqual([]);
+  expect(await hackDirEntries(repo)).toEqual(linked);
+});
+
+test("doctor and project metadata report a dangling default layer instead of the legacy format", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const path = await placeLayerEntry(repo, {
+    name: "hack.env.default.yaml",
+    kind: "dangling-link",
+  });
+  const refusal = `Refusing to choose the env format: ${path} is not a regular file`;
+
+  const meta = await resolveEnvMeta({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    composeFile: resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    projectName: "env-legacy-scope",
+  });
+  expect(meta.contractParseError).toContain(refusal);
+  expect(meta.vars).toEqual([]);
+
+  const run = await runCli({
+    repo,
+    args: ["doctor", "--json", "--path", repo.projectRoot],
+  });
+  expect(`${run.stdout}${run.stderr}`).not.toContain(KEPT_VALUE);
+  const checks = (
+    JSON.parse(run.stdout) as {
+      readonly data: {
+        readonly checks: readonly {
+          readonly id: string;
+          readonly status: string;
+          readonly detail: string;
+        }[];
+      };
+    }
+  ).data.checks;
+  const envMode = checks.find((check) => check.id === "env mode");
+  expect(envMode?.status).toBe("error");
+  expect(envMode?.detail).toContain(refusal);
+  expect(await readlink(path)).toBe(
+    resolve(repo.projectDir, "missing-layer.yaml")
+  );
+}, 120_000);
+
+const RUNS_AS_ROOT = (process.geteuid?.() ?? process.getuid?.() ?? -1) === 0;
+
+test.skipIf(RUNS_AS_ROOT)(
+  "env list and explain refuse an unreadable default layer with one closed line",
+  async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `KEPT_SETTING=${KEPT_VALUE}\n`
+    );
+    const file = resolve(repo.projectDir, "hack.env.default.yaml");
+    await writeFile(file, LAYER);
+    await chmod(file, 0o000);
+    try {
+      for (const args of [
+        ["env", "list"],
+        ["env", "explain", "KEPT_SETTING"],
+      ]) {
+        const run = await runCli({
+          repo,
+          args: [...args, "--path", repo.projectRoot],
+        });
+        expectRefusal(run, `Cannot read the env layer ${file}.`, {
+          lines: 1,
+        });
+      }
+    } finally {
+      await chmod(file, 0o600);
+    }
+    expect(await readFile(file, "utf8")).toBe(LAYER);
+  },
+  60_000
+);
+
+test("the migration refuses a legacy .env.<name> whose name is not an overlay name", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  for (const name of [".env.staging.old", ".env.Prod"]) {
+    await writeFile(
+      resolve(repo.projectDir, name),
+      `SHARED_SETTING=${STAGING_VALUE}\n`
+    );
+  }
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: "2 legacy .env.<name> files in",
+    hidden: [KEPT_VALUE, STAGING_VALUE],
+  });
+});
+
+test("the migration leaves template and backup copies alone and never offers a git-tracked legacy file for cleanup", async () => {
+  const repo = await createLegacyRepo();
+  await git({ repo, args: ["init", "-q"] });
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const staging = resolve(repo.projectDir, ".env.staging");
+  await writeFile(staging, `KEPT_SETTING=${STAGING_VALUE}\n`);
+  await git({ repo, args: ["add", "-f", ".hack/.env.staging"] });
+  const copies: Record<string, string> = {
+    ".env.example": "KEPT_SETTING=placeholder\n",
+    ".env.bak": `KEPT_SETTING=${BASE_ONLY_VALUE}\n`,
+  };
+  for (const [name, text] of Object.entries(copies)) {
+    await writeFile(resolve(repo.projectDir, name), text);
+  }
+
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  // The tracked overlay is migrated, but only the untracked .env is offered.
+  expect(migrated.migratedOverlays).toEqual(["staging"]);
+  expect(await readLayerValues(repo, "hack.env.staging.local.yaml")).toEqual({
+    global: { KEPT_SETTING: STAGING_VALUE },
+  });
+  expect(migrated.cleanupCandidates).toEqual([
+    resolve(repo.projectDir, ".env"),
+  ]);
+  for (const [name, text] of Object.entries(copies)) {
+    expect(await readFile(resolve(repo.projectDir, name), "utf8")).toBe(text);
+  }
+  const entries = await hackDirEntries(repo);
+  expect(entries).not.toContain("hack.env.example.yaml");
+  expect(entries).not.toContain("hack.env.bak.yaml");
+}, 60_000);

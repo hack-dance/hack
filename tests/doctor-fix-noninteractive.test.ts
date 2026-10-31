@@ -720,3 +720,19 @@ test("doctor --migrate-env-config refuses a dangling default layer with E_PATH_C
   ).toBeNull();
   expect(noteCalls.join("\n")).not.toContain(legacy);
 }, 30_000);
+
+test("doctor offers files compose still references for cleanup only after the compose repair removed them (HACK-1370)", async () => {
+  const { doctorEnvCleanupCandidates } = await import(
+    "../src/commands/doctor.ts"
+  );
+  const migrated = {
+    cleanupCandidates: ["/p/.hack/.env.staging"],
+    blockedCleanupCandidates: ["/p/.hack/.env"],
+  };
+  expect(
+    doctorEnvCleanupCandidates({ migrated, composeRepaired: false })
+  ).toEqual(["/p/.hack/.env.staging"]);
+  expect(
+    doctorEnvCleanupCandidates({ migrated, composeRepaired: true })
+  ).toEqual(["/p/.hack/.env", "/p/.hack/.env.staging"]);
+});

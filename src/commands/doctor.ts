@@ -169,9 +169,9 @@ import {
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   type LegacyComposeEnvFileReference,
+  type LegacyProjectEnvMigration,
   migrateLegacyProjectEnv,
   ProjectEnvLayerPathConflictError,
-  projectEnvConfigExists,
   projectEnvConfigExistsForMutation,
   removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
@@ -2656,11 +2656,11 @@ async function checkProjectEnvMode({
     };
   }
 
-  if (
-    await projectEnvConfigExists({
-      projectDir: ctx.projectDir,
-    })
-  ) {
+  const format = await doctorEnvFormat({ projectDir: ctx.projectDir });
+  if (format.kind === "conflict") {
+    return { name: "env mode", status: "error", message: format.message };
+  }
+  if (format.kind === "layers") {
     const defaultOverlay =
       cfg.env?.defaultOverlay ?? cfg.defaultEnvConfig ?? null;
     return {
@@ -2690,6 +2690,31 @@ async function checkProjectEnvMode({
   };
 }
 
+/**
+ * The env format the doctor checks report, decided by the same check that
+ * `hack env set`/`unset` use. A dangling or non-file `.hack/hack.env.*.yaml`
+ * entry is a conflict to report, never a silent "legacy format" (HACK-1370).
+ */
+async function doctorEnvFormat(opts: {
+  readonly projectDir: string;
+}): Promise<
+  | { readonly kind: "layers" | "legacy" }
+  | { readonly kind: "conflict"; readonly message: string }
+> {
+  try {
+    return (await projectEnvConfigExistsForMutation({
+      projectDir: opts.projectDir,
+    }))
+      ? { kind: "layers" }
+      : { kind: "legacy" };
+  } catch (error: unknown) {
+    if (error instanceof ProjectEnvLayerPathConflictError) {
+      return { kind: "conflict", message: error.message };
+    }
+    throw error;
+  }
+}
+
 async function checkProjectEnvOverlayWarnings({
   startDir,
 }: {
@@ -2713,11 +2738,15 @@ async function checkProjectEnvOverlayWarnings({
     };
   }
 
-  if (
-    await projectEnvConfigExists({
-      projectDir: ctx.projectDir,
-    })
-  ) {
+  const format = await doctorEnvFormat({ projectDir: ctx.projectDir });
+  if (format.kind === "conflict") {
+    return {
+      name: "env overlay warnings",
+      status: "warn",
+      message: "Skipped: an env layer entry is unusable (see env mode)",
+    };
+  }
+  if (format.kind === "layers") {
     const serviceNames = await discoverComposeServiceNames({
       composeFile: ctx.composeFile,
     });
@@ -2783,11 +2812,15 @@ async function checkProjectEnvMaterialization({
     };
   }
 
-  if (
-    !(await projectEnvConfigExists({
-      projectDir: ctx.projectDir,
-    }))
-  ) {
+  const format = await doctorEnvFormat({ projectDir: ctx.projectDir });
+  if (format.kind === "conflict") {
+    return {
+      name: "env materialization",
+      status: "warn",
+      message: "Skipped: an env layer entry is unusable (see env mode)",
+    };
+  }
+  if (format.kind === "legacy") {
     return {
       name: "env materialization",
       status: "ok",
@@ -3743,7 +3776,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
   }
   note(migrationNotes.join("\n"), "doctor");
 
-  let blockedCleanupCandidates = [...migrated.blockedCleanupCandidates];
+  let composeRepaired = false;
   if (migrated.composeEnvFileReferences.length > 0) {
     note(
       buildComposeEnvRepairNote({
@@ -3772,7 +3805,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
           ].join("\n"),
           "compose env repair"
         );
-        blockedCleanupCandidates = [];
+        composeRepaired = true;
       } else {
         note(
           "No compose env_file updates were needed; legacy compatibility files remain blocked from cleanup.",
@@ -3787,10 +3820,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
     }
   }
 
-  const cleanupCandidates = [
-    ...migrated.cleanupCandidates,
-    ...blockedCleanupCandidates,
-  ].sort((left, right) => left.localeCompare(right));
+  const cleanupCandidates = doctorEnvCleanupCandidates({
+    migrated,
+    composeRepaired,
+  });
   if (cleanupCandidates.length === 0) {
     return;
   }
@@ -3818,6 +3851,25 @@ async function maybeMigrateProjectEnvConfig(opts: {
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
   }
+}
+
+/**
+ * Legacy env files doctor offers to delete after a migration. Files compose
+ * still names as `env_file` (`blockedCleanupCandidates`) are offered only when
+ * the compose repair removed those references; deleting them otherwise would
+ * break the next `hack up`.
+ */
+export function doctorEnvCleanupCandidates(opts: {
+  readonly migrated: Pick<
+    LegacyProjectEnvMigration,
+    "cleanupCandidates" | "blockedCleanupCandidates"
+  >;
+  readonly composeRepaired: boolean;
+}): string[] {
+  return [
+    ...opts.migrated.cleanupCandidates,
+    ...(opts.composeRepaired ? opts.migrated.blockedCleanupCandidates : []),
+  ].sort((left, right) => left.localeCompare(right));
 }
 
 function buildComposeEnvRepairNote(opts: {

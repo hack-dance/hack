@@ -1044,6 +1044,12 @@ files, when:
 - a legacy file is named `.hack/.env.default`, `.hack/.env.local` or
   `.hack/.env.<name>.local`, whose layer would be the default or a machine-local layer
   rather than an overlay (`E_CONFIG_INVALID`). Rename or remove it;
+- a legacy `.hack/.env.<name>` file has a name that is not an overlay name (lowercase
+  letters, digits and single dashes), such as `.env.staging.old` or `.env.Prod`
+  (`E_CONFIG_INVALID`). The error counts such files. Rename or remove them. Template and
+  backup copies (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.bak`,
+  `.env.backup`, `.env.old`, `.env.orig`) are not overlays: they are neither migrated
+  nor offered for cleanup;
 - an entry named like an env layer (`.hack/hack.env.*.yaml`) is a dangling symlink, a
   directory or another non-file (`E_PATH_CONFLICT`). A regular layer file, or a symlink
   to one, means the repo already uses env layers: `hack doctor` reports that and writes
@@ -1057,9 +1063,14 @@ any secret backend it configures, is left unchanged. The migration changes proje
 only, so it runs even when Docker is not reachable; the other `--migrate-env-config`
 repairs still need Docker. As with any migration, `hack doctor` then offers to remove the
 legacy `.hack/.env*` files that Compose no longer references (a non-interactive run
-accepts).
+accepts). Files Compose still names as `env_file` are offered only when the Compose repair
+removed those references. Without `hack.env.json`, a legacy file that git tracks, or one
+whose status git cannot report in a git checkout, is never offered, because the migrated
+values now live only in this machine's local layers.
 
-`hack doctor` also warns when a repo still depends on the old format.
+`hack doctor` also warns when a repo still depends on the old format. Its `env mode`
+check reports an error, not the legacy format, when a `.hack/hack.env.*.yaml` entry is a
+dangling symlink or another non-file.
 For modern env repos, `hack doctor` also warns when materialized compatibility output in
 `.hack/.env` or `.hack/.env.state.json` is stale and points to `hack env materialize`.
 

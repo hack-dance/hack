@@ -1200,6 +1200,78 @@ test("the migration refuses when Compose uses a legacy file it would leave out",
   });
 });
 
+test("the migration refuses when Compose uses an overlay a launch would not select", async () => {
+  const repo = await createLegacyRepo();
+  const compose = resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME);
+  await writeFile(
+    compose,
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: .env.staging\n"
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), "SHARED=base\n");
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `SHARED=base\nKEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: 'Compose env_file uses ".env.staging"',
+    hidden: [KEPT_VALUE],
+  });
+
+  // Selected by default, every launch still gets the values.
+  await writeFile(
+    resolve(repo.projectDir, "hack.config.json"),
+    `${JSON.stringify({ env: { defaultOverlay: "staging" } })}\n`
+  );
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.migratedOverlays).toContain("staging");
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    serviceNames: ["api"],
+  });
+  if (!resolved) {
+    throw new Error("expected env layers");
+  }
+  expect(
+    selectProjectEnvValues({ resolved, scopeName: "api" }).KEPT_SETTING
+  ).toBe(KEPT_VALUE);
+});
+
+test("the migration accepts a Compose overlay that adds nothing to the base", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: .env.staging\n"
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.migratedOverlays).toContain("staging");
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    serviceNames: ["api"],
+  });
+  if (!resolved) {
+    throw new Error("expected env layers");
+  }
+  expect(
+    selectProjectEnvValues({ resolved, scopeName: "api" }).KEPT_SETTING
+  ).toBe(KEPT_VALUE);
+});
+
 test("after the migration, a migrated key's service override takes effect only with --local", async () => {
   const repo = await createLegacyRepo();
   await writeFile(

@@ -1055,6 +1055,11 @@ files, when:
 - Compose `env_file` uses one of those template or backup copies (`E_CONFIG_INVALID`), so
   its values would be lost. Rename the file to an overlay name or move it out of `.hack`,
   and update `env_file` to match;
+- Compose `env_file` uses an overlay such as `.env.staging` that holds values of its own
+  and is not `env.defaultOverlay` (`E_CONFIG_INVALID`). Compose loads that file on every
+  launch, but after the migration a launch without `--env` would not select the overlay,
+  so the service would lose those values. Set `env.defaultOverlay` to it, or remove the
+  `env_file` entry and select the overlay with `--env`;
 - an entry named like an env layer (`.hack/hack.env.*.yaml`) is a dangling symlink, a
   directory or another non-file (`E_PATH_CONFLICT`). A regular layer file, or a symlink
   to one, means the repo already uses env layers: `hack doctor` reports that and writes

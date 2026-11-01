@@ -5264,6 +5264,62 @@ async function assertComposeUsesNoExcludedLegacyDotenv(opts: {
   }
 }
 
+/**
+ * Refuses when Compose uses a migrated overlay that a launch without `--env`
+ * would not select. Compose loads that file unconditionally, but the migration
+ * puts its values only in the overlay's layers and the Compose repair removes
+ * the reference, so the service would lose them. An overlay with no entries
+ * beyond the base loses nothing, because the base layer already holds them.
+ */
+async function assertComposeOverlaysStaySelected(opts: {
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): Promise<void> {
+  const references = await inspectLegacyComposeEnvFileReferences({
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+    projectDir: opts.projectDir,
+  });
+  const referenced = new Set(
+    references.map((reference) =>
+      basename(reference.resolvedPath).slice(`${PROJECT_ENV_FILENAME}.`.length)
+    )
+  );
+  const defaultOverlay = await readProjectDefaultEnvConfig({
+    projectDir: opts.projectDir,
+  });
+  const baseValues = opts.legacyValues.get(null) ?? {};
+  const unselected = opts.overlayNames.filter(
+    (name) =>
+      name !== defaultOverlay &&
+      referenced.has(name) &&
+      Object.keys(
+        legacyOverlayChangedValues({
+          overlayValues: opts.legacyValues.get(name) ?? {},
+          baseValues,
+        })
+      ).length > 0
+  );
+  if (unselected.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose env_file uses ${legacyOverlayFileList(unselected)}, but a launch without --env would not select ${unselected.length === 1 ? "that overlay" : "those overlays"}, so the service would lose its values. Set env.defaultOverlay to the overlay every launch should use, or remove the env_file entry and select the overlay with --env, then retry.`,
+    });
+  }
+}
+
+/** Overlay entries a migrated overlay layer must hold: those that differ from the base. */
+function legacyOverlayChangedValues(opts: {
+  readonly overlayValues: Record<string, string>;
+  readonly baseValues: Record<string, string>;
+}): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(opts.overlayValues).filter(
+      ([key, value]) => opts.baseValues[key] !== value
+    )
+  );
+}
+
 async function selectLegacyDotenvOverlays(opts: {
   readonly projectDir: string;
 }): Promise<readonly string[]> {
@@ -5379,7 +5435,9 @@ async function readValidatedLegacyDotenvFiles(opts: {
  * - Refused before anything is written ({@link LegacyDotenvMigrationRefusalError},
  *   or {@link ProjectEnvLayerPathConflictError} for an unusable layer entry):
  *   any existing env layer entry, a legacy overlay named like the default or a
- *   machine-local layer, a key that does not match `^[A-Z_][A-Z0-9_]*$`
+ *   machine-local layer, a Compose `env_file` on a file the migration leaves
+ *   out or on an overlay a launch without `--env` would not select, a key that
+ *   does not match `^[A-Z_][A-Z0-9_]*$`
  *   (counted per file, never shown), and a machine-local target that git
  *   tracks or, inside a git checkout, cannot report on.
  * - Layers are created only where nothing exists (compare-and-swap against an
@@ -5418,6 +5476,11 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     projectDir: opts.projectDir,
     overlayNames,
   });
+  await assertComposeOverlaysStaySelected({
+    projectDir: opts.projectDir,
+    overlayNames,
+    legacyValues,
+  });
 
   const baseValues = legacyValues.get(null) ?? {};
   const localWrites: PlannedEnvLayerWrite[] = [];
@@ -5446,11 +5509,10 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     });
   }
   for (const overlayName of overlayNames) {
-    const changedValues = Object.fromEntries(
-      Object.entries(legacyValues.get(overlayName) ?? {}).filter(
-        ([key, value]) => baseValues[key] !== value
-      )
-    );
+    const changedValues = legacyOverlayChangedValues({
+      overlayValues: legacyValues.get(overlayName) ?? {},
+      baseValues,
+    });
     if (Object.keys(changedValues).length === 0) {
       continue;
     }

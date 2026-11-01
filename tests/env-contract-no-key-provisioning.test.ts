@@ -173,3 +173,135 @@ test("a failed keychain read refuses as unavailable and creates no key", async (
     unavailable: true,
   });
 }, 45_000);
+
+/** One worker run with no shell value, or a stored backend, or the keychain backend. */
+async function runWorker(opts: {
+  readonly keychain: "empty" | "key" | "throw";
+  readonly shell: boolean;
+  readonly storePresent: boolean;
+  readonly backend?: "encrypted_file" | "keychain";
+}) {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-no-provision-"))
+  );
+  roots.push(root);
+  const projectRoot = resolve(root, "repo");
+  const projectDir = resolve(projectRoot, ".hack");
+  const keyPath = resolve(projectRoot, "secrets-file.key");
+  const storePath = resolve(projectRoot, "secrets.enc.json");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    resolve(projectDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.20\n"
+  );
+  await writeFile(
+    resolve(projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "contract-keychain",
+      dev_host: "contract-keychain.hack",
+      controlPlane: {
+        secrets:
+          opts.backend === "keychain"
+            ? { backend: "keychain", storePlaintextInBackend: true }
+            : {
+                backend: "encrypted_file",
+                storePlaintextInBackend: true,
+                encryptedFile: { path: storePath, keyPath },
+              },
+      },
+    })}\n`
+  );
+  await writeFile(
+    resolve(projectDir, "hack.env.json"),
+    `${JSON.stringify({
+      version: 1,
+      vars: [{ key: SHELL_KEY, source: "plain_env", required: false }],
+    })}\n`
+  );
+  if (opts.storePresent) {
+    await writeFile(storePath, '{"version":1,"entries":{"x":"synthetic"}}\n');
+  }
+  const before = await snapshot(projectRoot);
+  const run = await children.run({
+    cmd: [process.execPath, WORKER],
+    cwd: projectRoot,
+    env: privateCliEnv({
+      root,
+      env: {
+        ...(opts.shell ? { [SHELL_KEY]: SHELL_VALUE } : {}),
+        HACK_GLOBAL_CONFIG_PATH: join(root, "hack-config.json"),
+        HACK_HOME: join(root, "hack-home"),
+        HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: undefined,
+        HACK_SECRETS_FILE_KEY: undefined,
+        HACK_TEST_KEYCHAIN: opts.keychain,
+        HACK_TEST_PROJECT_ROOT: projectRoot,
+      },
+    }),
+  });
+  expect(run.stderr).toBe("");
+  expect(run.exitCode).toBe(0);
+  return {
+    result: JSON.parse(run.stdout) as {
+      readonly message: string | null;
+      readonly calls: {
+        readonly get: number;
+        readonly set: number;
+        readonly delete: number;
+      };
+    },
+    before,
+    after: await snapshot(projectRoot),
+    keyFile: await lstat(keyPath).catch(() => null),
+  };
+}
+
+test("with nothing stored, the printed step 1 migrates and writes no shell value", async () => {
+  const { result, after } = await runWorker({
+    keychain: "empty",
+    shell: false,
+    storePresent: false,
+  });
+  expect(result.message).toBeNull();
+  expect(Object.keys(after)).toContain(".hack/hack.env.default.yaml");
+  expect(JSON.stringify(after)).not.toContain(
+    Buffer.from(SHELL_VALUE).toString("base64")
+  );
+}, 45_000);
+
+test("a store with no key refuses a shell value, and leaves the store and key path alone", async () => {
+  const { result, before, after, keyFile } = await runWorker({
+    keychain: "empty",
+    shell: true,
+    storePresent: true,
+  });
+  expect(result.message).toContain(UNAVAILABLE);
+  expect(result.message).not.toContain(SHELL_VALUE);
+  expect(after).toEqual(before);
+  expect(keyFile).toBeNull();
+  expect(result.calls.set).toBe(0);
+}, 45_000);
+
+test("a store with no key stops step 1 too, with no layer and no key", async () => {
+  const { result, before, after, keyFile } = await runWorker({
+    keychain: "empty",
+    shell: false,
+    storePresent: true,
+  });
+  expect(result.message).not.toBeNull();
+  expect(after).toEqual(before);
+  expect(keyFile).toBeNull();
+  expect(result.calls.set).toBe(0);
+}, 45_000);
+
+test("a keychain backend read failure stops the migration with its own error", async () => {
+  const { result, before, after } = await runWorker({
+    keychain: "throw",
+    shell: true,
+    storePresent: false,
+    backend: "keychain",
+  });
+  expect(result.message).toContain("stub keychain failure");
+  expect(result.message).not.toContain(SHELL_VALUE);
+  expect(after).toEqual(before);
+  expect(result.calls.set).toBe(0);
+}, 45_000);

@@ -6252,7 +6252,9 @@ export async function canMigrateCheckoutLegacyDotenv(opts: {
  * The recovery keeps each key's declared scope, because `--local` alone would
  * deliver it to every service. A local base outranks tracked overlays, so an overlay
  * that supplies the key itself also needs a local value, or it would take the base's.
- * Names from the repository are quoted, because these commands get pasted.
+ * Names from the repository are quoted, because these commands get pasted. Only a
+ * name the CLI accepts unchanged gets a command: `--env base`, for example, selects no
+ * overlay, so following it would replace the base value. Any other name is reported.
  *
  * It also refuses when a mirrored backend's key isn't available, because the shell
  * value might be the only one.
@@ -6302,9 +6304,13 @@ function assertNoShellValuesInContractMigration(opts: {
           : []),
         "--local --value-stdin",
       ].join(" ");
+    const isUsableOverlay = (name: string) =>
+      parseEnvConfigSelection(name) === name;
+    const isUsableService = (service: string) =>
+      isValidProjectEnvScopeName({ scopeName: service });
     const scopesOf = (value: ProcessOnlyContractValue) =>
       value.services && value.services.length > 0
-        ? value.services.map((service) => ({ service }))
+        ? value.services.filter(isUsableService).map((service) => ({ service }))
         : [{}];
     const baseCommands = named
       .flatMap((value) =>
@@ -6313,16 +6319,40 @@ function assertNoShellValuesInContractMigration(opts: {
       .sort();
     const overlayCommands = named
       .flatMap((value) =>
-        value.overlaysWithOwnValue.flatMap((envName) =>
-          scopesOf(value).map((scope) =>
-            setCommand({ key: value.key, envName, ...scope })
+        value.overlaysWithOwnValue
+          .filter(isUsableOverlay)
+          .flatMap((envName) =>
+            scopesOf(value).map((scope) =>
+              setCommand({ key: value.key, envName, ...scope })
+            )
           )
-        )
       )
       .sort();
+    const unusableOverlays = named
+      .flatMap((value) => value.overlaysWithOwnValue)
+      .filter((name) => !isUsableOverlay(name))
+      .map((name) => JSON.stringify(`.env.${name}`));
+    const unusableServices = named
+      .flatMap((value) => value.services ?? [])
+      .filter((service) => !isUsableService(service))
+      .map((service) => JSON.stringify(service));
     sentences.push(
-      `Unset it for one command so the migration runs (\`env ${unset} hack env exec -- true\`). Services then stop receiving it from the shell, so set it again with the scope the contract declares${undetermined ? ", if the backend doesn't hold it" : ""}: ${baseCommands.join("; ")}.`
+      `Unset it for one command so the migration runs (\`env ${unset} hack env exec -- true\`). Services then stop receiving it from the shell${
+        baseCommands.length > 0
+          ? `, so set it again with the scope the contract declares${undetermined ? ", if the backend doesn't hold it" : ""}: ${baseCommands.join("; ")}`
+          : ""
+      }.`
     );
+    if (unusableOverlays.length > 0) {
+      sentences.push(
+        `\`--env\` can't select the overlay file ${[...new Set(unusableOverlays)].sort().join(", ")}, so no command is given for it. Rename it to a lowercase name such as .env.staging, or remove it, then retry.`
+      );
+    }
+    if (unusableServices.length > 0) {
+      sentences.push(
+        `\`--service\` can't select the service ${[...new Set(unusableServices)].sort().join(", ")} in hack.env.json, so no command is given for it. Correct the name there, then retry.`
+      );
+    }
     if (overlayCommands.length > 0) {
       sentences.push(
         `A local base outranks tracked overlays, so also set the value each overlay file holds, or that env takes the base value: ${overlayCommands.join("; ")}.`

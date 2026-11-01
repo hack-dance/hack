@@ -147,6 +147,7 @@ async function runHack(opts: {
   readonly args: readonly string[];
   readonly shellValue?: string;
   readonly stdin?: string;
+  readonly env?: Readonly<Record<string, string>>;
 }) {
   const proc = Bun.spawn([process.execPath, ENTRYPOINT, ...opts.args], {
     cwd: opts.repo.projectRoot,
@@ -163,6 +164,7 @@ async function runHack(opts: {
         ...(opts.shellValue === undefined
           ? {}
           : { [SHELL_KEY]: opts.shellValue }),
+        ...opts.env,
       },
     }),
     stdin: opts.stdin === undefined ? "ignore" : new Blob([opts.stdin]),
@@ -279,12 +281,14 @@ for (const services of [undefined, ["api"]] as const) {
   }, 60_000);
 }
 
-test("service names from the contract are quoted in the printed commands", async () => {
+test("a service name that isn't safe to paste is reported, and gets no command", async () => {
   process.env[SHELL_KEY] = SHELL_VALUE;
   const message = await expectShellValueRefused(
     await createContractRepo({ services: ["a b$(touch pwned)"] })
   );
-  expect(message).toContain("--service 'a b$(touch pwned)' --local");
+  expect(message).not.toContain("--service 'a b$(touch pwned)'");
+  expect(message).not.toContain("--service a b");
+  expect(message).toContain(JSON.stringify("a b$(touch pwned)"));
 });
 
 test("the printed unset names every key it refuses", async () => {
@@ -605,3 +609,140 @@ test("with the key unset in the shell, the migration proceeds and writes no valu
     )
   ).not.toBeNull();
 });
+
+const MIRRORED = (projectRoot: string) => ({
+  backend: "encrypted_file",
+  storePlaintextInBackend: true,
+  encryptedFile: {
+    path: resolve(projectRoot, "secrets.enc.json"),
+    keyPath: resolve(projectRoot, "secrets-file.key"),
+  },
+});
+
+for (const services of [undefined, ["api"]] as const) {
+  const scope = services ? "a service-scoped key" : "an unscoped key";
+  test(`an undetermined ${scope} recovers through the printed steps once the key is available`, async () => {
+    const repo = await createContractRepo({
+      ...(services ? { services } : {}),
+      files: { ".env.staging": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+      secrets: MIRRORED,
+    });
+    const before = await snapshotTree(repo);
+    const exec = ["env", "exec", "--path", repo.projectRoot, "--", "true"];
+
+    const refused = await runHack({
+      repo,
+      args: exec,
+      shellValue: SHELL_VALUE,
+    });
+    expect(refused.exitCode).not.toBe(0);
+    expect(refused.output).toContain(
+      "the secret backend's key isn't available"
+    );
+    expect(refused.output).not.toContain(SHELL_VALUE);
+    expect(await snapshotTree(repo)).toEqual(before);
+
+    // Step 1 with the key still missing stops, and writes no layer.
+    const stillMissing = await runHack({ repo, args: exec });
+    expect(stillMissing.exitCode).not.toBe(0);
+    expect(await snapshotTree(repo)).toEqual(before);
+
+    const withKey = {
+      HACK_SECRETS_FILE_KEY: ["synthetic", "file", "1688"].join("-"),
+    };
+    const serviceFlags = services ? ["--service", "api"] : [];
+    const set = (flags: readonly string[], value: string) =>
+      runHack({
+        repo,
+        args: [
+          "env",
+          "set",
+          SHELL_KEY,
+          ...flags,
+          ...serviceFlags,
+          "--local",
+          "--value-stdin",
+          "--path",
+          repo.projectRoot,
+        ],
+        stdin: `${value}\n`,
+        env: withKey,
+      });
+    expect((await runHack({ repo, args: exec, env: withKey })).exitCode).toBe(
+      0
+    );
+    expect((await set([], SHELL_VALUE)).exitCode).toBe(0);
+    expect((await set(["--env", "staging"], DOTENV_VALUE)).exitCode).toBe(0);
+
+    expect(await valueFor(repo, "api")).toBe(SHELL_VALUE);
+    expect(await valueFor(repo, "api", "staging")).toBe(DOTENV_VALUE);
+    expect(await layerTextsTrackedOnly(repo)).not.toContain(SHELL_VALUE);
+  }, 90_000);
+}
+
+/** Text of the tracked layers: the machine-local ones are meant to hold the value. */
+async function layerTextsTrackedOnly(repo: Repo): Promise<string> {
+  const names = (await readdir(repo.projectDir)).filter(
+    (name) =>
+      name.startsWith("hack.env.") &&
+      name.endsWith(".yaml") &&
+      !name.endsWith(".local.yaml") &&
+      name !== "hack.env.local.yaml"
+  );
+  const texts = await Promise.all(
+    names.map((name) => readFile(resolve(repo.projectDir, name), "utf8"))
+  );
+  return texts.join("\n");
+}
+
+for (const [file, flag] of [
+  [".env.My_Staging", "--env"],
+  [".env.foo.bar", "--env"],
+  [".env.default", "--env"],
+  [".env.base", "--env"],
+] as const) {
+  test(`an overlay ${file} gets no command that --env can't select`, async () => {
+    process.env[SHELL_KEY] = SHELL_VALUE;
+    const repo = await createContractRepo({
+      files: { [file]: `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+    });
+    const message = await expectShellValueRefused(repo);
+    expect(message).not.toContain(`${flag} ${file.slice(".env.".length)}`);
+    expect(message).toContain(JSON.stringify(file));
+    expect(message).not.toContain(DOTENV_VALUE);
+  });
+}
+
+for (const service of ["Api", "a b"]) {
+  test(`a contract service ${JSON.stringify(service)} gets no command --service would refuse`, async () => {
+    process.env[SHELL_KEY] = SHELL_VALUE;
+    const repo = await createContractRepo({ services: [service] });
+    const message = await expectShellValueRefused(repo);
+    expect(message).not.toContain(`hack env set ${SHELL_KEY} --service`);
+    expect(message).toContain(JSON.stringify(service));
+  });
+}
+
+test("every command the refusal prints is accepted, for the names --env and --service take", async () => {
+  const repo = await createContractRepo({
+    services: ["api"],
+    files: { ".env.staging": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+  });
+  const exec = ["env", "exec", "--path", repo.projectRoot, "--", "true"];
+  const refused = await runHack({ repo, args: exec, shellValue: SHELL_VALUE });
+  expect(refused.exitCode).not.toBe(0);
+  const printed = [
+    ...refused.output.matchAll(/hack env set [^;.`\n]+--local --value-stdin/g),
+  ].map((match) => match[0]);
+  expect(printed).toHaveLength(2);
+  expect((await runHack({ repo, args: exec })).exitCode).toBe(0);
+  for (const command of printed) {
+    const words = command.split(" ").slice(1);
+    const run = await runHack({
+      repo,
+      args: [...words, "--path", repo.projectRoot],
+      stdin: `${SHELL_VALUE}\n`,
+    });
+    expect(run.exitCode).toBe(0);
+  }
+}, 60_000);

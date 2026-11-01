@@ -1195,6 +1195,9 @@ never the value, and gives the commands for the scope the contract declares:
 3. If an overlay file also sets the key, give that overlay its own value:
    `hack env set KEY --env <overlay> --local --value-stdin`, with `--service` as above. A local base
    outranks tracked overlays, so without this the overlay would take the base value.
+   The error prints a command only for a name the CLI accepts. It names an overlay file `--env`
+   can't select, such as `.env.My_Staging` or `.env.default`, or a service `--service` can't, so
+   you can rename it first.
 4. Keep it exported if Compose interpolation, or a host command run without that service's scope,
    reads a key you set with `--service`, because a service value doesn't reach them. A value set
    without `--service` does reach them, and overrides your shell.

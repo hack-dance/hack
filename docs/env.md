@@ -430,7 +430,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack env explain` | `--env`, `--service`, `--target` | Per invocation; reports source, precedence and delivery without the value. | Not needed. | Reads files; no runtime required. |
 | `hack env apply` | `--env`, `--service` | Runs `hack restart <service>` with the same `--env`, recreating one service. | This is the refresh path for one service. | `--service` is required. |
 | `hack env add` | `--env`, `--service` | Selects the file written (`hack.env.<name>.yaml`, or the base file for `base`/`default`/`none`; `--local` writes the local variant). | Running workloads keep old values until `hack env apply` or `hack restart`. | Mutates only env files. |
-| `hack env set` | `--env`, `--service` | Alias for `hack env add`. | Same as `hack env add`. | Mutates only env files. |
+| `hack env set` | `--env`, `--service` | Alias for `hack env add`, except that it refuses a dangling layer link. | Same as `hack env add`. | Mutates only env files. |
 | `hack env hydrate` | `--env`, `--service` | Selects the local file written, as for `hack env add --local`; imports every entry in one commit. | Same as `hack env add`. | Mutates only the machine-local env file; refuses a git-tracked one. |
 | `hack env unset` | `--env`, `--service` | Selects the file the key is removed from, as for `hack env add`. | Same as `hack env add`. | Mutates only env files. |
 | `hack env materialize` | `--env`, `--service` | Writes `.hack/.env` once, at invocation. | Rerun `hack env materialize`. | Compatibility output for external tools; runtime injection does not depend on it. |
@@ -562,6 +562,7 @@ hack env add API_BASE_URL https://api.example.com --local
 ```
 
 `hack env set` still works as a compatibility alias for `hack env add`, but `add` is the primary UX now.
+The two differ on an in-project dangling layer link: `set` refuses it and `add` replaces it.
 
 ### Entering secret values
 
@@ -1096,12 +1097,13 @@ files, when:
   so the service would lose those values. Set `env.defaultOverlay` to it, or remove the
   `env_file` entry and select the overlay with `--env`;
 - an entry named like an env layer (`.hack/hack.env.*.yaml`) is a dangling symlink, a
-  directory or another non-file (`E_PATH_CONFLICT`). A regular layer file, or a symlink
-  inside the project to one, means the repo already uses env layers: `hack doctor` reports
-  that and migrates nothing, and never writes through the link. It can still remove
-  `env_file: .env` from the Compose file, and a service then stops receiving a value only that
-  file set, so move such values with `hack env set` first. A `.hack` or a layer linked outside the
-  project is refused with a closed error, and the link and outside files stay as they are;
+  directory or another non-file (`E_PATH_CONFLICT`). With a symlinked layer inside the project,
+  or with nothing to move, `hack doctor` reports that the repo already uses env layers and
+  migrates nothing, and it never writes through the link. It can still remove `.hack/.env*`
+  entries from `env_file` in the Compose file, and a service then stops receiving a value only
+  that file set, so move such values first with `hack env set --local`. A `.hack` or a layer
+  linked outside the project is refused with a closed error, and the link and outside files
+  stay as they are;
 - git tracks a machine-local layer it would write, or, in a git checkout, git cannot
   report whether it does (`E_PATH_CONFLICT`);
 - in a git checkout, git does not ignore a machine-local layer it would write, for

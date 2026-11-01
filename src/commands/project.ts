@@ -1330,7 +1330,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
   });
   if (hasUnmigratedLegacyDotenv(unmigrated)) {
     logger.warn({
-      message: `This checkout ${describeUnmigratedLegacyDotenv(unmigrated)} in its legacy .hack/.env files, and the env layers don't deliver those values, so services that rely on them may not get them. Run \`hack doctor --migrate-env-config\` to move them to this checkout's local layers.`,
+      message: `This checkout ${describeUnmigratedLegacyDotenv(unmigrated)} in its legacy .hack/.env files, and the env layers don't deliver those values, so services that rely on them may not get them. Run \`hack doctor --migrate-env-config\`, which moves them to this checkout's local layers or says what to change first.`,
     });
   }
   const lifecycleEnv = selectProjectEnvValuesForExecutionTarget({

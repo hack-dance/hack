@@ -2742,3 +2742,106 @@ test("an overlay entry equal to a base the tracked default delivers is migrated,
   expect(await stagingValue(repo)).toBe("legacy");
   expect((await unmigratedIn(repo)).keys).toEqual([]);
 });
+
+test("an overlay entry equal to the base is kept when a tracked overlay overrides it, alongside a new base key", async () => {
+  const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY.replace("global: {}", "global:\n    PORT: legacy")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+    TRACKED_STAGING
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `PORT=legacy\nNEW_KEY=${KEPT_VALUE}\n`
+  );
+  await writeFile(resolve(repo.projectDir, ".env.staging"), "PORT=legacy\n");
+  expect(await stagingValue(repo)).toBe("stage");
+
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(await stagingValue(repo)).toBe("legacy");
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { NEW_KEY: KEPT_VALUE },
+  });
+  expect(await readLayerValues(repo, "hack.env.staging.local.yaml")).toEqual({
+    global: { PORT: "legacy" },
+  });
+  expect((await unmigratedIn(repo)).keys).toEqual([]);
+});
+
+test("the migration doesn't refuse a base value over an empty tracked overlay", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY.replace("global: {}", "global:\n    PORT: team")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+    LAYER_EMPTY.replace("environment: default", "environment: staging")
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), "PORT=mine\n");
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { PORT: "mine" },
+  });
+});
+
+test("the refusal warns that a value Compose interpolates can't be set per service, and names --env for an overlay", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    'services:\n  web:\n    image: alpine:3.20\n    ports:\n      - "${SYNTH_PORT}:3000"\n'
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), "SYNTH_PORT=8080\n");
+  const error = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  const { message } = error as Error;
+  expect(message).toContain(
+    "A value Compose interpolates can't be set per service"
+  );
+  expect(message).toContain("keep it in your shell");
+  expect(message).toContain("--env <name>");
+  expect(message).not.toContain("8080");
+});
+
+test("an unlisted non-default overlay identical to the base migrates without an overlay layer", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect(
+    await lstat(resolve(repo.projectDir, "hack.env.staging.local.yaml")).catch(
+      () => null
+    )
+  ).toBeNull();
+});
+
+test("a git-tracked legacy file isn't offered for cleanup when nothing in Compose holds it back", async () => {
+  const repo = await createLegacyRepo();
+  await git({ repo, args: ["init", "-q"] });
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services: {}\n"
+  );
+  const tracked = resolve(repo.projectDir, ".env");
+  await writeFile(tracked, `KEPT_SETTING=${KEPT_VALUE}\n`);
+  await git({ repo, args: ["add", "-f", ".hack/.env"] });
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+  expect(migrated.cleanupCandidates).not.toContain(tracked);
+  expect(await readFile(tracked, "utf8")).toContain(KEPT_VALUE);
+});

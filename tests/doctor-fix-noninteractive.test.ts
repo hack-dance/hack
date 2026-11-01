@@ -717,7 +717,7 @@ test("doctor --migrate-env-config refuses a .env no service lists, and keeps it 
   ).toBeNull();
 }, 30_000);
 
-test("doctor --migrate-env-config moves a checkout's own .env after a teammate's migration landed (HACK-1370)", async () => {
+test("doctor --migrate-env-config moves a checkout's own .env that Compose still lists, after a teammate's layers landed (HACK-1370)", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();
   const projectDir = resolve(projectRoot, ".hack");
   const legacy = ["synthetic", "legacy", "71ab"].join("-");

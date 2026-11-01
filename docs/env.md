@@ -1049,6 +1049,10 @@ layer (`E_CONFIG_INVALID`), which is left as it is. Adding to a layer drops its 
 and never show a value. A `.hack/.env` with a valid materialization state is generated output, and
 this comparison skips it. Tell teammates when you commit the migration.
 
+Migrated values are global, so a service added later receives them too, and so do host lifecycle
+hooks. A migrated value also takes precedence over the same variable exported in your shell,
+including for Compose interpolation.
+
 This migration refuses, with a one-line `E_*` error, writes nothing and keeps the legacy
 files, when:
 

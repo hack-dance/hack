@@ -3694,15 +3694,19 @@ function renderSkippedDoctorFixSteps(): void {
 
 function buildEnvMigrationNote(opts: {
   readonly migrated: LegacyProjectEnvMigration;
+  /** Only the migration without a contract makes every value global. */
+  readonly globalDelivery: boolean;
 }): string {
   const { migrated } = opts;
   const notes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
   if (migrated.updatedProjectConfig) {
     notes.push("Updated .hack/hack.config.json for the modern env format.");
   }
-  notes.push(
-    "Migrated values are global: every service and host lifecycle hook now receives them."
-  );
+  if (opts.globalDelivery) {
+    notes.push(
+      "Migrated values are global: every service, including one added later, and every host lifecycle hook now receives them."
+    );
+  }
   return notes.join("\n");
 }
 
@@ -3792,7 +3796,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
     note("Legacy env migration found nothing to write.", "doctor");
     return;
   }
-  note(buildEnvMigrationNote({ migrated }), "doctor");
+  note(
+    buildEnvMigrationNote({ migrated, globalDelivery: !hasContract }),
+    "doctor"
+  );
 
   let composeRepaired = false;
   if (migrated.composeEnvFileReferences.length > 0) {

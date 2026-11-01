@@ -5333,7 +5333,7 @@ async function assertComposeOverlaysStaySelected(opts: {
   if (unselected.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `Compose env_file uses ${legacyOverlayFileList(unselected)}, but a launch without --env would not select ${unselected.length === 1 ? "that overlay" : "those overlays"}, so the service would lose its values. Set env.defaultOverlay to the overlay every launch should use, or remove the env_file entry and select the overlay with --env, then retry.`,
+      reason: `Compose env_file uses ${legacyOverlayFileList(unselected)}, but a launch without --env would not select ${unselected.length === 1 ? "that overlay" : "those overlays"}, so the service would lose its values. Set env.defaultOverlay to the overlay every launch should use, or move its values out of the file and set them with \`hack env set --env <name> --service\` after migrating, then retry.`,
     });
   }
 }
@@ -5784,7 +5784,7 @@ function assertComposeServicesKeepLegacyValues(opts: {
   if (unlisted.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `${unlisted.join("; ")}. Migrated values are global and reach every service, so those services would receive values they never had, including a value that today only feeds Compose interpolation. List the file in env_file for each service that may have its values, or move the values out of it and set them with \`hack env set --service\` after migrating, then retry.`,
+      reason: `${unlisted.join("; ")}. Migrated values are global and reach every service, so those services would receive values they never had, including a value that today only feeds Compose interpolation. List the file in env_file for each service that may have its values (an overlay must also be env.defaultOverlay), or move the values out of it and set them with \`hack env set --service\` after migrating, adding \`--env <name>\` for an overlay. A value Compose interpolates can't be set per service, because service values don't reach interpolation: keep it in your shell, or list the file. Then retry.`,
     });
   }
   const orderConflicts = composeLegacyEnvFileOrderConflicts(opts);
@@ -6308,6 +6308,7 @@ async function assertBaseDoesNotOutrankTrackedOverlays(opts: {
   readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
 }): Promise<void> {
   const conflicts: string[] = [];
+  const deliveredBase = await deliveredLayerValues({ ...opts, envName: null });
   for (const overlayName of await listProjectEnvOverlayNames({
     projectDir: opts.projectDir,
   })) {
@@ -6317,9 +6318,11 @@ async function assertBaseDoesNotOutrankTrackedOverlays(opts: {
     });
     const legacyOverlay = opts.legacyValues.get(overlayName) ?? {};
     for (const [key, value] of Object.entries(opts.baseToMigrate)) {
+      // Equal to the base means the overlay's layers set nothing different.
       if (
         key in delivered &&
         delivered[key] !== value &&
+        delivered[key] !== deliveredBase[key] &&
         !(key in legacyOverlay)
       ) {
         conflicts.push(

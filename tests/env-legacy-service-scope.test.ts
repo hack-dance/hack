@@ -2609,3 +2609,66 @@ test("an unchanged local layer is replaced privately, with the new content", asy
   expect(await readFile(path, "utf8")).toContain("NEW_KEY");
   expect(await stagingFiles(repo)).toEqual([]);
 });
+
+async function stagingValue(repo: Repo): Promise<string | undefined> {
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: "staging",
+    serviceNames: ["api"],
+  });
+  return resolved?.globalEnv.PORT;
+}
+
+const TRACKED_STAGING = LAYER_EMPTY.replace(
+  "environment: default",
+  "environment: staging"
+).replace("global: {}", "global:\n    PORT: stage");
+
+test("the migration keeps an overlay value the tracked overlay delivers today, when the new local base would outrank it", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+    TRACKED_STAGING
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), "PORT=legacy\n");
+  await writeFile(resolve(repo.projectDir, ".env.staging"), "PORT=stage\n");
+  expect(await stagingValue(repo)).toBe("stage");
+
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(await stagingValue(repo)).toBe("stage");
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { PORT: "legacy" },
+  });
+  expect(await readLayerValues(repo, "hack.env.staging.local.yaml")).toEqual({
+    global: { PORT: "stage" },
+  });
+  expect((await unmigratedIn(repo)).keys).toEqual([]);
+});
+
+test("the migration accepts a local overlay already holding the value the overlay file sets", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.local.yaml"),
+    TRACKED_STAGING
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), "PORT=legacy\n");
+  await writeFile(resolve(repo.projectDir, ".env.staging"), "PORT=stage\n");
+
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(await stagingValue(repo)).toBe("stage");
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { PORT: "legacy" },
+  });
+  expect((await unmigratedIn(repo)).keys).toEqual([]);
+});

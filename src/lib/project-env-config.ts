@@ -6509,7 +6509,7 @@ async function planLocalLayerMerges(opts: {
     const added = write.config.values.global ?? {};
     conflicts.push(
       ...Object.keys(added)
-        .filter((key) => key in global)
+        .filter((key) => key in global && global[key] !== added[key])
         .map((key) => `${JSON.stringify(key)} in ${basename(write.path)}`)
     );
     merges.push({
@@ -6696,7 +6696,12 @@ async function migrateUndeclaredLegacyDotenv(opts: {
         overlayValues: legacyValues.get(overlayName) ?? {},
         baseValues,
       }),
-      delivered: await deliveredLayerValues({ ...opts, envName: overlayName }),
+      // The local base about to be written outranks a tracked overlay, so compare
+      // with the layers as they will be, not as they are.
+      delivered: {
+        ...(await deliveredLayerValues({ ...opts, envName: overlayName })),
+        ...baseToMigrate,
+      },
     });
     if (Object.keys(changedValues).length === 0) {
       continue;

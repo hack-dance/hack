@@ -29,8 +29,17 @@ const CONTRACT = `${JSON.stringify({
 const CLI_TEST_TIMEOUT_MS = 60_000;
 
 const roots: string[] = [];
+const running = new Set<Bun.Subprocess>();
 
 afterEach(async () => {
+  // A test timeout doesn't end its child, so stop and await any still running
+  // before removing the fixture it works in.
+  const children = [...running];
+  running.clear();
+  for (const child of children) {
+    child.kill("SIGKILL");
+  }
+  await Promise.all(children.map((child) => child.exited));
   for (const root of roots.splice(0)) {
     await rm(root, { recursive: true, force: true });
   }
@@ -112,6 +121,7 @@ async function runEnv(
       stderr: "pipe",
     }
   );
+  running.add(proc);
   proc.stdin.write(`${VALUE}\n`);
   await proc.stdin.end();
   const [stdout, stderr, exitCode] = await Promise.all([
@@ -119,6 +129,7 @@ async function runEnv(
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
+  running.delete(proc);
   return { exitCode, output: `${stdout}\n${stderr}` };
 }
 

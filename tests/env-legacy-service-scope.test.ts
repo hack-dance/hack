@@ -27,6 +27,7 @@ import {
   inspectProjectEnvMaterialization,
   LegacyDotenvMigrationRefusalError,
   type LegacyProjectEnvMigration,
+  materializeProjectEnv,
   migrateLegacyProjectEnv,
   ProjectEnvLayerPathConflictError,
   projectEnvConfigExistsForMutation,
@@ -2844,4 +2845,56 @@ test("a git-tracked legacy file isn't offered for cleanup when nothing in Compos
   expect(migrated.legacyDetected).toBe(true);
   expect(migrated.cleanupCandidates).not.toContain(tracked);
   expect(await readFile(tracked, "utf8")).toContain(KEPT_VALUE);
+});
+
+test("the migration doesn't treat generated .env output as legacy base values", async () => {
+  const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY.replace("global: {}", "global:\n    PORT: team")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+    TRACKED_STAGING
+  );
+  const serviceNames = ["api"];
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: "staging",
+    serviceNames,
+  });
+  expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toContain(
+    "PORT=stage"
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `ONLY_HERE=${KEPT_VALUE}\n`
+  );
+  const baseValue = async () =>
+    (
+      await resolveProjectEnvConfig({
+        projectRoot: repo.projectRoot,
+        projectDir: repo.projectDir,
+        envName: null,
+        serviceNames,
+      })
+    )?.globalEnv.PORT;
+  expect(await baseValue()).toBe("team");
+  expect((await unmigratedIn(repo)).keys).toEqual(["ONLY_HERE"]);
+
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(await baseValue()).toBe("team");
+  expect(await stagingValue(repo)).toBe("stage");
+  expect(
+    await lstat(resolve(repo.projectDir, "hack.env.local.yaml")).catch(
+      () => null
+    )
+  ).toBeNull();
+  expect(await readLayerValues(repo, "hack.env.staging.local.yaml")).toEqual({
+    global: { ONLY_HERE: KEPT_VALUE },
+  });
+  expect((await unmigratedIn(repo)).keys).toEqual([]);
 });

@@ -6242,9 +6242,11 @@ function readComposeDotenvEntryStart(rawLine: string): {
 async function readValidatedLegacyDotenvFiles(opts: {
   readonly projectDir: string;
   readonly overlayNames: readonly string[];
+  /** Leaves out `.hack/.env` when it is generated output, not a legacy source. */
+  readonly skipBase: boolean;
 }): Promise<ReadonlyMap<string | null, Record<string, string>>> {
   const legacyFiles = [
-    { envName: null, label: PROJECT_ENV_FILENAME },
+    ...(opts.skipBase ? [] : [{ envName: null, label: PROJECT_ENV_FILENAME }]),
     ...opts.overlayNames.map((name) => ({
       envName: name,
       label: `${PROJECT_ENV_FILENAME}.${name}`,
@@ -6631,9 +6633,18 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     overlayNames,
   });
 
+  // A valid state file means `.hack/.env` was generated from the layers, possibly
+  // for another env. As in findUnmigratedLegacyDotenv, it is not a legacy source,
+  // and migrating it would pin that env's values into the local base.
+  const generatedBase = (
+    await readProjectEnvStateFile({
+      statePath: resolveProjectEnvStatePath({ projectDir: opts.projectDir }),
+    })
+  ).ok;
   const legacyValues = await readValidatedLegacyDotenvFiles({
     projectDir: opts.projectDir,
     overlayNames,
+    skipBase: generatedBase,
   });
   await assertComposeOverlaysStaySelected({
     projectDir: opts.projectDir,

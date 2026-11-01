@@ -5024,6 +5024,7 @@ export async function migrateLegacyProjectEnv(opts: {
     projectName: opts.projectName,
     envName: null,
   });
+  assertNoShellValuesInContractMigration({ values: baseResolved.values });
 
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
@@ -6044,6 +6045,43 @@ export async function canMigrateCheckoutLegacyDotenv(opts: {
     allRegular &&
     hasUnmigratedLegacyDotenv(await findUnmigratedLegacyDotenv(opts))
   );
+}
+
+/**
+ * Refuses when a contract value comes only from this process's environment. A
+ * repository's contract can name any variable, and this migration writes plain
+ * values to tracked layers, so a shell credential could be committed. Skipping it
+ * isn't enough: env layers don't read the contract, so a service that received it
+ * would silently stop. An overlay can't add one, because the same key would fall
+ * back to the process here too, so checking the base covers every overlay.
+ */
+function assertNoShellValuesInContractMigration(opts: {
+  readonly values: readonly {
+    readonly key: string;
+    readonly resolvedFrom: string | null;
+  }[];
+}): void {
+  const fromShell = opts.values.filter(
+    (value) => value.resolvedFrom === "process"
+  );
+  if (fromShell.length === 0) {
+    return;
+  }
+  const named = fromShell
+    .filter((value) => PROJECT_ENV_KEY_PATTERN.test(value.key))
+    .map((value) => JSON.stringify(value.key))
+    .sort();
+  const malformed = fromShell.length - named.length;
+  const parts = [
+    ...named,
+    ...(malformed > 0
+      ? [countLabel({ count: malformed, noun: "malformed key" })]
+      : []),
+  ];
+  throw new LegacyDotenvMigrationRefusalError({
+    code: "E_CONFIG_INVALID",
+    reason: `the contract declares ${parts.join(", ")} as plain_env, and the value comes only from your shell, so migrating would write it to a tracked env layer. Unset it for this command and set it afterwards with \`hack env set KEY --local\`, or put a non-secret value in .hack/.env, then retry.`,
+  });
 }
 
 /**

@@ -1142,6 +1142,11 @@ files, when:
   that resolves to a readable file inside `.hack` is migrated like a regular one; cleanup
   removes only the link, never its target.
 
+With `hack.env.json`, the migration refuses (`E_CONFIG_INVALID`) when a `plain_env` value comes only
+from your shell, because it would otherwise be written to a tracked layer, and env layers don't read
+the contract, so simply skipping it would stop delivering it. The error names the key, never the
+value. Unset the variable for that command, then set it with `hack env set KEY --local`.
+
 With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
 symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a
 configured default overlay is a symlink, wherever it points, because this migration writes

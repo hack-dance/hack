@@ -16,7 +16,7 @@ export function wrapLifecyclePersistentCommand(
   return wrapSharedLifecyclePersistentCommand(opts);
 }
 
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import {
   autocompleteMultiselect,
   confirm,
@@ -199,6 +199,7 @@ import {
   ensureDir,
   pathExists,
   readTextFile,
+  writeTextFileAtomicIfChanged,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
@@ -270,6 +271,7 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import { assertProjectEnvLayerPath } from "../lib/project-env-layer-path.ts";
 import {
   parseRequestedTarget,
   resolveProjectExecutionTarget,
@@ -3475,6 +3477,13 @@ async function writeInitScaffoldFile(opts: {
   readonly content: string;
 }): Promise<void> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
+  if (basename(opts.file) === PROJECT_ENV_CONFIG_DEFAULT_FILENAME) {
+    await writeTextFileAtomicIfChanged(opts.file, opts.content, {
+      validatePath: async (path) =>
+        await assertProjectEnvLayerPath({ projectRoot: opts.repoRoot, path }),
+    });
+    return;
+  }
   await writeTextFileIfChanged(opts.file, opts.content);
 }
 

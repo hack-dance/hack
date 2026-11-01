@@ -74,6 +74,7 @@ import {
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import {
+  assertProjectEnvLayerPaths,
   assertValidProjectEnvScopeName,
   describeUnmigratedLegacyDotenv,
   discoverComposeServiceNames,
@@ -1800,13 +1801,17 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
-  const stdinValue = valueStdin ? await readEnvValueFromStdin() : null;
-
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
+
+  await assertProjectEnvLayerPaths({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+  });
+  const stdinValue = valueStdin ? await readEnvValueFromStdin() : null;
   const projectName = await resolveProjectName(project);
   await maybeMigrateLegacyProjectEnv({
     project,
@@ -1889,6 +1894,11 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+  });
+
+  await assertProjectEnvLayerPaths({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
   });
   const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({
@@ -1997,6 +2007,11 @@ const handleEnvHydrate: CommandHandlerFor<typeof hydrateSpec> = async ({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+  });
+
+  await assertProjectEnvLayerPaths({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
   });
   const entries = await readEnvHydrateInput({
     format,
@@ -2323,6 +2338,11 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+  });
+
+  await assertProjectEnvLayerPaths({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
   });
   const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({

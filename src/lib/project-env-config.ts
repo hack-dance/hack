@@ -88,6 +88,7 @@ import {
   replacePrivateFileAtomic,
 } from "./private-file.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
+import { assertProjectEnvLayerPath } from "./project-env-layer-path.ts";
 import {
   assertLegacyProjectDirectory,
   assertLegacyProjectInputFamily,
@@ -808,6 +809,10 @@ async function isInsideGitCheckoutMarker(opts: {
 async function hasLegacyLocalEnvironment(opts: {
   readonly path: string;
 }): Promise<boolean> {
+  await assertProjectEnvLayerPath({
+    projectRoot: dirname(dirname(opts.path)),
+    path: opts.path,
+  });
   const text = await readTextFile(opts.path);
   if (text === null) {
     return false;
@@ -831,6 +836,10 @@ async function isLegacyTrackedLocalOverlay(opts: {
   const localDefaultPath = resolveProjectEnvLocalConfigPath({
     projectDir: opts.projectDir,
     envName: null,
+  });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: localDefaultPath,
   });
   if (!(await pathExists(localDefaultPath))) {
     return false;
@@ -881,9 +890,37 @@ function resolveProjectEnvStatePath(opts: {
   return resolve(opts.projectDir, PROJECT_ENV_STATE_FILENAME);
 }
 
+/** Preflight all named layers before stdin, migration or mutation discovery. */
+export async function assertProjectEnvLayerPaths(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<void> {
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: opts.projectDir,
+  });
+  const entries = await readdir(opts.projectDir);
+  for (const name of entries) {
+    const canonicalName = name.toLowerCase();
+    if (
+      canonicalName.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+      canonicalName.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+    ) {
+      await assertProjectEnvLayerPath({
+        projectRoot: opts.projectRoot,
+        path: resolve(opts.projectDir, name),
+      });
+    }
+  }
+}
+
 export async function projectEnvConfigExists(opts: {
   readonly projectDir: string;
 }): Promise<boolean> {
+  await assertProjectEnvLayerPaths({
+    projectRoot: dirname(opts.projectDir),
+    projectDir: opts.projectDir,
+  });
   const defaultPath = resolveProjectEnvConfigPath({
     projectDir: opts.projectDir,
     envName: null,
@@ -1026,9 +1063,11 @@ async function readLenientProjectEnvLayerText(opts: {
 }
 
 async function readProjectEnvLayerText(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly strictRead?: boolean;
 }): Promise<string | null> {
+  await assertProjectEnvLayerPath(opts);
   if (!opts.strictRead) {
     return await readLenientProjectEnvLayerText({ path: opts.path });
   }
@@ -1056,6 +1095,7 @@ async function readProjectEnvLayerText(opts: {
 }
 
 async function readProjectEnvConfigFile(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly environment: string;
   readonly strictRead?: boolean;
@@ -1291,6 +1331,7 @@ async function readProjectEnvLayers(opts: {
   });
 
   const defaultRead = await readProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     strictRead: opts.strictRead,
     path: selection.defaultPath,
     environment: "default",
@@ -1299,11 +1340,13 @@ async function readProjectEnvLayers(opts: {
     selection.overlayPath === null
       ? null
       : await readProjectEnvConfigFile({
+          projectRoot: opts.projectRoot,
           strictRead: opts.strictRead,
           path: selection.overlayPath,
           environment: selection.effectiveEnv ?? "default",
         });
   const localDefaultRead = await readProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     strictRead: opts.strictRead,
     path: selection.localDefaultPath,
     environment: "default",
@@ -1312,6 +1355,7 @@ async function readProjectEnvLayers(opts: {
     selection.localOverlayPath === null
       ? null
       : await readProjectEnvConfigFile({
+          projectRoot: opts.projectRoot,
           strictRead: opts.strictRead,
           path: selection.localOverlayPath,
           environment: selection.effectiveEnv ?? "default",
@@ -1325,9 +1369,14 @@ async function readProjectEnvLayers(opts: {
       projectDir: primaryDir,
       envName: null,
     });
+    await assertProjectEnvLayerPath({
+      projectRoot: dirname(primaryDir),
+      path: primaryDefaultPath,
+    });
     await validatePrimaryLocalFile(primaryDefaultPath);
     inheritedReads.push(
       await readProjectEnvConfigFile({
+        projectRoot: dirname(primaryDir),
         strictRead: opts.strictRead,
         path: primaryDefaultPath,
         environment: "default",
@@ -1338,9 +1387,14 @@ async function readProjectEnvLayers(opts: {
         projectDir: primaryDir,
         envName: selection.effectiveEnv,
       });
+      await assertProjectEnvLayerPath({
+        projectRoot: dirname(primaryDir),
+        path: primaryOverlayPath,
+      });
       await validatePrimaryLocalFile(primaryOverlayPath);
       inheritedReads.push(
         await readProjectEnvConfigFile({
+          projectRoot: dirname(primaryDir),
           strictRead: opts.strictRead,
           path: primaryOverlayPath,
           environment: selection.effectiveEnv,
@@ -2811,6 +2865,7 @@ function opensToPlaintext(opts: {
  * value-free message. Both refusals happen before anything is written.
  */
 async function readProjectEnvLayerForMutation(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly environment: string;
 }): Promise<{
@@ -2818,6 +2873,7 @@ async function readProjectEnvLayerForMutation(opts: {
   /** The exact bytes read (null when absent), for the compare-and-swap. */
   readonly text: string | null;
 }> {
+  await assertProjectEnvLayerPath(opts);
   const text = await readAtomicWriteTargetText(opts.path);
   const read = parseProjectEnvConfigText({
     path: opts.path,
@@ -2864,6 +2920,10 @@ export async function setProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: filePath,
+  });
   // The read, the change and the write form one critical section per layer,
   // so a concurrent set or unset of another key is never lost (HACK-1376).
   return await withEnvLayerLock({
@@ -2887,6 +2947,7 @@ async function setLockedProjectEnvValue(opts: {
 }): Promise<ProjectEnvMutationResult> {
   const { filePath, scope } = opts;
   const { read, text } = await readProjectEnvLayerForMutation({
+    projectRoot: opts.projectRoot,
     path: filePath,
     environment: opts.envName ?? "default",
   });
@@ -2933,6 +2994,7 @@ async function setLockedProjectEnvValue(opts: {
   // The lock excludes cooperating writers; the compare-and-swap turns a write
   // by anything else since the read into a closed, retryable conflict.
   const changed = await writeProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     path: filePath,
     config: nextConfig,
     expectedExisting: text,
@@ -2969,6 +3031,10 @@ export async function unsetProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: filePath,
+  });
   // Same per-layer critical section as `setProjectEnvValue` (HACK-1376).
   return await withEnvLayerLock({
     layerPath: filePath,
@@ -2988,6 +3054,7 @@ async function unsetLockedProjectEnvValue(opts: {
 }): Promise<{ readonly changed: boolean; readonly filePath: string }> {
   const { filePath } = opts;
   const { read, text } = await readProjectEnvLayerForMutation({
+    projectRoot: opts.projectRoot,
     path: filePath,
     environment: opts.envName ?? "default",
   });
@@ -3019,6 +3086,7 @@ async function unsetLockedProjectEnvValue(opts: {
   }
 
   const changed = await writeProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     path: filePath,
     config: {
       version: PROJECT_ENV_CONFIG_VERSION,
@@ -3169,6 +3237,10 @@ export async function hydrateProjectEnvLocalLayer(opts: {
     projectDir: opts.projectDir,
     envName: opts.envName,
   });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: filePath,
+  });
   const lockPath = resolve(
     opts.projectDir,
     ".internal",
@@ -3233,6 +3305,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
 }): Promise<ProjectEnvHydrationResult> {
   const environment = opts.envName ?? "default";
   const layer = await readProjectEnvHydrationLayer({
+    projectRoot: opts.projectRoot,
     filePath: opts.filePath,
     environment,
     refuse: opts.refuse,
@@ -3288,6 +3361,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
   await ensureHackDirGitignoreForLocalEnvWrite({ projectDir: opts.projectDir });
   try {
     await writeProjectEnvConfigFile({
+      projectRoot: opts.projectRoot,
       path: opts.filePath,
       config: {
         version: PROJECT_ENV_CONFIG_VERSION,
@@ -3308,6 +3382,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
 
 /** The layer's exact bytes (null when absent) and its parsed config. */
 async function readProjectEnvHydrationLayer(opts: {
+  readonly projectRoot: string;
   readonly filePath: string;
   readonly environment: string;
   readonly refuse: ProjectEnvHydrationRefuse;
@@ -3315,9 +3390,14 @@ async function readProjectEnvHydrationLayer(opts: {
   readonly text: string | null;
   readonly config: ProjectEnvConfig;
 }> {
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: opts.filePath,
+  });
   let text: string | null;
   try {
     text = await readProjectEnvLayerText({
+      projectRoot: opts.projectRoot,
       path: opts.filePath,
       strictRead: true,
     });
@@ -3593,6 +3673,7 @@ async function publishMigrationLocalLayer(opts: {
 }
 
 async function writeProjectEnvConfigFile(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly config: ProjectEnvConfig;
   /** Compare-and-swap guard; see `writeTextFileAtomicIfChanged`. */
@@ -3602,13 +3683,16 @@ async function writeProjectEnvConfigFile(opts: {
   await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
   // Rename-committed: an interrupted mutation leaves the previous layer intact.
   return (
-    await writeTextFileAtomicIfChanged(
-      opts.path,
-      text,
-      opts.expectedExisting === undefined
+    await writeTextFileAtomicIfChanged(opts.path, text, {
+      ...(opts.expectedExisting === undefined
         ? {}
-        : { expectedExisting: opts.expectedExisting }
-    )
+        : { expectedExisting: opts.expectedExisting }),
+      validatePath: async (path) =>
+        await assertProjectEnvLayerPath({
+          projectRoot: opts.projectRoot,
+          path,
+        }),
+    })
   ).changed;
 }
 
@@ -3678,6 +3762,10 @@ async function buildProjectEnvStateDigests(opts: {
 }): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const filePath of opts.files) {
+    await assertProjectEnvLayerPath({
+      projectRoot: dirname(dirname(filePath)),
+      path: filePath,
+    });
     const contents = (await readTextFile(filePath)) ?? "";
     out[filePath] = createHash("sha256").update(contents, "utf8").digest("hex");
   }
@@ -5046,6 +5134,7 @@ export async function migrateLegacyProjectEnv(opts: {
   });
   if (
     await writeProjectEnvConfigFile({
+      projectRoot: opts.projectRoot,
       path: defaultPath,
       config: defaultConfig,
       // Create only: no layer existed at the format check above.
@@ -5084,6 +5173,7 @@ export async function migrateLegacyProjectEnv(opts: {
     });
     if (
       await writeProjectEnvConfigFile({
+        projectRoot: opts.projectRoot,
         path: overlayPath,
         config: overlayConfig,
         expectedExisting: null,

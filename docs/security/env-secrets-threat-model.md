@@ -155,11 +155,21 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    published now (HACK-1318); until `hack config adopt --recover --rollback` releases
    its journaled switch, it also keeps the file. Other generated files under `.hack/.internal/` and `.hack/.branch/` are
    written with the process umask; the scan shows they hold no values today.
-5. **YAML env file writes.** `writeProjectEnvConfigFile` in
-   `src/lib/project-env-config.ts` also uses `writeTextFileIfChanged`, so
-   `.hack/hack.env.*.yaml` writes follow a symlink at the file. These files hold
-   ciphertext and non-secret plaintext, but a hostile repository could redirect the
-   write.
+5. **YAML env layer TOCTOU (narrowed, HACK-1685).** Base and overlay YAML layers,
+   including local layers and init scaffold writes, may follow links only when the whole chain resolves inside
+   `realpath(projectRoot)`. Component-aware resolution handles relative targets,
+   chains, symlinked roots and missing targets; segment-aware containment refuses
+   sibling-prefix escapes. Outside targets, dangling outside links, loops and failed
+   inspections produce closed, value-free errors. Mutation discovery and commands
+   check before value stdin, and readers check before decryption or hydration output.
+   `writeProjectEnvConfigFile` uses `writeTextFileAtomicIfChanged` in
+   `src/lib/fs.ts`: allowed links keep their link and writes rename over their real
+   target. The writer rechecks the original layer and captured destination before
+   staging and commit, including after a concurrent link swap. These checks are
+   path-based, not descriptor-relative `openat`/`renameat`: an ancestor directory
+   swapped after the last check can still redirect an operation. This residual race
+   remains open; ordinary outside-link redirection is refused. In-project dangling
+   links retain set/unset's prior replacement behavior; strict reads refuse them.
 6. **`encrypted_file` key file reads.** Key writes now use the
    `src/lib/private-file.ts` helpers: explicit provisioning replaces the key
    atomically, and first-use generation publishes it exclusively. `readEncryptedFileKey`

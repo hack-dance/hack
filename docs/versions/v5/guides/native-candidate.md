@@ -1,5 +1,7 @@
 # Opt-in native candidate bundle
 
+This guide is source-reviewed at released next.6. Start with [Install](../install.md) for its shell bootstrap. Cross-version upgrade/rollback, initialized data, native and client acceptance remain open; the procedures below do not close those gates.
+
 `hack-native` is an experimental Apple Silicon macOS executor installed alongside
 Hack's supported CLI. It does not replace `hack`, select a Docker context, migrate
 projects, or install DNS or trust automatically. Its graph commands support a
@@ -46,9 +48,9 @@ The byte manifest is not proof of kernel ABI, durable storage or application acc
 The first supported qualification corpus is explicit UID/GID0 Bun with SQLite; arbitrary
 owner changes and stock PostgreSQL handoff remain refused pending separate qualification.
 For versioned candidate packages, channel rules and publishing gates are described
-in the [prerelease guide](https://github.com/hack-dance/hack/blob/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/docs/guides/prereleases.md),
+in the [prerelease guide](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/docs/guides/prereleases.md),
 and the separate `hack-next` installation path is described in the
-[candidate installer guide](https://github.com/hack-dance/hack/blob/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/docs/guides/candidate-install.md).
+[candidate installer guide](../install.md).
 The build re-signs the compiled frontend, config compiler, and MCP backend with local ad-hoc signatures and
 strictly verifies all macOS executables before generating checksums. This checks
 code integrity; an ad-hoc signature does not establish a publisher identity or
@@ -71,9 +73,7 @@ The public authored-command boundary remains in [Authored commands](../../refere
 
 ## Optional, separate MCP
 
-MCP is independent of native project preparation. The [explicit agent interface guide](../integrations.md#optional-separate-mcp) distinguishes the separate MCP adapter bundle, selected executable and optional stdio plugin. Use its configuration-preview reference when choosing that interface; installing a native CLI does not enroll a client.
-
-The pinned source still exposes a retiring MCP configuration installer. Its [historical compatibility boundary](../reference/agent-compatibility.md) records availability without an install/remove/reinstall procedure. That is not a prerequisite for this native preparation path.
+MCP is independent of native project preparation. The [explicit agent interface guide](../integrations.md#optional-separate-mcp) distinguishes the adapter bundle, selected executable and optional stdio plugin. Installation does not enroll a client.
 
 Verify the copied bundle, create a dedicated home, and explicitly select it:
 
@@ -102,8 +102,25 @@ export HACK_NATIVE_HOME=/absolute/private/candidate-home
 ```
 
 Keep the bundle together and invoke this entrypoint by its full path (do not copy
-or symlink only the script). It selects the adjacent executor even if inherited
-backend variables select another binary. It preserves arguments, exit codes and
+or symlink only the script). With `HACK_RUNTIME_BACKEND` unset (or `native`) it
+selects the native backend and the adjacent executor, even if an inherited
+`HACK_NATIVE_BINARY` selects another binary. An explicit
+`HACK_RUNTIME_BACKEND=compose` runs the same bundled CLI on the Compose backend
+with your own Hack home and existing global routing services. It needs no
+`HACK_NATIVE_HOME` and removes the native selectors. Other values refuse with exit
+code 64. The [candidate installer guide](../install.md)
+describes Compose testing and its shared-state limits: run stable `hack global up`,
+then any stable `hack doctor` or `hack doctor --fix`, then stable `hack daemon stop`,
+confirm `pgrep -fl "hack daemon start"` prints nothing, and run no stable `hack`
+command while the candidate uses your Hack home. Stable `hack global up` (v4.2.0)
+starts a stopped `hackd` again, and so does stable `hack doctor --fix` (it asks
+first only in a terminal). If the check lists a process, the guide gives the
+launchd remedy. The entrypoint turns off daemon autostart in newer builds, so the
+candidate does not start the stable `hackd` on its own: a candidate
+`hack doctor --fix` skips its `hackd` repair without asking and prints the
+command to run yourself, which runs the stable CLI. Do not commit the
+project's generated `.hack/.internal/` directory; newer generators rewrite files
+such as `compose.override.yml`. The entrypoint preserves arguments, exit codes and
 signals through `exec`, and never replaces the installed `hack`. Project-specific
 native adaptation, dependency and routing selections remain explicit; this entrypoint
 does not prepare a provider or migrate existing projects. An unversioned local
@@ -156,10 +173,73 @@ finalization checks still apply. Fresh and already branch-scoped graphs keep
 their normal branch namespace. This compatibility path does not authorize
 adopting an unrelated branch or project.
 
+## Compose projects that stay on the Compose backend
+
+In v5, an unchanged Compose project (`.hack/hack.config.json` with
+`.hack/docker-compose.yml`) that uses any of the following features runs on the
+Compose backend. Native support for them is planned after v5.
+
+| Compose feature | Kept on the Compose backend when |
+| --- | --- |
+| External network | A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the `HACK_NATIVE_ADAPTATION` selection (see [Frontend integration status](#frontend-integration-status)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
+| External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
+| Reserved ownership label | A service, network or volume label key starts with `com.docker.compose.`, `io.hack-local.`, `io.hack.native-config.`, `io.hack.native-file.` or `io.hack.storage-witness.`. Compose, the native runtime and native-config Compose use these labels to prove which resources they own. |
+| Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. |
+| Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64 only. A missing or `null` `platform` is unset and passes. |
+
+Native `hack up` and `hack restart` check for these features after selecting the
+project and before branch, environment, lifecycle, storage or runtime work. They
+refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and one line that names each feature
+found, without network or volume names, label keys, paths or platform values.
+Nothing is started, stopped or written. Every service is checked, including
+services outside the selected profiles.
+
+The check reads only `.hack/docker-compose.yml`, as native start does. It does not
+merge Compose override files, follow `extends` or `include`, or read environment
+defaults such as `DOCKER_DEFAULT_PLATFORM`: a platform counts only when a service
+sets its `platform` field. The native runtime's own review reports `extends` and
+`include` as unsupported fields.
+
+The check applies the explicit `HACK_NATIVE_ADAPTATION` selection first, as native
+start does. An unchanged Compose file whose external network is listed in
+`isolatedNetworks` therefore stays on native, and native start replaces that
+network with an owned isolated one. The selection is read only when the Compose
+file has an external network. If it cannot be read, is not version 1, or its
+`isolatedNetworks` is not a list of unique names, the command refuses with the
+same one-line `E_CONFIG_INVALID` message native start gives, before any runtime
+request.
+
+To run such a project, select the Compose backend:
+
+```sh
+HACK_RUNTIME_BACKEND=compose hack up
+```
+
+The bundle's `hack-v5` entrypoint and the `hack-next` launcher accept the same
+selection; see [Test both backends](../install.md).
+
+Other labels keep their native behavior. Routing (`caddy*`) and dependency cache
+(`hack.dependencies.*`) labels are reviewed as before, and other ordinary labels
+are refused with the general native configuration refusal. A basic build is also
+refused by native image-project `up`, with the general refusal: it needs the
+authored native format.
+
+`hack doctor` reports the same features for the current project in its
+`compose backend features` check. With `--json`, the check's `composeBackend.features`
+lists the closed names `external_network`, `external_volume`, `reserved_label`,
+`unsupported_build` and `foreign_platform`. On the native backend a found feature
+is a warning; on the Compose backend it is informational. Native doctor applies
+the same `HACK_NATIVE_ADAPTATION` selection before it reports.
+
+Native `up` and `restart` also stay in the foreground in every project:
+`--detach` refuses with one `E_USAGE` line. Run `hack up` in its own terminal and
+keep it open, use `hack ps` and `hack logs` from another terminal, and press
+Ctrl-C to stop it. For detached startup, use the Compose backend.
+
 ## Manual candidate upgrade and rollback
 
 Manual candidate bundles are selected by their full path. The separate
-[prerelease installer](https://github.com/hack-dance/hack/blob/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/docs/guides/candidate-install.md) manages verified versioned selections
+[prerelease installer](../install.md) manages verified versioned selections
 with independent homes; it does not migrate runtime data. `hack-v5 update` refuses before discovering an
 installed binary or contacting a release server; install a separately reviewed,
 complete bundle to change the candidate.
@@ -358,12 +438,20 @@ v4 state is enabled. Runtime startup is a further explicit operation subject to
 host resource admission. Read `--help` for the candidate command surface.
 
 The development profile reserves the declared 32 GiB storage disk and 10 GiB
-overlay ceiling plus 16 GiB of host disk space before startup. Its unchanged memory
-budget is a 10 GiB free-plus-file-cache estimate: 6 GiB guest, 2 GiB provisional
-provider overhead and 2 GiB host reserve. Normal and warning macOS pressure can
-qualify only with that headroom, normal thermal/performance state and stable
-swapouts. Development samples before the startup lease and again under the lease
-before allocation, keeping the same swapout baseline across both windows.
+overlay ceiling plus 16 GiB of host disk space before a fresh startup. Starting
+again on a verified running pool, or restarting an exactly clean stopped pool whose
+last `down` completed, reuses existing disks and reserves only the 16 GiB host
+reserve; `runtime probe --profile development --json` reports the basis in
+`disk_budget_basis`, and `retained_reserve_refusal` names why a stopped pool's
+disks were charged again. A restart uses that reserve only when free disk is
+below the fresh budget; with enough room it starts on the fresh budget as before.
+Any other stopped pool keeps the fresh budget. The
+unchanged memory budget is a 10 GiB free-plus-file-cache estimate: 6 GiB guest,
+2 GiB provisional provider overhead and 2 GiB host reserve. Normal and warning
+macOS pressure can qualify only with that headroom, normal thermal/performance
+state and stable swapouts. Development samples before the startup lease and again
+under the lease before allocation, keeping the same swapout baseline across both
+windows.
 Critical, unknown or incomplete observations refuse; there is no bypass option.
 It reports host load without refusing solely because unrelated jobs raise the
 one-minute average. The research profile keeps its normal-only pressure policy,
@@ -509,7 +597,7 @@ OrbStack, registry credentials, or a running guest:
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime fetch-image \
-  --reference 'namespace/repository@sha256:REVIEWED_MANIFEST_DIGEST' \
+  --reference '[namespace/]repository@sha256:REVIEWED_MANIFEST_DIGEST' \
   --archive /absolute/private/new-image.tar
 ```
 
@@ -517,8 +605,29 @@ For an existing mutable image declaration, resolve it explicitly first:
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime resolve-image \
-  --reference 'namespace/repository:tag' --json
+  --reference '[namespace/]repository:tag' --json
 ```
+
+Image references are normalized as the Docker CLI does before any request:
+`alpine` is `docker.io/library/alpine:latest`, `alpine:3.21` is
+`docker.io/library/alpine:3.21`, and `user/img` is `docker.io/user/img:latest`.
+`index.docker.io` becomes `docker.io`. Tags, digests, other registries and
+ports are kept as written; only public Docker Hub `namespace/repository`
+references are acquired. Repository names must be lowercase, and a normalized
+name is limited to 255 bytes. Uppercase digests and malformed registry ports are
+refused. Check a reference without network, credentials or candidate state:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime admit-image \
+  --reference 'alpine:3.21' --json
+```
+
+It returns the canonical `reference` and a `kind` of `docker_hub` or
+`image_id`; any other registry refuses with `registry_image`. Native foreground
+`hack up` runs this admission for every authored service image before startup
+hooks, the VM or any provider starts. Compose plan review applies the same
+syntax rules, keeps the authored image text in the reviewed plan, and does not
+change existing plan identities.
 
 Omitting the tag selects `latest`. Resolution returns `pinned_reference`,
 `source_digest`, `manifest_digest`, `image_id` and `platform`; it downloads only
@@ -582,8 +691,10 @@ performance guarantee or claim about fairness between workloads.
 Two native frontends exist. An authored `.hack/hack.project.json` project is owned
 by `src/lib/native-authored-command.ts`, which admits only the bounded macOS slices
 in the [authored command contract](../../reference/native-authored-commands.md):
-foreground `up`, owner-mediated `down` and `down --recover`, saved-run `ps`, finite
-`logs --no-follow` and noninteractive `exec`; `run` and `restart` refuse there. The
+foreground `up` and `restart`, owner-mediated `down` and `down --recover`, saved-run
+`ps`, finite `logs --no-follow`, noninteractive `exec` and bounded one-off `run`.
+One-off `run` refuses members with source, persistent-data or private-env mounts;
+`restart` requires a proven stop before a fresh foreground start. The
 rest of this section describes the older Compose-file native frontend for
 `.hack/hack.config.json` projects with a Compose file, which keeps its own
 command coverage below.
@@ -626,9 +737,27 @@ lifecycle hooks, and publishes the run mapping after native readiness. Ctrl-C wa
 for owned cleanup and keeps the stopped run mapping and named volumes after
 confirming cleanup. The VM remains available until explicit runtime shutdown.
 
+Without that grant, `up` and `restart` refuse with `E_PERMISSION` before any stop or
+runtime request; set it and run the command again.
+
 This initial foreground path does not support detached/JSON startup, selected
-services or external networks. Routed services and host dependencies require the
-explicit native selections described below. Existing
+services, or the Compose features listed in
+[Compose projects that stay on the Compose backend](#compose-projects-that-stay-on-the-compose-backend),
+such as external networks. `--detach`, `--json`, `--target` and service names
+each refuse with a one-line `E_USAGE` message that names the option and the supported
+form: run `hack up` in the foreground in its own terminal and use `hack ps` and
+`hack logs` from another. Routed services and host dependencies require the
+explicit native selections described below. Unsupported Compose or environment input
+(for example a service `env_file`, or a project `.env` without managed env) and
+unreviewed route labels refuse with `E_NATIVE_PROJECT_UNSUPPORTED`; invalid branch
+hosts, project adaptations, AWS selections and changed fresh-exec environments refuse
+with `E_CONFIG_INVALID`, as do an unbounded `--profile` selection, a malformed
+`HACK_NATIVE_DEPENDENCIES` listener selection and an occupied HTTPS port. A runtime
+reply, saved mapping or retained graph that changed or cannot be confirmed (for example
+a startup receipt for another run, or a mapping owned by another run) is an integrity
+or ownership refusal, not a configuration one: it prints one closed line naming what
+was not confirmed, and `--json` reports it as `E_UNEXPECTED`. Each prints one closed
+line and drops nothing. Existing
 `hack.dependencies.*` cache declarations publish the reviewed source snapshot and
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;
@@ -746,6 +875,18 @@ It does not publish service ports or aliases. Commands are noninteractive and
 bounded to 300 seconds; omitted arguments retain the service's default command.
 The CLI returns command output and exit status only after owned job cleanup is
 confirmed. There is no automatic command replay or fallback to Compose.
+`run` uses the running project's environment and profiles. `--env` and `--profile`
+are optional; when given they must equal the selection recorded at startup
+(profiles compare as a set). A different selection, or a legacy mapping without
+recorded selectors, refuses with `E_USAGE` before any runtime request. An empty
+value (`--env ""`, `--profile ""`, or one that is only spaces or commas) also
+refuses with `E_USAGE`: it does not mean "inherit" or an empty selection. Omit
+the option to inherit. A profile list is empty only when every entry is, so
+`--profile "web,"` asks for `web`. On the native backend the empty check runs
+first, before the project is selected, so an authored `hack.project.json`
+project refuses an empty value with the same `E_USAGE` line rather than its
+`E_NATIVE_PROJECT_UNSUPPORTED` refusal of any `--env` or `--profile`.
+`run` never restarts the project to change its selection.
 Services with no managed environment values also support `run`; they keep the
 admitted image's environment without creating a private environment mount or
 launcher. The one-off request still carries an explicit empty, identity-bound
@@ -767,7 +908,8 @@ restored one-off remain open. An uncertain shutdown retains its mapping and evid
 for recovery; do not delete managed state to retry.
 
 After starting an owned native pool, `runtime ensure-image --reference REF --json`
-resolves a public Docker Hub tag or accepts an explicit digest, reuses the verified
+resolves a public Docker Hub tag (including shorthand such as `alpine:3.21`) or
+accepts an explicit digest, reuses the verified
 archive cache, and imports through the existing content-ID-checked loader. Tags
 are resolved on each call; a warm explicit digest needs no registry request.
 The cache is limited to 16 archives and 2 GiB; an incomplete or conflicting entry
@@ -1154,7 +1296,9 @@ adaptations are accepted:
 ```
 
 Networks must already be declared external; selection explicitly replaces their
-connectivity with the owned isolated network. Probes apply only when no existing
+connectivity with the owned isolated network. Native `up`, `restart` and doctor
+then treat those networks as owned, not as external Compose networks (see
+[Compose projects that stay on the Compose backend](#compose-projects-that-stay-on-the-compose-backend)). Probes apply only when no existing
 healthcheck is present. Additional hostnames append to existing Caddy labels.
 Additional host aliases append explicit `host-gateway` declarations and still need
 separate pinned dependency selections; they do not enable general host access or
@@ -1505,6 +1649,133 @@ persisted empty pre-effect route selection to the pending cleanup and verifies
 the dead predecessor publication. That selection belongs to the interrupted
 operation; replacing a selection from an older restored generation still requires
 independent restore-history proof.
+
+### Quarantine a corrupted disposable build cache
+
+Some frameworks keep a regenerable build cache inside a named volume next to other
+generated output. When such a cache is corrupted (for example a Turbopack checksum
+mismatch reported as a misleading `Module not found`), you can move exactly that
+cache directory aside. Nothing is deleted, and other volumes and directories are
+unchanged.
+
+First declare the regenerable directories on the volume in the Compose file. Paths
+are relative to the volume root. List at most eight distinct directories; one entry
+cannot contain another:
+
+```yaml
+volumes:
+  www_next:
+    x-hack-disposable-cache:
+      - dev/cache/turbopack
+```
+
+The declaration is part of the reviewed plan. It is recorded in the graph receipt
+when the graph is admitted, and only a receipt-recorded entry can be selected later.
+A volume that is also a shared dependency cache cannot declare disposable
+directories. Declaring a path grants no automatic cleanup.
+
+Stop the graph with an ordinary retaining `down` (phase `stopped-data-retained`).
+With the owned runtime running, inspect the single target. This step is read-only:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-cache-quarantine \
+  --run-id <run-id> --volume www_next --path dev/cache/turbopack --json
+```
+
+The response reports the target's `target_bytes` (regular-file bytes),
+`allocated_bytes`, `entries` and a `selection_sha256`. The selection binds the exact
+receipt bytes, the volume name, creation time and root directory identity, the
+target directory identity and the measured bytes. Review it, then quarantine:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph quarantine-cache \
+  --run-id <run-id> --volume www_next --path dev/cache/turbopack \
+  --expect-selection <selection_sha256> --json
+```
+
+These commands, and `resolve-cache-quarantine` below, hold the provider mutation
+lease. They refuse when any of these is true:
+
+- the graph is active, its journal is incomplete, or interrupted cleanup is pending
+- the path is not exactly a declared entry, or is absolute, traversing or empty
+- the volume is missing, carries foreign ownership labels, or has changed
+  incarnation (any inspected field other than `CreatedAt` differs, or the guest
+  observes a different `_data` directory, as after the volume was removed and
+  recreated under the same name)
+- any container mounts the volume, including stopped containers
+- a component of the path, or the target itself, is a symbolic link or not a
+  directory
+- the target directory was replaced after inspection
+
+The guest renames the directory under a lock on the volume root into
+`/var/lib/docker/volumes/<volume>/hack-quarantine/<id>`. That directory is beside
+the volume's `_data` root, and no container can mount it. Before the rename the
+guest checks that the source and the quarantine directory are on the same mount
+(the same `findmnt` mount ID, not only the same device number). A rename within
+one mount cannot fail with a cross-device error, so `mv` never falls back to
+copying and then deleting the source. The result reports `quarantined_bytes` and
+`reclaimed_bytes: 0`. The bytes remain for diagnosis until the owning volume
+itself is explicitly removed (for example `graph cleanup --remove-data`). Restart,
+restore and ordinary cleanup never collect them. Then use a normal retaining
+restart. The framework regenerates its cache.
+
+Quarantined bytes are outside the volume's `_data` directory. Docker's disk-usage
+report, and therefore `graph storage-inventory`, does not count them, so the inventory
+undercounts a volume that holds a quarantine. Every `inspect-cache-quarantine`
+result, including `target_absent`, reports `retained_quarantine_records` and
+`retained_quarantine_bytes`: the recorded bytes still held in the current
+incarnation of that volume.
+
+The first quarantine of a volume creates `hack-quarantine` beside `_data`. Docker's
+`local` driver reports a volume's `CreatedAt` from the modification time of that
+directory, so the reported value changes. The selection records `CreatedAt` as
+observed evidence, but it is not volume identity: the move still settles, a pending
+record still resumes, and its bytes are still counted. A digest reviewed before an
+earlier quarantine of the same volume no longer matches; inspect again. If the
+volume changes during the guest effect, the command fails with
+`graph_cache_quarantine_unsettled` and the record stays pending for explicit resume
+or resolution.
+
+A private record under the candidate home's `run/cache-quarantine/` is written
+before the guest effect and marked `quarantined` after the guest syncs the move.
+If the command is interrupted, `inspect-cache-quarantine` reports the recorded
+digest with one of two phases:
+
+- `resume_required`: the receipt and volume are unchanged. Repeat
+  `quarantine-cache` with the same selection. Resumption accepts the recorded
+  directory either still at its source or already at its destination with the
+  same inode. It refuses a regenerated directory, a different destination or
+  both present, and never moves new bytes.
+- `resolve_required`: resumption is no longer possible, for example because a
+  restart changed the receipt, or because the move keeps refusing. Settle the
+  record without moving anything:
+
+  ```sh
+  ./hack-native --candidate-root /absolute/private/candidate-home graph resolve-cache-quarantine \
+    --run-id <run-id> --volume www_next --path dev/cache/turbopack \
+    --expect-selection <recorded selection_sha256> --json
+  ```
+
+  Under the same lease, consumer and ownership checks, the guest reads the
+  recorded destination under the volume root lock. The record becomes
+  `quarantined` when the recorded directory (same inode) is there, and
+  `abandoned` when the destination is absent, which means nothing was moved. Any
+  other layout, such as a symbolic-link quarantine directory or a different
+  directory at the destination, refuses. After resolution, inspect again for a
+  fresh selection.
+
+You can also resolve a record that could still be resumed. While a record is
+pending, other quarantines of that volume are refused. A torn record write
+refuses automatic replay. Records are retained as diagnosis evidence and are not
+collected automatically. Each volume admits at most 16 records, and the candidate
+home holds at most 1024. Volume names are specific to a run, so a new run starts
+with a fresh per-volume budget. When the global limit is reached, every new
+quarantine is refused; this candidate has no command that collects records.
+
+This operation does not classify the cause of the corruption. One checksum error
+does not show an interrupted write or a storage integrity fault. Container health
+also does not prove that application routes work; check the public route
+separately after restart.
 
 ### Explicit cleanup after a dead foreground owner
 

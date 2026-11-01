@@ -1100,10 +1100,17 @@ files, when:
   default overlay. Compose lets the last file win, but the default overlay always wins over
   `.hack/.env` in env layers. List `.env` first, or make the files agree;
 - the default overlay sets a key differently from `.hack/.env`, and Compose reads that key: its
-  name appears anywhere in the Compose file (`${KEY}`, a bare `build.args` entry, a secret's
-  `environment:`), or it is a `COMPOSE_*` or `DOCKER_*` setting (`E_CONFIG_INVALID`). Compose takes
-  it from `.hack/.env` today, but the overlay value would apply after the migration. Make the two
-  files agree or stop using the key in Compose;
+  name appears anywhere in the Compose file or another `env_file` (`${KEY}`, a bare `build.args`
+  entry, a secret's `environment:`), or it is a `COMPOSE_*` setting (`E_CONFIG_INVALID`). Compose
+  takes it from `.hack/.env` today, but the overlay value would apply after the migration. Make
+  the two files agree or stop using the key in Compose;
+- a legacy file sets a key that Docker, its build tools or the process read from their
+  environment (`E_CONFIG_INVALID`): `DOCKER_*`, `BUILDKIT_*`, `BUILDX_*`, a proxy setting,
+  `SOURCE_DATE_EPOCH`, `HOME` or `PATH`. After the migration it would reach the Docker client too.
+  Remove it from the legacy file, and set it in your shell or for one service with
+  `hack env set --service --local` after migrating;
+- the Compose file is not a single YAML document this check can read, such as several `---`
+  documents (`E_CONFIG_INVALID`). Merge it into one document;
 - `.hack/.env` or a legacy overlay is a symlink to a file outside `.hack`
   (`E_PATH_CONFLICT`), so its values would be copied from elsewhere into this project's
   layers. Replace the link with a regular file in `.hack`, or remove it;

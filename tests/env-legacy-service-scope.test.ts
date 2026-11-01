@@ -2054,3 +2054,73 @@ test("the migration allows a default overlay key the Compose file never uses, in
   });
   expect(migrated.legacyDetected).toBe(true);
 });
+
+for (const reference of ["Z=${PORT}", "Z=$PORT"]) {
+  test(`the migration refuses another env_file with ${reference} when the default overlay changes that key`, async () => {
+    const repo = await writeDefaultOverlayRepo({
+      compose:
+        "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, .env.staging, other.env]\n",
+      base: "PORT=2\n",
+      overlay: "PORT=3\n",
+    });
+    await writeFile(resolve(repo.projectDir, "other.env"), `${reference}\n`);
+    await expectMigrationRefusal({
+      repo,
+      code: "E_CONFIG_INVALID",
+      reason: 'Compose reads "PORT"',
+      hidden: [],
+    });
+  });
+}
+
+test("the migration refuses a Compose file with several documents", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n---\nservices:\n  api:\n    environment:\n      A: fixed\n"
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), `A=${KEPT_VALUE}\n`);
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: "is not a single YAML document",
+    hidden: [KEPT_VALUE],
+  });
+});
+
+for (const key of [
+  "DOCKER_HOST",
+  "BUILDKIT_PROGRESS",
+  "BUILDX_BUILDER",
+  "HTTP_PROXY",
+  "NO_PROXY",
+  "SOURCE_DATE_EPOCH",
+  "HOME",
+  "PATH",
+]) {
+  test(`the migration refuses ${key} in a legacy file, changed or not`, async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `${key}=${KEPT_VALUE}\nA=1\n`
+    );
+    await expectMigrationRefusal({
+      repo,
+      code: "E_CONFIG_INVALID",
+      reason: `the legacy .env files set "${key}"`,
+      hidden: [KEPT_VALUE],
+    });
+  });
+}
+
+test("the migration allows a name that only starts like a tool setting", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    "HOME_PAGE=/x\nPATH_PREFIX=/y\nMY_DOCKER_HOST=z\n"
+  );
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+});

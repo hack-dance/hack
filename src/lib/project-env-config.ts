@@ -5356,26 +5356,81 @@ function composeServiceEnvironmentKeys(
   return isRecord(environment) ? new Set(Object.keys(environment)) : null;
 }
 
-/** Environment Compose and Docker read for themselves, whatever the Compose file says. */
-const COMPOSE_OWN_KEY_PATTERN = /^(?:COMPOSE|DOCKER)_/;
+/** Compose's own settings: it reads these from `.hack/.env`, so only a changed value matters. */
+const COMPOSE_OWN_KEY_PATTERN = /^COMPOSE_/;
+
+/**
+ * Settings the Docker client, build tools or the process itself read from their
+ * environment. Migrated values enter Compose's process environment, where before
+ * they only reached Compose's project environment, so even an unchanged value
+ * could select another daemon or proxy.
+ */
+const COMPOSE_TOOL_KEY_PATTERN =
+  /^(?:DOCKER_|BUILDKIT_|BUILDX_|HTTP_PROXY$|HTTPS_PROXY$|NO_PROXY$|ALL_PROXY$|SOURCE_DATE_EPOCH$|HOME$|PATH$)/;
+
+function assertNoComposeToolKeys(opts: {
+  readonly migratedKeys: ReadonlySet<string>;
+}): void {
+  const toolKeys = [...opts.migratedKeys]
+    .filter((key) => COMPOSE_TOOL_KEY_PATTERN.test(key))
+    .map((key) => JSON.stringify(key))
+    .sort();
+  if (toolKeys.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `the legacy .env files set ${toolKeys.join(", ")}, which Docker, its build tools or the process read from their environment. After the migration these would reach the Docker client as well as the services. Set them for one service with \`hack env set --service --local\` after migrating, or in your shell, and remove them from the legacy file, then retry.`,
+    });
+  }
+}
+
+/**
+ * Text of each non-legacy `env_file`, because Compose expands variables inside
+ * those files too. An absent file adds nothing; an unreadable one was refused
+ * by {@link composeEnvFileKeyConflicts}.
+ */
+async function composeOtherEnvFileText(opts: {
+  readonly projectDir: string;
+  readonly services: Record<string, unknown>;
+}): Promise<string> {
+  const paths = new Set(
+    composeServiceEntries(opts.services).flatMap(([, rawService]) =>
+      readComposeEnvFilePaths({ rawService })
+        .map((configured) => resolve(opts.projectDir, configured))
+        .filter(
+          (candidatePath) =>
+            !isLegacyProjectEnvFilePath({
+              projectDir: opts.projectDir,
+              candidatePath,
+            })
+        )
+    )
+  );
+  const texts: string[] = [];
+  for (const path of paths) {
+    const read = await readOptionalTextFile(path);
+    if (read.kind !== "absent" && read.kind !== "unreadable") {
+      texts.push(read.text);
+    }
+  }
+  return texts.join("\n");
+}
 
 /**
  * Keys the default overlay changes that Compose reads from its own environment:
- * any whose name appears in the Compose file, however it is used (`${KEY}`, a
- * bare `build.args` entry, a secret's `environment:`), and Compose's and Docker's
- * own settings. Compose reads these from `.hack/.env` alone before the migration,
+ * any whose name appears in `searchText` (the Compose file and other `env_file`
+ * text), however it is used (`${KEY}`, a bare `build.args` entry, a secret's
+ * `environment:`), and Compose's own settings. Compose reads these from `.hack/.env` alone before the migration,
  * and from the selected layers after it. Matching the name anywhere can refuse
  * more than it must, which is the safe direction. Key names only, JSON-quoted.
  */
 function composeReferencedOverlayKeys(opts: {
-  readonly parsed: Record<string, unknown> | null;
+  readonly searchText: string;
   readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
   readonly defaultOverlay: string | null;
 }): readonly string[] {
-  if (opts.parsed === null || opts.defaultOverlay === null) {
+  if (opts.defaultOverlay === null) {
     return [];
   }
-  const composeText = JSON.stringify(opts.parsed);
   const changed = legacyOverlayChangedValues({
     overlayValues: opts.legacyValues.get(opts.defaultOverlay) ?? {},
     baseValues: opts.legacyValues.get(null) ?? {},
@@ -5385,7 +5440,9 @@ function composeReferencedOverlayKeys(opts: {
       // Keys match PROJECT_ENV_KEY_PATTERN, so they are safe in a pattern.
       (key) =>
         COMPOSE_OWN_KEY_PATTERN.test(key) ||
-        new RegExp(`(?<![A-Za-z0-9_])${key}(?![A-Za-z0-9_])`).test(composeText)
+        new RegExp(`(?<![A-Za-z0-9_])${key}(?![A-Za-z0-9_])`).test(
+          opts.searchText
+        )
     )
     .map((key) => JSON.stringify(key))
     .sort();
@@ -5491,13 +5548,6 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
   readonly projectDir: string;
   readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
 }): Promise<void> {
-  const parsed = await readComposeFile({
-    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
-  });
-  const services = parsed ? getRecord(parsed, "services") : null;
-  if (!services) {
-    return;
-  }
   const migratedKeys = new Set<string>();
   for (const values of opts.legacyValues.values()) {
     for (const key of Object.keys(values)) {
@@ -5507,15 +5557,26 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
   if (migratedKeys.size === 0) {
     return;
   }
+  assertNoComposeToolKeys({ migratedKeys });
   const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
-  const uncheckable = parsed
-    ? uncheckableComposeEnvInputs({
-        projectDir: opts.projectDir,
-        composeText: (await readTextFile(composeFile)) ?? "",
-        parsed,
-        services,
-      })
-    : [];
+  const composeText = (await readTextFile(composeFile)) ?? "";
+  const parsed = await readComposeFile({ composeFile });
+  if (parsed === null && composeText.trim().length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${PROJECT_COMPOSE_FILENAME} is not a single YAML document this check can read, such as a file with several "---" documents, so the migration cannot tell which values services receive. Merge it into one document, then retry.`,
+    });
+  }
+  const services = parsed ? getRecord(parsed, "services") : null;
+  if (!(parsed && services)) {
+    return;
+  }
+  const uncheckable = uncheckableComposeEnvInputs({
+    projectDir: opts.projectDir,
+    composeText,
+    parsed,
+    services,
+  });
   if (uncheckable.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
@@ -5568,7 +5629,10 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
     projectDir: opts.projectDir,
   });
   const referenced = composeReferencedOverlayKeys({
-    parsed,
+    searchText: `${JSON.stringify(parsed)}\n${await composeOtherEnvFileText({
+      projectDir: opts.projectDir,
+      services,
+    })}`,
     legacyValues: opts.legacyValues,
     defaultOverlay,
   });

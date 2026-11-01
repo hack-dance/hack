@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -8,6 +9,7 @@ import {
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -771,6 +773,8 @@ for (const file of [
     const error = await migrate(repo).catch((caught: unknown) => caught);
 
     expect((error as Error).message).toContain(RESERVED_NAME);
+    expect((error as Error).message).toContain("No env layer was written");
+    expect((error as Error).message).not.toContain("Nothing was written");
     expect((error as Error).message).toContain(JSON.stringify(file));
     expect((error as Error).message).not.toContain("overlay-value");
     expect(await snapshotTree(repo)).toEqual(before);
@@ -808,6 +812,7 @@ test("step 1 refuses a contract scope a layer can't hold, before any write", asy
 
   expect((error as Error).message).toContain(JSON.stringify("Api"));
   expect((error as Error).message).toContain("isn't a valid env scope");
+  expect((error as Error).message).toContain("No env layer was written");
   expect((error as Error).message).not.toContain(DOTENV_VALUE);
   expect(await snapshotTree(repo)).toEqual(before);
 });
@@ -864,4 +869,47 @@ for (const [shape, text] of [
     expect((error as Error).message).not.toContain("only-here");
     expect(await snapshotTree(repo)).toEqual(before);
   });
+}
+
+for (const kind of ["mode 000", "directory", "dangling link"] as const) {
+  test.skipIf(kind === "mode 000" && process.geteuid?.() === 0)(
+    `a hack.env.json that can't be opened (${kind}) refuses, and isn't read as no contract`,
+    async () => {
+      const repo = await createContractRepo({
+        files: { ".env": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+      });
+      const contract = resolve(repo.projectDir, "hack.env.json");
+      if (kind === "mode 000") {
+        await chmod(contract, 0o000);
+      } else {
+        await rm(contract);
+        if (kind === "directory") {
+          await mkdir(contract);
+        } else {
+          await symlink(resolve(repo.root, "contract-that-is-gone"), contract);
+        }
+      }
+      const names = async () => (await readdir(repo.projectDir)).sort();
+      const before = await names();
+
+      const error = await migrateLegacyProjectEnv({
+        projectRoot: repo.projectRoot,
+        projectDir: repo.projectDir,
+        projectName: "contract-shell",
+        serviceNames: ["api", "worker"],
+        materialize: false,
+        migrateUndeclaredDotenv: true,
+      })
+        .catch((caught: unknown) => caught)
+        .finally(async () => {
+          if (kind === "mode 000") {
+            await chmod(contract, 0o600);
+          }
+        });
+
+      expect((error as Error).message).toContain("hack.env.json can't be read");
+      expect((error as Error).message).not.toContain(DOTENV_VALUE);
+      expect(await names()).toEqual(before);
+    }
+  );
 }

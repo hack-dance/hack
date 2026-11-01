@@ -1213,8 +1213,9 @@ With `hack.env.json`, the migration also refuses (`E_CONFIG_INVALID`), writing n
 overlay named `default`, `local` or `<name>.local`, in any case, that sets a value of its own, because
 it would replace the base layer or write a machine-local file, and a contract service that isn't a
 valid env scope when a value would be written for it, because no read could parse that layer. A
-mirrored secret backend's key may already have been created by then. It also refuses, writing nothing,
-a `hack.env.json` it can't read as a contract, and it doesn't quote the file.
+secret backend's key may already have been created by then. The migration also refuses, writing nothing
+itself, a `hack.env.json` it can't open or read as a contract, and it doesn't quote the file. Earlier
+`hack doctor` steps, such as creating `.hack/.gitignore`, can still have run.
 
 With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
 symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a

@@ -1542,3 +1542,46 @@ for (const entry of [
     });
   });
 }
+
+for (const line of [
+  `PORT=3000 # ${KEPT_VALUE}`,
+  `PORT=${KEPT_VALUE}$OTHER`,
+  `PORT="${KEPT_VALUE}\${OTHER}"`,
+]) {
+  test(`the migration refuses a line Compose reads differently: ${line.slice(0, 7)}`, async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+      "services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n"
+    );
+    await writeFile(resolve(repo.projectDir, ".env"), `${line}\n`);
+    await expectMigrationRefusal({
+      repo,
+      code: "E_CONFIG_INVALID",
+      reason: "Compose reads 1 line in .env differently from Hack",
+      hidden: [KEPT_VALUE],
+    });
+  });
+}
+
+test("the migration keeps values Compose and Hack read the same", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    [
+      "# a comment with $ and # in it",
+      `SINGLE='${KEPT_VALUE}$literal # kept'`,
+      `QUOTED="${KEPT_VALUE} # kept"`,
+      `FRAGMENT=${KEPT_VALUE}#kept`,
+      "",
+    ].join("\n")
+  );
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: {
+      SINGLE: `${KEPT_VALUE}$literal # kept`,
+      QUOTED: `${KEPT_VALUE} # kept`,
+      FRAGMENT: `${KEPT_VALUE}#kept`,
+    },
+  });
+});

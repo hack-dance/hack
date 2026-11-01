@@ -5653,6 +5653,30 @@ async function assertIgnoredMigrationLocalLayer(opts: {
   });
 }
 
+const COMPOSE_UNQUOTED_INLINE_COMMENT_PATTERN = /\s#/;
+
+/**
+ * Whether Compose reads this dotenv line differently from {@link parseDotEnv}:
+ * it drops an unquoted inline comment and expands `$` outside single quotes,
+ * while the parser keeps both literally. A migrated value goes through Hack's
+ * generated override, so the service would receive the literal text instead.
+ */
+function hasComposeOnlyDotenvSyntax(line: string): boolean {
+  const separator = line.indexOf("=");
+  if (separator === -1 || line.trimStart().startsWith("#")) {
+    return false;
+  }
+  const value = line.slice(separator + 1).trimStart();
+  if (value.startsWith("'")) {
+    return false;
+  }
+  return (
+    value.includes("$") ||
+    (!value.startsWith('"') &&
+      COMPOSE_UNQUOTED_INLINE_COMMENT_PATTERN.test(value))
+  );
+}
+
 /**
  * Entries of `.hack/.env` (key `null`) and each legacy overlay file. Refuses,
  * before anything is written, when a key cannot be an env layer key; the
@@ -5671,14 +5695,24 @@ async function readValidatedLegacyDotenvFiles(opts: {
   ];
   const legacyValues = new Map<string | null, Record<string, string>>();
   const invalidKeyCounts: string[] = [];
+  const composeSyntaxCounts: string[] = [];
   for (const file of legacyFiles) {
-    const values = await readLegacyDotenvFile({
-      path: resolveEnvFilePath({
-        projectDir: opts.projectDir,
-        envName: file.envName,
-      }),
+    const path = resolveEnvFilePath({
+      projectDir: opts.projectDir,
+      envName: file.envName,
     });
+    const values = await readLegacyDotenvFile({ path });
     legacyValues.set(file.envName, values);
+    const read = await readOptionalTextFile(path);
+    const composeSyntax =
+      read.kind === "absent" || read.kind === "unreadable"
+        ? 0
+        : read.text.split("\n").filter(hasComposeOnlyDotenvSyntax).length;
+    if (composeSyntax > 0) {
+      composeSyntaxCounts.push(
+        `${countLabel({ count: composeSyntax, noun: "line" })} in ${file.label}`
+      );
+    }
     const invalid = Object.keys(values).filter(
       (key) => !PROJECT_ENV_KEY_PATTERN.test(key)
     ).length;
@@ -5692,6 +5726,12 @@ async function readValidatedLegacyDotenvFiles(opts: {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
       reason: `env keys must match ^[A-Z_][A-Z0-9_]*$, but ${invalidKeyCounts.join(", ")} do not (for example a lowercase name or an "export " prefix). The keys are not shown because a malformed line may contain a value. Rename or remove them, then retry.`,
+    });
+  }
+  if (composeSyntaxCounts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose reads ${composeSyntaxCounts.join(", ")} differently from Hack: an unquoted " #" starts a comment and "$" outside single quotes is expanded, so the migrated value would change. Remove the inline comment, or write the value Compose uses in single quotes, then retry. The lines are not shown because they may contain values.`,
     });
   }
   return legacyValues;

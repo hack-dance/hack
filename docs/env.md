@@ -1085,6 +1085,11 @@ files, when:
   `env_file` (`E_CONFIG_INVALID`), for the same reason: that file stays in Compose, but the
   migrated value would override it. The check does not look at the order of the entries,
   or expand variables in an `env_file` path. Remove the key from one of the files, then retry;
+- a line in a legacy file has an unquoted inline comment (`PORT=3000 # dev`) or a `$` outside
+  single quotes (`E_CONFIG_INVALID`). Compose drops the comment and expands the `$`, but the
+  migration would keep them as literal text, so the value would change. The error counts
+  lines per file and never shows them. Remove the comment, or write the value Compose uses
+  in single quotes;
 - `.hack/.env` or a legacy overlay is a symlink to a file outside `.hack`
   (`E_PATH_CONFLICT`), so its values would be copied from elsewhere into this project's
   layers. Replace the link with a regular file in `.hack`, or remove it;

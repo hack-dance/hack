@@ -1835,7 +1835,7 @@ for (const reference of ["${PORT}", "$PORT", "${PORT:-1}"]) {
     await expectMigrationRefusal({
       repo,
       code: "E_CONFIG_INVALID",
-      reason: 'the Compose file interpolates "PORT"',
+      reason: 'Compose reads "PORT"',
       hidden: [],
     });
   });
@@ -1996,8 +1996,61 @@ for (const section of ["secrets", "configs"]) {
     await expectMigrationRefusal({
       repo,
       code: "E_CONFIG_INVALID",
-      reason: 'the Compose file interpolates "PORT"',
+      reason: 'Compose reads "PORT"',
       hidden: [],
     });
   });
 }
+
+for (const [name, block] of [
+  [
+    "a bare build.args list entry",
+    "    build:\n      context: .\n      args: [PORT]\n",
+  ],
+  [
+    "a bare build.args map entry",
+    "    build:\n      context: .\n      args:\n        PORT:\n",
+  ],
+] as const) {
+  test(`the migration refuses ${name} the default overlay changes`, async () => {
+    const repo = await writeDefaultOverlayRepo({
+      compose: `services:\n  api:\n    image: alpine:3.20\n${block}    env_file: [.env, .env.staging]\n`,
+      base: "PORT=2\n",
+      overlay: "PORT=3\n",
+    });
+    await expectMigrationRefusal({
+      repo,
+      code: "E_CONFIG_INVALID",
+      reason: 'Compose reads "PORT"',
+      hidden: [],
+    });
+  });
+}
+
+test("the migration refuses a Compose setting the default overlay changes, even if the file never names it", async () => {
+  const repo = await writeDefaultOverlayRepo({
+    compose:
+      "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, .env.staging]\n",
+    base: "A=1\n",
+    overlay: "A=1\nCOMPOSE_PROFILES=dev\n",
+  });
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: 'Compose reads "COMPOSE_PROFILES"',
+    hidden: [],
+  });
+});
+
+test("the migration allows a default overlay key the Compose file never uses, including as part of a longer name", async () => {
+  const repo = await writeDefaultOverlayRepo({
+    compose:
+      "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, .env.staging]\n    environment:\n      MY_PORT_X: fixed\n",
+    base: "PORT=2\n",
+    overlay: "PORT=3\n",
+  });
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+});

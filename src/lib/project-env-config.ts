@@ -5356,13 +5356,18 @@ function composeServiceEnvironmentKeys(
   return isRecord(environment) ? new Set(Object.keys(environment)) : null;
 }
 
+/** Environment Compose and Docker read for themselves, whatever the Compose file says. */
+const COMPOSE_OWN_KEY_PATTERN = /^(?:COMPOSE|DOCKER)_/;
+
 /**
- * Keys the Compose file interpolates, or a top-level secret or config reads with
- * `environment:`, that the default overlay changes. Compose reads these from
- * `.hack/.env` alone before the migration, and from the selected layers after
- * it. Key names only, JSON-quoted.
+ * Keys the default overlay changes that Compose reads from its own environment:
+ * any whose name appears in the Compose file, however it is used (`${KEY}`, a
+ * bare `build.args` entry, a secret's `environment:`), and Compose's and Docker's
+ * own settings. Compose reads these from `.hack/.env` alone before the migration,
+ * and from the selected layers after it. Matching the name anywhere can refuse
+ * more than it must, which is the safe direction. Key names only, JSON-quoted.
  */
-function composeInterpolatedOverlayKeys(opts: {
+function composeReferencedOverlayKeys(opts: {
   readonly parsed: Record<string, unknown> | null;
   readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
   readonly defaultOverlay: string | null;
@@ -5371,11 +5376,6 @@ function composeInterpolatedOverlayKeys(opts: {
     return [];
   }
   const composeText = JSON.stringify(opts.parsed);
-  const environmentSources = ["secrets", "configs"].flatMap((section) =>
-    Object.values(getRecord(opts.parsed ?? {}, section) ?? {}).map((entry) =>
-      isRecord(entry) ? entry.environment : undefined
-    )
-  );
   const changed = legacyOverlayChangedValues({
     overlayValues: opts.legacyValues.get(opts.defaultOverlay) ?? {},
     baseValues: opts.legacyValues.get(null) ?? {},
@@ -5384,8 +5384,8 @@ function composeInterpolatedOverlayKeys(opts: {
     .filter(
       // Keys match PROJECT_ENV_KEY_PATTERN, so they are safe in a pattern.
       (key) =>
-        environmentSources.includes(key) ||
-        new RegExp(`\\$\\{?${key}(?![A-Z0-9_])`).test(composeText)
+        COMPOSE_OWN_KEY_PATTERN.test(key) ||
+        new RegExp(`(?<![A-Za-z0-9_])${key}(?![A-Za-z0-9_])`).test(composeText)
     )
     .map((key) => JSON.stringify(key))
     .sort();
@@ -5519,7 +5519,7 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
   if (uncheckable.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `Compose uses ${uncheckable.join(", ")}, so the migration cannot tell which values services receive from the legacy .env files. Write those services' env_file entries directly in ${PROJECT_COMPOSE_FILENAME}, each file once and with no format, then retry.`,
+      reason: `Compose uses ${uncheckable.join(", ")}, so the migration cannot tell which values services receive from the legacy .env files. Write those services' env_file entries directly in ${PROJECT_COMPOSE_FILENAME}, each file once, with a plain path and no format, and remove any !reset or !override text (a comment or value containing it also matches), then retry.`,
     });
   }
   const conflicts: string[] = [];
@@ -5567,15 +5567,15 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
   const defaultOverlay = await readProjectDefaultEnvConfig({
     projectDir: opts.projectDir,
   });
-  const interpolated = composeInterpolatedOverlayKeys({
+  const referenced = composeReferencedOverlayKeys({
     parsed,
     legacyValues: opts.legacyValues,
     defaultOverlay,
   });
-  if (interpolated.length > 0) {
+  if (referenced.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `the Compose file interpolates ${interpolated.join(", ")}, which the default overlay sets differently from .hack/.env. Compose takes these from .hack/.env today, but after the migration the overlay value would apply. Make the two files agree or stop interpolating the key, then retry.`,
+      reason: `Compose reads ${referenced.join(", ")}, which the default overlay sets differently from .hack/.env. Compose takes these from .hack/.env today, but after the migration the overlay value would apply. Make the two files agree or stop using the key in Compose, then retry.`,
     });
   }
   assertComposeServicesKeepLegacyValues({

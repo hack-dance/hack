@@ -1099,10 +1099,11 @@ files, when:
   layers (`E_CONFIG_INVALID`), such as `env_file: [.env.staging, .env]` with `.env.staging` as the
   default overlay. Compose lets the last file win, but the default overlay always wins over
   `.hack/.env` in env layers. List `.env` first, or make the files agree;
-- the Compose file interpolates a key, or a top-level secret or config reads it with
-  `environment:`, and the default overlay sets it differently from `.hack/.env`
-  (`E_CONFIG_INVALID`). Compose takes it from `.hack/.env` today, but the overlay value would
-  apply after the migration. Make the two files agree or stop interpolating the key;
+- the default overlay sets a key differently from `.hack/.env`, and Compose reads that key: its
+  name appears anywhere in the Compose file (`${KEY}`, a bare `build.args` entry, a secret's
+  `environment:`), or it is a `COMPOSE_*` or `DOCKER_*` setting (`E_CONFIG_INVALID`). Compose takes
+  it from `.hack/.env` today, but the overlay value would apply after the migration. Make the two
+  files agree or stop using the key in Compose;
 - `.hack/.env` or a legacy overlay is a symlink to a file outside `.hack`
   (`E_PATH_CONFLICT`), so its values would be copied from elsewhere into this project's
   layers. Replace the link with a regular file in `.hack`, or remove it;

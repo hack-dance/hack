@@ -6,7 +6,7 @@ project toolchain and task-time secret delivery before installing tools.
 
 ## Select an applicable distribution
 
-The published next.5 native bundle targets Apple Silicon macOS. It is not a Linux
+The published next.6 native bundle targets Apple Silicon macOS. It is not a Linux
 cloud-agent installer. A provider's Ubuntu VM cannot run that archive. Select the
 v4 documentation for the published Linux portable path, or qualify a separately
 identified distribution before writing a different installation recipe. A source

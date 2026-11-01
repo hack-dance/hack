@@ -231,8 +231,8 @@ A `null` result means no modern env configuration exists; it does not inspect or
 resolve legacy `.env` or secret-store values. Callers retain responsibility for
 their existing legacy fallback. Selected managed-env layer reads distinguish a
 missing path from a failed read or a dangling symlink. Only regular files
-(including readable symlinks to regular files) are read; invalid or unreadable
-layers throw a value-free error without YAML excerpts or a nested cause. Project configuration
+(including readable symlinks to regular files inside the real project root) are read;
+invalid or unreadable layers throw a value-free error without YAML excerpts or a nested cause. Project configuration
 selection keeps its existing semantics. Metadata inspection never writes key
 files or materializes `.env`.
 
@@ -609,9 +609,23 @@ new layer, so `.hack/.gitignore` ignores `.hack.env*.tmp`, and you can delete it
 does not remove it on the next write, because another write may still be using it. The
 rename has these effects:
 
-- a symlinked env file keeps its link; the new contents land at the file the link points
-  to, and the staging file is created next to that file
-- a symlink whose target does not exist is replaced by a regular file
+- a symlinked YAML env layer is allowed only when its fully resolved path stays inside
+  the project's real root. Relative links and link chains are resolved at each hop; a
+  root behind a symlink works too. An allowed link keeps its link, the write lands at
+  its target, and the staging file is created next to that target
+- outside targets (including dangling outside links), sibling-prefix escapes and link
+  loops are refused with a closed, value-free error before reading values from stdin
+  or writing decrypted or hydrated output. This applies to the base, tracked overlays
+  and local layers, including init scaffold writes; mutation discovery checks all named
+  YAML layers, including case-variant names on case-insensitive filesystems.
+  `hack doctor --fix` reports an error for a `.hack` linked outside the project
+  and leaves the link and outside files in place
+- an in-project symlink whose target does not exist keeps the existing behavior: the
+  link is replaced by a regular file. Strict planning and hydrate reads still refuse
+  dangling links
+- the writer rechecks both the layer and its resolved destination before staging and
+  commit. These path checks narrow concurrent-swap races; they are not an atomic
+  filesystem fence against a directory changed after the last check
 - a hard link is broken: the env file gets a new inode, and any other name for the old
   file keeps the previous contents
 - the directory must be writable, even when the env file itself is writable; if it is

@@ -125,9 +125,9 @@ console.log(
 );
 
 /** Keep retiring instruction management out of the recommended v5 corpus. */
-const branchRevision = "af71a8407d14a0dd27f7073a43010fff3a4bd219";
+const branchRevision = "44aaf5156426dfcbb1c8a189b8e20531e5b95613";
 const branchSlug = "guides/agent-setup-v5-branch";
-const branchLabel = "Unreleased PR531 v5 branch";
+const branchLabel = "Released next.6";
 const branchCommands = [
   '"$V5_CLI" setup codex --path /absolute/project',
   '"$V5_CLI" mcp install --codex --scope project --path /absolute/project',
@@ -223,14 +223,14 @@ const integrations = await Bun.file(resolve(v5Root, "integrations.md")).text();
 for (const fact of [
   "codex plugin marketplace add /absolute/path/to/reviewed-checkout",
   "Registration does not install or load the plugin",
-  "SessionStart/PreCompact",
-  "has not shipped in this pin",
+  "no longer require automatic guidance maintenance",
+  "Shipped in next.6",
   "hack-mcp",
   "--bundle",
   "--cli",
   "--runtime-directory",
   "actual preview host",
-  "/tree/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/plugins/hack/skills",
+  "/tree/44aaf5156426dfcbb1c8a189b8e20531e5b95613/plugins/hack/skills",
 ]) {
   if (!integrations.includes(fact)) {
     throw new Error(`Agent interface source boundary lost: ${fact}`);
@@ -333,7 +333,7 @@ if (
     branchIndex.includes(`— ${branchLabel}; source ${branchRevision}`)
   )
 ) {
-  throw new Error("Unreleased branch provenance missing from publication");
+  throw new Error("Released opt-in guide provenance missing from publication");
 }
 
 assertExplicitAgentContent(
@@ -446,3 +446,118 @@ for (const version of ["v4", "v5"] as const) {
 console.log(
   "Search index/anchor acceptance and cross-version negative controls passed."
 );
+
+// A release bump must update the install contract, navigation and both exports.
+const releasedRevision = "44aaf5156426dfcbb1c8a189b8e20531e5b95613";
+if (
+  versions.v5.revision !== releasedRevision ||
+  versions.v5.label !== "v5 (next.6)"
+) {
+  throw new Error("Current v5 must identify released next.6");
+}
+const install = await Bun.file(resolve(v5Root, "install.md")).text();
+const bootstrapUrl =
+  "https://github.com/hack-dance/hack/releases/download/v5.0.0-next.6/hack-next-install.sh";
+const quickInstall = `curl --fail --location --proto '=https' --tlsv1.2 ${bootstrapUrl} | sh`;
+const firstInstallCommand = /```sh\n([\s\S]*?)\n```/.exec(install)?.[1];
+if (
+  firstInstallCommand !== quickInstall ||
+  !install.includes("### Advanced: download and inspect") ||
+  !install.includes(`  ${bootstrapUrl} \\\n  --output hack-next-install.sh`)
+) {
+  throw new Error(
+    "Install must lead with the pinned HTTPS one-liner and retain advanced inspection"
+  );
+}
+for (const fact of [
+  "releases/download/v5.0.0-next.6/hack-next-install.sh",
+  "sh hack-next-install.sh",
+  "Apple Silicon macOS only",
+  "native DNS helper",
+  "Cross-version upgrade and rollback",
+  "initialized-data preservation",
+  "installed-client loading remain open",
+]) {
+  if (!install.includes(fact)) {
+    throw new Error(`next.6 installation boundary missing: ${fact}`);
+  }
+}
+if (/python3 .*install|install-prerelease\.py/.test(install)) {
+  throw new Error("Historical Python installer promoted as current");
+}
+for (const file of [
+  "site/public/llms.txt",
+  "site/public/v5/llms.txt",
+  "site/public/llms-full.txt",
+  "site/public/v5/llms-full.txt",
+]) {
+  const text = await Bun.file(resolve(repositoryRoot, file)).text();
+  if (
+    !text.includes(releasedRevision) ||
+    /Unreleased PR531|reviewed-af71-build/.test(text)
+  ) {
+    throw new Error(`Stale next.6 release provenance: ${file}`);
+  }
+}
+const navigation = await Bun.file(resolve(v5Root, "meta.json")).json();
+if (navigation.title !== versions.v5.label) {
+  throw new Error("Stale v5 navigation label");
+}
+console.log(
+  "next.6 installer, navigation and release-export contracts passed."
+);
+
+// The released source guide still contains Python-era procedures: never endorse
+// it as a current recipe through a prose link from the curated installation path.
+for (const page of [
+  "guides/candidate-install.md",
+  "guides/native-candidate.md",
+]) {
+  const text = await Bun.file(resolve(v5Root, page)).text();
+  if (
+    text.includes(`blob/${releasedRevision}/docs/guides/candidate-install.md`)
+  ) {
+    throw new Error(`Obsolete source installation recipe endorsed: ${page}`);
+  }
+  if (!text.includes("/docs/v5/install")) {
+    throw new Error(`Current installer route missing: ${page}`);
+  }
+}
+console.log("Current installer links avoid obsolete source procedures.");
+
+function assertNoObsoleteInstallRecipe(text: string): void {
+  if (
+    /(?:python3?\s+[^\n]*(?:install-prerelease\.py|hack-next-install\.py|manager\.py)|--version\s+5\.0\.0-next\.1(?:\s|$))/m.test(
+      text
+    )
+  ) {
+    throw new Error("Obsolete Python/next.1 installation recipe promoted");
+  }
+}
+for (const text of [
+  "python3 hack-next-install.py install --version 5.0.0-next.1",
+  'python3 "$HOME/.hack-next/manager.py" status',
+  "sh hack-next-install.sh --version 5.0.0-next.1",
+]) {
+  let rejected = false;
+  try {
+    assertNoObsoleteInstallRecipe(text);
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) {
+    throw new Error("Obsolete installer negative control was accepted");
+  }
+}
+assertNoObsoleteInstallRecipe(
+  "The next.1 Python recipe is historical; use the next.6 shell bootstrap."
+);
+for (const file of [
+  "site/public/v5/llms-full.txt",
+  "site/public/llms-full.txt",
+]) {
+  assertNoObsoleteInstallRecipe(
+    await Bun.file(resolve(repositoryRoot, file)).text()
+  );
+}
+console.log("Python/next.1 recipe negative controls and full exports passed.");

@@ -214,7 +214,7 @@ async function createProjectWithStaleDaemonPid(): Promise<string> {
   await mkdir(resolve(projectRoot, ".hack"), { recursive: true });
   await writeFile(
     resolve(projectRoot, ".hack", "docker-compose.yml"),
-    "services:\n  api:\n    image: alpine:3.19\n"
+    "services:\n  api:\n    image: alpine:3.19\n    env_file:\n      - path: .env\n        required: false\n"
   );
 
   // Stale daemon pid: a pid that cannot be running (very large, unlikely to
@@ -692,10 +692,14 @@ test("doctor --migrate-env-config treats a symlinked overlay as env layers and n
   }
 }, 30_000);
 
-test("doctor --migrate-env-config names the keys every service gains, never their values (HACK-1370)", async () => {
+test("doctor --migrate-env-config refuses a .env no service lists, and keeps it (HACK-1370)", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();
   const projectDir = resolve(projectRoot, ".hack");
   const legacy = ["synthetic", "legacy", "4c2e"].join("-");
+  await writeFile(
+    resolve(projectDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.19\n"
+  );
   await writeFile(resolve(projectDir, ".env"), `OWNED=${legacy}\n`);
 
   const { runCli } = await import("../src/cli/run.ts");
@@ -706,11 +710,11 @@ test("doctor --migrate-env-config names the keys every service gains, never thei
     "--path",
     projectRoot,
   ]);
-  expect(code).toBe(0);
-  const notes = noteCalls.join("\n");
-  expect(notes).toContain("once that env is selected: OWNED.");
-  expect(notes).toContain("not for a key your Compose file interpolates");
-  expect(notes).not.toContain(legacy);
+  expect(code).not.toBe(0);
+  expect(await readFile(resolve(projectDir, ".env"), "utf8")).toContain(legacy);
+  expect(
+    await lstat(resolve(projectDir, "hack.env.local.yaml")).catch(() => null)
+  ).toBeNull();
 }, 30_000);
 
 test("doctor --migrate-env-config moves a checkout's own .env after a teammate's migration landed (HACK-1370)", async () => {

@@ -4941,8 +4941,6 @@ export type LegacyProjectEnvMigration = {
   readonly cleanupCandidates: readonly string[];
   readonly blockedCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
-  /** Keys every service receives once their env is selected, from files no service listed. Names only. */
-  readonly keysNewToEveryService?: readonly string[];
 };
 
 /**
@@ -5709,21 +5707,19 @@ function composeServiceLegacyEnvNames(opts: {
 /**
  * Before the migration a legacy dotenv file listed in `env_file` reached only
  * the services that list it; after it, its values are global layer values that
- * Hack applies to every service. When any service lists a legacy file, returns
- * refusal labels (file, service and key names only) for each file with values
- * to migrate that only some services list, for a default overlay some service
- * does not list, and for each service that does not list a file setting a base
- * key.
+ * Hack applies to every service, including third-party images. So each service
+ * must list each file with values to migrate, which is also how a developer
+ * consents to that exposure. Returns refusal labels (file, service and key names
+ * only) for the services that don't.
  *
- * A project where no service lists a legacy file has no `env_file` boundary to
- * compare, and its values may be needed for interpolation, so it is not refused
- * here; {@link legacyKeysNewToEveryService} reports what those services gain.
+ * This includes a file no service lists, whose values today reach only Compose
+ * interpolation: migrating it would put credentials in containers that never had
+ * them, and a warning afterwards wouldn't prevent that.
  */
 function composeServicesMissingLegacyDotenv(opts: {
   readonly projectDir: string;
   readonly services: Record<string, unknown>;
   readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
-  readonly defaultOverlay: string | null;
 }): string[] {
   const baseValues = opts.legacyValues.get(null) ?? {};
   const services = composeServiceEntries(opts.services).map(
@@ -5736,9 +5732,6 @@ function composeServicesMissingLegacyDotenv(opts: {
       }),
     })
   );
-  if (services.every((service) => service.listed.length === 0)) {
-    return [];
-  }
   const labels: string[] = [];
   for (const [envName, values] of opts.legacyValues) {
     const migrated =
@@ -5752,14 +5745,7 @@ function composeServicesMissingLegacyDotenv(opts: {
       .filter((service) => !service.listed.includes(envName))
       .map((service) => service.label)
       .sort();
-    // Every launch selects the default overlay, so its values reach every
-    // service even when no service lists it.
-    const reachesEveryLaunch =
-      envName !== null && envName === opts.defaultOverlay;
-    if (
-      missing.length > 0 &&
-      (missing.length < services.length || reachesEveryLaunch)
-    ) {
+    if (missing.length > 0) {
       labels.push(
         `${missing.join(", ")} ${missing.length === 1 ? "does" : "do"} not list ${JSON.stringify(basename(resolveEnvFilePath({ projectDir: opts.projectDir, envName })))} in env_file`
       );
@@ -5798,7 +5784,7 @@ function assertComposeServicesKeepLegacyValues(opts: {
   if (unlisted.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `${unlisted.join("; ")}. Migrated values are global and reach every service, so those services would receive values they never had. List the file in env_file for those services if they may have its values, or move the values out of it and set them with \`hack env set --service\` after migrating, then retry.`,
+      reason: `${unlisted.join("; ")}. Migrated values are global and reach every service, so those services would receive values they never had, including a value that today only feeds Compose interpolation. List the file in env_file for each service that may have its values, or move the values out of it and set them with \`hack env set --service\` after migrating, then retry.`,
     });
   }
   const orderConflicts = composeLegacyEnvFileOrderConflicts(opts);
@@ -5850,52 +5836,6 @@ function composeLegacyEnvFileOrderConflicts(opts: {
     }
   }
   return conflicts.sort();
-}
-
-/**
- * Migrated keys from legacy files no service lists in `env_file`, for the
- * migration to name: they reach every service once their env is selected.
- * Files a service lists are covered by {@link composeServicesMissingLegacyDotenv}.
- */
-async function legacyKeysNewToEveryService(opts: {
-  readonly projectDir: string;
-  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
-}): Promise<readonly string[]> {
-  const parsed = await readComposeFile({
-    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
-  });
-  const services = parsed ? getRecord(parsed, "services") : null;
-  if (!services) {
-    return [];
-  }
-  const entries = composeServiceEntries(services);
-  if (entries.length === 0) {
-    return [];
-  }
-  const listed = new Set(
-    entries.flatMap(([, rawService]) =>
-      composeServiceLegacyEnvNames({
-        projectDir: opts.projectDir,
-        rawService,
-        legacyValues: opts.legacyValues,
-      })
-    )
-  );
-  const baseValues = opts.legacyValues.get(null) ?? {};
-  const keys = new Set<string>();
-  for (const [envName, values] of opts.legacyValues) {
-    if (listed.has(envName)) {
-      continue;
-    }
-    const migrated =
-      envName === null
-        ? values
-        : legacyOverlayChangedValues({ overlayValues: values, baseValues });
-    for (const key of Object.keys(migrated)) {
-      keys.add(key);
-    }
-  }
-  return [...keys].sort((left, right) => left.localeCompare(right));
 }
 
 /**
@@ -6355,6 +6295,48 @@ async function readValidatedLegacyDotenvFiles(opts: {
 }
 
 /**
+ * Refuses when a migrated base value would replace what a tracked overlay
+ * delivers for a key its legacy overlay file doesn't set. The local base outranks
+ * tracked overlays, so that env would silently change value and stop receiving
+ * later team changes to the key. Names keys and overlays, never values.
+ */
+async function assertBaseDoesNotOutrankTrackedOverlays(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly baseToMigrate: Record<string, string>;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): Promise<void> {
+  const conflicts: string[] = [];
+  for (const overlayName of await listProjectEnvOverlayNames({
+    projectDir: opts.projectDir,
+  })) {
+    const delivered = await deliveredLayerValues({
+      ...opts,
+      envName: overlayName,
+    });
+    const legacyOverlay = opts.legacyValues.get(overlayName) ?? {};
+    for (const [key, value] of Object.entries(opts.baseToMigrate)) {
+      if (
+        key in delivered &&
+        delivered[key] !== value &&
+        !(key in legacyOverlay)
+      ) {
+        conflicts.push(
+          `${JSON.stringify(key)} for ${JSON.stringify(overlayName)}`
+        );
+      }
+    }
+  }
+  if (conflicts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `.hack/.env sets ${conflicts.sort().join(", ")}, and its migrated value would replace what that overlay's env layers deliver. Set the value you want in that legacy overlay file, or remove the key from .hack/.env, then retry.`,
+    });
+  }
+}
+
+/**
  * An existing machine-local layer the migration may add to, or null when absent.
  * Refuses one it can't read or parse, or that isn't a regular file: `.config`
  * would be an empty default, and treating it as absent or empty loses values.
@@ -6692,10 +6674,7 @@ async function migrateUndeclaredLegacyDotenv(opts: {
   }
   for (const overlayName of overlayNames) {
     const changedValues = legacyValuesNotDelivered({
-      values: legacyOverlayChangedValues({
-        overlayValues: legacyValues.get(overlayName) ?? {},
-        baseValues,
-      }),
+      values: legacyValues.get(overlayName) ?? {},
       // The local base about to be written outranks a tracked overlay, so compare
       // with the layers as they will be, not as they are.
       delivered: {
@@ -6729,6 +6708,11 @@ async function migrateUndeclaredLegacyDotenv(opts: {
   }
 
   // Before anything is written, so these refusals leave the checkout unchanged.
+  await assertBaseDoesNotOutrankTrackedOverlays({
+    ...opts,
+    baseToMigrate,
+    legacyValues,
+  });
   await assertLocalOverlaysAgreeWithLegacy({
     projectDir: opts.projectDir,
     overlayNames,
@@ -6782,10 +6766,6 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     });
   }
 
-  const keysNewToEveryService = await legacyKeysNewToEveryService({
-    projectDir: opts.projectDir,
-    legacyValues,
-  });
   const composeEnvFileReferences = await inspectLegacyComposeEnvFileReferences({
     composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
     projectDir: opts.projectDir,
@@ -6818,7 +6798,6 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     cleanupCandidates: allowedCleanup,
     blockedCleanupCandidates: blockedCleanup,
     composeEnvFileReferences,
-    keysNewToEveryService,
   };
 }
 

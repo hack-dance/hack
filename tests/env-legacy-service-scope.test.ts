@@ -76,6 +76,27 @@ type Repo = {
   readonly storePath: string;
 };
 
+/** Every service lists the base file, which is how a project accepts global delivery. */
+const LISTED_COMPOSE =
+  "services:\n  api:\n    image: alpine:3.20\n    env_file:\n      - path: .env\n        required: false\n";
+
+/** Selects staging on every launch and lists it, so its values can migrate. */
+async function useStagingAsDefaultOverlay(repo: Repo): Promise<void> {
+  const configPath = resolve(repo.projectDir, PROJECT_CONFIG_FILENAME);
+  const config = JSON.parse(await readFile(configPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  await writeFile(
+    configPath,
+    `${JSON.stringify({ ...config, env: { defaultOverlay: "staging" } })}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n    env_file:\n      - path: .env\n        required: false\n      - path: .env.staging\n        required: false\n"
+  );
+}
+
 async function createLegacyRepo(): Promise<Repo> {
   const root = await mkdtemp(join(tmpdir(), "hack-env-legacy-scope-"));
   tempDirs.add(root);
@@ -85,7 +106,7 @@ async function createLegacyRepo(): Promise<Repo> {
   await mkdir(projectDir, { recursive: true });
   await writeFile(
     resolve(projectDir, PROJECT_COMPOSE_FILENAME),
-    "services:\n  api:\n    image: alpine:3.20\n"
+    LISTED_COMPOSE
   );
   await writeFile(
     resolve(projectDir, PROJECT_CONFIG_FILENAME),
@@ -547,6 +568,7 @@ async function serviceScopedSet(repo: Repo): Promise<CliRun> {
 
 test("the migration the refusal names converts a project with only .hack/.env, and a service-scoped set then works", async () => {
   const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
   await writeFile(
     resolve(repo.projectDir, ".env"),
     `KEPT_SETTING=${KEPT_VALUE}\nSHARED_SETTING=${BASE_ONLY_VALUE}\n`
@@ -603,11 +625,12 @@ test("the migration the refusal names converts a project with only .hack/.env, a
   // and its secret backend store are left alone and never offered for cleanup.
   expect(migrated.updatedProjectConfig).toBe(false);
   expect(await readFile(configPath, "utf8")).toBe(configBefore);
-  expect(migrated.cleanupCandidates).toEqual([
+  // Compose still lists these, so they wait for the Compose repair before cleanup.
+  expect(migrated.blockedCleanupCandidates).toEqual([
     resolve(repo.projectDir, ".env"),
     resolve(repo.projectDir, ".env.staging"),
   ]);
-  expect(migrated.blockedCleanupCandidates).toEqual([]);
+  expect(migrated.cleanupCandidates).toEqual([]);
 
   // The refusal no longer applies: the set lands in the api scope.
   const run = await serviceScopedSet(repo);
@@ -651,6 +674,7 @@ async function git(opts: {
 
 test("the migration keeps secret-shaped values from the gitignored .hack/.env out of every file git would commit", async () => {
   const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
   await git({ repo, args: ["init", "-q"] });
   await writeFile(
     resolve(repo.projectDir, ".env"),
@@ -1025,6 +1049,7 @@ test("the migration refuses a legacy .env.<name> whose name is not an overlay na
 
 test("the migration leaves template and backup copies alone and never offers a git-tracked legacy file for cleanup", async () => {
   const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
   await git({ repo, args: ["init", "-q"] });
   await writeFile(
     resolve(repo.projectDir, ".env"),
@@ -1049,7 +1074,8 @@ test("the migration leaves template and backup copies alone and never offers a g
   expect(await readLayerValues(repo, "hack.env.staging.local.yaml")).toEqual({
     global: { KEPT_SETTING: STAGING_VALUE },
   });
-  expect(migrated.cleanupCandidates).toEqual([
+  // Compose still lists these, so they wait for the Compose repair before cleanup.
+  expect(migrated.blockedCleanupCandidates).toEqual([
     resolve(repo.projectDir, ".env"),
   ]);
   for (const [name, text] of Object.entries(copies)) {
@@ -1119,6 +1145,7 @@ test.skipIf(RUNS_AS_ROOT)(
 
 test("the migration creates machine-local layers as private 0600 files", async () => {
   const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
   await writeFile(
     resolve(repo.projectDir, ".env"),
     `KEPT_SETTING=${KEPT_VALUE}\n`
@@ -1141,6 +1168,7 @@ test("the migration creates machine-local layers as private 0600 files", async (
 
 test("the migration carries a symlinked legacy overlay's values and refuses one it cannot read", async () => {
   const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
   await writeFile(
     resolve(repo.projectDir, ".env"),
     `KEPT_SETTING=${KEPT_VALUE}\n`
@@ -1161,7 +1189,8 @@ test("the migration carries a symlinked legacy overlay's values and refuses one 
       "utf8"
     )
   ).toContain(`${KEPT_VALUE}-linked`);
-  expect(migrated.cleanupCandidates).toContain(link);
+  // Compose still lists it, so it waits for the Compose repair before cleanup.
+  expect(migrated.blockedCleanupCandidates).toContain(link);
   expect(await readFile(target, "utf8")).toBe(targetText);
 
   for (const place of [
@@ -1209,7 +1238,7 @@ test("the migration refuses when Compose uses an overlay a launch would not sele
   const compose = resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME);
   await writeFile(
     compose,
-    "services:\n  api:\n    image: alpine:3.20\n    env_file: .env.staging\n"
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, .env.staging]\n"
   );
   await writeFile(resolve(repo.projectDir, ".env"), "SHARED=base\n");
   await writeFile(
@@ -1249,7 +1278,7 @@ test("the migration accepts a Compose overlay that adds nothing to the base", as
   const repo = await createLegacyRepo();
   await writeFile(
     resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
-    "services:\n  api:\n    image: alpine:3.20\n    env_file: .env.staging\n"
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, .env.staging]\n"
   );
   await writeFile(
     resolve(repo.projectDir, ".env"),
@@ -1490,23 +1519,25 @@ test("the migration refuses a legacy overlay only some services list, and accept
   expect(migrated.legacyDetected).toBe(true);
 });
 
-test("the migration goes ahead when no Compose service lists the legacy file", async () => {
+test("the migration refuses a legacy file no service lists, whose values only feed Compose interpolation", async () => {
   const repo = await createLegacyRepo();
   await writeFile(
     resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
-    "services:\n  api:\n    image: alpine:3.20\n  worker:\n    image: alpine:3.20\n"
+    "services:\n  db:\n    image: alpine:3.20\n    command: serve --password ${KEPT_SETTING}\n  third_party:\n    image: alpine:3.20\n"
   );
   await writeFile(
     resolve(repo.projectDir, ".env"),
     `KEPT_SETTING=${KEPT_VALUE}\n`
   );
-  const migrated = await migrateLegacyRepo(repo, {
-    migrateUndeclaredDotenv: true,
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: '"db", "third_party" do not list ".env" in env_file',
+    hidden: [KEPT_VALUE],
   });
-  expect(migrated.legacyDetected).toBe(true);
-  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
-    global: { KEPT_SETTING: KEPT_VALUE },
-  });
+  expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toContain(
+    KEPT_VALUE
+  );
 });
 
 for (const entry of [
@@ -1668,20 +1699,7 @@ for (const [name, compose, reason] of UNCHECKABLE_COMPOSE) {
   });
 }
 
-test("the migration names the keys every service gains when no service lists the legacy file", async () => {
-  const repo = await createLegacyRepo();
-  await writeFile(
-    resolve(repo.projectDir, ".env"),
-    `KEPT_SETTING=${KEPT_VALUE}\nOTHER=1\n`
-  );
-  const migrated = await migrateLegacyRepo(repo, {
-    migrateUndeclaredDotenv: true,
-  });
-  expect(migrated.keysNewToEveryService).toEqual(["KEPT_SETTING", "OTHER"]);
-  expect(JSON.stringify(migrated)).not.toContain(KEPT_VALUE);
-});
-
-test("the migration reports no new keys when every service lists the legacy file", async () => {
+test("the migration accepts every path spelling of a listed legacy file", async () => {
   const repo = await createLegacyRepo();
   await writeFile(
     resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
@@ -1694,7 +1712,7 @@ test("the migration reports no new keys when every service lists the legacy file
   const migrated = await migrateLegacyRepo(repo, {
     migrateUndeclaredDotenv: true,
   });
-  expect(migrated.keysNewToEveryService).toEqual([]);
+  expect(migrated.legacyDetected).toBe(true);
 });
 
 for (const [name, link, config] of [
@@ -1811,21 +1829,34 @@ test("the migration refuses a default overlay no service lists when a service li
   });
 });
 
-test("the migration names an overlay's keys when no service lists that non-default overlay", async () => {
+test("the migration refuses a non-default overlay with its own values that no service lists", async () => {
   const repo = await createLegacyRepo();
-  await writeFile(
-    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
-    "services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n"
-  );
   await writeFile(resolve(repo.projectDir, ".env"), "A=1\n");
   await writeFile(
     resolve(repo.projectDir, ".env.staging"),
     `NEW=${KEPT_VALUE}\n`
   );
-  const migrated = await migrateLegacyRepo(repo, {
-    migrateUndeclaredDotenv: true,
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: '"api" does not list ".env.staging" in env_file',
+    hidden: [KEPT_VALUE],
   });
-  expect(migrated.keysNewToEveryService).toEqual(["NEW"]);
+});
+
+test("a checkout whose Compose was already repaired refuses rather than widening its values", async () => {
+  const repo = await writeTeammateCheckout();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n  third_party:\n    image: alpine:3.20\n"
+  );
+  expect((await unmigratedIn(repo)).keys).toEqual(["KEPT_SETTING"]);
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: 'do not list ".env" in env_file',
+    hidden: [KEPT_VALUE],
+  });
 });
 
 for (const reference of ["${PORT}", "$PORT", "${PORT:-1}"]) {
@@ -2256,10 +2287,7 @@ test("the migration doesn't copy a value the tracked layers already deliver", as
 
 test("an overlay-only checkout is reported, and migrates", async () => {
   const repo = await createLegacyRepo();
-  await writeFile(
-    resolve(repo.projectDir, PROJECT_CONFIG_FILENAME),
-    `${JSON.stringify({ name: "env-legacy-scope", dev_host: "env-legacy-scope.hack", env: { defaultOverlay: "staging" } })}\n`
-  );
+  await useStagingAsDefaultOverlay(repo);
   await writeFile(
     resolve(repo.projectDir, "hack.env.default.yaml"),
     LAYER_EMPTY
@@ -2427,6 +2455,7 @@ for (const [name, layer] of [
 
 test("the migration refuses a local overlay that disagrees with its legacy overlay, even when that entry equals the base", async () => {
   const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
   await writeFile(
     resolve(repo.projectDir, "hack.env.default.yaml"),
     LAYER_EMPTY
@@ -2472,6 +2501,7 @@ test("adding migrated values to a readable local layer makes it private, and kee
 
 test("the migration refuses an unreadable local layer, so no value is lost and .env survives", async () => {
   const repo = await writeTeammateCheckout();
+  await useStagingAsDefaultOverlay(repo);
   await writeFile(resolve(repo.projectDir, ".env.staging"), "OVERLAY_ONLY=2\n");
   const path = resolve(repo.projectDir, "hack.env.local.yaml");
   await writeFile(path, LAYER_EMPTY);
@@ -2499,6 +2529,7 @@ test("the migration refuses an unreadable local layer, so no value is lost and .
 
 test("the migration refuses an unreadable local overlay that its legacy overlay could disagree with", async () => {
   const repo = await writeTeammateCheckout();
+  await useStagingAsDefaultOverlay(repo);
   await writeFile(
     resolve(repo.projectDir, ".env.staging"),
     `KEPT_SETTING=${KEPT_VALUE}\n`
@@ -2627,6 +2658,7 @@ const TRACKED_STAGING = LAYER_EMPTY.replace(
 
 test("the migration keeps an overlay value the tracked overlay delivers today, when the new local base would outrank it", async () => {
   const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
   await writeFile(
     resolve(repo.projectDir, "hack.env.default.yaml"),
     LAYER_EMPTY
@@ -2653,6 +2685,7 @@ test("the migration keeps an overlay value the tracked overlay delivers today, w
 
 test("the migration accepts a local overlay already holding the value the overlay file sets", async () => {
   const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
   await writeFile(
     resolve(repo.projectDir, "hack.env.default.yaml"),
     LAYER_EMPTY
@@ -2670,5 +2703,42 @@ test("the migration accepts a local overlay already holding the value the overla
   expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
     global: { PORT: "legacy" },
   });
+  expect((await unmigratedIn(repo)).keys).toEqual([]);
+});
+
+test("the migration refuses a base value that would replace a tracked overlay's value its legacy overlay doesn't set", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+    TRACKED_STAGING
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), `PORT=${KEPT_VALUE}\n`);
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: '.hack/.env sets "PORT" for "staging"',
+    hidden: [KEPT_VALUE],
+  });
+  expect(await stagingValue(repo)).toBe("stage");
+});
+
+test("an overlay entry equal to a base the tracked default delivers is migrated, so the key doesn't stay reported", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY.replace("global: {}", "global:\n    PORT: legacy")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+    TRACKED_STAGING
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), "PORT=legacy\n");
+  await writeFile(resolve(repo.projectDir, ".env.staging"), "PORT=legacy\n");
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect(await stagingValue(repo)).toBe("legacy");
   expect((await unmigratedIn(repo)).keys).toEqual([]);
 });

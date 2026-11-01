@@ -3700,12 +3700,9 @@ function buildEnvMigrationNote(opts: {
   if (migrated.updatedProjectConfig) {
     notes.push("Updated .hack/hack.config.json for the modern env format.");
   }
-  const newKeys = migrated.keysNewToEveryService ?? [];
-  if (newKeys.length > 0) {
-    notes.push(
-      `No Compose service listed the legacy file that sets these, so every service now receives them once that env is selected: ${newKeys.join(", ")}. To limit a key to one service, run \`hack env unset KEY --local\` and then \`hack env set KEY --service <name> --local\`, but not for a key your Compose file interpolates: service values do not reach interpolation. Host lifecycle hooks receive these values too.`
-    );
-  }
+  notes.push(
+    "Migrated values are global: every service and host lifecycle hook now receives them."
+  );
   return notes.join("\n");
 }
 

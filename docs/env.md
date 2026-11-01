@@ -1119,8 +1119,9 @@ precedence over the same variable exported in your shell, including for interpol
 
 With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
 symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a
-configured default overlay is a symlink to a file outside `.hack`, so its values cannot reach a
-tracked layer.
+configured default overlay is a symlink, wherever it points, because this migration writes
+`plain_env` values to tracked layers and another file's values, such as a machine-local
+`.env.local`, could then be committed.
 
 Without `hack.env.json`, nothing lists values kept in a secret backend, so none are
 migrated: set them again with `hack env set --secret` after the migration. In that case `.hack/hack.config.json`, and

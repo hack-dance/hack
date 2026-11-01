@@ -4996,15 +4996,16 @@ export async function migrateLegacyProjectEnv(opts: {
     };
   }
 
-  // Discovered overlays are regular files only, and any link that remains (the
-  // base file, or a configured default overlay) must stay in .hack: this path
-  // writes plain_env values to tracked layers, so a repository's symlink must
-  // not pull an outside file's values into them.
+  // Discovered overlays are regular files only, and a link that remains (the
+  // base file, or a configured default overlay) refuses wherever it points: this
+  // path writes plain_env values to tracked layers, so a repository's symlink
+  // must not pull another file's values into them, even one in .hack such as a
+  // machine-local .env.local.
   const overlayNames = await discoverLegacyOverlayNames({
     projectDir: opts.projectDir,
     includeSymlinks: false,
   });
-  await assertLegacyDotenvLinksStayInProject({
+  await assertNoLegacyDotenvLinks({
     projectDir: opts.projectDir,
     overlayNames,
   });
@@ -5807,6 +5808,30 @@ async function selectLegacyDotenvOverlays(opts: {
     });
   }
   return overlayNames;
+}
+
+/**
+ * Refuses a legacy `.hack/.env` or overlay that is a symlink at all, dangling or
+ * not, for a migration that publishes values to tracked layers.
+ */
+async function assertNoLegacyDotenvLinks(opts: {
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+}): Promise<void> {
+  const linked: string[] = [];
+  for (const envName of [null, ...opts.overlayNames]) {
+    const path = resolveEnvFilePath({ projectDir: opts.projectDir, envName });
+    const entry = await lstat(path).catch(() => null);
+    if (entry?.isSymbolicLink()) {
+      linked.push(JSON.stringify(basename(path)));
+    }
+  }
+  if (linked.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `${linked.join(", ")} ${linked.length === 1 ? "is a symlink" : "are symlinks"}, and this migration writes plain_env values to tracked env layers, so another file's values could be committed. Replace the link with a regular file, or remove it, then retry.`,
+    });
+  }
 }
 
 /**

@@ -1901,3 +1901,43 @@ test("the migration accepts any env_file order when the files agree", async () =
   });
   expect(migrated.legacyDetected).toBe(true);
 });
+
+test("the contract migration refuses a link that stays in .hack, so a local credential stays out of tracked layers", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.json"),
+    `${JSON.stringify({
+      version: 1,
+      vars: [{ key: "KEPT_SETTING", source: "plain_env", required: false }],
+    })}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env.local"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await symlink(".env.local", resolve(repo.projectDir, ".env"));
+  const before = await hackDirEntries(repo);
+  const error = await migrateLegacyRepo(repo, {}).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  expect((error as LegacyDotenvMigrationRefusalError).code).toBe(
+    "E_PATH_CONFLICT"
+  );
+  expect((error as Error).message).toContain('".env" is a symlink');
+  expect((error as Error).message).not.toContain(KEPT_VALUE);
+  expect(await hackDirEntries(repo)).toEqual(before);
+});
+
+test("the contract migration refuses a dangling legacy link", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.json"),
+    `${JSON.stringify({ version: 1, vars: [] })}\n`
+  );
+  await symlink("missing.env", resolve(repo.projectDir, ".env"));
+  const error = await migrateLegacyRepo(repo, {}).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+});

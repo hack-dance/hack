@@ -1913,7 +1913,7 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
 
   const storeSecret = args.options.secret === true;
   // Before stdin is read or anything is written. A secret goes to the store, not
-  // to .hack/.env, so the contract migration can't copy it to a tracked layer.
+  // to .hack/.env, so the contract migration can't copy its plaintext to a tracked layer.
   if (
     args.options.local === true &&
     !storeSecret &&

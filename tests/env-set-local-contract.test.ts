@@ -11,8 +11,6 @@ import {
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { LEGACY_ENV_LOCAL_CONTRACT_MESSAGE } from "../src/cli/env-arguments.ts";
-import { migrateLegacyProjectEnv } from "../src/lib/project-env-config.ts";
-import { fixtureChildren } from "./helpers/fixture-children.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /*
@@ -78,16 +76,17 @@ async function createProject(opts: {
 
 type Project = Awaited<ReturnType<typeof createProject>>;
 
-async function setLocal(project: Project) {
-  const children = fixtureChildren("env-set-local-contract");
+async function runEnv(
+  project: Project,
+  args: readonly string[],
+  extraEnv: Readonly<Record<string, string>> = {}
+) {
   const proc = Bun.spawn(
     [
       process.execPath,
       ENTRYPOINT,
       "env",
-      "set",
-      "LOCAL_KEY",
-      "--local",
+      ...args,
       "--value-stdin",
       "--path",
       project.projectRoot,
@@ -103,6 +102,7 @@ async function setLocal(project: Project) {
           HACK_NO_INTERACTIVE: "1",
           HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
           NO_COLOR: "1",
+          ...extraEnv,
         },
       }),
       stdin: "pipe",
@@ -117,7 +117,6 @@ async function setLocal(project: Project) {
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
-  await children.stopAll();
   return { exitCode, output: `${stdout}\n${stderr}` };
 }
 
@@ -135,15 +134,8 @@ async function tree(project: Project): Promise<Record<string, string>> {
   return out;
 }
 
-function migrate(project: Project) {
-  return migrateLegacyProjectEnv({
-    projectRoot: project.projectRoot,
-    projectDir: project.projectDir,
-    projectName: "hack-1710",
-    serviceNames: ["api"],
-    materialize: false,
-  });
-}
+const setLocal = (project: Project) =>
+  runEnv(project, ["set", "LOCAL_KEY", "--local"]);
 
 test("with a contract and no layers, set --local refuses and writes nothing", async () => {
   const project = await createProject({ contract: true });
@@ -154,6 +146,23 @@ test("with a contract and no layers, set --local refuses and writes nothing", as
   expect(run.exitCode).not.toBe(0);
   expect(run.output).toContain(LEGACY_ENV_LOCAL_CONTRACT_MESSAGE);
   expect(run.output).not.toContain(VALUE);
+  expect(await tree(project)).toEqual(before);
+});
+
+test("set --env staging --local refuses the same way", async () => {
+  const project = await createProject({ contract: true });
+  const before = await tree(project);
+
+  const run = await runEnv(project, [
+    "set",
+    "LOCAL_KEY",
+    "--env",
+    "staging",
+    "--local",
+  ]);
+
+  expect(run.exitCode).not.toBe(0);
+  expect(run.output).toContain(LEGACY_ENV_LOCAL_CONTRACT_MESSAGE);
   expect(await tree(project)).toEqual(before);
 });
 
@@ -168,17 +177,38 @@ test("with a mirrored backend, the refusal writes neither .env nor the store", a
   expect(await tree(project)).toEqual(before);
 });
 
-test("the remedy works: after the migration, set --local stays out of tracked layers", async () => {
+test("the remedy the refusal names keeps the value out of tracked layers", async () => {
   const project = await createProject({ contract: true });
-  await migrate(project);
 
-  const run = await setLocal(project);
+  const run = await runEnv(project, ["add", "LOCAL_KEY", "--local"]);
 
   expect(run.exitCode).toBe(0);
   const files = await tree(project);
   expect(files[".hack/hack.env.local.yaml"]).toContain(VALUE);
   expect(files[".hack/hack.env.default.yaml"]).not.toContain(VALUE);
   expect(files[".hack/.env"]).toBeUndefined();
+  // And set --local now has layers to write to.
+  const again = await setLocal(project);
+  expect(again.exitCode).toBe(0);
+  expect((await tree(project))[".hack/hack.env.default.yaml"]).not.toContain(
+    VALUE
+  );
+});
+
+test("--secret --local isn't refused, because the value goes to the store and not .env", async () => {
+  const project = await createProject({ contract: true, mirrored: true });
+
+  const run = await runEnv(
+    project,
+    ["set", "UNDECLARED_KEY", "--secret", "--local"],
+    { HACK_SECRETS_FILE_KEY: ["synthetic", "file", "1710"].join("-") }
+  );
+
+  expect(run.output).not.toContain(LEGACY_ENV_LOCAL_CONTRACT_MESSAGE);
+  expect(run.exitCode).toBe(0);
+  const files = await tree(project);
+  expect(files[".hack/.env"]).toBeUndefined();
+  expect(JSON.stringify(files)).not.toContain(VALUE);
 });
 
 test("without a contract, set --local still writes .env", async () => {

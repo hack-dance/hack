@@ -10,8 +10,8 @@ provide explicit agent handoff.
 ## Source provenance
 
 `scripts/docs/versions.json` pins v4.2.4 to
-`91b14bf0abb17602142425de0d02628a3e8a2615` and v5 next.5 to
-`28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc`. These are published source snapshots,
+`91b14bf0abb17602142425de0d02628a3e8a2615` and v5 next.6 to
+`44aaf5156426dfcbb1c8a189b8e20531e5b95613`. These are published source snapshots,
 not a claim that every newer development capability ships in those releases.
 Original Markdown is preserved under `docs/versions/<version>/originals`, with
 SHA-256 hashes. A public-file inventory makes link validation reproducible without
@@ -40,47 +40,16 @@ remain conditional; Google requires an exact product choice; code.computer was
 unavailable to research requests. ECS app hosting is distinct from a development
 host. No cloud resources, credentials or provider settings were changed.
 
-The pinned generated reference is supplemented by explicit command/output,
-configuration-field and MCP-field references for each version. v4 has 84 public
-leaves. The pinned v5 source inventory has 92; its recommended publication selection
-has 84 after eight retiring agent-management leaves are excluded; the supplements add
-three and six deeper leaf sections respectively. Initial flag display differences
-were generic value placeholders, not missing registered flags. The v5 authored
-schema reference lists all 168 project/local property declarations. See
-`reference-coverage.md` for counts, exclusions and limits. Owned diagnostic, provisioning, telemetry, project and env report fields are
-covered separately. Raw engine rows, dynamic application maps, shared error.detail
-and the explicitly opaque compiler plan boundary remain open; these
-pages do not turn private protocols into public APIs or claim runtime/cloud/client
-qualification from source review.
+The generated command reference is refreshed from next.6. Detailed next.5 field audits are retained with historical provenance; their counts do not qualify next.6 coverage. See `reference-coverage.md` for those historical inventories and open limits.
 
 The published generated CLI reference is curated to the declared public slice: unsupported/retired roots and Internal/Fun/Extensions/Beta groups are omitted, while the hashed historical originals remain intact. The public supplement completes that slice; publication checks reject excluded headings and retain logs/env/branch sections and version-specific setup boundaries.
 
-## Explicit-agent v5 publication choice
+## Released next.6 publication
 
-The recommended v5 setup is CLI plus versioned docs, with separately selected
-skills or MCP. Editorial overrides replace the pinned integrations, agent-first,
-project-setup, core and CLI-overview tutorials. The new integrations page links
-the reviewed next.5 native marketplace and manifests, names the exact seven
-skills, and distinguishes local source registration from client installation.
-The official OpenAI packaging guide supplies the local marketplace registration
-command and client-directory route; no client loading was performed here.
+V5 now selects released next.6 at `44aaf5156426dfcbb1c8a189b8e20531e5b95613`. The shell bootstrap and standalone manager shipped in PR525; opt-in agent setup and retirement of automatic injection shipped in PR531. The guide retains its route but no longer claims unreleased provenance. Source-reviewed backend selection includes an explicit Compose override, with shared stable-home cautions.
 
-Next.5 is not a hook-free artifact: its Codex manifest selects skills, whose text
-still includes guidance-maintenance recommendations; Claude selects primer hooks
-and Cursor selects rules. Core removal is a separate, pending dependency. The
-short historical compatibility page records shipped availability and source
-links without a runnable repair/export tutorial.
+The prior next.5 originals remain intact. New release snapshots live under `docs/versions/v5/originals/next6/` and have independent hashes in the manifest. V4 remains unchanged. The next.1 Python candidate-install recipe is curated as history. Detailed next.5 field audits retain explicit historical per-page provenance rather than being silently relabeled as next.6. See the next.6 release-contract page for changed interfaces and remaining field-coverage limits.
 
-Eight agent-management leaves and init's optional handoff flag are intentionally
-omitted from the recommended v5 command reference and LLM corpus. Setup-sync
-report types are also excluded from that slice. V4 and every hashed original
-remain intact; this editorial choice does not assert runtime removal in next.5.
-Env injection, lifecycle definition freshness and runtime ownership are unrelated
-and remain documented.
+Generation owns ignored content, navigation, version labels and LLM exports. Site source loaders consume those generated collections; there is no separate site/lib version pin. Publication controls admit only the two scoped opt-in examples on the source-labeled setup guide and continue rejecting automatic instruction-management recipes.
 
-Publication checks exercise both versions, reject retiring command/flag/tutorial
-patterns in staged v5 pages and full LLM exports, preserve unrelated runtime
-language, and require the explicit plugin/MCP artifact boundaries. All original
-manifest hashes are checked even when an editorial override replaces a page.
-
-The agent-setup-v5-branch guide is an explicit per-page source exception: unreleased PR531 at af71a8407d14a0dd27f7073a43010fff3a4bd219. Its title, footer and LLM index/export identify that source. Default v5 runtime/reference content stays pinned to released next.5; v4 and all original snapshot hashes remain unchanged. Only the two reviewed opt-in setup examples are allowed on this guide; retiring automatic instruction management remains excluded. This adds no release, installed-client or runtime acceptance claim.
+Fresh installation and local manager status are evidence for that bounded path only. Cross-version upgrade/rollback, initialized data, native application and installed-client acceptance remain open. No deployment or preview runtime was performed by this docs worker.

@@ -1,6 +1,6 @@
 # Run and inspect a project
 
-Complete [Getting started](../getting-started.md). The published next.5 launcher
+Complete [Getting started](../getting-started.md). The published next.6 launcher
 selects native execution. Choose v4 in Docs version for Compose recipes.
 
 ```sh

@@ -1,5 +1,7 @@
 # Authored schema fields
 
+Historical next.5 field audit. For released next.6 changes and current command sources, see [next.6 release contracts](next6-contracts.md). These field inventories have not been requalified against next.6; they do not override its current generated command reference.
+
 The published next.5 authored schemas describe project and local override documents. They are distinct from [legacy configuration fields](configuration-fields.md). See [Native configuration import](../../reference/native-config-import.md) for the admitted import subset and [Authored commands](../../reference/native-authored-commands.md) for semantic validation.
 
 A valid document shape does not establish runtime admission or provider availability. Defaults here are JSON-schema defaults, not promises of a running service. Requiredness is relative to the containing object or union variant: an optional parent remains optional. Dynamic maps are not a closed list of project-defined names. Definition names are authoring types, not internal transport APIs.

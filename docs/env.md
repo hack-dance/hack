@@ -1074,10 +1074,20 @@ files, when:
   become global layer values that Hack applies after `environment`, so the service would
   switch to the `.env` value. The error names the keys and services, never values. Remove
   the key from the `.hack/.env` file or from that service's `environment`, then retry;
+- a key the legacy files set is also set in another file a Compose service uses as
+  `env_file` (`E_CONFIG_INVALID`), for the same reason: that file stays in Compose, but the
+  migrated value would override it. The check does not look at the order of the entries,
+  or expand variables in an `env_file` path. Remove the key from one of the files, then retry;
+- `.hack/.env` or a legacy overlay is a symlink to a file outside `.hack`
+  (`E_PATH_CONFLICT`), so its values would be copied from elsewhere into this project's
+  layers. Replace the link with a regular file in `.hack`, or remove it;
 - a legacy `.hack/.env` or overlay file exists but cannot be read, for example mode 000
   or a dangling symlink (`E_PERMISSION`), so its values would be lost. A symlinked overlay
-  that resolves to a readable file is migrated like a regular one; cleanup removes only the
-  link, never its target.
+  that resolves to a readable file inside `.hack` is migrated like a regular one; cleanup
+  removes only the link, never its target.
+
+With `hack.env.json`, the migration reads only regular `.hack/.env.<overlay>` files, so a
+symlinked overlay is not migrated and its values cannot reach a tracked layer.
 
 Without `hack.env.json`, nothing lists values kept in a secret backend, so none are
 migrated: set them again with `hack env set --secret` after the migration. In that case `.hack/hack.config.json`, and

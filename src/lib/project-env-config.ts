@@ -5,8 +5,16 @@ import {
   randomBytes,
 } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, readdir, rm, stat, unlink } from "node:fs/promises";
-import { basename, dirname, relative, resolve } from "node:path";
+import {
+  access,
+  lstat,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  unlink,
+} from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
   HACK_PROJECT_DIR_PRIMARY,
@@ -4992,8 +5000,11 @@ export async function migrateLegacyProjectEnv(opts: {
     envName: null,
   });
 
+  // Regular files only: this path writes plain_env values to tracked layers, so
+  // a repository's symlink must not pull an outside file's values into them.
   const overlayNames = await discoverLegacyOverlayNames({
     projectDir: opts.projectDir,
+    includeSymlinks: false,
   });
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
@@ -5336,8 +5347,44 @@ function composeServiceEnvironmentKeys(
 }
 
 /**
+ * Migrated keys a service's other `env_file` entries set, as refusal labels.
+ * Those files stay in Compose, but Hack's generated override applies migrated
+ * values after them. An absent file sets nothing; an unreadable one refuses.
+ */
+async function composeEnvFileKeyConflicts(opts: {
+  readonly projectDir: string;
+  readonly service: string;
+  readonly rawService: Record<string, unknown>;
+  readonly migratedKeys: ReadonlySet<string>;
+}): Promise<readonly string[]> {
+  const conflicts: string[] = [];
+  for (const configuredPath of readComposeEnvFilePaths({
+    rawService: opts.rawService,
+  })) {
+    const path = resolve(opts.projectDir, configuredPath);
+    if (
+      isLegacyProjectEnvFilePath({
+        projectDir: opts.projectDir,
+        candidatePath: path,
+      })
+    ) {
+      continue;
+    }
+    const values = await readLegacyDotenvFile({ path });
+    for (const key of Object.keys(values)) {
+      if (opts.migratedKeys.has(key)) {
+        conflicts.push(
+          `${JSON.stringify(key)} (${JSON.stringify(configuredPath)} in ${JSON.stringify(opts.service)})`
+        );
+      }
+    }
+  }
+  return conflicts;
+}
+
+/**
  * Refuses when a migrated key is also set in a Compose service's own
- * `environment`. Legacy `env_file` values rank below `environment`, but the
+ * `environment` or another of its `env_file` entries. Legacy `env_file` values rank below `environment`, but the
  * migrated values become global layer values, which Hack's generated Compose
  * override applies to every service after `environment`; the service would
  * silently switch to the dotenv value. The refusal names services and keys,
@@ -5362,10 +5409,19 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
   }
   const conflicts: string[] = [];
   const unreadable: string[] = [];
+  const envFileConflicts: string[] = [];
   for (const [service, rawService] of Object.entries(services)) {
     if (!isRecord(rawService)) {
       continue;
     }
+    envFileConflicts.push(
+      ...(await composeEnvFileKeyConflicts({
+        projectDir: opts.projectDir,
+        service,
+        rawService,
+        migratedKeys,
+      }))
+    );
     const keys = composeServiceEnvironmentKeys(rawService.environment);
     if (keys === null) {
       unreadable.push(JSON.stringify(service));
@@ -5387,6 +5443,12 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
       reason: `Compose environment sets ${conflicts.sort().join(", ")}, which the legacy .env files also set; after the migration the .env value would override the Compose value. Remove the key from the .hack/.env file or from that service's environment, then retry.`,
     });
   }
+  if (envFileConflicts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose env_file sets ${envFileConflicts.sort().join(", ")}, which the legacy .env files also set; after the migration the .env value would override that file's value. Remove the key from the .hack/.env file or from that env_file, then retry.`,
+    });
+  }
 }
 
 /** Overlay entries a migrated overlay layer must hold: those that differ from the base. */
@@ -5406,9 +5468,15 @@ async function selectLegacyDotenvOverlays(opts: {
 }): Promise<readonly string[]> {
   // Template and backup copies (`.env.example`, `.env.bak`, ...) are not
   // overlays: they are neither migrated nor offered for cleanup.
-  const overlayNames = (
-    await discoverLegacyOverlayNames({ projectDir: opts.projectDir })
-  ).filter((name) => !isExcludedLegacyDotenvName(name));
+  const overlayNames =
+    // A symlinked overlay is an overlay too: skipping it would switch formats
+    // without its values. Its target is checked by the migration before reading.
+    (
+      await discoverLegacyOverlayNames({
+        projectDir: opts.projectDir,
+        includeSymlinks: true,
+      })
+    ).filter((name) => !isExcludedLegacyDotenvName(name));
   const invalidOverlays = overlayNames.filter(
     (name) =>
       !(
@@ -5430,6 +5498,40 @@ async function selectLegacyDotenvOverlays(opts: {
     });
   }
   return overlayNames;
+}
+
+/**
+ * Refuses a legacy `.hack/.env` or overlay that is a symlink resolving outside
+ * `.hack`, so a repository cannot pull an outside file, such as a root `.env`,
+ * into its env layers. A dangling link stays for the read to refuse.
+ */
+async function assertLegacyDotenvLinksStayInProject(opts: {
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+}): Promise<void> {
+  const projectDir = await realpath(opts.projectDir);
+  const escaping: string[] = [];
+  for (const envName of [null, ...opts.overlayNames]) {
+    const path = resolveEnvFilePath({ projectDir: opts.projectDir, envName });
+    const entry = await lstat(path).catch(() => null);
+    if (!entry?.isSymbolicLink()) {
+      continue;
+    }
+    const target = await realpath(path).catch(() => null);
+    if (target === null) {
+      continue;
+    }
+    const inside = relative(projectDir, target);
+    if (inside.startsWith("..") || isAbsolute(inside)) {
+      escaping.push(JSON.stringify(basename(path)));
+    }
+  }
+  if (escaping.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `${escaping.join(", ")} ${escaping.length === 1 ? "is a symlink" : "are symlinks"} to a file outside .hack, so migrating would copy that file's values into this project's env layers. Replace the link with a regular file in .hack, or remove it, then retry.`,
+    });
+  }
 }
 
 /**
@@ -5515,7 +5617,8 @@ async function readValidatedLegacyDotenvFiles(opts: {
  *   With no legacy file at all only the empty default layer is written.
  * - Refused before anything is written ({@link LegacyDotenvMigrationRefusalError},
  *   or {@link ProjectEnvLayerPathConflictError} for an unusable layer entry):
- *   any existing env layer entry, a legacy overlay named like the default or a
+ *   any existing env layer entry, a legacy file that is a symlink out of
+ *   `.hack`, a legacy overlay named like the default or a
  *   machine-local layer, a Compose `env_file` on a file the migration leaves
  *   out or on an overlay a launch without `--env` would not select, a key that
  *   does not match `^[A-Z_][A-Z0-9_]*$`
@@ -5551,6 +5654,10 @@ async function migrateUndeclaredLegacyDotenv(opts: {
   });
   await assertComposeUsesNoExcludedLegacyDotenv({
     projectDir: opts.projectDir,
+  });
+  await assertLegacyDotenvLinksStayInProject({
+    projectDir: opts.projectDir,
+    overlayNames,
   });
 
   const legacyValues = await readValidatedLegacyDotenvFiles({
@@ -5756,13 +5863,12 @@ export async function removeLegacyProjectEnvArtifacts(opts: {
 
 async function discoverLegacyOverlayNames(opts: {
   readonly projectDir: string;
+  readonly includeSymlinks: boolean;
 }): Promise<readonly string[]> {
   const names = new Set<string>();
   const entries = await readdir(opts.projectDir, { withFileTypes: true });
   for (const entry of entries) {
-    // A symlinked overlay is an overlay too: skipping it would switch formats
-    // without its values. What it points at is checked when it is read.
-    if (!(entry.isFile() || entry.isSymbolicLink())) {
+    if (!(entry.isFile() || (opts.includeSymlinks && entry.isSymbolicLink()))) {
       continue;
     }
     if (!entry.name.startsWith(`${PROJECT_ENV_FILENAME}.`)) {

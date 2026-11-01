@@ -1142,7 +1142,7 @@ test("the migration carries a symlinked legacy overlay's values and refuses one 
     resolve(repo.projectDir, ".env"),
     `KEPT_SETTING=${KEPT_VALUE}\n`
   );
-  const target = resolve(repo.root, "shared-staging.env");
+  const target = resolve(repo.projectDir, "shared-staging.env");
   const targetText = `KEPT_SETTING=${KEPT_VALUE}-linked\n`;
   await writeFile(target, targetText);
   const link = resolve(repo.projectDir, ".env.staging");
@@ -1163,7 +1163,8 @@ test("the migration carries a symlinked legacy overlay's values and refuses one 
 
   for (const place of [
     (root: string) => resolve(root, "missing"),
-    (root: string) => root,
+    // A link to a directory inside .hack: reading it fails.
+    (root: string) => resolve(root, "repo", ".hack"),
   ]) {
     const unusable = await createLegacyRepo();
     await symlink(
@@ -1347,4 +1348,78 @@ test("the migration refuses when a Compose environment value would lose preceden
   expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
     global: { KEPT_SETTING: KEPT_VALUE },
   });
+});
+
+test("the .env-only migration refuses a legacy symlink that leaves .hack", async () => {
+  for (const link of [".env", ".env.staging"]) {
+    const repo = await createLegacyRepo();
+    const target = resolve(repo.projectRoot, ".env");
+    await writeFile(target, `KEPT_SETTING=${KEPT_VALUE}\n`);
+    await symlink(target, resolve(repo.projectDir, link));
+    await expectMigrationRefusal({
+      repo,
+      code: "E_PATH_CONFLICT",
+      reason: `"${link}" is a symlink to a file outside .hack`,
+      hidden: [KEPT_VALUE],
+    });
+  }
+});
+
+test("the contract migration does not copy a symlinked overlay's values into a tracked layer", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.json"),
+    `${JSON.stringify({
+      version: 1,
+      vars: [{ key: "KEPT_SETTING", source: "plain_env", required: false }],
+    })}\n`
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), "OTHER=1\n");
+  const target = resolve(repo.projectRoot, ".env");
+  await writeFile(target, `KEPT_SETTING=${KEPT_VALUE}\n`);
+  await symlink(target, resolve(repo.projectDir, ".env.staging"));
+
+  const migrated = await migrateLegacyRepo(repo, {});
+  expect(migrated.migratedOverlays).not.toContain("staging");
+  expect(
+    await lstat(resolve(repo.projectDir, "hack.env.staging.yaml")).catch(
+      () => null
+    )
+  ).toBeNull();
+  for (const name of await readdir(repo.projectDir)) {
+    if (name.startsWith("hack.env.") && name.endsWith(".yaml")) {
+      expect(
+        await readFile(resolve(repo.projectDir, name), "utf8")
+      ).not.toContain(KEPT_VALUE);
+    }
+  }
+});
+
+test("the migration refuses when another Compose env_file sets a migrated key", async () => {
+  const repo = await createLegacyRepo();
+  const legacyPort = ["3", "000"].join("");
+  const servicePort = ["4", "000"].join("");
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n    env_file:\n      - .env\n      - service.env\n      - path: absent.env\n        required: false\n"
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `PORT=${legacyPort}\nKEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const serviceEnv = resolve(repo.projectDir, "service.env");
+  await writeFile(serviceEnv, `PORT=${servicePort}\n`);
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: 'Compose env_file sets "PORT" ("service.env" in "api")',
+    hidden: [legacyPort, servicePort, KEPT_VALUE],
+  });
+
+  // With no shared key, the same shape migrates.
+  await writeFile(serviceEnv, "SERVICE_ONLY=1\n");
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
 });

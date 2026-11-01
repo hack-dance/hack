@@ -98,6 +98,9 @@ async function unchanged(saved: Awaited<ReturnType<typeof capture>>) {
     return refuse();
   }
 }
+/** An abandoned launch's groups get 5 s to exit after their session ends. */
+const GROUP_SETTLEMENT_INTERVAL_MS = 50;
+const GROUP_SETTLEMENT_ATTEMPTS = 100;
 function absentGroup(group: number): void {
   try {
     process.kill(-group, 0);
@@ -108,6 +111,20 @@ function absentGroup(group: number): void {
     throw error;
   }
   refuse();
+}
+/** Bounded wait for an owned group to exit after its session was ended. */
+async function settledGroup(group: number): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      absentGroup(group);
+      return;
+    } catch (error) {
+      if (attempt >= GROUP_SETTLEMENT_ATTEMPTS) {
+        throw error;
+      }
+    }
+    await Bun.sleep(GROUP_SETTLEMENT_INTERVAL_MS);
+  }
 }
 function entry(value: unknown): LifecycleStateEntry | null {
   if (value === null) {
@@ -539,6 +556,7 @@ export async function createNativeAuthoredHostProcesses(input: {
     let active = true;
     let began = false;
     let launchIntent = false;
+    let abandoned = false;
     let stopped = false;
     let ready: Awaited<ReturnType<typeof capture>> | undefined;
     let stateFile: Awaited<ReturnType<typeof capture>> | undefined;
@@ -560,6 +578,8 @@ export async function createNativeAuthoredHostProcesses(input: {
       await recheckDirectories(directories);
       await unchanged(saved);
     };
+    /** Groups this owner launched, recorded before their launch completes. */
+    const launchedGroups = new Set<number>();
     const deliveries = new Set<
       Awaited<ReturnType<typeof serveLifecycleProcessDelivery>>
     >();
@@ -630,6 +650,7 @@ export async function createNativeAuthoredHostProcesses(input: {
             if (!(value.processGroupId && value.panePid)) {
               return refuse();
             }
+            launchedGroups.add(value.processGroupId);
             await delivery.started();
             await check();
             opts.remaining();
@@ -640,6 +661,36 @@ export async function createNativeAuthoredHostProcesses(input: {
         };
       },
     });
+    /**
+     * HACK-1458: a start that fails after its launch intent (a cancel, the
+     * startup deadline or a refused check) ends what it launched through the
+     * session ownership token it created, rather than leaving the groups
+     * running behind an intent that recovery never converts into authority.
+     * Only a recorded, verified-absent launch clears the owner bookkeeping;
+     * anything unproven stays retained.
+     */
+    const abandonLaunch = async () => {
+      try {
+        const launched = await currentEntry(opts.scope, composeProject);
+        await controller.abort();
+        if ((await currentEntry(opts.scope, composeProject)) !== null) {
+          return;
+        }
+        const groups = new Set(launchedGroups);
+        for (const process of launched?.processes ?? []) {
+          groups.add(process.processGroupId ?? refuse());
+        }
+        if (controller.hasStarted() && groups.size === 0) {
+          return;
+        }
+        for (const group of groups) {
+          await settledGroup(group);
+        }
+        abandoned = true;
+      } catch {
+        // Unproven teardown keeps the launch intent and owner retained.
+      }
+    };
     const assertReady = async () => {
       await check();
       if (!ready || stopped) {
@@ -704,74 +755,79 @@ export async function createNativeAuthoredHostProcesses(input: {
           opts.remaining();
         }
         launchIntent = true;
-        await writeExclusive(
-          join(root, `${opts.run}.host-process-intent.json`),
-          JSON.stringify({
-            version: 1,
-            kind: "native-authored-host-process-intent",
-            run: opts.run,
-            owner: saved.pin,
-          })
-        );
-        await synchronizeDirectories(directories);
-        await check();
-        opts.remaining();
-        if (processes.length !== 0) {
-          await controller.startMany({ processes });
+        try {
+          await writeExclusive(
+            join(root, `${opts.run}.host-process-intent.json`),
+            JSON.stringify({
+              version: 1,
+              kind: "native-authored-host-process-intent",
+              run: opts.run,
+              owner: saved.pin,
+            })
+          );
+          await synchronizeDirectories(directories);
+          await check();
+          opts.remaining();
+          if (processes.length !== 0) {
+            await controller.startMany({ processes });
+          }
+          await controller.finalize();
+          savedEntry = await currentEntry(opts.scope, composeProject);
+          if ((savedEntry !== null) !== controller.hasStarted()) {
+            return refuse();
+          }
+          if (
+            savedEntry &&
+            (savedEntry.definitionHash !== opts.semanticHash ||
+              savedEntry.projectName !== projectName ||
+              savedEntry.processes.some(
+                (process) => !owner.names.includes(process.name)
+              ))
+          ) {
+            return refuse();
+          }
+          await check();
+          opts.remaining();
+          await writeExclusive(
+            join(root, `${opts.run}.host-process-state.json`),
+            JSON.stringify({
+              version: 1,
+              kind: "native-authored-host-process-state",
+              run: opts.run,
+              owner: saved.pin,
+              entry: savedEntry,
+            })
+          );
+          await writeExclusive(
+            join(root, `${opts.run}.host-process-ready.json`),
+            JSON.stringify({
+              version: 1,
+              kind: "native-authored-host-process-ready",
+              run: opts.run,
+              project: owner.project,
+              branch: owner.branch,
+              semantic_hash: owner.semantic_hash,
+              owner: saved.pin,
+              pid: owner.pid,
+              uid: owner.uid,
+            })
+          );
+          await synchronizeDirectories(directories);
+          ready = await capture(
+            join(root, `${opts.run}.host-process-ready.json`)
+          );
+          stateFile = await capture(
+            join(root, `${opts.run}.host-process-state.json`)
+          );
+          await assertReady();
+        } catch (error) {
+          await abandonLaunch();
+          throw error;
         }
-        await controller.finalize();
-        savedEntry = await currentEntry(opts.scope, composeProject);
-        if ((savedEntry !== null) !== controller.hasStarted()) {
-          return refuse();
-        }
-        if (
-          savedEntry &&
-          (savedEntry.definitionHash !== opts.semanticHash ||
-            savedEntry.projectName !== projectName ||
-            savedEntry.processes.some(
-              (process) => !owner.names.includes(process.name)
-            ))
-        ) {
-          return refuse();
-        }
-        await check();
-        opts.remaining();
-        await writeExclusive(
-          join(root, `${opts.run}.host-process-state.json`),
-          JSON.stringify({
-            version: 1,
-            kind: "native-authored-host-process-state",
-            run: opts.run,
-            owner: saved.pin,
-            entry: savedEntry,
-          })
-        );
-        await writeExclusive(
-          join(root, `${opts.run}.host-process-ready.json`),
-          JSON.stringify({
-            version: 1,
-            kind: "native-authored-host-process-ready",
-            run: opts.run,
-            project: owner.project,
-            branch: owner.branch,
-            semantic_hash: owner.semantic_hash,
-            owner: saved.pin,
-            pid: owner.pid,
-            uid: owner.uid,
-          })
-        );
-        await synchronizeDirectories(directories);
-        ready = await capture(
-          join(root, `${opts.run}.host-process-ready.json`)
-        );
-        stateFile = await capture(
-          join(root, `${opts.run}.host-process-state.json`)
-        );
-        await assertReady();
       },
       assertReady,
       async stop() {
-        if (!launchIntent) {
+        if (!launchIntent || abandoned) {
           stopped = true;
           return;
         }

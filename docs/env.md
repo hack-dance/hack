@@ -1177,6 +1177,19 @@ files, when:
   that resolves to a readable file inside `.hack` is migrated like a regular one; cleanup
   removes only the link, never its target.
 
+With `hack.env.json`, the migration refuses (`E_CONFIG_INVALID`) when a `plain_env` value comes only
+from your shell, because it would otherwise be written to a tracked layer. This applies to commands
+that migrate implicitly, such as `hack env exec`. Simply skipping the value isn't enough, because
+env layers don't read the contract, so services would stop receiving it. The error names the key and
+never the value, and gives the commands for the scope the contract declares:
+
+1. Run one command without the variable, so the migration runs: `env -u KEY hack env exec -- true`.
+2. Set it for the declared scope: `hack env set KEY --service <name> --local --value-stdin`, or
+   without `--service` for a key the contract doesn't scope. `--local` alone delivers it to every
+   service, so keep `--service` for a scoped key.
+3. Keep it exported if Compose interpolation or a host command reads it: a service value doesn't
+   reach interpolation.
+
 With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
 symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a
 configured default overlay is a symlink, wherever it points, because this migration writes

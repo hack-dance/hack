@@ -6,6 +6,7 @@ import { isRecord } from "./guards.ts";
 /**
  * Resolve links component by component, including missing targets. Unlike lexical
  * normalization, this preserves the meaning of `link/..` in a link target.
+ * Existing components are canonicalized for case-insensitive filesystems.
  * Missing components are allowed so new layers and in-project dangling links
  * keep the atomic writer's existing behavior. Forty hops bound loops and work.
  */
@@ -30,7 +31,7 @@ async function resolveLayerPath(path: string): Promise<string> {
       throw error;
     });
     if (!entry?.isSymbolicLink()) {
-      current = candidate;
+      current = entry ? await realpath(candidate) : candidate;
       continue;
     }
     hops += 1;

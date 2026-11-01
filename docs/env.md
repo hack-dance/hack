@@ -231,8 +231,8 @@ A `null` result means no modern env configuration exists; it does not inspect or
 resolve legacy `.env` or secret-store values. Callers retain responsibility for
 their existing legacy fallback. Selected managed-env layer reads distinguish a
 missing path from a failed read or a dangling symlink. Only regular files
-(including readable symlinks to regular files inside the real project root) are read; invalid or unreadable
-layers throw a value-free error without YAML excerpts or a nested cause. Project configuration
+(including readable symlinks to regular files inside the real project root) are read;
+invalid or unreadable layers throw a value-free error without YAML excerpts or a nested cause. Project configuration
 selection keeps its existing semantics. Metadata inspection never writes key
 files or materializes `.env`.
 
@@ -616,7 +616,8 @@ rename has these effects:
 - outside targets (including dangling outside links), sibling-prefix escapes and link
   loops are refused with a closed, value-free error before reading values from stdin
   or writing decrypted or hydrated output. This applies to the base, tracked overlays
-  and local layers; mutation discovery checks all named YAML layers
+  and local layers, including init scaffold writes; mutation discovery checks all named
+  YAML layers, including case-variant names on case-insensitive filesystems
 - an in-project symlink whose target does not exist keeps the existing behavior: the
   link is replaced by a regular file. Strict planning and hydrate reads still refuse
   dangling links

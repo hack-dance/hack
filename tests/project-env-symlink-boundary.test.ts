@@ -328,3 +328,95 @@ test("hydrate and unset preserve an allowed local-layer link and update its in-p
   expect(await readFile(target, "utf8")).not.toContain("SETTING");
   await assertOutsideUntouched(repo);
 });
+
+test("case-insensitive realpath canonicalization admits existing and missing layers", async () => {
+  const repo = await fixture();
+  await writeFile(resolve(repo.projectDir, "hack.env.default.yaml"), ORIGINAL);
+  const proc = Bun.spawn(
+    [
+      process.execPath,
+      resolve(import.meta.dir, "fixtures/project-env-case-path-worker.ts"),
+      repo.projectRoot,
+      resolve(repo.root, "PROJ"),
+    ],
+    {
+      cwd: repo.projectRoot,
+      env: privateCliEnv({ root: repo.root }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 10_000,
+    }
+  );
+  const [code, out, err] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  expect({ code, out, err }).toEqual({ code: 0, out: "allowed\n", err: "" });
+});
+
+test("case-variant layer names are refused before stdin is consumed", async () => {
+  const repo = await fixture();
+  await plant(
+    repo,
+    resolve(repo.projectDir, "HACK.env.default.yaml"),
+    "absolute"
+  );
+  await cli(repo, ["set", "SETTING", "--value-stdin"], true);
+  await cli(repo, ["hydrate"], true);
+});
+
+for (const outside of [false, true]) {
+  test(`interactive init overwrite ${outside ? "refuses an outside" : "preserves an in-project"} base-layer link`, async () => {
+    const repo = await fixture();
+    await writeFile(
+      resolve(repo.projectRoot, "package.json"),
+      '{"name":"proj"}\n'
+    );
+    const target = outside
+      ? repo.outside
+      : resolve(repo.projectRoot, "init-target.yaml");
+    await writeFile(target, ORIGINAL);
+    const layer = resolve(repo.projectDir, "hack.env.default.yaml");
+    await symlink(target, layer);
+    const emptyPath = resolve(repo.root, "empty-path");
+    await mkdir(emptyPath);
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "helpers/interactive-init-runner.ts"),
+        repo.projectRoot,
+        "none",
+        "overwrite",
+      ],
+      {
+        cwd: repo.projectRoot,
+        env: privateCliEnv({
+          root: repo.root,
+          env: { PATH: emptyPath, HACK_LOGGER: "console" },
+        }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 10_000,
+      }
+    );
+    const [code, out, err] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    expect(code).toBe(outside ? 1 : 0);
+    if (outside) {
+      expect(`${out}${err}`).toContain("Refused env layer");
+      expect(`${out}${err}`).not.toContain(VALUE);
+      expect(`${out}${err}`).not.toContain(repo.outside);
+    } else {
+      expect(await readFile(target, "utf8")).not.toBe(ORIGINAL);
+      expect(await readFile(target, "utf8")).toContain("version: 1");
+    }
+    expect((await lstat(layer)).isSymbolicLink()).toBe(true);
+    await assertOutsideUntouched(repo);
+  });
+}

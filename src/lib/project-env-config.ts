@@ -888,9 +888,10 @@ export async function assertProjectEnvLayerPaths(opts: {
   });
   const entries = await readdir(opts.projectDir);
   for (const name of entries) {
+    const canonicalName = name.toLowerCase();
     if (
-      name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
-      name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+      canonicalName.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+      canonicalName.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
     ) {
       await assertProjectEnvLayerPath({
         projectRoot: opts.projectRoot,

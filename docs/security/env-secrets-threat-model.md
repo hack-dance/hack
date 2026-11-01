@@ -156,7 +156,7 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    its journaled switch, it also keeps the file. Other generated files under `.hack/.internal/` and `.hack/.branch/` are
    written with the process umask; the scan shows they hold no values today.
 5. **YAML env layer TOCTOU (narrowed, HACK-1685).** Base and overlay YAML layers,
-   including local layers, may follow links only when the whole chain resolves inside
+   including local layers and init scaffold writes, may follow links only when the whole chain resolves inside
    `realpath(projectRoot)`. Component-aware resolution handles relative targets,
    chains, symlinked roots and missing targets; segment-aware containment refuses
    sibling-prefix escapes. Outside targets, dangling outside links, loops and failed

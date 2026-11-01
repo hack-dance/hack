@@ -40,7 +40,7 @@ export function parseEnvScopeOption(input: {
  * that file's values to tracked layers, so `--local` would not stay local.
  */
 export const LEGACY_ENV_LOCAL_CONTRACT_MESSAGE =
-  "--local needs env layers, but this project has no env layers yet, and its hack.env.json migration copies .hack/.env values to tracked layers. Nothing was written. Use `hack env add <key> --local`, which migrates first and then writes the machine-local layer.";
+  "--local needs env layers, but this project has no env layers yet, and its hack.env.json migration copies .hack/.env values to tracked layers. Nothing was written. Use `hack env add` with the same flags, which migrates first and then writes the machine-local layer.";
 
 /**
  * Resolve the `--scope`/`--service` pair of host execution commands.

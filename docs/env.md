@@ -594,8 +594,9 @@ per-checkout values you don't want to commit.
 
 In a project with `.hack/hack.env.json` and no env layers yet, `hack env set --local` refuses and
 writes nothing for a plaintext value, because that project's migration copies `.hack/.env` values to
-tracked layers. Use `hack env add <key> --local`, which migrates first and then writes the
-machine-local layer. That migration still copies values already in `.hack/.env` to tracked layers.
+tracked layers. Use `hack env add` with the same flags, which migrates first and then writes the
+machine-local layer. That migration still copies values already in `.hack/.env`, and a `plain_env`
+value exported in your shell, to tracked layers.
 With `--secret`, the value goes to the secret backend, and a key the contract declares as `keychain`
 reaches a tracked layer as ciphertext when the project migrates. Without `hack.env.json`, `--local`
 still writes `.hack/.env`.

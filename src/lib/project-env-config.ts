@@ -6707,6 +6707,17 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     legacyValues,
   });
 
+  // Before the delivered values, so a local layer's refusal can name that file.
+  for (const envName of [null, ...overlayNames]) {
+    await readExistingLocalLayer({
+      path: resolveProjectEnvLocalConfigPath({
+        projectDir: opts.projectDir,
+        envName,
+      }),
+      environment: envName ?? "default",
+    });
+  }
+
   const baseValues = legacyValues.get(null) ?? {};
   const baseToMigrate = legacyValuesNotDelivered({
     values: baseValues,

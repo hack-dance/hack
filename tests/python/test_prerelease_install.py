@@ -1326,6 +1326,31 @@ print(json.dumps(stages))
                         self.channel.select(None)
                 self.assertEqual(self.selection()["selected"], "5.0.0-next.1")
 
+    def test_unproven_guest_flush_stop_and_unclean_recovery_never_count_as_quiescent(self):
+        # A guest that reports no storage flush result makes `runtime down` exit 2 with
+        # stop_uncertain (JSON on stderr, empty stdout), keeping phase `stopping`. A later
+        # `runtime recover` records only `recovered-unclean`. Neither is a clean stop, so
+        # selection must stay put rather than treat retained disks as quiescent.
+        self.install()
+        stopped = {"phase": "stopped", "process_alive": False}
+        for responses, actions in (
+                ([stopped, (2, b"")], ["status", "down"]),
+                ([{"phase": "stopping", "process_alive": True}], ["status"]),
+                ([{"phase": "stopping", "process_alive": False}], ["status"]),
+                ([{"phase": "recovered-unclean", "process_alive": False}], ["status"]),
+                ([stopped, {"phase": "recovered-unclean", "process_alive": False}],
+                 ["status", "down"])):
+            with self.subTest(responses=responses):
+                before = (self.channel.root / ".selection.json").read_bytes()
+                self.calls = []
+                self.runtime_responses = list(responses)
+                with self.channel.lock():
+                    with self.assertRaises(installer.Refusal):
+                        self.channel.select(None)
+                self.assertEqual([args[4] for args, _ in self.calls if args[0] != "/usr/bin/codesign"],
+                                 actions)
+                self.assertEqual((self.channel.root / ".selection.json").read_bytes(), before)
+
     def test_uninitialized_home_with_leftover_state_is_ambiguous(self):
         self.install()
         native_home = self.channel.root / "versions/5.0.0-next.1/native-home"

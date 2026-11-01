@@ -3061,3 +3061,43 @@ test("a .env generated for one service matches using the scope its state file re
     global: { ONLY_HERE: KEPT_VALUE },
   });
 });
+
+test("after a real branch switch, a stale state file doesn't cost a real .env its values", async () => {
+  const repo = await createLegacyRepo();
+  await git({ repo, args: ["init", "--quiet", "--initial-branch=main"] });
+  await git({ repo, args: ["add", "-A"] });
+  await git({ repo, args: ["commit", "--quiet", "-m", "legacy"] });
+
+  await git({ repo, args: ["checkout", "--quiet", "-b", "layers"] });
+  const defaultLayer = resolve(repo.projectDir, "hack.env.default.yaml");
+  await writeFile(defaultLayer, LAYER_EMPTY);
+  await git({ repo, args: ["add", "-A"] });
+  await git({ repo, args: ["commit", "--quiet", "-m", "layers"] });
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api"],
+  });
+
+  await git({ repo, args: ["checkout", "--quiet", "main"] });
+  expect(await lstat(defaultLayer).catch(() => null)).toBeNull();
+  const statePath = resolve(repo.projectDir, ".env.state.json");
+  expect(await lstat(statePath).catch(() => null)).not.toBeNull();
+  const envPath = resolve(repo.projectDir, ".env");
+  await appendFile(envPath, `KEPT_SETTING=${KEPT_VALUE}\n`);
+
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { KEPT_SETTING: KEPT_VALUE },
+  });
+  expect(await readFile(envPath, "utf8")).toContain(KEPT_VALUE);
+  // Offered only now that the layer holds what the file held.
+  expect([
+    ...migrated.cleanupCandidates,
+    ...migrated.blockedCleanupCandidates,
+  ]).toContain(envPath);
+});

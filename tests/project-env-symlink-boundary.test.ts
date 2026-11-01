@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -329,32 +330,55 @@ test("hydrate and unset preserve an allowed local-layer link and update its in-p
   await assertOutsideUntouched(repo);
 });
 
-test("case-insensitive realpath canonicalization admits existing and missing layers", async () => {
-  const repo = await fixture();
-  await writeFile(resolve(repo.projectDir, "hack.env.default.yaml"), ORIGINAL);
-  const proc = Bun.spawn(
-    [
-      process.execPath,
-      resolve(import.meta.dir, "fixtures/project-env-case-path-worker.ts"),
-      repo.projectRoot,
-      resolve(repo.root, "PROJ"),
-    ],
-    {
-      cwd: repo.projectRoot,
-      env: privateCliEnv({ root: repo.root }),
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      timeout: 10_000,
+for (const denyLeaf of [false, true]) {
+  test(
+    denyLeaf
+      ? "containment canonicalizes directories without requiring realpath access to unreadable leaves"
+      : "case-insensitive realpath canonicalization admits existing and missing layers",
+    async () => {
+      const repo = await fixture();
+      const layer = resolve(repo.projectDir, "hack.env.default.yaml");
+      await writeFile(layer, ORIGINAL);
+      if (denyLeaf) {
+        await chmod(layer, 0o000);
+      }
+      try {
+        const proc = Bun.spawn(
+          [
+            process.execPath,
+            resolve(
+              import.meta.dir,
+              "fixtures/project-env-case-path-worker.ts"
+            ),
+            repo.projectRoot,
+            resolve(repo.root, "PROJ"),
+            ...(denyLeaf ? ["deny-leaf"] : []),
+          ],
+          {
+            cwd: repo.projectRoot,
+            env: privateCliEnv({ root: repo.root }),
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+            timeout: 10_000,
+          }
+        );
+        const [code, out, err] = await Promise.all([
+          proc.exited,
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
+        expect({ code, out, err }).toEqual({
+          code: 0,
+          out: "allowed\n",
+          err: "",
+        });
+      } finally {
+        await chmod(layer, 0o600);
+      }
     }
   );
-  const [code, out, err] = await Promise.all([
-    proc.exited,
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  expect({ code, out, err }).toEqual({ code: 0, out: "allowed\n", err: "" });
-});
+}
 
 test("case-variant layer names are refused before stdin is consumed", async () => {
   const repo = await fixture();

@@ -617,7 +617,9 @@ rename has these effects:
   loops are refused with a closed, value-free error before reading values from stdin
   or writing decrypted or hydrated output. This applies to the base, tracked overlays
   and local layers, including init scaffold writes; mutation discovery checks all named
-  YAML layers, including case-variant names on case-insensitive filesystems
+  YAML layers, including case-variant names on case-insensitive filesystems.
+  `hack doctor --fix` reports an error for a `.hack` linked outside the project
+  and leaves the link and outside files in place
 - an in-project symlink whose target does not exist keeps the existing behavior: the
   link is replaced by a regular file. Strict planning and hydrate reads still refuse
   dangling links

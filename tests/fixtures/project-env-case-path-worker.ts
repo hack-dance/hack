@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import { resolve } from "node:path";
 
 /** Model case-insensitive lookup with canonical realpath spelling on Linux. */
-const [projectRoot, projectAlias] = process.argv.slice(2);
+const [projectRoot, projectAlias, denyLeaf] = process.argv.slice(2);
 if (!(projectRoot && projectAlias)) {
   throw new Error("Missing fixture paths");
 }
@@ -20,7 +20,18 @@ const readlink = fs.readlink;
 mock.module("node:fs/promises", () => ({
   ...fs,
   lstat: async (path: string) => await lstat(canonical(path)),
-  realpath: async (path: string) => await realpath(canonical(path)),
+  realpath: async (path: string) => {
+    if (
+      denyLeaf === "deny-leaf" &&
+      canonical(path) ===
+        resolve(canonicalRoot, ".hack", "hack.env.default.yaml")
+    ) {
+      throw Object.assign(new Error("Synthetic realpath permission refusal"), {
+        code: "EACCES",
+      });
+    }
+    return await realpath(canonical(path));
+  },
   readlink: async (path: string) => await readlink(canonical(path)),
 }));
 const { assertProjectEnvLayerPath } = await import(

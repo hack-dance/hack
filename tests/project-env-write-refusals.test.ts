@@ -838,10 +838,12 @@ test.skipIf(RUNS_AS_ROOT)(
 );
 
 // The CLI prints a closed error as one line; other code still narrows on
-// these classes with instanceof, so they keep their names and messages.
+// these classes with instanceof, so they keep their names and messages. The
+// .hack/.gitignore refusal is a path of the wrong kind (HACK-1377).
 test("project key and .hack/.gitignore refusals are closed errors", () => {
   const gitignore = new HackDirGitignoreRefusalError();
-  expect(gitignore).toBeInstanceOf(ClosedCliError);
+  expect(gitignore).toBeInstanceOf(HackCliError);
+  expect(gitignore.code).toBe("E_PATH_CONFLICT");
   expect(gitignore).toBeInstanceOf(HackDirGitignoreRefusalError);
   expect(gitignore.name).toBe("HackDirGitignoreRefusalError");
   expect(gitignore.message).toBe(HACK_DIR_GITIGNORE_REFUSAL);
@@ -1221,6 +1223,7 @@ test("the write-failure classifier maps only its fixed errno set", () => {
     EDQUOT: ["no_space", "E_NO_SPACE"],
     ENOTDIR: ["not_a_directory", "E_PATH_CONFLICT"],
     EISDIR: ["is_a_directory", "E_PATH_CONFLICT"],
+    ENAMETOOLONG: ["name_too_long", "E_PATH_CONFLICT"],
   } as const;
   for (const [code, [failure, errorCode]] of Object.entries(cases)) {
     const raw = Object.assign(new Error(`${code}: raw, open '/x/.y.tmp'`), {

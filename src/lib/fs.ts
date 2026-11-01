@@ -40,18 +40,78 @@ export async function ensureDir(absoluteDir: string): Promise<void> {
  * {@link ensureDir} for a write path whose failure the CLI reports: a
  * directory that cannot be created for one of the {@link FileWriteFailure}
  * reasons is refused with a closed {@link FileWriteRefusedError} that names
- * the directory, never the raw errno text. Other failures propagate as is.
+ * the directory, never the raw errno text. An entry already at the path that
+ * is not a directory (a file, or a dangling symlink, which a recursive mkdir
+ * reports as EEXIST) is refused as `not_a_directory_entry`. Other failures
+ * propagate as is.
  */
 export async function ensureDirForWrite(absoluteDir: string): Promise<void> {
   try {
     await mkdir(absoluteDir, { recursive: true });
   } catch (error: unknown) {
+    if (hasErrorCode(error, "EEXIST")) {
+      throw new FileWriteRefusedError({
+        path: absoluteDir,
+        failure: "not_a_directory_entry",
+        operation: "create_directory",
+      });
+    }
     throw closedFileWriteError({
       error,
       path: absoluteDir,
       operation: "create_directory",
     });
   }
+}
+
+/**
+ * {@link ensureDirForWrite} for a directory Hack creates files in and that
+ * must not redirect them: the final component must be a real directory. A
+ * symlink (dangling or not) or any other entry there is refused with a closed
+ * `not_a_directory_entry` {@link FileWriteRefusedError} (`E_PATH_CONFLICT`)
+ * before anything is created through it. Ancestors are not inspected. The
+ * check is repeated after a create, so an entry that races the mkdir is
+ * refused too; it is not a fence against a later swap.
+ */
+export async function ensureRealDirectoryForWrite(
+  absoluteDir: string
+): Promise<void> {
+  if (await isRealDirectoryOrAbsent(absoluteDir)) {
+    await ensureDirForWrite(absoluteDir);
+    if (await isRealDirectoryOrAbsent(absoluteDir)) {
+      return;
+    }
+  }
+  throw new FileWriteRefusedError({
+    path: absoluteDir,
+    failure: "not_a_directory_entry",
+    operation: "create_directory",
+  });
+}
+
+/** False for a symlink or non-directory entry; lstat failures are closed. */
+async function isRealDirectoryOrAbsent(absoluteDir: string): Promise<boolean> {
+  try {
+    return (await lstat(absoluteDir)).isDirectory();
+  } catch (error: unknown) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return true;
+    }
+    throw closedFileWriteError({
+      error,
+      path: absoluteDir,
+      operation: "create_directory",
+    });
+  }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code: unknown }).code === code
+  );
 }
 
 /**
@@ -64,7 +124,10 @@ export type FileWriteFailure =
   | "read_only_filesystem"
   | "no_space"
   | "not_a_directory"
-  | "is_a_directory";
+  | "is_a_directory"
+  | "name_too_long"
+  /** A symlink or non-directory where a directory is needed; never an errno. */
+  | "not_a_directory_entry";
 
 const FILE_WRITE_FAILURE_CODES: Readonly<Record<string, FileWriteFailure>> = {
   EACCES: "permission_denied",
@@ -74,12 +137,14 @@ const FILE_WRITE_FAILURE_CODES: Readonly<Record<string, FileWriteFailure>> = {
   EDQUOT: "no_space",
   ENOTDIR: "not_a_directory",
   EISDIR: "is_a_directory",
+  ENAMETOOLONG: "name_too_long",
 };
 
 /**
  * The stable `--json` code of each {@link FileWriteFailure}. A read-only
  * filesystem is reported as a permission problem; a path of the wrong kind
- * (a file where a directory is needed, or the reverse) as a path conflict.
+ * (a file where a directory is needed, or the reverse) or one too long for
+ * the filesystem as a path conflict.
  */
 const FILE_WRITE_FAILURE_ERROR_CODES: Readonly<
   Record<FileWriteFailure, HackErrorCode>
@@ -89,6 +154,8 @@ const FILE_WRITE_FAILURE_ERROR_CODES: Readonly<
   no_space: "E_NO_SPACE",
   not_a_directory: "E_PATH_CONFLICT",
   is_a_directory: "E_PATH_CONFLICT",
+  name_too_long: "E_PATH_CONFLICT",
+  not_a_directory_entry: "E_PATH_CONFLICT",
 };
 
 /** The {@link FileWriteFailure} of a filesystem error, or null for any other error. */
@@ -114,6 +181,8 @@ const FILE_WRITE_FAILURE_REASONS: Readonly<Record<FileWriteFailure, string>> = {
   no_space: "no space is left on the device or the disk quota is exceeded",
   not_a_directory: "a parent of that path is not a directory",
   is_a_directory: "that path is a directory",
+  name_too_long: "a file name or the path is too long for the filesystem",
+  not_a_directory_entry: "that path is a symlink or not a directory",
 };
 
 const FILE_WRITE_PERMISSION_REMEDIES: Readonly<
@@ -133,6 +202,9 @@ const FILE_WRITE_FAILURE_REMEDIES: Readonly<
   no_space: "Free some disk space or quota, then retry",
   not_a_directory: "Replace that path with a directory, then retry",
   is_a_directory: "Move that directory out of the way, then retry",
+  name_too_long:
+    "Use a shorter name or move the project to a shorter path, then retry",
+  not_a_directory_entry: "Replace it with a regular directory, then retry",
 };
 
 /** The fixed remedy sentence for a failure; never names a path or an errno. */
@@ -436,6 +508,8 @@ const ATOMIC_WRITE_STAGING_REFUSALS: Readonly<
   no_space: "no_space",
   not_a_directory: "not_a_directory",
   is_a_directory: "not_regular_file",
+  name_too_long: "name_too_long",
+  not_a_directory_entry: "not_a_directory",
 };
 
 /** The closed refusal for a classified staging failure, else `error` as is. */
@@ -462,7 +536,8 @@ export type AtomicWriteRefusal =
   | "directory_not_writable"
   | "read_only_filesystem"
   | "no_space"
-  | "not_a_directory";
+  | "not_a_directory"
+  | "name_too_long";
 
 const ATOMIC_WRITE_REFUSAL_MESSAGES: Readonly<
   Record<AtomicWriteRefusal, string>
@@ -478,13 +553,14 @@ const ATOMIC_WRITE_REFUSAL_MESSAGES: Readonly<
   read_only_filesystem: `${FILE_WRITE_FAILURE_REASONS.read_only_filesystem}. ${FILE_WRITE_FAILURE_REMEDIES.read_only_filesystem}`,
   no_space: `${FILE_WRITE_FAILURE_REASONS.no_space}. ${FILE_WRITE_FAILURE_REMEDIES.no_space}`,
   not_a_directory: `${FILE_WRITE_FAILURE_REASONS.not_a_directory}. ${FILE_WRITE_FAILURE_REMEDIES.not_a_directory}`,
+  name_too_long: `${FILE_WRITE_FAILURE_REASONS.name_too_long}. ${FILE_WRITE_FAILURE_REMEDIES.name_too_long}`,
 };
 
 /**
  * The stable `--json` code of each {@link AtomicWriteRefusal}, consistent with
  * {@link FileWriteRefusedError}: access, ownership and read-only refusals are
- * `E_PERMISSION`, a full disk is `E_NO_SPACE`, and a path of the wrong kind is
- * `E_PATH_CONFLICT`.
+ * `E_PERMISSION`, a full disk is `E_NO_SPACE`, and a path of the wrong kind
+ * or one too long for the filesystem is `E_PATH_CONFLICT`.
  */
 const ATOMIC_WRITE_REFUSAL_ERROR_CODES: Readonly<
   Record<AtomicWriteRefusal, HackErrorCode>
@@ -498,6 +574,7 @@ const ATOMIC_WRITE_REFUSAL_ERROR_CODES: Readonly<
   read_only_filesystem: "E_PERMISSION",
   no_space: "E_NO_SPACE",
   not_a_directory: "E_PATH_CONFLICT",
+  name_too_long: "E_PATH_CONFLICT",
 };
 
 /**

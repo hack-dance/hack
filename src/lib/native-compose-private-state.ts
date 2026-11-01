@@ -440,6 +440,18 @@ export async function holdDirectory(
     throw error;
   }
 }
+/**
+ * Recheck that every held path still names its held, safe directory.
+ *
+ * Each directory gets its own `lstat` identity, owner and mode check. The
+ * canonical-path (`realpath`) check runs only for a directory that no other
+ * directory in the same batch lies beneath. Held paths are canonical when held,
+ * so `realpath(child) === child` at one instant proves that every proper prefix
+ * of `child`, including each held ancestor, was also canonical (no symlink
+ * component) at that instant: any symlink in a prefix would appear resolved
+ * in the child's result. Both forms prove canonicality at some instant inside
+ * this one recheck; neither was ever atomic with the `lstat` (HACK-1440).
+ */
 export async function recheckDirectories(
   directories: readonly HeldDirectory[]
 ): Promise<void> {
@@ -450,11 +462,25 @@ export async function recheckDirectories(
       named.uid !== process.getuid?.() ||
       (named.mode & 0o022) !== 0 ||
       (held.private && (named.mode & 0o777) !== 0o700) ||
-      (await realpath(held.path)) !== held.path
+      (!canonicalCoveredByDescendant(held, directories) &&
+        (await realpath(held.path)) !== held.path)
     ) {
       refuse();
     }
   }
+}
+/** Whether another directory in this batch lies strictly beneath `held`. */
+function canonicalCoveredByDescendant(
+  held: HeldDirectory,
+  directories: readonly HeldDirectory[]
+): boolean {
+  const prefix = held.path.endsWith("/") ? held.path : `${held.path}/`;
+  return directories.some(
+    (other) =>
+      other !== held &&
+      other.path.length > prefix.length &&
+      other.path.startsWith(prefix)
+  );
 }
 export async function privateDirectory(path: string): Promise<HeldDirectory> {
   try {

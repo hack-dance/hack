@@ -357,9 +357,11 @@ export type NativeComposeCommandStorage = Awaited<
 /** Saved exec does not publish a ready receipt. The opening check directly
  * follows command storage preparation under the same lease, with only read-only
  * source and ownership checks between, so it may reuse that adjacent proof. The
- * closing check after the process always performs a fresh proof. Cancellation
- * preserves its known exit and starts no late helper; every future admission
- * re-verifies content. */
+ * closing check after the process always performs a fresh proof and is
+ * fail-closed: its refusal fails exec although the command already ran, and the
+ * command's exit code is not returned (docs/reference/native-compose-commands.md).
+ * Cancellation preserves its known exit and starts no late helper; every future
+ * admission re-verifies content. */
 export async function runNativeComposeStorageVerifiedExec(opts: {
   readonly signal: AbortSignal;
   readonly assertSaved: (

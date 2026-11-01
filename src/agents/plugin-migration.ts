@@ -55,15 +55,17 @@ import {
  *   `conflict` left unchanged. Rollback is idempotent and also recovers an
  *   interrupted apply.
  *
- * Only standalone skill and rule files are in scope. Claude primer hooks, MCP
+ * Only standalone skills with plugin replacements can be removed. Cursor rules
+ * are inventoried and preserved: the skills-only plugin ships no rule replacement.
+ * Claude primer hooks, MCP
  * entries and `AGENTS.md`/`CLAUDE.md` sections are never touched here.
  *
  * Replacement verification reads client configuration, not a live session:
  * Claude Code must enable `hack@hack-dance` in a settings file that applies to
  * the scope and list an installed copy that carries the replacement skills;
  * Codex must enable it in a `config.toml` that applies to the scope. Hack
- * cannot inspect Cursor plugin installs, so Cursor targets need an explicit
- * skip. A verified configuration is not proof that a fresh session loads the
+ * cannot inspect Cursor plugin installs; skipping a check never supplies a
+ * missing rule replacement. A verified configuration is not proof that a fresh session loads the
  * plugin.
  *
  * Every path derives from explicit `root`, `home` and `backupDir` inputs.
@@ -89,7 +91,8 @@ export type PluginCheck = {
 /** Why migration leaves a file in place. Closed and value-free. */
 export type MigrationPreservedReason =
   | IntegrationPreservedReason
-  | "symlinked-path";
+  | "symlinked-path"
+  | "no-plugin-replacement";
 
 export type MigrationPlanAction =
   | "remove"
@@ -163,6 +166,9 @@ const SYMLINK_MESSAGE =
 export function describeMigrationPreservedReason(
   reason: MigrationPreservedReason
 ): string {
+  if (reason === "no-plugin-replacement") {
+    return "Hack preserved Cursor rules because the skills-only hack plugin ships no replacement rules. Review any legacy rule cleanup separately; --skip-plugin-check does not authorize removal.";
+  }
   if (reason === "symlinked-path") {
     return SYMLINK_MESSAGE;
   }
@@ -294,6 +300,13 @@ async function planTarget(opts: {
       action: "preserve",
       reason: "symlinked-path",
       message: SYMLINK_MESSAGE,
+    };
+  }
+  if (opts.target.target === "cursor-rules") {
+    return {
+      action: "preserve",
+      reason: "no-plugin-replacement",
+      message: describeMigrationPreservedReason("no-plugin-replacement"),
     };
   }
   if (!opts.replaced) {

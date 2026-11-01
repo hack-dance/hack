@@ -91,7 +91,7 @@ async function fixture(kind: "managed" | "custom") {
     DOCKER_HOST: `unix://${root}/unavailable.sock`,
     NO_COLOR: "1",
   };
-  async function invoke(args: readonly string[]) {
+  async function invoke(args: readonly string[], expectedCode = 0) {
     const child = Bun.spawn([...cli, ...args], {
       cwd: project,
       env,
@@ -106,7 +106,9 @@ async function fixture(kind: "managed" | "custom") {
         new Response(child.stdout).text(),
         new Response(child.stderr).text(),
       ]);
-      expect(code, `${args.join(" ")}\n${stdout}\n${stderr}`).toBe(0);
+      expect(code, `${args.join(" ")}\n${stdout}\n${stderr}`).toBe(
+        expectedCode
+      );
     } finally {
       clearTimeout(timer);
       if (child.exitCode === null) {
@@ -145,11 +147,12 @@ for (const scope of scopes) {
       for (const args of [
         ["mcp", "install", "--all", "--scope", scope],
         ["setup", "mcp", "--all", ...scopeFlags],
-        ["setup", "sync", ...scopeFlags],
       ]) {
         await f.invoke(args);
         expect(await f.snapshot()).toEqual(initial);
       }
+      await f.invoke(["setup", "sync", ...scopeFlags], 1);
+      expect(await f.snapshot()).toEqual(initial);
       await f.invoke(["setup", "mcp", "--all", "--remove", ...scopeFlags]);
       const removed = await f.snapshot();
       expect(removed.filter((file) => file.scope !== scope)).toEqual(untouched);

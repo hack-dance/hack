@@ -102,6 +102,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "A path Hack must read or write is the wrong kind of entry: a file where a directory is needed, or a directory or special file where a regular file is needed.",
     readFirst: "`ls -ld <path from the message>`",
   },
+  E_LOCKED: {
+    meaning:
+      "A lock Hack needs stayed held for the whole bounded wait, by another Hack command or by a stale lock Hack cannot prove abandoned; nothing guarded by it was written.",
+    readFirst: "`ls -l <lock path from the message>`",
+  },
   E_INTERACTIVE_REQUIRED: {
     meaning:
       "The command needs an answer at a prompt but is running without one.",

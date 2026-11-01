@@ -1,6 +1,14 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  test,
+} from "bun:test";
 import {
   chmod,
+  cp,
   mkdir,
   mkdtemp,
   readdir,
@@ -13,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireNativeManagedEnvFile } from "../src/lib/native-project-inputs.ts";
 import {
+  nativeEnvMetadataDiagnostic,
   type ProjectEnvValuesByScope,
   resolveProjectEnvMetadataForNativeSelection,
 } from "../src/lib/project-env-config.ts";
@@ -46,8 +55,8 @@ afterEach(async () => {
   }
   await rm(root, { recursive: true, force: true });
 });
-async function project(name = "primary") {
-  const projectRoot = join(root, name);
+async function project(name = "primary", base = root) {
+  const projectRoot = join(base, name);
   await mkdir(join(projectRoot, ".hack"), { recursive: true });
   // Selection is supplied by the compiler; this owner never parses project policy.
   await writeFile(
@@ -72,60 +81,165 @@ async function layer(
     })
   );
 }
+/**
+ * An unexpected refusal fails with its value-free diagnostic in the message, so a
+ * hosted failure names the underlying error class/code; refuses() unwraps the
+ * original closed refusal and asserts on it unchanged.
+ */
+class MetadataRefused extends Error {
+  readonly refusal: unknown;
+  constructor(refusal: unknown) {
+    super(
+      `native env metadata refused (diagnostic: ${nativeEnvMetadataDiagnostic(refusal) ?? "none"})`
+    );
+    this.name = "MetadataRefused";
+    this.refusal = refusal;
+  }
+}
+async function reportingDiagnostic<T>(resolving: Promise<T>): Promise<T> {
+  try {
+    return await resolving;
+  } catch (error: unknown) {
+    throw new MetadataRefused(error);
+  }
+}
 function metadata(
   projectRoot: string,
   overlay: string | null = null,
   inheritLocal = true,
   declaredWorkloadNames: readonly string[] = ["web", "job", "inactive"]
 ) {
-  return resolveProjectEnvMetadataForNativeSelection({
-    projectRoot,
-    overlay,
-    inheritLocal,
-    declaredWorkloadNames,
-  });
+  return reportingDiagnostic(
+    resolveProjectEnvMetadataForNativeSelection({
+      projectRoot,
+      overlay,
+      inheritLocal,
+      declaredWorkloadNames,
+    })
+  );
 }
+/**
+ * Fixture Git ignores the caller's global/system configuration, so a contributor's
+ * hooks, fsmonitor or signing setup cannot add processes or latency to a test.
+ */
 async function git(projectRoot: string, args: string[]) {
   const child = Bun.spawn(["git", "-C", projectRoot, ...args], {
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+    },
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
   });
   expect(await child.exited).toBe(0);
 }
-async function linked() {
-  const primary = await project();
-  await git(primary, ["init", "--quiet", "-b", "main"]);
-  await git(primary, ["add", ".hack/hack.project.json"]);
-  await git(primary, [
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "-c",
-    "commit.gpgsign=false",
-    "commit",
-    "--quiet",
-    "-m",
-    "fixture",
+/**
+ * Git fixtures are built once per file and copied into each test's root.
+ * Creating a repository writes many files (init, index, objects, refs, worktree
+ * checkout); on a loaded runner those writes, not the product's read-only
+ * inspections, took seconds per test and hit bun's 5 s test budget (HACK-1362).
+ * A copy is filesystem-only and spawns no Git.
+ */
+let templates: string;
+beforeAll(async () => {
+  templates = await realpath(
+    await mkdtemp(join(tmpdir(), "native-env-metadata-template-"))
+  );
+  const plain = await project("primary", join(templates, "repository"));
+  const primary = await project("primary", join(templates, "linked"));
+  // No hook samples: fewer files to write now and to copy per test.
+  const init = ["init", "--quiet", "--template=", "-b", "main"];
+  await Promise.all([
+    git(plain, init),
+    (async () => {
+      await git(primary, init);
+      await git(primary, ["add", ".hack/hack.project.json"]);
+      await git(primary, [
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        // Never leave a detached background maintenance process behind the fixture.
+        "-c",
+        "maintenance.auto=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "fixture",
+      ]);
+      await git(primary, [
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "fixture",
+        join(templates, "linked/linked"),
+      ]);
+    })(),
   ]);
+});
+afterAll(async () => {
+  await rm(templates, { recursive: true, force: true });
+});
+async function copyTemplate(name: "repository" | "linked") {
+  await cp(join(templates, name), root, {
+    recursive: true,
+    verbatimSymlinks: true,
+  });
+}
+/** An exact Git root with an empty index and no commit or checkout. */
+async function repository() {
+  await copyTemplate("repository");
+  return join(root, "primary");
+}
+/**
+ * A committed primary with one linked checkout. The two linkage files are the
+ * only absolute paths Git keeps, so the copy points them at this test's root.
+ */
+async function linked() {
+  await copyTemplate("linked");
+  const primary = join(root, "primary");
   const checkout = join(root, "linked");
-  await git(primary, ["worktree", "add", "--quiet", "-b", "fixture", checkout]);
+  await writeFile(
+    join(checkout, ".git"),
+    `gitdir: ${join(primary, ".git/worktrees/linked")}\n`
+  );
+  await writeFile(
+    join(primary, ".git/worktrees/linked/gitdir"),
+    `${join(checkout, ".git")}\n`
+  );
   return { primary, checkout };
 }
-async function refuses(run: () => Promise<unknown>) {
+const VALUE_FREE_DIAGNOSTIC = /^[A-Za-z][A-Za-z0-9]*(?::[A-Z][A-Z0-9_]*)?$/;
+async function refuses(run: () => Promise<unknown>, diagnostic?: string) {
+  let refused: unknown = new Error("Expected refusal");
   try {
     await run();
-    throw new Error("Expected refusal");
   } catch (error: unknown) {
-    expect(error).toBeInstanceOf(Error);
-    if (!(error instanceof Error)) {
-      throw error;
-    }
-    expect(error.message).toContain("values omitted");
-    expect(error.message).not.toContain(SENTINEL);
-    expect(error.message).not.toContain(root);
-    expect(error.cause).toBeUndefined();
+    refused = error instanceof MetadataRefused ? error.refusal : error;
+  }
+  expect(refused).toBeInstanceOf(Error);
+  if (!(refused instanceof Error)) {
+    throw refused;
+  }
+  expect(refused.message).toContain("values omitted");
+  expect(refused.message).not.toContain(SENTINEL);
+  expect(refused.message).not.toContain(root);
+  expect(refused.cause).toBeUndefined();
+  if (
+    refused.message.startsWith("Cannot resolve native managed env metadata")
+  ) {
+    // Closed metadata refusals keep only a class/code diagnostic, never values or paths.
+    expect(nativeEnvMetadataDiagnostic(refused)).toMatch(VALUE_FREE_DIAGNOSTIC);
+    expect(Object.keys(refused)).toEqual([]);
+    expect(JSON.stringify(refused)).toBe("{}");
+  }
+  if (diagnostic !== undefined) {
+    expect(nativeEnvMetadataDiagnostic(refused)).toBe(diagnostic);
   }
 }
 
@@ -219,15 +333,12 @@ test("all six layers use live verified primary inputs with checkout-local preced
   await layer(checkout, "hack.env.qa.local.yaml", {
     global: { WIN: secure, CURRENT_OVERLAY: "" },
   });
-  expect((await metadata(checkout, "qa")).effectiveMetadata.web?.WIN).toEqual({
+  const qa = await metadata(checkout, "qa");
+  expect(qa.effectiveMetadata.web?.WIN).toEqual({
     scope: "global",
     secret: true,
   });
-  expect(
-    Object.keys(
-      (await metadata(checkout, "qa")).effectiveMetadata.web ?? {}
-    ).sort()
-  ).toEqual([
+  expect(Object.keys(qa.effectiveMetadata.web ?? {}).sort()).toEqual([
     "BASE",
     "CURRENT",
     "CURRENT_OVERLAY",
@@ -280,11 +391,12 @@ test("nested native root never inherits its ancestor checkout's locals", async (
 test("invalid exact-root Git linkage refuses instead of inheriting or falling back", async () => {
   const p = await project();
   await writeFile(join(p, ".git"), `gitdir: ${SENTINEL}`);
-  await refuses(() => metadata(p));
+  await refuses(() => metadata(p), "HackCliError:E_CONFIG_INVALID");
 });
 
 test("tracked local filename compatibility and non-Git environment hint remain supported", async () => {
-  const { primary } = await linked();
+  // Tracking is index state at an exact Git root; no commit or linked checkout is needed.
+  const primary = await repository();
   await layer(
     primary,
     "hack.env.local.yaml",
@@ -316,6 +428,15 @@ test("tracked local filename compatibility and non-Git environment hint remain s
   });
 });
 
+const SELECTED_INPUT_DIAGNOSTIC = {
+  symlink: "NativeProjectInputError:E_CONFIG_INVALID",
+  dangling: "NativeProjectInputError:E_CONFIG_INVALID",
+  directory: "NativeProjectInputError:E_CONFIG_INVALID",
+  unreadable: "NativeProjectInputError:E_CONFIG_INVALID",
+  oversized: "NativeProjectInputError:E_CONFIG_INVALID",
+  malformed: "SyntaxError",
+  utf8: "TypeError:ERR_ENCODING_INVALID_ENCODED_DATA",
+} as const;
 for (const kind of [
   "symlink",
   "dangling",
@@ -344,7 +465,7 @@ for (const kind of [
         await chmod(path, 0);
       }
     }
-    await refuses(() => metadata(p, "qa"));
+    await refuses(() => metadata(p, "qa"), SELECTED_INPUT_DIAGNOSTIC[kind]);
   });
 }
 
@@ -451,7 +572,7 @@ test("tracked-path inspection disables repository fsmonitor and ignores caller G
 });
 
 test("cancellation interrupts and reaps an in-flight owned Git inspection", async () => {
-  const { primary } = await linked();
+  const primary = await repository();
   const bin = join(root, "bin");
   const marker = join(root, "inspection-started");
   await mkdir(bin);
@@ -462,6 +583,7 @@ test("cancellation interrupts and reaps an in-flight owned Git inspection", asyn
   await chmod(join(bin, "git"), 0o700);
   process.env.PATH = bin;
   const controller = new AbortController();
+  let settled = false;
   const pending = resolveProjectEnvMetadataForNativeSelection({
     projectRoot: primary,
     overlay: null,
@@ -472,12 +594,14 @@ test("cancellation interrupts and reaps an in-flight owned Git inspection", asyn
     () => null,
     (error: unknown) => error
   );
+  pending.then(() => {
+    settled = true;
+  });
   try {
-    for (
-      let attempt = 0;
-      attempt < 100 && !(await Bun.file(marker).exists());
-      attempt++
-    ) {
+    // Wait for the owned child itself, not a fixed poll budget: on a loaded runner
+    // starting the inspection can outlast any fixed count of short sleeps. A call
+    // that settles without starting it fails the marker assertion below.
+    while (!(settled || (await Bun.file(marker).exists()))) {
       await Bun.sleep(5);
     }
     expect(await Bun.file(marker).exists()).toBe(true);
@@ -521,20 +645,22 @@ function hostMetadata(
     readonly workloadNames?: readonly string[];
   } = {}
 ) {
-  return resolveProjectEnvMetadataForNativeSelection({
-    projectRoot,
-    overlay: opts.overlay ?? null,
-    inheritLocal: opts.inheritLocal ?? true,
-    declaredWorkloadNames: opts.declaredWorkloadNames ?? [
-      "web",
-      "job",
-      "inactive",
-    ],
-    hostTargets: {
-      includeDefault: opts.includeDefault ?? true,
-      workloadNames: opts.workloadNames ?? ["web"],
-    },
-  });
+  return reportingDiagnostic(
+    resolveProjectEnvMetadataForNativeSelection({
+      projectRoot,
+      overlay: opts.overlay ?? null,
+      inheritLocal: opts.inheritLocal ?? true,
+      declaredWorkloadNames: opts.declaredWorkloadNames ?? [
+        "web",
+        "job",
+        "inactive",
+      ],
+      hostTargets: {
+        includeDefault: opts.includeDefault ?? true,
+        workloadNames: opts.workloadNames ?? ["web"],
+      },
+    })
+  );
 }
 
 test("host selection is optional and preserves exact empty/default/requested workload presence", async () => {
@@ -647,7 +773,7 @@ test("a host-named declared workload disables generic host injection even when n
   });
 });
 
-test("host metadata observes all six real worktree layers and explicit base selection", async () => {
+async function hostSixLayers() {
   const { primary, checkout } = await linked();
   await layer(checkout, "hack.env.default.yaml", {
     host: { BASE: "", WIN: secure },
@@ -667,6 +793,11 @@ test("host metadata observes all six real worktree layers and explicit base sele
   await layer(checkout, "hack.env.qa.local.yaml", {
     global: { CURRENT_OVERLAY: "", WIN: "" },
   });
+  return checkout;
+}
+
+test("host metadata observes all six real worktree layers and explicit base selection", async () => {
+  const checkout = await hostSixLayers();
   const result = await hostMetadata(checkout, { overlay: "qa" });
   expect(result.hostMetadata?.default?.WIN).toEqual({
     scope: "global",
@@ -691,12 +822,15 @@ test("host metadata observes all six real worktree layers and explicit base sele
   });
   expect(base.hostMetadata?.default?.PRIMARY_OVERLAY).toBeUndefined();
   expect(base.hostMetadata?.default?.CURRENT_OVERLAY).toBeUndefined();
-  for (const exclusion of ["optout", "ci", "slim"]) {
+});
+
+for (const exclusion of ["optout", "ci", "slim"] as const) {
+  test(`host metadata ${exclusion} skips primary layers but retains checkout-local layers`, async () => {
+    const checkout = await hostSixLayers();
     if (exclusion === "ci") {
       process.env.CI = "true";
     }
     if (exclusion === "slim") {
-      Reflect.deleteProperty(process.env, "CI");
       process.env.HACK_EXECUTION_MODE = "slim";
     }
     const excluded = await hostMetadata(checkout, {
@@ -709,8 +843,8 @@ test("host metadata observes all six real worktree layers and explicit base sele
       scope: "host",
       secret: false,
     });
-  }
-});
+  });
+}
 
 test("unknown, duplicate, noncanonical and malformed host requests refuse without disclosure", async () => {
   const p = await project();

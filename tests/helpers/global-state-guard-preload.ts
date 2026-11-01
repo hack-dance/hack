@@ -12,6 +12,8 @@
  *   file's own hooks and preload `afterEach` hooks after them, so a file's
  *   `beforeEach`/`afterEach` pair that restores correctly passes. A mismatch
  *   fails that test, restores the pre-test environment and cwd, and names the file.
+ *   Before comparing, it puts back the listeners that an unsettled
+ *   `withOwnedProcessListeners` callback took off (a test that timed out in it).
  * - Per file: when Bun loads the next test file, the state must match the
  *   state before the previous file loaded. This catches module-scope and
  *   `beforeAll`/`afterAll` leaks, including an `afterAll` that never ran its
@@ -43,6 +45,12 @@ import {
   restoreGlobalState,
   restoreProcessListeners,
 } from "./global-state-guard.ts";
+import { restoreUnsettledOwnedProcessListeners } from "./owned-process-listeners.ts";
+import { installProcessOnceListeners } from "./process-once-listeners.ts";
+
+// Before any test file registers a listener, so a `once` listener that a
+// helper takes off and puts back stays a `once` listener.
+installProcessOnceListeners();
 
 /**
  * Environment keys a test file may change without a restore. Every entry
@@ -133,6 +141,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // A test that timed out inside `withOwnedProcessListeners` hands the
+  // listeners it took off back first, so it is not blamed for removing them.
+  restoreUnsettledOwnedProcessListeners();
   const before = testBaseline;
   testBaseline = undefined;
   if (before === undefined) {

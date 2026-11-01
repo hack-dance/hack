@@ -64,6 +64,10 @@ export function buildDoctorRecoveryGuidance(input: {
   const followUp: string[] = [];
 
   for (const result of input.results) {
+    // Ignore reports from retired v4/early-v5 instruction audits.
+    if (result.name === "agent integrations") {
+      continue;
+    }
     if (!isActionableRecoveryResult(result)) {
       continue;
     }
@@ -107,30 +111,6 @@ export function buildDoctorRecoveryGuidance(input: {
 
     if (result.message.includes("hack daemon start")) {
       pushUnique(temporaryBreakage, "hack daemon start");
-      continue;
-    }
-
-    if (result.message.includes("hack setup sync --all-scopes")) {
-      pushUnique(
-        followUp,
-        "Inspect integration paths: hack setup sync --all-scopes --check"
-      );
-      pushUnique(
-        followUp,
-        "Repair only reported targets with the matching hack setup <integration> command and authorized project/global scope; missing optional integrations need not be installed."
-      );
-      continue;
-    }
-
-    if (result.message.includes("hack setup sync --global")) {
-      pushUnique(
-        followUp,
-        "Inspect global integration paths: hack setup sync --global --check"
-      );
-      pushUnique(
-        followUp,
-        "Repair only reported global targets with the matching hack setup <integration> --global command when authorized; missing optional integrations need not be installed."
-      );
       continue;
     }
 

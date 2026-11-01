@@ -351,7 +351,9 @@ carriers follow only `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Storage
 proofs that run while a native `up` or `restart` builds and starts workloads do not
 consume the start budget: their elapsed time extends the start deadline, and each
 proof stays bounded by its own carrier budget. Each Docker command inside a carrier
-keeps its fixed 10–15 second cap.
+is bounded by that carrier's remaining budget (reads at most 60 seconds), so a slow
+helper start on a loaded host can use the budget rather than a fixed 15-second cap.
+Helper cleanup keeps its own 10–60 second bound.
 
 The two variables bound different things:
 

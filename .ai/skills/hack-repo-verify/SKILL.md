@@ -71,10 +71,13 @@ exit code, a guarded global function or a process listener changed fails with a
 environment, cwd, umask and exit code so later files run clean; it keeps
 replaced functions, which may still protect unsettled work. It keeps a test's
 leftover listeners until its file ends, then puts the file's listeners back, so
-a later `process.emit` is not blamed for them. Fix the named file's restore
+a later `process.emit` is not blamed for them. Removing a leftover `SIGINT` or
+`SIGTERM` handler also drops whatever cleanup it would have run, so stop what
+it owns in the file's own teardown. Fix the named file's restore
 (`try`/`finally` or `afterEach`), not the later failures. To emit a real signal
 in a test, use `withOwnedProcessListeners` from
-`tests/helpers/owned-process-listeners.ts`.
+`tests/helpers/owned-process-listeners.ts`; it puts the listeners it took off
+back even when the test times out, with `once` listeners kept `once`.
 Restore environment keys with `restoreEnv` from `tests/helpers/env.ts`: Bun keeps
 a deleted `HTTP_PROXY`-style key for `fetch` and `Bun.spawn` without `env`, and
 the guard reports that as `native env <KEY> changed`.

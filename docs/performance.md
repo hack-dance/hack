@@ -743,6 +743,25 @@ more changes that contract, not just its cost:
 
 Every command therefore still opens with a full proof.
 
+**Host-side store checks (HACK-1440).** Each proof step also rechecks the private
+store on the host: every held store directory gets an `lstat` identity, owner and mode
+check, plus a canonical-path check. One xattr-witness `up` made about 3,100 such
+rechecks. Two changes cut their file-system calls without dropping a check:
+
+- A held directory beneath another held directory in the same recheck proves both
+  paths canonical with one `realpath`, because a symlink in any prefix would show in
+  the deeper path's result. Every directory keeps its own `lstat` checks.
+- A material-authority assertion opens and closes with a full store check, so the
+  generation load between them no longer adds two more. The generation directory's
+  own hold, recheck and manifest and document identity checks still run.
+
+Measured in-process (fake carrier, spied `node:fs/promises`) for the second `up` of
+the same-birth xattr case on a macOS host with load average 60–196 on 18 CPUs, four
+alternating trials each: `lstat` 18,834 → 13,452, `realpath` 12,821 → 3,685 and
+`open` 4,542 → 3,944 calls per `up` (identical in every trial), with median system CPU
+2.9 s → 1.9 s. An ordinary (USTAR) witness resume went from 1,298 / 922 / 280 calls to
+1,118 / 282 / 260. Wall time on that host was dominated by load and is inconclusive.
+
 **Revisit trigger.** Revisit this limit after the matched benchmark protocol
 (HACK-1169) is frozen and its first complete revision-1 cohort has run, using that
 cohort's measured warm startup and restart results. No proof-policy change may be made

@@ -166,7 +166,7 @@ test("the doctor --fix plan for an adopted project says what it leaves alone ins
       migrateEnvConfig: true,
     });
     expect(plan).toEqual([
-      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.",
+      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, and daemon drift where needed.",
       "2. Leave the adopted Compose project's inputs, retained containers and adoption state to 'hack config adopt'; --fix changes none of them.",
       "3. Skip env migration because an adopted Compose project's env config belongs to 'hack config adopt'.",
     ]);
@@ -176,7 +176,7 @@ test("the doctor --fix plan for an adopted project says what it leaves alone ins
 
 /** The global `--fix` step every plan starts with. */
 const GLOBAL_FIX_STEP =
-  "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.";
+  "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, and daemon drift where needed.";
 
 /** The adopted-project `--fix` plan, the same for an active or pending adoption. */
 const ADOPTED_FIX_PLAN = [

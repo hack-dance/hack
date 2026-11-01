@@ -493,3 +493,58 @@ if (navigation.title !== versions.v5.label) {
 console.log(
   "next.6 installer, navigation and release-export contracts passed."
 );
+
+// The released source guide still contains Python-era procedures: never endorse
+// it as a current recipe through a prose link from the curated installation path.
+for (const page of [
+  "guides/candidate-install.md",
+  "guides/native-candidate.md",
+]) {
+  const text = await Bun.file(resolve(v5Root, page)).text();
+  if (
+    text.includes(`blob/${releasedRevision}/docs/guides/candidate-install.md`)
+  ) {
+    throw new Error(`Obsolete source installation recipe endorsed: ${page}`);
+  }
+  if (!text.includes("/docs/v5/install")) {
+    throw new Error(`Current installer route missing: ${page}`);
+  }
+}
+console.log("Current installer links avoid obsolete source procedures.");
+
+function assertNoObsoleteInstallRecipe(text: string): void {
+  if (
+    /(?:python3?\s+[^\n]*(?:install-prerelease\.py|hack-next-install\.py|manager\.py)|--version\s+5\.0\.0-next\.1(?:\s|$))/m.test(
+      text
+    )
+  ) {
+    throw new Error("Obsolete Python/next.1 installation recipe promoted");
+  }
+}
+for (const text of [
+  "python3 hack-next-install.py install --version 5.0.0-next.1",
+  'python3 "$HOME/.hack-next/manager.py" status',
+  "sh hack-next-install.sh --version 5.0.0-next.1",
+]) {
+  let rejected = false;
+  try {
+    assertNoObsoleteInstallRecipe(text);
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) {
+    throw new Error("Obsolete installer negative control was accepted");
+  }
+}
+assertNoObsoleteInstallRecipe(
+  "The next.1 Python recipe is historical; use the next.6 shell bootstrap."
+);
+for (const file of [
+  "site/public/v5/llms-full.txt",
+  "site/public/llms-full.txt",
+]) {
+  assertNoObsoleteInstallRecipe(
+    await Bun.file(resolve(repositoryRoot, file)).text()
+  );
+}
+console.log("Python/next.1 recipe negative controls and full exports passed.");

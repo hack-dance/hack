@@ -50,7 +50,7 @@ owner changes and stock PostgreSQL handoff remain refused pending separate quali
 For versioned candidate packages, channel rules and publishing gates are described
 in the [prerelease guide](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/docs/guides/prereleases.md),
 and the separate `hack-next` installation path is described in the
-[candidate installer guide](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/docs/guides/candidate-install.md).
+[candidate installer guide](../install.md).
 The build re-signs the compiled frontend, config compiler, and MCP backend with local ad-hoc signatures and
 strictly verifies all macOS executables before generating checksums. This checks
 code integrity; an ad-hoc signature does not establish a publisher identity or
@@ -108,7 +108,7 @@ selects the native backend and the adjacent executor, even if an inherited
 `HACK_RUNTIME_BACKEND=compose` runs the same bundled CLI on the Compose backend
 with your own Hack home and existing global routing services. It needs no
 `HACK_NATIVE_HOME` and removes the native selectors. Other values refuse with exit
-code 64. The [candidate installer guide](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/docs/guides/candidate-install.md#test-both-backends)
+code 64. The [candidate installer guide](../install.md)
 describes Compose testing and its shared-state limits: run stable `hack global up`,
 then any stable `hack doctor` or `hack doctor --fix`, then stable `hack daemon stop`,
 confirm `pgrep -fl "hack daemon start"` prints nothing, and run no stable `hack`
@@ -216,7 +216,7 @@ HACK_RUNTIME_BACKEND=compose hack up
 ```
 
 The bundle's `hack-v5` entrypoint and the `hack-next` launcher accept the same
-selection; see [Test both backends](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/docs/guides/candidate-install.md#test-both-backends).
+selection; see [Test both backends](../install.md).
 
 Other labels keep their native behavior. Routing (`caddy*`) and dependency cache
 (`hack.dependencies.*`) labels are reviewed as before, and other ordinary labels
@@ -239,7 +239,7 @@ Ctrl-C to stop it. For detached startup, use the Compose backend.
 ## Manual candidate upgrade and rollback
 
 Manual candidate bundles are selected by their full path. The separate
-[prerelease installer](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/docs/guides/candidate-install.md) manages verified versioned selections
+[prerelease installer](../install.md) manages verified versioned selections
 with independent homes; it does not migrate runtime data. `hack-v5 update` refuses before discovering an
 installed binary or contacting a release server; install a separately reviewed,
 complete bundle to change the candidate.

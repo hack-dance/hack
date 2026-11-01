@@ -5943,6 +5943,8 @@ export async function findUnmigratedLegacyDotenv(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly serviceNames: readonly string[];
+  /** Only `.hack/.env`, for a caller that replaces that file and leaves overlays alone. */
+  readonly baseOnly?: boolean;
 }): Promise<UnmigratedLegacyDotenv> {
   const none = { keys: [], malformedCount: 0, unreadableFiles: [] };
   const entries = await readdir(opts.projectDir, { withFileTypes: true });
@@ -5960,17 +5962,20 @@ export async function findUnmigratedLegacyDotenv(opts: {
   const state = await readProjectEnvStateFile({
     statePath: resolveProjectEnvStatePath({ projectDir: opts.projectDir }),
   });
-  const overlayNames = (
-    await discoverLegacyOverlayNames({
-      projectDir: opts.projectDir,
-      includeSymlinks: true,
-    })
-  ).filter(
-    (name) =>
-      !(
-        isExcludedLegacyDotenvName(name) || isReservedLegacyOverlayName(name)
-      ) && NATIVE_ENV_OVERLAY_PATTERN.test(name)
-  );
+  const overlayNames = opts.baseOnly
+    ? []
+    : (
+        await discoverLegacyOverlayNames({
+          projectDir: opts.projectDir,
+          includeSymlinks: true,
+        })
+      ).filter(
+        (name) =>
+          !(
+            isExcludedLegacyDotenvName(name) ||
+            isReservedLegacyOverlayName(name)
+          ) && NATIVE_ENV_OVERLAY_PATTERN.test(name)
+      );
   const keys = new Set<string>();
   const unreadableFiles: string[] = [];
   let malformedCount = 0;
@@ -6827,26 +6832,29 @@ async function legacyBaseDotenvIsGenerated(opts: {
   readonly projectDir: string;
   readonly serviceNames: readonly string[];
 }): Promise<boolean> {
-  const stateRead = await readProjectEnvStateFile({
-    statePath: resolveProjectEnvStatePath({ projectDir: opts.projectDir }),
-  });
-  if (!stateRead.ok) {
-    return false;
-  }
+  const statePath = resolveProjectEnvStatePath({ projectDir: opts.projectDir });
   const read = await readOptionalTextFile(
     resolve(opts.projectDir, PROJECT_ENV_FILENAME)
   );
-  if (read.kind !== "text") {
+  if (read.kind !== "text" || !(await pathExists(statePath))) {
     return false;
   }
+  const stateRead = await readProjectEnvStateFile({ statePath });
   const resolved = await resolveProjectEnvConfig({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
-    envName: stateRead.state.selectedOverlay,
+    envName: stateRead.ok ? stateRead.state.selectedOverlay : null,
     serviceNames: opts.serviceNames,
   });
   if (!resolved) {
     return false;
+  }
+  if (!stateRead.ok) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason:
+        ".hack/.env's state file can't be read, so Hack can't tell whether .env is generated output or holds values of your own. If it's your own file, delete .hack/.env.state.json so it's read as a legacy file. If it's generated output you don't need, delete both files, then run `hack env materialize`.",
+    });
   }
   const generated = serializeDotEnv(
     selectProjectEnvValues({

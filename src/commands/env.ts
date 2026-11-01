@@ -2084,10 +2084,12 @@ const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
   const serviceNames = await discoverComposeServiceNames({
     composeFile: project.composeFile,
   });
+  // Materialize replaces only `.hack/.env`, so overlay values stay where they are.
   const unmigrated = await findUnmigratedLegacyDotenv({
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
     serviceNames,
+    baseOnly: true,
   });
   if (hasUnmigratedLegacyDotenv(unmigrated)) {
     throw new HackCliError({

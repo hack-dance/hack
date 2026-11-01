@@ -3101,3 +3101,101 @@ test("after a real branch switch, a stale state file doesn't cost a real .env it
     ...migrated.blockedCleanupCandidates,
   ]).toContain(envPath);
 });
+
+test("the refusal's materialize recovery runs with an overlay key waiting, and keeps every value", async () => {
+  const repo = await writeGeneratedCheckout({ envName: "staging" });
+  const envPath = resolve(repo.projectDir, ".env");
+  await appendFile(envPath, `EXTRA=${BASE_ONLY_VALUE}\n`);
+  await expectMigrationRefusal({
+    repo,
+    code: "E_PATH_CONFLICT",
+    reason: GENERATED_MISMATCH,
+    hidden: [BASE_ONLY_VALUE, KEPT_VALUE],
+  });
+
+  const moved = await runCli({
+    repo,
+    args: [
+      "env",
+      "set",
+      "EXTRA",
+      "--local",
+      "--value-stdin",
+      "--path",
+      repo.projectRoot,
+    ],
+    stdin: `${BASE_ONLY_VALUE}\n`,
+  });
+  expect(moved.exitCode).toBe(0);
+  const materialized = await runCli({
+    repo,
+    args: [
+      "env",
+      "materialize",
+      "--env",
+      "staging",
+      "--path",
+      repo.projectRoot,
+    ],
+  });
+  expect(materialized.exitCode).toBe(0);
+  // Materialize writes only .env, so the overlay's value is still there to migrate.
+  expect(
+    await readFile(resolve(repo.projectDir, ".env.staging"), "utf8")
+  ).toContain(KEPT_VALUE);
+  expect((await unmigratedIn(repo)).keys).toEqual(["ONLY_HERE"]);
+
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { EXTRA: BASE_ONLY_VALUE },
+  });
+  expect(await readLayerValues(repo, "hack.env.staging.local.yaml")).toEqual({
+    global: { ONLY_HERE: KEPT_VALUE },
+  });
+  expect((await unmigratedIn(repo)).keys).toEqual([]);
+}, 60_000);
+
+test("materialize still refuses a real .env with no state file when an overlay key is waiting too", async () => {
+  const repo = await writeTeammateCheckout();
+  const envPath = resolve(repo.projectDir, ".env");
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `ONLY_HERE=${NEW_VALUE}\n`
+  );
+  const run = await runCli({
+    repo,
+    args: ["env", "materialize", "--path", repo.projectRoot],
+  });
+  expect(run.exitCode).not.toBe(0);
+  const output = `${run.stdout}${run.stderr}`;
+  expect(output).toContain("KEPT_SETTING");
+  expect(output).not.toContain(KEPT_VALUE);
+  expect(await readFile(envPath, "utf8")).toContain(KEPT_VALUE);
+}, 60_000);
+
+test("the migration refuses a .env whose state file can't be parsed, while layers exist", async () => {
+  const repo = await writeGeneratedCheckout({ envName: "staging" });
+  await writeFile(resolve(repo.projectDir, ".env.state.json"), "{not json\n");
+  await expectMigrationRefusal({
+    repo,
+    code: "E_PATH_CONFLICT",
+    reason: "state file can't be read",
+    hidden: [KEPT_VALUE],
+  });
+});
+
+test("without layers, an unparseable state file doesn't stop a real .env migrating", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(resolve(repo.projectDir, ".env.state.json"), "{not json\n");
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { KEPT_SETTING: KEPT_VALUE },
+  });
+});

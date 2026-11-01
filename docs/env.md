@@ -1133,6 +1133,9 @@ files, when:
   `hack env materialize`, which replaces it. If it's your own file, delete `.hack/.env.state.json`
   so it's read as a legacy file. When the text does match, the migration doesn't read the file or
   offer it for cleanup;
+- `.hack/.env` has a state file that can't be parsed, and env layers exist (`E_PATH_CONFLICT`). If
+  `.env` is your own file, delete `.hack/.env.state.json`. If it's generated output you don't need,
+  delete both, then run `hack env materialize`;
 - a legacy file sets a key that Docker, its build tools or the process read from their
   environment (`E_CONFIG_INVALID`): `DOCKER_*`, `BUILDKIT_*`, `BUILDX_*`, a proxy setting,
   `SOURCE_DATE_EPOCH`, `HOME` or `PATH`. After the migration it would reach the Docker client too.

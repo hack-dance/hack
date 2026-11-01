@@ -1862,3 +1862,42 @@ test("the migration does not read a longer interpolated name as the overlay's ke
   });
   expect(migrated.legacyDetected).toBe(true);
 });
+
+test("the migration refuses an env_file order that gives a key a different value from the layers", async () => {
+  const compose = (order: string) =>
+    `services:\n  api:\n    image: alpine:3.20\n    env_file: ${order}\n`;
+  const repo = await writeDefaultOverlayRepo({
+    compose: compose("[.env.staging, .env]"),
+    base: `PORT=${KEPT_VALUE}-base\nSAME=1\n`,
+    overlay: `PORT=${KEPT_VALUE}-staging\nSAME=1\n`,
+  });
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: 'the order of Compose env_file gives "PORT" in "api"',
+    hidden: [KEPT_VALUE],
+  });
+
+  // In the order the layers apply, the value is the same before and after.
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    compose("[.env, .env.staging]")
+  );
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+});
+
+test("the migration accepts any env_file order when the files agree", async () => {
+  const repo = await writeDefaultOverlayRepo({
+    compose:
+      "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env.staging, .env]\n",
+    base: "PORT=1\n",
+    overlay: "PORT=1\nONLY=2\n",
+  });
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+});

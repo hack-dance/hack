@@ -1093,6 +1093,10 @@ files, when:
   or a bare `A`). The value would change or be lost. The error counts entries per file and never
   shows them. Write each value on its own line, in single quotes, with real line breaks and no
   backslashes, or remove the line;
+- a service lists legacy files in an order that gives a key a different value from the migrated
+  layers (`E_CONFIG_INVALID`), such as `env_file: [.env.staging, .env]` with `.env.staging` as the
+  default overlay. Compose lets the last file win, but the default overlay always wins over
+  `.hack/.env` in env layers. List `.env` first, or make the files agree;
 - the Compose file interpolates a key the default overlay sets differently from `.hack/.env`
   (`E_CONFIG_INVALID`). Compose takes it from `.hack/.env` today, but the overlay value would
   apply after the migration. Make the two files agree or stop interpolating the key;

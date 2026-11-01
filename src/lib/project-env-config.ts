@@ -5535,18 +5535,12 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
       reason: `the Compose file interpolates ${interpolated.join(", ")}, which the default overlay sets differently from .hack/.env. Compose takes these from .hack/.env today, but after the migration the overlay value would apply. Make the two files agree or stop interpolating the key, then retry.`,
     });
   }
-  const unlisted = composeServicesMissingLegacyDotenv({
+  assertComposeServicesKeepLegacyValues({
     projectDir: opts.projectDir,
     services,
     legacyValues: opts.legacyValues,
     defaultOverlay,
   });
-  if (unlisted.length > 0) {
-    throw new LegacyDotenvMigrationRefusalError({
-      code: "E_CONFIG_INVALID",
-      reason: `${unlisted.join("; ")}. Migrated values are global and reach every service, so those services would receive values they never had. List the file in env_file for those services if they may have its values, or move the values out of it and set them with \`hack env set --service\` after migrating, then retry.`,
-    });
-  }
 }
 
 /** Compose services as records, skipping entries that are not service maps. */
@@ -5650,6 +5644,74 @@ function composeServicesMissingLegacyDotenv(opts: {
     }
   }
   return labels.sort();
+}
+
+/**
+ * Refuses when a service would gain a value it never had, or a listed key
+ * would change because the migration ignores `env_file` order.
+ */
+function assertComposeServicesKeepLegacyValues(opts: {
+  readonly projectDir: string;
+  readonly services: Record<string, unknown>;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+  readonly defaultOverlay: string | null;
+}): void {
+  const unlisted = composeServicesMissingLegacyDotenv(opts);
+  if (unlisted.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${unlisted.join("; ")}. Migrated values are global and reach every service, so those services would receive values they never had. List the file in env_file for those services if they may have its values, or move the values out of it and set them with \`hack env set --service\` after migrating, then retry.`,
+    });
+  }
+  const orderConflicts = composeLegacyEnvFileOrderConflicts(opts);
+  if (orderConflicts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `the order of Compose env_file gives ${orderConflicts.join(", ")} a different value from the migrated layers, where the default overlay wins over .hack/.env. List .env before the overlay, or make the files agree, then retry.`,
+    });
+  }
+}
+
+/**
+ * Keys whose value a service would change because the migration ignores
+ * `env_file` order. Compose lets the last listed file win; the selected layers
+ * always let the default overlay win over the base. Refusal labels naming keys
+ * and services, never values.
+ */
+function composeLegacyEnvFileOrderConflicts(opts: {
+  readonly projectDir: string;
+  readonly services: Record<string, unknown>;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+  readonly defaultOverlay: string | null;
+}): readonly string[] {
+  const selected = {
+    ...(opts.legacyValues.get(null) ?? {}),
+    ...(opts.defaultOverlay === null
+      ? {}
+      : (opts.legacyValues.get(opts.defaultOverlay) ?? {})),
+  };
+  const envNameByPath = new Map(
+    [...opts.legacyValues.keys()].map((envName) => [
+      resolveEnvFilePath({ projectDir: opts.projectDir, envName }),
+      envName,
+    ])
+  );
+  const conflicts: string[] = [];
+  for (const [service, rawService] of composeServiceEntries(opts.services)) {
+    const effective: Record<string, string> = {};
+    for (const configured of readComposeEnvFilePaths({ rawService })) {
+      const envName = envNameByPath.get(resolve(opts.projectDir, configured));
+      if (envName !== undefined) {
+        Object.assign(effective, opts.legacyValues.get(envName) ?? {});
+      }
+    }
+    for (const [key, value] of Object.entries(effective)) {
+      if (key in selected && selected[key] !== value) {
+        conflicts.push(`${JSON.stringify(key)} in ${JSON.stringify(service)}`);
+      }
+    }
+  }
+  return conflicts.sort();
 }
 
 /**
@@ -5990,7 +6052,8 @@ async function readValidatedLegacyDotenvFiles(opts: {
  *   machine-local layer, a Compose `env_file` on a file the migration leaves
  *   out or on an overlay a launch without `--env` would not select, a Compose
  *   `environment` or `env_file` entry the migrated value would override, a
- *   service that would gain values a legacy file gave only to others, a Compose
+ *   service that would gain values a legacy file gave only to others, an
+ *   `env_file` order that gives a key a different value from the layers, a Compose
  *   input that hides `env_file` from this check, a line Compose reads differently
  *   from Hack, a key that does not match `^[A-Z_][A-Z0-9_]*$`
  *   (counted per file, never shown), and a machine-local target that git

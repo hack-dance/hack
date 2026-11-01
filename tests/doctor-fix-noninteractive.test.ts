@@ -672,7 +672,7 @@ test("doctor --migrate-env-config treats a symlinked overlay as env layers and n
   const legacy = ["synthetic", "legacy", "b9e0"].join("-");
   await writeFile(resolve(projectDir, ".env"), `OWNED=${legacy}\n`);
   await writeFile(resolve(projectDir, ".env.staging"), `OWNED=${legacy}-s\n`);
-  const target = resolve(projectRoot, "..", "outside-staging.yaml");
+  const target = resolve(projectRoot, "linked-staging.yaml");
   const targetText = `version: 1\nenvironment: staging\nsecretsprovider: project_key\nvalues:\n  global:\n    OWNED: ${owned}\n`;
   await writeFile(target, targetText);
   const link = resolve(projectDir, "hack.env.staging.yaml");

@@ -2468,3 +2468,47 @@ test("adding migrated values to a readable local layer makes it private, and kee
     api: { SCOPED: "yes" },
   });
 });
+
+test("the migration refuses an unreadable local layer, so no value is lost and .env survives", async () => {
+  const repo = await writeTeammateCheckout();
+  await writeFile(resolve(repo.projectDir, ".env.staging"), "OVERLAY_ONLY=2\n");
+  const path = resolve(repo.projectDir, "hack.env.local.yaml");
+  await writeFile(path, LAYER_EMPTY);
+  await chmod(path, 0o000);
+  try {
+    const error = await migrateLegacyRepo(repo, {
+      migrateUndeclaredDotenv: true,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+    expect((error as Error).message).toContain(
+      "hack.env.local.yaml can't be read as an env layer"
+    );
+    expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toContain(
+      KEPT_VALUE
+    );
+    expect(
+      await lstat(
+        resolve(repo.projectDir, "hack.env.staging.local.yaml")
+      ).catch(() => null)
+    ).toBeNull();
+  } finally {
+    await chmod(path, 0o600);
+  }
+});
+
+test("the migration refuses an unreadable local overlay that its legacy overlay could disagree with", async () => {
+  const repo = await writeTeammateCheckout();
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const path = resolve(repo.projectDir, "hack.env.staging.local.yaml");
+  await writeFile(path, "version: [");
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: "hack.env.staging.local.yaml can't be read as an env layer",
+    hidden: [KEPT_VALUE],
+  });
+  expect(await readFile(path, "utf8")).toBe("version: [");
+});

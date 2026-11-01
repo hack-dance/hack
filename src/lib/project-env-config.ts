@@ -7,7 +7,6 @@ import {
 import { constants } from "node:fs";
 import {
   access,
-  chmod,
   lstat,
   readdir,
   realpath,
@@ -6356,6 +6355,42 @@ async function readValidatedLegacyDotenvFiles(opts: {
 }
 
 /**
+ * An existing machine-local layer the migration may add to, or null when absent.
+ * Refuses one it can't read or parse, or that isn't a regular file: `.config`
+ * would be an empty default, and treating it as absent or empty loses values.
+ * The refusal names the file, never its content.
+ */
+async function readExistingLocalLayer(opts: {
+  readonly path: string;
+  readonly environment: string;
+}): Promise<{
+  readonly text: string;
+  readonly config: ProjectEnvConfig;
+} | null> {
+  const read = await readOptionalTextFile(opts.path);
+  if (read.kind === "absent") {
+    return null;
+  }
+  const parsed =
+    read.kind === "text"
+      ? parseProjectEnvConfigText({ ...opts, text: read.text })
+      : null;
+  const entry = await lstat(opts.path).catch(() => null);
+  if (
+    read.kind !== "text" ||
+    parsed?.parseError !== undefined ||
+    !entry?.isFile() ||
+    !parsed
+  ) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${basename(opts.path)} can't be read as an env layer, so migrated values can't be added to it safely. Fix or move that file, then retry.`,
+    });
+  }
+  return { text: read.text, config: parsed.config };
+}
+
+/**
  * Refuses when an existing local overlay sets a key its legacy overlay file sets
  * differently. Planning drops an overlay entry equal to the base, and this layer
  * would keep winning over it, so the disagreement would pass unnoticed and leave
@@ -6372,13 +6407,14 @@ async function assertLocalOverlaysAgreeWithLegacy(opts: {
       projectDir: opts.projectDir,
       envName: overlayName,
     });
-    const text = await readTextFile(path);
-    if (text === null) {
+    const layer = await readExistingLocalLayer({
+      path,
+      environment: overlayName,
+    });
+    if (layer === null) {
       continue;
     }
-    const global =
-      parseProjectEnvConfigText({ path, environment: overlayName, text }).config
-        .values.global ?? {};
+    const global = layer.config.values.global ?? {};
     for (const [key, value] of Object.entries(
       opts.legacyValues.get(overlayName) ?? {}
     )) {
@@ -6393,6 +6429,37 @@ async function assertLocalOverlaysAgreeWithLegacy(opts: {
       reason: `the legacy .env files and the local layer set ${conflicts.sort().join(", ")} to different values. Keep the one you want, by removing the key from the other, then retry.`,
     });
   }
+}
+
+/**
+ * Replaces a local layer with mode 0600, because the values were in a private
+ * `.env` and a layer from `hack env set --local` may be readable by others. It
+ * doesn't follow a link at the path: the reader opens no-follow, staging is
+ * private from creation, and rename replaces the path itself.
+ */
+async function replaceLocalLayerPrivately(opts: {
+  readonly projectDir: string;
+  readonly path: string;
+  readonly config: ProjectEnvConfig;
+  readonly expectedExisting: string;
+}): Promise<void> {
+  const options = {
+    path: opts.path,
+    directories: [opts.projectDir],
+    refusal: () =>
+      new LegacyDotenvMigrationRefusalError({
+        code: "E_PATH_CONFLICT",
+        reason: `${basename(opts.path)} changed during the migration or is not a regular file. Check it, then retry.`,
+      }),
+  };
+  const current = await readReplaceablePrivateFile(options);
+  if (current?.text !== opts.expectedExisting) {
+    throw options.refusal();
+  }
+  await replacePrivateFileAtomic({
+    ...options,
+    text: serializeProjectEnvConfig(opts.config),
+  });
 }
 
 /**
@@ -6416,25 +6483,14 @@ async function planLocalLayerMerges(opts: {
   }[] = [];
   const conflicts: string[] = [];
   for (const write of opts.localWrites) {
-    const text = await readTextFile(write.path);
-    if (text === null) {
-      continue;
-    }
-    const read = parseProjectEnvConfigText({
+    const layer = await readExistingLocalLayer({
       path: write.path,
       environment: write.config.environment,
-      text,
     });
-    const entry = await lstat(write.path);
-    // A failed parse gives an empty default, and rewriting that would lose the
-    // layer's real entries. The refusal names the file, never its content.
-    if (read.parseError !== undefined || !entry.isFile()) {
-      throw new LegacyDotenvMigrationRefusalError({
-        code: "E_CONFIG_INVALID",
-        reason: `${basename(write.path)} can't be read as an env layer, so migrated values can't be added to it safely. Fix or move that file, then retry.`,
-      });
+    if (layer === null) {
+      continue;
     }
-    const existing = read.config;
+    const existing = layer.config;
     const global = existing.values.global ?? {};
     const added = write.config.values.global ?? {};
     conflicts.push(
@@ -6448,7 +6504,7 @@ async function planLocalLayerMerges(opts: {
         ...existing,
         values: { ...existing.values, global: { ...global, ...added } },
       },
-      expectedExisting: text,
+      expectedExisting: layer.text,
     });
   }
   if (conflicts.length > 0) {
@@ -6468,13 +6524,15 @@ async function publishMigratedLegacyLayers(opts: {
   readonly projectDir: string;
   readonly localWrites: readonly PlannedEnvLayerWrite[];
   readonly trackedWrites: readonly PlannedEnvLayerWrite[];
+  /** Local layers that exist and receive these values by merging instead. */
+  readonly mergedPaths: ReadonlySet<string>;
 }): Promise<string[]> {
   // Machine-local layers first, so the tracked layers switch the format only
   // once the values have a home.
   const wroteFiles: string[] = [];
   try {
     for (const write of opts.localWrites) {
-      if (await pathExists(write.path)) {
+      if (opts.mergedPaths.has(write.path)) {
         continue;
       }
       // Created 0600 from the start: the values were in a private .env.
@@ -6682,14 +6740,17 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     projectDir: opts.projectDir,
     localWrites,
     trackedWrites,
+    mergedPaths: new Set(merges.map((merge) => merge.path)),
   });
   // Last, after everything that can roll back: each only adds keys, so a failure
   // here leaves the rest for the next run.
   for (const merge of merges) {
-    // The values were in a private .env. The atomic write keeps the file's mode,
-    // and a layer from `hack env set --local` may be readable by others.
-    await chmod(merge.path, 0o600);
-    await writeProjectEnvConfigFile(merge);
+    await replaceLocalLayerPrivately({
+      projectDir: opts.projectDir,
+      path: merge.path,
+      config: merge.config,
+      expectedExisting: merge.expectedExisting,
+    });
     wroteFiles.push(merge.path);
   }
 

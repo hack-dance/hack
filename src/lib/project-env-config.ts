@@ -5129,6 +5129,22 @@ export async function migrateLegacyProjectEnv(opts: {
     projectName: opts.projectName,
     envName: null,
   });
+  const overlaysResolved: {
+    readonly name: string;
+    readonly values: Awaited<ReturnType<typeof resolveHackEnv>>["values"];
+  }[] = [];
+  for (const name of overlayNames) {
+    const overlay = await resolveHackEnv({
+      projectDir: opts.projectDir,
+      projectName: opts.projectName,
+      envName: name,
+    });
+    overlaysResolved.push({ name, values: overlay.values });
+  }
+  assertContractMigrationLayersAreWritable({
+    baseValues: baseResolved.values,
+    overlays: overlaysResolved,
+  });
 
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
@@ -5161,16 +5177,11 @@ export async function migrateLegacyProjectEnv(opts: {
     wroteFiles.push(defaultPath);
   }
 
-  for (const overlayName of overlayNames) {
-    const overlayResolved = await resolveHackEnv({
-      projectDir: opts.projectDir,
-      projectName: opts.projectName,
-      envName: overlayName,
-    });
+  for (const { name: overlayName, values: overlayValues } of overlaysResolved) {
     const overlayConfig = buildMigratedProjectEnvConfig({
       environment: overlayName,
       values: buildMigratedValues({
-        resolvedValues: overlayResolved.values,
+        resolvedValues: overlayValues,
         baseValues: new Map(
           baseResolved.values.map((value) => [value.key, value.value])
         ),
@@ -6305,7 +6316,8 @@ function assertNoShellValuesInContractMigration(opts: {
         "--local --value-stdin",
       ].join(" ");
     const isUsableOverlay = (name: string) =>
-      parseEnvConfigSelection(name) === name;
+      parseEnvConfigSelection(name) === name &&
+      !isReservedLegacyOverlayName(name);
     const isUsableService = (service: string) =>
       isValidProjectEnvScopeName({ scopeName: service });
     const scopesOf = (value: ProcessOnlyContractValue) =>
@@ -6336,6 +6348,17 @@ function assertNoShellValuesInContractMigration(opts: {
       .flatMap((value) => value.services ?? [])
       .filter((service) => !isUsableService(service))
       .map((service) => JSON.stringify(service));
+    // First, because the layers don't read the contract or these files once it migrates.
+    if (unusableOverlays.length > 0) {
+      sentences.push(
+        `First, \`--env\` can't select the overlay file ${[...new Set(unusableOverlays)].sort().join(", ")}, so no command is given for it. Rename it to a lowercase name such as .env.staging and update any env_file or env.defaultOverlay that names it, or remove it.`
+      );
+    }
+    if (unusableServices.length > 0) {
+      sentences.push(
+        `First, \`--service\` can't select the service ${[...new Set(unusableServices)].sort().join(", ")} in hack.env.json, so no command is given for it. Correct the name there, renaming the Compose service if it must match.`
+      );
+    }
     sentences.push(
       `Unset it for one command so the migration runs (\`env ${unset} hack env exec -- true\`). Services then stop receiving it from the shell${
         baseCommands.length > 0
@@ -6343,16 +6366,6 @@ function assertNoShellValuesInContractMigration(opts: {
           : ""
       }.`
     );
-    if (unusableOverlays.length > 0) {
-      sentences.push(
-        `\`--env\` can't select the overlay file ${[...new Set(unusableOverlays)].sort().join(", ")}, so no command is given for it. Rename it to a lowercase name such as .env.staging, or remove it, then retry.`
-      );
-    }
-    if (unusableServices.length > 0) {
-      sentences.push(
-        `\`--service\` can't select the service ${[...new Set(unusableServices)].sort().join(", ")} in hack.env.json, so no command is given for it. Correct the name there, then retry.`
-      );
-    }
     if (overlayCommands.length > 0) {
       sentences.push(
         `A local base outranks tracked overlays, so also set the value each overlay file holds, or that env takes the base value: ${overlayCommands.join("; ")}.`
@@ -6366,6 +6379,73 @@ function assertNoShellValuesInContractMigration(opts: {
     code: "E_CONFIG_INVALID",
     reason: sentences.join(" "),
   });
+}
+
+/**
+ * Refuses what this migration can't write as a working layer, before it writes
+ * anything, because it has no rollback and a retry finds layers and does nothing.
+ * An overlay named `default` would land on the base layer, and `local` on the
+ * machine-local one. A scope a layer can't hold would leave a layer no read can parse.
+ * Only an entry that would be written counts, so an overlay that adds nothing to the
+ * base, or a scope with no value, still migrates. Names only, JSON-quoted.
+ */
+type ResolvedContractMigrationValue = {
+  readonly key: string;
+  readonly value: string | null;
+  readonly services: readonly string[] | null;
+};
+
+function assertContractMigrationLayersAreWritable(opts: {
+  readonly baseValues: readonly ResolvedContractMigrationValue[];
+  readonly overlays: readonly {
+    readonly name: string;
+    readonly values: readonly ResolvedContractMigrationValue[];
+  }[];
+}): void {
+  const base = new Map(
+    opts.baseValues.map((value) => [value.key, value.value])
+  );
+  const addedBy = (values: readonly ResolvedContractMigrationValue[]) =>
+    values.filter(
+      (value) => value.value !== null && base.get(value.key) !== value.value
+    );
+  const reserved = opts.overlays
+    .filter(
+      (overlay) =>
+        isReservedLegacyOverlayName(overlay.name) &&
+        addedBy(overlay.values).length > 0
+    )
+    .map((overlay) => JSON.stringify(`.env.${overlay.name}`))
+    .sort();
+  if (reserved.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `the overlay file ${reserved.join(", ")} uses a name reserved for Hack's own layers, so migrating it would replace the base layer or write a machine-local file. Rename it to a lowercase name such as .env.staging and update any env_file or env.defaultOverlay that names it, or remove it, then retry.`,
+    });
+  }
+  const written = [
+    ...opts.baseValues.filter((value) => value.value !== null),
+    ...opts.overlays.flatMap((overlay) => addedBy(overlay.values)),
+  ];
+  const invalidScopes = [
+    ...new Set(
+      written
+        .flatMap((value) => value.services ?? [])
+        .filter(
+          (service) =>
+            service.trim().length > 0 &&
+            !isValidProjectEnvScopeName({ scopeName: service })
+        )
+    ),
+  ]
+    .map((service) => JSON.stringify(service))
+    .sort();
+  if (invalidScopes.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `hack.env.json declares the service ${invalidScopes.join(", ")}, which isn't a valid env scope, so no read could parse the layer the migration would write. Use lowercase letters, numbers, dots, dashes or underscores, renaming the Compose service if it must match, then retry.`,
+    });
+  }
 }
 
 /**

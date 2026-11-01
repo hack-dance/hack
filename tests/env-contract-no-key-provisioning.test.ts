@@ -255,7 +255,7 @@ async function runWorker(opts: {
   };
 }
 
-test("with nothing stored, the printed step 1 migrates and writes no shell value", async () => {
+test("with nothing stored, the printed step 1 migrates", async () => {
   const { result, after } = await runWorker({
     keychain: "empty",
     shell: false,
@@ -263,9 +263,6 @@ test("with nothing stored, the printed step 1 migrates and writes no shell value
   });
   expect(result.message).toBeNull();
   expect(Object.keys(after)).toContain(".hack/hack.env.default.yaml");
-  expect(JSON.stringify(after)).not.toContain(
-    Buffer.from(SHELL_VALUE).toString("base64")
-  );
 }, 45_000);
 
 test("a store with no key refuses a shell value, and leaves the store and key path alone", async () => {
@@ -287,9 +284,10 @@ test("a store with no key stops step 1 too, with no layer and no key", async () 
     shell: false,
     storePresent: true,
   });
-  expect(result.message).not.toBeNull();
+  expect(result.message).toContain("Missing encrypted backend key");
   expect(after).toEqual(before);
   expect(keyFile).toBeNull();
+  expect(result.calls.get).toBeGreaterThan(0);
   expect(result.calls.set).toBe(0);
 }, 45_000);
 

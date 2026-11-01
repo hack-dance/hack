@@ -1196,8 +1196,8 @@ never the value, and gives the commands for the scope the contract declares:
    `hack env set KEY --env <overlay> --local --value-stdin`, with `--service` as above. A local base
    outranks tracked overlays, so without this the overlay would take the base value.
    The error prints a command only for a name the CLI accepts. It names an overlay file `--env`
-   can't select, such as `.env.My_Staging` or `.env.default`, or a service `--service` can't, so
-   you can rename it first.
+   can't select, such as `.env.My_Staging` or `.env.default`, or a service `--service` can't. Fix
+   those before step 1, because env layers don't read the contract once the project migrates.
 4. Keep it exported if Compose interpolation, or a host command run without that service's scope,
    reads a key you set with `--service`, because a service value doesn't reach them. A value set
    without `--service` does reach them, and overrides your shell.
@@ -1208,6 +1208,11 @@ the backend, so it refuses that key the same way. Make the backend's key availab
 backend has nothing stored yet and `HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK` isn't set, you can run
 these steps instead, and the migration creates its key; set the key only if the backend doesn't hold
 it. Any other backend failure, such as a corrupt store, stops the migration with that error.
+
+With `hack.env.json`, the migration also refuses (`E_CONFIG_INVALID`), writing nothing, an overlay
+named `default`, `local` or `<name>.local` that sets a value of its own, because it would replace the
+base layer or write a machine-local file, and a contract service that isn't a valid env scope when a
+value would be written for it, because no read could parse that layer.
 
 With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
 symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a

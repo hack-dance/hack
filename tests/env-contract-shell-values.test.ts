@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   stat,
   writeFile,
@@ -697,6 +698,7 @@ async function layerTextsTrackedOnly(repo: Repo): Promise<string> {
 
 for (const [file, flag] of [
   [".env.My_Staging", "--env"],
+  [".env.local", "--env"],
   [".env.foo.bar", "--env"],
   [".env.default", "--env"],
   [".env.base", "--env"],
@@ -746,3 +748,93 @@ test("every command the refusal prints is accepted, for the names --env and --se
     expect(run.exitCode).toBe(0);
   }
 }, 60_000);
+
+const RESERVED_NAME = "reserved for Hack's own layers";
+
+for (const file of [".env.default", ".env.local", ".env.staging.local"]) {
+  test(`step 1 refuses an overlay ${file} before any write, and a retry after renaming migrates it`, async () => {
+    const repo = await createContractRepo({
+      files: {
+        ".env": `${SHELL_KEY}=${DOTENV_VALUE}\n`,
+        [file]: `${SHELL_KEY}=overlay-value\n`,
+        ".env.staging": `${SHELL_KEY}=staging-value\n`,
+      },
+    });
+    const before = await snapshotTree(repo);
+
+    const error = await migrate(repo).catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toContain(RESERVED_NAME);
+    expect((error as Error).message).toContain(JSON.stringify(file));
+    expect((error as Error).message).not.toContain("overlay-value");
+    expect(await snapshotTree(repo)).toEqual(before);
+
+    await rename(
+      resolve(repo.projectDir, file),
+      resolve(repo.projectDir, ".env.renamed")
+    );
+    await migrate(repo);
+    expect(await valueFor(repo, "api")).toBe(DOTENV_VALUE);
+    expect(await valueFor(repo, "api", "staging")).toBe("staging-value");
+    expect(await valueFor(repo, "api", "renamed")).toBe("overlay-value");
+  });
+}
+
+test("an overlay .env.default that adds nothing to the base still migrates", async () => {
+  const repo = await createContractRepo({
+    files: {
+      ".env": `${SHELL_KEY}=${DOTENV_VALUE}\n`,
+      ".env.default": `${SHELL_KEY}=${DOTENV_VALUE}\n`,
+    },
+  });
+  await migrate(repo);
+  expect(await valueFor(repo, "api")).toBe(DOTENV_VALUE);
+});
+
+test("step 1 refuses a contract scope a layer can't hold, before any write", async () => {
+  const repo = await createContractRepo({
+    services: ["Api"],
+    files: { ".env": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+  });
+  const before = await snapshotTree(repo);
+
+  const error = await migrate(repo).catch((caught: unknown) => caught);
+
+  expect((error as Error).message).toContain(JSON.stringify("Api"));
+  expect((error as Error).message).toContain("isn't a valid env scope");
+  expect((error as Error).message).not.toContain(DOTENV_VALUE);
+  expect(await snapshotTree(repo)).toEqual(before);
+});
+
+test("a contract scope a layer can't hold doesn't stop a migration with no value for it", async () => {
+  const repo = await createContractRepo({ services: ["Api"] });
+  const migrated = await migrate(repo);
+  expect(migrated.legacyDetected).toBe(true);
+  expect(await valueFor(repo, "api")).toBeUndefined();
+});
+
+test("a service list with usable and unusable names prints a command for the usable one", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  const message = await expectShellValueRefused(
+    await createContractRepo({ services: ["api", "Api"] })
+  );
+  expect(message).toContain(`hack env set ${SHELL_KEY} --service api --local`);
+  expect(message).not.toContain(`hack env set ${SHELL_KEY} --service Api`);
+  expect(message).toContain(JSON.stringify("Api"));
+});
+
+test("names to fix come before the step that migrates, because a migration can't be redone", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  const message = await expectShellValueRefused(
+    await createContractRepo({
+      services: ["Api"],
+      files: { ".env.My_Staging": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+    })
+  );
+  const unsetAt = message.indexOf("Unset it for one command");
+  expect(unsetAt).toBeGreaterThan(-1);
+  expect(message.indexOf(JSON.stringify(".env.My_Staging"))).toBeLessThan(
+    unsetAt
+  );
+  expect(message.indexOf(JSON.stringify("Api"))).toBeLessThan(unsetAt);
+});

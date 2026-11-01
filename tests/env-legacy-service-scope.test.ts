@@ -333,8 +333,9 @@ async function placeLayerEntry(repo: Repo, entry: LayerEntry): Promise<string> {
   if (entry.kind === "directory") {
     await mkdir(path);
   } else if (entry.kind === "link-to-directory") {
-    await mkdir(resolve(repo.root, "elsewhere"), { recursive: true });
-    await symlink(resolve(repo.root, "elsewhere"), path);
+    // Inside the project: a link leaving it is refused earlier (HACK-1685).
+    await mkdir(resolve(repo.projectRoot, "elsewhere"), { recursive: true });
+    await symlink(resolve(repo.projectRoot, "elsewhere"), path);
   } else {
     await symlink(resolve(repo.projectDir, "missing-layer.yaml"), path);
   }
@@ -408,7 +409,7 @@ for (const entry of UNUSABLE_LAYER_ENTRIES) {
 
 test("a symlinked overlay that resolves to a regular layer selects the env layers", async () => {
   const repo = await createLegacyRepo();
-  const target = resolve(repo.root, "shared-staging.yaml");
+  const target = resolve(repo.projectRoot, "shared-staging.yaml");
   await writeFile(
     target,
     LAYER.replace("environment: default", "environment: staging")
@@ -3464,6 +3465,34 @@ test("an overlay layer whose project env key is missing refuses and names that o
   }
 });
 
+for (const [fileName, shown] of [
+  ["hack.env.$(touch x).yaml", '"hack.env.$(touch x).yaml"'],
+  ["hack.env.My_Overlay.yaml", '"hack.env.My_Overlay.yaml"'],
+  ["hack.env.base.yaml", '"hack.env.base.yaml"'],
+] as const) {
+  test(`the layer refusal names ${fileName} instead of building a command from it`, async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `KEPT_SETTING=${KEPT_VALUE}\n`
+    );
+    await writeFile(
+      resolve(repo.projectDir, "hack.env.default.yaml"),
+      LAYER_EMPTY
+    );
+    await writeFile(
+      resolve(repo.projectDir, fileName),
+      "<<<<<<< HEAD\nvalues: [\n"
+    );
+    const error = await migrateLegacyRepo(repo, {
+      migrateUndeclaredDotenv: true,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+    expect((error as Error).message).toContain(`Check ${shown}`);
+    expect((error as Error).message).not.toContain("hack env list");
+  });
+}
+
 test("an unparseable default layer refuses instead of pinning every value locally", async () => {
   const repo = await createLegacyRepo();
   await writeFile(
@@ -3537,7 +3566,7 @@ test("another env_file that only mentions a migrated key in a comment or a value
   );
   await writeFile(
     resolve(repo.projectDir, "other.env"),
-    "# KEPT_SETTING is set elsewhere\nOTHER=KEPT_SETTING\n"
+    "# KEPT_SETTING is set elsewhere\n# KEPT_SETTING=old\nOTHER=KEPT_SETTING\nFOO=bar # used by KEPT_SETTING\n"
   );
   await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
   expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({

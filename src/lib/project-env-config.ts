@@ -87,7 +87,10 @@ import {
   readReplaceablePrivateFile,
   replacePrivateFileAtomic,
 } from "./private-file.ts";
-import { readProjectDefaultEnvConfig } from "./project.ts";
+import {
+  parseEnvConfigSelection,
+  readProjectDefaultEnvConfig,
+} from "./project.ts";
 import { assertProjectEnvLayerPath } from "./project-env-layer-path.ts";
 import {
   assertLegacyProjectDirectory,
@@ -5635,17 +5638,21 @@ async function composeEnvFileKeyConflicts(opts: {
   return conflicts;
 }
 
-// `\s` includes a BOM. The quotes are there for text after a closing quote.
+// `\s` includes a BOM. The quotes are there for text after a closing quote, and the
+// space is what finds the key in `export KEY=value`.
 const COMPOSE_ENV_FILE_ENTRY_NAME =
-  /(?:^|[\s'"])(?:export[ \t]+)?([^\s=:#'"]+)[ \t]*(?:[=:#]|$)/g;
+  /(?:^|[\s'"])([^\s=:#'"]+)[ \t]*(?:[=:#]|$)/g;
 const ENV_FILE_LINE_BREAK = /\r?\n/;
+const ENV_FILE_QUOTE = /['"]/;
+const ENV_FILE_TRAILING_COMMENT = /\s#.*$/;
 
 /**
  * Key names a Compose `env_file` can set, read line by line instead of with
  * `parseDotEnv`, which doesn't see `export KEY=value`, `KEY: value`, a bare `KEY`, or
  * `A='x' KEY=value`, where Compose reads the text after the closing quote as another
- * entry. A value that holds such text, or a line inside a multi-line value, can match
- * too, which refuses more than it must.
+ * entry. A value that holds such text, a comment after a quoted value, or a line inside
+ * a multi-line value can match too, which refuses more than it must. A trailing comment
+ * is dropped only from a line without quotes, because `A='x # y' KEY=value` sets KEY.
  */
 function composeEnvFileEntryNames(text: string): ReadonlySet<string> {
   const names = new Set(Object.keys(parseDotEnv(text)));
@@ -5653,7 +5660,10 @@ function composeEnvFileEntryNames(text: string): ReadonlySet<string> {
     if (line.trimStart().startsWith("#")) {
       continue;
     }
-    for (const match of line.matchAll(COMPOSE_ENV_FILE_ENTRY_NAME)) {
+    const entries = ENV_FILE_QUOTE.test(line)
+      ? line
+      : line.replace(ENV_FILE_TRAILING_COMMENT, "");
+    for (const match of entries.matchAll(COMPOSE_ENV_FILE_ENTRY_NAME)) {
       if (match[1] !== undefined) {
         names.add(match[1]);
       }
@@ -6052,6 +6062,21 @@ async function deliveredLayerValues(opts: {
 }
 
 /**
+ * How to see a layer's error. A file name comes from the repository and this text
+ * gets pasted, so only a name `--env` accepts unchanged goes into a command; `base`,
+ * `default` and `none` select no overlay, so they get the file name too.
+ */
+function unusableLayerRemedy(envName: string | null): string {
+  if (envName === null) {
+    return "Run `hack env list` to see the error, fix it, then retry.";
+  }
+  if (parseEnvConfigSelection(envName) === envName) {
+    return `Run \`hack env list --env ${envName}\` to see the error, fix it, then retry.`;
+  }
+  return `Check ${JSON.stringify(`hack.env.${envName}.yaml`)}, fix it, then retry.`;
+}
+
+/**
  * {@link deliveredLayerValues} for a caller that plans writes from the answer. A
  * layer it can't read might set any key, so it refuses instead of reporting nothing
  * delivered, which would pin legacy values over that layer once it's readable again.
@@ -6066,13 +6091,9 @@ async function deliveredLayerValuesForMigration(opts: {
   try {
     return (await resolveProjectEnvConfig(opts))?.globalEnv ?? {};
   } catch {
-    const listCommand =
-      opts.envName === null
-        ? "hack env list"
-        : `hack env list --env ${opts.envName}`;
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `an env layer can't be read or resolved, for example it doesn't parse or its project env key is missing, so the migration can't tell which values the layers already deliver. Run \`${listCommand}\` to see the error, fix it, then retry.`,
+      reason: `an env layer can't be read or resolved, for example it doesn't parse or its project env key is missing, so the migration can't tell which values the layers already deliver. ${unusableLayerRemedy(opts.envName)}`,
     });
   }
 }
@@ -6682,6 +6703,7 @@ async function planLocalLayerMerges(opts: {
  * what this call created, so the checkout keeps using the legacy files.
  */
 async function publishMigratedLegacyLayers(opts: {
+  readonly projectRoot: string;
   readonly projectDir: string;
   readonly localWrites: readonly PlannedEnvLayerWrite[];
   readonly trackedWrites: readonly PlannedEnvLayerWrite[];
@@ -6710,6 +6732,7 @@ async function publishMigratedLegacyLayers(opts: {
       }
       if (
         await writeProjectEnvConfigFile({
+          projectRoot: opts.projectRoot,
           path: write.path,
           config: write.config,
           expectedExisting: null,
@@ -6924,6 +6947,7 @@ async function migrateUndeclaredLegacyDotenv(opts: {
   }
 
   const wroteFiles = await publishMigratedLegacyLayers({
+    projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
     localWrites,
     trackedWrites,

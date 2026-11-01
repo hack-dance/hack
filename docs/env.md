@@ -1169,8 +1169,8 @@ files, when:
   values services receive. Make it a readable regular file, then retry;
 - an env layer can't be read or resolved (`E_CONFIG_INVALID`), for example it doesn't parse or its
   project env key is missing, including a layer for an overlay you don't use, so the migration
-  can't tell which values the layers already deliver. The error gives the `hack env list` command
-  that shows the problem. Fix it, then retry;
+  can't tell which values the layers already deliver. The error names the file or gives the
+  `hack env list` command that shows the problem. Fix it, then retry;
 - a legacy `.hack/.env` or overlay file exists but cannot be read, for example mode 000
   or a dangling symlink (`E_PERMISSION`), so its values would be lost. A symlinked overlay
   that resolves to a readable file inside `.hack` is migrated like a regular one; cleanup

@@ -50,7 +50,10 @@ import {
   planLegacyComposeRetainedRoutingAdoption,
   planLegacyComposeSourceBindAdoption,
 } from "./native-compose-adoption-plan.ts";
-import { readSavedLegacyComposeAdoptionProjection } from "./native-compose-adoption-projection.ts";
+import {
+  readSavedLegacyComposeAdoptionProjection,
+  savedLegacyComposeEnvOverrideChanged,
+} from "./native-compose-adoption-projection.ts";
 import {
   type LegacyComposePublicationRefusal,
   legacyComposePublicationRefusal,
@@ -604,6 +607,13 @@ export type LegacyComposeAdoptedGenerationStore = {
     readonly binary?: string;
   }) => Promise<void>;
   readonly rollback: () => Promise<void>;
+  /**
+   * Read-only, lock-free hint for a refusal message: true when a `switching`
+   * publication's bound env override was moved or changed since preparation
+   * while its other generated inputs still match, so completing the switch
+   * refuses and only `--recover --rollback` releases it (HACK-1437).
+   */
+  readonly pendingSwitchEnvOverrideChanged: () => Promise<boolean>;
   /** Explicit repair after lock recovery; incomplete source/resource ownership refuses rather than overwriting edits. */
   readonly repairPublication: (opts: {
     readonly action: "complete" | "rollback";
@@ -1050,11 +1060,17 @@ function selectedPlanner(routing: boolean, basic: boolean) {
   }
   return planLegacyComposeAdoption;
 }
+/**
+ * `envOverride: "released"` is rollback's read only: rollback never reads,
+ * executes, rewrites or removes the generated env override, so it neither
+ * reads nor requires it; every other saved proof stays exact (HACK-1437).
+ */
 async function readInputs(
   ctx: Context,
   selected: Anchor,
   preparing = false,
-  material: "verify" | "saved" = "verify"
+  material: "verify" | "saved" = "verify",
+  envOverride: "bound" | "released" = "bound"
 ): Promise<{
   readonly manifest: Manifest;
   readonly literalEnvOverride: boolean;
@@ -1168,6 +1184,7 @@ async function readInputs(
       proof: meta.projectionProof,
       signal: ctx.signal,
       checkOwner: ctx.check,
+      envOverride,
     };
     const projection =
       (meta.adoption_generation_version === 5 &&
@@ -2351,7 +2368,13 @@ async function completeRollback(ctx: Context, state: Receipt) {
   }
   const routingDeadline =
     Date.now() + Math.min(ctx.timeoutMs ?? 15_000, 60_000);
-  const loaded = await readInputs(ctx, publication.generation, false, "saved");
+  const loaded = await readInputs(
+    ctx,
+    publication.generation,
+    false,
+    "saved",
+    "released"
+  );
   await requireStopped(ctx, loaded.inputs.binding);
   const held = await holdDirectory(
     join(ctx.generationsRoot, publication.generation.id, "originals"),
@@ -2403,7 +2426,13 @@ async function completeRollback(ctx: Context, state: Receipt) {
     if (!(await absent(join(transaction.root, ".hack/hack.project.json")))) {
       refuse();
     }
-    await readInputs(transaction, publication.generation, false, "saved");
+    await readInputs(
+      transaction,
+      publication.generation,
+      false,
+      "saved",
+      "released"
+    );
     await requireStopped(transaction, loaded.inputs.binding);
     await recheckDirectories([held]);
     if (loaded.inputs.retainedRouting) {
@@ -3550,7 +3579,8 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
               ctx,
               state.publication.generation,
               false,
-              "saved"
+              "saved",
+              "released"
             );
             await requireActiveCandidate(ctx, state.publication, loaded.inputs);
             await requireStopped(ctx, loaded.inputs.binding);
@@ -3560,6 +3590,35 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             };
             const pending = await save(ctx, next, state);
             await completeRollback(ctx, pending);
+          });
+        } catch (error: unknown) {
+          translate(error, signal);
+        }
+      },
+      async pendingSwitchEnvOverrideChanged() {
+        try {
+          const state = await publicationState(ctx);
+          if (state.publication?.phase !== "switching") {
+            return false;
+          }
+          const anchor = state.publication.generation;
+          const saved = await json(
+            join(ctx.generationsRoot, anchor.id, "manifest.json")
+          );
+          if (
+            !sameFile(saved.info, anchor.manifest) ||
+            hash(saved.text) !== anchor.manifest.hash
+          ) {
+            refuse();
+          }
+          const meta = manifest(saved.value, ctx.root, anchor.id);
+          if (meta.projectionProof === undefined) {
+            return false;
+          }
+          return await savedLegacyComposeEnvOverrideChanged({
+            projectRoot: ctx.root,
+            proof: meta.projectionProof,
+            signal: ctx.signal,
           });
         } catch (error: unknown) {
           translate(error, signal);

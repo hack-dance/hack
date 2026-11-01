@@ -93,10 +93,13 @@ function refuse(): never {
 /**
  * What a `pending` selection waits on, which decides the only command that
  * moves it on:
- * - `switch`: a journaled publication switch or rollback. `hack config adopt
- *   --recover` completes it and `--recover --rollback` restores the originals.
+ * - `switch`: a journaled publication switch or rollback.
+ *   `hack config adopt --recover --rollback` restores the originals from
+ *   either phase; plain `--recover` completes only a `switching` one, and
+ *   refuses once the switch is `rolling-back` (see `switchPhase`).
  * - `preparation-stop`: an interrupted `hack config adopt --stop` before
- *   publication. Only `hack config adopt --recover --stop` retries it.
+ *   publication, or before a new publication over a rolled-back one. Only
+ *   `hack config adopt --recover --stop` retries it.
  * - `retained-operation`: an interrupted retained-container command of an
  *   active adoption. Only `hack down --recover` settles it.
  * A receipt never holds a pending operation and a pending switch together.
@@ -111,6 +114,11 @@ export type LegacyComposeAdoptionSelectionDetail = {
   readonly status: LegacyComposeAdoptionSelection;
   /** Null unless `status` is `pending`. */
   readonly pending: LegacyComposeAdoptionPending | null;
+  /**
+   * The journaled phase of a pending `switch`, which decides whether plain
+   * `--recover` can still complete it. Null unless `pending` is `switch`.
+   */
+  readonly switchPhase: "switching" | "rolling-back" | null;
 };
 
 function classify(
@@ -119,27 +127,34 @@ function classify(
 ): LegacyComposeAdoptionSelectionDetail {
   const state = parseLegacyComposeAdoptionReceipt(value, checkout);
   if (state.pendingOperation !== null) {
-    // The receipt parser admits a pending operation only over an active
-    // publication (a retained command) or before one (a preparation stop).
+    // The receipt parser (`pendingSelectionMatches`) admits a pending
+    // operation only over an active publication (a retained command), or as
+    // a stop of the prepared generation either before any publication or
+    // over a rolled-back one (a preparation stop before the next switch).
     return {
       status: "pending",
       pending:
         state.publication?.phase === "active"
           ? "retained-operation"
           : "preparation-stop",
+      switchPhase: null,
     };
   }
   if (state.publication === null) {
-    return { status: "prepared", pending: null };
+    return { status: "prepared", pending: null, switchPhase: null };
   }
   switch (state.publication.phase) {
     case "switching":
     case "rolling-back":
-      return { status: "pending", pending: "switch" };
+      return {
+        status: "pending",
+        pending: "switch",
+        switchPhase: state.publication.phase,
+      };
     case "active":
-      return { status: "active", pending: null };
+      return { status: "active", pending: null, switchPhase: null };
     case "rolled-back":
-      return { status: "rolled-back", pending: null };
+      return { status: "rolled-back", pending: null, switchPhase: null };
     default:
       refuse();
   }

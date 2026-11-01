@@ -1314,3 +1314,37 @@ test("after the migration, a migrated key's service override takes effect only w
   await set(["--local"]);
   expect(await apiValue()).toBe(NEW_VALUE);
 }, 60_000);
+
+test("the migration refuses when a Compose environment value would lose precedence to a migrated .env value", async () => {
+  const repo = await createLegacyRepo();
+  const composeLegacyPort = ["3", "000"].join("");
+  const composeExplicitPort = ["4", "000"].join("");
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    `services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n    environment:\n      PORT: "${composeExplicitPort}"\n  worker:\n    image: alpine:3.20\n    environment:\n      - OTHER=1\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `PORT=${composeLegacyPort}\nKEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason:
+      'Compose environment sets "PORT" in "api", which the legacy .env files also set',
+    hidden: [composeLegacyPort, composeExplicitPort, KEPT_VALUE],
+  });
+
+  // Without the overlapping key the same shape migrates.
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { KEPT_SETTING: KEPT_VALUE },
+  });
+});

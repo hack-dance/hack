@@ -1069,6 +1069,11 @@ files, when:
 - in a git checkout, git does not ignore a machine-local layer it would write, for
   example because `.hack/.gitignore` is read-only and lacks Hack's managed block
   (`E_PATH_CONFLICT`). Make `.hack/.gitignore` writable, or ignore the path, and retry;
+- a key the legacy files set is also set in a Compose service's own `environment`
+  (`E_CONFIG_INVALID`). Compose ranks `environment` above `env_file`, but migrated values
+  become global layer values that Hack applies after `environment`, so the service would
+  switch to the `.env` value. The error names the keys and services, never values. Remove
+  the key from the `.hack/.env` file or from that service's `environment`, then retry;
 - a legacy `.hack/.env` or overlay file exists but cannot be read, for example mode 000
   or a dangling symlink (`E_PERMISSION`), so its values would be lost. A symlinked overlay
   that resolves to a readable file is migrated like a regular one; cleanup removes only the

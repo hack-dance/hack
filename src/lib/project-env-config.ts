@@ -5308,6 +5308,87 @@ async function assertComposeOverlaysStaySelected(opts: {
   }
 }
 
+/**
+ * Keys a Compose service sets in its own `environment` (map keys, or the
+ * names of `KEY=value` / `KEY` list entries). Null when the entry has a shape
+ * this check cannot read.
+ */
+function composeServiceEnvironmentKeys(
+  environment: unknown
+): ReadonlySet<string> | null {
+  if (environment === undefined || environment === null) {
+    return new Set();
+  }
+  if (Array.isArray(environment)) {
+    const keys = new Set<string>();
+    for (const entry of environment) {
+      if (typeof entry !== "string") {
+        return null;
+      }
+      const key = entry.split("=", 1)[0]?.trim() ?? "";
+      if (key.length > 0) {
+        keys.add(key);
+      }
+    }
+    return keys;
+  }
+  return isRecord(environment) ? new Set(Object.keys(environment)) : null;
+}
+
+/**
+ * Refuses when a migrated key is also set in a Compose service's own
+ * `environment`. Legacy `env_file` values rank below `environment`, but the
+ * migrated values become global layer values, which Hack's generated Compose
+ * override applies to every service after `environment`; the service would
+ * silently switch to the dotenv value. The refusal names services and keys,
+ * JSON-quoted, never values.
+ */
+async function assertComposeEnvironmentKeepsPrecedence(opts: {
+  readonly projectDir: string;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): Promise<void> {
+  const parsed = await readComposeFile({
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+  });
+  const services = parsed ? getRecord(parsed, "services") : null;
+  if (!services) {
+    return;
+  }
+  const migratedKeys = new Set<string>();
+  for (const values of opts.legacyValues.values()) {
+    for (const key of Object.keys(values)) {
+      migratedKeys.add(key);
+    }
+  }
+  const conflicts: string[] = [];
+  const unreadable: string[] = [];
+  for (const [service, rawService] of Object.entries(services)) {
+    if (!isRecord(rawService)) {
+      continue;
+    }
+    const keys = composeServiceEnvironmentKeys(rawService.environment);
+    if (keys === null) {
+      unreadable.push(JSON.stringify(service));
+      continue;
+    }
+    for (const key of [...keys].filter((name) => migratedKeys.has(name))) {
+      conflicts.push(`${JSON.stringify(key)} in ${JSON.stringify(service)}`);
+    }
+  }
+  if (unreadable.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `the Compose environment of ${unreadable.sort().join(", ")} cannot be read, so the migration cannot check that it keeps precedence over the migrated values. Use a map or a list of KEY=value entries, then retry.`,
+    });
+  }
+  if (conflicts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose environment sets ${conflicts.sort().join(", ")}, which the legacy .env files also set; after the migration the .env value would override the Compose value. Remove the key from the .hack/.env file or from that service's environment, then retry.`,
+    });
+  }
+}
+
 /** Overlay entries a migrated overlay layer must hold: those that differ from the base. */
 function legacyOverlayChangedValues(opts: {
   readonly overlayValues: Record<string, string>;
@@ -5479,6 +5560,10 @@ async function migrateUndeclaredLegacyDotenv(opts: {
   await assertComposeOverlaysStaySelected({
     projectDir: opts.projectDir,
     overlayNames,
+    legacyValues,
+  });
+  await assertComposeEnvironmentKeepsPrecedence({
+    projectDir: opts.projectDir,
     legacyValues,
   });
 

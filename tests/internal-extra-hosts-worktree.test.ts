@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveInternalExtraHosts } from "../src/lib/internal-extra-hosts.ts";
 import { resolvePrimaryLocalProjectDir } from "../src/lib/worktree-local-config.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const roots: string[] = [];
 let savedCi: string | undefined;
@@ -41,6 +42,7 @@ async function fixture() {
   await mkdir(primary);
   const git = async (...args: string[]) => {
     const child = Bun.spawn(["git", "-C", primary, ...args], {
+      env: fixtureGitEnv(),
       stdout: "pipe",
       stderr: "pipe",
     });

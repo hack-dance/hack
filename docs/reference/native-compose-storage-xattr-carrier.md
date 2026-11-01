@@ -437,7 +437,11 @@ Budgets are layered and all finite:
   helpers on loaded hosted runners as `storage-helper-start`/`probe-timeout`
   while most of the 90-second budget remained (HACK-1369). A timeout that ends
   before the carrier's deadline still reports `probe-timeout`; one that reaches
-  it reports `storage-budget`. A recorded command's 15-second settlement budget
+  it reports `storage-budget`. A hung volume create or helper create/start is
+  bounded only by the carrier's remaining budget, so it always reports
+  `storage-budget` (for a start, `storage-helper-start`/`storage-budget`), never
+  `probe-timeout`: the remedy is the storage budget the summary names
+  (HACK-1459). A recorded command's 15-second settlement budget
   follows its exit.
 - An unrecorded command (an identity read or a legacy root/seed command) waits
   at most three seconds for its process group to become absent after exit,

@@ -19,6 +19,7 @@ import {
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -35,6 +36,7 @@ afterEach(async () => {
 
 async function git(cwd: string, args: string[]) {
   const child = Bun.spawn(["git", ...args], {
+    env: fixtureGitEnv(),
     cwd,
     stdout: "pipe",
     stderr: "pipe",

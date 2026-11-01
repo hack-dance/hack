@@ -672,9 +672,15 @@ message in the envelope:
 - `E_PATH_CONFLICT`: a path is the wrong kind of entry, such as a file where Hack needs
   a directory, a directory where Hack needs a file (including a `.hack/.gitignore` that
   is a directory or a symlink), or a `.hack/.internal` that `hack env hydrate` finds to
-  be a symlink (dangling or not) or a file. A file name or path that is too long for
-  the filesystem is reported with this code too; use a shorter `--env` overlay name or
+  be a symlink (dangling or not). A file name or path that is too long for the
+  filesystem is reported with this code too; use a shorter `--env` overlay name or
   move the project to a shorter path.
+- `E_CONFIG_INVALID`: `hack env hydrate` could not check its project inputs. A
+  `.hack/.internal` that is a file gives this code with `Cannot inspect Hack project
+  inputs. Check filesystem permissions and paths before retrying. Values omitted.`:
+  Hack cannot tell whether the private state it keeps inside `.hack/.internal`
+  exists, so it stops before hydrating instead of treating it as absent. Replace
+  the file with a directory (or remove it), then retry.
 - `E_LOCKED`: the project env key lock (`<git common dir>/.hack.secret.key.lock`, taken
   by the first `--secret` value) stayed held for the whole 10-second wait. Nothing was
   written. Another hack command may be creating the key; retry when it finishes. If no
@@ -733,7 +739,7 @@ when it cannot get the env file's lock.
 
 `.hack/.internal/` is ignored by the managed `.hack/.gitignore`, so lock files never show
 in `git status`. If `.hack/.internal` is a symlink or not a directory, these commands
-refuse instead of creating the lock through it. If you cannot write the directory that
+refuse with one `E_PATH_CONFLICT` line instead of creating the lock through it. If you cannot write the directory that
 holds the env file (for example a read-only checkout), no lock is taken: no command can
 replace the file there, so a command that changes nothing still succeeds and one that
 would change the file is refused as before.

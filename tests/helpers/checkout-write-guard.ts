@@ -1,4 +1,5 @@
 import { ClosedCliError } from "../../src/lib/cli-result.ts";
+import { GIT_REPOSITORY_ENV_KEYS } from "./fixture-git.ts";
 
 /**
  * Checkout write guard (HACK-1343).
@@ -128,6 +129,12 @@ export function installCheckoutWriteGuard(opts: {
     if (typeof value === "string") {
       env[key] = value;
     }
+  }
+  // Inspect the checkout that contains `start`, never a repository, work tree
+  // or index a caller exported (HACK-1459). The contributor's config stays, so
+  // their global excludes keep hiding the files they already ignore.
+  for (const key of GIT_REPOSITORY_ENV_KEYS) {
+    Reflect.deleteProperty(env, key);
   }
   // Read-only status: never take the index lock a contributor's git may need.
   env.GIT_OPTIONAL_LOCKS = "0";

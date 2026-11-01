@@ -25,6 +25,7 @@ import {
   type InspectEnvKeyOptions,
   inspectProjectEnvKey,
 } from "../src/lib/doctor-env-key.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const KEY_FILE = ".hack.secret.key";
 const uid = typeof process.getuid === "function" ? process.getuid() : null;
@@ -713,7 +714,7 @@ describe("gitListTrackedKeyPaths", () => {
     };
     const git = async (args: readonly string[]) => {
       const proc = Bun.spawn(["git", "-C", root, ...args], {
-        env: gitEnv,
+        env: fixtureGitEnv({ env: gitEnv }),
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
@@ -780,6 +781,7 @@ describe("gitIsLocalKeyIgnored", () => {
     await withPrivateGitEnvironment(join(root, "home"), async () => {
       expect(await gitIsLocalKeyIgnored({ projectRoot: outside })).toBeNull();
       const init = Bun.spawn(["git", "-C", repo, "init", "-q"], {
+        env: fixtureGitEnv(),
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",

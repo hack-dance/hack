@@ -46,6 +46,7 @@ import {
   ProjectsRegistryLockTimeoutError,
   withProjectsRegistryLock,
 } from "../src/lib/projects-registry-lock.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -175,9 +176,11 @@ async function runCli(opts: {
 async function runGit(repo: Repo, args: readonly string[]): Promise<void> {
   const proc = Bun.spawn(["git", ...args], {
     cwd: repo.projectRoot,
-    env: privateCliEnv({
-      root: repo.root,
-      env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+    env: fixtureGitEnv({
+      env: privateCliEnv({
+        root: repo.root,
+        env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      }),
     }),
     stdout: "ignore",
     stderr: "pipe",
@@ -556,6 +559,74 @@ for (const kind of ["dangling", "live"] as const) {
     expect(await readFile(repo.tracked, "utf8")).toBe(LAYER);
   }, 60_000);
 }
+
+// A `.hack/.internal` that is a file stops hydrate earlier: its check of the
+// legacy adoption state under `.hack/.internal` finds a non-directory on the
+// way (ENOTDIR), which is an input access failure, never absence, so it refuses
+// closed before hydrate reaches its lock directory. docs/env.md says so
+// (HACK-1459).
+const INTERNAL_FILE_REFUSAL =
+  "E_CONFIG_INVALID: Cannot inspect Hack project inputs. Check filesystem permissions and paths before retrying. Values omitted.";
+
+test("hydrate with a .hack/.internal file is a closed E_CONFIG_INVALID input refusal", async () => {
+  const repo = await createRepo();
+  const internal = resolve(repo.projectDir, ".internal");
+  await writeFile(internal, "not a directory\n");
+
+  for (const logger of ["console", "clack", "gum"]) {
+    const run = await runCli({
+      repo,
+      args: ["env", "hydrate", "--path", repo.projectRoot],
+      stdin: HYDRATE_INPUT,
+      logger,
+    });
+    expectOneLineRefusal(run, INTERNAL_FILE_REFUSAL);
+  }
+  const json = await runCli({
+    repo,
+    args: ["env", "hydrate", "--json", "--path", repo.projectRoot],
+    stdin: HYDRATE_INPUT,
+  });
+  expect(jsonFailure(json)).toEqual({
+    code: "E_CONFIG_INVALID",
+    message: INTERNAL_FILE_REFUSAL.replace("E_CONFIG_INVALID: ", ""),
+  });
+  // The file and the layer are untouched.
+  expect(await readFile(internal, "utf8")).toBe("not a directory\n");
+  expect(await readFile(repo.tracked, "utf8")).toBe(LAYER);
+}, 60_000);
+
+// The per-layer write lock refuses the same dangling `.hack/.internal` with the
+// same stable code as hydrate: one `E_PATH_CONFLICT` line (HACK-1459).
+const LAYER_LOCK_REFUSAL = (layer: string) =>
+  `E_PATH_CONFLICT: Refused to update ${layer}: the .internal entry beside it is a symlink or not a directory, so its write lock cannot be taken safely. Replace it with a regular directory and retry. Nothing was written.`;
+
+test("env set and unset with a dangling .hack/.internal symlink are one closed E_PATH_CONFLICT line", async () => {
+  const repo = await createRepo();
+  const internal = resolve(repo.projectDir, ".internal");
+  const elsewhere = resolve(repo.root, "elsewhere");
+  await symlink(elsewhere, internal);
+
+  const set = await runCli({
+    repo,
+    args: setArgs(repo, "NEW_SETTING"),
+    stdin: NEW_VALUE,
+  });
+  expectOneLineRefusal(set, LAYER_LOCK_REFUSAL(repo.tracked));
+  const unsetArgs = [
+    "env",
+    "unset",
+    "KEPT_SETTING",
+    "--path",
+    repo.projectRoot,
+  ];
+  const unset = await runCli({ repo, args: unsetArgs });
+  expectOneLineRefusal(unset, LAYER_LOCK_REFUSAL(repo.tracked));
+  // Nothing was created through the link, and the layer is unchanged.
+  expect(await readlink(internal)).toBe(elsewhere);
+  expect(await readdir(elsewhere).catch(() => null)).toBeNull();
+  expect(await readFile(repo.tracked, "utf8")).toBe(LAYER);
+}, 60_000);
 
 test("ensureDirForWrite refuses a dangling symlink or a file closed, not as EEXIST", async () => {
   const directory = await scratch();

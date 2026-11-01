@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { handleNodeRoutes } from "../src/daemon/routes/node.ts";
 import { exec } from "../src/lib/shell.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitShellEnv } from "./helpers/fixture-git.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -374,6 +375,7 @@ async function runGit(opts: {
   readonly args: readonly string[];
 }): Promise<void> {
   const result = await exec(["git", ...opts.args], {
+    ...fixtureGitShellEnv(),
     cwd: opts.cwd,
     stdin: "ignore",
   });
@@ -395,6 +397,7 @@ async function assertTrackedPaths(opts: {
     const result = await exec(
       ["git", "ls-tree", "--name-only", "HEAD", "--", filePath],
       {
+        ...fixtureGitShellEnv(),
         cwd: opts.cwd,
         stdin: "ignore",
       }

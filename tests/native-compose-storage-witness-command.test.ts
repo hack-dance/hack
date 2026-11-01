@@ -1,5 +1,9 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { join } from "node:path";
+import {
+  DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+  DEFAULT_NATIVE_STORAGE_TIMEOUT_MS,
+} from "../src/lib/compose-startup-budget.ts";
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
 import { nativeComposeRetainedVolumesValid } from "../src/lib/native-compose-retained-storage.ts";
 import {
@@ -12,8 +16,85 @@ import {
 import { captureNativeComposeStorageXattrCarrier } from "../src/lib/native-compose-storage-witness-xattr-carrier.ts";
 import { encodeNativeComposeStorageXattrResponse } from "../src/lib/native-compose-storage-witness-xattr-codec.ts";
 import { runNativeComposeStorageXattrHelper } from "../src/lib/native-compose-storage-witness-xattr-helper.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { invoke } from "./helpers/native-compose-command.ts";
 import { legacyStorageFixture } from "./helpers/native-compose-legacy-storage.ts";
+
+/**
+ * `down --recover` bounds its owned stop by `HACK_COMPOSE_STARTUP_TIMEOUT_MS`,
+ * which `invoke` sets to 1 s by default. On a loaded host (HACK-1459: load
+ * average above 60) the stop's synthetic Docker processes alone take longer,
+ * the deadline expires mid-stop, and the CLI reports a `private-uncertain`
+ * effect refusal instead of the `E_COMPOSE_FAILED` these cases pin. A 30 s
+ * deadline still expired at load average 120. Every source CLI process here
+ * (`ps`, `down`, `up`/`run`/`exec` refusals and recovery) therefore runs with
+ * the product's default budget, as on a host that sets none; a CLI that hangs
+ * is still killed by {@link CLI_COMMAND_TIMEOUT_MS}.
+ */
+const RECOVERY_DEADLINE_MS = DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
+/**
+ * Kill bound for one source CLI process here. `invoke`'s 15 s default killed a
+ * cold CLI start with its synthetic Docker and compiler processes (exit 137)
+ * at load average 110. It stays a minute above the recovery deadline, which
+ * covers the stop's bounded cleanup after that deadline.
+ */
+const CLI_COMMAND_TIMEOUT_MS = RECOVERY_DEADLINE_MS + 60_000;
+/**
+ * Each case builds a legacy fixture through the public store, runs up to four
+ * source CLI processes (each a cold Bun start plus synthetic Docker and compiler
+ * processes) and reads saved state back. At load average 120 a case took up to
+ * 4 minutes; Bun's old 30 s per-case budget ended cases while their CLI child
+ * still ran. In CI the whole file takes about 5 s.
+ */
+const STORAGE_WITNESS_CASE_BUDGET_MS = 8 * 60_000;
+setDefaultTimeout(STORAGE_WITNESS_CASE_BUDGET_MS);
+
+function cli(root: string, args: string[]) {
+  return invoke(root, args, RECOVERY_DEADLINE_MS, CLI_COMMAND_TIMEOUT_MS);
+}
+
+function recover(root: string) {
+  return invoke(
+    root,
+    ["down", "--recover", "--json"],
+    RECOVERY_DEADLINE_MS,
+    CLI_COMMAND_TIMEOUT_MS
+  );
+}
+
+/**
+ * Docker client selection a contributor or CI step may export. No case may read
+ * it: the source CLI runs with an isolated client config and the in-process
+ * store never selects an engine, so a missing socket changes nothing.
+ */
+const AMBIENT_DOCKER_SELECTIONS = [
+  { label: "", env: {} },
+  {
+    label: " with an ambient DOCKER_HOST at a missing socket",
+    env: {
+      DOCKER_HOST: "unix:///nonexistent-hack-test/missing-docker.sock",
+      DOCKER_CONTEXT: "hack-test-missing-context",
+    },
+  },
+] as const;
+
+async function withAmbientEnv<T>(
+  env: Readonly<Record<string, string>>,
+  run: () => Promise<T>
+): Promise<T> {
+  const saved = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(env)) {
+    saved.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of saved) {
+      restoreEnv(key, value);
+    }
+  }
+}
 
 async function prepared(enroll: boolean) {
   const root = await legacyStorageFixture();
@@ -113,7 +194,7 @@ test("source CLI cannot fall back to metadata for enrolled v3 startup, run or ex
     ["run", "web", "--", "synthetic"],
     ["exec", "web", "--", "synthetic"],
   ]) {
-    const result = await invoke(root, args);
+    const result = await cli(root, args);
     expect(result.code).toBe(1);
     expect(`${result.stdout}\n${result.stderr}`).toContain(
       "E_NATIVE_PROJECT_UNSUPPORTED"
@@ -125,39 +206,45 @@ test("source CLI cannot fall back to metadata for enrolled v3 startup, run or ex
   expect(await Bun.file(join(root, "requests")).text()).toBe(requests);
   expect(await Bun.file(join(root, "order")).text()).toBe(order);
   expect((await saved(root)).storageWitnesses).toEqual(witnesses);
-}, 30_000);
+});
 
-test("source-unavailable explicit saved recovery stops engine but retains Expected intent and ownership anchor", async () => {
-  const { root, witnesses, generationId } = await prepared(false);
-  const requests = await Bun.file(join(root, "requests")).text();
-  const compiler = await Bun.file(join(root, "compiler-requests")).text();
-  await Bun.write(
-    join(root, ".hack/hack.project.json"),
-    "malformed authored source"
-  );
-  await Bun.write(
-    join(root, ".hack/hack.env.default.yaml"),
-    "malformed private env"
-  );
-  const normal = await invoke(root, ["down", "--json"]);
-  expect(normal.code).toBe(1);
-  expect(await Bun.file(join(root, "requests")).text()).toBe(requests);
-  const recovery = await invoke(root, ["down", "--recover", "--json"]);
-  expect(recovery.code).toBe(1);
-  expect(JSON.parse(recovery.stdout)).toMatchObject({
-    ok: false,
-    error: { code: "E_COMPOSE_FAILED" },
+for (const ambient of AMBIENT_DOCKER_SELECTIONS) {
+  test(`source-unavailable explicit saved recovery stops engine but retains Expected intent and ownership anchor${ambient.label}`, async () => {
+    await withAmbientEnv(ambient.env, async () => {
+      const { root, witnesses, generationId } = await prepared(false);
+      const requests = await Bun.file(join(root, "requests")).text();
+      const compiler = await Bun.file(join(root, "compiler-requests")).text();
+      await Bun.write(
+        join(root, ".hack/hack.project.json"),
+        "malformed authored source"
+      );
+      await Bun.write(
+        join(root, ".hack/hack.env.default.yaml"),
+        "malformed private env"
+      );
+      const normal = await cli(root, ["down", "--json"]);
+      expect(normal.code).toBe(1);
+      expect(await Bun.file(join(root, "requests")).text()).toBe(requests);
+      const recovery = await recover(root);
+      expect(recovery.code).toBe(1);
+      expect(JSON.parse(recovery.stdout)).toMatchObject({
+        ok: false,
+        error: { code: "E_COMPOSE_FAILED" },
+      });
+      expect(await Bun.file(join(root, "engine")).exists()).toBe(false);
+      await noRecoveryHelperRequests(root, requests);
+      expect(await Bun.file(join(root, "compiler-requests")).text()).toBe(
+        compiler
+      );
+      const current = await saved(root);
+      expect(current.storageWitnesses).toEqual(witnesses);
+      expect(current.storageWitnessesPending).toBe(true);
+      expect(current.pending?.generationId).toBe(generationId);
+      expect(current.retainedStorage).toHaveLength(1);
+      expect(JSON.stringify(current)).not.toContain(".hack-storage-");
+    });
   });
-  expect(await Bun.file(join(root, "engine")).exists()).toBe(false);
-  await noRecoveryHelperRequests(root, requests);
-  expect(await Bun.file(join(root, "compiler-requests")).text()).toBe(compiler);
-  const current = await saved(root);
-  expect(current.storageWitnesses).toEqual(witnesses);
-  expect(current.storageWitnessesPending).toBe(true);
-  expect(current.pending?.generationId).toBe(generationId);
-  expect(current.retainedStorage).toHaveLength(1);
-  expect(JSON.stringify(current)).not.toContain(".hack-storage-");
-}, 30_000);
+}
 
 test("source CLI reports and explicitly stops saved resources for unknown enrolled preflight helper with no main pending", async () => {
   const root = await legacyStorageFixture();
@@ -193,7 +280,9 @@ test("source CLI reports and explicitly stops saved resources for unknown enroll
         kernelAbi: 1,
       },
       signal: new AbortController().signal,
-      deadline: Date.now() + 30_000,
+      // The product's default per-carrier budget. A shorter one expired under
+      // load before enrollment finished and failed the case as uncertain.
+      deadline: Date.now() + DEFAULT_NATIVE_STORAGE_TIMEOUT_MS,
       ports: {
         inspect: async () => ({
           engineId: "d".repeat(64),
@@ -307,7 +396,7 @@ test("source CLI reports and explicitly stops saved resources for unknown enroll
   } finally {
     await store.close();
   }
-  const ps = await invoke(root, ["ps", "--json"]);
+  const ps = await cli(root, ["ps", "--json"]);
   expect(ps.code).toBe(0);
   expect(JSON.parse(ps.stdout)).toMatchObject({
     ok: true,
@@ -325,9 +414,9 @@ test("source CLI reports and explicitly stops saved resources for unknown enroll
     join(root, ".hack/hack.env.default.yaml"),
     "malformed private env"
   );
-  expect((await invoke(root, ["down", "--json"])).code).toBe(1);
+  expect((await cli(root, ["down", "--json"])).code).toBe(1);
   expect(await Bun.file(join(root, "requests")).text()).toBe(requests);
-  const recovered = await invoke(root, ["down", "--recover", "--json"]);
+  const recovered = await recover(root);
   expect(recovered.code).toBe(1);
   expect(JSON.parse(recovered.stdout)).toMatchObject({
     ok: false,
@@ -341,4 +430,4 @@ test("source CLI reports and explicitly stops saved resources for unknown enroll
   expect(retained.storageWitnesses).toEqual(witnesses);
   expect(retained.storageWitnessesPending).toBe(true);
   expect(retained.retainedStorage).toHaveLength(1);
-}, 30_000);
+});

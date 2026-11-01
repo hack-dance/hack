@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { test as bunTest, expect } from "bun:test";
 import {
   chmod,
   mkdtemp,
@@ -33,6 +33,25 @@ import {
   classifyProcessPolicyMemberKeys,
 } from "./e2e/native-process-policy-startup-diagnostic.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { testBudgetMs } from "./helpers/test-budget.ts";
+
+/** Bun's own default case timeout, used as the unloaded time of a case that names none. */
+const BUN_DEFAULT_CASE_TIMEOUT_MS = 5000;
+
+/**
+ * A case whose last argument is the time it needs on an unloaded host. The Bun
+ * timeout is that time scaled by `testBudgetMs`, since these cases cold-start
+ * Bun children: trace forwarders, stub engines and replay children. A case
+ * that names no time gets Bun's default, scaled the same way, so no case here
+ * keeps an unscaled 5 s budget.
+ */
+function test(
+  name: string,
+  run: () => void | Promise<void>,
+  unloadedTimeoutMs = BUN_DEFAULT_CASE_TIMEOUT_MS
+): void {
+  bunTest(name, run, testBudgetMs(unloadedTimeoutMs));
+}
 
 const CANARY = "synthetic-unknown-docker-stdout-stderr-canary";
 const EMPTY_MEMBER_KEYS = { hex64: 0, epPrefixed: 0, other: 0 } as const;
@@ -114,7 +133,7 @@ const FORWARDED_DOCKER_EXEC_TIMEOUT_MS = 30_000;
 /** Four forwarded commands at their exec bound, plus trace reads and rewrites. */
 const INITIAL_FORWARDING_TEST_TIMEOUT_MS = 150_000;
 
-test(
+bunTest(
   "initial forwarding preserves bytes/exits but records no unknown output, args or stderr",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "process-initial-forwarding-"));
@@ -252,7 +271,12 @@ test("initial forwarding preserves a multicall Docker entry and refuses its repl
     await symlink(target, entry);
     process.env.PATH = root;
     expect(
-      (await exec([target], { stdin: "ignore", timeoutMs: 3000 })).exitCode
+      (
+        await exec([target], {
+          stdin: "ignore",
+          timeoutMs: FORWARDED_DOCKER_EXEC_TIMEOUT_MS,
+        })
+      ).exitCode
     ).toBe(79);
     const prepared = await prepareProcessPolicyInitialTrace({
       directory: traceRoot,
@@ -261,7 +285,7 @@ test("initial forwarding preserves a multicall Docker entry and refuses its repl
       await exec([join(traceRoot, "docker"), "version"], {
         env: { PATH: prepared.path },
         stdin: "ignore",
-        timeoutMs: 3000,
+        timeoutMs: FORWARDED_DOCKER_EXEC_TIMEOUT_MS,
       });
     expect(await run()).toEqual({
       exitCode: 0,
@@ -312,7 +336,10 @@ test("malformed UTF-8 keeps the caller's exact bytes/exit and makes replay unava
     expect(await new Response(child.stderr).text()).toBe("");
     process.env.PATH = prepared.path;
     await expect(
-      assertNativeComposeOwned({ ...selection, timeoutMs: 3000 })
+      assertNativeComposeOwned({
+        ...selection,
+        timeoutMs: FORWARDED_DOCKER_EXEC_TIMEOUT_MS,
+      })
     ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_PROBE" });
     await expect(
       readProcessPolicyInitialTrace(prepared.directory)

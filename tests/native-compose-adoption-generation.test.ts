@@ -1,7 +1,7 @@
 import {
   afterEach,
   beforeEach,
-  test as boundedTest,
+  test as bunTest,
   expect,
   spyOn,
 } from "bun:test";
@@ -39,6 +39,7 @@ import {
   renderComposeEnvReferenceOverride,
   renderManagedComposeEnvOverride,
 } from "../src/lib/compose-managed-env.ts";
+import { COMPOSE_STARTUP_TIMEOUT_ENV } from "../src/lib/compose-startup-budget.ts";
 import { acquireLegacyComposeAdoptionPreparationBinding } from "../src/lib/native-compose-adoption-binding.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
 import {
@@ -47,7 +48,7 @@ import {
 } from "../src/lib/native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
-  openLegacyComposeAdoptedGenerationStore,
+  openLegacyComposeAdoptedGenerationStore as openAdoptedGenerationStore,
 } from "../src/lib/native-compose-adoption-generation.ts";
 import { inspectLegacyComposeAdoptionSelection } from "../src/lib/native-compose-adoption-marker.ts";
 import {
@@ -66,14 +67,145 @@ import {
 import { buildRuntimeHostMetadataOverride } from "../src/lib/runtime-host-metadata.ts";
 import { captureAdoptionDependencyFirstPrepare } from "./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts";
 import { completedJobFixtureSources } from "./e2e/scenarios/native-compose-adoption-job-inputs.ts";
-import { createCompletedJobFixtureSettlement } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
+import {
+  CASE_DRAIN_BUN_MARGIN_MS,
+  createCaseDrain,
+} from "./helpers/case-drain.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import {
+  CASE_TIMEOUT_CEILING_MS,
+  testBudgetMs,
+  withinCaseCeilingMs,
+} from "./helpers/test-budget.ts";
 
-// Each owner workflow performs multiple bounded child probes; allow their cumulative work on shared CI hosts.
-const test = (name: string, run: () => Promise<void>) =>
-  boundedTest(name, run, 20_000);
+/*
+ * Harness budgets. Every engine probe below spawns the Bun stub engine, and one
+ * retained dispatch issues several hundred probes, so an owner operation's wall
+ * time follows host load. Case budgets and the caller deadlines of cases that
+ * are not about the deadline derive from `testBudgetMs`, within the case
+ * ceiling that the hosted shard's per-file limit allows. The expiry cases'
+ * promptness assertion (1.5 s past the deadline) is a product bound under test
+ * and stays literal.
+ */
+/** Caller deadline for one owner operation in a case that is not about the deadline. */
+const OPERATION_DEADLINE_MS = testBudgetMs(4000);
+/**
+ * Time a case body that overran its budget gets to settle inside its own case:
+ * one caller deadline plus slack. A body with several owner operations left
+ * can need longer on a loaded host; the next case then waits for it.
+ */
+const CASE_DRAIN_MS = OPERATION_DEADLINE_MS + testBudgetMs(250);
+/**
+ * How long the next case's `beforeEach` waits for a body still running after
+ * its budget and drain, outside that case's own timeout: one more case
+ * ceiling. The overrunning case has already failed by name by then.
+ */
+const CASE_RESERVATION_WAIT_MS = CASE_TIMEOUT_CEILING_MS;
+/** `beforeEach` timeout: the reservation wait plus the fixture setup. */
+const BEFORE_EACH_TIMEOUT_MS = CASE_RESERVATION_WAIT_MS + testBudgetMs(500);
+/**
+ * Every case shares this file's roots, stub engine and environment, and Bun's
+ * timeout does not cancel a body, so cases run under the drain guard: an
+ * overrun fails only that case, by name (see `tests/helpers/case-drain.ts`).
+ */
+const cases = createCaseDrain({
+  label: "Adoption fixture",
+  drainMs: CASE_DRAIN_MS,
+});
+/** Largest body budget whose Bun timeout (budget, drain and margin) fits the case ceiling. */
+const CASE_BODY_CEILING_MS =
+  CASE_TIMEOUT_CEILING_MS - CASE_DRAIN_MS - CASE_DRAIN_BUN_MARGIN_MS;
+withinCaseCeilingMs(cases.bunTimeoutMs(CASE_BODY_CEILING_MS));
+/** Body budget for a case that needs `unloadedMs` on an unloaded host. */
+function caseBudgetMs(unloadedMs: number): number {
+  return testBudgetMs(unloadedMs, { ceilingMs: CASE_BODY_CEILING_MS });
+}
+type CaseBody = () => void | Promise<void>;
+/** Bun's `test`, `test.each` and `test.skipIf`, each under the drain guard. */
+const boundedTest = Object.assign(
+  (name: string, body: CaseBody, budgetMs: number) =>
+    cases.test(name, body, budgetMs),
+  {
+    each:
+      <T extends string>(values: readonly T[]) =>
+      (
+        name: string,
+        body: (value: T) => void | Promise<void>,
+        budgetMs: number
+      ) =>
+        bunTest.each(values as T[])(
+          name,
+          (value: T) => cases.run(name, () => body(value), budgetMs),
+          cases.bunTimeoutMs(budgetMs)
+        ),
+    skipIf:
+      (condition: boolean) =>
+      (name: string, body: CaseBody, budgetMs: number) =>
+        bunTest.skipIf(condition)(
+          name,
+          () => cases.run(name, body, budgetMs),
+          cases.bunTimeoutMs(budgetMs)
+        ),
+  }
+);
+const test = (name: string, run: CaseBody) =>
+  boundedTest(name, run, caseBudgetMs(20_000));
+/**
+ * Probe-phase bound for stores these cases open. One store probe carries a
+ * single aggregate clock across a whole inspection (dozens of stub-engine
+ * processes), 15 s by default. That default is a product bound no case here
+ * tests, so stores open with the largest phase bound the product accepts.
+ * Public dispatch opens its own store and keeps the default (HACK-1458).
+ */
+const PROBE_PHASE_BUDGET_MS = 60_000;
+/**
+ * Caller deadline in the cases that test its expiry after the callback. The
+ * product behavior under test (expiry ends a held probe or an overlong callback
+ * with `E_LEGACY_ADOPTION_DEADLINE`, keeps the operation pending, and returns
+ * within 1.5 s of the deadline) does not depend on its length, but the work
+ * before the callback must finish first: a 5 s deadline expired before the
+ * callback at load 30-45. It stays under the probe-phase bound, so the caller
+ * deadline, not a probe's own phase clock, ends a held probe. The cases do not
+ * wait it out: once the callback is reached they move the product's clock to
+ * just before the deadline (`shiftProductClock`).
+ */
+const EXPIRY_DEADLINE_MS = PROBE_PHASE_BUDGET_MS - 15_000;
+/**
+ * Clock time an expiry case leaves before the deadline when its callback runs.
+ * It must cover the work before the held probe and the stub engine recording
+ * its PID, which the case then proves was killed. For per-effect freshness the
+ * callback's own probe is the held one (0.3 s from the callback at 1-min load
+ * 45 on the M5); for the final observation the product first runs its other
+ * final probes (5.7 s at the same load).
+ */
+const EXPIRY_LEAD_MS = {
+  "per-effect freshness": testBudgetMs(250),
+  "final observation": testBudgetMs(1000),
+} as const;
+/**
+ * Move the clock the product reads (`Date.now`) forward by `byMs` for the rest
+ * of the case; it keeps advancing at the real rate. The product takes the
+ * caller deadline as a `Date.now` timestamp and has no clock seam, so this
+ * stands in for one. Timers are not moved: a held probe still ends by the
+ * timeout the product derives from the remaining clock time. Returns the
+ * restore function; call it in `finally`.
+ */
+function shiftProductClock(byMs: number): () => void {
+  const realNow = Date.now.bind(Date);
+  const clock = spyOn(Date, "now").mockImplementation(() => realNow() + byMs);
+  return () => clock.mockRestore();
+}
+/** The product store opener, with the harness probe-phase bound unless a case names one. */
+function openLegacyComposeAdoptedGenerationStore(
+  input: Parameters<typeof openAdoptedGenerationStore>[0]
+): ReturnType<typeof openAdoptedGenerationStore> {
+  return openAdoptedGenerationStore({
+    timeoutMs: PROBE_PHASE_BUDGET_MS,
+    ...input,
+  });
+}
 const CANARY = "synthetic-private-adoption-canary";
 const ID = "a".repeat(64);
 const NETWORK = "b".repeat(64);
@@ -146,21 +278,29 @@ type Fixture = {
 };
 let root: string;
 let projectRoot: string;
-let priorPath: string | undefined;
-let priorCI: string | undefined;
-let priorExecutionMode: string | undefined;
-let priorRuntimeBackend: string | undefined;
 let fixture: Fixture;
-let publicStatic7Commands = 0;
-const publicStatic7Settlement = createCompletedJobFixtureSettlement();
+/**
+ * Environment the cases change, as it was when the file loaded. Every case
+ * restores these values, so a case that settles late cannot leave its own
+ * values behind as a later case's "prior" ones.
+ */
+const FILE_ENV = Object.freeze({
+  PATH: process.env.PATH,
+  CI: process.env.CI,
+  HACK_EXECUTION_MODE: process.env.HACK_EXECUTION_MODE,
+  HACK_RUNTIME_BACKEND: process.env.HACK_RUNTIME_BACKEND,
+  [COMPOSE_STARTUP_TIMEOUT_ENV]: process.env[COMPOSE_STARTUP_TIMEOUT_ENV],
+});
 beforeEach(async () => {
-  // An outer test timeout does not cancel an awaited owner. Never recycle its globals or roots.
-  publicStatic7Settlement.assertConfirmed();
-  priorPath = process.env.PATH;
-  priorCI = process.env.CI;
-  priorExecutionMode = process.env.HACK_EXECUTION_MODE;
-  priorRuntimeBackend = process.env.HACK_RUNTIME_BACKEND;
+  // A body still running past its budget and drain owns the shared roots,
+  // stub engine and environment. Wait for it rather than recycling them.
+  await cases.awaitUnreserved(CASE_RESERVATION_WAIT_MS);
   process.env.HACK_RUNTIME_BACKEND = "compose";
+  // Public dispatch (`tryLegacyComposeAdoptedCommand`) takes its caller
+  // deadline from the Compose startup budget, 90 s by default. No case here
+  // tests that default, so inject the direct operations' harness deadline
+  // through the product's own setting.
+  process.env[COMPOSE_STARTUP_TIMEOUT_ENV] = String(OPERATION_DEADLINE_MS);
   root = await realpath(
     await mkdtemp(join(tmpdir(), "native-adoption-binding-"))
   );
@@ -307,21 +447,18 @@ if (fixture.mode === "inventory-change" && kind === "container" && action === "l
   process.env.PATH = root;
   await mkdir(join(projectRoot, ".git"));
   await save();
-});
+}, BEFORE_EACH_TIMEOUT_MS);
 afterEach(async () => {
-  if (publicStatic7Commands !== 0) {
-    publicStatic7Settlement.markUnconfirmed();
-  }
-  try {
-    publicStatic7Settlement.assertConfirmed();
-  } catch {
-    // Retain the still-owned fixture; a late callback cannot restore teardown authority.
+  if (cases.reservedBy() !== undefined) {
+    // The body still runs and owns this root and environment; keep both.
+    console.error(
+      "Adoption fixture root retained for a case still running past its budget and drain."
+    );
     return;
   }
-  restoreEnv("PATH", priorPath);
-  restoreEnv("CI", priorCI);
-  restoreEnv("HACK_EXECUTION_MODE", priorExecutionMode);
-  restoreEnv("HACK_RUNTIME_BACKEND", priorRuntimeBackend);
+  for (const [key, value] of Object.entries(FILE_ENV)) {
+    restoreEnv(key, value);
+  }
   await rm(root, { recursive: true, force: true });
 });
 async function save() {
@@ -607,15 +744,6 @@ else {
   return binary;
 }
 
-async function publicStatic7Case(run: () => Promise<void>) {
-  publicStatic7Commands += 1;
-  try {
-    await run();
-  } finally {
-    publicStatic7Commands -= 1;
-  }
-}
-
 function publicStatic7Stages() {
   const started = Date.now();
   return (
@@ -629,29 +757,61 @@ function publicStatic7Stages() {
 }
 
 test("retained Compose fixture admits its explicit backend and preserves opposite-backend refusal before probes", async () => {
-  await publicStatic7Case(async () => {
-    expect(process.env.HACK_RUNTIME_BACKEND).toBe("compose");
-    const binary = await compiler();
+  expect(process.env.HACK_RUNTIME_BACKEND).toBe("compose");
+  const binary = await compiler();
+  const { store, generation } = await prepared(binary);
+  const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+  try {
+    process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+    await store.publish({ generation, binary });
+    const commands = await readFile(join(root, "commands"), "utf8");
+    process.env.HACK_RUNTIME_BACKEND = "native";
+    try {
+      await expect(
+        tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "up",
+          detach: true,
+        })
+      ).rejects.toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
+      expect(await readFile(join(root, "commands"), "utf8")).toBe(commands);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+    } finally {
+      process.env.HACK_RUNTIME_BACKEND = "compose";
+    }
+    expect(
+      await tryLegacyComposeAdoptedCommand({
+        cwd: projectRoot,
+        operation: "up",
+        detach: true,
+      })
+    ).toBe(0);
+    expect(await mutationCommands()).toEqual([["container", "start", ID]]);
+  } finally {
+    restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+    await store.close();
+  }
+});
+
+boundedTest.each(["no", ""] as const)(
+  "public retained up dispatches the maintained static7 family with disabled policy %j",
+  async (jobRestartPolicy) => {
+    const stages = publicStatic7Stages();
+    stages("prepare", "enter");
+    const { app, job } = await maintainedCompletedJobFixture();
+    const binary = await maintainedJobCompiler();
     const { store, generation } = await prepared(binary);
+    stages("prepare", "settled");
     const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
     try {
       process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+      stages("publish", "enter");
       await store.publish({ generation, binary });
-      const commands = await readFile(join(root, "commands"), "utf8");
-      process.env.HACK_RUNTIME_BACKEND = "native";
-      try {
-        await expect(
-          tryLegacyComposeAdoptedCommand({
-            cwd: projectRoot,
-            operation: "up",
-            detach: true,
-          })
-        ).rejects.toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
-        expect(await readFile(join(root, "commands"), "utf8")).toBe(commands);
-        expect((await readReceipt()).pendingOperation).toBeNull();
-      } finally {
-        process.env.HACK_RUNTIME_BACKEND = "compose";
-      }
+      stages("publish", "settled");
+      fixture.jobRestartPolicy = jobRestartPolicy;
+      await save();
+      expect(generation.report.adoption_generation_version).toBe(7);
+      stages("start", "enter");
       expect(
         await tryLegacyComposeAdoptedCommand({
           cwd: projectRoot,
@@ -659,69 +819,33 @@ test("retained Compose fixture admits its explicit backend and preserves opposit
           detach: true,
         })
       ).toBe(0);
-      expect(await mutationCommands()).toEqual([["container", "start", ID]]);
+      stages("start", "settled");
+      expect(await mutationCommands()).toEqual([
+        ["container", "start", ID],
+        ["container", "start", job],
+        ["container", "start", app],
+      ]);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+      stages("stop", "enter");
+      expect(
+        await tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "down",
+        })
+      ).toBe(0);
+      stages("stop", "settled");
+      expect((await mutationCommands()).slice(-3)).toEqual([
+        ["container", "stop", app],
+        ["container", "stop", job],
+        ["container", "stop", ID],
+      ]);
     } finally {
       restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
       await store.close();
     }
-  });
-});
-
-boundedTest.each(["no", ""] as const)(
-  "public retained up dispatches the maintained static7 family with disabled policy %j",
-  async (jobRestartPolicy) => {
-    await publicStatic7Case(async () => {
-      const stages = publicStatic7Stages();
-      stages("prepare", "enter");
-      const { app, job } = await maintainedCompletedJobFixture();
-      const binary = await maintainedJobCompiler();
-      const { store, generation } = await prepared(binary);
-      stages("prepare", "settled");
-      const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-      try {
-        process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-        stages("publish", "enter");
-        await store.publish({ generation, binary });
-        stages("publish", "settled");
-        fixture.jobRestartPolicy = jobRestartPolicy;
-        await save();
-        expect(generation.report.adoption_generation_version).toBe(7);
-        stages("start", "enter");
-        expect(
-          await tryLegacyComposeAdoptedCommand({
-            cwd: projectRoot,
-            operation: "up",
-            detach: true,
-          })
-        ).toBe(0);
-        stages("start", "settled");
-        expect(await mutationCommands()).toEqual([
-          ["container", "start", ID],
-          ["container", "start", job],
-          ["container", "start", app],
-        ]);
-        expect((await readReceipt()).pendingOperation).toBeNull();
-        stages("stop", "enter");
-        expect(
-          await tryLegacyComposeAdoptedCommand({
-            cwd: projectRoot,
-            operation: "down",
-          })
-        ).toBe(0);
-        stages("stop", "settled");
-        expect((await mutationCommands()).slice(-3)).toEqual([
-          ["container", "stop", app],
-          ["container", "stop", job],
-          ["container", "stop", ID],
-        ]);
-      } finally {
-        restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-        await store.close();
-      }
-    });
   },
   // Cover prepare/publish and separate bounded up/down operations without changing their deadlines.
-  60_000
+  caseBudgetMs(60_000)
 );
 
 boundedTest.each([
@@ -733,110 +857,106 @@ boundedTest.each([
 ] as const)(
   "public static7 observer refuses %s with only closed diagnostics and keeps pending",
   async (reason) => {
-    await publicStatic7Case(async () => {
-      await maintainedCompletedJobFixture();
-      const binary = await maintainedJobCompiler();
-      const { store, generation } = await prepared(binary);
-      const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+    await maintainedCompletedJobFixture();
+    const binary = await maintainedJobCompiler();
+    const { store, generation } = await prepared(binary);
+    const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+    try {
+      process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+      await store.publish({ generation, binary });
+      fixture.jobObservation = reason;
+      await save();
+      let rejection: unknown;
       try {
-        process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-        await store.publish({ generation, binary });
-        fixture.jobObservation = reason;
-        await save();
-        let rejection: unknown;
-        try {
-          await tryLegacyComposeAdoptedCommand({
-            cwd: projectRoot,
-            operation: "up",
-            detach: true,
-          });
-        } catch (error: unknown) {
-          rejection = error;
-        }
-        expect(rejection).toBeInstanceOf(HackCliError);
-        if (!(rejection instanceof HackCliError)) {
-          throw new Error("missing public refusal");
-        }
-        expect(rejection.code).toBe("E_CONFIG_INVALID");
-        expect(rejection.detail).toEqual({
-          legacy_adoption_refusal: {
-            stage: "ordered-observation",
-            reason: reason === "probe" ? "probe-child" : reason,
-          },
+        await tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "up",
+          detach: true,
         });
-        expect(
-          JSON.stringify({
-            message: rejection.message,
-            detail: rejection.detail,
-          })
-        ).not.toContain(CANARY);
-        expect((await readReceipt()).pendingOperation.operation).toBe("start");
-        expect(
-          (await mutationCommands()).some(
-            (args) => args[2] === "e".repeat(64) || args[2] === "c".repeat(64)
-          )
-        ).toBe(false);
-      } finally {
-        restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-        await store.close();
+      } catch (error: unknown) {
+        rejection = error;
       }
-    });
+      expect(rejection).toBeInstanceOf(HackCliError);
+      if (!(rejection instanceof HackCliError)) {
+        throw new Error("missing public refusal");
+      }
+      expect(rejection.code).toBe("E_CONFIG_INVALID");
+      expect(rejection.detail).toEqual({
+        legacy_adoption_refusal: {
+          stage: "ordered-observation",
+          reason: reason === "probe" ? "probe-child" : reason,
+        },
+      });
+      expect(
+        JSON.stringify({
+          message: rejection.message,
+          detail: rejection.detail,
+        })
+      ).not.toContain(CANARY);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      expect(
+        (await mutationCommands()).some(
+          (args) => args[2] === "e".repeat(64) || args[2] === "c".repeat(64)
+        )
+      ).toBe(false);
+    } finally {
+      restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+      await store.close();
+    }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
   "public static7 scheduler classifies actual nonzero job exit without starting its dependent",
   async () => {
-    await publicStatic7Case(async () => {
-      const { job, app } = await maintainedCompletedJobFixture();
-      const binary = await maintainedJobCompiler();
-      const { store, generation } = await prepared(binary);
-      const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-      try {
-        process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-        await store.publish({ generation, binary });
-        const jobState = fixture.jobs?.[job];
-        if (!jobState) {
-          throw new Error("missing job state");
-        }
-        jobState.exitCode = 17;
-        await save();
-        let rejection: unknown;
-        try {
-          await tryLegacyComposeAdoptedCommand({
-            cwd: projectRoot,
-            operation: "up",
-            detach: true,
-          });
-        } catch (error: unknown) {
-          rejection = error;
-        }
-        expect(rejection).toBeInstanceOf(HackCliError);
-        if (!(rejection instanceof HackCliError)) {
-          throw new Error("missing public refusal");
-        }
-        expect(rejection.detail).toEqual({
-          legacy_adoption_refusal: {
-            stage: "ordered-scheduler",
-            reason: "job-failed",
-          },
-        });
-        expect(await mutationCommands()).toEqual([
-          ["container", "start", ID],
-          ["container", "start", job],
-        ]);
-        expect((await mutationCommands()).some((args) => args[2] === app)).toBe(
-          false
-        );
-        expect((await readReceipt()).pendingOperation.operation).toBe("start");
-      } finally {
-        restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-        await store.close();
+    const { job, app } = await maintainedCompletedJobFixture();
+    const binary = await maintainedJobCompiler();
+    const { store, generation } = await prepared(binary);
+    const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+    try {
+      process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+      await store.publish({ generation, binary });
+      const jobState = fixture.jobs?.[job];
+      if (!jobState) {
+        throw new Error("missing job state");
       }
-    });
+      jobState.exitCode = 17;
+      await save();
+      let rejection: unknown;
+      try {
+        await tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "up",
+          detach: true,
+        });
+      } catch (error: unknown) {
+        rejection = error;
+      }
+      expect(rejection).toBeInstanceOf(HackCliError);
+      if (!(rejection instanceof HackCliError)) {
+        throw new Error("missing public refusal");
+      }
+      expect(rejection.detail).toEqual({
+        legacy_adoption_refusal: {
+          stage: "ordered-scheduler",
+          reason: "job-failed",
+        },
+      });
+      expect(await mutationCommands()).toEqual([
+        ["container", "start", ID],
+        ["container", "start", job],
+      ]);
+      expect((await mutationCommands()).some((args) => args[2] === app)).toBe(
+        false
+      );
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+    } finally {
+      restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+      await store.close();
+    }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest.each(["start", "restart", "stop"] as const)(
@@ -855,7 +975,7 @@ boundedTest.each(["start", "restart", "stop"] as const)(
         fixture.states = { [ID]: true, [app]: true, [job]: false };
         await save();
       }
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -914,7 +1034,7 @@ boundedTest.each(["start", "restart", "stop"] as const)(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -931,7 +1051,7 @@ boundedTest(
           binary,
           operation: "start",
           services: [],
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + OPERATION_DEADLINE_MS,
           run: async () => {
             fixture.states = { [ID]: true, [app]: true, [job]: false };
             await save();
@@ -941,7 +1061,7 @@ boundedTest(
       ).rejects.toThrow("values omitted");
       expect((await readReceipt()).pendingOperation.operation).toBe("start");
       expect(await mutationCommands()).toEqual([]);
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -969,7 +1089,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -985,7 +1105,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       await expect(
         store.withMutation({
           generation,
@@ -1012,7 +1132,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1024,7 +1144,7 @@ boundedTest(
       const binary = await compiler();
       await store.publish({ generation, binary });
       let previous: LegacyComposeRetainedOutcome | undefined;
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -1051,7 +1171,7 @@ boundedTest(
           binary,
           operation: "start",
           services: [],
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + OPERATION_DEADLINE_MS,
           run: async () => {
             if (!previous) {
               throw new Error("missing completion");
@@ -1066,7 +1186,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1077,7 +1197,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       await expect(
         store.withMutation({
           generation,
@@ -1107,7 +1227,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1122,7 +1242,7 @@ boundedTest(
         join(projectRoot, ".hack/hack.project.json"),
         "utf8"
       );
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       await refusal(
         store.withMutation({
           generation,
@@ -1156,7 +1276,7 @@ boundedTest(
       fixture.jobFinalRace = false;
       await save();
       await writeFile(join(projectRoot, ".hack/hack.project.json"), original);
-      const recoveryDeadline = Date.now() + 20_000;
+      const recoveryDeadline = Date.now() + OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -1178,7 +1298,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1189,7 +1309,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       await expect(
         store.withMutation({
           generation,
@@ -1225,7 +1345,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1252,7 +1372,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1265,7 +1385,7 @@ boundedTest(
     const controller = new AbortController();
     try {
       const binary = await compiler(),
-        deadline = Date.now() + 20_000;
+        deadline = Date.now() + OPERATION_DEADLINE_MS;
       expect(
         await store.withPreparationStop({
           generation,
@@ -1295,7 +1415,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1303,10 +1423,11 @@ boundedTest(
   async () => {
     await dependencyFixture();
     const { store, generation } = await prepared();
+    let restoreClock: () => void = () => undefined;
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 5000;
+      const deadline = Date.now() + EXPIRY_DEADLINE_MS;
       await refusal(
         store.withMutation({
           generation,
@@ -1315,7 +1436,11 @@ boundedTest(
           services: [],
           deadline,
           run: async () => {
-            await Bun.sleep(Math.max(1, deadline - Date.now() + 5));
+            // The callback overruns the deadline: move the clock past it
+            // instead of sleeping until it.
+            restoreClock = shiftProductClock(
+              Math.max(0, deadline - Date.now() + 5)
+            );
             return 0;
           },
         }),
@@ -1324,10 +1449,11 @@ boundedTest(
       );
       expect((await readReceipt()).pendingOperation.operation).toBe("stop");
     } finally {
+      restoreClock();
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1368,7 +1494,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 for (const linked of [false, true]) {
@@ -1452,7 +1578,7 @@ for (const linked of [false, true]) {
         stage("closed");
       }
     },
-    30_000
+    caseBudgetMs(30_000)
   );
 }
 
@@ -1462,10 +1588,11 @@ for (const stage of ["per-effect freshness", "final observation"] as const) {
     async () => {
       await dependencyFixture();
       const { store, generation } = await prepared();
+      let restoreClock: () => void = () => undefined;
       try {
         const binary = await compiler();
         await store.publish({ generation, binary });
-        const deadline = Date.now() + 5000;
+        const deadline = Date.now() + EXPIRY_DEADLINE_MS;
         let reachedCallback = false;
         await refusal(
           store.withMutation({
@@ -1479,6 +1606,11 @@ for (const stage of ["per-effect freshness", "final observation"] as const) {
               fixture.mode =
                 stage === "per-effect freshness" ? "hang" : "hang-state";
               await save();
+              // Leave only the lead before the deadline, rather than waiting
+              // out the whole deadline. Never move the clock back.
+              restoreClock = shiftProductClock(
+                Math.max(0, deadline - Date.now() - EXPIRY_LEAD_MS[stage])
+              );
               if (stage === "per-effect freshness") {
                 await input.assertFresh();
               }
@@ -1504,10 +1636,11 @@ for (const stage of ["per-effect freshness", "final observation"] as const) {
         expect(await mutationCommands()).toEqual([]);
         expect(fixture.volume[0]?.createdAt).toBe(CREATED);
       } finally {
+        restoreClock();
         await store.close();
       }
     },
-    30_000
+    caseBudgetMs(30_000)
   );
 }
 
@@ -1532,7 +1665,7 @@ boundedTest(
     expect(await mutationCommands()).toEqual([]);
     expect(fixture.volume[0]?.createdAt).toBe(CREATED);
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1565,7 +1698,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1626,7 +1759,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1640,7 +1773,7 @@ boundedTest(
       let calls = 0;
       await refusal(
         store.withMutation({
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + OPERATION_DEADLINE_MS,
           generation,
           binary,
           operation: "start",
@@ -1656,7 +1789,7 @@ boundedTest(
       expect((await readReceipt()).pendingOperation).toBeNull();
       let retained: (() => Promise<void>) | undefined;
       await store.withMutation({
-        deadline: Date.now() + 20_000,
+        deadline: Date.now() + OPERATION_DEADLINE_MS,
         generation,
         binary,
         operation: "stop",
@@ -1679,7 +1812,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1729,7 +1862,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1742,7 +1875,7 @@ boundedTest(
       await store.publish({ generation, binary });
       await refusal(
         store.withMutation({
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + OPERATION_DEADLINE_MS,
           generation,
           binary,
           operation: "start",
@@ -1765,7 +1898,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1784,7 +1917,7 @@ boundedTest(
       let effects = 0;
       await refusal(
         store.withMutation({
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + OPERATION_DEADLINE_MS,
           generation,
           binary,
           operation: "start",
@@ -1805,7 +1938,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -1823,7 +1956,7 @@ boundedTest(
       await store.publish({ generation, binary });
       fixture.hangMutation = true;
       await save();
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + OPERATION_DEADLINE_MS;
       let effectStartedAt = 0;
       await refusal(
         store.withMutation({
@@ -1839,7 +1972,7 @@ boundedTest(
               deadline,
               signal: controller.signal,
             });
-            const readyUntil = Date.now() + 4000;
+            const readyUntil = Date.now() + testBudgetMs(4000);
             while (
               !(await Bun.file(join(root, "effect-started")).exists()) &&
               Date.now() < readyUntil
@@ -1872,7 +2005,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
@@ -1900,7 +2033,7 @@ boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",
-          timeout: 5000,
+          timeout: testBudgetMs(5000),
         }
       );
       const [stdout, stderr, code] = await Promise.all([
@@ -1916,7 +2049,7 @@ boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 /** Current writers keep references at rest; "literal" models a file an earlier
@@ -1984,7 +2117,7 @@ async function trackedManagedCheckout() {
   ]) {
     const child = Bun.spawn(["/usr/bin/git", "-C", projectRoot, ...args], {
       env: {
-        PATH: priorPath ?? "/usr/bin:/bin",
+        PATH: FILE_ENV.PATH ?? "/usr/bin:/bin",
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_CONFIG_GLOBAL: "/dev/null",
       },
@@ -2272,7 +2405,7 @@ boundedTest(
       "active"
     );
   },
-  90_000
+  caseBudgetMs(90_000)
 );
 
 boundedTest(
@@ -2436,7 +2569,7 @@ boundedTest(
       })
     ).toMatchObject({ removed: true, adoptionBound: false });
   },
-  90_000
+  caseBudgetMs(90_000)
 );
 
 test("v3 value-free env override binds the engine config hash computed with the values (HACK-1273)", async () => {
@@ -2644,7 +2777,7 @@ test("v4 typed locals preserve generated bytes, exact original IDs and key-free 
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",
-          timeout: 5000,
+          timeout: testBudgetMs(5000),
         }
       );
       const [stdout, stderr, code] = await Promise.all([
@@ -2824,7 +2957,7 @@ boundedTest(
       await store.close();
     }
   },
-  240_000
+  caseBudgetMs(240_000)
 );
 
 boundedTest(
@@ -2887,7 +3020,7 @@ boundedTest(
       await store.close();
     }
   },
-  60_000
+  caseBudgetMs(60_000)
 );
 async function artifactPath(name: string) {
   const receipt = JSON.parse(
@@ -2923,7 +3056,7 @@ async function linkedCheckout() {
   const git = async (args: readonly string[]) => {
     const child = Bun.spawn(["/usr/bin/git", "-C", projectRoot, ...args], {
       env: {
-        PATH: priorPath ?? "/usr/bin:/bin",
+        PATH: FILE_ENV.PATH ?? "/usr/bin:/bin",
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_CONFIG_GLOBAL: "/dev/null",
       },
@@ -3063,7 +3196,7 @@ test("v13 linked default pins the physical branch originals and explicit selecti
       stdout: "ignore",
       stderr: "ignore",
       env: {
-        PATH: priorPath ?? "/usr/bin:/bin",
+        PATH: FILE_ENV.PATH ?? "/usr/bin:/bin",
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_CONFIG_GLOBAL: "/dev/null",
       },
@@ -3492,7 +3625,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 test("v10 saved bridge and health owner rejects other contract receipts", async () => {
@@ -3580,7 +3713,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 boundedTest(
@@ -3615,7 +3748,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 test("rolled-back v10 can reprepare the same owned bridge without health under v6", async () => {
@@ -3785,7 +3918,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  caseBudgetMs(30_000)
 );
 
 test("v6 rollback permits a later plain owner without inheriting topology authority", async () => {

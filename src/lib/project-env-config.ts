@@ -5357,9 +5357,10 @@ function composeServiceEnvironmentKeys(
 }
 
 /**
- * Keys the Compose file interpolates that the default overlay changes. Compose
- * interpolates from `.hack/.env` alone before the migration, and from the
- * selected layers after it. Key names only, JSON-quoted.
+ * Keys the Compose file interpolates, or a top-level secret or config reads with
+ * `environment:`, that the default overlay changes. Compose reads these from
+ * `.hack/.env` alone before the migration, and from the selected layers after
+ * it. Key names only, JSON-quoted.
  */
 function composeInterpolatedOverlayKeys(opts: {
   readonly parsed: Record<string, unknown> | null;
@@ -5370,6 +5371,11 @@ function composeInterpolatedOverlayKeys(opts: {
     return [];
   }
   const composeText = JSON.stringify(opts.parsed);
+  const environmentSources = ["secrets", "configs"].flatMap((section) =>
+    Object.values(getRecord(opts.parsed ?? {}, section) ?? {}).map((entry) =>
+      isRecord(entry) ? entry.environment : undefined
+    )
+  );
   const changed = legacyOverlayChangedValues({
     overlayValues: opts.legacyValues.get(opts.defaultOverlay) ?? {},
     baseValues: opts.legacyValues.get(null) ?? {},
@@ -5377,11 +5383,15 @@ function composeInterpolatedOverlayKeys(opts: {
   return Object.keys(changed)
     .filter(
       // Keys match PROJECT_ENV_KEY_PATTERN, so they are safe in a pattern.
-      (key) => new RegExp(`\\$\\{?${key}(?![A-Z0-9_])`).test(composeText)
+      (key) =>
+        environmentSources.includes(key) ||
+        new RegExp(`\\$\\{?${key}(?![A-Z0-9_])`).test(composeText)
     )
     .map((key) => JSON.stringify(key))
     .sort();
 }
+
+const COMPOSE_MERGE_TAG_PATTERN = /!(?:reset|override)\b/;
 
 /** Whether a map-form `env_file` entry sets a `format`, which changes how Compose reads the file. */
 function composeEnvFileHasFormat(rawEnvFile: unknown): boolean {
@@ -5394,16 +5404,21 @@ function composeEnvFileHasFormat(rawEnvFile: unknown): boolean {
 /**
  * Compose inputs that can add, hide or reinterpret an `env_file` this check
  * cannot read: a top-level `include`, a service `extends`, an `env_file` path
- * with a variable, a repeated entry (Compose versions may drop a repeat, which
+ * with a variable or a `~`, a `!reset` or `!override` tag, a repeated entry (Compose versions may drop a repeat, which
  * changes the order), or a `format`. Returned as refusal labels naming the
  * service or field only.
  */
 function uncheckableComposeEnvInputs(opts: {
+  readonly projectDir: string;
+  readonly composeText: string;
   readonly parsed: Record<string, unknown>;
   readonly services: Record<string, unknown>;
 }): readonly string[] {
   const labels: string[] =
     "include" in opts.parsed ? ["top-level include"] : [];
+  if (COMPOSE_MERGE_TAG_PATTERN.test(opts.composeText)) {
+    labels.push("a !reset or !override tag");
+  }
   for (const [service, rawService] of composeServiceEntries(opts.services)) {
     if ("extends" in rawService) {
       labels.push(`extends in ${JSON.stringify(service)}`);
@@ -5412,7 +5427,12 @@ function uncheckableComposeEnvInputs(opts: {
     if (paths.some((path) => path.includes("$"))) {
       labels.push(`a variable env_file path in ${JSON.stringify(service)}`);
     }
-    const resolved = paths.map((path) => resolve("/", path));
+    if (paths.some((path) => path.startsWith("~"))) {
+      labels.push(
+        `a home-relative env_file path in ${JSON.stringify(service)}`
+      );
+    }
+    const resolved = paths.map((path) => resolve(opts.projectDir, path));
     if (new Set(resolved).size < resolved.length) {
       labels.push(`a repeated env_file entry in ${JSON.stringify(service)}`);
     }
@@ -5487,8 +5507,14 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
   if (migratedKeys.size === 0) {
     return;
   }
+  const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
   const uncheckable = parsed
-    ? uncheckableComposeEnvInputs({ parsed, services })
+    ? uncheckableComposeEnvInputs({
+        projectDir: opts.projectDir,
+        composeText: (await readTextFile(composeFile)) ?? "",
+        parsed,
+        services,
+      })
     : [];
   if (uncheckable.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({

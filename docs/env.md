@@ -1080,10 +1080,11 @@ files, when:
   service. The error names files, services and keys, never values. List the file for those
   services if they may have its values, or move the values out of it and set them with
   `hack env set --service` after migrating;
-- Compose uses a top-level `include`, a service `extends`, a variable in an `env_file` path, a
-  file listed twice in one `env_file`, or a `format` on an `env_file` entry (`E_CONFIG_INVALID`),
-  so the migration cannot tell which values services receive. Write those `env_file` entries
-  directly in the Compose file, each file once and with no `format`;
+- Compose uses a top-level `include`, a service `extends`, a `!reset` or `!override` tag, a
+  variable or a `~` in an `env_file` path, a file listed twice in one `env_file`, or a `format`
+  on an `env_file` entry (`E_CONFIG_INVALID`), so the migration cannot tell which values services
+  receive. Write those `env_file` entries directly in the Compose file, each file once, with a
+  plain path and no `format`;
 - a key the legacy files set is also set in another file a Compose service uses as
   `env_file` (`E_CONFIG_INVALID`), for the same reason: that file stays in Compose, but the
   migrated value would override it. The check does not look at the order of the entries,
@@ -1098,7 +1099,8 @@ files, when:
   layers (`E_CONFIG_INVALID`), such as `env_file: [.env.staging, .env]` with `.env.staging` as the
   default overlay. Compose lets the last file win, but the default overlay always wins over
   `.hack/.env` in env layers. List `.env` first, or make the files agree;
-- the Compose file interpolates a key the default overlay sets differently from `.hack/.env`
+- the Compose file interpolates a key, or a top-level secret or config reads it with
+  `environment:`, and the default overlay sets it differently from `.hack/.env`
   (`E_CONFIG_INVALID`). Compose takes it from `.hack/.env` today, but the overlay value would
   apply after the migration. Make the two files agree or stop interpolating the key;
 - `.hack/.env` or a legacy overlay is a symlink to a file outside `.hack`

@@ -1624,6 +1624,21 @@ const UNCHECKABLE_COMPOSE: readonly (readonly [string, string, string])[] = [
     'a repeated env_file entry in "api"',
   ],
   [
+    "a home-relative env_file path",
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, ~/x.env]\n",
+    'a home-relative env_file path in "api"',
+  ],
+  [
+    "a !reset tag",
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: !reset [.env]\n",
+    "a !reset or !override tag",
+  ],
+  [
+    "an !override tag",
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: !override [.env]\n",
+    "a !reset or !override tag",
+  ],
+  [
     "an env_file format",
     "services:\n  api:\n    image: alpine:3.20\n    env_file:\n      - path: .env\n        format: raw\n",
     'an env_file format in "api"',
@@ -1956,3 +1971,33 @@ test("the contract migration refuses a dangling legacy link", async () => {
   );
   expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
 });
+
+test("the migration does not count a parent-directory env_file as a repeat", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, ../.env]\n"
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), "A=1\n");
+  await writeFile(resolve(repo.projectRoot, ".env"), "OTHER=2\n");
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+});
+
+for (const section of ["secrets", "configs"]) {
+  test(`the migration refuses top-level ${section} reading a key the default overlay changes`, async () => {
+    const repo = await writeDefaultOverlayRepo({
+      compose: `services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, .env.staging]\n${section}:\n  item:\n    environment: PORT\n`,
+      base: "PORT=2\n",
+      overlay: "PORT=3\n",
+    });
+    await expectMigrationRefusal({
+      repo,
+      code: "E_CONFIG_INVALID",
+      reason: 'the Compose file interpolates "PORT"',
+      hidden: [],
+    });
+  });
+}

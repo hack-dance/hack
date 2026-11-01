@@ -1,4 +1,4 @@
-import { chmod, writeFile } from "node:fs/promises";
+import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 /** A closed tmux transport stand-in. It starts the shipping wrapper/client, not
@@ -47,4 +47,56 @@ default:process.exit(93);
   await writeFile(path, source, { flag: "wx", mode: 0o700 });
   await chmod(path, 0o700);
   return path;
+}
+
+function groupPresent(group: number): boolean {
+  try {
+    process.kill(-group, 0);
+    return true;
+  } catch (error) {
+    if ((error as { readonly code?: unknown }).code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/** Time a stand-in window group gets to handle SIGTERM before SIGKILL. */
+const WINDOW_GROUP_TERM_GRACE_MS = 2000;
+
+/**
+ * End the window groups the stand-in mux recorded in `stateFile`. Test cleanup
+ * for a failed case only: a retained real start would leave them for `hack
+ * down` recovery, and nothing would otherwise stop these captured children.
+ * The file is rewritten as a whole, so an unreadable one names no groups yet.
+ */
+export async function endLifecycleMuxFixtureGroups(
+  stateFile: string
+): Promise<void> {
+  let windows: Record<string, { readonly pid?: unknown }>;
+  try {
+    windows = (
+      JSON.parse(await readFile(stateFile, "utf8")) as {
+        readonly windows: Record<string, { readonly pid?: unknown }>;
+      }
+    ).windows;
+  } catch {
+    return;
+  }
+  const groups = Object.values(windows ?? {}).flatMap((row) =>
+    typeof row.pid === "number" && row.pid > 1 ? [row.pid] : []
+  );
+  const signalAll = (signal: NodeJS.Signals) => {
+    for (const group of groups) {
+      if (groupPresent(group)) {
+        process.kill(-group, signal);
+      }
+    }
+  };
+  signalAll("SIGTERM");
+  const deadline = performance.now() + WINDOW_GROUP_TERM_GRACE_MS;
+  while (groups.some(groupPresent) && performance.now() < deadline) {
+    await Bun.sleep(20);
+  }
+  signalAll("SIGKILL");
 }

@@ -8,6 +8,7 @@ import {
   readdir,
   readFile,
   realpath,
+  rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -40,7 +41,10 @@ import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
-import { writeLifecycleMuxFixture } from "./helpers/lifecycle-mux-fixture.ts";
+import {
+  endLifecycleMuxFixtureGroups,
+  writeLifecycleMuxFixture,
+} from "./helpers/lifecycle-mux-fixture.ts";
 import {
   createNativeFixtureCases,
   type NativeFixtureCase,
@@ -73,6 +77,12 @@ const DEADLINE_WALL_BOUND_MS = 1000;
  * cap outlasts the case's Bun timeout. Passing cases release it explicitly.
  */
 const OWNER_RELEASE_CAP_MS = 2 * CASE_TIMEOUT_MS;
+/**
+ * Longest life of a stand-in host process that nothing stopped. A failed case
+ * ends its groups through `onFailure`; this bounds the rest (a runner killed by
+ * the shard's limit). It outlasts that limit, so no case ever reaches it.
+ */
+const HOST_PROCESS_CAP_MS = 900_000;
 const cases = createNativeFixtureCases({
   label: "Startup fixture",
   defaultTimeoutMs: CASE_TIMEOUT_MS,
@@ -327,6 +337,9 @@ async function fixture(options: FixtureOptions = {}) {
       emptySettled: true,
       parse: muxWindowPids,
     });
+    // A start that fails after reservation retains these groups on purpose,
+    // for `hack down` recovery that a failed case never reaches.
+    owner.onFailure(() => endLifecycleMuxFixtureGroups(join(root, "mux.json")));
   }
   const hook = (name: string) => ({
     name,
@@ -367,7 +380,8 @@ async function fixture(options: FixtureOptions = {}) {
                               'const {appendFileSync}=await import("node:fs");appendFileSync("process-order","started\\n");await Bun.write("process-value",process.env.PROCESS_TOKEN??"missing");const stop=()=>{appendFileSync("process-order","stopped\\n");process.exit(0)};process.on("SIGTERM",stop);process.on("SIGINT",stop);' +
                                 (options.releaseHostAfterTest
                                   ? 'const {existsSync}=await import("node:fs");setInterval(()=>{if(existsSync("release-host-test")){appendFileSync("process-order","fixture-released"+String.fromCharCode(10));process.exit(0)}},20)'
-                                  : "setInterval(()=>{},1000)"),
+                                  : "setInterval(()=>{},1000)") +
+                                `;setTimeout(()=>process.exit(0),${HOST_PROCESS_CAP_MS})`,
                             ],
                           },
                           env_target: { kind: "host" },
@@ -2428,3 +2442,50 @@ for (const proof of [
     }
   );
 }
+
+// HACK-1458 item 4: a failed case must not leave the stand-in groups running.
+// Bun runs this body outside `cases.test`, because the guarded case fails here.
+bunTest.skipIf(process.platform !== "darwin")(
+  "HACK-1458: a failed case ends the stand-in mux groups it left running",
+  async () => {
+    let group: number | undefined;
+    let root: string | undefined;
+    try {
+      await expect(
+        cases.run(async () => {
+          const selected = await fixture({ hostProcesses: true });
+          root = selected.root;
+          const mux = join(selected.root, "bin", "tmux");
+          for (const args of [
+            ["new-session", "-s", "failed-case", "-c", selected.root],
+            ["new-window", "-n", "held", "-c", selected.root, "sleep 300"],
+          ]) {
+            const child = Bun.spawn([mux, ...args], {
+              env: process.env,
+              stdout: "ignore",
+              stderr: "ignore",
+            });
+            expect(await child.exited).toBe(0);
+          }
+          const state = JSON.parse(
+            await readFile(join(selected.root, "mux.json"), "utf8")
+          ) as {
+            readonly windows: { readonly held: { readonly pid: number } };
+          };
+          group = state.windows.held.pid;
+          process.kill(-group, 0);
+          throw new Error("deliberate case failure");
+        }, CASE_TIMEOUT_MS)
+      ).rejects.toThrow("deliberate case failure");
+      if (group === undefined) {
+        throw new Error("the stand-in window was never recorded");
+      }
+      expect(await groupEnded(group)).toBe(true);
+    } finally {
+      if (root !== undefined) {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  },
+  CASE_TIMEOUT_MS + SETTLEMENT_BUDGET_MS + 5000
+);

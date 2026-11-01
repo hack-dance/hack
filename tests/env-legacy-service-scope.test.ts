@@ -150,6 +150,7 @@ async function runCli(opts: {
         HACK_GLOBAL_CONFIG_PATH: join(opts.repo.root, "hack-config.json"),
         HACK_HOME: join(opts.repo.root, "hack-home"),
         HACK_LOGGER: opts.logger ?? "console",
+        HACK_DAEMON_AUTOSTART_DISABLE: "1",
         HACK_NO_INTERACTIVE: "1",
         HACK_SECRETS_FILE_KEY: ["legacy", "scope", "test", "key"].join("-"),
         HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
@@ -3199,3 +3200,169 @@ test("without layers, an unparseable state file doesn't stop a real .env migrati
     global: { KEPT_SETTING: KEPT_VALUE },
   });
 });
+
+/** For a state entry `legacySnapshot` can't read: refuses, and `.env` and the entries stay. */
+async function expectUnreadableStateRefused(repo: Repo): Promise<void> {
+  const envPath = resolve(repo.projectDir, ".env");
+  const envBefore = await readFile(envPath, "utf8");
+  const entriesBefore = await hackDirEntries(repo);
+  const error = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  const refusal = error as LegacyDotenvMigrationRefusalError;
+  expect(refusal.code).toBe("E_PATH_CONFLICT");
+  expect(refusal.message).toContain("state file can't be read");
+  expect(refusal.message).not.toContain(KEPT_VALUE);
+  expect(await readFile(envPath, "utf8")).toBe(envBefore);
+  expect(await hackDirEntries(repo)).toEqual(entriesBefore);
+}
+
+test("a dangling state link isn't absent: the migration refuses, and generated values aren't pinned", async () => {
+  const repo = await writeGeneratedCheckout({ envName: "staging" });
+  const statePath = resolve(repo.projectDir, ".env.state.json");
+  await rm(statePath);
+  await symlink(resolve(repo.root, "state-file-that-is-gone"), statePath);
+  await expectUnreadableStateRefused(repo);
+  expect(await readlink(statePath)).toBe(
+    resolve(repo.root, "state-file-that-is-gone")
+  );
+});
+
+test.skipIf(RUNS_AS_ROOT)(
+  "a state entry that can't be read refuses the same way",
+  async () => {
+    const repo = await writeGeneratedCheckout({ envName: "staging" });
+    const statePath = resolve(repo.projectDir, ".env.state.json");
+    await chmod(statePath, 0o000);
+    try {
+      await expectUnreadableStateRefused(repo);
+    } finally {
+      await chmod(statePath, 0o600);
+    }
+  }
+);
+
+test("a directory at the state path refuses the same way", async () => {
+  const repo = await writeGeneratedCheckout({ envName: "staging" });
+  const statePath = resolve(repo.projectDir, ".env.state.json");
+  await rm(statePath);
+  await mkdir(statePath);
+  await expectUnreadableStateRefused(repo);
+});
+
+test("without layers, a dangling state link doesn't stop a real .env migrating", async () => {
+  const repo = await createLegacyRepo();
+  await symlink(
+    resolve(repo.root, "state-file-that-is-gone"),
+    resolve(repo.projectDir, ".env.state.json")
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { KEPT_SETTING: KEPT_VALUE },
+  });
+});
+
+test("following the printed recovery through doctor keeps the overlay's and the manual values", async () => {
+  const repo = await writeGeneratedCheckout({ envName: "staging" });
+  const envPath = resolve(repo.projectDir, ".env");
+  const stagingPath = resolve(repo.projectDir, ".env.staging");
+  const stagingBytes = await readFile(stagingPath);
+  const manualLine = `EXTRA=${BASE_ONLY_VALUE}\n`;
+  await appendFile(envPath, manualLine);
+  const editedBytes = await readFile(envPath, "utf8");
+  const doctor = () =>
+    runCli({
+      repo,
+      args: ["doctor", "--migrate-env-config", "--path", repo.projectRoot],
+    });
+
+  const refused = await doctor();
+  const refusedOutput = `${refused.stdout}${refused.stderr}`;
+  expect(refusedOutput).toContain("hack env materialize");
+  expect(refusedOutput).not.toContain(BASE_ONLY_VALUE);
+  expect(refusedOutput).not.toContain(KEPT_VALUE);
+  expect(await readFile(envPath, "utf8")).toBe(editedBytes);
+  expect((await readFile(stagingPath)).equals(stagingBytes)).toBe(true);
+
+  const moved = await runCli({
+    repo,
+    args: [
+      "env",
+      "set",
+      "EXTRA",
+      "--local",
+      "--value-stdin",
+      "--path",
+      repo.projectRoot,
+    ],
+    stdin: `${BASE_ONLY_VALUE}\n`,
+  });
+  expect(moved.exitCode).toBe(0);
+  const materialized = await runCli({
+    repo,
+    args: [
+      "env",
+      "materialize",
+      "--env",
+      "staging",
+      "--path",
+      repo.projectRoot,
+    ],
+  });
+  expect(materialized.exitCode).toBe(0);
+  expect(await readFile(envPath, "utf8")).toContain(manualLine);
+  expect((await readFile(stagingPath)).equals(stagingBytes)).toBe(true);
+
+  const recovered = await doctor();
+  const recoveredOutput = `${recovered.stdout}${recovered.stderr}`;
+  expect(recoveredOutput).not.toContain(BASE_ONLY_VALUE);
+  expect(recoveredOutput).not.toContain(KEPT_VALUE);
+  // Doctor's exit code also reflects Docker, so assert on what it migrated.
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { EXTRA: BASE_ONLY_VALUE },
+  });
+  expect(await readLayerValues(repo, "hack.env.staging.local.yaml")).toEqual({
+    global: { ONLY_HERE: KEPT_VALUE },
+  });
+  expect(await readFile(envPath, "utf8")).toContain(manualLine);
+}, 60_000);
+
+test("with a corrupt state and a .env generated for staging, deleting both files breaks the loop", async () => {
+  const repo = await writeGeneratedCheckout({ envName: "staging" });
+  const envPath = resolve(repo.projectDir, ".env");
+  const statePath = resolve(repo.projectDir, ".env.state.json");
+  await writeFile(statePath, "{not json\n");
+  const materialize = () =>
+    runCli({
+      repo,
+      args: ["env", "materialize", "--path", repo.projectRoot],
+    });
+  await expectMigrationRefusal({
+    repo,
+    code: "E_PATH_CONFLICT",
+    reason: "state file can't be read",
+    hidden: [KEPT_VALUE],
+  });
+  expect((await materialize()).exitCode).not.toBe(0);
+
+  await rm(envPath);
+  await rm(statePath);
+  expect((await materialize()).exitCode).toBe(0);
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(
+    await lstat(resolve(repo.projectDir, "hack.env.local.yaml")).catch(
+      () => null
+    )
+  ).toBeNull();
+  expect(await readLayerValues(repo, "hack.env.staging.local.yaml")).toEqual({
+    global: { ONLY_HERE: KEPT_VALUE },
+  });
+}, 60_000);

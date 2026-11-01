@@ -1039,15 +1039,19 @@ A repo with no legacy env file gets only an empty `hack.env.default.yaml`.
 
 Once this is committed, a teammate's own `.hack/.env` and overlays may stop reaching services,
 because their checkout now uses env layers. Hack compares those files with what the layers
-deliver. For any value the layers don't deliver, `hack up` warns, doctor reports it, and
-`hack env materialize` refuses, so the file isn't replaced. They run
+deliver. For any value the layers don't deliver, `hack up` warns and doctor reports it. For a
+value in `.hack/.env`, `hack env materialize` also refuses, so the file isn't replaced; it doesn't
+write overlay files, so an overlay value doesn't stop it. They run
 `hack doctor --migrate-env-config` to move those values to their own local layers, adding to a
 local layer that already exists and making it private (mode 0600). A value equal to what the
 layers deliver isn't copied, so later team changes still reach them. A key the local layer sets
 differently refuses (`E_PATH_CONFLICT`), and so does a local layer that can't be read as an env
 layer (`E_CONFIG_INVALID`), which is left as it is. Adding to a layer drops its YAML comments. Messages name valid keys, count malformed entries and name unreadable files,
-and never show a value. A `.hack/.env` with a valid materialization state is generated output, and
-this comparison skips it. Tell teammates when you commit the migration.
+and never show a value. This comparison skips a `.hack/.env` with a valid materialization state.
+A migration that runs for another reason, such as an overlay value, also checks that file's text,
+as described below. With nothing else to migrate, doctor reports that the project already uses env
+layers without checking the text, and a later `hack env materialize` replaces the file. Tell
+teammates when you commit the migration.
 
 Migrated values are global, so a service added later receives them too, and so do host lifecycle
 hooks. A migrated value also takes precedence over the same variable exported in your shell,
@@ -1131,11 +1135,11 @@ files, when:
   would write (`E_PATH_CONFLICT`). The file is out of date or was edited by hand, and Hack can't
   tell which. If it's generated, move any value of your own with `hack env set`, then run
   `hack env materialize`, which replaces it. If it's your own file, delete `.hack/.env.state.json`
-  so it's read as a legacy file. When the text does match, the migration doesn't read the file or
-  offer it for cleanup;
-- `.hack/.env` has a state file that can't be parsed, and env layers exist (`E_PATH_CONFLICT`). If
-  `.env` is your own file, delete `.hack/.env.state.json`. If it's generated output you don't need,
-  delete both, then run `hack env materialize`;
+  so it's read as a legacy file, but not for generated output, whose values would then migrate as
+  your own. When the text does match, the migration doesn't read the file or offer it for cleanup;
+- `.hack/.env` has a state entry that can't be read or parsed, such as a dangling link, and env
+  layers exist (`E_PATH_CONFLICT`). If `.env` is your own file, delete `.hack/.env.state.json`. If
+  it's generated output you don't need, delete both, then run `hack env materialize`;
 - a legacy file sets a key that Docker, its build tools or the process read from their
   environment (`E_CONFIG_INVALID`): `DOCKER_*`, `BUILDKIT_*`, `BUILDX_*`, a proxy setting,
   `SOURCE_DATE_EPOCH`, `HOME` or `PATH`. After the migration it would reach the Docker client too.

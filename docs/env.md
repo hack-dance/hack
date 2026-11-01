@@ -1072,15 +1072,17 @@ files, when:
 - a key the legacy files set is also set in a Compose service's own `environment`
   (`E_CONFIG_INVALID`). Compose ranks `environment` above `env_file`, but migrated values
   become global layer values that Hack applies after `environment`, so the service would
-  switch to the `.env` value. An entry that only refers to the same key (`${KEY}`, `$KEY`,
-  `${KEY:-default}`) is not a conflict. The error names the keys and services, never values.
+  switch to the `.env` value. This includes an entry that only refers to its own key
+  (`PORT: ${PORT}`), whose result can differ when an overlay or the shell sets the key. The error names the keys and services, never values.
   Remove the key from the `.hack/.env` file or from that service's `environment`, then retry;
-- some Compose services list a legacy file with values to migrate in `env_file` and others
-  do not (`E_CONFIG_INVALID`). Migrated values are global and reach every service, so the
-  others would receive values they never had. The error names the file and services, never
-  values. List the file for those services if they may have its values, or move the values
-  out of it and set them with `hack env set --service` after migrating. If no service lists
-  the file, the migration goes ahead and its values then reach every service;
+- some Compose services list a legacy file and others do not, so a service would receive
+  values it never had (`E_CONFIG_INVALID`), because migrated values are global and reach every
+  service. The error names files, services and keys, never values. List the file for those
+  services if they may have its values, or move the values out of it and set them with
+  `hack env set --service` after migrating;
+- Compose uses a top-level `include`, a service `extends` or a variable in an `env_file` path
+  (`E_CONFIG_INVALID`), so the migration cannot tell which services receive the values. Write
+  those `env_file` entries directly in the Compose file;
 - a key the legacy files set is also set in another file a Compose service uses as
   `env_file` (`E_CONFIG_INVALID`), for the same reason: that file stays in Compose, but the
   migrated value would override it. The check does not look at the order of the entries,
@@ -1098,8 +1100,15 @@ files, when:
   that resolves to a readable file inside `.hack` is migrated like a regular one; cleanup
   removes only the link, never its target.
 
-With `hack.env.json`, the migration reads only regular `.hack/.env.<overlay>` files, so a
-symlinked overlay is not migrated and its values cannot reach a tracked layer.
+If no Compose service lists a legacy file, the values may only be used for Compose
+interpolation today. The migration goes ahead, every service then receives them as environment
+variables, and doctor names the keys. To limit a key to one service, unset it and set it with
+`hack env set --service --local`.
+
+With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
+symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a
+configured default overlay is a symlink to a file outside `.hack`, so its values cannot reach a
+tracked layer.
 
 Without `hack.env.json`, nothing lists values kept in a secret backend, so none are
 migrated: set them again with `hack env set --secret` after the migration. In that case `.hack/hack.config.json`, and

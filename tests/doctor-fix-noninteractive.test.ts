@@ -692,6 +692,26 @@ test("doctor --migrate-env-config treats a symlinked overlay as env layers and n
   }
 }, 30_000);
 
+test("doctor --migrate-env-config names the keys every service gains, never their values (HACK-1370)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  const legacy = ["synthetic", "legacy", "4c2e"].join("-");
+  await writeFile(resolve(projectDir, ".env"), `OWNED=${legacy}\n`);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli([
+    "doctor",
+    "--migrate-env-config",
+    "--no-interactive",
+    "--path",
+    projectRoot,
+  ]);
+  expect(code).toBe(0);
+  const notes = noteCalls.join("\n");
+  expect(notes).toContain("so every service now receives: OWNED.");
+  expect(notes).not.toContain(legacy);
+}, 30_000);
+
 test("doctor --migrate-env-config refuses a dangling default layer with E_PATH_CONFLICT and keeps it (HACK-1370)", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();
   const projectDir = resolve(projectRoot, ".hack");

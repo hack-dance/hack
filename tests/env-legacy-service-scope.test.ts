@@ -1506,22 +1506,11 @@ test("the migration goes ahead when no Compose service lists the legacy file", a
   });
 });
 
-for (const entry of ["${PORT}", "$PORT", "${PORT:-1}", "${PORT-1}"]) {
-  test(`a Compose environment entry ${entry} that only refers to its own key is not a conflict`, async () => {
-    const repo = await createLegacyRepo();
-    await writeFile(
-      resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
-      `services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n    environment:\n      - PORT=${entry}\n`
-    );
-    await writeFile(resolve(repo.projectDir, ".env"), "PORT=2\n");
-    const migrated = await migrateLegacyRepo(repo, {
-      migrateUndeclaredDotenv: true,
-    });
-    expect(migrated.legacyDetected).toBe(true);
-  });
-}
-
 for (const entry of [
+  "PORT: ${PORT}",
+  "PORT: $PORT",
+  "PORT: ${PORT:-1}",
+  "PORT: ${PORT-1}",
   "PORT: ${PORT:?required}",
   "PORT: ${OTHER}",
   "PORT: ${PORT:-${OTHER}}",
@@ -1585,3 +1574,128 @@ test("the migration keeps values Compose and Hack read the same", async () => {
     },
   });
 });
+
+test("the migration refuses a service that gains keys from a file only another service lists as an identical overlay", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: .env.staging\n  worker:\n    image: alpine:3.20\n"
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: '"worker" lists no legacy file that sets "KEPT_SETTING"',
+    hidden: [KEPT_VALUE],
+  });
+});
+
+const UNCHECKABLE_COMPOSE: readonly (readonly [string, string, string])[] = [
+  [
+    "a service extends",
+    "services:\n  api:\n    image: alpine:3.20\n    extends: {file: base.yml, service: b}\n  worker:\n    image: alpine:3.20\n",
+    'extends in "api"',
+  ],
+  [
+    "a top-level include",
+    "include:\n  - other.yml\nservices:\n  worker:\n    image: alpine:3.20\n",
+    "top-level include",
+  ],
+  [
+    "a variable env_file path",
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: ${D:-.}/.env\n  worker:\n    image: alpine:3.20\n",
+    'a variable env_file path in "api"',
+  ],
+];
+
+for (const [name, compose, reason] of UNCHECKABLE_COMPOSE) {
+  test(`the migration refuses ${name} it cannot check`, async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+      compose
+    );
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `KEPT_SETTING=${KEPT_VALUE}\n`
+    );
+    await expectMigrationRefusal({
+      repo,
+      code: "E_CONFIG_INVALID",
+      reason,
+      hidden: [KEPT_VALUE],
+    });
+  });
+}
+
+test("the migration names the keys every service gains when no service lists the legacy file", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\nOTHER=1\n`
+  );
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.keysNewToEveryService).toEqual(["KEPT_SETTING", "OTHER"]);
+  expect(JSON.stringify(migrated)).not.toContain(KEPT_VALUE);
+});
+
+test("the migration reports no new keys when every service lists the legacy file", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: ./.env\n  worker:\n    image: alpine:3.20\n    env_file:\n      - path: ../.hack/.env\n        required: false\n"
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.keysNewToEveryService).toEqual([]);
+});
+
+for (const [name, link, config] of [
+  [".hack/.env", ".env", null],
+  ["a default overlay", ".env.staging", "staging"],
+] as const) {
+  test(`the contract migration refuses ${name} linked out of .hack before writing`, async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, "hack.env.json"),
+      `${JSON.stringify({
+        version: 1,
+        vars: [{ key: "KEPT_SETTING", source: "plain_env", required: false }],
+      })}\n`
+    );
+    if (config) {
+      await writeFile(
+        resolve(repo.projectDir, PROJECT_CONFIG_FILENAME),
+        `${JSON.stringify({ name: "env-legacy-scope", dev_host: "env-legacy-scope.hack", env: { defaultOverlay: config } })}\n`
+      );
+    }
+    const target = resolve(repo.projectRoot, ".env");
+    await writeFile(target, `KEPT_SETTING=${KEPT_VALUE}\n`);
+    await symlink(target, resolve(repo.projectDir, link));
+    const before = await hackDirEntries(repo);
+    const error = await migrateLegacyRepo(repo, {}).catch(
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+    expect((error as LegacyDotenvMigrationRefusalError).code).toBe(
+      "E_PATH_CONFLICT"
+    );
+    expect((error as Error).message).toContain(`"${link}" is a symlink`);
+    expect((error as Error).message).not.toContain(KEPT_VALUE);
+    expect(await hackDirEntries(repo)).toEqual(before);
+  });
+}

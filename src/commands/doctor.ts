@@ -3691,6 +3691,23 @@ function renderSkippedDoctorFixSteps(): void {
   );
 }
 
+function buildEnvMigrationNote(opts: {
+  readonly migrated: LegacyProjectEnvMigration;
+}): string {
+  const { migrated } = opts;
+  const notes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
+  if (migrated.updatedProjectConfig) {
+    notes.push("Updated .hack/hack.config.json for the modern env format.");
+  }
+  const newKeys = migrated.keysNewToEveryService ?? [];
+  if (newKeys.length > 0) {
+    notes.push(
+      `No Compose service listed the legacy .env files, so every service now receives: ${newKeys.join(", ")}. To limit a key to one service, run \`hack env unset KEY --local\` and then \`hack env set KEY --service <name> --local\`.`
+    );
+  }
+  return notes.join("\n");
+}
+
 async function maybeMigrateProjectEnvConfig(opts: {
   readonly startDir: string;
 }): Promise<void> {
@@ -3768,13 +3785,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     note("Legacy env migration found nothing to write.", "doctor");
     return;
   }
-  const migrationNotes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
-  if (migrated.updatedProjectConfig) {
-    migrationNotes.push(
-      "Updated .hack/hack.config.json for the modern env format."
-    );
-  }
-  note(migrationNotes.join("\n"), "doctor");
+  note(buildEnvMigrationNote({ migrated }), "doctor");
 
   let composeRepaired = false;
   if (migrated.composeEnvFileReferences.length > 0) {

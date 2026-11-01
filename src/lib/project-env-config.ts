@@ -4930,6 +4930,8 @@ export type LegacyProjectEnvMigration = {
   readonly cleanupCandidates: readonly string[];
   readonly blockedCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
+  /** Keys every service now receives though none listed a legacy file. Names only. */
+  readonly keysNewToEveryService?: readonly string[];
 };
 
 /**
@@ -4994,18 +4996,25 @@ export async function migrateLegacyProjectEnv(opts: {
     };
   }
 
+  // Discovered overlays are regular files only, and any link that remains (the
+  // base file, or a configured default overlay) must stay in .hack: this path
+  // writes plain_env values to tracked layers, so a repository's symlink must
+  // not pull an outside file's values into them.
+  const overlayNames = await discoverLegacyOverlayNames({
+    projectDir: opts.projectDir,
+    includeSymlinks: false,
+  });
+  await assertLegacyDotenvLinksStayInProject({
+    projectDir: opts.projectDir,
+    overlayNames,
+  });
+
   const baseResolved = await resolveHackEnv({
     projectDir: opts.projectDir,
     projectName: opts.projectName,
     envName: null,
   });
 
-  // Regular files only: this path writes plain_env values to tracked layers, so
-  // a repository's symlink must not pull an outside file's values into them.
-  const overlayNames = await discoverLegacyOverlayNames({
-    projectDir: opts.projectDir,
-    includeSymlinks: false,
-  });
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
   )
@@ -5321,10 +5330,8 @@ async function assertComposeOverlaysStaySelected(opts: {
 
 /**
  * Keys a Compose service sets in its own `environment` (map keys, or the
- * names of `KEY=value` / `KEY` list entries), except a value that only refers
- * to the same key (`${KEY}`, `${KEY:-default}`, `$KEY`): Compose resolves that
- * from the same values before and after the migration. Null when the entry
- * has a shape this check cannot read.
+ * names of `KEY=value` / `KEY` list entries). Null when the entry has a shape
+ * this check cannot read.
  */
 function composeServiceEnvironmentKeys(
   environment: unknown
@@ -5332,55 +5339,44 @@ function composeServiceEnvironmentKeys(
   if (environment === undefined || environment === null) {
     return new Set();
   }
-  const keys = new Set<string>();
-  const add = (key: string, value: unknown) => {
-    if (key.length > 0 && !isComposeSelfReference({ key, value })) {
-      keys.add(key);
-    }
-  };
   if (Array.isArray(environment)) {
+    const keys = new Set<string>();
     for (const entry of environment) {
       if (typeof entry !== "string") {
         return null;
       }
-      const separator = entry.indexOf("=");
-      if (separator === -1) {
-        add(entry.trim(), undefined);
-      } else {
-        add(entry.slice(0, separator).trim(), entry.slice(separator + 1));
+      const key = entry.split("=", 1)[0]?.trim() ?? "";
+      if (key.length > 0) {
+        keys.add(key);
       }
     }
     return keys;
   }
-  if (!isRecord(environment)) {
-    return null;
-  }
-  for (const [key, value] of Object.entries(environment)) {
-    add(key, value);
-  }
-  return keys;
+  return isRecord(environment) ? new Set(Object.keys(environment)) : null;
 }
 
-/** Default forms only (`:-`, `-`); `${KEY:?err}` and nested references stay conflicts. */
-const COMPOSE_DEFAULT_MODIFIER_PATTERN = /^:?-[^${}]*$/;
-
-function isComposeSelfReference(opts: {
-  readonly key: string;
-  readonly value: unknown;
-}): boolean {
-  if (typeof opts.value !== "string") {
-    return false;
+/**
+ * Compose inputs that can add or hide an `env_file` this check cannot read: a
+ * top-level `include`, a service `extends`, or an `env_file` path with a
+ * variable. Returned as refusal labels naming the service or field only.
+ */
+function uncheckableComposeEnvInputs(opts: {
+  readonly parsed: Record<string, unknown>;
+  readonly services: Record<string, unknown>;
+}): readonly string[] {
+  const labels: string[] =
+    "include" in opts.parsed ? ["top-level include"] : [];
+  for (const [service, rawService] of composeServiceEntries(opts.services)) {
+    if ("extends" in rawService) {
+      labels.push(`extends in ${JSON.stringify(service)}`);
+    }
+    if (
+      readComposeEnvFilePaths({ rawService }).some((path) => path.includes("$"))
+    ) {
+      labels.push(`a variable env_file path in ${JSON.stringify(service)}`);
+    }
   }
-  const value = opts.value.trim();
-  if (value === `$${opts.key}` || value === `\${${opts.key}}`) {
-    return true;
-  }
-  const prefix = `\${${opts.key}`;
-  if (!(value.startsWith(prefix) && value.endsWith("}"))) {
-    return false;
-  }
-  const modifier = value.slice(prefix.length, -1);
-  return COMPOSE_DEFAULT_MODIFIER_PATTERN.test(modifier);
+  return labels;
 }
 
 /**
@@ -5444,6 +5440,18 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
       migratedKeys.add(key);
     }
   }
+  if (migratedKeys.size === 0) {
+    return;
+  }
+  const uncheckable = parsed
+    ? uncheckableComposeEnvInputs({ parsed, services })
+    : [];
+  if (uncheckable.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose uses ${uncheckable.join(", ")}, so the migration cannot tell which services receive the legacy .env values. Write those services' env_file entries directly in ${PROJECT_COMPOSE_FILENAME}, then retry.`,
+    });
+  }
   const conflicts: string[] = [];
   const unreadable: string[] = [];
   const envFileConflicts: string[] = [];
@@ -5494,19 +5502,47 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
   if (unlisted.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `${unlisted.join("; ")}, but other services do. Migrated values are global and reach every service, so those services would receive values they never had. List the file in env_file for those services if they may have its values, or move the values out of it and set them with \`hack env set --service\` after migrating, then retry.`,
+      reason: `${unlisted.join("; ")}. Migrated values are global and reach every service, so those services would receive values they never had. List the file in env_file for those services if they may have its values, or move the values out of it and set them with \`hack env set --service\` after migrating, then retry.`,
     });
   }
+}
+
+/** Compose services as records, skipping entries that are not service maps. */
+function composeServiceEntries(
+  services: Record<string, unknown>
+): readonly (readonly [string, Record<string, unknown>])[] {
+  return Object.entries(services).filter(
+    (entry): entry is [string, Record<string, unknown>] => isRecord(entry[1])
+  );
+}
+
+/** Legacy files a service lists in `env_file`, as `legacyValues` keys. */
+function composeServiceLegacyEnvNames(opts: {
+  readonly projectDir: string;
+  readonly rawService: Record<string, unknown>;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): readonly (string | null)[] {
+  const listed = readComposeEnvFilePaths({ rawService: opts.rawService }).map(
+    (configured) => resolve(opts.projectDir, configured)
+  );
+  return [...opts.legacyValues.keys()].filter((envName) =>
+    listed.includes(
+      resolveEnvFilePath({ projectDir: opts.projectDir, envName })
+    )
+  );
 }
 
 /**
  * Before the migration a legacy dotenv file listed in `env_file` reached only
  * the services that list it; after it, its values are global layer values that
- * Hack applies to every service. For each file with values to migrate (the
- * base, and each overlay entry that differs from it) that some service lists,
- * the services that do not, as refusal labels naming files and services only.
- * A file no service lists has no per-service boundary to keep: it is project
- * wide already, and docs/env.md says its values then reach every service.
+ * Hack applies to every service. When any service lists a legacy file, returns
+ * refusal labels (file, service and key names only) for each file with values
+ * to migrate that only some services list, and for each service that does not
+ * list a file setting a base key.
+ *
+ * A project where no service lists a legacy file has no `env_file` boundary to
+ * compare, and its values may be needed for interpolation, so it is not refused
+ * here; {@link legacyKeysNewToEveryService} reports what those services gain.
  */
 function composeServicesMissingLegacyDotenv(opts: {
   readonly projectDir: string;
@@ -5514,6 +5550,19 @@ function composeServicesMissingLegacyDotenv(opts: {
   readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
 }): string[] {
   const baseValues = opts.legacyValues.get(null) ?? {};
+  const services = composeServiceEntries(opts.services).map(
+    ([service, rawService]) => ({
+      label: JSON.stringify(service),
+      listed: composeServiceLegacyEnvNames({
+        projectDir: opts.projectDir,
+        rawService,
+        legacyValues: opts.legacyValues,
+      }),
+    })
+  );
+  if (services.every((service) => service.listed.length === 0)) {
+    return [];
+  }
   const labels: string[] = [];
   for (const [envName, values] of opts.legacyValues) {
     const migrated =
@@ -5523,26 +5572,68 @@ function composeServicesMissingLegacyDotenv(opts: {
     if (Object.keys(migrated).length === 0) {
       continue;
     }
-    const path = resolveEnvFilePath({ projectDir: opts.projectDir, envName });
-    const composeServices = Object.entries(opts.services).filter(
-      (entry): entry is [string, Record<string, unknown>] => isRecord(entry[1])
-    );
-    const missing = composeServices
-      .filter(
-        ([, rawService]) =>
-          !readComposeEnvFilePaths({ rawService }).some(
-            (configured) => resolve(opts.projectDir, configured) === path
-          )
-      )
-      .map(([service]) => JSON.stringify(service))
+    const missing = services
+      .filter((service) => !service.listed.includes(envName))
+      .map((service) => service.label)
       .sort();
-    if (missing.length > 0 && missing.length < composeServices.length) {
+    if (missing.length > 0 && missing.length < services.length) {
       labels.push(
-        `${missing.join(", ")} ${missing.length === 1 ? "does" : "do"} not list ${JSON.stringify(basename(path))} in env_file`
+        `${missing.join(", ")} ${missing.length === 1 ? "does" : "do"} not list ${JSON.stringify(basename(resolveEnvFilePath({ projectDir: opts.projectDir, envName })))} in env_file`
+      );
+    }
+  }
+  for (const service of services) {
+    const had = new Set(
+      service.listed.flatMap((envName) =>
+        Object.keys(opts.legacyValues.get(envName) ?? {})
+      )
+    );
+    const gained = Object.keys(baseValues)
+      .filter((key) => !had.has(key))
+      .map((key) => JSON.stringify(key))
+      .sort();
+    if (gained.length > 0 && !service.listed.includes(null)) {
+      labels.push(
+        `${service.label} lists no legacy file that sets ${gained.join(", ")}`
       );
     }
   }
   return labels.sort();
+}
+
+/**
+ * Migrated keys that reach every service although no service lists a legacy
+ * file in `env_file`, for the migration to name. Empty when any service lists
+ * one, because {@link composeServicesMissingLegacyDotenv} covers that case.
+ */
+async function legacyKeysNewToEveryService(opts: {
+  readonly projectDir: string;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): Promise<readonly string[]> {
+  const parsed = await readComposeFile({
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+  });
+  const services = parsed ? getRecord(parsed, "services") : null;
+  if (!services) {
+    return [];
+  }
+  const entries = composeServiceEntries(services);
+  const anyListed = entries.some(
+    ([, rawService]) =>
+      composeServiceLegacyEnvNames({
+        projectDir: opts.projectDir,
+        rawService,
+        legacyValues: opts.legacyValues,
+      }).length > 0
+  );
+  if (entries.length === 0 || anyListed) {
+    return [];
+  }
+  return [
+    ...new Set(
+      [...opts.legacyValues.values()].flatMap((values) => Object.keys(values))
+    ),
+  ].sort((left, right) => left.localeCompare(right));
 }
 
 /** Overlay entries a migrated overlay layer must hold: those that differ from the base. */
@@ -5754,8 +5845,11 @@ async function readValidatedLegacyDotenvFiles(opts: {
  *   any existing env layer entry, a legacy file that is a symlink out of
  *   `.hack`, a legacy overlay named like the default or a
  *   machine-local layer, a Compose `env_file` on a file the migration leaves
- *   out or on an overlay a launch without `--env` would not select, a key that
- *   does not match `^[A-Z_][A-Z0-9_]*$`
+ *   out or on an overlay a launch without `--env` would not select, a Compose
+ *   `environment` or `env_file` entry the migrated value would override, a
+ *   service that would gain values a legacy file gave only to others, a Compose
+ *   input that hides `env_file` from this check, a line Compose reads differently
+ *   from Hack, a key that does not match `^[A-Z_][A-Z0-9_]*$`
  *   (counted per file, never shown), and a machine-local target that git
  *   tracks or, inside a git checkout, cannot report on.
  * - Layers are created only where nothing exists (compare-and-swap against an
@@ -5925,6 +6019,10 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     });
   }
 
+  const keysNewToEveryService = await legacyKeysNewToEveryService({
+    projectDir: opts.projectDir,
+    legacyValues,
+  });
   const composeEnvFileReferences = await inspectLegacyComposeEnvFileReferences({
     composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
     projectDir: opts.projectDir,
@@ -5957,6 +6055,7 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     cleanupCandidates: allowedCleanup,
     blockedCleanupCandidates: blockedCleanup,
     composeEnvFileReferences,
+    keysNewToEveryService,
   };
 }
 

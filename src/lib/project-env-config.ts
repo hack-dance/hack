@@ -5533,8 +5533,8 @@ async function composeEnvFileKeyConflicts(opts: {
     ) {
       continue;
     }
-    const values = await readLegacyDotenvFile({ path });
-    for (const key of Object.keys(values)) {
+    const text = await readLegacyDotenvText({ path });
+    for (const key of composeEnvFileEntryNames(text ?? "")) {
       if (opts.migratedKeys.has(key)) {
         conflicts.push(
           `${JSON.stringify(key)} (${JSON.stringify(configuredPath)} in ${JSON.stringify(opts.service)})`
@@ -5543,6 +5543,25 @@ async function composeEnvFileKeyConflicts(opts: {
     }
   }
   return conflicts;
+}
+
+const COMPOSE_ENV_FILE_ENTRY_NAME = /^﻿?[ \t]*(?:export[ \t]+)?([^\s=:#]+)/;
+const ENV_FILE_LINE_BREAK = /\r?\n/;
+
+/**
+ * Key names a Compose `env_file` can set, read line by line instead of with
+ * `parseDotEnv`, which doesn't see `export KEY=value`, `KEY: value` or a bare `KEY`.
+ * A line inside a multi-line value can match too, which refuses more than it must.
+ */
+function composeEnvFileEntryNames(text: string): ReadonlySet<string> {
+  const names = new Set(Object.keys(parseDotEnv(text)));
+  for (const line of text.split(ENV_FILE_LINE_BREAK)) {
+    const name = COMPOSE_ENV_FILE_ENTRY_NAME.exec(line)?.[1];
+    if (name !== undefined) {
+      names.add(name);
+    }
+  }
+  return names;
 }
 
 /** Per-service `environment` and other `env_file` entries that set a migrated key. */
@@ -5605,7 +5624,14 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
   }
   assertNoComposeToolKeys({ migratedKeys });
   const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
-  const composeText = (await readTextFile(composeFile)) ?? "";
+  const composeRead = await readOptionalTextFile(composeFile);
+  if (composeRead.kind === "unreadable") {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PERMISSION",
+      reason: `${PROJECT_COMPOSE_FILENAME} exists but cannot be read, so the migration cannot tell which values services receive. Make it a readable regular file, then retry.`,
+    });
+  }
+  const composeText = composeRead.kind === "text" ? composeRead.text : "";
   const parsed = await readComposeFile({ composeFile });
   if (parsed === null && composeText.trim().length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
@@ -5924,6 +5950,28 @@ async function deliveredLayerValues(opts: {
   } catch {
     // An unusable layer delivers nothing, and its own commands report it.
     return {};
+  }
+}
+
+/**
+ * {@link deliveredLayerValues} for a caller that plans writes from the answer. A
+ * layer it can't read might set any key, so it refuses instead of reporting nothing
+ * delivered, which would pin legacy values over that layer once it's readable again.
+ */
+async function deliveredLayerValuesForMigration(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly envName: string | null;
+}): Promise<Readonly<Record<string, string>>> {
+  try {
+    return (await resolveProjectEnvConfig(opts))?.globalEnv ?? {};
+  } catch {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason:
+        "an env layer can't be read, so the migration can't tell which values the layers already deliver. Run `hack env list` to see the error, fix that layer, then retry.",
+    });
   }
 }
 
@@ -6317,11 +6365,14 @@ async function assertBaseDoesNotOutrankTrackedOverlays(opts: {
   readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
 }): Promise<void> {
   const conflicts: string[] = [];
-  const deliveredBase = await deliveredLayerValues({ ...opts, envName: null });
+  const deliveredBase = await deliveredLayerValuesForMigration({
+    ...opts,
+    envName: null,
+  });
   for (const overlayName of await listProjectEnvOverlayNames({
     projectDir: opts.projectDir,
   })) {
-    const delivered = await deliveredLayerValues({
+    const delivered = await deliveredLayerValuesForMigration({
       ...opts,
       envName: overlayName,
     });
@@ -6659,7 +6710,10 @@ async function migrateUndeclaredLegacyDotenv(opts: {
   const baseValues = legacyValues.get(null) ?? {};
   const baseToMigrate = legacyValuesNotDelivered({
     values: baseValues,
-    delivered: await deliveredLayerValues({ ...opts, envName: null }),
+    delivered: await deliveredLayerValuesForMigration({
+      ...opts,
+      envName: null,
+    }),
   });
   const localWrites: PlannedEnvLayerWrite[] = [];
   const trackedWrites: PlannedEnvLayerWrite[] = [
@@ -6692,7 +6746,10 @@ async function migrateUndeclaredLegacyDotenv(opts: {
       // The local base about to be written outranks a tracked overlay, so compare
       // with the layers as they will be, not as they are.
       delivered: {
-        ...(await deliveredLayerValues({ ...opts, envName: overlayName })),
+        ...(await deliveredLayerValuesForMigration({
+          ...opts,
+          envName: overlayName,
+        })),
         ...baseToMigrate,
       },
     });
@@ -6885,6 +6942,14 @@ async function legacyBaseDotenvIsGenerated(opts: {
 async function readLegacyDotenvFile(opts: {
   readonly path: string;
 }): Promise<Record<string, string>> {
+  const text = await readLegacyDotenvText(opts);
+  return text === null ? {} : parseDotEnv(text);
+}
+
+/** Text of a legacy dotenv file, null when absent; refuses like {@link readLegacyDotenvFile}. */
+async function readLegacyDotenvText(opts: {
+  readonly path: string;
+}): Promise<string | null> {
   const read = await readOptionalTextFile(opts.path);
   if (read.kind === "unreadable") {
     throw new LegacyDotenvMigrationRefusalError({
@@ -6892,7 +6957,7 @@ async function readLegacyDotenvFile(opts: {
       reason: `${opts.path} exists but cannot be read. Make it a readable regular file, then retry.`,
     });
   }
-  return read.kind === "absent" ? {} : parseDotEnv(read.text);
+  return read.kind === "absent" ? null : read.text;
 }
 
 export async function removeLegacyProjectEnvArtifacts(opts: {

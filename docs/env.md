@@ -1110,7 +1110,8 @@ files, when:
   receive. Write those `env_file` entries directly in the Compose file, each file once, with a
   plain path and no `format`;
 - a key the legacy files set is also set in another file a Compose service uses as
-  `env_file` (`E_CONFIG_INVALID`), for the same reason: that file stays in Compose, but the
+  `env_file` (`E_CONFIG_INVALID`), in any form Compose reads, such as `export KEY=value`,
+  `KEY: value` or a bare `KEY`, for the same reason: that file stays in Compose, but the
   migrated value would override it. The check does not look at the order of the entries,
   or expand variables in an `env_file` path. Remove the key from one of the files, then retry;
 - a legacy entry is one Compose reads differently from Hack (`E_CONFIG_INVALID`): an unquoted
@@ -1150,6 +1151,9 @@ files, when:
 - `.hack/.env` or a legacy overlay is a symlink to a file outside `.hack`
   (`E_PATH_CONFLICT`), so its values would be copied from elsewhere into this project's
   layers. Replace the link with a regular file in `.hack`, or remove it;
+- the Compose file exists but cannot be read (`E_PERMISSION`), or an env layer can't be read
+  (`E_CONFIG_INVALID`), so the migration can't tell which values services receive or which
+  values the layers already deliver. Make the file readable or fix the layer, then retry;
 - a legacy `.hack/.env` or overlay file exists but cannot be read, for example mode 000
   or a dangling symlink (`E_PERMISSION`), so its values would be lost. A symlinked overlay
   that resolves to a readable file inside `.hack` is migrated like a regular one; cleanup

@@ -3366,3 +3366,203 @@ test("with a corrupt state and a .env generated for staging, deleting both files
     global: { ONLY_HERE: KEPT_VALUE },
   });
 }, 60_000);
+
+const TWO_ENV_FILES =
+  "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, other.env]\n";
+
+/** Refuses with `code`, and writes no layer and changes nothing already there. */
+async function expectMigrationRefused(
+  repo: Repo,
+  code: string,
+  reason: string
+): Promise<void> {
+  const entriesBefore = await hackDirEntries(repo);
+  const error = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  const refusal = error as LegacyDotenvMigrationRefusalError;
+  expect(refusal.code).toBe(code as typeof refusal.code);
+  expect(refusal.message).toContain(reason);
+  expect(refusal.message).not.toContain(KEPT_VALUE);
+  expect(await hackDirEntries(repo)).toEqual(entriesBefore);
+}
+
+const LAYER_UNREADABLE = "an env layer can't be read";
+
+test("an unparseable tracked overlay layer refuses instead of pinning the base over it", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+    "<<<<<<< HEAD\nvalues: [\n"
+  );
+  await expectMigrationRefused(repo, "E_CONFIG_INVALID", LAYER_UNREADABLE);
+});
+
+test("an unparseable default layer refuses instead of pinning every value locally", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    "<<<<<<< HEAD\nvalues: [\n"
+  );
+  await expectMigrationRefused(repo, "E_CONFIG_INVALID", LAYER_UNREADABLE);
+});
+
+test.skipIf(RUNS_AS_ROOT)(
+  "a default layer that can't be read refuses the same way",
+  async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `KEPT_SETTING=${KEPT_VALUE}\n`
+    );
+    const layer = resolve(repo.projectDir, "hack.env.default.yaml");
+    await writeFile(layer, LAYER_EMPTY);
+    await chmod(layer, 0o000);
+    try {
+      await expectMigrationRefused(repo, "E_CONFIG_INVALID", LAYER_UNREADABLE);
+    } finally {
+      await chmod(layer, 0o600);
+    }
+  }
+);
+
+for (const [form, line] of [
+  ["export", "export KEPT_SETTING=other"],
+  ["colon", "KEPT_SETTING: other"],
+  ["bare", "KEPT_SETTING"],
+] as const) {
+  test(`another env_file that sets a migrated key in ${form} form refuses`, async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+      TWO_ENV_FILES
+    );
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `KEPT_SETTING=${KEPT_VALUE}\n`
+    );
+    await writeFile(resolve(repo.projectDir, "other.env"), `${line}\n`);
+    await expectMigrationRefused(
+      repo,
+      "E_CONFIG_INVALID",
+      '"KEPT_SETTING" ("other.env" in "api")'
+    );
+  });
+}
+
+test("another env_file that only mentions a migrated key in a comment or a value still migrates", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    TWO_ENV_FILES
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, "other.env"),
+    "# KEPT_SETTING is set elsewhere\nOTHER=KEPT_SETTING\n"
+  );
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { KEPT_SETTING: KEPT_VALUE },
+  });
+});
+
+test.skipIf(RUNS_AS_ROOT)(
+  "a Compose file that can't be read refuses instead of skipping the Compose checks",
+  async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `KEPT_SETTING=${KEPT_VALUE}\n`
+    );
+    const composeFile = resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME);
+    await chmod(composeFile, 0o000);
+    try {
+      await expectMigrationRefused(
+        repo,
+        "E_PERMISSION",
+        "exists but cannot be read"
+      );
+    } finally {
+      await chmod(composeFile, 0o644);
+    }
+  }
+);
+
+test("a dangling Compose link refuses the same way", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const composeFile = resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME);
+  await rm(composeFile);
+  await symlink(resolve(repo.root, "compose-that-is-gone"), composeFile);
+  await expectMigrationRefused(
+    repo,
+    "E_PERMISSION",
+    "exists but cannot be read"
+  );
+});
+
+test.skipIf(RUNS_AS_ROOT)(
+  "a state link into a directory without search permission refuses, and generated values aren't pinned",
+  async () => {
+    const repo = await writeGeneratedCheckout({ envName: "staging" });
+    const locked = resolve(repo.root, "locked");
+    await mkdir(locked);
+    const statePath = resolve(repo.projectDir, ".env.state.json");
+    const target = resolve(locked, "state.json");
+    await writeFile(target, await readFile(statePath));
+    await rm(statePath);
+    await symlink(target, statePath);
+    await chmod(locked, 0o600);
+    try {
+      await expectUnreadableStateRefused(repo);
+    } finally {
+      await chmod(locked, 0o700);
+    }
+  }
+);
+
+test.skipIf(RUNS_AS_ROOT)(
+  "without layers, a state link into a directory without search permission doesn't stop a real .env migrating",
+  async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `KEPT_SETTING=${KEPT_VALUE}\n`
+    );
+    const locked = resolve(repo.root, "locked");
+    await mkdir(locked);
+    await symlink(
+      resolve(locked, "state.json"),
+      resolve(repo.projectDir, ".env.state.json")
+    );
+    await chmod(locked, 0o600);
+    try {
+      await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+    } finally {
+      await chmod(locked, 0o700);
+    }
+    expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+      global: { KEPT_SETTING: KEPT_VALUE },
+    });
+  }
+);

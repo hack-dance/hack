@@ -6436,12 +6436,19 @@ async function assertLocalOverlaysAgreeWithLegacy(opts: {
  * `.env` and a layer from `hack env set --local` may be readable by others. It
  * doesn't follow a link at the path: the reader opens no-follow, staging is
  * private from creation, and rename replaces the path itself.
+ *
+ * The content is compared with `expectedExisting` before staging and again after
+ * the staging file is fsynced, immediately before the rename. As with the shared
+ * atomic writer, the second check narrows, but cannot close, the window in which
+ * a writer that does not use this check can still be overwritten.
  */
-async function replaceLocalLayerPrivately(opts: {
+export async function replaceLocalLayerPrivately(opts: {
   readonly projectDir: string;
   readonly path: string;
   readonly config: ProjectEnvConfig;
   readonly expectedExisting: string;
+  /** Test seam: runs just before the last comparison. */
+  readonly beforeFinalCheck?: () => Promise<void>;
 }): Promise<void> {
   const options = {
     path: opts.path,
@@ -6452,13 +6459,20 @@ async function replaceLocalLayerPrivately(opts: {
         reason: `${basename(opts.path)} changed during the migration or is not a regular file. Check it, then retry.`,
       }),
   };
-  const current = await readReplaceablePrivateFile(options);
-  if (current?.text !== opts.expectedExisting) {
-    throw options.refusal();
-  }
+  const assertUnchanged = async (): Promise<void> => {
+    const current = await readReplaceablePrivateFile(options);
+    if (current?.text !== opts.expectedExisting) {
+      throw options.refusal();
+    }
+  };
+  await assertUnchanged();
   await replacePrivateFileAtomic({
     ...options,
     text: serializeProjectEnvConfig(opts.config),
+    beforeRename: async () => {
+      await opts.beforeFinalCheck?.();
+      await assertUnchanged();
+    },
   });
 }
 

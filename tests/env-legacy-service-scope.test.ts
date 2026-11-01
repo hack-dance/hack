@@ -30,6 +30,7 @@ import {
   migrateLegacyProjectEnv,
   ProjectEnvLayerPathConflictError,
   projectEnvConfigExistsForMutation,
+  replaceLocalLayerPrivately,
   resolveProjectEnvConfig,
   selectProjectEnvValues,
 } from "../src/lib/project-env-config.ts";
@@ -2511,4 +2512,100 @@ test("the migration refuses an unreadable local overlay that its legacy overlay 
     hidden: [KEPT_VALUE],
   });
   expect(await readFile(path, "utf8")).toBe("version: [");
+});
+
+async function localLayerFixture(): Promise<{
+  readonly repo: Repo;
+  readonly path: string;
+  readonly config: {
+    readonly version: 1;
+    readonly environment: string;
+    readonly secretsprovider: "project_key";
+    readonly values: { readonly global: { readonly NEW_KEY: string } };
+  };
+}> {
+  const repo = await createLegacyRepo();
+  const path = resolve(repo.projectDir, "hack.env.local.yaml");
+  await writeFile(path, LAYER_EMPTY);
+  return {
+    repo,
+    path,
+    config: {
+      version: 1,
+      environment: "default",
+      secretsprovider: "project_key",
+      values: { global: { NEW_KEY: KEPT_VALUE } },
+    },
+  };
+}
+
+async function stagingFiles(repo: Repo): Promise<readonly string[]> {
+  return (await readdir(repo.projectDir)).filter((name) =>
+    name.endsWith(".tmp")
+  );
+}
+
+test("a local layer that changed before the first read is refused and left alone", async () => {
+  const { repo, path, config } = await localLayerFixture();
+  await writeFile(path, `${LAYER_EMPTY}# changed\n`);
+  const error = await replaceLocalLayerPrivately({
+    projectDir: repo.projectDir,
+    path,
+    config,
+    expectedExisting: LAYER_EMPTY,
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  expect((error as Error).message).toContain("changed during the migration");
+  expect(await readFile(path, "utf8")).toBe(`${LAYER_EMPTY}# changed\n`);
+});
+
+test("a local layer that changed after staging is refused at the last check, with nothing lost or left behind", async () => {
+  const { repo, path, config } = await localLayerFixture();
+  const changed = `${LAYER_EMPTY}# changed after the first read\n`;
+  const error = await replaceLocalLayerPrivately({
+    projectDir: repo.projectDir,
+    path,
+    config,
+    expectedExisting: LAYER_EMPTY,
+    beforeFinalCheck: () => writeFile(path, changed),
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  expect((error as Error).message).toContain("changed during the migration");
+  expect(await readFile(path, "utf8")).toBe(changed);
+  expect(await stagingFiles(repo)).toEqual([]);
+});
+
+test("a link planted at the local layer path after staging is refused, and its target is untouched", async () => {
+  const { repo, path, config } = await localLayerFixture();
+  const outside = resolve(repo.root, "outside.yaml");
+  await writeFile(outside, LAYER_EMPTY);
+  await chmod(outside, 0o644);
+  const error = await replaceLocalLayerPrivately({
+    projectDir: repo.projectDir,
+    path,
+    config,
+    expectedExisting: LAYER_EMPTY,
+    beforeFinalCheck: async () => {
+      await rm(path);
+      await symlink(outside, path);
+    },
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  expect(await readFile(outside, "utf8")).toBe(LAYER_EMPTY);
+  expect((await lstat(outside)).mode & 0o777).toBe(0o644);
+  expect(await stagingFiles(repo)).toEqual([]);
+});
+
+test("an unchanged local layer is replaced privately, with the new content", async () => {
+  const { repo, path, config } = await localLayerFixture();
+  await chmod(path, 0o644);
+  await replaceLocalLayerPrivately({
+    projectDir: repo.projectDir,
+    path,
+    config,
+    expectedExisting: LAYER_EMPTY,
+  });
+  expect((await lstat(path)).mode & 0o777).toBe(0o600);
+  expect(await readFile(path, "utf8")).toContain("NEW_KEY");
+  expect(await stagingFiles(repo)).toEqual([]);
 });

@@ -12,6 +12,19 @@ import { requireFixtureRoot } from "./fixture-root.ts";
  */
 export const PRIVATE_CLI_INHERITED_ENV = ["PATH", "TMPDIR"] as const;
 
+/**
+ * Set to `1` on every private child unless the test passes its own value in
+ * `env`. `hack doctor --fix`, `hack doctor --migrate-env-config` and
+ * `hack global up` run `hack daemon start` through `resolveHackInvocation`,
+ * with or without a TTY, and nothing stops that daemon with the fixture
+ * (HACK-1696). Taking `hack` off PATH does not prevent it: the CLI then runs
+ * itself. `hack gateway enable` and `setup` do not read this variable. A test
+ * that asserts a daemon start opts in with `undefined`.
+ * Same name as `DAEMON_AUTOSTART_DISABLE_ENV` in src/daemon/client.ts; it is
+ * not imported so that this helper does not load CLI modules a test may mock.
+ */
+export const PRIVATE_CLI_DAEMON_AUTOSTART_ENV = "HACK_DAEMON_AUTOSTART_DISABLE";
+
 /** The default private HOME of a fixture root. */
 export function privateCliHome(root: string): string {
   return join(root, "user-home");
@@ -33,7 +46,8 @@ export type PrivateCliEnvOptions = {
   readonly home?: string;
   /**
    * Values the test needs, applied after the inherited allow-list. An
-   * `undefined` value removes an inherited key. `HOME` is not accepted here.
+   * `undefined` value removes an inherited key or a default, such as
+   * {@link PRIVATE_CLI_DAEMON_AUTOSTART_ENV}. `HOME` is not accepted here.
    */
   readonly env?: Readonly<Record<string, string | undefined>>;
   /**
@@ -77,6 +91,7 @@ export function privateCliEnv(
       env[key] = value;
     }
   }
+  env[PRIVATE_CLI_DAEMON_AUTOSTART_ENV] = "1";
   if (opts.isolateDockerClient !== false) {
     Object.assign(env, isolatedDockerClientEnv(root));
   }

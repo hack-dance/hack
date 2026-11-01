@@ -146,6 +146,11 @@ needs source mapping and implementation regression evidence; use
 
 Do not overlap stateful runs against one checkout, daemon, port range or runtime.
 Record owned resources before a live run, use bounded fixtures and verify cleanup.
+A harness outside `privateCliEnv` and `buildCliEnv` sets
+`HACK_DAEMON_AUTOSTART_DISABLE=1` for every CLI run: `doctor --fix`,
+`doctor --migrate-env-config` and `global up` start a daemon that outlives the run,
+even with `HACK_NO_INTERACTIVE=1`. `gateway enable` and `gateway setup` start one
+regardless of it.
 Never hand-edit managed internal state or prune unowned resources to repair a test.
 Report exact command, source/executable, host/container context, result, skips/cache
 and remaining gate. Do not upgrade a mocked/unit result into live runtime evidence.

@@ -751,7 +751,13 @@ test("every command the refusal prints is accepted, for the names --env and --se
 
 const RESERVED_NAME = "reserved for Hack's own layers";
 
-for (const file of [".env.default", ".env.local", ".env.staging.local"]) {
+for (const file of [
+  ".env.default",
+  ".env.Default",
+  ".env.local",
+  ".env.LOCAL",
+  ".env.staging.local",
+]) {
   test(`step 1 refuses an overlay ${file} before any write, and a retry after renaming migrates it`, async () => {
     const repo = await createContractRepo({
       files: {
@@ -833,8 +839,29 @@ test("names to fix come before the step that migrates, because a migration can't
   );
   const unsetAt = message.indexOf("Unset it for one command");
   expect(unsetAt).toBeGreaterThan(-1);
-  expect(message.indexOf(JSON.stringify(".env.My_Staging"))).toBeLessThan(
-    unsetAt
-  );
-  expect(message.indexOf(JSON.stringify("Api"))).toBeLessThan(unsetAt);
+  for (const name of [".env.My_Staging", "Api"]) {
+    const at = message.indexOf(JSON.stringify(name));
+    expect(at).toBeGreaterThan(-1);
+    expect(at).toBeLessThan(unsetAt);
+  }
 });
+
+for (const [shape, text] of [
+  ["malformed", "{not json\n"],
+  ["wrong-shape", '{"version":99}\n'],
+] as const) {
+  test(`a ${shape} hack.env.json refuses before any write, without quoting the file`, async () => {
+    const repo = await createContractRepo({
+      files: { ".env": `${SHELL_KEY}=${DOTENV_VALUE}\nOTHER=only-here\n` },
+    });
+    await writeFile(resolve(repo.projectDir, "hack.env.json"), text);
+    const before = await snapshotTree(repo);
+
+    const error = await migrate(repo).catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toContain("hack.env.json can't be read");
+    expect((error as Error).message).not.toContain("not json");
+    expect((error as Error).message).not.toContain("only-here");
+    expect(await snapshotTree(repo)).toEqual(before);
+  });
+}

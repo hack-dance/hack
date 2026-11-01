@@ -1209,10 +1209,12 @@ backend has nothing stored yet and `HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK` isn'
 these steps instead, and the migration creates its key; set the key only if the backend doesn't hold
 it. Any other backend failure, such as a corrupt store, stops the migration with that error.
 
-With `hack.env.json`, the migration also refuses (`E_CONFIG_INVALID`), writing nothing, an overlay
-named `default`, `local` or `<name>.local` that sets a value of its own, because it would replace the
-base layer or write a machine-local file, and a contract service that isn't a valid env scope when a
-value would be written for it, because no read could parse that layer.
+With `hack.env.json`, the migration also refuses (`E_CONFIG_INVALID`), writing no env layer, an
+overlay named `default`, `local` or `<name>.local`, in any case, that sets a value of its own, because
+it would replace the base layer or write a machine-local file, and a contract service that isn't a
+valid env scope when a value would be written for it, because no read could parse that layer. A
+mirrored secret backend's key may already have been created by then. It also refuses, writing nothing,
+a `hack.env.json` it can't read as a contract, and it doesn't quote the file.
 
 With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
 symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a

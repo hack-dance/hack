@@ -256,12 +256,14 @@ async function runWorker(opts: {
 }
 
 test("with nothing stored, the printed step 1 migrates", async () => {
-  const { result, after } = await runWorker({
+  const { result, after, keyFile } = await runWorker({
     keychain: "empty",
     shell: false,
     storePresent: false,
   });
   expect(result.message).toBeNull();
+  // The docs say the migration creates the key when nothing is stored yet.
+  expect(keyFile).not.toBeNull();
   expect(Object.keys(after)).toContain(".hack/hack.env.default.yaml");
 }, 45_000);
 

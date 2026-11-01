@@ -5070,6 +5070,15 @@ export async function migrateLegacyProjectEnv(opts: {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const contract = await readHackEnvContract({ projectDir: opts.projectDir });
+  // Read as an empty contract, it would migrate nothing and offer .env and the contract
+  // for cleanup. The parser's message isn't repeated, because it can quote the file.
+  if (contract.exists && contract.parseError !== undefined) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason:
+        "hack.env.json can't be read as an env contract, so the migration can't tell which values to keep. Correct it, or remove it if this project doesn't use a contract, then retry.",
+    });
+  }
   if (!contract.exists) {
     if (opts.migrateUndeclaredDotenv === true) {
       return await migrateUndeclaredLegacyDotenv(opts);
@@ -5259,10 +5268,12 @@ export class LegacyDotenvMigrationRefusalError extends HackCliError {
   constructor(opts: {
     readonly code: "E_CONFIG_INVALID" | "E_PATH_CONFLICT" | "E_PERMISSION";
     readonly reason: string;
+    /** Replaces the closing sentence, for a refusal that can follow a key being created. */
+    readonly closing?: string;
   }) {
     super({
       code: opts.code,
-      message: `Refusing to migrate the legacy .hack/.env files: ${opts.reason} Nothing was written, and the legacy files are kept.`,
+      message: `Refusing to migrate the legacy .hack/.env files: ${opts.reason} ${opts.closing ?? "Nothing was written, and the legacy files are kept."}`,
     });
     this.name = "LegacyDotenvMigrationRefusalError";
   }
@@ -6317,7 +6328,7 @@ function assertNoShellValuesInContractMigration(opts: {
       ].join(" ");
     const isUsableOverlay = (name: string) =>
       parseEnvConfigSelection(name) === name &&
-      !isReservedLegacyOverlayName(name);
+      !isReservedLegacyOverlayName(name.toLowerCase());
     const isUsableService = (service: string) =>
       isValidProjectEnvScopeName({ scopeName: service });
     const scopesOf = (value: ProcessOnlyContractValue) =>
@@ -6381,6 +6392,19 @@ function assertNoShellValuesInContractMigration(opts: {
   });
 }
 
+type ResolvedContractMigrationValue = {
+  readonly key: string;
+  readonly value: string | null;
+  readonly services: readonly string[] | null;
+};
+
+/**
+ * Resolving values can create a mirrored backend's key before these refusals, so they
+ * don't claim nothing at all was written.
+ */
+const CONTRACT_LAYER_REFUSAL_CLOSING =
+  "No env layer was written, and the legacy files are kept. A secret backend's key may have been created.";
+
 /**
  * Refuses what this migration can't write as a working layer, before it writes
  * anything, because it has no rollback and a retry finds layers and does nothing.
@@ -6389,12 +6413,6 @@ function assertNoShellValuesInContractMigration(opts: {
  * Only an entry that would be written counts, so an overlay that adds nothing to the
  * base, or a scope with no value, still migrates. Names only, JSON-quoted.
  */
-type ResolvedContractMigrationValue = {
-  readonly key: string;
-  readonly value: string | null;
-  readonly services: readonly string[] | null;
-};
-
 function assertContractMigrationLayersAreWritable(opts: {
   readonly baseValues: readonly ResolvedContractMigrationValue[];
   readonly overlays: readonly {
@@ -6412,7 +6430,8 @@ function assertContractMigrationLayersAreWritable(opts: {
   const reserved = opts.overlays
     .filter(
       (overlay) =>
-        isReservedLegacyOverlayName(overlay.name) &&
+        // Lowercased: on a case-insensitive filesystem .env.Default lands on the same layer.
+        isReservedLegacyOverlayName(overlay.name.toLowerCase()) &&
         addedBy(overlay.values).length > 0
     )
     .map((overlay) => JSON.stringify(`.env.${overlay.name}`))
@@ -6421,6 +6440,7 @@ function assertContractMigrationLayersAreWritable(opts: {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
       reason: `the overlay file ${reserved.join(", ")} uses a name reserved for Hack's own layers, so migrating it would replace the base layer or write a machine-local file. Rename it to a lowercase name such as .env.staging and update any env_file or env.defaultOverlay that names it, or remove it, then retry.`,
+      closing: CONTRACT_LAYER_REFUSAL_CLOSING,
     });
   }
   const written = [
@@ -6444,6 +6464,7 @@ function assertContractMigrationLayersAreWritable(opts: {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
       reason: `hack.env.json declares the service ${invalidScopes.join(", ")}, which isn't a valid env scope, so no read could parse the layer the migration would write. Use lowercase letters, numbers, dots, dashes or underscores, renaming the Compose service if it must match, then retry.`,
+      closing: CONTRACT_LAYER_REFUSAL_CLOSING,
     });
   }
 }

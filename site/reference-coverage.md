@@ -1,6 +1,6 @@
-# Pinned public reference coverage
+# Historical public reference coverage
 
-The public site uses v4.2.4 (`91b14bf0abb17602142425de0d02628a3e8a2615`) and published next.5 (`28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc`). Newer working-next interfaces must not be backported into these docs.
+V4 remains at v4.2.4. Current v5 is released next.6 (`44aaf5156426dfcbb1c8a189b8e20531e5b95613`); its generated CLI and runtime support snapshots are refreshed. The table below records the prior next.5 field audit only, not next.6 totals. See the published next.6 release-contract page for changed APIs. Exhaustive next.6 nested-field and diagnostic reconciliation remains open.
 
 | Surface | v4 | v5 next.5 | Evidence and limits |
 | --- | --- | --- | --- |
@@ -21,6 +21,5 @@ Source recovery and editorial decisions remain in `content-decisions.md` and `ve
 
 V5 setup-sync target/status report tables are intentionally excluded (13 field rows,
 3 object variants and 5 aliases); see the short historical agent compatibility
-boundary for source availability. This is editorial curation, not deletion of
-next.5 commands. V4 and hashed originals are unchanged. No client-load evidence
+boundary for source availability. Those counts describe next.5; next.6 ships retirement refusals and explicit opt-in setup. V4 and hashed originals are unchanged. No client-load evidence
 is inferred from the seven shipped skills or local marketplace registration.

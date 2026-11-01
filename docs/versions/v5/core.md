@@ -1,6 +1,6 @@
 # Native project basics
 
-This v5 corpus describes the published next.5 native candidate. Complete [Install](install.md) and [Native preparation](guides/native-candidate.md), select that candidate's explicit launcher, then follow [Getting started](getting-started.md).
+This v5 corpus describes the published next.6 native candidate. Complete [Install](install.md) and [Native preparation](guides/native-candidate.md), select that candidate's explicit launcher, then follow [Getting started](getting-started.md).
 
 For the stable Compose workflow, select v4 in the documentation version selector. Detached startup, pretty/following logs and Compose lifecycle JSON examples are not the native startup path.
 

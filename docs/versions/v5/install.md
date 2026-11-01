@@ -2,37 +2,66 @@
 
 ## Prerequisites
 
-The native prerelease needs Apple Silicon macOS, Python 3.9 or newer, and macOS codesign. Provider installation, routing and project adoption are separate steps. Compose execution additionally needs a running Docker-compatible engine with Compose. A cloud sandbox must supply its own supported runtime; installing the CLI alone does not provide one.
+The next.6 native prerelease supports Apple Silicon macOS only. The shell bootstrap
+uses system tools including curl, shasum and codesign. The installer and standalone
+manager need neither Python nor a separately installed Bun. The native DNS helper
+is separate; this is not a claim that every native helper is Python-free.
 
-Download and inspect the installer from the selected published source tag:
+## Install next.6
+
+Run the pinned public bootstrap:
+
+```sh
+curl --fail --location --proto '=https' --tlsv1.2 https://github.com/hack-dance/hack/releases/download/v5.0.0-next.6/hack-next-install.sh | sh
+```
+
+### Advanced: download and inspect
+
+To inspect the same shell asset before running it:
 
 ```sh
 curl --fail --location --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/hack-dance/hack/v5.0.0-next.5/scripts/install-prerelease.py \
-  --output hack-next-install.py
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.6/hack-next-install.sh \
+  --output hack-next-install.sh
 # Inspect the downloaded script before executing it.
-python3 hack-next-install.py install --version 5.0.0-next.5
+sh hack-next-install.sh
 ```
 
-Read [candidate installation](../guides/candidate-install.md) for verification,
-retained versions and provider preparation. This installs the selected bundle;
-it does not create an application environment.
-
-The candidate is invoked explicitly:
+The bootstrap pins its standalone manager checksum and release version; it does
+not discover a mutable latest release. Its default installation root is
+`~/.hack-next`. It installs the explicit launcher below without replacing an
+existing stable install or PATH entry:
 
 ```sh
 "$HOME/.hack-next/bin/hack-next" --version
 ```
 
-It uses the native backend by default. It leaves the stable Homebrew executable in place. Follow [Getting started](getting-started.md) to choose a runtime path.
+Installation does not install the native provider, boot a VM, enroll a project,
+migrate data, activate DNS or trust, or load an agent client integration. Complete
+[Native preparation](../guides/native-candidate.md) before native application work.
 
-## Prepare the native runtime
+## Choose the backend explicitly
 
-The published next.5 launcher enforces native selection. Setting
-`HACK_RUNTIME_BACKEND=compose` before this launcher does not select Compose.
-Choose v4 in Docs version for stable Compose installation and local routing.
+The released launcher defaults to native execution with version-private CLI and
+native homes. Unlike next.5, next.6 also accepts an explicit Compose selection:
 
-For native use, follow [Native preparation](../guides/native-candidate.md) for the
-provider, pinned image, source sharing and routing. Confirm the supported project
-subset before adoption. DNS, trust and source-sharing changes require the native
-approvals described there. Installation alone does not perform that preparation.
+```sh
+HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" --version
+```
+
+This selects the bundle's CLI on Compose, clears native binary/home selections,
+and retains the caller's `HACK_HOME` and global configuration (default `~/.hack`).
+Compose requires an existing Docker-compatible engine, Compose and separately
+prepared routing. It shares stable project/configuration state: do not run stable
+v4 and the candidate concurrently against the same home, including their daemons.
+The [candidate guide](../guides/candidate-install.md) links the exact source contract.
+Choose v4 in Docs version for the stable Compose workflow; its examples do not
+establish native command support.
+
+## Evidence and open acceptance
+
+The fresh public next.6 bootstrap and local manager status were verified in an
+isolated installation. That check did not execute the native payload or MCP backend.
+Cross-version upgrade and rollback, initialized-data preservation, native application
+acceptance and installed-client loading remain open. Manager operations existing in
+source do not close those acceptance gates. See [release contracts](reference/next6-contracts.md).

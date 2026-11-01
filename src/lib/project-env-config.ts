@@ -6052,13 +6052,20 @@ export async function canMigrateCheckoutLegacyDotenv(opts: {
  * repository's contract can name any variable, and this migration writes plain
  * values to tracked layers, so a shell credential could be committed. Skipping it
  * isn't enough: env layers don't read the contract, so a service that received it
- * would silently stop. An overlay can't add one, because the same key would fall
- * back to the process here too, so checking the base covers every overlay.
+ * would silently stop.
+ *
+ * Checking the base covers every overlay. An overlay falls back to the process only
+ * when its own sources and the base file lack the key, and then the base does too.
+ *
+ * The recovery keeps each key's declared scope, because `--local` alone would
+ * deliver it to every service. No `--env` is needed: the shell fallback applied to
+ * every env.
  */
 function assertNoShellValuesInContractMigration(opts: {
   readonly values: readonly {
     readonly key: string;
     readonly resolvedFrom: string | null;
+    readonly services: readonly string[] | null;
   }[];
 }): void {
   const fromShell = opts.values.filter(
@@ -6067,20 +6074,29 @@ function assertNoShellValuesInContractMigration(opts: {
   if (fromShell.length === 0) {
     return;
   }
-  const named = fromShell
-    .filter((value) => PROJECT_ENV_KEY_PATTERN.test(value.key))
-    .map((value) => JSON.stringify(value.key))
-    .sort();
+  const named = fromShell.filter((value) =>
+    PROJECT_ENV_KEY_PATTERN.test(value.key)
+  );
   const malformed = fromShell.length - named.length;
   const parts = [
-    ...named,
+    ...named.map((value) => JSON.stringify(value.key)).sort(),
     ...(malformed > 0
       ? [countLabel({ count: malformed, noun: "malformed key" })]
       : []),
   ];
+  const commands = named
+    .flatMap((value) =>
+      value.services && value.services.length > 0
+        ? value.services.map(
+            (service) =>
+              `hack env set ${value.key} --service ${JSON.stringify(service)} --local --value-stdin`
+          )
+        : [`hack env set ${value.key} --local --value-stdin`]
+    )
+    .sort();
   throw new LegacyDotenvMigrationRefusalError({
     code: "E_CONFIG_INVALID",
-    reason: `the contract declares ${parts.join(", ")} as plain_env, and the value comes only from your shell, so migrating would write it to a tracked env layer. Unset it for this command and set it afterwards with \`hack env set KEY --local\`, or put a non-secret value in .hack/.env, then retry.`,
+    reason: `the contract declares ${parts.join(", ")} as plain_env, and the value comes only from your shell, so migrating would write it to a tracked env layer. Unset it for one command so the migration runs without it (\`env -u KEY hack env exec -- true\`). Services then stop receiving it from the shell, so set it again with the scope the contract declares: ${commands.join("; ")}. Compose interpolation and host commands keep reading it from your shell, so keep it exported if they need it.`,
   });
 }
 

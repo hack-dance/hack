@@ -394,7 +394,7 @@ test("doctor --fix never writes through a symlinked .hack/.gitignore", async () 
   expect(await readlink(gitignore)).toBe(outside);
 }, 30_000);
 
-test("doctor --fix never writes .gitignore through a symlinked .hack directory", async () => {
+test("doctor --fix refuses an outside .hack without writing .gitignore (HACK-1685)", async () => {
   if (!tempDir) {
     throw new Error("tempDir not set");
   }
@@ -406,14 +406,20 @@ test("doctor --fix never writes .gitignore through a symlinked .hack directory",
     resolve(outsideDir, "docker-compose.yml"),
     "services:\n  api:\n    image: alpine:3.19\n"
   );
-  await symlink(outsideDir, resolve(projectRoot, ".hack"));
+  const hackDir = resolve(projectRoot, ".hack");
+  await symlink(outsideDir, hackDir);
 
   const { runCli } = await import("../src/cli/run.ts");
   expect(
     await runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot])
-  ).toBe(0);
+  ).toBe(1);
 
   expect(await readdir(outsideDir)).toEqual(["docker-compose.yml"]);
+  expect(
+    await readFile(resolve(outsideDir, "docker-compose.yml"), "utf8")
+  ).toBe("services:\n  api:\n    image: alpine:3.19\n");
+  expect((await lstat(hackDir)).isSymbolicLink()).toBe(true);
+  expect(await readlink(hackDir)).toBe(outsideDir);
 }, 30_000);
 
 test("doctor --fix removes a literal Compose env override and keeps a reference-only one (HACK-1273)", async () => {
@@ -566,7 +572,7 @@ for (const repairCase of HACKD_REPAIR_CASES) {
   }, 30_000);
 }
 
-test("doctor --fix leaves an override behind a symlinked .hack untouched (HACK-1316)", async () => {
+test("doctor --fix refuses an outside .hack and preserves its override (HACK-1316, HACK-1685)", async () => {
   if (!tempDir) {
     throw new Error("tempDir not set");
   }
@@ -589,7 +595,7 @@ test("doctor --fix leaves an override behind a symlinked .hack untouched (HACK-1
   const { runCli } = await import("../src/cli/run.ts");
   expect(
     await runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot])
-  ).toBe(0);
+  ).toBe(1);
   expect(await readFile(override, "utf8")).toBe(`${canary}\n`);
   expect(await readdir(resolve(outside, ".internal"))).toEqual([
     "compose.env.override.yml",
@@ -599,6 +605,10 @@ test("doctor --fix leaves an override behind a symlinked .hack untouched (HACK-1
     "docker-compose.yml",
   ]);
   expect((await lstat(hackDir)).isSymbolicLink()).toBe(true);
+  expect(await readlink(hackDir)).toBe(outside);
+  expect(await readFile(resolve(outside, "docker-compose.yml"), "utf8")).toBe(
+    "services:\n  api:\n    image: alpine:3.19\n"
+  );
   const notes = noteCalls.join("\n");
   // Neither planned nor performed.
   expect(notes).not.toContain(".hack/.internal/compose.env.override.yml");

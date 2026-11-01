@@ -7,7 +7,17 @@ uses system tools including curl, shasum and codesign. The installer and standal
 manager need neither Python nor a separately installed Bun. The native DNS helper
 is separate; this is not a claim that every native helper is Python-free.
 
-Download and inspect the shell asset from the released next.6 tag:
+## Install next.6
+
+Run the pinned public bootstrap:
+
+```sh
+curl --fail --location --proto '=https' --tlsv1.2 https://github.com/hack-dance/hack/releases/download/v5.0.0-next.6/hack-next-install.sh | sh
+```
+
+### Advanced: download and inspect
+
+To inspect the same shell asset before running it:
 
 ```sh
 curl --fail --location --proto '=https' --tlsv1.2 \

@@ -456,6 +456,19 @@ if (
   throw new Error("Current v5 must identify released next.6");
 }
 const install = await Bun.file(resolve(v5Root, "install.md")).text();
+const bootstrapUrl =
+  "https://github.com/hack-dance/hack/releases/download/v5.0.0-next.6/hack-next-install.sh";
+const quickInstall = `curl --fail --location --proto '=https' --tlsv1.2 ${bootstrapUrl} | sh`;
+const firstInstallCommand = /```sh\n([\s\S]*?)\n```/.exec(install)?.[1];
+if (
+  firstInstallCommand !== quickInstall ||
+  !install.includes("### Advanced: download and inspect") ||
+  !install.includes(`  ${bootstrapUrl} \\\n  --output hack-next-install.sh`)
+) {
+  throw new Error(
+    "Install must lead with the pinned HTTPS one-liner and retain advanced inspection"
+  );
+}
 for (const fact of [
   "releases/download/v5.0.0-next.6/hack-next-install.sh",
   "sh hack-next-install.sh",

@@ -12,22 +12,28 @@ import {
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 
+import { findProcessOnlyContractValues } from "../src/lib/hack-env.ts";
 import {
   LegacyDotenvMigrationRefusalError,
   migrateLegacyProjectEnv,
   resolveProjectEnvConfig,
   selectProjectEnvValues,
 } from "../src/lib/project-env-config.ts";
+import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const SHELL_KEY = "HACK_1688_SYNTHETIC_TOKEN";
 const SHELL_VALUE = ["synthetic", "shell", "1688"].join("-");
 const DOTENV_VALUE = ["synthetic", "dotenv", "1688"].join("-");
+const OTHER_SHELL_KEY = "HACK_1688_OTHER_SYNTHETIC_TOKEN";
 const ENTRYPOINT = resolve(import.meta.dir, "..", "index.ts");
 const tempDirs = new Set<string>();
 
 afterEach(async () => {
   delete process.env[SHELL_KEY];
+  delete process.env[OTHER_SHELL_KEY];
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK");
   for (const dir of tempDirs) {
     await rm(dir, { recursive: true, force: true });
   }
@@ -44,6 +50,7 @@ async function createContractRepo(opts: {
   readonly services?: readonly string[];
   readonly files?: Readonly<Record<string, string>>;
   readonly otherVars?: readonly Record<string, unknown>[];
+  readonly secrets?: (projectRoot: string) => Record<string, unknown>;
 }): Promise<Repo> {
   const root = await mkdtemp(join(tmpdir(), "hack-env-contract-shell-"));
   tempDirs.add(root);
@@ -56,7 +63,13 @@ async function createContractRepo(opts: {
   );
   await writeFile(
     resolve(projectDir, "hack.config.json"),
-    `${JSON.stringify({ name: "contract-shell", dev_host: "contract-shell.hack" })}\n`
+    `${JSON.stringify({
+      name: "contract-shell",
+      dev_host: "contract-shell.hack",
+      ...(opts.secrets
+        ? { controlPlane: { secrets: opts.secrets(projectRoot) } }
+        : {}),
+    })}\n`
   );
   await writeFile(
     resolve(projectDir, "hack.env.json"),
@@ -142,6 +155,7 @@ async function runHack(opts: {
       env: {
         HACK_GLOBAL_CONFIG_PATH: join(opts.repo.root, "hack-config.json"),
         HACK_HOME: join(opts.repo.root, "hack-home"),
+        HACK_DAEMON_AUTOSTART_DISABLE: "1",
         HACK_NO_INTERACTIVE: "1",
         HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
         GIT_CONFIG_NOSYSTEM: "1",
@@ -163,10 +177,11 @@ async function runHack(opts: {
   return { exitCode, output: `${stdout}${stderr}` };
 }
 
-async function valueFor(repo: Repo, service: string) {
+async function valueFor(repo: Repo, service: string, envName?: string) {
   const resolved = await resolveProjectEnvConfig({
     projectRoot: repo.projectRoot,
     projectDir: repo.projectDir,
+    ...(envName ? { envName } : {}),
     serviceNames: ["api", "worker"],
   });
   if (!resolved) {
@@ -185,19 +200,300 @@ test("a service-scoped shell-only plain_env value is refused the same way", asyn
   const message = await expectShellValueRefused(
     await createContractRepo({ services: ["api"] })
   );
-  expect(message).toContain(
-    `hack env set ${SHELL_KEY} --service "api" --local`
-  );
+  expect(message).toContain(`hack env set ${SHELL_KEY} --service api --local`);
   expect(message).not.toContain(`hack env set ${SHELL_KEY} --local`);
 });
 
 test("a key set only in an overlay file is refused too, because the base still takes it from the shell", async () => {
   process.env[SHELL_KEY] = SHELL_VALUE;
-  await expectShellValueRefused(
+  const message = await expectShellValueRefused(
     await createContractRepo({
       files: { ".env.staging": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
     })
   );
+  expect(message).toContain(
+    `hack env set ${SHELL_KEY} --env staging --local --value-stdin`
+  );
+  expect(message).not.toContain(DOTENV_VALUE);
+});
+
+test("an overlay that leaves the key to the shell gets no overlay command", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  const message = await expectShellValueRefused(
+    await createContractRepo({ files: { ".env.staging": "OTHER=1\n" } })
+  );
+  expect(message).not.toContain("--env staging");
+});
+
+for (const services of [undefined, ["api"]] as const) {
+  const scope = services ? "a service-scoped key" : "an unscoped key";
+  test(`the printed recovery keeps an overlay's own value for ${scope}`, async () => {
+    const repo = await createContractRepo({
+      ...(services ? { services } : {}),
+      files: { ".env.staging": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+    });
+    const serviceFlags = services ? ["--service", "api"] : [];
+    const set = (input: {
+      readonly flags: readonly string[];
+      readonly value: string;
+    }) =>
+      runHack({
+        repo,
+        args: [
+          "env",
+          "set",
+          SHELL_KEY,
+          ...input.flags,
+          ...serviceFlags,
+          "--local",
+          "--value-stdin",
+          "--path",
+          repo.projectRoot,
+        ],
+        stdin: `${input.value}\n`,
+      });
+
+    const refused = await runHack({
+      repo,
+      args: ["env", "exec", "--path", repo.projectRoot, "--", "true"],
+      shellValue: SHELL_VALUE,
+    });
+    expect(refused.exitCode).not.toBe(0);
+    const migrated = await runHack({
+      repo,
+      args: ["env", "exec", "--path", repo.projectRoot, "--", "true"],
+    });
+    expect(migrated.exitCode).toBe(0);
+    expect((await set({ flags: [], value: SHELL_VALUE })).exitCode).toBe(0);
+    // Without this step, the local base above would replace staging's value.
+    expect(await valueFor(repo, "api", "staging")).toBe(SHELL_VALUE);
+    expect(
+      (await set({ flags: ["--env", "staging"], value: DOTENV_VALUE })).exitCode
+    ).toBe(0);
+
+    expect(await valueFor(repo, "api")).toBe(SHELL_VALUE);
+    expect(await valueFor(repo, "api", "staging")).toBe(DOTENV_VALUE);
+    if (services) {
+      expect(await valueFor(repo, "worker", "staging")).toBeUndefined();
+    }
+  }, 60_000);
+}
+
+test("service names from the contract are quoted in the printed commands", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  const message = await expectShellValueRefused(
+    await createContractRepo({ services: ["a b$(touch pwned)"] })
+  );
+  expect(message).toContain("--service 'a b$(touch pwned)' --local");
+});
+
+test("the printed unset names every key it refuses", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  process.env[OTHER_SHELL_KEY] = SHELL_VALUE;
+  const message = await expectShellValueRefused(
+    await createContractRepo({
+      otherVars: [
+        { key: OTHER_SHELL_KEY, source: "plain_env", required: false },
+      ],
+    })
+  );
+  expect(message).toContain(
+    `env -u ${OTHER_SHELL_KEY} -u ${SHELL_KEY} hack env exec -- true`
+  );
+});
+
+test("a keychain var doesn't set up a store or write a key before the refusal", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  const repo = await createContractRepo({
+    otherVars: [{ key: "SERVICE_TOKEN", source: "keychain", required: false }],
+    secrets: (projectRoot) => ({
+      backend: "encrypted_file",
+      encryptedFile: {
+        path: resolve(projectRoot, "secrets.enc.json"),
+        keyPath: resolve(projectRoot, "secrets-file.key"),
+      },
+    }),
+  });
+  await expectShellValueRefused(repo);
+  expect(
+    await lstat(resolve(repo.projectRoot, "secrets-file.key")).catch(() => null)
+  ).toBeNull();
+});
+
+test("a mirrored backend whose read works doesn't write a key file before the refusal", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  process.env.HACK_SECRETS_FILE_KEY = ["synthetic", "file", "1688"].join("-");
+  const repo = await createContractRepo({
+    secrets: (projectRoot) => ({
+      backend: "encrypted_file",
+      storePlaintextInBackend: true,
+      encryptedFile: {
+        path: resolve(projectRoot, "secrets.enc.json"),
+        keyPath: resolve(projectRoot, "secrets-file.key"),
+      },
+    }),
+  });
+  await expectShellValueRefused(repo);
+  expect(
+    await lstat(resolve(repo.projectRoot, "secrets-file.key")).catch(() => null)
+  ).toBeNull();
+});
+
+test("a mirrored backend whose key isn't available refuses a shell key, and creates no key", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  const repo = await createContractRepo({
+    secrets: (projectRoot) => ({
+      backend: "encrypted_file",
+      storePlaintextInBackend: true,
+      encryptedFile: {
+        path: resolve(projectRoot, "secrets.enc.json"),
+        keyPath: resolve(projectRoot, "secrets-file.key"),
+      },
+    }),
+  });
+  const message = await expectShellValueRefused(repo);
+  expect(message).toContain("the secret backend's key isn't available");
+  expect(
+    await lstat(resolve(repo.projectRoot, "secrets-file.key")).catch(() => null)
+  ).toBeNull();
+});
+
+test("an undetermined key still gets the overlay command, so recovery can't replace that overlay's value", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  const repo = await createContractRepo({
+    files: { ".env.staging": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+    secrets: (projectRoot) => ({
+      backend: "encrypted_file",
+      storePlaintextInBackend: true,
+      encryptedFile: {
+        path: resolve(projectRoot, "secrets.enc.json"),
+        keyPath: resolve(projectRoot, "secrets-file.key"),
+      },
+    }),
+  });
+  const message = await expectShellValueRefused(repo);
+  expect(message).toContain("the secret backend's key isn't available");
+  expect(message).toContain(
+    `hack env set ${SHELL_KEY} --env staging --local --value-stdin`
+  );
+  expect(message).not.toContain(DOTENV_VALUE);
+});
+
+test("a corrupt mirrored store stops the migration with its own error, not a shell-value refusal", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  process.env.HACK_SECRETS_FILE_KEY = ["synthetic", "file", "1688"].join("-");
+  const repo = await createContractRepo({
+    secrets: (projectRoot) => ({
+      backend: "encrypted_file",
+      storePlaintextInBackend: true,
+      encryptedFile: {
+        path: resolve(projectRoot, "secrets.enc.json"),
+        keyPath: resolve(projectRoot, "secrets-file.key"),
+      },
+    }),
+  });
+  await writeFile(resolve(repo.projectRoot, "secrets.enc.json"), "{not json\n");
+  const before = await snapshotTree(repo);
+
+  const error = await migrate(repo).catch((caught: unknown) => caught);
+
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  expect((error as Error).message).toContain(
+    "Invalid encrypted secret store JSON"
+  );
+  expect((error as Error).message).not.toContain(SHELL_VALUE);
+  expect(await snapshotTree(repo)).toEqual(before);
+});
+
+test("with the key unset in the shell, the backend isn't read before the migration's own setup", async () => {
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  const repo = await createContractRepo({
+    secrets: (projectRoot) => ({
+      backend: "encrypted_file",
+      storePlaintextInBackend: true,
+      encryptedFile: {
+        path: resolve(projectRoot, "secrets.enc.json"),
+        keyPath: resolve(projectRoot, "secrets-file.key"),
+      },
+    }),
+  });
+  expect(
+    await findProcessOnlyContractValues({
+      projectDir: repo.projectDir,
+      projectName: "contract-shell",
+      overlayNames: [],
+    })
+  ).toEqual([]);
+});
+
+test("a dotenv value wins over the shell with no backend read at all", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  const repo = await createContractRepo({
+    files: { ".env": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+    secrets: (projectRoot) => ({
+      backend: "encrypted_file",
+      storePlaintextInBackend: true,
+      encryptedFile: {
+        path: resolve(projectRoot, "secrets.enc.json"),
+        keyPath: resolve(projectRoot, "secrets-file.key"),
+      },
+    }),
+  });
+  expect(
+    await findProcessOnlyContractValues({
+      projectDir: repo.projectDir,
+      projectName: "contract-shell",
+      overlayNames: [],
+    })
+  ).toEqual([]);
+});
+
+test("an encrypted value still migrates beside a dotenv value, and a shell value stays out", async () => {
+  process.env[SHELL_KEY] = SHELL_VALUE;
+  process.env.HACK_SECRETS_FILE_KEY = ["synthetic", "file", "1688"].join("-");
+  const secret = ["synthetic", "encrypted", "1688"].join("-");
+  const repo = await createContractRepo({
+    otherVars: [
+      {
+        key: "SERVICE_TOKEN",
+        source: "keychain",
+        required: false,
+        services: ["api"],
+      },
+    ],
+    files: { ".env": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+    secrets: (projectRoot) => ({
+      backend: "encrypted_file",
+      encryptedFile: {
+        path: resolve(projectRoot, "secrets.enc.json"),
+        keyPath: resolve(projectRoot, "secrets-file.key"),
+      },
+    }),
+  });
+  const store = await resolveSecretStore({
+    projectName: "contract-shell",
+    projectDir: repo.projectDir,
+  });
+  await store.set({ key: "SERVICE_TOKEN", value: secret });
+
+  await migrate(repo);
+
+  const layers = await layerTexts(repo);
+  expect(layers).toContain(DOTENV_VALUE);
+  expect(layers).not.toContain(SHELL_VALUE);
+  expect(layers).not.toContain(secret);
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    serviceNames: ["api", "worker"],
+  });
+  expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe(secret);
 });
 
 test("a contract mixing a dotenv key and a shell key writes nothing at all", async () => {

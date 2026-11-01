@@ -82,6 +82,14 @@ export type SecretStore = {
   readonly delete: (input: { readonly key: string }) => Promise<boolean>;
 };
 
+/** An encrypted backend's key isn't available, and this read didn't create one. */
+export class SecretStoreKeyUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SecretStoreKeyUnavailableError";
+  }
+}
+
 /**
  * Resolve the active secret backend for a project context.
  *
@@ -600,7 +608,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   if (
     isTruthyEnvFlag(process.env[DISABLE_ENCRYPTED_FILE_KEYCHAIN_FALLBACK_ENV])
   ) {
-    throw new Error(
+    throw new SecretStoreKeyUnavailableError(
       buildEncryptedBackendKeyRecoveryMessage({
         keyPath: configuredKeyPath,
         storePath: input?.storePath,
@@ -660,7 +668,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
 
   const nowMs = Date.now();
   if (nowMs < encryptedFileKeyFailureCooldownUntilMs) {
-    throw new Error(
+    throw new SecretStoreKeyUnavailableError(
       buildEncryptedBackendKeyRecoveryMessage({
         keyPath: configuredKeyPath,
         storePath: input?.storePath,
@@ -680,7 +688,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   } catch {
     encryptedFileKeyFailureCooldownUntilMs =
       Date.now() + ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS;
-    throw new Error(
+    throw new SecretStoreKeyUnavailableError(
       buildEncryptedBackendKeyRecoveryMessage({
         keyPath: configuredKeyPath,
         storePath: input?.storePath,
@@ -704,7 +712,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   }
 
   if (configuredKeyPath || !allowKeyProvisioning) {
-    throw new Error(
+    throw new SecretStoreKeyUnavailableError(
       buildEncryptedBackendKeyRecoveryMessage({
         keyPath: configuredKeyPath,
         storePath: input?.storePath,

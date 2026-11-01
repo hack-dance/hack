@@ -61,10 +61,13 @@ import {
 } from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
 import {
+  findProcessOnlyContractValues,
+  type ProcessOnlyContractValue,
   readHackEnvContract,
   resolveEnvFilePath,
   resolveHackEnv,
 } from "./hack-env.ts";
+import { quoteShellWord } from "./logs.ts";
 import {
   isOwnedLegacyAdoptionManagedEnvAdmission,
   type LegacyAdoptionManagedEnvAdmission,
@@ -5113,12 +5116,19 @@ export async function migrateLegacyProjectEnv(opts: {
     overlayNames,
   });
 
+  // Before resolveHackEnv, which can provision secret-store key material.
+  assertNoShellValuesInContractMigration({
+    values: await findProcessOnlyContractValues({
+      projectDir: opts.projectDir,
+      projectName: opts.projectName,
+      overlayNames,
+    }),
+  });
   const baseResolved = await resolveHackEnv({
     projectDir: opts.projectDir,
     projectName: opts.projectName,
     envName: null,
   });
-  assertNoShellValuesInContractMigration({ values: baseResolved.values });
 
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
@@ -6237,48 +6247,94 @@ export async function canMigrateCheckoutLegacyDotenv(opts: {
  * would silently stop.
  *
  * Checking the base covers every overlay. An overlay falls back to the process only
- * when its own sources and the base file lack the key, and then the base does too.
+ * when its own sources and the base's lack the key, and then the base does too.
  *
  * The recovery keeps each key's declared scope, because `--local` alone would
- * deliver it to every service. No `--env` is needed: the shell fallback applied to
- * every env.
+ * deliver it to every service. A local base outranks tracked overlays, so an overlay
+ * that supplies the key itself also needs a local value, or it would take the base's.
+ * Names from the repository are quoted, because these commands get pasted.
+ *
+ * It also refuses when a mirrored backend's key isn't available, because the shell
+ * value might be the only one.
  */
 function assertNoShellValuesInContractMigration(opts: {
-  readonly values: readonly {
-    readonly key: string;
-    readonly resolvedFrom: string | null;
-    readonly services: readonly string[] | null;
-  }[];
+  readonly values: readonly ProcessOnlyContractValue[];
 }): void {
-  const fromShell = opts.values.filter(
-    (value) => value.resolvedFrom === "process"
-  );
-  if (fromShell.length === 0) {
+  if (opts.values.length === 0) {
     return;
   }
-  const named = fromShell.filter((value) =>
+  const named = opts.values.filter((value) =>
     PROJECT_ENV_KEY_PATTERN.test(value.key)
   );
-  const malformed = fromShell.length - named.length;
+  const malformed = opts.values.length - named.length;
   const parts = [
     ...named.map((value) => JSON.stringify(value.key)).sort(),
     ...(malformed > 0
       ? [countLabel({ count: malformed, noun: "malformed key" })]
       : []),
   ];
-  const commands = named
-    .flatMap((value) =>
+  const undetermined = opts.values.some((value) => value.undetermined);
+  const sentences = [
+    undetermined
+      ? `the contract declares ${parts.join(", ")} as plain_env, your shell sets it, and the secret backend's key isn't available, so the value may come only from your shell, and migrating could write it to a tracked env layer. No key was created. Make the backend's key available and retry. If the backend has nothing stored yet and HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK isn't set, the steps below also work, and the migration then creates its key.`
+      : `the contract declares ${parts.join(", ")} as plain_env, and the value comes only from your shell, so migrating would write it to a tracked env layer.`,
+  ];
+  if (malformed > 0) {
+    sentences.push(
+      "Correct or remove a malformed key in hack.env.json, and unset it in your shell."
+    );
+  }
+  if (named.length > 0) {
+    const unset = named
+      .map((value) => `-u ${value.key}`)
+      .sort()
+      .join(" ");
+    const setCommand = (input: {
+      readonly key: string;
+      readonly envName?: string;
+      readonly service?: string;
+    }) =>
+      [
+        `hack env set ${input.key}`,
+        ...(input.envName ? [`--env ${quoteShellWord(input.envName)}`] : []),
+        ...(input.service
+          ? [`--service ${quoteShellWord(input.service)}`]
+          : []),
+        "--local --value-stdin",
+      ].join(" ");
+    const scopesOf = (value: ProcessOnlyContractValue) =>
       value.services && value.services.length > 0
-        ? value.services.map(
-            (service) =>
-              `hack env set ${value.key} --service ${JSON.stringify(service)} --local --value-stdin`
+        ? value.services.map((service) => ({ service }))
+        : [{}];
+    const baseCommands = named
+      .flatMap((value) =>
+        scopesOf(value).map((scope) => setCommand({ key: value.key, ...scope }))
+      )
+      .sort();
+    const overlayCommands = named
+      .flatMap((value) =>
+        value.overlaysWithOwnValue.flatMap((envName) =>
+          scopesOf(value).map((scope) =>
+            setCommand({ key: value.key, envName, ...scope })
           )
-        : [`hack env set ${value.key} --local --value-stdin`]
-    )
-    .sort();
+        )
+      )
+      .sort();
+    sentences.push(
+      `Unset it for one command so the migration runs (\`env ${unset} hack env exec -- true\`). Services then stop receiving it from the shell, so set it again with the scope the contract declares${undetermined ? ", if the backend doesn't hold it" : ""}: ${baseCommands.join("; ")}.`
+    );
+    if (overlayCommands.length > 0) {
+      sentences.push(
+        `A local base outranks tracked overlays, so also set the value each overlay file holds, or that env takes the base value: ${overlayCommands.join("; ")}.`
+      );
+    }
+    sentences.push(
+      "A value set with --service doesn't reach Compose interpolation or a host command run without that service's scope, so keep it exported if they read it. A value set without --service reaches them and overrides your shell."
+    );
+  }
   throw new LegacyDotenvMigrationRefusalError({
     code: "E_CONFIG_INVALID",
-    reason: `the contract declares ${parts.join(", ")} as plain_env, and the value comes only from your shell, so migrating would write it to a tracked env layer. Unset it for one command so the migration runs without it (\`env -u KEY hack env exec -- true\`). Services then stop receiving it from the shell, so set it again with the scope the contract declares: ${commands.join("; ")}. Compose interpolation and host commands keep reading it from your shell, so keep it exported if they need it.`,
+    reason: sentences.join(" "),
   });
 }
 

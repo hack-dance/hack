@@ -1184,11 +1184,23 @@ env layers don't read the contract, so services would stop receiving it. The err
 never the value, and gives the commands for the scope the contract declares:
 
 1. Run one command without the variable, so the migration runs: `env -u KEY hack env exec -- true`.
+   Add a `-u` for each key it names.
 2. Set it for the declared scope: `hack env set KEY --service <name> --local --value-stdin`, or
    without `--service` for a key the contract doesn't scope. `--local` alone delivers it to every
    service, so keep `--service` for a scoped key.
-3. Keep it exported if Compose interpolation or a host command reads it: a service value doesn't
-   reach interpolation.
+3. If an overlay file also sets the key, give that overlay its own value:
+   `hack env set KEY --env <overlay> --local --value-stdin`, with `--service` as above. A local base
+   outranks tracked overlays, so without this the overlay would take the base value.
+4. Keep it exported if Compose interpolation, or a host command run without that service's scope,
+   reads a key you set with `--service`, because a service value doesn't reach them. A value set
+   without `--service` does reach them, and overrides your shell.
+
+The refusal comes before Hack provisions any secret-store key. If plaintext values are mirrored to a
+secret backend whose key isn't available, Hack can't tell whether a key your shell sets is also in
+the backend, so it refuses that key the same way. Make the backend's key available and retry. If the
+backend has nothing stored yet and `HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK` isn't set, you can run
+these steps instead, and the migration creates its key; set the key only if the backend doesn't hold
+it. Any other backend failure, such as a corrupt store, stops the migration with that error.
 
 With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
 symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a

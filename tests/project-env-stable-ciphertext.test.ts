@@ -288,7 +288,7 @@ async function readUntil(
 
 test("a symlinked layer keeps its link and the write lands at the link target", async () => {
   const repo = await createRepo();
-  const shared = resolve(repo.root, "shared");
+  const shared = resolve(repo.projectRoot, "shared");
   await mkdir(shared);
   const linkTarget = resolve(shared, "hack.env.default.yaml");
   await writeFile(
@@ -307,6 +307,19 @@ test("a symlinked layer keeps its link and the write lands at the link target", 
       (await readdir(dir)).filter((name) => name.endsWith(".tmp"))
     ).toEqual([]);
   }
+});
+
+test("an outside symlinked layer is refused without changing the target", async () => {
+  const repo = await createRepo();
+  const outside = resolve(repo.root, "outside.yaml");
+  const original =
+    "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n";
+  await writeFile(outside, original);
+  await symlink(outside, repo.envFile);
+  await expect(setSecret(repo, FIRST)).rejects.toThrow("Refused env layer");
+  expect(await readFile(outside, "utf8")).toBe(original);
+  expect((await lstat(repo.envFile)).isSymbolicLink()).toBe(true);
+  expect((await readdir(repo.root)).sort()).toEqual(["outside.yaml", "repo"]);
 });
 
 test("a write that fails after staging removes its staging file", async () => {
@@ -440,9 +453,9 @@ test.skipIf(RUNS_AS_ROOT)(
   30_000
 );
 
-test("a dangling symlink layer is replaced by a regular file", async () => {
+test("an in-project dangling symlink layer is replaced by a regular file", async () => {
   const repo = await createRepo();
-  await symlink(resolve(repo.root, "missing.yaml"), repo.envFile);
+  await symlink(resolve(repo.projectRoot, "missing.yaml"), repo.envFile);
 
   expect((await setSecret(repo, FIRST)).changed).toBe(true);
   expect((await lstat(repo.envFile)).isFile()).toBe(true);

@@ -34,7 +34,8 @@ spyOn(secrets, "delete").mockImplementation(async () => {
   return false;
 });
 
-// Fails before any migration runs if the stub isn't what the code will call.
+// Fails before any migration runs if this reference to `secrets` isn't stubbed. The
+// test's `calls.get` check shows afterwards that secret-store.ts used the stub too.
 const preflight = await secrets.get({
   service: PREFLIGHT_SERVICE,
   name: "preflight",

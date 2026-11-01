@@ -1088,10 +1088,11 @@ files, when:
   migrated value would override it. The check does not look at the order of the entries,
   or expand variables in an `env_file` path. Remove the key from one of the files, then retry;
 - a legacy entry is one Compose reads differently from Hack (`E_CONFIG_INVALID`): an unquoted
-  inline comment (`PORT=3000 # dev`), a `$` outside single quotes, a `\` in double quotes (such
-  as `\n` in a PEM key), or a line without `=` (`A: 1`, or a bare `A`). The value would change
-  or be lost. The error counts entries per file and never shows them. Write the value Compose
-  uses in single quotes, with real line breaks and no escapes, or remove the line;
+  inline comment (`PORT=3000 # dev`), a `$` outside single quotes, a `\` in a quoted value (such
+  as `\n` in a PEM key), text after a closing quote (`A='x' B=2`), or a line without `=` (`A: 1`,
+  or a bare `A`). The value would change or be lost. The error counts entries per file and never
+  shows them. Write each value on its own line, in single quotes, with real line breaks and no
+  backslashes, or remove the line;
 - the Compose file interpolates a key the default overlay sets differently from `.hack/.env`
   (`E_CONFIG_INVALID`). Compose takes it from `.hack/.env` today, but the overlay value would
   apply after the migration. Make the two files agree or stop interpolating the key;
@@ -1109,7 +1110,8 @@ variables once that env is selected, and doctor names the keys. The same applies
 no service lists, unless it is the default overlay, which refuses when any service lists a legacy
 file. To limit a key to one service, unset it and set it with `hack env set --service --local`.
 Do not do this for a key your Compose file interpolates: service values do not reach
-interpolation, so `${KEY}` would become empty.
+interpolation, so `${KEY}` would become empty. After the migration a migrated value also takes
+precedence over the same variable exported in your shell, including for interpolation.
 
 With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
 symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a

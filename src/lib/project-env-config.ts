@@ -5375,9 +5375,8 @@ function composeInterpolatedOverlayKeys(opts: {
   });
   return Object.keys(changed)
     .filter(
-      (key) =>
-        composeText.includes(`\${${key}`) ||
-        new RegExp(`\\$${key}(?![A-Z0-9_])`).test(composeText)
+      // Keys match PROJECT_ENV_KEY_PATTERN, so they are safe in a pattern.
+      (key) => new RegExp(`\\$\\{?${key}(?![A-Z0-9_])`).test(composeText)
     )
     .map((key) => JSON.stringify(key))
     .sort();
@@ -5815,7 +5814,7 @@ function closingQuoteIndex(opts: {
   readonly quote: string;
 }): number {
   for (let index = 0; index < opts.text.length; index += 1) {
-    if (opts.text[index] === "\\" && opts.quote === '"') {
+    if (opts.text[index] === "\\") {
       index += 1;
     } else if (opts.text[index] === opts.quote) {
       return index;
@@ -5827,9 +5826,9 @@ function closingQuoteIndex(opts: {
 /**
  * Counts dotenv entries Compose reads differently from {@link parseDotEnv}.
  * Compose drops an unquoted inline comment, expands `$` outside single quotes,
- * decodes backslash escapes in double quotes (across lines too), and accepts
- * `KEY: value` and a bare `KEY`, while the parser keeps the text literally or
- * skips the line. A migrated value goes through Hack's generated override, so
+ * reads backslashes in quoted values differently (across lines too), reads
+ * text after a closing quote as another entry, and accepts `KEY: value` and a
+ * bare `KEY`, while the parser keeps the text literally or skips it. A migrated value goes through Hack's generated override, so
  * the service would receive the parser's reading instead.
  */
 function countComposeOnlyDotenvEntries(text: string): number {
@@ -5847,11 +5846,13 @@ function countComposeOnlyDotenvEntries(text: string): number {
       quoted = entry.text;
     }
     const end = closingQuoteIndex({ text: quoted, quote: open.quote });
-    const content = end === -1 ? quoted : quoted.slice(0, end);
     if (
-      open.quote === '"' &&
       !open.flagged &&
-      (content.includes("$") || content.includes("\\"))
+      composeReadsQuotedTextDifferently({
+        text: quoted,
+        end,
+        quote: open.quote,
+      })
     ) {
       open.flagged = true;
       count += 1;
@@ -5861,6 +5862,21 @@ function countComposeOnlyDotenvEntries(text: string): number {
     }
   }
   return count;
+}
+
+/** Whether Compose reads this line of a quoted value differently from the parser. */
+function composeReadsQuotedTextDifferently(opts: {
+  readonly text: string;
+  readonly end: number;
+  readonly quote: string;
+}): boolean {
+  const content = opts.end === -1 ? opts.text : opts.text.slice(0, opts.end);
+  const trailing = opts.end === -1 ? "" : opts.text.slice(opts.end + 1).trim();
+  return (
+    content.includes("\\") ||
+    (opts.quote === '"' && content.includes("$")) ||
+    !(trailing.length === 0 || trailing.startsWith("#"))
+  );
 }
 
 /**
@@ -5949,7 +5965,7 @@ async function readValidatedLegacyDotenvFiles(opts: {
   if (composeSyntaxCounts.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `Compose reads ${composeSyntaxCounts.join(", ")} differently from Hack, so the migrated value would change or be lost: an unquoted " #" starts a comment, "$" outside single quotes is expanded, "\\" in double quotes is an escape, and a line without "=" still sets a key. Write each one as KEY='the value Compose uses' with real line breaks and no escapes, or remove it, then retry. The lines are not shown because they may contain values.`,
+      reason: `Compose reads ${composeSyntaxCounts.join(", ")} differently from Hack, so the migrated value would change or be lost: an unquoted " #" starts a comment, "$" outside single quotes is expanded, "\\" in a quoted value is read differently, text after a closing quote is another entry, and a line without "=" still sets a key. Write each one on its own as KEY='the value Compose uses' with real line breaks and no backslashes, or remove it, then retry. The lines are not shown because they may contain values.`,
     });
   }
   return legacyValues;

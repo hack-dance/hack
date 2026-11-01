@@ -1707,6 +1707,12 @@ const COMPOSE_READS_DIFFERENTLY: readonly (readonly [string, string])[] = [
   ["a multi-line escape", `P="${KEPT_VALUE}\nabc\\n"`],
   ["a colon form", `P: ${KEPT_VALUE}`],
   ["a bare key", "P"],
+  ["an entry after a single-quoted value", `P='${KEPT_VALUE}' B=2`],
+  ["an entry after a double-quoted value", `P="${KEPT_VALUE}" B=2`],
+  ["an entry touching a closing quote", `P='${KEPT_VALUE}'B=2`],
+  ["a colon entry after a closing quote", `P='${KEPT_VALUE}' B: 2`],
+  ["a double backslash in single quotes", `P='${KEPT_VALUE}\\\\b'`],
+  ["an escaped quote in single quotes", `P='${KEPT_VALUE}\\'`],
 ];
 
 for (const [name, content] of COMPOSE_READS_DIFFERENTLY) {
@@ -1726,12 +1732,12 @@ test("the migration keeps a multi-line value in single quotes and does not read 
   const repo = await createLegacyRepo();
   await writeFile(
     resolve(repo.projectDir, ".env"),
-    `PEM='${KEPT_VALUE}\nnot an entry $ \\n\nend'\nAFTER=1\nQUOTED="a\nb"\n`
+    `PEM='${KEPT_VALUE}\nnot an entry $ =\nend'\nAFTER=1\nQUOTED="a\nb"\n`
   );
   await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
   expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
     global: {
-      PEM: `${KEPT_VALUE}\nnot an entry $ \\n\nend`,
+      PEM: `${KEPT_VALUE}\nnot an entry $ =\nend`,
       AFTER: "1",
       QUOTED: "a\nb",
     },
@@ -1811,6 +1817,45 @@ test("the migration allows interpolating a key the default overlay leaves alone 
       "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, .env.staging]\n    command: run ${A} $PORT_EXTRA\n",
     base: "A=1\nPORT=2\n",
     overlay: "A=1\nPORT=3\n",
+  });
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+});
+
+test("the migration keeps a comment after a closing quote", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `SPACED='${KEPT_VALUE}' # note\nTOUCHING="${KEPT_VALUE}"#note\n`
+  );
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { SPACED: KEPT_VALUE, TOUCHING: KEPT_VALUE },
+  });
+});
+
+test("a backslash before a single quote cannot hide a later line from the migration", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `Z=1\nA='q\\'\nB='r\nC=$Z\n`
+  );
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: "differently from Hack",
+    hidden: [],
+  });
+});
+
+test("the migration does not read a longer interpolated name as the overlay's key", async () => {
+  const repo = await writeDefaultOverlayRepo({
+    compose:
+      "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, .env.staging]\n    command: run ${PORT_X}\n",
+    base: "PORT=2\n",
+    overlay: "PORT=3\n",
   });
   const migrated = await migrateLegacyRepo(repo, {
     migrateUndeclaredDotenv: true,

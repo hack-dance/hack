@@ -3678,7 +3678,7 @@ test.skipIf(RUNS_AS_ROOT)(
 
 const LEAVES_PROJECT = "its path must resolve inside the project";
 
-test("a layer linked outside the project refuses the migration and every mutation", async () => {
+test("a layer linked outside the project refuses the migration", async () => {
   for (const kind of ["file", "directory"] as const) {
     const repo = await createLegacyRepo();
     await writeFile(
@@ -3824,3 +3824,31 @@ test("doctor doesn't rewrite Compose while a local layer links outside the proje
   expect(await hackDirContents(repo)).toEqual(before);
   expect(await readFile(target, "utf8")).toBe(LAYER);
 }, 60_000);
+
+test("a contract project with a layer linked outside the project refuses the migration", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.json"),
+    `${JSON.stringify({
+      version: 1,
+      vars: [{ key: "KEPT_SETTING", source: "plain_env", required: false }],
+    })}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const target = resolve(repo.root, "outside-layer.yaml");
+  await writeFile(target, LAYER);
+  await symlink(target, resolve(repo.projectDir, "hack.env.staging.yaml"));
+  const before = await hackDirContents(repo);
+
+  const error = await migrateLegacyRepo(repo, {}).catch(
+    (caught: unknown) => caught
+  );
+
+  expect((error as Error).message).toContain(LEAVES_PROJECT);
+  expect((error as Error).message).not.toContain(KEPT_VALUE);
+  expect(await hackDirContents(repo)).toEqual(before);
+  expect(await readFile(target, "utf8")).toBe(LAYER);
+});

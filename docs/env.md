@@ -1072,8 +1072,15 @@ files, when:
 - a key the legacy files set is also set in a Compose service's own `environment`
   (`E_CONFIG_INVALID`). Compose ranks `environment` above `env_file`, but migrated values
   become global layer values that Hack applies after `environment`, so the service would
-  switch to the `.env` value. The error names the keys and services, never values. Remove
-  the key from the `.hack/.env` file or from that service's `environment`, then retry;
+  switch to the `.env` value. An entry that only refers to the same key (`${KEY}`, `$KEY`,
+  `${KEY:-default}`) is not a conflict. The error names the keys and services, never values.
+  Remove the key from the `.hack/.env` file or from that service's `environment`, then retry;
+- some Compose services list a legacy file with values to migrate in `env_file` and others
+  do not (`E_CONFIG_INVALID`). Migrated values are global and reach every service, so the
+  others would receive values they never had. The error names the file and services, never
+  values. List the file for those services if they may have its values, or move the values
+  out of it and set them with `hack env set --service` after migrating. If no service lists
+  the file, the migration goes ahead and its values then reach every service;
 - a key the legacy files set is also set in another file a Compose service uses as
   `env_file` (`E_CONFIG_INVALID`), for the same reason: that file stays in Compose, but the
   migrated value would override it. The check does not look at the order of the entries,

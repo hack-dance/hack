@@ -1322,7 +1322,7 @@ test("the migration refuses when a Compose environment value would lose preceden
   const composeExplicitPort = ["4", "000"].join("");
   await writeFile(
     resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
-    `services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n    environment:\n      PORT: "${composeExplicitPort}"\n  worker:\n    image: alpine:3.20\n    environment:\n      - OTHER=1\n`
+    `services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n    environment:\n      PORT: "${composeExplicitPort}"\n  worker:\n    image: alpine:3.20\n    env_file: .env\n    environment:\n      - OTHER=1\n`
   );
   await writeFile(
     resolve(repo.projectDir, ".env"),
@@ -1423,3 +1423,122 @@ test("the migration refuses when another Compose env_file sets a migrated key", 
   });
   expect(migrated.legacyDetected).toBe(true);
 });
+
+test("the migration refuses when only some Compose services list a legacy file", async () => {
+  const repo = await createLegacyRepo();
+  const compose = resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME);
+  await writeFile(
+    compose,
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n  worker:\n    image: alpine:3.20\n"
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: '"worker" does not list ".env" in env_file',
+    hidden: [KEPT_VALUE],
+  });
+
+  // Once every service lists it, none receives anything new.
+  await writeFile(
+    compose,
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n  worker:\n    image: alpine:3.20\n    env_file: [.env]\n"
+  );
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { KEPT_SETTING: KEPT_VALUE },
+  });
+});
+
+test("the migration refuses a legacy overlay only some services list, and accepts one that adds nothing", async () => {
+  const repo = await createLegacyRepo();
+  const compose = resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME);
+  await writeFile(
+    resolve(repo.projectDir, "hack.config.json"),
+    `${JSON.stringify({ env: { defaultOverlay: "staging" } })}\n`
+  );
+  await writeFile(
+    compose,
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, .env.staging]\n  worker:\n    image: alpine:3.20\n    env_file: .env\n"
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const overlay = resolve(repo.projectDir, ".env.staging");
+  await writeFile(overlay, `KEPT_SETTING=${KEPT_VALUE}-staging\n`);
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: '"worker" does not list ".env.staging" in env_file',
+    hidden: [KEPT_VALUE],
+  });
+
+  await writeFile(overlay, `KEPT_SETTING=${KEPT_VALUE}\n`);
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+});
+
+test("the migration goes ahead when no Compose service lists the legacy file", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n  worker:\n    image: alpine:3.20\n"
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { KEPT_SETTING: KEPT_VALUE },
+  });
+});
+
+for (const entry of ["${PORT}", "$PORT", "${PORT:-1}", "${PORT-1}"]) {
+  test(`a Compose environment entry ${entry} that only refers to its own key is not a conflict`, async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+      `services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n    environment:\n      - PORT=${entry}\n`
+    );
+    await writeFile(resolve(repo.projectDir, ".env"), "PORT=2\n");
+    const migrated = await migrateLegacyRepo(repo, {
+      migrateUndeclaredDotenv: true,
+    });
+    expect(migrated.legacyDetected).toBe(true);
+  });
+}
+
+for (const entry of [
+  "PORT: ${PORT:?required}",
+  "PORT: ${OTHER}",
+  "PORT: ${PORT:-${OTHER}}",
+  "PORT:",
+]) {
+  test(`a Compose environment entry "${entry}" stays a conflict`, async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+      `services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n    environment:\n      ${entry}\n`
+    );
+    await writeFile(resolve(repo.projectDir, ".env"), "PORT=2\n");
+    await expectMigrationRefusal({
+      repo,
+      code: "E_CONFIG_INVALID",
+      reason: 'Compose environment sets "PORT" in "api"',
+      hidden: [],
+    });
+  });
+}

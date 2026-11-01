@@ -5321,8 +5321,10 @@ async function assertComposeOverlaysStaySelected(opts: {
 
 /**
  * Keys a Compose service sets in its own `environment` (map keys, or the
- * names of `KEY=value` / `KEY` list entries). Null when the entry has a shape
- * this check cannot read.
+ * names of `KEY=value` / `KEY` list entries), except a value that only refers
+ * to the same key (`${KEY}`, `${KEY:-default}`, `$KEY`): Compose resolves that
+ * from the same values before and after the migration. Null when the entry
+ * has a shape this check cannot read.
  */
 function composeServiceEnvironmentKeys(
   environment: unknown
@@ -5330,20 +5332,55 @@ function composeServiceEnvironmentKeys(
   if (environment === undefined || environment === null) {
     return new Set();
   }
+  const keys = new Set<string>();
+  const add = (key: string, value: unknown) => {
+    if (key.length > 0 && !isComposeSelfReference({ key, value })) {
+      keys.add(key);
+    }
+  };
   if (Array.isArray(environment)) {
-    const keys = new Set<string>();
     for (const entry of environment) {
       if (typeof entry !== "string") {
         return null;
       }
-      const key = entry.split("=", 1)[0]?.trim() ?? "";
-      if (key.length > 0) {
-        keys.add(key);
+      const separator = entry.indexOf("=");
+      if (separator === -1) {
+        add(entry.trim(), undefined);
+      } else {
+        add(entry.slice(0, separator).trim(), entry.slice(separator + 1));
       }
     }
     return keys;
   }
-  return isRecord(environment) ? new Set(Object.keys(environment)) : null;
+  if (!isRecord(environment)) {
+    return null;
+  }
+  for (const [key, value] of Object.entries(environment)) {
+    add(key, value);
+  }
+  return keys;
+}
+
+/** Default forms only (`:-`, `-`); `${KEY:?err}` and nested references stay conflicts. */
+const COMPOSE_DEFAULT_MODIFIER_PATTERN = /^:?-[^${}]*$/;
+
+function isComposeSelfReference(opts: {
+  readonly key: string;
+  readonly value: unknown;
+}): boolean {
+  if (typeof opts.value !== "string") {
+    return false;
+  }
+  const value = opts.value.trim();
+  if (value === `$${opts.key}` || value === `\${${opts.key}}`) {
+    return true;
+  }
+  const prefix = `\${${opts.key}`;
+  if (!(value.startsWith(prefix) && value.endsWith("}"))) {
+    return false;
+  }
+  const modifier = value.slice(prefix.length, -1);
+  return COMPOSE_DEFAULT_MODIFIER_PATTERN.test(modifier);
 }
 
 /**
@@ -5449,6 +5486,63 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
       reason: `Compose env_file sets ${envFileConflicts.sort().join(", ")}, which the legacy .env files also set; after the migration the .env value would override that file's value. Remove the key from the .hack/.env file or from that env_file, then retry.`,
     });
   }
+  const unlisted = composeServicesMissingLegacyDotenv({
+    projectDir: opts.projectDir,
+    services,
+    legacyValues: opts.legacyValues,
+  });
+  if (unlisted.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${unlisted.join("; ")}, but other services do. Migrated values are global and reach every service, so those services would receive values they never had. List the file in env_file for those services if they may have its values, or move the values out of it and set them with \`hack env set --service\` after migrating, then retry.`,
+    });
+  }
+}
+
+/**
+ * Before the migration a legacy dotenv file listed in `env_file` reached only
+ * the services that list it; after it, its values are global layer values that
+ * Hack applies to every service. For each file with values to migrate (the
+ * base, and each overlay entry that differs from it) that some service lists,
+ * the services that do not, as refusal labels naming files and services only.
+ * A file no service lists has no per-service boundary to keep: it is project
+ * wide already, and docs/env.md says its values then reach every service.
+ */
+function composeServicesMissingLegacyDotenv(opts: {
+  readonly projectDir: string;
+  readonly services: Record<string, unknown>;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): string[] {
+  const baseValues = opts.legacyValues.get(null) ?? {};
+  const labels: string[] = [];
+  for (const [envName, values] of opts.legacyValues) {
+    const migrated =
+      envName === null
+        ? values
+        : legacyOverlayChangedValues({ overlayValues: values, baseValues });
+    if (Object.keys(migrated).length === 0) {
+      continue;
+    }
+    const path = resolveEnvFilePath({ projectDir: opts.projectDir, envName });
+    const composeServices = Object.entries(opts.services).filter(
+      (entry): entry is [string, Record<string, unknown>] => isRecord(entry[1])
+    );
+    const missing = composeServices
+      .filter(
+        ([, rawService]) =>
+          !readComposeEnvFilePaths({ rawService }).some(
+            (configured) => resolve(opts.projectDir, configured) === path
+          )
+      )
+      .map(([service]) => JSON.stringify(service))
+      .sort();
+    if (missing.length > 0 && missing.length < composeServices.length) {
+      labels.push(
+        `${missing.join(", ")} ${missing.length === 1 ? "does" : "do"} not list ${JSON.stringify(basename(path))} in env_file`
+      );
+    }
+  }
+  return labels.sort();
 }
 
 /** Overlay entries a migrated overlay layer must hold: those that differ from the base. */

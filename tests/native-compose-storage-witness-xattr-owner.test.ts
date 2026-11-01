@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  expect,
+  setDefaultTimeout,
+  spyOn,
+  test,
+} from "bun:test";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import {
@@ -86,17 +93,27 @@ const artifact: NativeComposeStorageXattrArtifact = {
  * fake carrier answers at once. Their cost is a fixed amount of durable store
  * file work, mostly system time: the second `up` of the same-birth case alone
  * makes about 13.5k lstat, 3.7k realpath and 3.9k open calls, the same count
- * on every run (19k, 13k and 4.5k before HACK-1440). It can still take tens
- * of seconds on a host whose load is several times its CPU count, so this
- * budget is a hang guard, not a speed assertion (HACK-1422).
+ * on every run (19k, 13k and 4.5k before HACK-1440). Before HACK-1440 the
+ * slowest case took 63 s at a load average of about 90 on an 18-CPU host, and
+ * four cases passed 180 s at a sustained load average of 110-190 while their
+ * assertions held (HACK-1439). This budget is a hang guard, not a speed
+ * assertion (HACK-1422).
+ *
+ * Nearly every case here opens a store and publishes at least one generation,
+ * so this is the file's default: no case keeps Bun's 5 s default or a fixed
+ * 30 s literal, which 17 or more cases passed under load while their
+ * assertions held (HACK-1439). `setDefaultTimeout` is scoped to this file, so
+ * it changes no other file's budget.
  */
-const STORE_CASE_BUDGET_MS = 180_000;
+const STORE_CASE_BUDGET_MS = 600_000;
+setDefaultTimeout(STORE_CASE_BUDGET_MS);
 /**
- * Wall-clock lifetime of the fake carrier. Every carrier is captured inside a
- * case, so its deadline is always later than that case's Bun budget: a slow
- * host fails the case as a clean timeout, never by exhausting the carrier
- * deadline, which refuses with the storage witness error and would change the
- * asserted outcome (HACK-1422).
+ * Wall-clock lifetime of a carrier a case captures for real use. Every such
+ * carrier is captured inside a case, so its deadline is always later than that
+ * case's Bun budget: a slow host fails the case as a clean timeout, never by
+ * exhausting the carrier deadline, which refuses with the storage witness
+ * error and would change the asserted outcome (HACK-1422). The one case that
+ * mocks `Date.now` keeps its own deadline on its own clock.
  */
 const FAKE_CARRIER_LIFETIME_MS = 2 * STORE_CASE_BUDGET_MS;
 const roots: string[] = [];
@@ -807,7 +824,7 @@ test.each([
   expect(transport.calls).not.toContain("seed");
   expect(transport.calls).not.toContain("provision");
   expect((await store.loadCurrent()).pending).toBeNull();
-}, 30_000);
+});
 
 test("warm enrollment proves in full when the material binding moved since the effect-entry proof", async () => {
   const { store, transport } = await rememberedActive();
@@ -870,7 +887,7 @@ test("warm enrollment proves in full when the material binding moved since the e
   }
   expect(transport.calls).toContain("workload");
   expect(transport.calls).not.toContain("seed");
-}, 30_000);
+});
 
 test("an adjacent verification never reuses a proof across a receipt publication or a later lease", async () => {
   const { store, transport, generation, reference } = await rememberedActive();
@@ -935,7 +952,7 @@ test("an adjacent verification never reuses a proof across a receipt publication
     ).rejects.toThrow(witnessRefusal);
     expect(proofs()).toBe(before + 1);
   });
-}, 30_000);
+});
 
 test.each(
   (["prepublication", "effect-entry"] as const).flatMap((phase) =>
@@ -998,7 +1015,7 @@ test.each(
     phase === "prepublication"
   );
   expect(transport.calls).not.toContain("seed");
-}, 30_000);
+});
 
 test("warm closing proof observes xattr drift during the preceding receipt await", async () => {
   const { store, generation, transport } = await rememberedActive();
@@ -1053,7 +1070,7 @@ test("warm closing proof observes xattr drift during the preceding receipt await
   expect(changed).toBe(true);
   expect(effects).toBe(0);
   expect((await store.loadCurrent()).pending).toBeNull();
-}, 30_000);
+});
 
 test.each([
   "incarnation",
@@ -1124,7 +1141,7 @@ test.each([
   expect(changed).toBe(true);
   expect(effects).toBe(0);
   expect(transport.calls.filter((call) => call === "verify")).toHaveLength(1);
-}, 30_000);
+});
 
 test("a newly observed retained birth uses the original leading proof and writing path", async () => {
   const { store, generation, transport } = await active();
@@ -1168,7 +1185,7 @@ test("a newly observed retained birth uses the original leading proof and writin
     });
   });
   expect(transport.calls).not.toContain("seed");
-}, 30_000);
+});
 
 test.each([
   "run",
@@ -1216,7 +1233,7 @@ test.each([
       },
     });
   });
-}, 30_000);
+});
 
 test.each([
   "arbitrary",
@@ -1266,7 +1283,7 @@ test.each([
   );
   expect(effects).toBe(0);
   expect((await store.loadCurrent()).pending).toBeNull();
-}, 30_000);
+});
 
 test.each([
   "up",
@@ -1352,7 +1369,7 @@ test.each([
   expect(transport.calls).not.toContain("seed");
   expect(transport.calls).toContain("verify");
   expect((await store.loadCurrent()).pending).toBeNull();
-}, 30_000);
+});
 
 test.each([
   "up",
@@ -1448,7 +1465,7 @@ test.each([
   expect(verified).toBeGreaterThanOrEqual(3);
   expect(spawned).toBe(false);
   expect(transport.calls).toContain("seed");
-}, 30_000);
+});
 
 test("cold run reaches the real pre-spawn guard with exactly eleven helper calls", async () => {
   const store = await fixture();
@@ -1531,7 +1548,7 @@ test("cold run reaches the real pre-spawn guard with exactly eleven helper calls
   expect(transport.calls.filter((call) => call === "provision")).toHaveLength(
     1
   );
-}, 30_000);
+});
 
 test("original cold run storage authority cannot grant general effects, adoption or another generation", async () => {
   const store = await fixture();
@@ -1683,7 +1700,7 @@ test.each([
     transport.calls.indexOf("workload")
   );
   expect((await store.loadCurrent()).pending).toBeNull();
-}, 30_000);
+});
 
 test("cold run enrollment authority expires when its original effect returns before seed", async () => {
   const store = await fixture();
@@ -2177,7 +2194,7 @@ test("fresh readonly proofs tolerate observed UID change and exact owned running
   );
   expect(transport.calls).not.toContain("provision");
   expect(transport.calls).not.toContain("seed");
-}, 30_000);
+});
 
 test.each(
   (["up", "run"] as const).flatMap((operation) =>
@@ -2575,7 +2592,7 @@ test("captured artifacts/ports cannot be substituted and cancelled lifetime stop
     artifact: { ...artifact },
     ports: { ...transport.ports },
     signal: transport.controller.signal,
-    deadline: Date.now() + 60_000,
+    deadline: Date.now() + FAKE_CARRIER_LIFETIME_MS,
   };
   const carrier = captureNativeComposeStorageXattrCarrier(mutable);
   mutable.artifact.helperHash = "f".repeat(64);
@@ -2641,7 +2658,7 @@ test("prepare captures original carrier, selection and admission callback before
   const poison = captureNativeComposeStorageXattrCarrier({
     artifact,
     signal: transport.controller.signal,
-    deadline: Date.now() + 60_000,
+    deadline: Date.now() + FAKE_CARRIER_LIFETIME_MS,
     ports: {
       inspect: async () => {
         substituted++;
@@ -2964,7 +2981,7 @@ for (const evidence of ["issued", "copied"] as const) {
     } finally {
       commandReaderCases--;
     }
-  }, 30_000);
+  });
 }
 
 test.each([
@@ -3027,7 +3044,7 @@ test.each([
   expect(after.storageWitnessesPending).toBe(true);
   expect(after.pending?.token).toBe(before.pending?.token);
   expect(after.pending?.operation).toBe("up");
-}, 30_000);
+});
 
 test.each([
   "unrecorded",
@@ -3107,7 +3124,7 @@ test.each([
   expect(observed).toBe(0);
   expect(await readFile(owned.journal, "utf8")).toBe(changed);
   expect(owned.transport.calls).toEqual([]);
-}, 30_000);
+});
 
 test("readonly observation rejects a journal replacement across its await", async () => {
   const owned = await interruptedReadonlyVerification();
@@ -3139,7 +3156,7 @@ test("readonly observation rejects a journal replacement across its await", asyn
   expect((await lstat(owned.journal)).ino).not.toBe(owned.info.ino);
   expect((await owned.store.loadCurrent()).storageWitnessesPending).toBe(true);
   expect(owned.transport.calls).toEqual([]);
-}, 30_000);
+});
 
 test("ordinary inspection authority cannot enter saved carrier recovery observation", async () => {
   const owned = await active();
@@ -3174,7 +3191,7 @@ test("ordinary inspection authority cannot enter saved carrier recovery observat
     });
   });
   expect(observed).toBe(0);
-}, 30_000);
+});
 
 function adjacentVerifier(opts: {
   readonly transport: ReturnType<typeof fake>;
@@ -3215,7 +3232,7 @@ test("adjacent storage proof is reused only within its own lease", async () => {
   });
   expect(transport.calls).not.toContain("seed");
   expect(transport.calls).not.toContain("provision");
-}, 30_000);
+});
 
 test("adjacent storage proof still runs every host check and never replaces the next fresh proof", async () => {
   const { store, transport, generation, reference } = await active();
@@ -3247,7 +3264,7 @@ test("adjacent storage proof still runs every host check and never replaces the 
     await expect(verify(mutation, true)).rejects.toThrow("values omitted");
   });
   expect(transport.calls).not.toContain("seed");
-}, 30_000);
+});
 
 test("adjacent storage proof is not reused across a changed material binding", async () => {
   const { store, transport, generation, reference } = await active();
@@ -3282,4 +3299,4 @@ test("adjacent storage proof is not reused across a changed material binding", a
     await verify(mutation, true);
     expect(helperOperations(transport)).toHaveLength(finished + 3);
   });
-}, 30_000);
+});

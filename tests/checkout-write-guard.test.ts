@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
   assertNoCheckoutWrites,
+  CHECKOUT_GIT_BUDGET_MS,
   checkoutStatusEntries,
   newStatusEntries,
 } from "./helpers/checkout-write-guard.ts";
@@ -34,6 +35,14 @@ const HELPERS = resolve(import.meta.dir, "helpers");
 const CLI_RESULT = resolve(import.meta.dir, "..", "src/lib/cli-result.ts");
 /** Each case starts a fresh `bun` child; a cold start under suite load is slow. */
 const CHILD_TEST_TIMEOUT_MS = 60_000;
+/**
+ * Bun timeout of a guarded fixture's keep-alive case. That case only has to
+ * outlive the timed-out case's late call, but a late `spawnSync` blocks the
+ * fixture's event loop while its cold `bun` child starts, which under host
+ * load passed Bun's 5 s default (HACK-1439). It stays inside the outer case's
+ * budget.
+ */
+const KEEP_ALIVE_CASE_TIMEOUT_MS = 30_000;
 
 let root = "";
 
@@ -54,10 +63,14 @@ const fixture = (): string =>
 async function run(opts: {
   readonly argv: readonly string[];
   readonly cwd: string;
+  readonly env?: Readonly<Record<string, string>>;
 }): Promise<{ readonly exitCode: number; readonly output: string }> {
   const child = Bun.spawn([...opts.argv], {
     cwd: opts.cwd,
-    env: privateCliEnv({ root: fixture(), env: { NO_COLOR: "1" } }),
+    env: privateCliEnv({
+      root: fixture(),
+      env: { NO_COLOR: "1", ...opts.env },
+    }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -276,6 +289,29 @@ test(
   CHILD_TEST_TIMEOUT_MS
 );
 
+test(
+  "the guard kills and refuses a git status that reaches its bound instead of waiting on it",
+  async () => {
+    const checkout = await gitCheckout("hanging-status");
+    const bin = join(fixture(), "hanging-bin");
+    await mkdir(bin);
+    const hanging = join(bin, "git");
+    await writeFile(hanging, "#!/bin/sh\nexec sleep 30\n", { mode: 0o700 });
+    const started = performance.now();
+    expectClosedThrow(
+      () =>
+        checkoutStatusEntries(
+          { git: hanging, env: gitRunner().env, budgetMs: 200 },
+          checkout
+        ),
+      "checkout write guard: git status did not finish within 200 ms"
+    );
+    // Killed at its bound, not left to finish its 30 s sleep.
+    expect(performance.now() - started).toBeLessThan(20_000);
+  },
+  CHILD_TEST_TIMEOUT_MS
+);
+
 /**
  * A bun-test project in a fresh git checkout, preloading the guard exactly as
  * the repository's bunfig.toml does.
@@ -328,7 +364,7 @@ test(
         });
         test("keeps the run alive past the late call", async () => {
           await Bun.sleep(1000);
-        });
+        }, ${KEEP_ALIVE_CASE_TIMEOUT_MS});
       `,
     });
     const result = await run({
@@ -372,6 +408,60 @@ test(
   CHILD_TEST_TIMEOUT_MS
 );
 
+/** Longer than Bun's 5 s default hook timeout, far inside the status bound. */
+const SLOW_STATUS_SECONDS = 6;
+
+test(
+  "an end-of-run git status slower than Bun's default hook timeout still passes a clean run",
+  async () => {
+    // HACK-1439: under host load the end-of-run status passed 5 s, Bun's
+    // default hook timeout killed git mid-read ("killed 1 dangling process"),
+    // and the guard refused a run whose cases all passed. A git wrapper makes
+    // only the end-of-run status slow: the case arms it after the baseline.
+    expect(SLOW_STATUS_SECONDS * 1000).toBeLessThan(CHECKOUT_GIT_BUDGET_MS);
+    const realGit = gitRunner().git;
+    const bin = join(fixture(), "slow-bin");
+    await mkdir(bin);
+    const armed = join(fixture(), "slow-status-armed");
+    const slept = join(fixture(), "slow-status-slept");
+    await writeFile(
+      join(bin, "git"),
+      [
+        "#!/bin/sh",
+        `if [ "$1" = status ] && [ -e ${JSON.stringify(armed)} ]; then`,
+        `  sleep ${SLOW_STATUS_SECONDS}`,
+        `  : > ${JSON.stringify(slept)}`,
+        "fi",
+        `exec ${JSON.stringify(realGit)} "$@"`,
+        "",
+      ].join("\n"),
+      { mode: 0o700 }
+    );
+    const checkout = await guardedProject({
+      name: "slow-status",
+      testSource: `
+        import { expect, test } from "bun:test";
+        import { writeFileSync } from "node:fs";
+        test("arms the slow end-of-run status", () => {
+          writeFileSync(${JSON.stringify(armed)}, "");
+          expect(true).toBe(true);
+        });
+      `,
+    });
+    const result = await run({
+      argv: [process.execPath, "test"],
+      cwd: checkout,
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
+    });
+    expect(result.output).not.toContain("checkout write guard");
+    expect(result.output).not.toContain("dangling process");
+    expect(result.exitCode).toBe(0);
+    // The hook waited out the slow status rather than skipping it.
+    expect(await Bun.file(slept).exists()).toBe(true);
+  },
+  CHILD_TEST_TIMEOUT_MS
+);
+
 test(
   "a late spawn with a reset cwd that rewrites a tracked file fails the run, named",
   async () => {
@@ -401,7 +491,7 @@ test(
         });
         test("keeps the run alive past the late spawn", async () => {
           await Bun.sleep(1000);
-        });
+        }, ${KEEP_ALIVE_CASE_TIMEOUT_MS});
       `,
     });
     const result = await run({

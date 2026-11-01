@@ -3702,7 +3702,7 @@ function buildEnvMigrationNote(opts: {
   const newKeys = migrated.keysNewToEveryService ?? [];
   if (newKeys.length > 0) {
     notes.push(
-      `No Compose service listed the legacy .env files, so every service now receives: ${newKeys.join(", ")}. To limit a key to one service, run \`hack env unset KEY --local\` and then \`hack env set KEY --service <name> --local\`.`
+      `No Compose service listed the legacy file that sets these, so every service now receives them once that env is selected: ${newKeys.join(", ")}. To limit a key to one service, run \`hack env unset KEY --local\` and then \`hack env set KEY --service <name> --local\`, but not for a key your Compose file interpolates: service values do not reach interpolation.`
     );
   }
   return notes.join("\n");

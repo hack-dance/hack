@@ -1087,11 +1087,14 @@ files, when:
   `env_file` (`E_CONFIG_INVALID`), for the same reason: that file stays in Compose, but the
   migrated value would override it. The check does not look at the order of the entries,
   or expand variables in an `env_file` path. Remove the key from one of the files, then retry;
-- a line in a legacy file has an unquoted inline comment (`PORT=3000 # dev`) or a `$` outside
-  single quotes (`E_CONFIG_INVALID`). Compose drops the comment and expands the `$`, but the
-  migration would keep them as literal text, so the value would change. The error counts
-  lines per file and never shows them. Remove the comment, or write the value Compose uses
-  in single quotes;
+- a legacy entry is one Compose reads differently from Hack (`E_CONFIG_INVALID`): an unquoted
+  inline comment (`PORT=3000 # dev`), a `$` outside single quotes, a `\` in double quotes (such
+  as `\n` in a PEM key), or a line without `=` (`A: 1`, or a bare `A`). The value would change
+  or be lost. The error counts entries per file and never shows them. Write the value Compose
+  uses in single quotes, with real line breaks and no escapes, or remove the line;
+- the Compose file interpolates a key the default overlay sets differently from `.hack/.env`
+  (`E_CONFIG_INVALID`). Compose takes it from `.hack/.env` today, but the overlay value would
+  apply after the migration. Make the two files agree or stop interpolating the key;
 - `.hack/.env` or a legacy overlay is a symlink to a file outside `.hack`
   (`E_PATH_CONFLICT`), so its values would be copied from elsewhere into this project's
   layers. Replace the link with a regular file in `.hack`, or remove it;
@@ -1100,10 +1103,13 @@ files, when:
   that resolves to a readable file inside `.hack` is migrated like a regular one; cleanup
   removes only the link, never its target.
 
-If no Compose service lists a legacy file, the values may only be used for Compose
-interpolation today. The migration goes ahead, every service then receives them as environment
-variables, and doctor names the keys. To limit a key to one service, unset it and set it with
-`hack env set --service --local`.
+If no Compose service lists a legacy file, its values may only be used for Compose
+interpolation today. The migration goes ahead, every service receives them as environment
+variables once that env is selected, and doctor names the keys. The same applies to an overlay
+no service lists, unless it is the default overlay, which refuses when any service lists a legacy
+file. To limit a key to one service, unset it and set it with `hack env set --service --local`.
+Do not do this for a key your Compose file interpolates: service values do not reach
+interpolation, so `${KEY}` would become empty.
 
 With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
 symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a

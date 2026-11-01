@@ -4930,7 +4930,7 @@ export type LegacyProjectEnvMigration = {
   readonly cleanupCandidates: readonly string[];
   readonly blockedCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
-  /** Keys every service now receives though none listed a legacy file. Names only. */
+  /** Keys every service receives once their env is selected, from files no service listed. Names only. */
   readonly keysNewToEveryService?: readonly string[];
 };
 
@@ -5356,6 +5356,34 @@ function composeServiceEnvironmentKeys(
 }
 
 /**
+ * Keys the Compose file interpolates that the default overlay changes. Compose
+ * interpolates from `.hack/.env` alone before the migration, and from the
+ * selected layers after it. Key names only, JSON-quoted.
+ */
+function composeInterpolatedOverlayKeys(opts: {
+  readonly parsed: Record<string, unknown> | null;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+  readonly defaultOverlay: string | null;
+}): readonly string[] {
+  if (opts.parsed === null || opts.defaultOverlay === null) {
+    return [];
+  }
+  const composeText = JSON.stringify(opts.parsed);
+  const changed = legacyOverlayChangedValues({
+    overlayValues: opts.legacyValues.get(opts.defaultOverlay) ?? {},
+    baseValues: opts.legacyValues.get(null) ?? {},
+  });
+  return Object.keys(changed)
+    .filter(
+      (key) =>
+        composeText.includes(`\${${key}`) ||
+        new RegExp(`\\$${key}(?![A-Z0-9_])`).test(composeText)
+    )
+    .map((key) => JSON.stringify(key))
+    .sort();
+}
+
+/**
  * Compose inputs that can add or hide an `env_file` this check cannot read: a
  * top-level `include`, a service `extends`, or an `env_file` path with a
  * variable. Returned as refusal labels naming the service or field only.
@@ -5494,10 +5522,25 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
       reason: `Compose env_file sets ${envFileConflicts.sort().join(", ")}, which the legacy .env files also set; after the migration the .env value would override that file's value. Remove the key from the .hack/.env file or from that env_file, then retry.`,
     });
   }
+  const defaultOverlay = await readProjectDefaultEnvConfig({
+    projectDir: opts.projectDir,
+  });
+  const interpolated = composeInterpolatedOverlayKeys({
+    parsed,
+    legacyValues: opts.legacyValues,
+    defaultOverlay,
+  });
+  if (interpolated.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `the Compose file interpolates ${interpolated.join(", ")}, which the default overlay sets differently from .hack/.env. Compose takes these from .hack/.env today, but after the migration the overlay value would apply. Make the two files agree or stop interpolating the key, then retry.`,
+    });
+  }
   const unlisted = composeServicesMissingLegacyDotenv({
     projectDir: opts.projectDir,
     services,
     legacyValues: opts.legacyValues,
+    defaultOverlay,
   });
   if (unlisted.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
@@ -5537,8 +5580,9 @@ function composeServiceLegacyEnvNames(opts: {
  * the services that list it; after it, its values are global layer values that
  * Hack applies to every service. When any service lists a legacy file, returns
  * refusal labels (file, service and key names only) for each file with values
- * to migrate that only some services list, and for each service that does not
- * list a file setting a base key.
+ * to migrate that only some services list, for a default overlay some service
+ * does not list, and for each service that does not list a file setting a base
+ * key.
  *
  * A project where no service lists a legacy file has no `env_file` boundary to
  * compare, and its values may be needed for interpolation, so it is not refused
@@ -5548,6 +5592,7 @@ function composeServicesMissingLegacyDotenv(opts: {
   readonly projectDir: string;
   readonly services: Record<string, unknown>;
   readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+  readonly defaultOverlay: string | null;
 }): string[] {
   const baseValues = opts.legacyValues.get(null) ?? {};
   const services = composeServiceEntries(opts.services).map(
@@ -5576,7 +5621,14 @@ function composeServicesMissingLegacyDotenv(opts: {
       .filter((service) => !service.listed.includes(envName))
       .map((service) => service.label)
       .sort();
-    if (missing.length > 0 && missing.length < services.length) {
+    // Every launch selects the default overlay, so its values reach every
+    // service even when no service lists it.
+    const reachesEveryLaunch =
+      envName !== null && envName === opts.defaultOverlay;
+    if (
+      missing.length > 0 &&
+      (missing.length < services.length || reachesEveryLaunch)
+    ) {
       labels.push(
         `${missing.join(", ")} ${missing.length === 1 ? "does" : "do"} not list ${JSON.stringify(basename(resolveEnvFilePath({ projectDir: opts.projectDir, envName })))} in env_file`
       );
@@ -5602,9 +5654,9 @@ function composeServicesMissingLegacyDotenv(opts: {
 }
 
 /**
- * Migrated keys that reach every service although no service lists a legacy
- * file in `env_file`, for the migration to name. Empty when any service lists
- * one, because {@link composeServicesMissingLegacyDotenv} covers that case.
+ * Migrated keys from legacy files no service lists in `env_file`, for the
+ * migration to name: they reach every service once their env is selected.
+ * Files a service lists are covered by {@link composeServicesMissingLegacyDotenv}.
  */
 async function legacyKeysNewToEveryService(opts: {
   readonly projectDir: string;
@@ -5618,22 +5670,33 @@ async function legacyKeysNewToEveryService(opts: {
     return [];
   }
   const entries = composeServiceEntries(services);
-  const anyListed = entries.some(
-    ([, rawService]) =>
+  if (entries.length === 0) {
+    return [];
+  }
+  const listed = new Set(
+    entries.flatMap(([, rawService]) =>
       composeServiceLegacyEnvNames({
         projectDir: opts.projectDir,
         rawService,
         legacyValues: opts.legacyValues,
-      }).length > 0
+      })
+    )
   );
-  if (entries.length === 0 || anyListed) {
-    return [];
+  const baseValues = opts.legacyValues.get(null) ?? {};
+  const keys = new Set<string>();
+  for (const [envName, values] of opts.legacyValues) {
+    if (listed.has(envName)) {
+      continue;
+    }
+    const migrated =
+      envName === null
+        ? values
+        : legacyOverlayChangedValues({ overlayValues: values, baseValues });
+    for (const key of Object.keys(migrated)) {
+      keys.add(key);
+    }
   }
-  return [
-    ...new Set(
-      [...opts.legacyValues.values()].flatMap((values) => Object.keys(values))
-    ),
-  ].sort((left, right) => left.localeCompare(right));
+  return [...keys].sort((left, right) => left.localeCompare(right));
 }
 
 /** Overlay entries a migrated overlay layer must hold: those that differ from the base. */
@@ -5746,26 +5809,90 @@ async function assertIgnoredMigrationLocalLayer(opts: {
 
 const COMPOSE_UNQUOTED_INLINE_COMMENT_PATTERN = /\s#/;
 
+/** End of the quoted value in `text`, or -1 when it continues on the next line. */
+function closingQuoteIndex(opts: {
+  readonly text: string;
+  readonly quote: string;
+}): number {
+  for (let index = 0; index < opts.text.length; index += 1) {
+    if (opts.text[index] === "\\" && opts.quote === '"') {
+      index += 1;
+    } else if (opts.text[index] === opts.quote) {
+      return index;
+    }
+  }
+  return -1;
+}
+
 /**
- * Whether Compose reads this dotenv line differently from {@link parseDotEnv}:
- * it drops an unquoted inline comment and expands `$` outside single quotes,
- * while the parser keeps both literally. A migrated value goes through Hack's
- * generated override, so the service would receive the literal text instead.
+ * Counts dotenv entries Compose reads differently from {@link parseDotEnv}.
+ * Compose drops an unquoted inline comment, expands `$` outside single quotes,
+ * decodes backslash escapes in double quotes (across lines too), and accepts
+ * `KEY: value` and a bare `KEY`, while the parser keeps the text literally or
+ * skips the line. A migrated value goes through Hack's generated override, so
+ * the service would receive the parser's reading instead.
  */
-function hasComposeOnlyDotenvSyntax(line: string): boolean {
-  const separator = line.indexOf("=");
-  if (separator === -1 || line.trimStart().startsWith("#")) {
-    return false;
+function countComposeOnlyDotenvEntries(text: string): number {
+  let count = 0;
+  let open: { quote: string; flagged: boolean } | null = null;
+  for (const rawLine of text.split("\n")) {
+    let quoted = rawLine;
+    if (open === null) {
+      const entry = readComposeDotenvEntryStart(rawLine);
+      count += entry.differs ? 1 : 0;
+      if (entry.quote === null) {
+        continue;
+      }
+      open = { quote: entry.quote, flagged: false };
+      quoted = entry.text;
+    }
+    const end = closingQuoteIndex({ text: quoted, quote: open.quote });
+    const content = end === -1 ? quoted : quoted.slice(0, end);
+    if (
+      open.quote === '"' &&
+      !open.flagged &&
+      (content.includes("$") || content.includes("\\"))
+    ) {
+      open.flagged = true;
+      count += 1;
+    }
+    if (end !== -1) {
+      open = null;
+    }
   }
-  const value = line.slice(separator + 1).trimStart();
-  if (value.startsWith("'")) {
-    return false;
+  return count;
+}
+
+/**
+ * Reads a dotenv line that starts an entry. `quote` is set when the value is
+ * quoted, with `text` as what follows the opening quote; otherwise `differs`
+ * says whether Compose reads the whole line differently.
+ */
+function readComposeDotenvEntryStart(rawLine: string): {
+  readonly differs: boolean;
+  readonly quote: string | null;
+  readonly text: string;
+} {
+  const line = rawLine.trim();
+  if (line.length === 0 || line.startsWith("#")) {
+    return { differs: false, quote: null, text: "" };
   }
-  return (
-    value.includes("$") ||
-    (!value.startsWith('"') &&
-      COMPOSE_UNQUOTED_INLINE_COMMENT_PATTERN.test(value))
-  );
+  const separator = rawLine.indexOf("=");
+  if (separator <= 0) {
+    return { differs: true, quote: null, text: "" };
+  }
+  const value = rawLine.slice(separator + 1).trimStart();
+  const first = value[0];
+  if (first === '"' || first === "'") {
+    return { differs: false, quote: first, text: value.slice(1) };
+  }
+  return {
+    differs:
+      value.includes("$") ||
+      COMPOSE_UNQUOTED_INLINE_COMMENT_PATTERN.test(value),
+    quote: null,
+    text: "",
+  };
 }
 
 /**
@@ -5798,7 +5925,7 @@ async function readValidatedLegacyDotenvFiles(opts: {
     const composeSyntax =
       read.kind === "absent" || read.kind === "unreadable"
         ? 0
-        : read.text.split("\n").filter(hasComposeOnlyDotenvSyntax).length;
+        : countComposeOnlyDotenvEntries(read.text);
     if (composeSyntax > 0) {
       composeSyntaxCounts.push(
         `${countLabel({ count: composeSyntax, noun: "line" })} in ${file.label}`
@@ -5822,7 +5949,7 @@ async function readValidatedLegacyDotenvFiles(opts: {
   if (composeSyntaxCounts.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `Compose reads ${composeSyntaxCounts.join(", ")} differently from Hack: an unquoted " #" starts a comment and "$" outside single quotes is expanded, so the migrated value would change. Remove the inline comment, or write the value Compose uses in single quotes, then retry. The lines are not shown because they may contain values.`,
+      reason: `Compose reads ${composeSyntaxCounts.join(", ")} differently from Hack, so the migrated value would change or be lost: an unquoted " #" starts a comment, "$" outside single quotes is expanded, "\\" in double quotes is an escape, and a line without "=" still sets a key. Write each one as KEY='the value Compose uses' with real line breaks and no escapes, or remove it, then retry. The lines are not shown because they may contain values.`,
     });
   }
   return legacyValues;

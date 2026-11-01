@@ -1699,3 +1699,121 @@ for (const [name, link, config] of [
     expect(await hackDirEntries(repo)).toEqual(before);
   });
 }
+
+const COMPOSE_READS_DIFFERENTLY: readonly (readonly [string, string])[] = [
+  ["a double-quoted escape", `P="${KEPT_VALUE}\\nabc"`],
+  ["a double-quoted tab escape", `P="${KEPT_VALUE}\\tz"`],
+  ["a multi-line $", `P="${KEPT_VALUE}\n$OTHER"`],
+  ["a multi-line escape", `P="${KEPT_VALUE}\nabc\\n"`],
+  ["a colon form", `P: ${KEPT_VALUE}`],
+  ["a bare key", "P"],
+];
+
+for (const [name, content] of COMPOSE_READS_DIFFERENTLY) {
+  test(`the migration refuses ${name}`, async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(resolve(repo.projectDir, ".env"), `${content}\n`);
+    await expectMigrationRefusal({
+      repo,
+      code: "E_CONFIG_INVALID",
+      reason: "Compose reads 1 line in .env differently from Hack",
+      hidden: [KEPT_VALUE],
+    });
+  });
+}
+
+test("the migration keeps a multi-line value in single quotes and does not read its lines as entries", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `PEM='${KEPT_VALUE}\nnot an entry $ \\n\nend'\nAFTER=1\nQUOTED="a\nb"\n`
+  );
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: {
+      PEM: `${KEPT_VALUE}\nnot an entry $ \\n\nend`,
+      AFTER: "1",
+      QUOTED: "a\nb",
+    },
+  });
+});
+
+async function writeDefaultOverlayRepo(opts: {
+  readonly compose: string;
+  readonly base: string;
+  readonly overlay: string;
+}): Promise<Repo> {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify({ name: "env-legacy-scope", dev_host: "env-legacy-scope.hack", env: { defaultOverlay: "staging" } })}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    opts.compose
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), opts.base);
+  await writeFile(resolve(repo.projectDir, ".env.staging"), opts.overlay);
+  return repo;
+}
+
+test("the migration refuses a default overlay no service lists when a service lists the base", async () => {
+  const repo = await writeDefaultOverlayRepo({
+    compose:
+      "services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n  worker:\n    image: alpine:3.20\n    env_file: .env\n",
+    base: "A=1\n",
+    overlay: `NEW=${KEPT_VALUE}\n`,
+  });
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: '"api", "worker" do not list ".env.staging" in env_file',
+    hidden: [KEPT_VALUE],
+  });
+});
+
+test("the migration names an overlay's keys when no service lists that non-default overlay", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n"
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), "A=1\n");
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `NEW=${KEPT_VALUE}\n`
+  );
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.keysNewToEveryService).toEqual(["NEW"]);
+});
+
+for (const reference of ["${PORT}", "$PORT", "${PORT:-1}"]) {
+  test(`the migration refuses ${reference} when the default overlay changes that key`, async () => {
+    const repo = await writeDefaultOverlayRepo({
+      compose: `services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, .env.staging]\n    command: run ${reference}\n`,
+      base: "PORT=2\n",
+      overlay: "PORT=3\n",
+    });
+    await expectMigrationRefusal({
+      repo,
+      code: "E_CONFIG_INVALID",
+      reason: 'the Compose file interpolates "PORT"',
+      hidden: [],
+    });
+  });
+}
+
+test("the migration allows interpolating a key the default overlay leaves alone or a longer name", async () => {
+  const repo = await writeDefaultOverlayRepo({
+    compose:
+      "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, .env.staging]\n    command: run ${A} $PORT_EXTRA\n",
+    base: "A=1\nPORT=2\n",
+    overlay: "A=1\nPORT=3\n",
+  });
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+});

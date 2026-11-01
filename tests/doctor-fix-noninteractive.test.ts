@@ -708,7 +708,8 @@ test("doctor --migrate-env-config names the keys every service gains, never thei
   ]);
   expect(code).toBe(0);
   const notes = noteCalls.join("\n");
-  expect(notes).toContain("so every service now receives: OWNED.");
+  expect(notes).toContain("once that env is selected: OWNED.");
+  expect(notes).toContain("not for a key your Compose file interpolates");
   expect(notes).not.toContain(legacy);
 }, 30_000);
 

@@ -2402,3 +2402,69 @@ test("doctor names a checkout's unmigrated keys, not their values", async () => 
   expect(inspected.message).toContain("hack doctor --migrate-env-config");
   expect(inspected.message).not.toContain(KEPT_VALUE);
 });
+
+for (const [name, layer] of [
+  ["invalid YAML", "version: ["],
+  [
+    "a newer version",
+    "version: 2\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    KEEP: x\n",
+  ],
+] as const) {
+  test(`the migration leaves a local layer with ${name} alone and refuses`, async () => {
+    const repo = await writeTeammateCheckout();
+    const path = resolve(repo.projectDir, "hack.env.local.yaml");
+    await writeFile(path, layer);
+    await expectMigrationRefusal({
+      repo,
+      code: "E_CONFIG_INVALID",
+      reason: "hack.env.local.yaml can't be read as an env layer",
+      hidden: [KEPT_VALUE],
+    });
+    expect(await readFile(path, "utf8")).toBe(layer);
+  });
+}
+
+test("the migration refuses a local overlay that disagrees with its legacy overlay, even when that entry equals the base", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  const local = LAYER_EMPTY.replace(
+    "environment: default",
+    "environment: staging"
+  ).replace("global: {}", "global:\n    A: stage");
+  const path = resolve(repo.projectDir, "hack.env.staging.local.yaml");
+  await writeFile(path, local);
+  await writeFile(resolve(repo.projectDir, ".env"), `A=${KEPT_VALUE}\n`);
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `A=${KEPT_VALUE}\n`
+  );
+  await expectMigrationRefusal({
+    repo,
+    code: "E_PATH_CONFLICT",
+    reason: '"A" in hack.env.staging.local.yaml',
+    hidden: [KEPT_VALUE],
+  });
+  expect(await readFile(path, "utf8")).toBe(local);
+});
+
+test("adding migrated values to a readable local layer makes it private, and keeps its other entries", async () => {
+  const repo = await writeTeammateCheckout();
+  const path = resolve(repo.projectDir, "hack.env.local.yaml");
+  await writeFile(
+    path,
+    LAYER_EMPTY.replace(
+      "global: {}",
+      "global:\n    OTHER: kept\n  api:\n    SCOPED: yes"
+    )
+  );
+  await chmod(path, 0o644);
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect((await lstat(path)).mode & 0o777).toBe(0o600);
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { OTHER: "kept", KEPT_SETTING: KEPT_VALUE },
+    api: { SCOPED: "yes" },
+  });
+});

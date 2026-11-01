@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  appendFile,
   chmod,
   lstat,
   mkdir,
@@ -2897,4 +2898,166 @@ test("the migration doesn't treat generated .env output as legacy base values", 
     global: { ONLY_HERE: KEPT_VALUE },
   });
   expect((await unmigratedIn(repo)).keys).toEqual([]);
+});
+
+/** A checkout whose `.env` was generated from tracked layers, with a new overlay key to migrate. */
+async function writeGeneratedCheckout(opts: {
+  readonly envName: string | null;
+  readonly serviceName?: string;
+  readonly defaultLayerValues?: string;
+}): Promise<Repo> {
+  const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY.replace(
+      "  global: {}\n",
+      opts.defaultLayerValues ?? "  global:\n    PORT: team\n"
+    )
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+    TRACKED_STAGING
+  );
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: opts.envName,
+    serviceName: opts.serviceName,
+    serviceNames: ["api"],
+  });
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `ONLY_HERE=${KEPT_VALUE}\n`
+  );
+  return repo;
+}
+
+const GENERATED_MISMATCH = "isn't what `hack env materialize` would write";
+
+test("a state file left from another branch doesn't make a real .env generated output", async () => {
+  const repo = await createLegacyRepo();
+  const defaultLayer = resolve(repo.projectDir, "hack.env.default.yaml");
+  await writeFile(defaultLayer, LAYER_EMPTY);
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api"],
+  });
+  // Both files are gitignored, so switching to a branch without layers leaves them.
+  await rm(defaultLayer);
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { KEPT_SETTING: KEPT_VALUE },
+  });
+});
+
+test("the migration refuses a generated .env with a value added by hand, and keeps it", async () => {
+  const repo = await writeGeneratedCheckout({ envName: "staging" });
+  await appendFile(
+    resolve(repo.projectDir, ".env"),
+    `EXTRA=${BASE_ONLY_VALUE}\n`
+  );
+  await expectMigrationRefusal({
+    repo,
+    code: "E_PATH_CONFLICT",
+    reason: GENERATED_MISMATCH,
+    hidden: [BASE_ONLY_VALUE, KEPT_VALUE],
+  });
+});
+
+test("after that refusal, deleting the state file migrates .env as the legacy file it now is", async () => {
+  const repo = await writeGeneratedCheckout({ envName: null });
+  await appendFile(
+    resolve(repo.projectDir, ".env"),
+    `EXTRA=${BASE_ONLY_VALUE}\n`
+  );
+  await expectMigrationRefusal({
+    repo,
+    code: "E_PATH_CONFLICT",
+    reason: GENERATED_MISMATCH,
+    hidden: [BASE_ONLY_VALUE, KEPT_VALUE],
+  });
+
+  await rm(resolve(repo.projectDir, ".env.state.json"));
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { EXTRA: BASE_ONLY_VALUE },
+  });
+});
+
+test("the migration refuses a generated .env its layers have moved past, until materialize runs again", async () => {
+  const repo = await writeGeneratedCheckout({ envName: "staging" });
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+    TRACKED_STAGING.replace("PORT: stage", "PORT: moved")
+  );
+  await expectMigrationRefusal({
+    repo,
+    code: "E_PATH_CONFLICT",
+    reason: GENERATED_MISMATCH,
+    hidden: [KEPT_VALUE],
+  });
+
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: "staging",
+    serviceNames: ["api"],
+  });
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(
+    await lstat(resolve(repo.projectDir, "hack.env.local.yaml")).catch(
+      () => null
+    )
+  ).toBeNull();
+  expect(await readLayerValues(repo, "hack.env.staging.local.yaml")).toEqual({
+    global: { ONLY_HERE: KEPT_VALUE },
+  });
+});
+
+test("a generated .env is not offered for cleanup, because the migration didn't read it", async () => {
+  const repo = await writeGeneratedCheckout({ envName: "staging" });
+  const envPath = resolve(repo.projectDir, ".env");
+  const before = await readFile(envPath, "utf8");
+
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+
+  expect(migrated.cleanupCandidates).not.toContain(envPath);
+  expect(migrated.blockedCleanupCandidates).not.toContain(envPath);
+  expect(await readFile(envPath, "utf8")).toBe(before);
+});
+
+test("a .env generated for one service matches using the scope its state file records", async () => {
+  const repo = await writeGeneratedCheckout({
+    envName: null,
+    serviceName: "api",
+    defaultLayerValues:
+      "  global:\n    PORT: team\n  api:\n    SCOPED: only-api\n",
+  });
+  expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toContain(
+    "SCOPED=only-api"
+  );
+
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+
+  expect(
+    await lstat(resolve(repo.projectDir, "hack.env.local.yaml")).catch(
+      () => null
+    )
+  ).toBeNull();
+  expect(await readLayerValues(repo, "hack.env.staging.local.yaml")).toEqual({
+    global: { ONLY_HERE: KEPT_VALUE },
+  });
 });

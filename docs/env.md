@@ -1127,6 +1127,12 @@ files, when:
 - a migrated `.hack/.env` value would replace what a tracked overlay delivers for a key its legacy
   overlay file doesn't set (`E_CONFIG_INVALID`), because a local base outranks tracked overlays. Set
   the value you want in that legacy overlay file, or remove the key from `.hack/.env`;
+- `.hack/.env` has a state file, env layers exist, and its text isn't what `hack env materialize`
+  would write (`E_PATH_CONFLICT`). The file is out of date or was edited by hand, and Hack can't
+  tell which. If it's generated, move any value of your own with `hack env set`, then run
+  `hack env materialize`, which replaces it. If it's your own file, delete `.hack/.env.state.json`
+  so it's read as a legacy file. When the text does match, the migration doesn't read the file or
+  offer it for cleanup;
 - a legacy file sets a key that Docker, its build tools or the process read from their
   environment (`E_CONFIG_INVALID`): `DOCKER_*`, `BUILDKIT_*`, `BUILDX_*`, a proxy setting,
   `SOURCE_DATE_EPOCH`, `HOME` or `PATH`. After the migration it would reach the Docker client too.

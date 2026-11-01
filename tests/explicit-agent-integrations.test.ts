@@ -36,7 +36,6 @@ test("CLI retirement preserves project/global originals; selected skill and MCP 
         CODEX_HOME: join(root, "home/.codex"),
         HACK_GLOBAL_CONFIG_PATH: join(root, "state/hack.config.json"),
         HACK_NO_INTERACTIVE: "1",
-        HACK_DAEMON_DISABLE: "1",
         HACK_LOGGER: "console",
       },
     }),

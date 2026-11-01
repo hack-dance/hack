@@ -19,7 +19,6 @@ export async function projectNameFixture() {
     env: {
       HACK_HOME: state,
       HACK_GLOBAL_CONFIG_PATH: join(state, "hack.config.json"),
-      HACK_DAEMON_DISABLE: "1",
       NO_COLOR: "1",
     },
   });

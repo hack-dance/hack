@@ -69,7 +69,6 @@ async function cli(opts: {
         env: {
           HACK_HOME: state,
           HACK_GLOBAL_CONFIG_PATH: join(state, "hack.config.json"),
-          HACK_DAEMON_DISABLE: "1",
           HACK_NO_INTERACTIVE: "1",
           HACK_LOGGER: "console",
           HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",

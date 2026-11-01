@@ -1613,6 +1613,21 @@ const UNCHECKABLE_COMPOSE: readonly (readonly [string, string, string])[] = [
     "services:\n  api:\n    image: alpine:3.20\n    env_file: ${D:-.}/.env\n  worker:\n    image: alpine:3.20\n",
     'a variable env_file path in "api"',
   ],
+  [
+    "a repeated env_file entry",
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env.staging, .env, .env.staging]\n",
+    'a repeated env_file entry in "api"',
+  ],
+  [
+    "the same file spelled twice in env_file",
+    "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, ./.env]\n",
+    'a repeated env_file entry in "api"',
+  ],
+  [
+    "an env_file format",
+    "services:\n  api:\n    image: alpine:3.20\n    env_file:\n      - path: .env\n        format: raw\n",
+    'an env_file format in "api"',
+  ],
 ];
 
 for (const [name, compose, reason] of UNCHECKABLE_COMPOSE) {

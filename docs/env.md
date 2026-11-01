@@ -1080,9 +1080,10 @@ files, when:
   service. The error names files, services and keys, never values. List the file for those
   services if they may have its values, or move the values out of it and set them with
   `hack env set --service` after migrating;
-- Compose uses a top-level `include`, a service `extends` or a variable in an `env_file` path
-  (`E_CONFIG_INVALID`), so the migration cannot tell which services receive the values. Write
-  those `env_file` entries directly in the Compose file;
+- Compose uses a top-level `include`, a service `extends`, a variable in an `env_file` path, a
+  file listed twice in one `env_file`, or a `format` on an `env_file` entry (`E_CONFIG_INVALID`),
+  so the migration cannot tell which values services receive. Write those `env_file` entries
+  directly in the Compose file, each file once and with no `format`;
 - a key the legacy files set is also set in another file a Compose service uses as
   `env_file` (`E_CONFIG_INVALID`), for the same reason: that file stays in Compose, but the
   migrated value would override it. The check does not look at the order of the entries,

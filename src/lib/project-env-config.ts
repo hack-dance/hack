@@ -5383,10 +5383,20 @@ function composeInterpolatedOverlayKeys(opts: {
     .sort();
 }
 
+/** Whether a map-form `env_file` entry sets a `format`, which changes how Compose reads the file. */
+function composeEnvFileHasFormat(rawEnvFile: unknown): boolean {
+  return (
+    Array.isArray(rawEnvFile) &&
+    rawEnvFile.some((entry) => isRecord(entry) && "format" in entry)
+  );
+}
+
 /**
- * Compose inputs that can add or hide an `env_file` this check cannot read: a
- * top-level `include`, a service `extends`, or an `env_file` path with a
- * variable. Returned as refusal labels naming the service or field only.
+ * Compose inputs that can add, hide or reinterpret an `env_file` this check
+ * cannot read: a top-level `include`, a service `extends`, an `env_file` path
+ * with a variable, a repeated entry (Compose versions may drop a repeat, which
+ * changes the order), or a `format`. Returned as refusal labels naming the
+ * service or field only.
  */
 function uncheckableComposeEnvInputs(opts: {
   readonly parsed: Record<string, unknown>;
@@ -5398,10 +5408,16 @@ function uncheckableComposeEnvInputs(opts: {
     if ("extends" in rawService) {
       labels.push(`extends in ${JSON.stringify(service)}`);
     }
-    if (
-      readComposeEnvFilePaths({ rawService }).some((path) => path.includes("$"))
-    ) {
+    const paths = readComposeEnvFilePaths({ rawService });
+    if (paths.some((path) => path.includes("$"))) {
       labels.push(`a variable env_file path in ${JSON.stringify(service)}`);
+    }
+    const resolved = paths.map((path) => resolve("/", path));
+    if (new Set(resolved).size < resolved.length) {
+      labels.push(`a repeated env_file entry in ${JSON.stringify(service)}`);
+    }
+    if (composeEnvFileHasFormat(rawService.env_file)) {
+      labels.push(`an env_file format in ${JSON.stringify(service)}`);
     }
   }
   return labels;
@@ -5477,7 +5493,7 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
   if (uncheckable.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `Compose uses ${uncheckable.join(", ")}, so the migration cannot tell which services receive the legacy .env values. Write those services' env_file entries directly in ${PROJECT_COMPOSE_FILENAME}, then retry.`,
+      reason: `Compose uses ${uncheckable.join(", ")}, so the migration cannot tell which values services receive from the legacy .env files. Write those services' env_file entries directly in ${PROJECT_COMPOSE_FILENAME}, each file once and with no format, then retry.`,
     });
   }
   const conflicts: string[] = [];

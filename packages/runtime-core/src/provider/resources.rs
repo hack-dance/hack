@@ -193,11 +193,13 @@ mod tests {
     #[test]
     fn owned_tree_includes_live_child_and_refuses_stale_root() {
         let mut child = std::process::Command::new("/bin/bash")
-            .args(["-c", "/bin/sleep 30 & wait"])
+            .args(["-c", "/bin/sleep 120 & wait"])
             .spawn()
             .unwrap();
         let root = identity::observe(child.id() as i32).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        // A hang guard for the fork, exec and first accounting sample on a loaded host.
+        let deadline =
+            std::time::Instant::now() + crate::provider::test_executable::LOADED_EVENT_HANG_GUARD;
         let result = loop {
             if let Ok(tree) = observe(&root) {
                 // A two-PID snapshot can still catch the forked shell before exec,
@@ -248,8 +250,9 @@ mod tests {
     #[test]
     fn cpu_counter_advances_in_nanoseconds_under_work() {
         let root = identity::observe(std::process::id() as i32).unwrap();
-        // Observe only this process's counter so unrelated parallel test children do not matter.
-        let read = || {
+        // The native counter under test: this whole process, in Mach absolute time converted
+        // to nanoseconds by `cpu_nanoseconds`.
+        let native = || {
             let mut value = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
             assert_eq!(
                 unsafe {
@@ -260,7 +263,8 @@ mod tests {
             let value = unsafe { value.assume_init() };
             cpu_nanoseconds(value.ri_user_time + value.ri_system_time).unwrap()
         };
-        let cpu_clock = || {
+        // An independent clock for the same whole-process quantity, at microsecond resolution.
+        let process_clock = || {
             let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
             assert_eq!(
                 unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
@@ -270,18 +274,41 @@ mod tests {
             ((usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as u64) * 1_000_000_000
                 + ((usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as u64) * 1000
         };
-        let before = read();
-        let clock_before = cpu_clock();
-        let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_millis(40) {
+        let thread_clock = || {
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) },
+                0
+            );
+            now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+        };
+        // Parallel tests in this process also use CPU, so no single read pair is simultaneous.
+        // Bracket the native window between an inner and an outer process-clock window instead:
+        // every counter is monotonic, so inner <= native <= outer whatever runs in between.
+        // And spin for 40 ms of this thread's CPU, not wall time, so a loaded host cannot
+        // shrink the measured work (HACK-1457: 40 ms of wall time measured 35 ms native and
+        // 72 ms by the clock read just after it).
+        const WORK: u64 = 40_000_000;
+        let outer_before = process_clock();
+        let native_before = native();
+        let inner_before = process_clock();
+        let spin_start = thread_clock();
+        while thread_clock() - spin_start < WORK {
             std::hint::black_box(123u64.wrapping_mul(456));
         }
-        let native_delta = read() - before;
-        let clock_delta = cpu_clock() - clock_before;
-        assert!(native_delta > 1_000_000);
+        let inner_delta = process_clock() - inner_before;
+        let native_delta = native() - native_before;
+        let outer_delta = process_clock() - outer_before;
+        assert!(inner_delta >= WORK, "E_TEST_CPU_WORK_NOT_MEASURED");
+        // Half or double absorbs the two counters' different accounting; an unconverted Mach
+        // tick count (about 1/41 of nanoseconds on Apple silicon) or a doubled conversion
+        // still fails.
         assert!(
-            native_delta > clock_delta / 2 && native_delta < clock_delta * 2,
-            "native={native_delta}, clock={clock_delta}"
+            native_delta > inner_delta / 2 && native_delta < outer_delta * 2,
+            "E_TEST_CPU_COUNTER_UNITS"
         );
     }
 }

@@ -10,6 +10,11 @@ use std::{
 };
 
 #[cfg(target_os = "macos")]
+use crate::provider::test_executable::{
+    ISOLATED_HANG_GUARD, LOADED_EVENT_HANG_GUARD, MAX_CONNECT_BUDGET,
+};
+
+#[cfg(target_os = "macos")]
 fn fixture() -> (TcpListener, HostEndpoint) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = HostEndpoint::capture(
@@ -112,9 +117,8 @@ fn pinned_discovery_child() {
         }
     }
     let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
-    let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = reserved.local_addr().unwrap().port();
-    drop(reserved);
+    // The listener children bind this port long after it is chosen; never an ephemeral one.
+    let port = crate::provider::test_socket::unallocated_tcp_port();
     let spawn = || {
         OwnedChild(
             Command::new(&executable)
@@ -133,7 +137,8 @@ fn pinned_discovery_child() {
         )
     };
     let await_discovery = |child: &mut OwnedChild| {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // The child is a whole test binary starting on a possibly loaded host.
+        let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
         loop {
             if let Ok(found) = HostEndpoint::discover(&executable, port) {
                 assert_eq!(found.0, child.0.id() as i32);
@@ -203,7 +208,7 @@ fn identity_notifications_require_authenticated_checks_and_ignore_revocation_or_
     }));
     let (authority, session) = authorized(&endpoint);
     let mut pending = endpoint
-        .begin_connect(Duration::from_secs(1), &session)
+        .begin_connect(MAX_CONNECT_BUDGET, &session)
         .unwrap();
     pending.deadline = Instant::now();
     assert_eq!(
@@ -216,14 +221,14 @@ fn identity_notifications_require_authenticated_checks_and_ignore_revocation_or_
     assert_eq!(failures.load(Ordering::Relaxed), 0);
     assert!(
         endpoint
-            .begin_connect(Duration::from_secs(1), &session)
+            .begin_connect(MAX_CONNECT_BUDGET, &session)
             .is_err()
     );
     assert_eq!(failures.load(Ordering::Relaxed), 1);
     authority.revoke();
     assert!(
         endpoint
-            .begin_connect(Duration::from_secs(1), &session)
+            .begin_connect(MAX_CONNECT_BUDGET, &session)
             .is_err()
     );
     assert_eq!(failures.load(Ordering::Relaxed), 1);
@@ -253,9 +258,7 @@ fn pending_accepted_identity_notification_child() {
         counter.fetch_add(1, Ordering::Relaxed);
     }));
     let (_authority, session) = authorized(&endpoint);
-    let mut pending = endpoint
-        .begin_connect(Duration::from_secs(3), &session)
-        .unwrap();
+    let mut pending = begin_unexpiring(&endpoint, &session);
     let mut peer = accept_pending(&listener);
     let peer_port = pending
         .stream
@@ -280,7 +283,8 @@ fn pending_accepted_identity_notification_child() {
     assert!(pending.progress().is_err());
     assert_eq!(failures.load(Ordering::Relaxed), 1);
     peer.set_nonblocking(false).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    peer.set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
+        .unwrap();
     assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
 }
 
@@ -293,7 +297,8 @@ fn discovery_listener_child() {
         .parse()
         .unwrap();
     let _listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-    thread::sleep(Duration::from_secs(30));
+    // Outlive the parent's whole watchdog; the parent kills this child when done.
+    thread::sleep(ISOLATED_HANG_GUARD);
 }
 
 #[cfg(target_os = "macos")]
@@ -303,7 +308,7 @@ fn accepted_stream_preserves_payload_and_half_close() {
     listener.set_nonblocking(true).unwrap();
     thread::scope(|scope| {
         let server = scope.spawn(|| {
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
             let mut peer = loop {
                 match listener.accept() {
                     Ok((peer, _)) => break peer,
@@ -315,15 +320,16 @@ fn accepted_stream_preserves_payload_and_half_close() {
                 }
             };
             peer.set_nonblocking(false).unwrap();
-            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            peer.set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
+                .unwrap();
             let mut body = String::new();
             peer.read_to_string(&mut body).unwrap();
             assert_eq!(body, "synthetic endpoint payload");
             peer.write_all(b"reply").unwrap();
         });
-        let mut stream = endpoint.connect(Duration::from_secs(2)).unwrap();
+        let mut stream = endpoint.connect(MAX_CONNECT_BUDGET).unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
             .unwrap();
         stream.write_all(b"synthetic endpoint payload").unwrap();
         stream.shutdown(std::net::Shutdown::Write).unwrap();
@@ -346,12 +352,18 @@ fn pending_accept_times_out_without_releasing_payload() {
             .code,
         "host_endpoint_timeout"
     );
-    assert!(start.elapsed() < Duration::from_secs(2));
+    // Not a latency bound: returning before the largest budget the API accepts still
+    // shows the 80 ms budget was honored rather than replaced by that maximum, and it
+    // leaves room for a loaded host's scheduling delay (HACK-1457).
+    assert!(
+        start.elapsed() < MAX_CONNECT_BUDGET,
+        "E_TEST_CONNECT_BUDGET_NOT_HONORED"
+    );
     listener.set_nonblocking(true).unwrap();
     let (mut stream, _) = listener.accept().unwrap();
     stream.set_nonblocking(false).unwrap();
     stream
-        .set_read_timeout(Some(Duration::from_secs(1)))
+        .set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
         .unwrap();
     let mut data = Vec::new();
     stream.read_to_end(&mut data).unwrap();
@@ -452,12 +464,13 @@ fn precheck_replacement_child() {
     let (listener, endpoint) = fixture();
     let address = listener.local_addr().unwrap();
     let mut replacement = None;
-    let result = endpoint.connect_after_check(Duration::from_secs(1), || {
+    let result = endpoint.connect_after_check(MAX_CONNECT_BUDGET, || {
         drop(listener);
         // Parallel subprocess creation can briefly retain a forked copy of the
         // closed listener until exec. Require a real replacement before connect;
         // a collision or timeout must never count as the expected identity refusal.
-        let deadline = Instant::now() + Duration::from_millis(250);
+        // Waiting longer than the connect budget would expire the connect anyway.
+        let deadline = Instant::now() + MAX_CONNECT_BUDGET;
         replacement = Some(loop {
             match TcpListener::bind(address) {
                 Ok(listener) => break listener,
@@ -476,7 +489,8 @@ fn precheck_replacement_child() {
     replacement.set_nonblocking(true).unwrap();
     let mut peer = accept_pending(&replacement);
     peer.set_nonblocking(false).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    peer.set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
+        .unwrap();
     let mut data = Vec::new();
     peer.read_to_end(&mut data).unwrap();
     assert!(data.is_empty());
@@ -484,7 +498,7 @@ fn precheck_replacement_child() {
 
 #[cfg(target_os = "macos")]
 fn accept_pending(listener: &TcpListener) -> TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
     loop {
         match listener.accept() {
             Ok((stream, _)) => return stream,
@@ -495,6 +509,18 @@ fn accept_pending(listener: &TcpListener) -> TcpStream {
             Err(error) => panic!("accept failed: {error}"),
         }
     }
+}
+
+/// Begin a pending connection for a test whose result is not its deadline's expiry. The
+/// deadline moves out to a hang guard, a value the API itself refuses (it accepts at most
+/// 5 s), so a loaded host's scheduling delay cannot expire it before the test's next check
+/// and turn the result under test into `host_endpoint_timeout` (HACK-1457). Expiry tests
+/// set an expired deadline themselves.
+#[cfg(target_os = "macos")]
+fn begin_unexpiring(endpoint: &HostEndpoint, session: &AuthorizedSession) -> PendingConnection {
+    let mut pending = endpoint.begin_connect(MAX_CONNECT_BUDGET, session).unwrap();
+    pending.deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
+    pending
 }
 
 #[cfg(target_os = "macos")]
@@ -524,9 +550,7 @@ fn authorization() -> (super::super::relay_auth::Authority, AuthorizedSession) {
 fn pending_connection_releases_only_after_accept_and_is_nonblocking() {
     let (listener, endpoint) = fixture();
     let (_authority, session) = authorization();
-    let mut pending = endpoint
-        .begin_connect(Duration::from_secs(2), &session)
-        .unwrap();
+    let mut pending = begin_unexpiring(&endpoint, &session);
     assert!(pending.progress().unwrap().is_none());
     listener.set_nonblocking(true).unwrap();
     let mut peer = accept_pending(&listener);
@@ -541,7 +565,8 @@ fn pending_connection_releases_only_after_accept_and_is_nonblocking() {
         .unwrap()
         .unwrap();
     peer.set_nonblocking(false).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    peer.set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
+        .unwrap();
     let mut data = [0; 8];
     peer.read_exact(&mut data).unwrap();
     assert_eq!(&data, b"verified");
@@ -556,7 +581,7 @@ fn revoked_connection_never_starts_and_pending_revoke_closes_without_data() {
     authority.revoke();
     assert!(
         endpoint
-            .begin_connect(Duration::from_secs(1), &session)
+            .begin_connect(MAX_CONNECT_BUDGET, &session)
             .is_err()
     );
     assert_eq!(
@@ -564,15 +589,14 @@ fn revoked_connection_never_starts_and_pending_revoke_closes_without_data() {
         std::io::ErrorKind::WouldBlock
     );
     let (authority, session) = authorization();
-    let mut pending = endpoint
-        .begin_connect(Duration::from_secs(1), &session)
-        .unwrap();
+    let mut pending = begin_unexpiring(&endpoint, &session);
     let mut peer = accept_pending(&listener);
     authority.revoke();
     assert_eq!(pending.progress().err().unwrap().code, "relay_auth_refused");
     assert!(pending.stream.is_none());
     peer.set_nonblocking(false).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    peer.set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
+        .unwrap();
     assert_eq!(peer.read(&mut [0]).unwrap(), 0);
 }
 
@@ -583,9 +607,7 @@ fn pending_timeout_and_drop_release_the_socket_without_data() {
     listener.set_nonblocking(true).unwrap();
     let (_authority, session) = authorization();
     for expire in [true, false] {
-        let mut pending = endpoint
-            .begin_connect(Duration::from_secs(1), &session)
-            .unwrap();
+        let mut pending = begin_unexpiring(&endpoint, &session);
         let mut peer = accept_pending(&listener);
         if expire {
             pending.deadline = Instant::now();
@@ -597,7 +619,8 @@ fn pending_timeout_and_drop_release_the_socket_without_data() {
         }
         drop(pending);
         peer.set_nonblocking(false).unwrap();
-        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        peer.set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
+            .unwrap();
         assert_eq!(peer.read(&mut [0]).unwrap(), 0);
     }
     assert!(endpoint.begin_connect(Duration::ZERO, &session).is_err());
@@ -621,7 +644,7 @@ fn pending_replacement_cannot_release_stream() {
 /// [`HostEndpoint::discover`]. Close/rebind and discovery fixtures therefore run isolated.
 #[cfg(target_os = "macos")]
 fn isolated_endpoint_fixture(test: &str) {
-    use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+    use crate::provider::test_executable::run_isolated;
     run_isolated(test, ISOLATED_HANG_GUARD);
 }
 #[cfg(target_os = "macos")]
@@ -631,13 +654,11 @@ fn pending_replacement_child() {
     let (listener, endpoint) = fixture();
     let (_authority, session) = authorization();
     let address = listener.local_addr().unwrap();
-    let mut pending = endpoint
-        .begin_connect(Duration::from_secs(1), &session)
-        .unwrap();
+    let mut pending = begin_unexpiring(&endpoint, &session);
     // The nonblocking handshake may still be in flight. Let it reach the original listener
     // first: completed later, it lands on the replacement, which the endpoint refuses but
     // which leaves that connection queued there.
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
     while pending.stream.as_ref().unwrap().peer_addr().is_err() {
         assert!(
             Instant::now() < deadline,
@@ -668,7 +689,8 @@ fn pending_socket_survives_closed_peer_with_default_sigpipe() {
                 .args(["--exact", "provider::host_endpoint::tests::pending_socket_survives_closed_peer_with_default_sigpipe", "--test-threads=1"])
                 .env_clear().env(HELPER,mode)
                 .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).spawn().unwrap();
-            let deadline = Instant::now() + Duration::from_secs(6);
+            // The child launches the whole test binary on a possibly loaded host.
+            let deadline = Instant::now() + ISOLATED_HANG_GUARD;
             loop {
                 if let Some(status) = child.try_wait().unwrap() {
                     if mode == "unprotected" {
@@ -694,9 +716,7 @@ fn pending_socket_survives_closed_peer_with_default_sigpipe() {
     let (listener, endpoint) = fixture();
     listener.set_nonblocking(true).unwrap();
     let (_authority, session) = authorization();
-    let mut pending = endpoint
-        .begin_connect(Duration::from_secs(2), &session)
-        .unwrap();
+    let mut pending = begin_unexpiring(&endpoint, &session);
     let peer = accept_pending(&listener);
     let stream = pending.progress().unwrap().unwrap();
     if std::env::var(HELPER).unwrap() == "unprotected" {
@@ -739,7 +759,7 @@ fn pending_socket_survives_closed_peer_with_default_sigpipe() {
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) },
         libc::SIG_ERR
     );
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
     loop {
         let byte = [42_u8];
         // SAFETY: live stream descriptor and readable one-byte buffer. A raw write
@@ -762,9 +782,7 @@ fn revocation_readiness_wakes_handler_and_closes_pending_socket() {
     listener.set_nonblocking(true).unwrap();
     let (authority, session) = authorization();
     let watch = session.watch_revocation().unwrap();
-    let pending = endpoint
-        .begin_connect(Duration::from_secs(2), &session)
-        .unwrap();
+    let pending = begin_unexpiring(&endpoint, &session);
     let mut peer = accept_pending(&listener);
     thread::scope(|scope| {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -777,16 +795,18 @@ fn revocation_readiness_wakes_handler_and_closes_pending_socket() {
             ready_tx.send(()).unwrap();
             // SAFETY: a live owned watch keeps its initialized pollfd valid through
             // this bounded call; the kernel does not retain the pointer.
-            assert_eq!(unsafe { libc::poll(&mut fd, 1, 2000) }, 1);
+            let guard = LOADED_EVENT_HANG_GUARD.as_millis() as libc::c_int;
+            assert_eq!(unsafe { libc::poll(&mut fd, 1, guard) }, 1);
             assert!(watch.is_revoked().unwrap());
             drop(pending);
         });
-        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        ready_rx.recv_timeout(LOADED_EVENT_HANG_GUARD).unwrap();
         authority.revoke();
         handler.join().unwrap();
     });
     peer.set_nonblocking(false).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    peer.set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
+        .unwrap();
     assert_eq!(peer.read(&mut [0]).unwrap(), 0);
     assert!(session.with_active(|| ()).is_err());
 }
@@ -796,9 +816,7 @@ fn revocation_readiness_wakes_handler_and_closes_pending_socket() {
 fn pending_accept_after_backend_fin_preserves_request_direction() {
     let (listener, endpoint) = fixture();
     let (_authority, session) = authorization();
-    let mut pending = endpoint
-        .begin_connect(Duration::from_secs(2), &session)
-        .unwrap();
+    let mut pending = begin_unexpiring(&endpoint, &session);
     listener.set_nonblocking(true).unwrap();
     let mut peer = accept_pending(&listener);
     peer.set_nonblocking(false).unwrap();
@@ -806,7 +824,7 @@ fn pending_accept_after_backend_fin_preserves_request_direction() {
     // Observe FIN before identity inspection, without releasing caller payload.
     let raw = pending.stream.as_mut().unwrap();
     raw.set_nonblocking(false).unwrap();
-    raw.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    raw.set_read_timeout(Some(LOADED_EVENT_HANG_GUARD)).unwrap();
     assert_eq!(raw.read(&mut [0]).unwrap(), 0);
     raw.set_nonblocking(true).unwrap();
     let mut stream = pending
@@ -817,7 +835,8 @@ fn pending_accept_after_backend_fin_preserves_request_direction() {
         .with_active(|| stream.write_all(b"request"))
         .unwrap()
         .unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    peer.set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
+        .unwrap();
     let mut received = [0; 7];
     peer.read_exact(&mut received).unwrap();
     assert_eq!(&received, b"request");
@@ -835,19 +854,18 @@ fn backend_fin_does_not_bypass_listener_replacement() {
 fn backend_fin_replacement_child() {
     let (listener, endpoint) = fixture();
     let (_authority, session) = authorization();
-    let mut pending = endpoint
-        .begin_connect(Duration::from_secs(2), &session)
-        .unwrap();
+    let mut pending = begin_unexpiring(&endpoint, &session);
     listener.set_nonblocking(true).unwrap();
     let mut peer = accept_pending(&listener);
     peer.set_nonblocking(false).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    peer.set_read_timeout(Some(LOADED_EVENT_HANG_GUARD))
+        .unwrap();
     peer.shutdown(std::net::Shutdown::Write).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     // Parallel subprocess fixtures can briefly inherit the closing listener
     // during fork/exec. Require a real replacement within a bounded window.
-    let deadline = Instant::now() + Duration::from_millis(500);
+    let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
     let _replacement = loop {
         match TcpListener::bind(("127.0.0.1", port)) {
             Ok(listener) => break listener,
@@ -869,9 +887,7 @@ fn backend_fin_replacement_child() {
 fn closed_accepted_descriptor_cannot_prove_peer_identity() {
     let (listener, endpoint) = fixture();
     let (_authority, session) = authorization();
-    let mut pending = endpoint
-        .begin_connect(Duration::from_secs(2), &session)
-        .unwrap();
+    let mut pending = begin_unexpiring(&endpoint, &session);
     listener.set_nonblocking(true).unwrap();
     let peer = accept_pending(&listener);
     drop(peer);

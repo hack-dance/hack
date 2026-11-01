@@ -51,6 +51,63 @@ pub(super) fn bound_unlistened(path: &Path) -> OwnedFd {
     socket
 }
 
+/// Lowest port [`unallocated_tcp_port`] picks from. Its range ends where the kernel's
+/// ephemeral range starts, and it must stay a range the kernel never assigns by itself.
+#[cfg(target_os = "macos")]
+const UNALLOCATED_PORT_FLOOR: u16 = 20_000;
+
+/// Return a TCP port that no wildcard or loopback socket holds now, chosen below the
+/// kernel's ephemeral range, for a fixture that records a port and later needs it free.
+///
+/// Do not get such a port by binding port 0 and dropping the listener. The kernel hands
+/// out the same range to every other port-0 bind and outgoing connection on the host, so
+/// under parallel load another socket can take the port before the fixture needs it
+/// (HACK-1457: a full HTTPS recovery fixture refused its own recorded port at load ~200).
+/// The kernel never assigns a port below its ephemeral range by itself, so only an
+/// explicit bind of the same number can take this one.
+#[cfg(target_os = "macos")]
+pub(super) fn unallocated_tcp_port() -> u16 {
+    use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
+    let mut first: libc::c_int = 0;
+    let mut length = std::mem::size_of_val(&first);
+    // SAFETY: the name is NUL-terminated and the output is one live, correctly sized integer.
+    let read = unsafe {
+        libc::sysctlbyname(
+            c"net.inet.ip.portrange.first".as_ptr(),
+            (&raw mut first).cast(),
+            &raw mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let ceiling = u16::try_from(first).unwrap_or(0);
+    assert!(
+        read == 0 && length == std::mem::size_of_val(&first) && ceiling > UNALLOCATED_PORT_FLOOR,
+        "E_TEST_EPHEMERAL_RANGE_UNKNOWN"
+    );
+    let span = u32::from(ceiling - UNALLOCATED_PORT_FLOOR);
+    // Spread parallel fixtures over the range; the bind probes below decide.
+    let seed = std::process::id()
+        .wrapping_mul(7919)
+        .wrapping_add(crate::next_test_scratch() as u32)
+        .wrapping_add(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos(),
+        );
+    (0..span)
+        .map(|step| UNALLOCATED_PORT_FLOOR + ((seed.wrapping_add(step) % span) as u16))
+        .find(|&port| {
+            // Without SO_REUSEADDR a wildcard bind fails if any socket holds the port.
+            TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok()
+                && TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)).is_ok()
+                && TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+                && TcpListener::bind((Ipv6Addr::LOCALHOST, port)).is_ok()
+        })
+        .expect("E_TEST_NO_UNALLOCATED_PORT")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +136,45 @@ mod tests {
         );
         drop(copy);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unallocated_port_is_free_and_outside_the_kernel_assigned_range() {
+        use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
+        let mut first: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&first);
+        // SAFETY: NUL-terminated name; one live, correctly sized output integer.
+        assert_eq!(
+            unsafe {
+                libc::sysctlbyname(
+                    c"net.inet.ip.portrange.first".as_ptr(),
+                    (&raw mut first).cast(),
+                    &raw mut length,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            },
+            0
+        );
+        for _ in 0..8 {
+            let port = unallocated_tcp_port();
+            assert!(
+                (UNALLOCATED_PORT_FLOOR..u16::try_from(first).unwrap()).contains(&port),
+                "E_TEST_PORT_IN_KERNEL_RANGE"
+            );
+            // Free on all four addresses that a later wildcard and loopback claim needs.
+            let held = [
+                TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)),
+                TcpListener::bind((Ipv4Addr::LOCALHOST, port)),
+            ];
+            assert!(held.iter().all(Result::is_ok), "E_TEST_PORT_NOT_FREE");
+            drop(held);
+            let held = [
+                TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)),
+                TcpListener::bind((Ipv6Addr::LOCALHOST, port)),
+            ];
+            assert!(held.iter().all(Result::is_ok), "E_TEST_PORT_NOT_FREE");
+        }
     }
 }

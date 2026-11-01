@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DAEMON_LAUNCHD_LABEL } from "../src/constants.ts";
 import {
+  DAEMON_AUTOSTART_DISABLE_ENV,
+  resolveDaemonAutostartAccess,
+} from "../src/daemon/client.ts";
+import {
   LAUNCHD_ALLOW_ISOLATED_ENV,
   LAUNCHD_DISABLE_ENV,
 } from "../src/daemon/launchd.ts";
@@ -48,6 +52,18 @@ test("buildCliEnv forces the launchd hard deny over scenario env", () => {
   const [guardDir, ...rest] = (env.PATH ?? "").split(":");
   expect(guardDir).toContain("hack-e2e-launchctl-guard-");
   expect(rest.join(":")).toBe("/scenario/tools:/usr/bin:/bin");
+});
+
+test("buildCliEnv denies implicit daemon starts unless a scenario opts in (HACK-1696)", () => {
+  const denied = buildCliEnv({ hackHome: "/tmp/hack-e2e-home-guard" });
+  expect(denied[DAEMON_AUTOSTART_DISABLE_ENV]).toBe("1");
+  expect(resolveDaemonAutostartAccess({ env: denied }).allowed).toBe(false);
+
+  const optedIn = buildCliEnv({
+    hackHome: "/tmp/hack-e2e-home-guard",
+    extra: { [DAEMON_AUTOSTART_DISABLE_ENV]: "0" },
+  });
+  expect(resolveDaemonAutostartAccess({ env: optedIn }).allowed).toBe(true);
 });
 
 test("the launchctl guard shim refuses and records hackd service calls", async () => {

@@ -87,7 +87,7 @@ async function fixture(kind: "managed" | "custom") {
     CODEX_HOME: join(home, ".codex"),
     PATH: join(root, "unavailable-bin"),
     HACK_NO_INTERACTIVE: "1",
-    HACK_DAEMON_DISABLE: "1",
+    HACK_DAEMON_AUTOSTART_DISABLE: "1",
     DOCKER_HOST: `unix://${root}/unavailable.sock`,
     NO_COLOR: "1",
   };

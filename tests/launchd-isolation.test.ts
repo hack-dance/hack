@@ -135,6 +135,9 @@ async function makeFixture(): Promise<Fixture> {
           HACK_NO_INTERACTIVE: "1",
           NO_COLOR: "1",
           HACK_TEST_STUB_LAUNCHCTL: join(tools, "launchctl"),
+          // This file asserts daemon starts against stubs, so it opts in. A
+          // case that tests the opt-out sets it again through `extra`.
+          [DAEMON_AUTOSTART_DISABLE_ENV]: undefined,
           ...extra,
         },
       }),

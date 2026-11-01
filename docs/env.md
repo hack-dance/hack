@@ -593,6 +593,15 @@ input and without writing anything:
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
 per-checkout values you don't want to commit.
 
+In a project with `.hack/hack.env.json` and no env layers yet, `hack env set --local` refuses and
+writes nothing for a plaintext value, because that project's migration copies `.hack/.env` values to
+tracked layers. Use `hack env add` with the same flags, which migrates first and then writes the
+machine-local layer. That migration still copies values already in `.hack/.env`, and a `plain_env`
+value exported in your shell, to tracked layers.
+With `--secret`, the value goes to the secret backend, and a key the contract declares as `keychain`
+reaches a tracked layer as ciphertext when the project migrates. Without `hack.env.json`, `--local`
+still writes `.hack/.env`.
+
 Repeating `hack env add` or `hack env set` with the value already stored is a no-op: when
 the existing secret decrypts to the same value under the current key, its ciphertext is
 kept, so once Hack has written the file it stays byte-identical and Git shows no change.

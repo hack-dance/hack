@@ -5545,20 +5545,28 @@ async function composeEnvFileKeyConflicts(opts: {
   return conflicts;
 }
 
-const COMPOSE_ENV_FILE_ENTRY_NAME = /^﻿?[ \t]*(?:export[ \t]+)?([^\s=:#]+)/;
+// `\s` includes a BOM. The quotes are there for text after a closing quote.
+const COMPOSE_ENV_FILE_ENTRY_NAME =
+  /(?:^|[\s'"])(?:export[ \t]+)?([^\s=:#'"]+)[ \t]*(?:[=:#]|$)/g;
 const ENV_FILE_LINE_BREAK = /\r?\n/;
 
 /**
  * Key names a Compose `env_file` can set, read line by line instead of with
- * `parseDotEnv`, which doesn't see `export KEY=value`, `KEY: value` or a bare `KEY`.
- * A line inside a multi-line value can match too, which refuses more than it must.
+ * `parseDotEnv`, which doesn't see `export KEY=value`, `KEY: value`, a bare `KEY`, or
+ * `A='x' KEY=value`, where Compose reads the text after the closing quote as another
+ * entry. A value that holds such text, or a line inside a multi-line value, can match
+ * too, which refuses more than it must.
  */
 function composeEnvFileEntryNames(text: string): ReadonlySet<string> {
   const names = new Set(Object.keys(parseDotEnv(text)));
   for (const line of text.split(ENV_FILE_LINE_BREAK)) {
-    const name = COMPOSE_ENV_FILE_ENTRY_NAME.exec(line)?.[1];
-    if (name !== undefined) {
-      names.add(name);
+    if (line.trimStart().startsWith("#")) {
+      continue;
+    }
+    for (const match of line.matchAll(COMPOSE_ENV_FILE_ENTRY_NAME)) {
+      if (match[1] !== undefined) {
+        names.add(match[1]);
+      }
     }
   }
   return names;
@@ -5619,10 +5627,6 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
       migratedKeys.add(key);
     }
   }
-  if (migratedKeys.size === 0) {
-    return;
-  }
-  assertNoComposeToolKeys({ migratedKeys });
   const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
   const composeRead = await readOptionalTextFile(composeFile);
   if (composeRead.kind === "unreadable") {
@@ -5631,6 +5635,10 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
       reason: `${PROJECT_COMPOSE_FILENAME} exists but cannot be read, so the migration cannot tell which values services receive. Make it a readable regular file, then retry.`,
     });
   }
+  if (migratedKeys.size === 0) {
+    return;
+  }
+  assertNoComposeToolKeys({ migratedKeys });
   const composeText = composeRead.kind === "text" ? composeRead.text : "";
   const parsed = await readComposeFile({ composeFile });
   if (parsed === null && composeText.trim().length > 0) {
@@ -5957,6 +5965,7 @@ async function deliveredLayerValues(opts: {
  * {@link deliveredLayerValues} for a caller that plans writes from the answer. A
  * layer it can't read might set any key, so it refuses instead of reporting nothing
  * delivered, which would pin legacy values over that layer once it's readable again.
+ * The caught message isn't repeated, because a parser's message might quote the file.
  */
 async function deliveredLayerValuesForMigration(opts: {
   readonly projectRoot: string;
@@ -5967,10 +5976,13 @@ async function deliveredLayerValuesForMigration(opts: {
   try {
     return (await resolveProjectEnvConfig(opts))?.globalEnv ?? {};
   } catch {
+    const listCommand =
+      opts.envName === null
+        ? "hack env list"
+        : `hack env list --env ${opts.envName}`;
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason:
-        "an env layer can't be read, so the migration can't tell which values the layers already deliver. Run `hack env list` to see the error, fix that layer, then retry.",
+      reason: `an env layer can't be read or resolved, for example it doesn't parse or its project env key is missing, so the migration can't tell which values the layers already deliver. Run \`${listCommand}\` to see the error, fix it, then retry.`,
     });
   }
 }

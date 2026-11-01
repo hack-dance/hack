@@ -3370,13 +3370,27 @@ test("with a corrupt state and a .env generated for staging, deleting both files
 const TWO_ENV_FILES =
   "services:\n  api:\n    image: alpine:3.20\n    env_file: [.env, other.env]\n";
 
+/** Every entry's bytes, null for one that can't be read. */
+async function hackDirContents(
+  repo: Repo
+): Promise<Record<string, string | null>> {
+  const contents: Record<string, string | null> = {};
+  for (const name of await hackDirEntries(repo)) {
+    contents[name] = await readFile(
+      resolve(repo.projectDir, name),
+      "base64"
+    ).catch(() => null);
+  }
+  return contents;
+}
+
 /** Refuses with `code`, and writes no layer and changes nothing already there. */
 async function expectMigrationRefused(
   repo: Repo,
   code: string,
   reason: string
 ): Promise<void> {
-  const entriesBefore = await hackDirEntries(repo);
+  const contentsBefore = await hackDirContents(repo);
   const error = await migrateLegacyRepo(repo, {
     migrateUndeclaredDotenv: true,
   }).catch((caught: unknown) => caught);
@@ -3385,10 +3399,10 @@ async function expectMigrationRefused(
   expect(refusal.code).toBe(code as typeof refusal.code);
   expect(refusal.message).toContain(reason);
   expect(refusal.message).not.toContain(KEPT_VALUE);
-  expect(await hackDirEntries(repo)).toEqual(entriesBefore);
+  expect(await hackDirContents(repo)).toEqual(contentsBefore);
 }
 
-const LAYER_UNREADABLE = "an env layer can't be read";
+const LAYER_UNREADABLE = "an env layer can't be read or resolved";
 
 test("an unparseable tracked overlay layer refuses instead of pinning the base over it", async () => {
   const repo = await createLegacyRepo();
@@ -3404,7 +3418,50 @@ test("an unparseable tracked overlay layer refuses instead of pinning the base o
     resolve(repo.projectDir, "hack.env.staging.yaml"),
     "<<<<<<< HEAD\nvalues: [\n"
   );
-  await expectMigrationRefused(repo, "E_CONFIG_INVALID", LAYER_UNREADABLE);
+  await expectMigrationRefused(
+    repo,
+    "E_CONFIG_INVALID",
+    "Run `hack env list --env staging` to see the error"
+  );
+  // The command the refusal names shows the problem, which a plain list doesn't.
+  const named = await runCli({
+    repo,
+    args: ["env", "list", "--env", "staging", "--path", repo.projectRoot],
+  });
+  expect(named.exitCode).not.toBe(0);
+  expect(`${named.stdout}\n${named.stderr}`).toContain("hack.env.staging.yaml");
+});
+
+test("an overlay layer whose project env key is missing refuses and names that overlay", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+    LAYER_EMPTY.replace(
+      "  global: {}\n",
+      "  global:\n    STAGING_SECRET:\n      secure: v1:synthetic-ciphertext-not-valid-for-decryption\n"
+    )
+  );
+  const inherited = process.env.HACK_ENV_SECRET_KEY;
+  Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");
+  try {
+    await expectMigrationRefused(
+      repo,
+      "E_CONFIG_INVALID",
+      "Run `hack env list --env staging` to see the error"
+    );
+  } finally {
+    if (inherited !== undefined) {
+      process.env.HACK_ENV_SECRET_KEY = inherited;
+    }
+  }
 });
 
 test("an unparseable default layer refuses instead of pinning every value locally", async () => {
@@ -3443,6 +3500,11 @@ for (const [form, line] of [
   ["export", "export KEPT_SETTING=other"],
   ["colon", "KEPT_SETTING: other"],
   ["bare", "KEPT_SETTING"],
+  ["after a closing quote", "A='x' KEPT_SETTING=other"],
+  ["right after a closing quote", "A='x'KEPT_SETTING=other"],
+  ["CRLF", "export KEPT_SETTING=other\r"],
+  ["indented", "  KEPT_SETTING=other"],
+  ["BOM", "\uFEFFKEPT_SETTING=other"],
 ] as const) {
   test(`another env_file that sets a migrated key in ${form} form refuses`, async () => {
     const repo = await createLegacyRepo();
@@ -3491,6 +3553,24 @@ test.skipIf(RUNS_AS_ROOT)(
       resolve(repo.projectDir, ".env"),
       `KEPT_SETTING=${KEPT_VALUE}\n`
     );
+    const composeFile = resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME);
+    await chmod(composeFile, 0o000);
+    try {
+      await expectMigrationRefused(
+        repo,
+        "E_PERMISSION",
+        "exists but cannot be read"
+      );
+    } finally {
+      await chmod(composeFile, 0o644);
+    }
+  }
+);
+
+test.skipIf(RUNS_AS_ROOT)(
+  "a Compose file that can't be read refuses with nothing to migrate too",
+  async () => {
+    const repo = await createLegacyRepo();
     const composeFile = resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME);
     await chmod(composeFile, 0o000);
     try {

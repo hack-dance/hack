@@ -1033,7 +1033,15 @@ as private (mode 0600) files and never replace an existing entry. The tracked `h
 `hack.env.<overlay>.yaml` for each migrated overlay, are written with no values, so the
 repo switches to env layers. Teammates do not receive these values through git; share
 the ones they need with `hack env set` (plain settings) or `hack env set --secret`
-(encrypted) after the migration. A repo with no legacy env file gets only an empty
+(encrypted) after the migration.
+
+Once this is committed, a teammate's own `.hack/.env` stops reaching services, because
+their checkout now uses env layers. `hack up` warns and names the keys, doctor reports it,
+and `hack env materialize` refuses to replace that file. They run
+`hack doctor --migrate-env-config` to move their values to their own local layers; this
+applies while the checkout has regular layer files, no machine-local layer, no contract and
+no materialization state. Tell teammates when you commit the migration.
+ A repo with no legacy env file gets only an empty
 `hack.env.default.yaml`.
 
 This migration refuses, with a one-line `E_*` error, writes nothing and keeps the legacy

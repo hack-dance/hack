@@ -3709,11 +3709,24 @@ export async function inspectProjectEnvMaterialization(opts: {
   }
 
   if (envExists && !stateExists) {
+    const resolved = await resolveProjectEnvConfig({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      envName: opts.envName,
+      serviceNames: opts.serviceNames,
+    });
+    const unmigrated = await findUnmigratedLegacyDotenvKeys({
+      projectDir: opts.projectDir,
+      layerValues: resolved?.globalEnv ?? {},
+    });
     return {
       envPath,
       statePath,
       status: "warn",
-      message: `Materialized ${envPath} is missing ${statePath} (run: hack env materialize)`,
+      message:
+        unmigrated.length > 0
+          ? `${envPath} sets ${unmigrated.join(", ")}, which the env layers don't deliver, and it is this checkout's only copy (run: hack doctor --migrate-env-config)`
+          : `Materialized ${envPath} is missing ${statePath} (run: hack env materialize)`,
       issues: [`missing ${statePath}`],
     };
   }
@@ -5536,6 +5549,43 @@ async function composeEnvFileKeyConflicts(opts: {
   return conflicts;
 }
 
+/** Per-service `environment` and other `env_file` entries that set a migrated key. */
+async function collectComposeServiceConflicts(opts: {
+  readonly projectDir: string;
+  readonly services: Record<string, unknown>;
+  readonly migratedKeys: ReadonlySet<string>;
+}): Promise<{
+  readonly conflicts: string[];
+  readonly unreadable: string[];
+  readonly envFileConflicts: string[];
+}> {
+  const conflicts: string[] = [];
+  const unreadable: string[] = [];
+  const envFileConflicts: string[] = [];
+  for (const [service, rawService] of Object.entries(opts.services)) {
+    if (!isRecord(rawService)) {
+      continue;
+    }
+    envFileConflicts.push(
+      ...(await composeEnvFileKeyConflicts({
+        projectDir: opts.projectDir,
+        service,
+        rawService,
+        migratedKeys: opts.migratedKeys,
+      }))
+    );
+    const keys = composeServiceEnvironmentKeys(rawService.environment);
+    if (keys === null) {
+      unreadable.push(JSON.stringify(service));
+      continue;
+    }
+    for (const key of [...keys].filter((name) => opts.migratedKeys.has(name))) {
+      conflicts.push(`${JSON.stringify(key)} in ${JSON.stringify(service)}`);
+    }
+  }
+  return { conflicts, unreadable, envFileConflicts };
+}
+
 /**
  * Refuses when a migrated key is also set in a Compose service's own
  * `environment` or another of its `env_file` entries. Legacy `env_file` values rank below `environment`, but the
@@ -5567,10 +5617,11 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
       reason: `${PROJECT_COMPOSE_FILENAME} is not a single YAML document this check can read, such as a file with several "---" documents, so the migration cannot tell which values services receive. Merge it into one document, then retry.`,
     });
   }
-  const services = parsed ? getRecord(parsed, "services") : null;
-  if (!(parsed && services)) {
+  if (!parsed) {
     return;
   }
+  // No `services` still runs the checks: `include` can supply every service.
+  const services = getRecord(parsed, "services") ?? {};
   const uncheckable = uncheckableComposeEnvInputs({
     projectDir: opts.projectDir,
     composeText,
@@ -5583,30 +5634,12 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
       reason: `Compose uses ${uncheckable.join(", ")}, so the migration cannot tell which values services receive from the legacy .env files. Write those services' env_file entries directly in ${PROJECT_COMPOSE_FILENAME}, each file once, with a plain path and no format, and remove any !reset or !override text (a comment or value containing it also matches), then retry.`,
     });
   }
-  const conflicts: string[] = [];
-  const unreadable: string[] = [];
-  const envFileConflicts: string[] = [];
-  for (const [service, rawService] of Object.entries(services)) {
-    if (!isRecord(rawService)) {
-      continue;
-    }
-    envFileConflicts.push(
-      ...(await composeEnvFileKeyConflicts({
-        projectDir: opts.projectDir,
-        service,
-        rawService,
-        migratedKeys,
-      }))
-    );
-    const keys = composeServiceEnvironmentKeys(rawService.environment);
-    if (keys === null) {
-      unreadable.push(JSON.stringify(service));
-      continue;
-    }
-    for (const key of [...keys].filter((name) => migratedKeys.has(name))) {
-      conflicts.push(`${JSON.stringify(key)} in ${JSON.stringify(service)}`);
-    }
-  }
+  const { conflicts, unreadable, envFileConflicts } =
+    await collectComposeServiceConflicts({
+      projectDir: opts.projectDir,
+      services,
+      migratedKeys,
+    });
   if (unreadable.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
@@ -5917,6 +5950,90 @@ async function selectLegacyDotenvOverlays(opts: {
 }
 
 /**
+ * Keys in this checkout's legacy `.hack/.env*` files when they are its only copy
+ * of the values: the repo already has tracked env layers, for example because a
+ * teammate's migration was committed, but this checkout never migrated. That
+ * means regular layer files only, none of them machine-local, no contract and no
+ * materialization state. Empty otherwise.
+ */
+export async function checkoutOnlyLegacyDotenvKeys(opts: {
+  readonly projectDir: string;
+  readonly baseOnly?: boolean;
+}): Promise<readonly string[]> {
+  const entries = await readdir(opts.projectDir, { withFileTypes: true });
+  const layers = entries.filter(
+    (entry) =>
+      entry.name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+      entry.name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+  );
+  const notApplicable =
+    layers.length === 0 ||
+    layers.some(
+      (entry) =>
+        !entry.isFile() ||
+        entry.name.endsWith(
+          `.${PROJECT_ENV_LOCAL_SEGMENT}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`
+        )
+    ) ||
+    (await pathExists(
+      resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME)
+    )) ||
+    (await pathExists(
+      resolveProjectEnvStatePath({ projectDir: opts.projectDir })
+    ));
+  if (notApplicable) {
+    return [];
+  }
+  const overlayNames =
+    opts.baseOnly === true
+      ? []
+      : (
+          await discoverLegacyOverlayNames({
+            projectDir: opts.projectDir,
+            includeSymlinks: true,
+          })
+        ).filter((name) => !isExcludedLegacyDotenvName(name));
+  const keys = new Set<string>();
+  for (const envName of [null, ...overlayNames]) {
+    const read = await readOptionalTextFile(
+      resolveEnvFilePath({ projectDir: opts.projectDir, envName })
+    );
+    if (read.kind !== "absent" && read.kind !== "unreadable") {
+      for (const key of Object.keys(parseDotEnv(read.text))) {
+        keys.add(key);
+      }
+    }
+  }
+  return [...keys].sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Keys this checkout's `.hack/.env` sets that its env layers don't deliver, when
+ * that file is its only copy of them. Commands that run from layers would lose
+ * these, and `hack env materialize` would erase them. Names only.
+ */
+export async function findUnmigratedLegacyDotenvKeys(opts: {
+  readonly projectDir: string;
+  readonly layerValues: Readonly<Record<string, string>>;
+}): Promise<readonly string[]> {
+  const keys = await checkoutOnlyLegacyDotenvKeys({
+    projectDir: opts.projectDir,
+    baseOnly: true,
+  });
+  if (keys.length === 0) {
+    return [];
+  }
+  const read = await readOptionalTextFile(
+    resolveEnvFilePath({ projectDir: opts.projectDir, envName: null })
+  );
+  const values =
+    read.kind === "absent" || read.kind === "unreadable"
+      ? {}
+      : parseDotEnv(read.text);
+  return keys.filter((key) => values[key] !== opts.layerValues[key]);
+}
+
+/**
  * Refuses a legacy `.hack/.env` or overlay that is a symlink at all, dangling or
  * not, for a migration that publishes values to tracked layers.
  */
@@ -6165,6 +6282,53 @@ async function readValidatedLegacyDotenvFiles(opts: {
 }
 
 /**
+ * Publishes machine-local layers, then tracked ones. If a write fails, removes
+ * what this call created, so the checkout keeps using the legacy files.
+ */
+async function publishMigratedLegacyLayers(opts: {
+  readonly projectDir: string;
+  readonly localWrites: readonly PlannedEnvLayerWrite[];
+  readonly trackedWrites: readonly PlannedEnvLayerWrite[];
+}): Promise<string[]> {
+  // Machine-local layers first, so the tracked layers switch the format only
+  // once the values have a home.
+  const wroteFiles: string[] = [];
+  try {
+    for (const write of opts.localWrites) {
+      // Created 0600 from the start: the values were in a private .env.
+      await publishMigrationLocalLayer({
+        projectDir: opts.projectDir,
+        write,
+      });
+      wroteFiles.push(write.path);
+    }
+    for (const write of opts.trackedWrites) {
+      // Another checkout's migration may already have committed this layer.
+      if (await pathExists(write.path)) {
+        continue;
+      }
+      if (
+        await writeProjectEnvConfigFile({
+          path: write.path,
+          config: write.config,
+          expectedExisting: null,
+        })
+      ) {
+        wroteFiles.push(write.path);
+      }
+    }
+  } catch (error: unknown) {
+    // Every target was absent before this call, so removing what it created
+    // leaves the project on the legacy files.
+    for (const path of [...wroteFiles].reverse()) {
+      await unlink(path).catch(() => undefined);
+    }
+    throw error;
+  }
+  return wroteFiles;
+}
+
+/**
  * Migrates a legacy project that has no `.hack/hack.env.json` contract, so
  * its values live only in `.hack/.env` and `.hack/.env.<overlay>`.
  *
@@ -6207,7 +6371,11 @@ async function migrateUndeclaredLegacyDotenv(opts: {
   // Also refuses a dangling or non-file layer entry (E_PATH_CONFLICT), which
   // an atomic write would otherwise replace or write through.
   if (
-    await projectEnvConfigExistsForMutation({ projectDir: opts.projectDir })
+    (await projectEnvConfigExistsForMutation({
+      projectDir: opts.projectDir,
+    })) &&
+    (await checkoutOnlyLegacyDotenvKeys({ projectDir: opts.projectDir }))
+      .length === 0
   ) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_PATH_CONFLICT",
@@ -6315,37 +6483,11 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     });
   }
 
-  // Machine-local layers first, so the tracked layers switch the format only
-  // once the values have a home.
-  const wroteFiles: string[] = [];
-  try {
-    for (const write of localWrites) {
-      // Created 0600 from the start: the values were in a private .env.
-      await publishMigrationLocalLayer({
-        projectDir: opts.projectDir,
-        write,
-      });
-      wroteFiles.push(write.path);
-    }
-    for (const write of trackedWrites) {
-      if (
-        await writeProjectEnvConfigFile({
-          path: write.path,
-          config: write.config,
-          expectedExisting: null,
-        })
-      ) {
-        wroteFiles.push(write.path);
-      }
-    }
-  } catch (error: unknown) {
-    // Every target was absent before this call, so removing what it created
-    // leaves the project on the legacy files.
-    for (const path of [...wroteFiles].reverse()) {
-      await unlink(path).catch(() => undefined);
-    }
-    throw error;
-  }
+  const wroteFiles = await publishMigratedLegacyLayers({
+    projectDir: opts.projectDir,
+    localWrites,
+    trackedWrites,
+  });
 
   if (opts.materialize) {
     await materializeProjectEnv({

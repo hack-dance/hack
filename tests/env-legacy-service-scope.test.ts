@@ -22,7 +22,10 @@ import {
 } from "../src/constants.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
+  checkoutOnlyLegacyDotenvKeys,
   ENV_SCOPE_INVALID_MESSAGE,
+  findUnmigratedLegacyDotenvKeys,
+  inspectProjectEnvMaterialization,
   LegacyDotenvMigrationRefusalError,
   type LegacyProjectEnvMigration,
   migrateLegacyProjectEnv,
@@ -2123,4 +2126,130 @@ test("the migration allows a name that only starts like a tool setting", async (
     migrateUndeclaredDotenv: true,
   });
   expect(migrated.legacyDetected).toBe(true);
+});
+
+test("the migration refuses a Compose file with include and no services", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "include:\n  - inc.yml\n"
+  );
+  await writeFile(resolve(repo.projectDir, ".env"), `A=${KEPT_VALUE}\n`);
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: "top-level include",
+    hidden: [KEPT_VALUE],
+  });
+});
+
+async function writeTeammateCheckout(): Promise<Repo> {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  return repo;
+}
+
+const LAYER_EMPTY =
+  "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n";
+
+test("a checkout with only its own .env migrates to its local layer after a teammate's migration landed", async () => {
+  const repo = await writeTeammateCheckout();
+  const tracked = await readFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    "utf8"
+  );
+  expect(
+    await findUnmigratedLegacyDotenvKeys({
+      projectDir: repo.projectDir,
+      layerValues: {},
+    })
+  ).toEqual(["KEPT_SETTING"]);
+
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(migrated.legacyDetected).toBe(true);
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { KEPT_SETTING: KEPT_VALUE },
+  });
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.default.yaml"), "utf8")
+  ).toBe(tracked);
+  // Now migrated: nothing is unmigrated, and a second run refuses.
+  expect(
+    await checkoutOnlyLegacyDotenvKeys({ projectDir: repo.projectDir })
+  ).toEqual([]);
+  await expectMigrationRefusal({
+    repo,
+    code: "E_PATH_CONFLICT",
+    reason: "env layer files already exist",
+    hidden: [KEPT_VALUE],
+  });
+});
+
+test("a checkout's .env is not its only copy with a state file, a local layer, a contract or a linked layer", async () => {
+  for (const place of [
+    (repo: Repo) =>
+      writeFile(resolve(repo.projectDir, ".env.state.json"), "{}\n"),
+    (repo: Repo) =>
+      writeFile(resolve(repo.projectDir, "hack.env.local.yaml"), LAYER_EMPTY),
+    (repo: Repo) =>
+      writeFile(
+        resolve(repo.projectDir, "hack.env.json"),
+        `${JSON.stringify({ version: 1, vars: [] })}\n`
+      ),
+    (repo: Repo) =>
+      symlink(
+        resolve(repo.root, "elsewhere.yaml"),
+        resolve(repo.projectDir, "hack.env.staging.yaml")
+      ),
+  ]) {
+    const repo = await writeTeammateCheckout();
+    await place(repo);
+    expect(
+      await checkoutOnlyLegacyDotenvKeys({ projectDir: repo.projectDir })
+    ).toEqual([]);
+  }
+});
+
+test("hack env materialize refuses to replace a checkout's only copy, and keeps the file", async () => {
+  const repo = await writeTeammateCheckout();
+  const envPath = resolve(repo.projectDir, ".env");
+  const run = await runCli({
+    repo,
+    args: ["env", "materialize", "--path", repo.projectRoot],
+  });
+  expect(run.exitCode).not.toBe(0);
+  const output = `${run.stdout}${run.stderr}`;
+  expect(output).toContain("E_CONFIG_INVALID");
+  expect(output).toContain("KEPT_SETTING");
+  expect(output).not.toContain(KEPT_VALUE);
+  expect(await readFile(envPath, "utf8")).toContain(KEPT_VALUE);
+
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  const after = await runCli({
+    repo,
+    args: ["env", "materialize", "--path", repo.projectRoot],
+  });
+  expect(after.exitCode).toBe(0);
+  expect(await readFile(envPath, "utf8")).toContain(KEPT_VALUE);
+}, 60_000);
+
+test("doctor names a checkout's unmigrated keys, not their values", async () => {
+  const repo = await writeTeammateCheckout();
+  const inspected = await inspectProjectEnvMaterialization({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    serviceNames: ["api"],
+  });
+  expect(inspected.message).toContain("KEPT_SETTING");
+  expect(inspected.message).toContain("hack doctor --migrate-env-config");
+  expect(inspected.message).not.toContain(KEPT_VALUE);
 });

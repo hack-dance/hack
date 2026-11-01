@@ -713,6 +713,31 @@ test("doctor --migrate-env-config names the keys every service gains, never thei
   expect(notes).not.toContain(legacy);
 }, 30_000);
 
+test("doctor --migrate-env-config moves a checkout's own .env after a teammate's migration landed (HACK-1370)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  const legacy = ["synthetic", "legacy", "71ab"].join("-");
+  await writeFile(
+    resolve(projectDir, "hack.env.default.yaml"),
+    "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  await writeFile(resolve(projectDir, ".env"), `OWNED=${legacy}\n`);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli([
+    "doctor",
+    "--migrate-env-config",
+    "--no-interactive",
+    "--path",
+    projectRoot,
+  ]);
+  expect(code).toBe(0);
+  expect(noteCalls.join("\n")).not.toContain(legacy);
+  expect(
+    await readFile(resolve(projectDir, "hack.env.local.yaml"), "utf8")
+  ).toContain(legacy);
+}, 30_000);
+
 test("doctor --migrate-env-config refuses a dangling default layer with E_PATH_CONFLICT and keeps it (HACK-1370)", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();
   const projectDir = resolve(projectRoot, ".hack");

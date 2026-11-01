@@ -261,6 +261,7 @@ import {
 import {
   discoverComposeServiceNames,
   ensureHackDirGitignore,
+  findUnmigratedLegacyDotenvKeys,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
@@ -1319,6 +1320,15 @@ export async function resolveModernComposeEnvOverrides(opts: {
   });
   if (!modern) {
     return null;
+  }
+  const unmigrated = await findUnmigratedLegacyDotenvKeys({
+    projectDir: opts.project.projectDir,
+    layerValues: modern.globalEnv,
+  });
+  if (unmigrated.length > 0) {
+    logger.warn({
+      message: `.hack/.env sets ${unmigrated.join(", ")}, which the env layers don't deliver, so services won't receive them. Run \`hack doctor --migrate-env-config\` to move them to this checkout's local layer.`,
+    });
   }
   const lifecycleEnv = selectProjectEnvValuesForExecutionTarget({
     resolved: modern,

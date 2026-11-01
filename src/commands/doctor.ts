@@ -161,6 +161,7 @@ import {
 } from "../lib/project.ts";
 import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
+  checkoutOnlyLegacyDotenvKeys,
   discoverComposeServiceNames,
   ensureHackDirGitignore,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
@@ -3702,7 +3703,7 @@ function buildEnvMigrationNote(opts: {
   const newKeys = migrated.keysNewToEveryService ?? [];
   if (newKeys.length > 0) {
     notes.push(
-      `No Compose service listed the legacy file that sets these, so every service now receives them once that env is selected: ${newKeys.join(", ")}. To limit a key to one service, run \`hack env unset KEY --local\` and then \`hack env set KEY --service <name> --local\`, but not for a key your Compose file interpolates: service values do not reach interpolation.`
+      `No Compose service listed the legacy file that sets these, so every service now receives them once that env is selected: ${newKeys.join(", ")}. To limit a key to one service, run \`hack env unset KEY --local\` and then \`hack env set KEY --service <name> --local\`, but not for a key your Compose file interpolates: service values do not reach interpolation. Host lifecycle hooks receive these values too.`
     );
   }
   return notes.join("\n");
@@ -3721,9 +3722,13 @@ async function maybeMigrateProjectEnvConfig(opts: {
   // through), and a dangling or non-file layer entry refuses closed with
   // E_PATH_CONFLICT instead of being replaced.
   if (
-    await projectEnvConfigExistsForMutation({
+    (await projectEnvConfigExistsForMutation({
       projectDir: project.projectDir,
-    })
+    })) &&
+    // A checkout whose legacy file is its only copy still needs migrating, for
+    // example after a teammate's migration was committed.
+    (await checkoutOnlyLegacyDotenvKeys({ projectDir: project.projectDir }))
+      .length === 0
   ) {
     note("Project already uses the new env config files.", "doctor");
     await maybeRepairModernProjectComposeEnvReferences({

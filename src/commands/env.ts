@@ -21,6 +21,7 @@ import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
 import {
@@ -76,6 +77,7 @@ import {
   assertValidProjectEnvScopeName,
   discoverComposeServiceNames,
   ENV_KEY_INVALID_MESSAGE,
+  findUnmigratedLegacyDotenvKeys,
   hydrateProjectEnvLocalLayer,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
@@ -2080,6 +2082,24 @@ const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
   const serviceNames = await discoverComposeServiceNames({
     composeFile: project.composeFile,
   });
+  const unmigrated = await findUnmigratedLegacyDotenvKeys({
+    projectDir: project.projectDir,
+    layerValues:
+      (
+        await resolveProjectEnvConfig({
+          projectRoot: project.projectRoot,
+          projectDir: project.projectDir,
+          envName,
+          serviceNames,
+        })
+      )?.globalEnv ?? {},
+  });
+  if (unmigrated.length > 0) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: `Refusing to replace ${resolve(project.projectDir, ".env")}: it sets ${unmigrated.join(", ")}, which the env layers don't deliver, and it is this checkout's only copy. Run \`hack doctor --migrate-env-config\` first, or remove the file if you don't need it.`,
+    });
+  }
   const result = await materializeProjectEnv({
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,

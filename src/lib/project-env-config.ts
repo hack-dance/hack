@@ -1269,6 +1269,10 @@ async function readProjectEnvLayers(opts: {
       projectDir: primaryDir,
       envName: null,
     });
+    await assertProjectEnvLayerPath({
+      projectRoot: dirname(primaryDir),
+      path: primaryDefaultPath,
+    });
     await validatePrimaryLocalFile(primaryDefaultPath);
     inheritedReads.push(
       await readProjectEnvConfigFile({
@@ -1282,6 +1286,10 @@ async function readProjectEnvLayers(opts: {
       const primaryOverlayPath = resolveProjectEnvLocalConfigPath({
         projectDir: primaryDir,
         envName: selection.effectiveEnv,
+      });
+      await assertProjectEnvLayerPath({
+        projectRoot: dirname(primaryDir),
+        path: primaryOverlayPath,
       });
       await validatePrimaryLocalFile(primaryOverlayPath);
       inheritedReads.push(

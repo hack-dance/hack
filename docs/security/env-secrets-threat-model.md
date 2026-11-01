@@ -169,7 +169,7 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    path-based, not descriptor-relative `openat`/`renameat`: an ancestor directory
    swapped after the last check can still redirect an operation. This residual race
    remains open; ordinary outside-link redirection is refused. In-project dangling
-   links retain set/unset's prior replacement behavior; strict reads refuse them.
+   links are refused by `hack env set`, `hack env unset` and strict reads.
 6. **`encrypted_file` key file reads.** Key writes now use the
    `src/lib/private-file.ts` helpers: explicit provisioning replaces the key
    atomically, and first-use generation publishes it exclusively. `readEncryptedFileKey`

@@ -973,9 +973,9 @@ export class ProjectEnvLayerPathConflictError extends HackCliError {
  * {@link projectEnvConfigExists} reads a dangling default layer, and any
  * symlinked overlay, as absent, so such a project would silently fall back to
  * the legacy file. Here every entry named like an env layer must be a regular
- * file or a symlink that resolves to one, and either counts as an env layer;
- * any other entry is refused with {@link ProjectEnvLayerPathConflictError}
- * before anything is read from stdin or written.
+ * file or a symlink inside the project that resolves to one, and either counts
+ * as an env layer; any other entry is refused before anything is read from stdin
+ * or written.
  */
 export async function projectEnvConfigExistsForMutation(opts: {
   readonly projectDir: string;
@@ -997,7 +997,10 @@ export async function projectEnvConfigExistsForMutation(opts: {
     }
     linkedLayer = true;
   }
-  return linkedLayer || (await projectEnvConfigExists(opts));
+  // Always, not only without a linked layer: this is what checks that `.hack` and
+  // every layer stay inside the project (HACK-1685).
+  const regularLayerExists = await projectEnvConfigExists(opts);
+  return linkedLayer || regularLayerExists;
 }
 
 export async function listProjectEnvOverlayNames(opts: {
@@ -5652,7 +5655,8 @@ const ENV_FILE_TRAILING_COMMENT = /\s#.*$/;
  * `A='x' KEY=value`, where Compose reads the text after the closing quote as another
  * entry. A value that holds such text, a comment after a quoted value, or a line inside
  * a multi-line value can match too, which refuses more than it must. A trailing comment
- * is dropped only from a line without quotes, because `A='x # y' KEY=value` sets KEY.
+ * is dropped only from a line without quotes, because `A='x # y' KEY=value` sets KEY, so
+ * an apostrophe in a comment keeps that comment.
  */
 function composeEnvFileEntryNames(text: string): ReadonlySet<string> {
   const names = new Set(Object.keys(parseDotEnv(text)));
@@ -6073,7 +6077,7 @@ function unusableLayerRemedy(envName: string | null): string {
   if (parseEnvConfigSelection(envName) === envName) {
     return `Run \`hack env list --env ${envName}\` to see the error, fix it, then retry.`;
   }
-  return `Check ${JSON.stringify(`hack.env.${envName}.yaml`)}, fix it, then retry.`;
+  return `Check ${JSON.stringify(`hack.env.${envName}.yaml`)} and its local layer, fix the problem, then retry.`;
 }
 
 /**
@@ -6093,7 +6097,7 @@ async function deliveredLayerValuesForMigration(opts: {
   } catch {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `an env layer can't be read or resolved, for example it doesn't parse or its project env key is missing, so the migration can't tell which values the layers already deliver. ${unusableLayerRemedy(opts.envName)}`,
+      reason: `an env layer can't be read or resolved, for example it doesn't parse, its project env key is missing or its path leaves the project, so the migration can't tell which values the layers already deliver. ${unusableLayerRemedy(opts.envName)}`,
     });
   }
 }

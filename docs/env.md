@@ -620,9 +620,9 @@ rename has these effects:
   YAML layers, including case-variant names on case-insensitive filesystems.
   `hack doctor --fix` reports an error for a `.hack` linked outside the project
   and leaves the link and outside files in place
-- an in-project symlink whose target does not exist keeps the existing behavior: the
-  link is replaced by a regular file. Strict planning and hydrate reads still refuse
-  dangling links
+- `hack env set` and `hack env unset` refuse an in-project symlink whose target does not
+  exist with `E_PATH_CONFLICT`, and strict planning and hydrate reads refuse it too. Replace
+  or remove the link, then retry
 - the writer rechecks both the layer and its resolved destination before staging and
   commit. These path checks narrow concurrent-swap races; they are not an atomic
   filesystem fence against a directory changed after the last check
@@ -1097,8 +1097,9 @@ files, when:
   `env_file` entry and select the overlay with `--env`;
 - an entry named like an env layer (`.hack/hack.env.*.yaml`) is a dangling symlink, a
   directory or another non-file (`E_PATH_CONFLICT`). A regular layer file, or a symlink
-  to one, means the repo already uses env layers: `hack doctor` reports that and writes
-  nothing, never through the link;
+  inside the project to one, means the repo already uses env layers: `hack doctor` reports
+  that and writes nothing, never through the link. A `.hack` or a layer linked outside the
+  project is refused with a closed error, and the link and outside files stay as they are;
 - git tracks a machine-local layer it would write, or, in a git checkout, git cannot
   report whether it does (`E_PATH_CONFLICT`);
 - in a git checkout, git does not ignore a machine-local layer it would write, for
@@ -1214,7 +1215,7 @@ and the command has no effect on the runtime value.
 
 `hack env set` and `hack env unset` choose between the env layers and the legacy file by
 looking for `.hack/hack.env.*.yaml` entries, `hack.env.default.yaml` included. A regular
-file, or a symlink to one, counts as an env layer. Any other entry with a layer name, such
+file, or a symlink inside the project to one, counts as an env layer. Any other entry with a layer name, such
 as a dangling symlink or a directory, is refused with `E_PATH_CONFLICT` and nothing is
 written; it never silently selects the legacy `.hack/.env`. Replace or remove the entry,
 then retry. Reads refuse the same way: `hack env list`, `hack env explain` and runtime

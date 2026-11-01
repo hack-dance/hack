@@ -841,7 +841,7 @@ test("the migration refuses existing layer entries and never writes through or r
     resolve(linked.projectDir, ".env.staging"),
     `OWNED=${STAGING_VALUE}\n`
   );
-  const target = resolve(linked.root, "outside-staging.yaml");
+  const target = resolve(linked.projectRoot, "linked-staging.yaml");
   const targetText = LAYER.replace(
     "environment: default",
     "environment: staging"
@@ -938,7 +938,7 @@ test("the contract migration refuses a dangling default layer and never replaces
 
   // A linked regular overlay means env layers are in use: nothing is migrated.
   await rm(path);
-  const target = resolve(repo.root, "shared-staging.yaml");
+  const target = resolve(repo.projectRoot, "shared-staging.yaml");
   await writeFile(
     target,
     LAYER.replace("environment: default", "environment: staging")
@@ -2321,7 +2321,7 @@ test("a contract project or a linked layer keeps the older behaviour", async () 
   expect((await unmigratedIn(contract)).keys).toEqual([]);
 
   const linked = await writeTeammateCheckout();
-  const target = resolve(linked.root, "elsewhere.yaml");
+  const target = resolve(linked.projectRoot, "elsewhere.yaml");
   await writeFile(
     target,
     LAYER_EMPTY.replace("environment: default", "environment: staging")
@@ -3675,3 +3675,152 @@ test.skipIf(RUNS_AS_ROOT)(
     });
   }
 );
+
+const LEAVES_PROJECT = "its path must resolve inside the project";
+
+test("a layer linked outside the project refuses the migration and every mutation", async () => {
+  for (const kind of ["file", "directory"] as const) {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, ".env"),
+      `KEPT_SETTING=${KEPT_VALUE}\n`
+    );
+    const target = resolve(repo.root, "outside-target");
+    if (kind === "file") {
+      await writeFile(target, LAYER);
+    } else {
+      await mkdir(target);
+    }
+    await symlink(target, resolve(repo.projectDir, "hack.env.staging.yaml"));
+    const before = await hackDirContents(repo);
+
+    const error = await migrateLegacyRepo(repo, {
+      migrateUndeclaredDotenv: true,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(
+      kind === "file"
+        ? message.includes(LEAVES_PROJECT)
+        : message.includes("is not a regular file")
+    ).toBe(true);
+    expect(message).not.toContain(KEPT_VALUE);
+    expect(await hackDirContents(repo)).toEqual(before);
+    if (kind === "file") {
+      expect(await readFile(target, "utf8")).toBe(LAYER);
+    }
+  }
+});
+
+/** `hack doctor` with stub `hack` and `docker`, so neither a daemon nor Docker is reached. */
+async function runStubbedDoctor(opts: {
+  readonly root: string;
+  readonly projectRoot: string;
+}): Promise<CliRun> {
+  const tools = resolve(opts.root, "tools");
+  await mkdir(tools);
+  for (const [name, body] of [
+    ["hack", "exit 0"],
+    ["docker", "exit 1"],
+    ["mutagen", "exit 0"],
+  ] as const) {
+    await writeFile(join(tools, name), `#!/bin/sh\n${body}\n`, { mode: 0o700 });
+  }
+  const proc = Bun.spawn(
+    [
+      process.execPath,
+      ENTRYPOINT,
+      "doctor",
+      "--fix",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      opts.projectRoot,
+    ],
+    {
+      cwd: opts.projectRoot,
+      env: privateCliEnv({
+        root: opts.root,
+        env: {
+          HACK_GLOBAL_CONFIG_PATH: join(opts.root, "hack-config.json"),
+          HACK_HOME: join(opts.root, "hack-home"),
+          HACK_LOGGER: "console",
+          HACK_MUTAGEN_PATH: join(tools, "mutagen"),
+          HACK_NO_INTERACTIVE: "1",
+          HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
+          NO_COLOR: "1",
+          PATH: `${tools}:/usr/bin:/bin`,
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { exitCode, stdout, stderr };
+}
+
+test("doctor doesn't rewrite a Compose file outside the project through a linked .hack", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-env-legacy-scope-"));
+  tempDirs.add(root);
+  const projectRoot = resolve(root, "repo");
+  const outside = resolve(root, "outside");
+  await mkdir(projectRoot);
+  await mkdir(outside);
+  const layerTarget = resolve(outside, "layer-target.yaml");
+  await writeFile(layerTarget, LAYER);
+  await writeFile(resolve(outside, PROJECT_COMPOSE_FILENAME), LISTED_COMPOSE);
+  await writeFile(
+    resolve(outside, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify({ name: "env-legacy-scope", dev_host: "env-legacy-scope.hack" })}\n`
+  );
+  await writeFile(resolve(outside, ".env"), `KEPT_SETTING=${KEPT_VALUE}\n`);
+  await symlink(layerTarget, resolve(outside, "hack.env.x.yaml"));
+  await symlink(outside, resolve(projectRoot, ".hack"));
+  const contents = async () =>
+    Object.fromEntries(
+      await Promise.all(
+        (await readdir(outside))
+          .sort()
+          .map(
+            async (name) =>
+              [name, await readFile(resolve(outside, name), "base64")] as const
+          )
+      )
+    );
+  const before = await contents();
+
+  const run = await runStubbedDoctor({ root, projectRoot });
+
+  expect(run.exitCode).not.toBe(0);
+  expect(`${run.stdout}${run.stderr}`).toContain(LEAVES_PROJECT);
+  expect(`${run.stdout}${run.stderr}`).not.toContain(KEPT_VALUE);
+  expect(await contents()).toEqual(before);
+}, 60_000);
+
+test("doctor doesn't rewrite Compose while a local layer links outside the project", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+  const target = resolve(repo.root, "outside-layer.yaml");
+  await writeFile(target, LAYER);
+  await symlink(target, resolve(repo.projectDir, "hack.env.local.yaml"));
+  const before = await hackDirContents(repo);
+
+  const run = await runStubbedDoctor({
+    root: repo.root,
+    projectRoot: repo.projectRoot,
+  });
+
+  expect(run.exitCode).not.toBe(0);
+  expect(`${run.stdout}${run.stderr}`).toContain(LEAVES_PROJECT);
+  expect(await hackDirContents(repo)).toEqual(before);
+  expect(await readFile(target, "utf8")).toBe(LAYER);
+}, 60_000);

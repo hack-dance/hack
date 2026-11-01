@@ -4041,7 +4041,8 @@ async function buildEnvMigrationPlanStep(opts: {
     return "Skip env migration because no project was detected from this path.";
   }
 
-  // The same format decision as the migration itself; a plan never throws.
+  // The same format decision as the migration itself. A layer entry it refuses is
+  // reported as a plan; a path leaving the project still stops the run (HACK-1685).
   let modernExists: boolean;
   try {
     modernExists = await projectEnvConfigExistsForMutation({

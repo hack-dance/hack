@@ -75,9 +75,11 @@ import {
 } from "../lib/project.ts";
 import {
   assertValidProjectEnvScopeName,
+  describeUnmigratedLegacyDotenv,
   discoverComposeServiceNames,
   ENV_KEY_INVALID_MESSAGE,
-  findUnmigratedLegacyDotenvKeys,
+  findUnmigratedLegacyDotenv,
+  hasUnmigratedLegacyDotenv,
   hydrateProjectEnvLocalLayer,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
@@ -2082,22 +2084,15 @@ const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
   const serviceNames = await discoverComposeServiceNames({
     composeFile: project.composeFile,
   });
-  const unmigrated = await findUnmigratedLegacyDotenvKeys({
+  const unmigrated = await findUnmigratedLegacyDotenv({
+    projectRoot: project.projectRoot,
     projectDir: project.projectDir,
-    layerValues:
-      (
-        await resolveProjectEnvConfig({
-          projectRoot: project.projectRoot,
-          projectDir: project.projectDir,
-          envName,
-          serviceNames,
-        })
-      )?.globalEnv ?? {},
+    serviceNames,
   });
-  if (unmigrated.length > 0) {
+  if (hasUnmigratedLegacyDotenv(unmigrated)) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
-      message: `Refusing to replace ${resolve(project.projectDir, ".env")}: it sets ${unmigrated.join(", ")}, which the env layers don't deliver, and it is this checkout's only copy. Run \`hack doctor --migrate-env-config\` first, or remove the file if you don't need it.`,
+      message: `Refusing to materialize: this checkout ${describeUnmigratedLegacyDotenv(unmigrated)} in its legacy .hack/.env files, and the env layers don't deliver those values, so they could be lost. Run \`hack doctor --migrate-env-config\` first, or remove what you don't need.`,
     });
   }
   const result = await materializeProjectEnv({

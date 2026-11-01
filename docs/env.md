@@ -1035,14 +1035,18 @@ repo switches to env layers. Teammates do not receive these values through git; 
 the ones they need with `hack env set` (plain settings) or `hack env set --secret`
 (encrypted) after the migration.
 
-Once this is committed, a teammate's own `.hack/.env` stops reaching services, because
-their checkout now uses env layers. `hack up` warns and names the keys, doctor reports it,
-and `hack env materialize` refuses to replace that file. They run
-`hack doctor --migrate-env-config` to move their values to their own local layers; this
-applies while the checkout has regular layer files, no machine-local layer, no contract and
-no materialization state. Tell teammates when you commit the migration.
- A repo with no legacy env file gets only an empty
-`hack.env.default.yaml`.
+A repo with no legacy env file gets only an empty `hack.env.default.yaml`.
+
+Once this is committed, a teammate's own `.hack/.env` and overlays may stop reaching services,
+because their checkout now uses env layers. Hack compares those files with what the layers
+deliver. For any value the layers don't deliver, `hack up` warns, doctor reports it, and
+`hack env materialize` refuses, so the file isn't replaced. They run
+`hack doctor --migrate-env-config` to move those values to their own local layers, adding to a
+local layer that already exists. A value equal to what the layers deliver isn't copied, so later
+team changes still reach them. A key the local layer sets differently refuses
+(`E_PATH_CONFLICT`). Messages name valid keys, count malformed entries and name unreadable files,
+and never show a value. A `.hack/.env` with a valid materialization state is generated output, and
+this comparison skips it. Tell teammates when you commit the migration.
 
 This migration refuses, with a one-line `E_*` error, writes nothing and keeps the legacy
 files, when:

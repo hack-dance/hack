@@ -161,7 +161,7 @@ import {
 } from "../lib/project.ts";
 import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
-  checkoutOnlyLegacyDotenvKeys,
+  canMigrateCheckoutLegacyDotenv,
   discoverComposeServiceNames,
   ensureHackDirGitignore,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
@@ -3725,10 +3725,15 @@ async function maybeMigrateProjectEnvConfig(opts: {
     (await projectEnvConfigExistsForMutation({
       projectDir: project.projectDir,
     })) &&
-    // A checkout whose legacy file is its only copy still needs migrating, for
-    // example after a teammate's migration was committed.
-    (await checkoutOnlyLegacyDotenvKeys({ projectDir: project.projectDir }))
-      .length === 0
+    // A checkout whose legacy files hold values its layers don't deliver still
+    // needs migrating, for example after a teammate's migration was committed.
+    !(await canMigrateCheckoutLegacyDotenv({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      serviceNames: await discoverComposeServiceNames({
+        composeFile: project.composeFile,
+      }),
+    }))
   ) {
     note("Project already uses the new env config files.", "doctor");
     await maybeRepairModernProjectComposeEnvReferences({

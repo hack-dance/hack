@@ -22,9 +22,8 @@ import {
 } from "../src/constants.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
-  checkoutOnlyLegacyDotenvKeys,
   ENV_SCOPE_INVALID_MESSAGE,
-  findUnmigratedLegacyDotenvKeys,
+  findUnmigratedLegacyDotenv,
   inspectProjectEnvMaterialization,
   LegacyDotenvMigrationRefusalError,
   type LegacyProjectEnvMigration,
@@ -2159,18 +2158,21 @@ async function writeTeammateCheckout(): Promise<Repo> {
 const LAYER_EMPTY =
   "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n";
 
+function unmigratedIn(repo: Repo) {
+  return findUnmigratedLegacyDotenv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    serviceNames: ["api"],
+  });
+}
+
 test("a checkout with only its own .env migrates to its local layer after a teammate's migration landed", async () => {
   const repo = await writeTeammateCheckout();
   const tracked = await readFile(
     resolve(repo.projectDir, "hack.env.default.yaml"),
     "utf8"
   );
-  expect(
-    await findUnmigratedLegacyDotenvKeys({
-      projectDir: repo.projectDir,
-      layerValues: {},
-    })
-  ).toEqual(["KEPT_SETTING"]);
+  expect((await unmigratedIn(repo)).keys).toEqual(["KEPT_SETTING"]);
 
   const migrated = await migrateLegacyRepo(repo, {
     migrateUndeclaredDotenv: true,
@@ -2182,10 +2184,8 @@ test("a checkout with only its own .env migrates to its local layer after a team
   expect(
     await readFile(resolve(repo.projectDir, "hack.env.default.yaml"), "utf8")
   ).toBe(tracked);
-  // Now migrated: nothing is unmigrated, and a second run refuses.
-  expect(
-    await checkoutOnlyLegacyDotenvKeys({ projectDir: repo.projectDir })
-  ).toEqual([]);
+  // Now delivered: nothing is unmigrated, and a second run refuses.
+  expect((await unmigratedIn(repo)).keys).toEqual([]);
   await expectMigrationRefusal({
     repo,
     code: "E_PATH_CONFLICT",
@@ -2194,28 +2194,177 @@ test("a checkout with only its own .env migrates to its local layer after a team
   });
 });
 
-test("a checkout's .env is not its only copy with a state file, a local layer, a contract or a linked layer", async () => {
-  for (const place of [
-    (repo: Repo) =>
-      writeFile(resolve(repo.projectDir, ".env.state.json"), "{}\n"),
-    (repo: Repo) =>
-      writeFile(resolve(repo.projectDir, "hack.env.local.yaml"), LAYER_EMPTY),
-    (repo: Repo) =>
-      writeFile(
-        resolve(repo.projectDir, "hack.env.json"),
-        `${JSON.stringify({ version: 1, vars: [] })}\n`
-      ),
-    (repo: Repo) =>
-      symlink(
-        resolve(repo.root, "elsewhere.yaml"),
-        resolve(repo.projectDir, "hack.env.staging.yaml")
-      ),
+test("an unrelated local layer doesn't hide a checkout's undelivered values, and migrating adds to its layer", async () => {
+  const repo = await writeTeammateCheckout();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.x.local.yaml"),
+    LAYER_EMPTY.replace("environment: default", "environment: x")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    `${LAYER_EMPTY.replace("global: {}", "global:\n    OTHER: kept")}`
+  );
+  expect((await unmigratedIn(repo)).keys).toEqual(["KEPT_SETTING"]);
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { OTHER: "kept", KEPT_SETTING: KEPT_VALUE },
+  });
+  expect((await unmigratedIn(repo)).keys).toEqual([]);
+});
+
+test("a stray state file doesn't hide undelivered values", async () => {
+  const repo = await writeTeammateCheckout();
+  await writeFile(resolve(repo.projectDir, ".env.state.json"), "{}\n");
+  expect((await unmigratedIn(repo)).keys).toEqual(["KEPT_SETTING"]);
+});
+
+test("the migration refuses a key the local layer sets differently, and keeps both", async () => {
+  const repo = await writeTeammateCheckout();
+  const layer = LAYER_EMPTY.replace(
+    "global: {}",
+    "global:\n    KEPT_SETTING: other"
+  );
+  await writeFile(resolve(repo.projectDir, "hack.env.local.yaml"), layer);
+  await expectMigrationRefusal({
+    repo,
+    code: "E_PATH_CONFLICT",
+    reason: '"KEPT_SETTING" in hack.env.local.yaml',
+    hidden: [KEPT_VALUE],
+  });
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.local.yaml"), "utf8")
+  ).toBe(layer);
+});
+
+test("the migration doesn't copy a value the tracked layers already deliver", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY.replace("global: {}", "global:\n    SAME: team")
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `SAME=team\nMINE=${KEPT_VALUE}\n`
+  );
+  expect((await unmigratedIn(repo)).keys).toEqual(["MINE"]);
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { MINE: KEPT_VALUE },
+  });
+});
+
+test("an overlay-only checkout is reported, and migrates", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify({ name: "env-legacy-scope", dev_host: "env-legacy-scope.hack", env: { defaultOverlay: "staging" } })}\n`
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.staging.yaml"),
+    LAYER_EMPTY.replace("environment: default", "environment: staging")
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env.staging"),
+    `ONLY_HERE=${KEPT_VALUE}\n`
+  );
+  expect((await unmigratedIn(repo)).keys).toEqual(["ONLY_HERE"]);
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect(await readLayerValues(repo, "hack.env.staging.local.yaml")).toEqual({
+    global: { ONLY_HERE: KEPT_VALUE },
+  });
+  expect((await unmigratedIn(repo)).keys).toEqual([]);
+});
+
+test("a contract project or a linked layer keeps the older behaviour", async () => {
+  const contract = await writeTeammateCheckout();
+  await writeFile(
+    resolve(contract.projectDir, "hack.env.json"),
+    `${JSON.stringify({ version: 1, vars: [] })}\n`
+  );
+  expect((await unmigratedIn(contract)).keys).toEqual([]);
+
+  const linked = await writeTeammateCheckout();
+  const target = resolve(linked.root, "elsewhere.yaml");
+  await writeFile(
+    target,
+    LAYER_EMPTY.replace("environment: default", "environment: staging")
+  );
+  await symlink(target, resolve(linked.projectDir, "hack.env.staging.yaml"));
+  await expectMigrationRefusal({
+    repo: linked,
+    code: "E_PATH_CONFLICT",
+    reason: "env layer files already exist",
+    hidden: [KEPT_VALUE],
+  });
+});
+
+test("diagnostics never echo a malformed entry, and it still blocks materialize", async () => {
+  const secret = ["hunter", "2-synthetic"].join("");
+  for (const line of [
+    `sk-${secret}=x`,
+    `postgres://u:${secret}@db/app?x=1`,
+    `SECRET ${secret}=1`,
+    `\u001b[31m${secret}=1`,
   ]) {
-    const repo = await writeTeammateCheckout();
-    await place(repo);
-    expect(
-      await checkoutOnlyLegacyDotenvKeys({ projectDir: repo.projectDir })
-    ).toEqual([]);
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, "hack.env.default.yaml"),
+      LAYER_EMPTY
+    );
+    await writeFile(resolve(repo.projectDir, ".env"), `${line}\n`);
+    const unmigrated = await unmigratedIn(repo);
+    expect(unmigrated.keys).toEqual([]);
+    expect(unmigrated.malformedCount).toBe(1);
+    const inspected = await inspectProjectEnvMaterialization({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      serviceNames: ["api"],
+    });
+    expect(inspected.message).toContain("1 malformed entry");
+    expect(inspected.message).not.toContain(secret);
+    const run = await runCli({
+      repo,
+      args: ["env", "materialize", "--path", repo.projectRoot],
+    });
+    expect(run.exitCode).not.toBe(0);
+    expect(`${run.stdout}${run.stderr}`).not.toContain(secret);
+    expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toContain(
+      secret
+    );
+  }
+}, 120_000);
+
+test("an unreadable legacy file is reported and goes to the migration, which refuses it", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  const envPath = resolve(repo.projectDir, ".env");
+  await writeFile(envPath, `KEPT_SETTING=${KEPT_VALUE}\n`);
+  await chmod(envPath, 0o000);
+  try {
+    expect((await unmigratedIn(repo)).unreadableFiles).toEqual([".env"]);
+    const inspected = await inspectProjectEnvMaterialization({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      serviceNames: ["api"],
+    });
+    expect(inspected.message).toContain("can't read .env");
+    expect(inspected.message).toContain("hack doctor --migrate-env-config");
+    const error = await migrateLegacyRepo(repo, {
+      migrateUndeclaredDotenv: true,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+    expect((error as LegacyDotenvMigrationRefusalError).code).toBe(
+      "E_PERMISSION"
+    );
+  } finally {
+    await chmod(envPath, 0o600);
   }
 });
 

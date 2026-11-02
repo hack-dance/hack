@@ -1,6 +1,4 @@
 import { isCancel, password, text } from "@clack/prompts";
-
-import { secrets } from "bun";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import {
@@ -8,6 +6,7 @@ import {
   confirmSafe,
   requireInteractive,
 } from "../lib/interactivity.ts";
+import { keychain } from "../lib/keychain.ts";
 import { logger } from "../ui/logger.ts";
 
 const DEFAULT_SECRETS_SERVICE = "hack-cli" as const;
@@ -146,7 +145,7 @@ async function handleSecretsSet({
     return 1;
   }
 
-  await secrets.set({ service, name, value });
+  await keychain.set({ service, name, value });
   logger.success({
     message: `Stored secret "${name}" under service "${service}"`,
   });
@@ -164,7 +163,7 @@ async function handleSecretsGet({
     [args.positionals.name].filter((v) => typeof v === "string")
   );
 
-  const value = await secrets.get({ service, name });
+  const value = await keychain.get({ service, name });
   if (value === null) {
     logger.warn({ message: `No secret found for "${name}" (${service})` });
     return 1;
@@ -206,7 +205,7 @@ async function handleSecretsDelete({
     return 0;
   }
 
-  const deleted = await secrets.delete({ service, name });
+  const deleted = await keychain.delete({ service, name });
   if (!deleted) {
     logger.warn({
       message: `No secret found to delete for "${name}" (${service})`,

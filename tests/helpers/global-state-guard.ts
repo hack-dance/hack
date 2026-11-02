@@ -387,6 +387,17 @@ export type NativeEnv = ReadonlyMap<string, string>;
 // Bound at load so a leaked `Bun.spawnSync` fake can never answer for Bun.
 const realSpawnSync = Bun.spawnSync.bind(Bun);
 
+let nativeEnvSourceForGuardTest: (() => NativeEnv) | undefined;
+
+/**
+ * Lets tests/global-state-guard.test.ts present a changed native environment.
+ * Under Bun 1.4.4 no operation it could find leaves a native change that
+ * `process.env` hides, and this keeps the boundary check and its report tested.
+ */
+export function setNativeEnvSourceForGuardTest(source: () => NativeEnv): void {
+  nativeEnvSourceForGuardTest = source;
+}
+
 /**
  * Reads Bun's native environment by running `/usr/bin/env -0` without an
  * `env` option, or returns undefined when that is not possible.
@@ -403,6 +414,9 @@ const realSpawnSync = Bun.spawnSync.bind(Bun);
  * Costs one short child process; the preload runs it once per test file.
  */
 export function captureNativeEnv(): NativeEnv | undefined {
+  if (nativeEnvSourceForGuardTest) {
+    return nativeEnvSourceForGuardTest();
+  }
   try {
     const child = realSpawnSync(["/usr/bin/env", "-0"], {
       stdin: "ignore",

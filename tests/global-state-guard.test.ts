@@ -24,6 +24,7 @@ const PRELOAD = resolve(
   import.meta.dir,
   "helpers/global-state-guard-preload.ts"
 );
+const GUARD_HELPER = resolve(import.meta.dir, "helpers/global-state-guard.ts");
 const KEY = "HACK_GLOBAL_STATE_GUARD_TEST";
 const owned: string[] = [];
 
@@ -268,6 +269,17 @@ test("a later file still reaches a loopback server directly", async () => {
 });
 `;
 
+// No process.env operation leaves a hidden native change under Bun 1.4.4, so this
+// fixture presents one to the guard's own native reader at the file boundary.
+const LEAK_NATIVE_ENV = `import { test } from "bun:test";
+import { captureNativeEnv, setNativeEnvSourceForGuardTest } from ${JSON.stringify(GUARD_HELPER)};
+test("leaves Bun's native environment changed", () => {
+  const changed = new Map(captureNativeEnv() ?? []);
+  changed.set("HTTP_PROXY", "http://127.0.0.1:9");
+  setNativeEnvSourceForGuardTest(() => changed);
+});
+`;
+
 async function runNestedSuite(opts: {
   readonly preload: boolean;
 }): Promise<{ readonly code: number; readonly output: string }> {
@@ -294,6 +306,7 @@ async function runNestedSuite(opts: {
     join(suite, "c2-leak-signal-listener.test.ts"),
     LEAK_LISTENER
   );
+  await writeFile(join(suite, "c3-leak-native-env.test.ts"), LEAK_NATIVE_ENV);
   await writeFile(join(suite, "d-later.test.ts"), LATER);
   const child = Bun.spawn(
     [
@@ -303,6 +316,7 @@ async function runNestedSuite(opts: {
       "./b-leak-in-hooks.test.ts",
       "./c-leak-native-proxy.test.ts",
       "./c2-leak-signal-listener.test.ts",
+      "./c3-leak-native-env.test.ts",
       "./d-later.test.ts",
     ],
     {
@@ -356,7 +370,10 @@ test("the guard names each leaking file, restores state, and later files pass", 
   expect(run.output).toContain(
     "(pass) a later test that emits SIGUSR2 is not charged with an earlier listener"
   );
-  expect(run.output).toContain("2 test file(s) leaked process state");
+  expect(run.output).toContain(
+    "c3-leak-native-env.test.ts left Bun's native environment changed after the file finished: native env HTTP_PROXY changed"
+  );
+  expect(run.output).toContain("3 test file(s) leaked process state");
   expect(run.output).not.toContain("127.0.0.1:9");
   expect(run.output).not.toContain("Executable not found");
   expect(run.output).toContain("LATER-FILE-PASSED");

@@ -1189,7 +1189,7 @@ const COMMAND_WORD = String.raw`h\p{Cf}*a\p{Cf}*c\p{Cf}*k(?:[-@#](?:(?!\p{Cf})[^
  * text has no gap and words after it. `hack-dance/hack up` does, like any other
  * path prefix: a repository exemption here would keep its arguments.
  */
-const COMMAND_START_SOURCE = String.raw`(?<![\w.-])(${COMMAND_WORD})(?=${COMMAND_GAP_UNIT}|$)`;
+const COMMAND_START_SOURCE = String.raw`(?<![\w.-])(${COMMAND_WORD})(?=${COMMAND_GAP_UNIT}|[\r\n]|$)`;
 /** In prose only lowercase counts, because `Hack` is the product's name. */
 const PROSE_COMMAND_START = new RegExp(COMMAND_START_SOURCE, "gu");
 /** In code nothing else explains the word, so any case counts. */
@@ -1462,7 +1462,12 @@ function splitCodeSpans(block: string): readonly CommandTextPiece[] {
   return pieces;
 }
 
-/** Text as lines of prose and code pieces; a code span may cross lines. */
+/**
+ * Text as lines of prose and code pieces. A code span that crosses a line break
+ * renders as one line, so it stays whole: a command in it runs through the
+ * span's end and on to the end of the line where the span closes. Lines of a
+ * fence or an indented block are separate, so each starts clean.
+ */
 function commandTextLines(text: string): readonly CommandTextPiece[][] {
   const rawLines = text.split(LINE_START);
   const inCodeBlock = codeBlockLines(
@@ -1493,7 +1498,11 @@ function commandTextLines(text: string): readonly CommandTextPiece[][] {
       add({ text: block, kind: "code" });
     } else {
       for (const piece of splitCodeSpans(block)) {
-        add(piece);
+        if (piece.kind === "code") {
+          lines.at(-1)?.push(piece);
+        } else {
+          add(piece);
+        }
       }
     }
   }

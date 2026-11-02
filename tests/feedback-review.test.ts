@@ -1988,6 +1988,20 @@ test("command text fails closed in prose and in code", () => {
     ],
     // A code span may cross a line.
     ["`see\nHack up acme-web`", `\`see\nHack up ${ARG}\``],
+    // A wrapped span keeps the command open through its end and that line.
+    [
+      "Ran `hack up --branch\nacme-web` today",
+      `Ran \`hack up --branch\n${ARG}\` ${ARG}`,
+    ],
+    ["`hack up\nacme-web`", `\`hack up\n${ARG}\``],
+    ["`hack\nup acme-web`", `\`hack\nup ${ARG}\``],
+    ["`hack up\r\nacme-web`", `\`hack up\r\n${ARG}\``],
+    ["`hack up\nacme-a\nacme-b`", `\`hack up\n${ARG}\n${ARG}\``],
+    ["hack up --branch `\nacme-web`", `hack up --branch \`\n${ARG}\``],
+    [
+      "`Hack up\nacme-web` x\nacme-next stays",
+      `\`Hack up\n${ARG}\` ${ARG}\nacme-next stays`,
+    ],
     // Rich-text spaces in code and in prose.
     [
       "`hack\u00A0up\u00A0--branch\u00A0acme-web`",
@@ -2166,6 +2180,9 @@ test("negative controls: private command text added after rendering never sends"
     ["capital H in a span", body("`Hack up --branch acme-payments` fails.")],
     ["name quoted after prose", body("hack up --branch `acme-web`")],
     ["name in a second span", body("`hack up --branch` `acme-web`")],
+    ["name in a wrapped span", body("Ran `hack up --branch\nacme-web` today")],
+    ["positional in a wrapped span", body("`hack logs\nacme-web`")],
+    ["span wrapped after the word", body("`Hack\nup acme-web`")],
     ["name in a span after prose", body("`hack up` on `acme-web`")],
     ["name in prose after a span", body("`hack up` on acme-web")],
     ["comment end in a span", body("`hack up --> --branch acme-web`")],

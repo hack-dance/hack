@@ -148,9 +148,10 @@ next word is not a command; a capitalized `Hack` in prose is the product name an
 not matched. Launcher and version spellings such as `hack-local` and `hack@latest`,
 and a repository prefix such as `hack-dance/hack up`, count too; a bare repository
 reference with no words after it does not. A command stays open to the end of its
-line, across code spans and the prose between them. Every later word on that line is
-an argument: prose keeps registered error codes, sentence punctuation and an HTML
-comment end, and code keeps none of them. So a draft should end each line with its
+line, across code spans and the prose between them. A code span that wraps keeps it
+open through the span and to the end of the line where the span closes. Every later
+word on that line is an argument: prose keeps registered error codes, sentence
+punctuation and an HTML comment end, and code keeps none of them. So a draft should end each line with its
 command and put any error code before it. Flag values are always replaced, including
 enum and number values the spec could validate.
 

@@ -981,6 +981,7 @@ test("doctor names a contract it can't open as the migration source, not as abse
     "and no .hack/hack.env.default.yaml present"
   );
   expect(run.output).not.toContain("Legacy env format detected");
+  expect(run.output).not.toContain("Detected legacy project env files");
   const entries = await readdir(repo.projectDir);
   expect(entries).toContain("hack.env.json");
   expect(entries).not.toContain("hack.env.default.yaml");

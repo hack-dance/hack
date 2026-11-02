@@ -3764,9 +3764,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
     PROJECT_ENV_CONTRACT_FILENAME
   );
   // A dangling link is a contract that can't be opened, not a project without one.
-  const { exists: hasContract } = await readHackEnvContract({
+  const contract = await readHackEnvContract({
     projectDir: project.projectDir,
   });
+  const hasContract = contract.exists;
 
   const cfg = await readProjectConfig(project);
   const projectName = (
@@ -3777,26 +3778,29 @@ async function maybeMigrateProjectEnvConfig(opts: {
   const serviceNames = await discoverComposeServiceNames({
     composeFile: project.composeFile,
   });
-  note(
-    [
-      "Detected legacy project env files.",
-      hasContract
-        ? `- source: ${contractPath} and current local env state`
-        : `- source: ${resolve(project.projectDir, PROJECT_ENV_FILENAME)} and its overlays (no ${PROJECT_ENV_CONTRACT_FILENAME}; secret-backend values are not migrated)`,
-      hasContract
-        ? `- target: ${resolve(project.projectDir, "hack.env.default.yaml")}`
-        : `- target: values go to the gitignored ${resolve(project.projectDir, "hack.env.local.yaml")} (and hack.env.<overlay>.local.yaml); ${resolve(project.projectDir, "hack.env.default.yaml")} is written with no values`,
-      "- runtime: direct env injection by default; .hack/.env becomes compatibility-only",
-    ].join("\n"),
-    "env migration"
-  );
-  const shouldMigrate = await doctorConfirm({
-    message:
-      "Migrate project env from .hack/hack.env.json/.hack/.env to hack.env.*.yaml now?",
-    initialValue: true,
-  });
-  if (!shouldMigrate) {
-    return;
+  // The migration refuses this contract, so don't describe it or ask first.
+  if (contract.parseError === undefined) {
+    note(
+      [
+        "Detected legacy project env files.",
+        hasContract
+          ? `- source: ${contractPath} and current local env state`
+          : `- source: ${resolve(project.projectDir, PROJECT_ENV_FILENAME)} and its overlays (no ${PROJECT_ENV_CONTRACT_FILENAME}; secret-backend values are not migrated)`,
+        hasContract
+          ? `- target: ${resolve(project.projectDir, "hack.env.default.yaml")}`
+          : `- target: values go to the gitignored ${resolve(project.projectDir, "hack.env.local.yaml")} (and hack.env.<overlay>.local.yaml); ${resolve(project.projectDir, "hack.env.default.yaml")} is written with no values`,
+        "- runtime: direct env injection by default; .hack/.env becomes compatibility-only",
+      ].join("\n"),
+      "env migration"
+    );
+    const shouldMigrate = await doctorConfirm({
+      message:
+        "Migrate project env from .hack/hack.env.json/.hack/.env to hack.env.*.yaml now?",
+      initialValue: true,
+    });
+    if (!shouldMigrate) {
+      return;
+    }
   }
 
   const migrated = await migrateLegacyProjectEnv({

@@ -2677,7 +2677,9 @@ async function checkProjectEnvMode({
   }
 
   const contractPath = resolve(ctx.projectDir, PROJECT_ENV_CONTRACT_FILENAME);
-  const contractExists = await pathExists(contractPath);
+  const { exists: contractExists } = await readHackEnvContract({
+    projectDir: ctx.projectDir,
+  });
   if (!contractExists) {
     return {
       name: "env mode",
@@ -4064,11 +4066,10 @@ async function buildEnvMigrationPlanStep(opts: {
     return "Skip env migration because this project already uses hack.env.*.yaml.";
   }
 
-  const contractPath = resolve(
-    opts.project.projectDir,
-    PROJECT_ENV_CONTRACT_FILENAME
-  );
-  if (await pathExists(contractPath)) {
+  const contract = await readHackEnvContract({
+    projectDir: opts.project.projectDir,
+  });
+  if (contract.exists) {
     return "Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.";
   }
 

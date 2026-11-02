@@ -188,6 +188,8 @@ export type HackEnvStorageSummary = {
   readonly portableState: HackEnvPortableStateSummary;
 };
 
+const CONTRACT_UNREADABLE = "the file can't be read";
+
 export async function readHackEnvContract(opts: {
   readonly projectDir: string;
 }): Promise<HackEnvReadResult> {
@@ -893,8 +895,6 @@ function buildHackEnvMutationSourceMismatchMessage(input: {
 
   return `Env key "${input.key}" is declared as source "plain_env" in ${input.contractPath}. Use "hack env set ${input.key}=…" or update the contract source before writing. Hack will not write this key through the secret backend until the contract source changes.`;
 }
-
-const CONTRACT_UNREADABLE = "the file can't be read";
 
 function describeContractProblem(parseError: string): string {
   return parseError === CONTRACT_UNREADABLE

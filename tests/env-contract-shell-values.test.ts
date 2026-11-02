@@ -948,9 +948,13 @@ test("doctor names a contract it can't open as the migration source, not as abse
   await symlink(resolve(repo.root, "contract-that-is-gone"), contract);
   const tools = resolve(repo.root, "doctor-tools");
   await mkdir(tools);
-  for (const tool of ["hack", "docker", "mutagen"]) {
-    await writeFile(join(tools, tool), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-  }
+  await writeFile(join(tools, "hack"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await writeFile(join(tools, "docker"), "#!/bin/sh\nexit 1\n", {
+    mode: 0o700,
+  });
+  await writeFile(join(tools, "mutagen"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o700,
+  });
 
   const run = await runHack({
     repo,
@@ -969,7 +973,15 @@ test("doctor names a contract it can't open as the migration source, not as abse
   });
 
   expect(run.output).toContain("hack.env.json can't be read");
+  expect(run.exitCode).not.toBe(0);
   expect(run.output).not.toContain("no hack.env.json");
+  expect(run.output).not.toContain("no .hack/hack.env.json");
+  expect(run.output).not.toContain(
+    "and no .hack/hack.env.default.yaml present"
+  );
+  const entries = await readdir(repo.projectDir);
+  expect(entries).toContain("hack.env.json");
+  expect(entries).not.toContain("hack.env.default.yaml");
   expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toContain(
     DOTENV_VALUE
   );

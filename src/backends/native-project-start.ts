@@ -188,12 +188,18 @@ async function acquireReadyHttps(opts: {
     onIntent: opts.onIntent,
   });
 }
+/**
+ * Routes from the reviewed runtime plan. A plan that lacks the routed service
+ * or its hostname list is malformed runtime output, refused as unconfirmed; a
+ * routed service without an enabled reviewed HTTP probe, or one hostname with
+ * conflicting probes, is the configuration refusal.
+ */
 export function reviewedNativeHttpsRoutes(
   plan: unknown,
   services: ReadonlySet<string>
 ): readonly { hostname: string; path: string; service: string }[] {
   if (!(isRecord(plan) && isRecord(plan.services))) {
-    throw refused();
+    throw unconfirmed("the reviewed runtime plan");
   }
   const names = new Map<string, { path: string; service: string }>();
   for (const name of services) {
@@ -202,7 +208,13 @@ export function reviewedNativeHttpsRoutes(
       !(
         isRecord(service) &&
         isRecord(service.routing) &&
-        Array.isArray(service.routing.hostnames) &&
+        Array.isArray(service.routing.hostnames)
+      )
+    ) {
+      throw unconfirmed("the reviewed runtime plan");
+    }
+    if (
+      !(
         isRecord(service.healthcheck) &&
         service.healthcheck.disabled !== true &&
         isRecord(service.healthcheck.native_http) &&
@@ -213,7 +225,7 @@ export function reviewedNativeHttpsRoutes(
     }
     for (const hostname of service.routing.hostnames) {
       if (typeof hostname !== "string") {
-        throw refused();
+        throw unconfirmed("the reviewed runtime plan");
       }
       const path = service.healthcheck.native_http.path;
       if (

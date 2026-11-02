@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
 import { isRecord } from "../src/lib/guards.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
 
 const roots: string[] = [];
@@ -470,4 +471,114 @@ macTest(
     expect(files.filter((file) => file.endsWith(".json"))).toEqual([]);
     expect(files.filter((file) => file.endsWith(".lock"))).toEqual([]);
   }
+);
+
+macTest(
+  "source CLI Ctrl-C during authored preflight reports a cancellation and exits 130",
+  async () => {
+    const selected = await fixture();
+    await Bun.write(
+      join(selected.root, ".hack/hack.project.json"),
+      JSON.stringify({
+        schema_version: 1,
+        name: "cancel-control",
+        worktree: { inherit_local: false, auto_branch: false },
+        services: { web: { image: `sha256:${"a".repeat(64)}` } },
+      })
+    );
+    // The native plan request hangs until the CLI's cancellation kills it, so
+    // SIGINT lands in preflight, before any startup intent is reserved.
+    const planning = join(selected.root, "native-plan-started");
+    const planPid = join(selected.root, "native-plan.pid");
+    await Bun.write(
+      selected.native,
+      `#!${process.execPath}
+const args=process.argv.slice(2);
+if(args[2]!=='graph'||args[3]!=='native'||args[4]!=='plan'){
+ await Bun.write(${JSON.stringify(join(selected.root, "runtime-called"))}, 'unexpected-effect'); process.exit(2);
+}
+await Bun.write(${JSON.stringify(planPid)}, String(process.pid));
+await Bun.write(${JSON.stringify(planning)}, 'planning');
+await Bun.sleep(20_000);
+process.exit(2);
+`
+    );
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "../index.ts"),
+        "--path",
+        selected.root,
+        "up",
+      ],
+      {
+        env: privateCliEnv({
+          root: selected.root,
+          env: {
+            CI: "1",
+            HACK_EXECUTION_MODE: "ci",
+            HACK_HOME: join(selected.root, "home"),
+            HACK_LOGGER: "console",
+            HACK_CONFIG_COMPILER_BINARY: realCompiler,
+            HACK_NATIVE_BINARY: selected.native,
+            HACK_NATIVE_HOME: join(selected.root, "candidate"),
+            HACK_RUNTIME_BACKEND: "native",
+          },
+        }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
+    try {
+      const deadline = performance.now() + 15_000;
+      while (!(await Bun.file(planning).exists())) {
+        if (performance.now() > deadline || child.exitCode !== null) {
+          throw new Error("native plan was never requested");
+        }
+        await Bun.sleep(20);
+      }
+      child.kill("SIGINT");
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      const output = stdout + stderr;
+      expect({ code, output }).toMatchObject({ code: 130 });
+      expect(output).toContain(
+        "Native project start was canceled; nothing was started and no startup intent was reserved."
+      );
+      expect(output).not.toContain("E_STARTUP_INCOMPLETE");
+      expect(output).not.toContain("Native authored startup failed");
+      expect(output).not.toMatch(/^\s+at /m);
+      expect(
+        await Bun.file(join(selected.root, "runtime-called")).exists()
+      ).toBe(false);
+      const files = await readdir(
+        join(selected.root, ".hack/.internal/native-authored-runs")
+      );
+      expect(files.filter((file) => file.endsWith(".json"))).toEqual([]);
+    } finally {
+      clearTimeout(timer);
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
+      const pid = Number(
+        await Bun.file(planPid)
+          .text()
+          .catch(() => "")
+      );
+      if (Number.isSafeInteger(pid) && pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already ended by the CLI's cancellation.
+        }
+      }
+    }
+  },
+  30_000
 );

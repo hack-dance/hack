@@ -95,9 +95,35 @@ test("fresh exec refuses missing selectors or deleted overlays before AWS export
     })
   ).rejects.toMatchObject({
     code: "E_CONFIG_INVALID",
-    message: expect.stringContaining("unavailable"),
+    message: expect.stringContaining("selection changed since startup"),
   });
   expect(calls).toBe(0);
+});
+test("fresh exec names a changed selection apart from an unresolvable environment", async () => {
+  const opts = await fixture();
+  // The service this exec selects is no longer in the configuration.
+  await expect(
+    prepareNativeExecEnvironment({ ...opts, service: "removed" })
+  ).rejects.toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message: expect.stringContaining(
+      "selection changed since startup: the service, environment or overlay this run started with is no longer selected. Restart the project"
+    ),
+  });
+  // Values that cannot be resolved are not reported as a changed selection.
+  const unavailable = await prepareNativeExecEnvironment({
+    ...opts,
+    run: { ...opts.run, aws: { profile: "qa" } },
+    adaptAws: async () => {
+      throw new Error("synthetic-private-detail");
+    },
+  }).catch((error: unknown) => error);
+  expect(unavailable).toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native fresh exec environment could not be resolved; no command was requested. Values omitted.",
+  });
+  expect(String(unavailable)).not.toContain("synthetic-private-detail");
 });
 test("fresh exec uses only saved AWS selection and omits adapter failure details", async () => {
   const opts = await fixture();

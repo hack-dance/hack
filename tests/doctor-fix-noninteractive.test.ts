@@ -760,3 +760,49 @@ test("doctor refuses a default overlay that would overwrite the migrated base (H
   expect(noteCalls.join("\n")).not.toContain("synthetic-collision-base");
   expect(noteCalls.join("\n")).not.toContain("synthetic-collision-overlay");
 });
+
+for (const filename of [".env", ".env.bak"]) {
+  test.skipIf(process.getuid?.() === 0)(
+    `doctor refuses cleanup when ${filename} cannot be read (HACK-1695)`,
+    async () => {
+      const projectRoot = await createProjectWithStaleDaemonPid();
+      const projectDir = resolve(projectRoot, ".hack");
+      await writeFile(
+        resolve(projectDir, "hack.env.json"),
+        JSON.stringify({
+          version: 1,
+          vars: [{ key: "A", source: "plain_env" }],
+        })
+      );
+      const file = resolve(projectDir, filename);
+      const text =
+        "A=synthetic-unreadable-declared\nUNREADABLE_ONLY=synthetic-unreadable-only\n";
+      await writeFile(file, text);
+      await chmod(file, 0o000);
+      try {
+        const { runCli } = await import("../src/cli/run.ts");
+        expect(
+          await runCli([
+            "doctor",
+            "--migrate-env-config",
+            "--no-interactive",
+            "--path",
+            projectRoot,
+          ])
+        ).toBe(1);
+        expect(await lstat(file).catch(() => null)).not.toBeNull();
+        expect(
+          await lstat(resolve(projectDir, "hack.env.json")).catch(() => null)
+        ).not.toBeNull();
+        expect(noteCalls.join("\n")).not.toContain("can now be removed");
+        expect(noteCalls.join("\n")).not.toContain(
+          "synthetic-unreadable-declared"
+        );
+        expect(noteCalls.join("\n")).not.toContain("synthetic-unreadable-only");
+      } finally {
+        await chmod(file, 0o600);
+      }
+      expect(await readFile(file, "utf8")).toBe(text);
+    }
+  );
+}

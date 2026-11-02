@@ -39,6 +39,7 @@ import {
   mergeManagedGitignoreBlock,
   pathExists,
   readAtomicWriteTargetText,
+  readOptionalTextFile,
   readTextFile,
   writeTextFile,
   writeTextFileAtomicIfChanged,
@@ -5161,6 +5162,19 @@ function buildMigratedValues(opts: {
   return values;
 }
 
+/** Cleanup requires readable contents, even when legacy resolution treated a read failure as absence. */
+async function readLegacyDotenvCleanupEntries(opts: {
+  readonly path: string;
+}): Promise<Readonly<Record<string, string>>> {
+  const source = await readOptionalTextFile(opts.path);
+  if (source.kind !== "text") {
+    throw new ClosedCliError(
+      `Refusing legacy env cleanup: could not read ${opts.path}. No legacy files were removed; env layers may already have been written. Check read access before cleaning up manually (values omitted).`
+    );
+  }
+  return parseDotEnv(source.text);
+}
+
 async function collectLegacyProjectEnvCleanupCandidates(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -5206,7 +5220,7 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
       // must never promote a file holding undelivered values into cleanup.
       const delivered = opts.deliveredValues.get(path);
       if (delivered) {
-        const entries = parseDotEnv((await readTextFile(path)) ?? "");
+        const entries = await readLegacyDotenvCleanupEntries({ path });
         const keys = Object.entries(entries)
           .filter(([key, value]) => delivered.get(key) !== value)
           .map(([key]) => key)

@@ -19,32 +19,61 @@ import { ClosedCliError } from "../../src/lib/cli-result.ts";
 /** At most this many paths are named in a failure. */
 const MAX_NAMED = 50;
 
+/**
+ * Wall-clock bound on one guard `git` call. A read-only `git status` of this
+ * checkout takes well under a second on an idle host, but its cost is file
+ * system work that grows with host load: at a load of 56-118 on an 18-CPU
+ * host it passed 5 s (HACK-1439). The bound is a hang guard, not a speed
+ * assertion; a call that reaches it is killed and refused, closed.
+ */
+export const CHECKOUT_GIT_BUDGET_MS = 60_000;
+
+/**
+ * Bun timeout of the end-of-run `afterAll` hook. It outlasts the status
+ * call's own bound, so a slow status ends as the guard's named refusal rather
+ * than Bun's 5 s default hook timeout killing `git` mid-read, which failed
+ * runs whose cases all passed (HACK-1439).
+ */
+export const CHECKOUT_GUARD_HOOK_BUDGET_MS = CHECKOUT_GIT_BUDGET_MS + 30_000;
+
 type GitRunner = {
   readonly git: string;
   readonly env: Readonly<Record<string, string>>;
+  /** Bound on each call; `CHECKOUT_GIT_BUDGET_MS` when omitted. */
+  readonly budgetMs?: number;
 };
 
 function runGit(
   runner: GitRunner,
   cwd: string,
   args: readonly string[]
-): { readonly exitCode: number; readonly stdout: string } {
+): {
+  readonly exitCode: number;
+  readonly timedOut: boolean;
+  readonly stdout: string;
+} {
   const result = Bun.spawnSync([runner.git, ...args], {
     cwd,
     env: runner.env,
     stdin: "ignore",
     stdout: "pipe",
     stderr: "ignore",
+    timeout: runner.budgetMs ?? CHECKOUT_GIT_BUDGET_MS,
+    killSignal: "SIGKILL",
   });
-  return { exitCode: result.exitCode, stdout: result.stdout.toString() };
+  return {
+    exitCode: result.exitCode,
+    timedOut: result.exitedDueToTimeout === true,
+    stdout: result.stdout.toString(),
+  };
 }
 
 /**
  * The `git status` entries of `checkout`: every untracked, non-ignored file
  * and every changed tracked file, each as its two-letter status and its
  * checkout-relative path (`?? new.txt`, ` M package.json`). A failed
- * `git status` is refused, closed: the guard never treats an unreadable
- * checkout as clean.
+ * `git status`, or one that reaches its bound, is refused, closed: the guard
+ * never treats an unreadable checkout as clean.
  */
 export function checkoutStatusEntries(
   runner: GitRunner,
@@ -56,6 +85,11 @@ export function checkoutStatusEntries(
     "-z",
     "--untracked-files=all",
   ]);
+  if (status.timedOut) {
+    throw new ClosedCliError(
+      `checkout write guard: git status did not finish within ${runner.budgetMs ?? CHECKOUT_GIT_BUDGET_MS} ms; the checkout could not be checked for files written by tests.`
+    );
+  }
   if (status.exitCode !== 0) {
     throw new ClosedCliError(
       "checkout write guard: git status failed; the checkout could not be checked for files written by tests."
@@ -110,7 +144,8 @@ export function assertNoCheckoutWrites(opts: {
 
 /**
  * Records the baseline for the git checkout that contains `start` and
- * registers the end-of-run check through `afterAll`.
+ * registers the end-of-run check through `afterAll`, with the named
+ * `CHECKOUT_GUARD_HOOK_BUDGET_MS` timeout instead of Bun's 5 s default.
  *
  * When `start` is not in a git work tree (an export, or a container mount of a
  * linked worktree) there is nothing to compare, so the guard stays inactive
@@ -119,7 +154,7 @@ export function assertNoCheckoutWrites(opts: {
  */
 export function installCheckoutWriteGuard(opts: {
   readonly start: string;
-  readonly afterAll: (hook: () => void) => void;
+  readonly afterAll: (hook: () => void, timeoutMs: number) => void;
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): void {
   const source = opts.env ?? process.env;
@@ -158,5 +193,5 @@ export function installCheckoutWriteGuard(opts: {
         checkoutStatusEntries(runner, checkout)
       ),
     });
-  });
+  }, CHECKOUT_GUARD_HOOK_BUDGET_MS);
 }

@@ -6,7 +6,6 @@ import {
 } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { secrets } from "bun";
 import type {
   CloudSecretProvider,
   SecretsBackend,
@@ -15,6 +14,7 @@ import type {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
+import { nativeKeychain as secrets } from "./native-keychain.ts";
 import {
   decodeCanonicalBase64,
   publishPrivateFileExclusive,

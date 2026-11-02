@@ -249,6 +249,20 @@ mod tests {
 
     #[test]
     fn cpu_counter_advances_in_nanoseconds_under_work() {
+        // The upper bound below only holds this tightly when process CPU is about thread CPU.
+        // Parallel tests in this process would add CPU to every whole-process window, and
+        // the bound would then accept a doubled conversion (HACK-1457). So measure in a child
+        // that runs only this one test, on one thread.
+        use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+        run_isolated(
+            "provider::resources::tests::cpu_counter_child",
+            ISOLATED_HANG_GUARD,
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated single-thread measurement launched by cpu_counter_advances_in_nanoseconds_under_work"]
+    fn cpu_counter_child() {
         let root = identity::observe(std::process::id() as i32).unwrap();
         // The native counter under test: this whole process, in Mach absolute time converted
         // to nanoseconds by `cpu_nanoseconds`.
@@ -285,12 +299,10 @@ mod tests {
             );
             now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
         };
-        // Parallel tests in this process also use CPU, so no single read pair is simultaneous.
-        // Bracket the native window between an inner and an outer process-clock window instead:
-        // every counter is monotonic, so inner <= native <= outer whatever runs in between.
-        // And spin for 40 ms of this thread's CPU, not wall time, so a loaded host cannot
-        // shrink the measured work (HACK-1457: 40 ms of wall time measured 35 ms native and
-        // 72 ms by the clock read just after it).
+        // Bracket the native window between an inner and an outer process-clock window: every
+        // counter is monotonic, so inner <= native <= outer whatever the scheduler does.
+        // Spin for 40 ms of this thread's CPU, not wall time, so a loaded host cannot shrink
+        // the measured work.
         const WORK: u64 = 40_000_000;
         let outer_before = process_clock();
         let native_before = native();
@@ -302,13 +314,15 @@ mod tests {
         let inner_delta = process_clock() - inner_before;
         let native_delta = native() - native_before;
         let outer_delta = process_clock() - outer_before;
-        assert!(inner_delta >= WORK, "E_TEST_CPU_WORK_NOT_MEASURED");
-        // Half or double absorbs the two counters' different accounting; an unconverted Mach
-        // tick count (about 1/41 of nanoseconds on Apple silicon) or a doubled conversion
-        // still fails.
+        // The process clock has microsecond resolution, so allow it a small shortfall.
+        assert!(inner_delta >= WORK * 9 / 10, "E_TEST_CPU_WORK_NOT_MEASURED");
+        // This process has one busy thread, so both clocks measure about the same work. A
+        // third either way absorbs their different accounting. An unconverted Mach tick count
+        // (about 1/41 of nanoseconds on Apple silicon) fails the lower bound, and a doubled
+        // conversion fails the upper bound.
         assert!(
-            native_delta > inner_delta / 2 && native_delta < outer_delta * 2,
-            "E_TEST_CPU_COUNTER_UNITS"
+            native_delta * 3 > inner_delta * 2 && native_delta * 2 < outer_delta * 3,
+            "E_TEST_CPU_COUNTER_UNITS: native={native_delta} inner={inner_delta} outer={outer_delta}"
         );
     }
 }

@@ -321,16 +321,28 @@ fn buffered_hello_keeps_original_deadline_and_wrong_proof_never_connects() {
     let mut reactor = reactor(2);
     let (_, hello) = credential.begin().unwrap();
     let (server, mut client) = transport_pair();
-    let deadline = Instant::now() + Duration::from_millis(20);
+    // The longest budget `admit_hello` accepts, so that a loaded host's scheduling delay
+    // before it runs cannot expire the deadline first (HACK-1457).
+    let deadline = Instant::now() + MAX_CONNECT_BUDGET;
     reactor
         .admit_hello(server, &endpoint, &authority, deadline, &hello)
         .unwrap();
+    // The exact instant the owner chose, not a new budget counted from this admission.
     assert_eq!(reactor.handshakes[0].deadline, deadline);
-    while reactor.connections() > 0 {
-        reactor.tick(Duration::from_millis(30)).unwrap();
-    }
+    // Handshake progress does not renew it either. From here on the test sets the deadline
+    // itself, so the time a loaded host takes to run these steps cannot change the result.
+    let unexpired = Instant::now() + LOADED_EVENT_HANG_GUARD;
+    reactor.handshakes[0].deadline = unexpired;
+    reactor.tick(Duration::ZERO).unwrap();
+    client.read_exact(&mut [0; 64]).unwrap();
+    assert_eq!(reactor.handshakes[0].deadline, unexpired);
+    // Expiry closes the connection without connecting upstream.
+    reactor.handshakes[0].deadline = Instant::now();
+    reactor.tick(Duration::ZERO).unwrap();
+    assert_eq!(reactor.connections(), 0);
+    assert_eq!(reactor.stats().timed_out, 1);
+    assert_eq!(client.read(&mut [0]).unwrap(), 0);
     no_backend(&listener);
-    let _ = client.read(&mut [0; 64]);
     let (server, mut client) = transport_pair();
     reactor
         .admit_hello(
@@ -341,6 +353,7 @@ fn buffered_hello_keeps_original_deadline_and_wrong_proof_never_connects() {
             &hello,
         )
         .unwrap();
+    reactor.handshakes[0].deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
     reactor.tick(Duration::ZERO).unwrap();
     let mut challenge = [0; 64];
     client.read_exact(&mut challenge).unwrap();

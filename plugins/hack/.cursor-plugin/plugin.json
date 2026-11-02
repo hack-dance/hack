@@ -9,6 +9,5 @@
   "repository": "https://github.com/hack-dance/hack",
   "license": "MIT",
   "keywords": ["local-development", "docker", "developer-tools", "agents"],
-  "skills": "./skills/",
-  "rules": "./rules/"
+  "skills": "./skills/"
 }

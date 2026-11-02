@@ -83,10 +83,12 @@ inside the box. Services, env, secrets, startup order. It's manual, it drifts, a
 it has to be redone for every project and every platform.
 
 A hack project has already done this work. The environment is committed with the
-repo and isolated by design, so it runs the same on a teammate's laptop, in CI, or
-inside an agent's sandbox. Install hack, pass `HACK_ENV_SECRET_KEY`, run `hack up`.
-That is the entire setup — make a repo portable once and every environment,
-human or machine, gets it for free.
+repo and isolated by design, so teammates and agents can reuse the same project
+definition. Each host still needs a compatible container runtime and the project's
+prerequisites. Install Hack,
+configure those prerequisites, provide the secret key through an appropriate secret
+store, and run `hack up`. See [managed environments](docs/guides/codex-managed-environments.md)
+for the supported boundaries.
 
 There's a slim container image (`hackdance/hack:slim`) built for exactly this; see
 [managed environments](./docs/guides/codex-managed-environments.md).
@@ -157,11 +159,19 @@ Every command works from the repo root, or anywhere with `--project <name>`.
 - [Env & secrets](./docs/env.md) · [Lifecycle](./docs/lifecycle.md) · [Sessions](./docs/sessions.md)
 - [Agent-first setup](./docs/guides/agent-first-setup.md)
 
-A slim macOS companion app shows project status and quick actions; the CLI stays the
-source of truth. Optional extensions and container images are covered in the docs.
-Remote/gateway/node/dispatch commands are source-available but unsupported
-experimental — hidden behind `hack help --all`.
+The CLI is the supported product. The retained macOS app and
+remote/gateway/node/dispatch commands are unsupported and are not part of setup.
+Optional agent integrations and container environments are covered in the docs.
 
 ## License
 
 See [LICENSE](./LICENSE).
+
+## Documentation
+
+Start with [Getting started](docs/guides/getting-started.md) or browse the
+[documentation index](docs/README.md). Stable Docker Compose setup is primary;
+the [native v5 candidate](docs/guides/v5-dogfooding.md) is experimental.
+
+The local docs site is prepared with `bun run docs:prepare`. See
+[site development](site/README.md) for installation, checks and the public corpus policy.

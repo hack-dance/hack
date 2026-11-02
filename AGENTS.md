@@ -99,6 +99,12 @@ or unresolved concern. Do not skip a required gate or weaken an assertion to get
 - Use `tests/e2e/` for CLI workflows. Run runtime tests in isolated fixtures; do not
   overlap stateful tests against the same checkout, daemon, ports, or containers.
 
+For release-critical lifecycle or concurrency changes, use the TLA+ guide and
+maintain [the model coverage map](docs/reference/v5-model-coverage.md): invariant,
+source transition, regression, finite bound, failure assumption and uncovered state.
+Statecharts must use the same guards and distinguish unknown outcomes from absence.
+A finite or bounded check does not qualify the implementation or installed artifact.
+
 Match proof to the behavior: env changes need overlay/target/worktree coverage;
 lifecycle changes need shell, stdin, process-group, ownership and recovery coverage;
 agent changes need source/render parity and actual client loading when relevant.

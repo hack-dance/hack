@@ -406,8 +406,13 @@ export class AtomicWriteConflictError extends ClosedCliError {
 export async function writeTextFileAtomicIfChanged(
   absolutePath: string,
   content: string,
-  options: { readonly expectedExisting?: string | null } = {}
+  options: {
+    readonly expectedExisting?: string | null;
+    /** Policy check on the selected path and resolved destination, before read/stage/commit. */
+    readonly validatePath?: (path: string) => Promise<void>;
+  } = {}
 ): Promise<{ readonly changed: boolean }> {
+  await options.validatePath?.(absolutePath);
   const existing = await inspectAtomicWriteTarget(absolutePath);
   const expectsExisting = options.expectedExisting !== undefined;
   if (expectsExisting && targetText(existing) !== options.expectedExisting) {
@@ -418,6 +423,7 @@ export async function writeTextFileAtomicIfChanged(
   }
   const target =
     existing.kind === "absent" ? absolutePath : await realpath(absolutePath);
+  await options.validatePath?.(target);
   if (existing.kind === "existing") {
     try {
       await access(target, constants.W_OK);
@@ -446,6 +452,7 @@ export async function writeTextFileAtomicIfChanged(
     }
     await file.writeFile(content, "utf8");
     await file.sync();
+    await options.validatePath?.(absolutePath);
     if (
       expectsExisting &&
       targetText(await inspectAtomicWriteTarget(absolutePath)) !==
@@ -453,6 +460,8 @@ export async function writeTextFileAtomicIfChanged(
     ) {
       throw new AtomicWriteConflictError();
     }
+    await options.validatePath?.(absolutePath);
+    await options.validatePath?.(target);
     await rename(staging, target);
     committed = true;
   } catch (error: unknown) {

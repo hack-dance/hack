@@ -15,6 +15,7 @@ import {
   expectClosedRefusal,
   expectCodedRefusal,
 } from "./helpers/closed-refusal.ts";
+import { waitForFileContent } from "./helpers/wait-for-file-content.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -84,39 +85,10 @@ function test(
 }
 
 /**
- * Wait, bounded, until a fixture file at `path` holds complete content, and
- * return what `complete` makes of it. A fixture's writeFileSync creates the
- * file before it writes the bytes, so a wait for existence alone can return
- * while the file is still "" (HACK-1422, HACK-1439). Every handshake here is
- * read through this helper; no case waits for existence and then reads.
- * `complete` returns undefined for content that is not complete yet.
+ * Wait until a fixture's completion file holds exactly `expected`. Every
+ * handshake here is read through waitForFileContent; no case waits for
+ * existence and then reads.
  */
-async function waitForFileContent<T>(opts: {
-  readonly path: string;
-  readonly complete: (text: string) => T | undefined;
-  readonly what: string;
-  readonly budgetMs?: number;
-}): Promise<T> {
-  const budgetMs = opts.budgetMs ?? HANDSHAKE_BUDGET_MS;
-  const deadline = performance.now() + budgetMs;
-  for (;;) {
-    const file = Bun.file(opts.path);
-    if (await file.exists()) {
-      const value = opts.complete(await file.text());
-      if (value !== undefined) {
-        return value;
-      }
-    }
-    if (performance.now() >= deadline) {
-      throw new Error(
-        `Fixture ${opts.what} did not complete within ${budgetMs} ms.`
-      );
-    }
-    await Bun.sleep(10);
-  }
-}
-
-/** Wait until a fixture's completion file holds exactly `expected`. */
 async function waitForFileText(
   path: string,
   expected: string,

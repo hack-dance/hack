@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,6 +19,11 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
  * commit, branch and register worktrees in another repository, and a
  * contributor's global `core.hooksPath` refused fixture commits.
  */
+
+// These cases run many git processes and read every test file. On a loaded host
+// they passed Bun's default 5 s, and a test that outlives it fails after its root
+// is gone. No assertion depends on this budget.
+setDefaultTimeout(120_000);
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -270,40 +275,107 @@ const NOT_SPAWNS: ReadonlyMap<string, string> = new Map([
   ["fixture-hermeticity.test.ts", "this scanner's own patterns"],
   ["fixture-git.ts", "the shared helper, which builds the environment itself"],
 ]);
+/**
+ * A literal `["git"` argv passed to a spawn call (`spawn`, `spawnSync`, `exec`,
+ * `execFile`, or `run` from src/lib/shell.ts), or held in a `cmd`/`argv` field.
+ *
+ * Known gap: an argv built in a separate variable and passed by name is not
+ * seen, because nothing at the call says it runs git.
+ */
 const GIT_SPAWN =
-  /(?:\b(?:spawn|spawnSync|exec|execFile)\(\s*|\b(?:cmd|argv)\s*:\s*)\[\s*"git"/g;
+  /(?:\b(?:spawn|spawnSync|exec|execFile|run)\(\s*|\b(?:cmd|argv)\s*:\s*)\[\s*"git"/g;
+/** A Bun shell template that starts with git. It inherits the runner's env. */
+const GIT_SHELL_TEMPLATE = /\$`\s*git\b/g;
 const SHARED_ENV = /fixtureGit(?:Shell)?Env\(|runFixtureGit(?:Sync)?\(/;
+const SHELL_SHARED_ENV = /^\s*\.env\(\s*fixtureGitEnv\(/;
 
-/** The text of the call or object literal that holds a `["git"` argv. */
-function spawnSite(text: string, at: number): string {
-  let depth = 0;
-  let start = at;
-  // Walk back to the call's `(` or the options object's `{`.
-  for (let i = at; i >= 0; i--) {
+/** The index just past the string or template literal that opens at `start`. */
+function skipLiteral(text: string, start: number): number {
+  const quote = text[start];
+  let i = start + 1;
+  while (i < text.length) {
     const c = text[i];
-    if (c === ")" || c === "}" || c === "]") {
-      depth++;
-    } else if (c === "(" || c === "{" || c === "[") {
-      if (depth === 0 && (c === "(" || c === "{")) {
-        start = i;
-        break;
-      }
-      depth = Math.max(0, depth - 1);
+    if (c === "\\") {
+      i += 2;
+    } else if (c === quote) {
+      return i + 1;
+    } else if (quote === "`" && c === "$" && text[i + 1] === "{") {
+      i = closingIndex(text, i + 1) + 1;
+    } else {
+      i++;
     }
   }
-  depth = 0;
-  for (let i = start; i < text.length; i++) {
-    const c = text[i];
-    if (c === "(" || c === "{" || c === "[") {
+  return text.length;
+}
+
+/**
+ * The index of the bracket that closes the one at `open`, ignoring brackets in
+ * string and template text. Unbalanced text gives the last index.
+ */
+function closingIndex(text: string, open: number): number {
+  let depth = 0;
+  let i = open;
+  while (i < text.length) {
+    const c = text[i] ?? "";
+    if (c === '"' || c === "'" || c === "`") {
+      i = skipLiteral(text, i);
+      continue;
+    }
+    if ("({[".includes(c)) {
       depth++;
-    } else if (c === ")" || c === "}" || c === "]") {
+    } else if (")}]".includes(c)) {
       depth--;
       if (depth === 0) {
-        return text.slice(start, i + 1);
+        return i;
+      }
+    }
+    i++;
+  }
+  return text.length - 1;
+}
+
+/**
+ * The text that must name the shared environment for one `GIT_SPAWN` match: a
+ * call's own parentheses, or for a `cmd`/`argv` field the object that holds it.
+ * A helper elsewhere in the surrounding function does not route this spawn.
+ */
+function spawnSite(text: string, at: number, matched: string): string {
+  const paren = matched.indexOf("(");
+  let start = at + paren;
+  if (paren < 0) {
+    let depth = 0;
+    for (start = at; start >= 0; start--) {
+      const c = text[start] ?? "";
+      if (")}]".includes(c)) {
+        depth++;
+      } else if ("({[".includes(c)) {
+        if (depth === 0) {
+          break;
+        }
+        depth--;
       }
     }
   }
-  return text.slice(start);
+  return text.slice(start, closingIndex(text, start) + 1);
+}
+
+/** Offsets of every git spawn in `text` that does not use the shared env. */
+function unroutedGitSpawns(text: string): readonly number[] {
+  const unrouted: number[] = [];
+  for (const match of text.matchAll(GIT_SPAWN)) {
+    const at = match.index ?? 0;
+    if (!SHARED_ENV.test(spawnSite(text, at, match[0]))) {
+      unrouted.push(at);
+    }
+  }
+  for (const match of text.matchAll(GIT_SHELL_TEMPLATE)) {
+    const at = match.index ?? 0;
+    const after = skipLiteral(text, at + 1);
+    if (!SHELL_SHARED_ENV.test(text.slice(after))) {
+      unrouted.push(at);
+    }
+  }
+  return unrouted;
 }
 
 test("every fixture git spawn in tests/ uses the shared hermetic environment", () => {
@@ -314,11 +386,9 @@ test("every fixture git spawn in tests/ uses the shared hermetic environment", (
       continue;
     }
     const text = readFileSync(join(TESTS_ROOT, file), "utf8");
-    for (const match of text.matchAll(GIT_SPAWN)) {
-      if (!SHARED_ENV.test(spawnSite(text, match.index ?? 0))) {
-        const line = text.slice(0, match.index).split("\n").length;
-        unrouted.push(`tests/${file}:${line}`);
-      }
+    for (const at of unroutedGitSpawns(text)) {
+      const line = text.slice(0, at).split("\n").length;
+      unrouted.push(`tests/${file}:${line}`);
     }
   }
   expect(unrouted).toEqual([]);
@@ -329,7 +399,59 @@ test("every fixture git spawn in tests/ uses the shared hermetic environment", (
   );
   const sites = [...routed.matchAll(GIT_SPAWN)];
   expect(sites.length).toBeGreaterThan(0);
-  for (const site of sites) {
-    expect(spawnSite(routed, site.index ?? 0)).toMatch(SHARED_ENV);
+  expect(unroutedGitSpawns(routed)).toEqual([]);
+});
+
+// Inline snippets, so the controls do not depend on any fixture staying as it is.
+const UNROUTED_GIT_SNIPPETS: Readonly<Record<string, string>> = {
+  "a call beside a stored helper result": `test("x", () => {
+    const env = fixtureGitEnv();
+    Bun.spawnSync(["git", "init"], { cwd, env: process.env });
+    use(env);
+  });`,
+  "a call beside a routed call": `test("x", () => {
+    Bun.spawnSync(["git", "add", "."], { env: fixtureGitEnv() });
+    Bun.spawn(["git", "init"], { env: process.env });
+  });`,
+  "a helper in the next call's arguments": `Bun.spawnSync(["git", "init"]);
+    other(fixtureGitEnv());`,
+  "a closing parenthesis in the argv text": `Bun.spawnSync(["git", "log", "--format=%h)"], {
+      env: process.env,
+    });
+    other(fixtureGitEnv());`,
+  "a run call from src/lib/shell.ts": `test("x", async () => {
+    const options = fixtureGitShellEnv();
+    await run(["git", "init"], { cwd });
+    use(options);
+  });`,
+  "an options object beside a helper": `test("x", () => {
+    const env = fixtureGitEnv();
+    Bun.spawn({ cmd: ["git", "init"], env: process.env });
+    use(env);
+  });`,
+  "a Bun shell template": `test("x", async () => {
+    const env = fixtureGitEnv();
+    await $\`git init\`;
+    use(env);
+  });`,
+  "a Bun shell template with the runner's env": `await $\`git init\`.env(process.env);
+    other(fixtureGitEnv());`,
+};
+
+for (const [label, snippet] of Object.entries(UNROUTED_GIT_SNIPPETS)) {
+  test(`the git spawn scan flags ${label}`, () => {
+    expect(unroutedGitSpawns(snippet)).toHaveLength(1);
+  });
+}
+
+test("the git spawn scan accepts each routed form", () => {
+  for (const snippet of [
+    'Bun.spawnSync(["git", "init"], { env: fixtureGitEnv() });',
+    'Bun.spawnSync(["git", "log", "--format=%h)"], { env: fixtureGitEnv({ env }) });',
+    'await run(["git", "init"], { cwd, ...fixtureGitShellEnv() });',
+    'Bun.spawn({ cmd: ["git", "init"], env: fixtureGitEnv() });',
+    "await $`git init`.env(fixtureGitEnv());",
+  ]) {
+    expect(unroutedGitSpawns(snippet)).toEqual([]);
   }
 });

@@ -103,6 +103,8 @@ import {
   NativeComposeOwnershipError,
   type NativeComposeOwnershipObservation,
   type NativeComposeOwnershipOptions,
+  nativeComposePreSpawnOwnershipTimeoutMs,
+  nativeComposeStopChildReserveMs,
   nativeComposeStopOwnershipTimeoutMs,
   observeSavedNativeComposeOwned,
   waitNativeComposeStartupOwned,
@@ -813,8 +815,8 @@ async function savedCommand(opts: {
               >;
             } = { files: null };
             try {
-              const stopDeadline =
-                Date.now() + resolveComposeStartupTimeoutMs();
+              const stopBudgetMs = resolveComposeStartupTimeoutMs();
+              const stopDeadline = Date.now() + stopBudgetMs;
               const code = await runNativeComposeOwnedFileChild({
                 command: [
                   ...composeArgs(generation),
@@ -823,6 +825,7 @@ async function savedCommand(opts: {
                 ],
                 signal,
                 deadline: () => stopDeadline,
+                minimumChildMs: nativeComposeStopChildReserveMs(stopBudgetMs),
                 arm: async () => {
                   stopping.files = await prepareNativeComposeSavedFileStop({
                     mutation,
@@ -830,7 +833,19 @@ async function savedCommand(opts: {
                     saved,
                   });
                 },
-                assertOwned,
+                assertOwned: async (admittedMs) => {
+                  await prepared.assertOwned({
+                    timeoutMs: nativeComposePreSpawnOwnershipTimeoutMs({
+                      stopBudgetMs,
+                      admittedMs,
+                    }),
+                  });
+                  await assertNativeComposeSavedFileEngines({
+                    saved,
+                    store,
+                    signal,
+                  });
+                },
                 options: {
                   cwd: base.cwd,
                   env: base.env,
@@ -1051,8 +1066,11 @@ async function prepareSavedStop(opts: {
   const hasDownHooks = Object.hasOwn(document, "x-hack-native-down-hooks");
   let engineStopped = false;
   let storage: readonly NativeComposeRetainedVolume[] | null = null;
-  const assertOwned = async () => {
-    const observed = await assertNativeComposeOwned(selection);
+  const assertOwned = async (bound?: { readonly timeoutMs: number }) => {
+    const observed = await assertNativeComposeOwned({
+      ...selection,
+      ...bound,
+    });
     storage = observed.volumes;
     if (
       engineStopped &&

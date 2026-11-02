@@ -327,7 +327,10 @@ deadline. A restart repair attempt has its own budgets and is reported
 separately. Foreground `up` stays a single unbounded Compose invocation; `down`
 retains its separate 90-second limit. A native `down` reads that limit from
 `HACK_COMPOSE_STARTUP_TIMEOUT_MS`, and each check that it still owns its containers
-may use that time too, at least 15 and at most 60 seconds.
+may use that time too, at least 15 and at most 60 seconds. The last check before
+`compose down` must also leave about a fifth of that limit, at most 5 seconds, for the
+stop itself; otherwise `down` refuses before it starts Compose, and `hack down --recover`
+completes the stop.
 
 On timeout, Hack terminates the owned Compose process group of that phase. After an
 image-phase timeout no container was started by that attempt, but containers may

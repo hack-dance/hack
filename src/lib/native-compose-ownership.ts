@@ -1394,6 +1394,44 @@ export function nativeComposeStopOwnershipTimeoutMs(
   );
 }
 
+/** The most stop time {@link nativeComposeStopChildReserveMs} keeps for the child. */
+const MAX_STOP_CHILD_RESERVE_MS = 5000;
+
+/** The shortest budget accepted, which has no stop time to set aside. */
+const MIN_STOP_BUDGET_MS = 1000;
+
+/**
+ * Stop time kept for `compose down` itself: a fifth of the stop's budget above its
+ * 1 s minimum, at most 5 s. An engine that answers the last ownership check just
+ * before the deadline would otherwise start a child that is killed partway, with an
+ * incomplete stop. A short budget keeps nearly all of its time for that check.
+ */
+export function nativeComposeStopChildReserveMs(stopBudgetMs: number): number {
+  return Math.min(
+    MAX_STOP_CHILD_RESERVE_MS,
+    Math.floor(Math.max(0, stopBudgetMs - MIN_STOP_BUDGET_MS) / 5)
+  );
+}
+
+/**
+ * Bound of the ownership query just before `compose down` starts: the smaller of
+ * the probe timeout and the time admitted before the stop deadline, less the
+ * child's reserve. With no time left it is the probe's 1 ms minimum, which refuses
+ * as `probe-timeout` before any child runs.
+ */
+export function nativeComposePreSpawnOwnershipTimeoutMs(opts: {
+  readonly stopBudgetMs: number;
+  readonly admittedMs: number;
+}): number {
+  return Math.max(
+    1,
+    Math.min(
+      nativeComposeStopOwnershipTimeoutMs(opts.stopBudgetMs),
+      Math.floor(opts.admittedMs)
+    )
+  );
+}
+
 /**
  * One bounded aggregate Docker acquisition; callers supply only fixed read commands.
  * Lifecycle polling must issue a fresh owner for each capture, rather than reuse

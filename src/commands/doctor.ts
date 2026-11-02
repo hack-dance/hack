@@ -2677,14 +2677,21 @@ async function checkProjectEnvMode({
   }
 
   const contractPath = resolve(ctx.projectDir, PROJECT_ENV_CONTRACT_FILENAME);
-  const { exists: contractExists } = await readHackEnvContract({
-    projectDir: ctx.projectDir,
-  });
-  if (!contractExists) {
+  const contract = await readHackEnvContract({ projectDir: ctx.projectDir });
+  if (!contract.exists) {
     return {
       name: "env mode",
       status: "warn",
       message: `Missing ${contractPath} and no .hack/hack.env.default.yaml present`,
+    };
+  }
+  // The migration refuses this contract, so don't send the user to it. The parser's
+  // message isn't printed, because it can quote the file.
+  if (contract.parseError !== undefined) {
+    return {
+      name: "env mode",
+      status: "warn",
+      message: `${contractPath} can't be read or parsed. Correct it or remove it, then run \`hack doctor --migrate-env-config\`.`,
     };
   }
 
@@ -4069,6 +4076,9 @@ async function buildEnvMigrationPlanStep(opts: {
   const contract = await readHackEnvContract({
     projectDir: opts.project.projectDir,
   });
+  if (contract.parseError !== undefined) {
+    return "Refuse env migration (E_CONFIG_INVALID) because .hack/hack.env.json can't be read or parsed.";
+  }
   if (contract.exists) {
     return "Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.";
   }

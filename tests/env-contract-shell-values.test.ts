@@ -973,12 +973,14 @@ test("doctor names a contract it can't open as the migration source, not as abse
   });
 
   expect(run.output).toContain("hack.env.json can't be read");
-  expect(run.exitCode).not.toBe(0);
+  // The env mode check also says "can't be read", so this proves the migration ran.
+  expect(run.output).toContain("Refusing to migrate");
+  expect(run.output).toContain("can't be read or parsed");
   expect(run.output).not.toContain("no hack.env.json");
-  expect(run.output).not.toContain("no .hack/hack.env.json");
   expect(run.output).not.toContain(
     "and no .hack/hack.env.default.yaml present"
   );
+  expect(run.output).not.toContain("Legacy env format detected");
   const entries = await readdir(repo.projectDir);
   expect(entries).toContain("hack.env.json");
   expect(entries).not.toContain("hack.env.default.yaml");

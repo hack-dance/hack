@@ -170,25 +170,31 @@ test("doctor rejects mutating repair flags combined with json", () => {
   ).not.toThrow();
 });
 
-test("doctor remediation plan treats a dangling contract as a contract, not as absent", async () => {
-  const root = await createDoctorTestProject({ legacy: true });
-  try {
-    const contract = resolve(root, ".hack", "hack.env.json");
-    await rm(contract);
-    await symlink(resolve(root, "contract-that-is-gone"), contract);
+for (const form of ["dangling link", "malformed"] as const) {
+  test(`doctor remediation plan says a ${form} contract refuses, and doesn't offer the migration`, async () => {
+    const root = await createDoctorTestProject({ legacy: true });
+    try {
+      const contract = resolve(root, ".hack", "hack.env.json");
+      await rm(contract);
+      if (form === "dangling link") {
+        await symlink(resolve(root, "contract-that-is-gone"), contract);
+      } else {
+        await writeFile(contract, "{not json\n");
+      }
 
-    const lines = await buildDoctorRemediationPlanLines({
-      startDir: root,
-      migrateEnvConfig: true,
-    });
+      const lines = await buildDoctorRemediationPlanLines({
+        startDir: root,
+        migrateEnvConfig: true,
+      });
 
-    expect(lines.at(-1)).toBe(
-      "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml."
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
+      expect(lines.at(-1)).toBe(
+        "3. Refuse env migration (E_CONFIG_INVALID) because .hack/hack.env.json can't be read or parsed."
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("doctor remediation plan mentions env migration when requested for a legacy project", async () => {
   const root = await createDoctorTestProject({ legacy: true });

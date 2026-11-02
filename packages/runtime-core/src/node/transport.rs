@@ -338,13 +338,27 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id() as i32;
+        // The receipt differs from this live child's identity only in its boot format
+        // (HACK-1457): same PID, UID, group and start, so nothing but the retired format
+        // can be why this identity never authorizes a signal.
+        let live = super::super::ownership::observe(pid).unwrap();
         let legacy = crate::node::ProcessIdentity {
-            pid,
-            uid: unsafe { libc::geteuid() },
-            process_group: pid,
-            start: 1,
             boot: "1700000000:250000".into(),
+            ..live.clone()
         };
+        assert_ne!(legacy.boot, live.boot);
+        // The only signal authority any owner has is `verify`, and it refuses this
+        // identity for its format alone: against the live child, and against an observer
+        // that still reports the retired format, which every other field matches.
+        for observed in [&live, &legacy] {
+            assert_eq!(
+                super::super::ownership::verify(&legacy, observed)
+                    .unwrap_err()
+                    .message,
+                "Owned child identity uses a retired boot format; no signal sent.",
+                "E_TEST_RETIRED_FORMAT_NOT_REFUSED"
+            );
+        }
         let id = "b".repeat(64);
         super::super::test_support::job(&store, &id, "running", 60_000);
         store

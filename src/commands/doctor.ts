@@ -3790,7 +3790,6 @@ async function maybeMigrateProjectEnvConfig(opts: {
     project.projectDir,
     PROJECT_ENV_CONTRACT_FILENAME
   );
-  // A dangling link is a contract that can't be opened, not a project without one.
   const contract = await readHackEnvContract({
     projectDir: project.projectDir,
   });

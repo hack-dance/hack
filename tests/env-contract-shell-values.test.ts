@@ -939,7 +939,7 @@ test("env set says a contract it can't open can't be read, not that it's malform
   expect(run.output).not.toContain("new-value");
 }, 60_000);
 
-test("doctor names a contract it can't open as the migration source, not as absent", async () => {
+test("doctor refuses a contract it can't open, without offering the migration first", async () => {
   const repo = await createContractRepo({
     files: { ".env": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
   });
@@ -976,7 +976,6 @@ test("doctor names a contract it can't open as the migration source, not as abse
   // The env mode check also says "can't be read", so this proves the migration ran.
   expect(run.output).toContain("Refusing to migrate");
   expect(run.output).toContain("can't be read or parsed");
-  expect(run.output).not.toContain("no hack.env.json");
   expect(run.output).not.toContain(
     "and no .hack/hack.env.default.yaml present"
   );

@@ -1,6 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
 import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../agents/integration-revision.ts";
@@ -3728,6 +3728,11 @@ async function maybeMigrateProjectEnvConfig(opts: {
     return;
   }
   const migrationNotes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
+  for (const moved of migrated.movedPlainValues) {
+    migrationNotes.push(
+      `Moved ${moved.key} to ${relative(project.projectRoot, moved.path)} (values omitted).`
+    );
+  }
   if (migrated.updatedProjectConfig) {
     migrationNotes.push(
       "Updated .hack/hack.config.json for the modern env format."

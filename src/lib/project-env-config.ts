@@ -52,7 +52,11 @@ import {
   resolveGitWorktreeDir,
 } from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
-import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
+import {
+  type HackEnvResolveResult,
+  readHackEnvContract,
+  resolveHackEnv,
+} from "./hack-env.ts";
 import {
   isOwnedLegacyAdoptionManagedEnvAdmission,
   type LegacyAdoptionManagedEnvAdmission,
@@ -4877,6 +4881,69 @@ function removeLegacyComposeEnvFileEntries(opts: {
   return kept.length > 0 ? kept : undefined;
 }
 
+/** Reject aliases between tracked and effective local destinations before any writes. */
+async function preflightLegacyEnvMigrationPaths(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+}): Promise<readonly string[]> {
+  const destinations = new Set<string>();
+  const localPaths: string[] = [];
+  for (const envName of [null, ...opts.overlayNames]) {
+    const trackedPath = resolveProjectEnvConfigPath({
+      projectDir: opts.projectDir,
+      envName,
+    });
+    const localPath = await resolveProjectEnvEffectiveLocalConfigPath({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      envName,
+    });
+    for (const path of [trackedPath, localPath]) {
+      await assertProjectEnvLayerPath({ projectRoot: opts.projectRoot, path });
+      // Refuse portable aliases too: macOS checkouts may fold filename case.
+      const identity = path.toLowerCase();
+      if (destinations.has(identity)) {
+        throw new ClosedCliError(
+          "Refusing legacy env migration: env layer destination paths collide. Rename conflicting legacy overlays and update their project references before retrying. No env migration files were written (values omitted)."
+        );
+      }
+      destinations.add(identity);
+    }
+    localPaths.push(localPath);
+  }
+  return localPaths;
+}
+
+/** Migration must establish effective ignore protection before publishing any plaintext. */
+async function ensureLegacyMigrationLocalLayersIgnored(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly localPaths: readonly string[];
+}): Promise<void> {
+  const ignored = await ensureHackDirGitignore({ projectDir: opts.projectDir });
+  if (ignored.readOnly) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .hack/.gitignore is read-only and cannot protect machine-local values. Make it writable and retry. No env migration values were written (values omitted)."
+    );
+  }
+  if (!(await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))) {
+    return;
+  }
+  for (const path of opts.localPaths) {
+    if (
+      (await isGitIgnoredProjectEnvPath({
+        projectRoot: opts.projectRoot,
+        path,
+      })) !== true
+    ) {
+      throw new ClosedCliError(
+        "Refusing legacy env migration: a machine-local destination is not ignored by Git or its ignore status cannot be checked. Repair ignore rules and retry. No env migration values were written (values omitted)."
+      );
+    }
+  }
+}
+
 /**
  * Migrates a legacy v2 `.env`-based project env layout to the v3
  * `hack.env.*.yaml` config system.
@@ -4894,6 +4961,10 @@ export async function migrateLegacyProjectEnv(opts: {
 }): Promise<{
   readonly wroteFiles: readonly string[];
   readonly migratedOverlays: readonly string[];
+  readonly movedPlainValues: readonly {
+    readonly key: string;
+    readonly path: string;
+  }[];
   readonly legacyDetected: boolean;
   readonly updatedProjectConfig: boolean;
   readonly cleanupCandidates: readonly string[];
@@ -4911,6 +4982,7 @@ export async function migrateLegacyProjectEnv(opts: {
     return {
       wroteFiles: [],
       migratedOverlays: [],
+      movedPlainValues: [],
       legacyDetected: false,
       updatedProjectConfig: false,
       cleanupCandidates: [],
@@ -4934,11 +5006,47 @@ export async function migrateLegacyProjectEnv(opts: {
       "Refusing legacy env migration: .env.default would overwrite the base hack.env.default.yaml layer. Rename the legacy default overlay and update its project references before retrying. No env migration files were written."
     );
   }
+  if (overlayNames.includes("local")) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .env.local would collide with the machine-local hack.env.local.yaml layer. Rename the legacy local overlay and update its project references before retrying. No env migration files were written."
+    );
+  }
+  const localPaths = await preflightLegacyEnvMigrationPaths({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    overlayNames,
+  });
+  const resolvedOverlays: { name: string; resolved: HackEnvResolveResult }[] =
+    [];
+  for (const name of overlayNames) {
+    resolvedOverlays.push({
+      name,
+      resolved: await resolveHackEnv({
+        projectDir: opts.projectDir,
+        projectName: opts.projectName,
+        envName: name,
+      }),
+    });
+  }
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
   )
     ? await ensureProjectEnvSecretKey({ projectRoot: opts.projectRoot })
     : null;
+  if (
+    [baseResolved, ...resolvedOverlays.map((overlay) => overlay.resolved)].some(
+      (resolved) =>
+        resolved.values.some(
+          (value) => value.source === "plain_env" && value.value !== null
+        )
+    )
+  ) {
+    await ensureLegacyMigrationLocalLayersIgnored({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      localPaths,
+    });
+  }
 
   // An overlay may inherit an equal base value without writing its own entry.
   // Keep the full resolved delivery per source file, including inherited values.
@@ -4948,10 +5056,60 @@ export async function migrateLegacyProjectEnv(opts: {
     new Map(baseResolved.values.map((entry) => [entry.key, entry.value]))
   );
   const wroteFiles: string[] = [];
+  const movedPlainValues: { key: string; path: string }[] = [];
+  /** Keep plaintext in ignored layers; hydration preserves other entries and refuses unsafe targets. */
+  const migratePlainValues = async (migration: {
+    readonly resolvedValues: typeof baseResolved.values;
+    readonly envName: string | null;
+    readonly baseValues: ReadonlyMap<string, string | null> | null;
+  }) => {
+    const values = buildMigratedValues({
+      resolvedValues: migration.resolvedValues.filter(
+        (entry) => entry.source === "plain_env"
+      ),
+      baseValues: migration.baseValues,
+      keyText: null,
+    });
+    let hasEntries = false;
+    for (const [scope, entries] of Object.entries(values)) {
+      const plainEntries = new Map<string, string>();
+      for (const [key, value] of Object.entries(entries)) {
+        if (typeof value === "string") {
+          plainEntries.set(key, value);
+        }
+      }
+      if (plainEntries.size === 0) {
+        continue;
+      }
+      hasEntries = true;
+      const result = await hydrateProjectEnvLocalLayer({
+        projectRoot: opts.projectRoot,
+        projectDir: opts.projectDir,
+        envName: migration.envName,
+        scope,
+        entries: plainEntries,
+        secret: false,
+      });
+      if (result.changed && !wroteFiles.includes(result.filePath)) {
+        wroteFiles.push(result.filePath);
+      }
+      for (const key of plainEntries.keys()) {
+        movedPlainValues.push({ key, path: result.filePath });
+      }
+    }
+    return hasEntries;
+  };
+  await migratePlainValues({
+    resolvedValues: baseResolved.values,
+    envName: null,
+    baseValues: null,
+  });
   const defaultConfig = buildMigratedProjectEnvConfig({
     environment: "default",
     values: buildMigratedValues({
-      resolvedValues: baseResolved.values,
+      resolvedValues: baseResolved.values.filter(
+        (entry) => entry.source === "keychain"
+      ),
       baseValues: null,
       keyText: keyInfo?.keyText ?? null,
     }),
@@ -4970,20 +5128,27 @@ export async function migrateLegacyProjectEnv(opts: {
     wroteFiles.push(defaultPath);
   }
 
-  for (const overlayName of overlayNames) {
-    const overlayResolved = await resolveHackEnv({
-      projectDir: opts.projectDir,
-      projectName: opts.projectName,
-      envName: overlayName,
-    });
+  for (const {
+    name: overlayName,
+    resolved: overlayResolved,
+  } of resolvedOverlays) {
     deliveredValues.set(
       resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlayName}`),
       new Map(overlayResolved.values.map((entry) => [entry.key, entry.value]))
     );
+    const hasPlainOverlayEntries = await migratePlainValues({
+      resolvedValues: overlayResolved.values,
+      envName: overlayName,
+      baseValues: new Map(
+        baseResolved.values.map((value) => [value.key, value.value])
+      ),
+    });
     const overlayConfig = buildMigratedProjectEnvConfig({
       environment: overlayName,
       values: buildMigratedValues({
-        resolvedValues: overlayResolved.values,
+        resolvedValues: overlayResolved.values.filter(
+          (entry) => entry.source === "keychain"
+        ),
         baseValues: new Map(
           baseResolved.values.map((value) => [value.key, value.value])
         ),
@@ -4993,7 +5158,7 @@ export async function migrateLegacyProjectEnv(opts: {
     const hasOverlayEntries = Object.entries(overlayConfig.values).some(
       ([scope, values]) => scope !== "global" || Object.keys(values).length > 0
     );
-    if (!hasOverlayEntries) {
+    if (!(hasOverlayEntries || hasPlainOverlayEntries)) {
       continue;
     }
 
@@ -5042,6 +5207,7 @@ export async function migrateLegacyProjectEnv(opts: {
   return {
     wroteFiles,
     migratedOverlays: overlayNames,
+    movedPlainValues,
     legacyDetected: true,
     updatedProjectConfig: configCleanup.changed,
     cleanupCandidates: cleanupCandidates.allowed,

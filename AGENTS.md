@@ -61,6 +61,12 @@ agent changes need source/render parity and actual client loading when relevant.
 Distinguish local tests, hosted CI, installed versions, and published artifacts.
 A required check failing is a blocker; unrelated optional integration warnings are not.
 
+For changes to the supervisor job lifecycle (`runner.ts`, `job-store.ts` and
+`service.ts` in `src/control-plane/extensions/supervisor/`), update and review
+`docs/supervisor-job-statechart.md` and `docs/supervisor-job-walkthrough.md`, then
+run `bun run check:tla`. It does not cover other control-plane state. See
+`specs/fv/COVERAGE.md` for property scope, known bugs, and source sync revisions.
+
 ## Runtime and secrets
 
 Use Hack for its managed runtime. Never hand-edit `.hack/.internal/` or `.hack/.branch/`.

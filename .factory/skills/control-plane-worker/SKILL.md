@@ -21,6 +21,11 @@ mission; do not assume those files or tools exist in ordinary tasks.
 5. Complete required checks and report exact results and remaining uncertainty.
    Known warning-only diagnostics do not become a new blocker unless the change
    worsens them. Failed required checks still need repair.
+   For supervisor job lifecycle changes (`runner.ts`, `job-store.ts`, `service.ts` in
+   `src/control-plane/extensions/supervisor/`), update and review
+   `docs/supervisor-job-statechart.md` and `docs/supervisor-job-walkthrough.md`, then
+   run `bun run check:tla`. It does not cover other control-plane state.
+   Consult `specs/fv/COVERAGE.md` for scope, known bugs, and source sync revisions.
 6. Stop only task-owned temporary processes. Record useful learning and actionable
    follow-up within authorization; skip empty handoff or ticket paperwork.
 

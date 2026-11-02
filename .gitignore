@@ -80,6 +80,11 @@ zig-out/
 
 
 SPECS/
+# Track the bounded verification suite even on case-insensitive filesystems.
+!/specs/
+/specs/*
+!/specs/tla/
+!/specs/fv/
 _DOCS
 TODO.md
 REVIEW.md
@@ -87,3 +92,13 @@ REVIEW.md
 dist
 
 .tmp
+
+# TLA+ tools and generated model-checking data
+.tlc/
+states/
+*_TTrace_*.tla
+*_TTrace_*.bin
+*_TTrace_*.cfg
+SpecTE.tla
+SpecTE.cfg
+*.jar

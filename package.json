@@ -52,6 +52,7 @@
     "turbo:test": "bunx turbo run test",
     "turbo:check": "bunx turbo run check",
     "check": "bun run privacy:check && bun run turbo:check",
+    "check:tla": "bun run scripts/check-tla-models.ts",
     "prepare": "husky",
     "release:prepare": "bunx semantic-release --no-ci",
     "typecheck": "bun run turbo:typecheck",

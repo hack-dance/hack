@@ -1124,4 +1124,39 @@ mod tests {
         drop(inspect);
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn a_rollback_journal_deleted_between_check_and_open_reads_as_absent() {
+        use super::super::test_support::BeforeOpen;
+        let root = test_root("journal-race");
+        drop(Store::open(&root, true).unwrap());
+        let journal = root.join("journal.sqlite-journal");
+        let rollback_journal = || {
+            std::fs::write(&journal, b"").unwrap();
+            std::fs::set_permissions(
+                &journal,
+                std::os::unix::fs::PermissionsExt::from_mode(0o600),
+            )
+            .unwrap();
+        };
+        // A running supervisor's commit deletes its rollback journal after any earlier
+        // check saw it and just before the restarted node's open (HACK-1418).
+        rollback_journal();
+        let race = BeforeOpen::arm(&journal, |path| std::fs::remove_file(path).unwrap());
+        let store = Store::open(&root, false).unwrap();
+        assert!(race.fired());
+        assert!(journal.symlink_metadata().is_err());
+        drop((store, race));
+        // The same instant cannot swap in an alias: the O_NOFOLLOW open still refuses.
+        rollback_journal();
+        let outside = root.join("outside");
+        let race = BeforeOpen::arm(&journal, move |path| {
+            std::fs::remove_file(path).unwrap();
+            std::os::unix::fs::symlink(&outside, path).unwrap();
+        });
+        assert!(Store::open(&root, false).is_err());
+        assert!(race.fired());
+        drop(race);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

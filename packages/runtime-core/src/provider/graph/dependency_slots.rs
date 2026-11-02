@@ -777,43 +777,85 @@ mod tests {
             other
         );
     }
+    /// Hang guard for the claim-writer test, not a correctness bound. A writer can
+    /// wait behind seven fsync-backed critical sections whose latency is unbounded on
+    /// a loaded host (HACK-1430: a 3 s per-writer budget expired at load average
+    /// ~190), so only a lease that is never released should reach this limit.
+    const CLAIM_LEASE_HANG_GUARD: Duration = Duration::from_secs(120);
     #[test]
     fn concurrent_claim_writers_serialize_without_overlapping_slots() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        const WRITERS: u8 = 8;
         let fixture = super::super::tests::Fixture::new();
         let provider = fixture.0.join("provider");
         let directory = fixture.0.join("claims");
+        // Hold the lease until every writer has been refused once, so all of them
+        // contend before any may claim a slot, whatever the scheduler does.
+        let held = state::Lock::acquire(&provider).unwrap();
+        let refused = Arc::new(AtomicUsize::new(0));
+        let inside = Arc::new(AtomicUsize::new(0));
         let mut threads = Vec::new();
-        for index in 0..8 {
+        for index in 0..WRITERS {
             let provider = provider.clone();
             let directory = directory.clone();
+            let refused = Arc::clone(&refused);
+            let inside = Arc::clone(&inside);
             threads.push(std::thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(3);
-                let _lock = loop {
+                let deadline = Instant::now() + CLAIM_LEASE_HANG_GUARD;
+                let mut was_refused = false;
+                let lock = loop {
                     match state::Lock::acquire(&provider) {
                         Ok(lock) => break lock,
-                        Err(e) if e.code == "provider_busy" && Instant::now() < deadline => {
-                            std::thread::yield_now()
+                        Err(e) if e.code == "provider_busy" => {
+                            if !was_refused {
+                                was_refused = true;
+                                refused.fetch_add(1, SeqCst);
+                            }
+                            assert!(Instant::now() < deadline, "E_TEST_CLAIM_LEASE_HANG");
+                            std::thread::sleep(Duration::from_millis(1));
                         }
                         Err(e) => panic!("unexpected reservation lock refusal: {}", e.code),
                     }
                 };
+                assert!(was_refused, "E_TEST_CLAIM_WRITER_UNCONTENDED");
+                // The lease, not the slot selection, must exclude other writers.
+                assert_eq!(inside.fetch_add(1, SeqCst), 0, "E_TEST_CLAIM_LEASE_OVERLAP");
                 let mut record = fixture_record(char::from(b'1' + index), 0);
-                let existing = records(&directory, &record.owner, 8).unwrap();
+                let existing = records(&directory, &record.owner, WRITERS).unwrap();
                 let used = existing
                     .iter()
                     .flat_map(|r| r.slots.values().copied())
                     .collect();
-                record.slots = select(&BTreeSet::from([0]), &used, 8, true).unwrap();
+                record.slots = select(&BTreeSet::from([0]), &used, WRITERS, true).unwrap();
                 store(&directory, &record);
+                assert_eq!(inside.fetch_sub(1, SeqCst), 1, "E_TEST_CLAIM_LEASE_OVERLAP");
+                drop(lock);
                 record.slots[&0]
             }));
         }
+        // No writer can finish while the lease is held; one that did already failed,
+        // so stop waiting and let join report it.
+        let deadline = Instant::now() + CLAIM_LEASE_HANG_GUARD;
+        let mut all_refused = false;
+        while Instant::now() < deadline && !threads.iter().any(|t| t.is_finished()) {
+            if refused.load(SeqCst) == usize::from(WRITERS) {
+                all_refused = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(held);
         let slots = threads
             .into_iter()
             .map(|t| t.join().unwrap())
             .collect::<BTreeSet<_>>();
-        assert_eq!(slots, (0..8).collect());
-        assert_eq!(records(&directory, &"a".repeat(32), 8).unwrap().len(), 8);
+        assert!(all_refused, "E_TEST_CLAIM_WRITERS_NOT_REFUSED");
+        assert_eq!(slots, (0..WRITERS).collect());
+        assert_eq!(
+            records(&directory, &"a".repeat(32), WRITERS).unwrap().len(),
+            usize::from(WRITERS)
+        );
     }
     #[test]
     fn legacy_exact_selection_cannot_steal_unbound_durable_reservation() {

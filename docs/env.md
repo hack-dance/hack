@@ -200,9 +200,12 @@ Use `--env=base` to bypass that default and read only `.hack/hack.env.default.ya
 command that accepts `--env`; an overlay file named after one of those spellings is never
 selected by name. Any other value must already be a canonical overlay name: lowercase
 letters and digits joined by single hyphens (`^[a-z0-9]+(-[a-z0-9]+)*$`, for example
-`qa` or `qa-2`); surrounding whitespace is ignored. Hack never rewrites a requested name,
-so `QA`, `q_a` or `X=1` is refused with a fixed `Invalid --env value.` message that does
-not repeat the argument, before any project file is read or any child process starts.
+`qa` or `qa-2`), at most 128 characters long; surrounding whitespace is ignored. Hack
+never rewrites a requested name, so `QA`, `q_a`, `X=1` or a name longer than 128
+characters is refused with a fixed `Invalid --env value.` message (`E_USAGE` under
+`--json`) that does not repeat the argument, before any project file is read or any
+child process starts. The limit keeps every file name Hack derives from the overlay
+name, such as the layer's lock, within the usual 255-byte file name limit.
 See the [command and delivery matrix](#command-and-delivery-matrix) for what each command
 does with the selection.
 
@@ -228,8 +231,8 @@ A `null` result means no modern env configuration exists; it does not inspect or
 resolve legacy `.env` or secret-store values. Callers retain responsibility for
 their existing legacy fallback. Selected managed-env layer reads distinguish a
 missing path from a failed read or a dangling symlink. Only regular files
-(including readable symlinks to regular files) are read; invalid or unreadable
-layers throw a value-free error without YAML excerpts or a nested cause. Project configuration
+(including readable symlinks to regular files inside the real project root) are read;
+invalid or unreadable layers throw a value-free error without YAML excerpts or a nested cause. Project configuration
 selection keeps its existing semantics. Metadata inspection never writes key
 files or materializes `.env`.
 
@@ -589,6 +592,15 @@ input and without writing anything:
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
 per-checkout values you don't want to commit.
 
+In a project with `.hack/hack.env.json` and no env layers yet, `hack env set --local` refuses and
+writes nothing for a plaintext value, because that project's migration copies `.hack/.env` values to
+tracked layers. Use `hack env add` with the same flags, which migrates first and then writes the
+machine-local layer. That migration still copies values already in `.hack/.env`, and a `plain_env`
+value exported in your shell, to tracked layers.
+With `--secret`, the value goes to the secret backend, and a key the contract declares as `keychain`
+reaches a tracked layer as ciphertext when the project migrates. Without `hack.env.json`, `--local`
+still writes `.hack/.env`.
+
 Repeating `hack env add` or `hack env set` with the value already stored is a no-op: when
 the existing secret decrypts to the same value under the current key, its ciphertext is
 kept, so once Hack has written the file it stays byte-identical and Git shows no change.
@@ -606,9 +618,23 @@ new layer, so `.hack/.gitignore` ignores `.hack.env*.tmp`, and you can delete it
 does not remove it on the next write, because another write may still be using it. The
 rename has these effects:
 
-- a symlinked env file keeps its link; the new contents land at the file the link points
-  to, and the staging file is created next to that file
-- a symlink whose target does not exist is replaced by a regular file
+- a symlinked YAML env layer is allowed only when its fully resolved path stays inside
+  the project's real root. Relative links and link chains are resolved at each hop; a
+  root behind a symlink works too. An allowed link keeps its link, the write lands at
+  its target, and the staging file is created next to that target
+- outside targets (including dangling outside links), sibling-prefix escapes and link
+  loops are refused with a closed, value-free error before reading values from stdin
+  or writing decrypted or hydrated output. This applies to the base, tracked overlays
+  and local layers, including init scaffold writes; mutation discovery checks all named
+  YAML layers, including case-variant names on case-insensitive filesystems.
+  `hack doctor --fix` reports an error for a `.hack` linked outside the project
+  and leaves the link and outside files in place
+- an in-project symlink whose target does not exist keeps the existing behavior: the
+  link is replaced by a regular file. Strict planning and hydrate reads still refuse
+  dangling links
+- the writer rechecks both the layer and its resolved destination before staging and
+  commit. These path checks narrow concurrent-swap races; they are not an atomic
+  filesystem fence against a directory changed after the last check
 - a hard link is broken: the env file gets a new inode, and any other name for the old
   file keeps the previous contents
 - the directory must be writable, even when the env file itself is writable; if it is
@@ -653,7 +679,28 @@ message in the envelope:
   you cannot write (for example mode `0555`) both give this code.
 - `E_NO_SPACE`: the disk or the disk quota is full.
 - `E_PATH_CONFLICT`: a path is the wrong kind of entry, such as a file where Hack needs
-  a directory, or a directory where Hack needs a file.
+  a directory, a directory where Hack needs a file (including a `.hack/.gitignore` that
+  is a directory or a symlink), or a `.hack/.internal` that `hack env hydrate` finds to
+  be a symlink (dangling or not) or a file. A file name or path that is too long for
+  the filesystem is reported with this code too; use a shorter `--env` overlay name or
+  move the project to a shorter path.
+- `E_LOCKED`: the project env key lock (`<git common dir>/.hack.secret.key.lock`, taken
+  by the first `--secret` value) stayed held for the whole 10-second wait. Nothing was
+  written. Another hack command may be creating the key; retry when it finishes. If no
+  other hack command is running, the lock is stale (for example its process ID now
+  belongs to an unrelated process, which Hack never treats as abandoned): remove the
+  lock file the message names, then retry.
+
+The first `--secret` value also works on a filesystem without hard links, such as ExFAT
+or FAT on a USB drive. Hack normally publishes the key file and its locks with a hard
+link, so they appear complete or not at all. Where that is not possible, it creates an
+empty placeholder exclusively and renames the complete file over it, which keeps the
+same rules: an existing file or symlink is never replaced or followed, and a reader
+never sees a partial file. If Hack is killed between those two steps, an empty
+`.hack.secret.key` or lock file is left behind. Hack refuses it rather than use or
+replace it; remove it and run the command again. ExFAT and FAT do not store Unix
+permissions, so on such a drive the key file is not limited to your user the way mode
+`0600` limits it elsewhere.
 
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the
@@ -918,7 +965,7 @@ Write-path guarantees in a linked worktree (first secret added from any checkout
 - otherwise an existing shared key (git common dir) is reused
 - otherwise the primary checkout's key is adopted by copying it to the shared location, so sibling checkouts converge on one key
 - only then is a new key generated, and it is written to the shared location — never silently to the checkout
-- concurrent first use from several checkouts converges on one key: when no key exists, creation runs under a cooperative lock at `<git common dir>/.hack.secret.key.lock`, and a key file is published only when complete, never empty or partial (Hack v4 writers do not take the lock)
+- concurrent first use from several checkouts converges on one key: when no key exists, creation runs under a cooperative lock at `<git common dir>/.hack.secret.key.lock`, and a key file is published only when complete, never empty or partial (Hack v4 writers do not take the lock; on a filesystem without hard links, such as ExFAT, an empty placeholder is visible for a moment before the complete key replaces it)
 - if the shared location cannot be resolved (git unavailable) or written, Hack falls back to a checkout-local key and prints a loud divergence warning
 - `hack doctor` flags divergent `.hack.secret.key` contents across checkouts with the exact paths
 
@@ -998,6 +1045,17 @@ That migrates the repo into:
 - `.hack/hack.env.default.yaml`
 - `.hack/hack.env.<overlay>.yaml`
 - `.hack.secret.key` when needed
+
+Doctor offers legacy dotenv files for cleanup only when every parsed entry was
+delivered to an env layer. Files containing undeclared or undelivered entries stay
+on disk; the cleanup report lists their key names and omits their values. This
+also applies to untracked overlays such as `.env.bak` and `.env.example`.
+Migration refuses a legacy `.env.default` overlay before writing env layers,
+because it would overwrite the base `hack.env.default.yaml` layer. Rename that
+legacy overlay and update its project references before retrying.
+If a legacy dotenv file cannot be read, migration refuses cleanup and leaves
+legacy artifacts in place. Env layers may already have been written; check read
+access and preserve the remaining entries before cleaning up manually.
 
 `hack doctor` also warns when a repo still depends on the old format.
 For modern env repos, `hack doctor` also warns when materialized compatibility output in

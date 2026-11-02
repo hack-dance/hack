@@ -907,6 +907,12 @@ boundedTest(
 gatedTest(
   "a refused teardown still restores HACK_HOME so later files never inherit the fixture home",
   async (restored) => {
+    // This case installs the fixture's global doubles, so it must hold the
+    // file's fixture gate: as a plain test it could run while an earlier
+    // fixture's lifetime is unknown, and a later case would not see this one
+    // still open (HACK-1455).
+    expect(fixtureActive).toBe(true);
+    expect(fixtureUncertain).toBe(false);
     const before = process.env.HACK_HOME;
     // Stands in for another fixture's spy that is kept on purpose while its
     // settlement is unknown: this case must restore only its own spies.

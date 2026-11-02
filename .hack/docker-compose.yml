@@ -1,5 +1,32 @@
 name: hack-cli
 services:
+  docs:
+    profiles: [docs]
+    pull_policy: build
+    build:
+      context: ./docs
+    init: true
+    working_dir: /app
+    cpus: 2
+    mem_limit: 6g
+    volumes:
+      - ..:/app
+      - docs_dependencies:/app/site/node_modules
+      - docs_build:/app/site/.next
+    command:
+      - /bin/sh
+      - -ec
+      - cd site && bun install --frozen-lockfile && cd .. && bun run docs:build && cd site && bun run start -- --hostname 0.0.0.0
+    environment:
+      NEXT_TELEMETRY_DISABLED: "1"
+      NODE_OPTIONS: --max-old-space-size=3072
+    labels:
+      caddy: docs.hack-cli.hack
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+      caddy.tls: internal
+    networks:
+      - hack-dev
+      - default
   deps:
     image: imbios/bun-node:latest
     working_dir: /app
@@ -37,6 +64,8 @@ networks:
     external: true
 
 volumes:
+  docs_dependencies:
+  docs_build:
   node_modules:
   toolchain_dependencies:
   toolchain_dist:

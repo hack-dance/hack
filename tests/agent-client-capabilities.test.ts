@@ -344,8 +344,8 @@ test("manifest-declared components agree with the matrix", async () => {
   ).toEqual(["manifest-disagreement"]);
 
   const hiddenRules = replaceCell("cursor", "rules", {
-    status: "unsupported",
-    openGate: null,
+    status: "untested",
+    openGate: "Observe the selected client loading this capability.",
   });
   expect(
     codesFor(
@@ -370,12 +370,12 @@ test("manifest-declared components agree with the matrix", async () => {
     )
   ).toEqual(["missing-cell"]);
 
-  const ungated = replaceCell("claude", "hooks", { openGate: null });
+  const ungated = replaceCell("claude", "skillDiscovery", { openGate: null });
   expect(
     codesFor(
       classificationIssues({ cells: ungated, manifests, exists: repoExists }),
       "claude",
-      "hooks"
+      "skillDiscovery"
     )
   ).toEqual(["open-gate-missing"]);
 });
@@ -453,6 +453,38 @@ test("committed reference section matches the generator output", async () => {
   expect(
     isRecord(scripts) ? scripts["docs:agent-client-capabilities"] : undefined
   ).toBe("bun run scripts/generate-agent-client-capabilities.ts");
+});
+
+test("docs-owner projected parity update preserves prose and is idempotent", async () => {
+  const doc = await Bun.file(referencePath).text();
+  const section = renderAgentClientCapabilitySection();
+  const projected = replaceGeneratedSection({ document: doc, section });
+  expect(extractGeneratedSection(projected)).toBe(section);
+  expect(replaceGeneratedSection({ document: projected, section })).toBe(
+    projected
+  );
+  expect(projected.slice(0, projected.indexOf(GENERATED_BEGIN))).toBe(
+    doc.slice(0, doc.indexOf(GENERATED_BEGIN))
+  );
+  expect(projected.slice(projected.indexOf(GENERATED_END))).toBe(
+    doc.slice(doc.indexOf(GENERATED_END))
+  );
+  for (const [client, capability] of [
+    ["claude", "hooks"],
+    ["cursor", "rules"],
+  ] as const) {
+    const cell = AGENT_CLIENT_CAPABILITY_MATRIX.find(
+      (candidate) =>
+        candidate.client === client && candidate.capability === capability
+    );
+    expect(cell).toMatchObject({
+      status: "unsupported",
+      evidenceClass: "schema",
+      sourceSha: "5c066d6cca0d26212b1b46681111c4a393b0cd0b",
+      openGate: null,
+    });
+  }
+  expect(section).not.toContain("Hack hooks may only run");
 });
 
 test("negative control: a reclassified cell makes the committed section stale", async () => {

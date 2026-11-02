@@ -26,7 +26,7 @@ import {
   HACK_DIR_GITIGNORE_END_MARKER,
   HACK_DIR_GITIGNORE_ENTRIES,
 } from "../templates.ts";
-import { ClosedCliError } from "./cli-result.ts";
+import { ClosedCliError, HackCliError } from "./cli-result.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
@@ -35,9 +35,11 @@ import {
   ensureDir,
   ensureDirForWrite,
   ensureGitignoreEntry,
+  ensureRealDirectoryForWrite,
   mergeManagedGitignoreBlock,
   pathExists,
   readAtomicWriteTargetText,
+  readOptionalTextFile,
   readTextFile,
   writeTextFile,
   writeTextFileAtomicIfChanged,
@@ -74,12 +76,16 @@ import {
   replacePrivateFileAtomic,
 } from "./private-file.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
+import { assertProjectEnvLayerPath } from "./project-env-layer-path.ts";
 import {
   assertLegacyProjectDirectory,
   assertLegacyProjectInputFamily,
   ProjectInputSelectionError,
 } from "./project-input-selection.ts";
-import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
+import {
+  ProjectsRegistryLockTimeoutError,
+  withProjectsRegistryLock,
+} from "./projects-registry-lock.ts";
 import {
   isNativeManagedLocalTracked,
   resolvePrimaryLocalProjectDir,
@@ -592,12 +598,13 @@ export const HACK_DIR_GITIGNORE_REFUSAL =
 
 /**
  * Refusal to read or write `.hack/.gitignore` through a symlink or a
- * non-regular entry. Names no path or contents. Closed: the CLI prints its
- * message as one line, never with a stack.
+ * non-regular entry (for example a directory). Names no path or contents.
+ * Closed with `E_PATH_CONFLICT`: the CLI prints it as one `CODE: message`
+ * line, never with a stack, and `--json` reports the same code.
  */
-export class HackDirGitignoreRefusalError extends ClosedCliError {
+export class HackDirGitignoreRefusalError extends HackCliError {
   constructor() {
-    super(HACK_DIR_GITIGNORE_REFUSAL);
+    super({ code: "E_PATH_CONFLICT", message: HACK_DIR_GITIGNORE_REFUSAL });
     this.name = "HackDirGitignoreRefusalError";
   }
 }
@@ -790,6 +797,10 @@ async function isInsideGitCheckoutMarker(opts: {
 async function hasLegacyLocalEnvironment(opts: {
   readonly path: string;
 }): Promise<boolean> {
+  await assertProjectEnvLayerPath({
+    projectRoot: dirname(dirname(opts.path)),
+    path: opts.path,
+  });
   const text = await readTextFile(opts.path);
   if (text === null) {
     return false;
@@ -813,6 +824,10 @@ async function isLegacyTrackedLocalOverlay(opts: {
   const localDefaultPath = resolveProjectEnvLocalConfigPath({
     projectDir: opts.projectDir,
     envName: null,
+  });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: localDefaultPath,
   });
   if (!(await pathExists(localDefaultPath))) {
     return false;
@@ -863,9 +878,37 @@ function resolveProjectEnvStatePath(opts: {
   return resolve(opts.projectDir, PROJECT_ENV_STATE_FILENAME);
 }
 
+/** Preflight all named layers before stdin, migration or mutation discovery. */
+export async function assertProjectEnvLayerPaths(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<void> {
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: opts.projectDir,
+  });
+  const entries = await readdir(opts.projectDir);
+  for (const name of entries) {
+    const canonicalName = name.toLowerCase();
+    if (
+      canonicalName.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+      canonicalName.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+    ) {
+      await assertProjectEnvLayerPath({
+        projectRoot: opts.projectRoot,
+        path: resolve(opts.projectDir, name),
+      });
+    }
+  }
+}
+
 export async function projectEnvConfigExists(opts: {
   readonly projectDir: string;
 }): Promise<boolean> {
+  await assertProjectEnvLayerPaths({
+    projectRoot: dirname(opts.projectDir),
+    projectDir: opts.projectDir,
+  });
   const defaultPath = resolveProjectEnvConfigPath({
     projectDir: opts.projectDir,
     envName: null,
@@ -924,9 +967,11 @@ export async function listProjectEnvOverlayNames(opts: {
 
 /** Strict planning reads distinguish missing paths from failed/non-file layers. */
 async function readProjectEnvLayerText(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly strictRead?: boolean;
 }): Promise<string | null> {
+  await assertProjectEnvLayerPath(opts);
   if (!opts.strictRead) {
     return await readTextFile(opts.path);
   }
@@ -954,6 +999,7 @@ async function readProjectEnvLayerText(opts: {
 }
 
 async function readProjectEnvConfigFile(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly environment: string;
   readonly strictRead?: boolean;
@@ -1186,6 +1232,7 @@ async function readProjectEnvLayers(opts: {
   });
 
   const defaultRead = await readProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     strictRead: opts.strictRead,
     path: selection.defaultPath,
     environment: "default",
@@ -1194,11 +1241,13 @@ async function readProjectEnvLayers(opts: {
     selection.overlayPath === null
       ? null
       : await readProjectEnvConfigFile({
+          projectRoot: opts.projectRoot,
           strictRead: opts.strictRead,
           path: selection.overlayPath,
           environment: selection.effectiveEnv ?? "default",
         });
   const localDefaultRead = await readProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     strictRead: opts.strictRead,
     path: selection.localDefaultPath,
     environment: "default",
@@ -1207,6 +1256,7 @@ async function readProjectEnvLayers(opts: {
     selection.localOverlayPath === null
       ? null
       : await readProjectEnvConfigFile({
+          projectRoot: opts.projectRoot,
           strictRead: opts.strictRead,
           path: selection.localOverlayPath,
           environment: selection.effectiveEnv ?? "default",
@@ -1220,9 +1270,14 @@ async function readProjectEnvLayers(opts: {
       projectDir: primaryDir,
       envName: null,
     });
+    await assertProjectEnvLayerPath({
+      projectRoot: dirname(primaryDir),
+      path: primaryDefaultPath,
+    });
     await validatePrimaryLocalFile(primaryDefaultPath);
     inheritedReads.push(
       await readProjectEnvConfigFile({
+        projectRoot: dirname(primaryDir),
         strictRead: opts.strictRead,
         path: primaryDefaultPath,
         environment: "default",
@@ -1233,9 +1288,14 @@ async function readProjectEnvLayers(opts: {
         projectDir: primaryDir,
         envName: selection.effectiveEnv,
       });
+      await assertProjectEnvLayerPath({
+        projectRoot: dirname(primaryDir),
+        path: primaryOverlayPath,
+      });
       await validatePrimaryLocalFile(primaryOverlayPath);
       inheritedReads.push(
         await readProjectEnvConfigFile({
+          projectRoot: dirname(primaryDir),
           strictRead: opts.strictRead,
           path: primaryOverlayPath,
           environment: selection.effectiveEnv,
@@ -1489,10 +1549,68 @@ function nativeEnvValuesError(): Error {
   );
 }
 
-function nativeEnvMetadataError(): Error {
-  return new Error(
+const NATIVE_ENV_DIAGNOSTIC_PROPERTY = "diagnosticCause";
+const NATIVE_ENV_DIAGNOSTIC_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+const NATIVE_ENV_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const NATIVE_ENV_DIAGNOSTIC =
+  /^[A-Za-z][A-Za-z0-9]{0,63}(?::[A-Z][A-Z0-9_]{0,63})?$/;
+
+/**
+ * Closed metadata refusal. It keeps only a value-free diagnostic of what failed:
+ * the underlying error's class name and identifier-shaped code (for example
+ * `HackCliError:E_CONFIG_INVALID` or `Error:ENOENT`), never its message, paths,
+ * bytes or values. The diagnostic is a non-enumerable own property rather than
+ * `cause`, so serializers, reports and the public message stay unchanged.
+ */
+function nativeEnvMetadataError(diagnostic = "NativeEnvMetadataError"): Error {
+  const refusal = new Error(
     "Cannot resolve native managed env metadata: selected inputs are invalid, unreadable, unstable or oversized; values omitted."
   );
+  Object.defineProperty(refusal, NATIVE_ENV_DIAGNOSTIC_PROPERTY, {
+    value: diagnostic,
+    enumerable: false,
+  });
+  return refusal;
+}
+
+/** Refuse with the cause's value-free diagnostic; a nested refusal keeps its own. */
+function nativeEnvMetadataRefusal(cause: unknown): Error {
+  return nativeEnvMetadataError(
+    nativeEnvMetadataDiagnostic(cause) ?? valueFreeErrorDiagnostic(cause)
+  );
+}
+
+function valueFreeErrorDiagnostic(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return error === null ? "null" : typeof error;
+  }
+  const name = NATIVE_ENV_DIAGNOSTIC_NAME.test(error.name)
+    ? error.name
+    : "Error";
+  const code: unknown = Reflect.get(error, "code");
+  return typeof code === "string" && NATIVE_ENV_DIAGNOSTIC_CODE.test(code)
+    ? `${name}:${code}`
+    : name;
+}
+
+/**
+ * Read the value-free diagnostic of a native metadata refusal, for tests and
+ * debugging. Returns undefined for any other error or a malformed diagnostic.
+ */
+export function nativeEnvMetadataDiagnostic(
+  error: unknown
+): string | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+  const diagnostic: unknown = Reflect.get(
+    error,
+    NATIVE_ENV_DIAGNOSTIC_PROPERTY
+  );
+  return typeof diagnostic === "string" &&
+    NATIVE_ENV_DIAGNOSTIC.test(diagnostic)
+    ? diagnostic
+    : undefined;
 }
 
 function validateNativeHostTargets(
@@ -1832,7 +1950,7 @@ export async function resolveProjectEnvMetadataForNativeSelection(
     ) {
       throw error;
     }
-    throw nativeEnvMetadataError();
+    throw nativeEnvMetadataRefusal(error);
   }
 }
 
@@ -2645,6 +2763,7 @@ function opensToPlaintext(opts: {
  * value-free message. Both refusals happen before anything is written.
  */
 async function readProjectEnvLayerForMutation(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly environment: string;
 }): Promise<{
@@ -2652,6 +2771,7 @@ async function readProjectEnvLayerForMutation(opts: {
   /** The exact bytes read (null when absent), for the compare-and-swap. */
   readonly text: string | null;
 }> {
+  await assertProjectEnvLayerPath(opts);
   const text = await readAtomicWriteTargetText(opts.path);
   const read = parseProjectEnvConfigText({
     path: opts.path,
@@ -2698,6 +2818,10 @@ export async function setProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: filePath,
+  });
   // The read, the change and the write form one critical section per layer,
   // so a concurrent set or unset of another key is never lost (HACK-1376).
   return await withEnvLayerLock({
@@ -2721,6 +2845,7 @@ async function setLockedProjectEnvValue(opts: {
 }): Promise<ProjectEnvMutationResult> {
   const { filePath, scope } = opts;
   const { read, text } = await readProjectEnvLayerForMutation({
+    projectRoot: opts.projectRoot,
     path: filePath,
     environment: opts.envName ?? "default",
   });
@@ -2767,6 +2892,7 @@ async function setLockedProjectEnvValue(opts: {
   // The lock excludes cooperating writers; the compare-and-swap turns a write
   // by anything else since the read into a closed, retryable conflict.
   const changed = await writeProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     path: filePath,
     config: nextConfig,
     expectedExisting: text,
@@ -2803,6 +2929,10 @@ export async function unsetProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: filePath,
+  });
   // Same per-layer critical section as `setProjectEnvValue` (HACK-1376).
   return await withEnvLayerLock({
     layerPath: filePath,
@@ -2822,6 +2952,7 @@ async function unsetLockedProjectEnvValue(opts: {
 }): Promise<{ readonly changed: boolean; readonly filePath: string }> {
   const { filePath } = opts;
   const { read, text } = await readProjectEnvLayerForMutation({
+    projectRoot: opts.projectRoot,
     path: filePath,
     environment: opts.envName ?? "default",
   });
@@ -2853,6 +2984,7 @@ async function unsetLockedProjectEnvValue(opts: {
   }
 
   const changed = await writeProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     path: filePath,
     config: {
       version: PROJECT_ENV_CONFIG_VERSION,
@@ -3003,6 +3135,10 @@ export async function hydrateProjectEnvLocalLayer(opts: {
     projectDir: opts.projectDir,
     envName: opts.envName,
   });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: filePath,
+  });
   const lockPath = resolve(
     opts.projectDir,
     ".internal",
@@ -3067,6 +3203,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
 }): Promise<ProjectEnvHydrationResult> {
   const environment = opts.envName ?? "default";
   const layer = await readProjectEnvHydrationLayer({
+    projectRoot: opts.projectRoot,
     filePath: opts.filePath,
     environment,
     refuse: opts.refuse,
@@ -3122,6 +3259,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
   await ensureHackDirGitignoreForLocalEnvWrite({ projectDir: opts.projectDir });
   try {
     await writeProjectEnvConfigFile({
+      projectRoot: opts.projectRoot,
       path: opts.filePath,
       config: {
         version: PROJECT_ENV_CONFIG_VERSION,
@@ -3142,6 +3280,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
 
 /** The layer's exact bytes (null when absent) and its parsed config. */
 async function readProjectEnvHydrationLayer(opts: {
+  readonly projectRoot: string;
   readonly filePath: string;
   readonly environment: string;
   readonly refuse: ProjectEnvHydrationRefuse;
@@ -3149,9 +3288,14 @@ async function readProjectEnvHydrationLayer(opts: {
   readonly text: string | null;
   readonly config: ProjectEnvConfig;
 }> {
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: opts.filePath,
+  });
   let text: string | null;
   try {
     text = await readProjectEnvLayerText({
+      projectRoot: opts.projectRoot,
       path: opts.filePath,
       strictRead: true,
     });
@@ -3337,6 +3481,7 @@ async function readExistingProjectEnvKeyFileText(opts: {
 /**
  * Takes the project's hydration lock: `.internal/env-hydrate.lock`, created
  * exclusively (no symlink follow, mode 0600) and holding the owner's PID.
+ * `.internal` itself must be a real directory (or absent, then created).
  *
  * An existing lock is never removed or taken over, because a second process
  * cannot prove the first one is gone without racing a third. It refuses as
@@ -3350,7 +3495,9 @@ async function acquireProjectEnvHydrationLock(opts: {
   readonly lockPath: string;
   readonly refuse: ProjectEnvHydrationRefuse;
 }): Promise<() => Promise<void>> {
-  await ensureDirForWrite(dirname(opts.lockPath));
+  // A symlinked or non-directory `.internal` (including a dangling link) is
+  // refused as E_PATH_CONFLICT; the lock is never created through it.
+  await ensureRealDirectoryForWrite(dirname(opts.lockPath));
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   try {
     await createPrivateFileExclusive({
@@ -3393,6 +3540,7 @@ function isProcessAlive(pid: number): boolean {
 }
 
 async function writeProjectEnvConfigFile(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly config: ProjectEnvConfig;
   /** Compare-and-swap guard; see `writeTextFileAtomicIfChanged`. */
@@ -3403,13 +3551,16 @@ async function writeProjectEnvConfigFile(opts: {
   await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
   // Rename-committed: an interrupted mutation leaves the previous layer intact.
   return (
-    await writeTextFileAtomicIfChanged(
-      opts.path,
-      text,
-      opts.expectedExisting === undefined
+    await writeTextFileAtomicIfChanged(opts.path, text, {
+      ...(opts.expectedExisting === undefined
         ? {}
-        : { expectedExisting: opts.expectedExisting }
-    )
+        : { expectedExisting: opts.expectedExisting }),
+      validatePath: async (path) =>
+        await assertProjectEnvLayerPath({
+          projectRoot: opts.projectRoot,
+          path,
+        }),
+    })
   ).changed;
 }
 
@@ -3479,6 +3630,10 @@ async function buildProjectEnvStateDigests(opts: {
 }): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const filePath of opts.files) {
+    await assertProjectEnvLayerPath({
+      projectRoot: dirname(dirname(filePath)),
+      path: filePath,
+    });
     const contents = (await readTextFile(filePath)) ?? "";
     out[filePath] = createHash("sha256").update(contents, "utf8").digest("hex");
   }
@@ -3987,9 +4142,10 @@ export async function ensureProjectEnvSecretKey(opts: {
   // git common dir serializes creation; under it the full lookup runs again
   // and adopts a key another checkout created meanwhile.
   let started = false;
+  const lockPath = `${sharedLocation.path}.lock`;
   try {
     return await withProjectsRegistryLock({
-      lockPath: `${sharedLocation.path}.lock`,
+      lockPath,
       label: "project env key",
       run: async () => {
         started = true;
@@ -3999,6 +4155,12 @@ export async function ensureProjectEnvSecretKey(opts: {
   } catch (error: unknown) {
     if (started) {
       throw error;
+    }
+    if (error instanceof ProjectsRegistryLockTimeoutError) {
+      throw new ProjectEnvKeyLockTimeoutError({
+        lockPath,
+        recoveryBusy: error.recoveryBusy,
+      });
     }
     if (!isProjectEnvKeyLockUnavailable(error)) {
       // Any other filesystem failure the user must fix (a full disk or quota,
@@ -4015,6 +4177,29 @@ export async function ensureProjectEnvSecretKey(opts: {
     // The git dir cannot hold a lock (for example it is read-only): create
     // the key unserialized, as before; the writer's own fallbacks apply.
     return await ensureProjectEnvSecretKeyUnlocked(opts);
+  }
+}
+
+/**
+ * The project env key lock stayed held for the whole bounded wait: another
+ * hack command is creating the key, or a lock was left behind by a process
+ * whose PID is now reused (which is never reclaimed automatically), or an
+ * interrupted recovery left its guard. Closed (`E_LOCKED`) and value-free: it
+ * names the lock path and the remedy only. Nothing was written.
+ */
+export class ProjectEnvKeyLockTimeoutError extends HackCliError {
+  constructor(opts: {
+    readonly lockPath: string;
+    readonly recoveryBusy: boolean;
+  }) {
+    const stale = opts.recoveryBusy
+      ? `${opts.lockPath} and the directory ${opts.lockPath}.recovery`
+      : opts.lockPath;
+    super({
+      code: "E_LOCKED",
+      message: `Timed out waiting for the project env key lock ${opts.lockPath}; nothing was written. Another hack command may be creating the key: retry when it finishes. If no other hack command is running, the lock is stale: remove ${stale}, then retry.`,
+    });
+    this.name = "ProjectEnvKeyLockTimeoutError";
   }
 }
 
@@ -4714,6 +4899,10 @@ export async function migrateLegacyProjectEnv(opts: {
   readonly cleanupCandidates: readonly string[];
   readonly blockedCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
+  readonly retainedEnvFiles: readonly {
+    readonly path: string;
+    readonly keys: readonly string[];
+  }[];
 }> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
@@ -4727,6 +4916,7 @@ export async function migrateLegacyProjectEnv(opts: {
       cleanupCandidates: [],
       blockedCleanupCandidates: [],
       composeEnvFileReferences: [],
+      retainedEnvFiles: [],
     };
   }
 
@@ -4739,12 +4929,24 @@ export async function migrateLegacyProjectEnv(opts: {
   const overlayNames = await discoverLegacyOverlayNames({
     projectDir: opts.projectDir,
   });
+  if (overlayNames.includes("default")) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .env.default would overwrite the base hack.env.default.yaml layer. Rename the legacy default overlay and update its project references before retrying. No env migration files were written."
+    );
+  }
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
   )
     ? await ensureProjectEnvSecretKey({ projectRoot: opts.projectRoot })
     : null;
 
+  // An overlay may inherit an equal base value without writing its own entry.
+  // Keep the full resolved delivery per source file, including inherited values.
+  const deliveredValues = new Map<string, ReadonlyMap<string, string | null>>();
+  deliveredValues.set(
+    resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+    new Map(baseResolved.values.map((entry) => [entry.key, entry.value]))
+  );
   const wroteFiles: string[] = [];
   const defaultConfig = buildMigratedProjectEnvConfig({
     environment: "default",
@@ -4760,6 +4962,7 @@ export async function migrateLegacyProjectEnv(opts: {
   });
   if (
     await writeProjectEnvConfigFile({
+      projectRoot: opts.projectRoot,
       path: defaultPath,
       config: defaultConfig,
     })
@@ -4773,6 +4976,10 @@ export async function migrateLegacyProjectEnv(opts: {
       projectName: opts.projectName,
       envName: overlayName,
     });
+    deliveredValues.set(
+      resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlayName}`),
+      new Map(overlayResolved.values.map((entry) => [entry.key, entry.value]))
+    );
     const overlayConfig = buildMigratedProjectEnvConfig({
       environment: overlayName,
       values: buildMigratedValues({
@@ -4796,6 +5003,7 @@ export async function migrateLegacyProjectEnv(opts: {
     });
     if (
       await writeProjectEnvConfigFile({
+        projectRoot: opts.projectRoot,
         path: overlayPath,
         config: overlayConfig,
       })
@@ -4827,6 +5035,7 @@ export async function migrateLegacyProjectEnv(opts: {
     overlayNames,
     materialize: opts.materialize,
     configCleanupCandidates: configCleanup.cleanupCandidates,
+    deliveredValues,
     composeEnvFileReferences,
   });
 
@@ -4837,6 +5046,7 @@ export async function migrateLegacyProjectEnv(opts: {
     updatedProjectConfig: configCleanup.changed,
     cleanupCandidates: cleanupCandidates.allowed,
     blockedCleanupCandidates: cleanupCandidates.blocked,
+    retainedEnvFiles: cleanupCandidates.retainedEnvFiles,
     composeEnvFileReferences,
   };
 }
@@ -4952,16 +5162,37 @@ function buildMigratedValues(opts: {
   return values;
 }
 
+/** Cleanup requires readable contents, even when legacy resolution treated a read failure as absence. */
+async function readLegacyDotenvCleanupEntries(opts: {
+  readonly path: string;
+}): Promise<Readonly<Record<string, string>>> {
+  const source = await readOptionalTextFile(opts.path);
+  if (source.kind !== "text") {
+    throw new ClosedCliError(
+      `Refusing legacy env cleanup: could not read ${opts.path}. No legacy files were removed; env layers may already have been written. Check read access before cleaning up manually (values omitted).`
+    );
+  }
+  return parseDotEnv(source.text);
+}
+
 async function collectLegacyProjectEnvCleanupCandidates(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly overlayNames: readonly string[];
   readonly materialize: boolean;
+  readonly deliveredValues: ReadonlyMap<
+    string,
+    ReadonlyMap<string, string | null>
+  >;
   readonly configCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
 }): Promise<{
   readonly allowed: readonly string[];
   readonly blocked: readonly string[];
+  readonly retainedEnvFiles: readonly {
+    readonly path: string;
+    readonly keys: readonly string[];
+  }[];
 }> {
   const candidates = new Set<string>();
   candidates.add(resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME));
@@ -4980,10 +5211,25 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
   const blockedPaths = new Set(
     opts.composeEnvFileReferences.map((reference) => reference.resolvedPath)
   );
+  const retainedEnvFiles: { path: string; keys: string[] }[] = [];
   const allowed: string[] = [];
   const blocked: string[] = [];
   for (const path of candidates) {
     if (await pathExists(path)) {
+      // Value retention is independent of Compose references: repairing Compose
+      // must never promote a file holding undelivered values into cleanup.
+      const delivered = opts.deliveredValues.get(path);
+      if (delivered) {
+        const entries = await readLegacyDotenvCleanupEntries({ path });
+        const keys = Object.entries(entries)
+          .filter(([key, value]) => delivered.get(key) !== value)
+          .map(([key]) => key)
+          .sort();
+        if (keys.length > 0) {
+          retainedEnvFiles.push({ path, keys });
+          continue;
+        }
+      }
       if (blockedPaths.has(path)) {
         blocked.push(path);
       } else {
@@ -4992,6 +5238,7 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
     }
   }
   return {
+    retainedEnvFiles,
     allowed: allowed.sort((left, right) => left.localeCompare(right)),
     blocked: blocked.sort((left, right) => left.localeCompare(right)),
   };

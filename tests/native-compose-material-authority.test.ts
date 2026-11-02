@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs/promises";
 import {
   mkdir,
   mkdtemp,
@@ -269,6 +270,89 @@ test.each([
     });
     expect(binding.generationId).toBe(reservation.generationId);
   });
+});
+
+test.each([
+  "receipt",
+  "document",
+] as const)("a store directory swapped during the %s read of a generation assertion refuses at its closing check", async (point) => {
+  const store = await fixture();
+  const generation = await store.withMutation(async (mutation) => {
+    const published = await publish(mutation);
+    await mutation.runEffect({
+      generation: published,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      effect: async () => ({ outcome: "complete", value: 0 }),
+    });
+    return published;
+  });
+  const instanceRoot = dirname(receiptPath(store));
+  const leases = join(instanceRoot, "leases");
+  const target =
+    point === "receipt"
+      ? receiptPath(store)
+      : join(
+          instanceRoot,
+          "generations",
+          generation.generationId,
+          "compose.json"
+        );
+  const checkoutRoot = store.identity.checkoutRoot;
+  const original = { open: fs.open, lstat: fs.lstat };
+  let armed = false;
+  let swap = false;
+  let swapped = false;
+  let storeChecks = 0;
+  const openSpy = spyOn(fs, "open").mockImplementation((async (
+    ...args: Parameters<typeof original.open>
+  ) => {
+    if (swap && !swapped && args[0] === target) {
+      swapped = true;
+      await rename(leases, `${leases}.moved`);
+      await mkdir(leases, { mode: 0o700 });
+    }
+    return await original.open(...args);
+  }) as typeof original.open);
+  const lstatSpy = spyOn(fs, "lstat").mockImplementation(((
+    ...args: Parameters<typeof original.lstat>
+  ) => {
+    // Every full store check lstats the checkout root exactly once.
+    if (armed && args[0] === checkoutRoot) {
+      storeChecks++;
+    }
+    return original.lstat(...args);
+  }) as typeof original.lstat);
+  try {
+    await store.withMutation(async (mutation) => {
+      const select = {
+        authority: mutation.materialAuthority,
+        generation,
+        phase: "inspect" as const,
+      };
+      // One assertion: the leading and closing lease checks bracket its
+      // generation load, which adds no store check of its own (HACK-1440).
+      armed = true;
+      await assertNativeComposeMaterialAuthority(select);
+      armed = false;
+      expect(storeChecks).toBe(2);
+      // A swap after the leading check is refused by the closing one.
+      swap = true;
+      await expect(
+        assertNativeComposeMaterialAuthority(select)
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+      swap = false;
+      expect(swapped).toBe(true);
+      await rm(leases, { recursive: true });
+      await rename(`${leases}.moved`, leases);
+      const binding = await assertNativeComposeMaterialAuthority(select);
+      expect(binding.generationId).toBe(generation.generationId);
+    });
+  } finally {
+    openSpy.mockRestore();
+    lstatSpy.mockRestore();
+  }
 });
 
 test("saved mutation uses immutable generation despite missing authored source and cannot prepare", async () => {

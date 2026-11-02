@@ -15,12 +15,13 @@ import { test as bunTest } from "bun:test";
  *
  * - Settled within the drain: the next case starts normally.
  * - Still running: the shared state stays reserved for that body, and
- *   `afterEach` keeps its roots. The next case's `beforeEach` calls
- *   `awaitUnreserved`, which waits (outside that case's own timeout) for the
- *   body to settle; a slow body on a loaded host usually does, and the case
- *   then starts normally. Only a body that outlasts that wait too makes later
- *   cases refuse with a closed reason naming it, without waiting again, until
- *   it settles.
+ *   `afterEach` keeps its roots and skips its restore. The next case's
+ *   `beforeEach` calls `awaitUnreserved`, which waits (outside that case's own
+ *   timeout) for the body to settle; a slow body on a loaded host usually does.
+ *   That `beforeEach` then owes the cleanup `afterEach` skipped (restore the
+ *   environment, remove the kept roots), and the case starts normally. Only a
+ *   body that outlasts that wait too makes later cases refuse with a closed
+ *   reason naming it, without waiting again, until it settles.
  */
 export type CaseDrain = {
   /** Register a case: `budgetMs` bounds its body; the Bun timeout adds the drain. */
@@ -37,6 +38,12 @@ export type CaseDrain = {
   ) => Promise<void>;
   /** The Bun timeout for a body budget: budget, drain and margin. */
   readonly bunTimeoutMs: (budgetMs: number) => number;
+  /**
+   * Hold the shared state for a body still running until it settles. `run` does
+   * this after a budget and drain run out; a file's own check of its hooks can
+   * call it directly rather than wait out a real drain.
+   */
+  readonly reserve: (name: string, running: Promise<void>) => void;
   /** The case whose body still runs past its budget and drain, if any. */
   readonly reservedBy: () => string | undefined;
   /**
@@ -97,6 +104,18 @@ export function createCaseDrain(opts: {
       throw refusal(reservation);
     }
   };
+  const reserve = (name: string, running: Promise<void>) => {
+    requireUnreserved();
+    const released = running
+      .catch(() => undefined)
+      .then(() => {
+        if (reservation === held) {
+          reservation = undefined;
+        }
+      });
+    const held: Reservation = { name, released, waitedOut: false };
+    reservation = held;
+  };
   const awaitUnreserved = async (waitMs: number) => {
     const held = reservation;
     if (held === undefined) {
@@ -122,15 +141,7 @@ export function createCaseDrain(opts: {
     }
     const drained = await within(running, opts.drainMs);
     if (drained === "overrun") {
-      const released = running
-        .catch(() => undefined)
-        .then(() => {
-          if (reservation === held) {
-            reservation = undefined;
-          }
-        });
-      const held: Reservation = { name, released, waitedOut: false };
-      reservation = held;
+      reserve(name, running);
     }
     throw new Error(
       drained === "settled"
@@ -144,6 +155,7 @@ export function createCaseDrain(opts: {
     },
     run,
     bunTimeoutMs,
+    reserve,
     reservedBy: () => reservation?.name,
     awaitUnreserved,
     requireUnreserved,

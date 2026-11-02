@@ -105,9 +105,18 @@ const CASE_DRAIN_MS = OPERATION_DEADLINE_MS + testBudgetMs(250);
  * How long the next case's `beforeEach` waits for a body still running after
  * its budget and drain, outside that case's own timeout: one more case
  * ceiling. The overrunning case has already failed by name by then.
+ *
+ * This wait is not held to the file's headroom under the shard's per-file
+ * limit, on purpose. A body hung for good at time T takes the file to T plus
+ * one ceiling for its case plus this wait, which passes the 720 s limit once T
+ * is past about 230 s. The shard then reports a file timeout, but Bun has
+ * already named the hung case; only the later cases, which would all refuse,
+ * go unnamed. A body that is only slow gains from the full wait: at load
+ * 100-120 one outlasted its budget and drain, and with no wait the next 92
+ * cases refused. The wait runs once per late body (see `awaitUnreserved`).
  */
-const CASE_RESERVATION_WAIT_MS = CASE_TIMEOUT_CEILING_MS;
-/** `beforeEach` timeout: the reservation wait plus the fixture setup. */
+const CASE_RESERVATION_WAIT_MS = withinCaseCeilingMs(CASE_TIMEOUT_CEILING_MS);
+/** `beforeEach` timeout: the reservation wait plus the fixture setup, so it passes the ceiling by the setup alone. */
 const BEFORE_EACH_TIMEOUT_MS = CASE_RESERVATION_WAIT_MS + testBudgetMs(500);
 /**
  * Every case shares this file's roots, stub engine and environment, and Bun's
@@ -292,7 +301,8 @@ let fixture: Fixture;
 /**
  * Environment the cases change, as it was when the file loaded. Every case
  * restores these values, so a case that settles late cannot leave its own
- * values behind as a later case's "prior" ones.
+ * values behind as a later case's "prior" ones. `afterEach` skips a body still
+ * running, so the next `beforeEach` restores them once that body has settled.
  */
 const FILE_ENV = Object.freeze({
   PATH: process.env.PATH,
@@ -301,10 +311,45 @@ const FILE_ENV = Object.freeze({
   HACK_RUNTIME_BACKEND: process.env.HACK_RUNTIME_BACKEND,
   [COMPOSE_STARTUP_TIMEOUT_ENV]: process.env[COMPOSE_STARTUP_TIMEOUT_ENV],
 });
-beforeEach(async () => {
-  // A body still running past its budget and drain owns the shared roots,
-  // stub engine and environment. Wait for it rather than recycling them.
+function restoreFileEnv() {
+  for (const [key, value] of Object.entries(FILE_ENV)) {
+    restoreEnv(key, value);
+  }
+}
+/** Root `finishCase` kept for a body still running, until that body settles. */
+let retainedRoot: string | undefined;
+/**
+ * First step of `beforeEach`. A body still running past its budget and drain
+ * owns the shared roots, stub engine and environment, so wait for it rather
+ * than recycling them. Whatever it set before settling must not reach the next
+ * case, and `finishCase` left this cleanup undone.
+ */
+async function settleLateCase() {
   await cases.awaitUnreserved(CASE_RESERVATION_WAIT_MS);
+  restoreFileEnv();
+  if (retainedRoot !== undefined) {
+    const kept = retainedRoot;
+    retainedRoot = undefined;
+    await rm(kept, { recursive: true, force: true });
+  }
+}
+/** `afterEach`: restore and remove, or keep both for a body still running. */
+async function finishCase() {
+  if (cases.reservedBy() !== undefined) {
+    // The body still runs and owns this root and environment; keep both. The
+    // next `beforeEach` finishes this cleanup once the body has settled.
+    retainedRoot = root;
+    console.error(
+      "Adoption fixture root retained for a case still running past its budget and drain."
+    );
+    return;
+  }
+  restoreFileEnv();
+  retainedRoot = undefined;
+  await rm(root, { recursive: true, force: true });
+}
+beforeEach(async () => {
+  await settleLateCase();
   process.env.HACK_RUNTIME_BACKEND = "compose";
   // Public dispatch (`tryLegacyComposeAdoptedCommand`) takes its caller
   // deadline from the Compose startup budget, 90 s by default. No case here
@@ -458,19 +503,7 @@ if (fixture.mode === "inventory-change" && kind === "container" && action === "l
   await mkdir(join(projectRoot, ".git"));
   await save();
 }, BEFORE_EACH_TIMEOUT_MS);
-afterEach(async () => {
-  if (cases.reservedBy() !== undefined) {
-    // The body still runs and owns this root and environment; keep both.
-    console.error(
-      "Adoption fixture root retained for a case still running past its budget and drain."
-    );
-    return;
-  }
-  for (const [key, value] of Object.entries(FILE_ENV)) {
-    restoreEnv(key, value);
-  }
-  await rm(root, { recursive: true, force: true });
-});
+afterEach(finishCase);
 async function save() {
   await writeFile(join(root, "fixture.json"), JSON.stringify(fixture));
 }
@@ -5439,4 +5472,29 @@ test("preparation stop refuses changed source, forged claims and config drift be
   } finally {
     await store.close();
   }
+});
+
+test("a body that settles after its afterEach leaves the next case the file's environment and no kept root", async () => {
+  const kept = root;
+  const release = Promise.withResolvers<void>();
+  cases.reserve(
+    "late body",
+    (async () => {
+      await release.promise;
+      for (const key of Object.keys(FILE_ENV)) {
+        process.env[key] = "value-left-by-late-body";
+      }
+    })()
+  );
+  await finishCase();
+  expect(retainedRoot).toBe(kept);
+  expect((await lstat(kept)).isDirectory()).toBe(true);
+  release.resolve();
+  await settleLateCase();
+  expect(cases.reservedBy()).toBeUndefined();
+  for (const [key, value] of Object.entries(FILE_ENV)) {
+    expect(process.env[key]).toBe(value);
+  }
+  expect(retainedRoot).toBeUndefined();
+  await expect(lstat(kept)).rejects.toMatchObject({ code: "ENOENT" });
 });

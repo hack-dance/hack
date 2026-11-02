@@ -140,8 +140,14 @@ what protects a user in practice is an agent following the skill's prose. A pass
 gate does not prove a draft is clean: a hostname under a public suffix, a
 single-label machine name, a bare username, a relative project path or a project,
 service, branch, repository or organization name in prose can still pass, so the
-user's review of the exact payload still matters. An unquoted command in prose is
-redacted to the end of its line, so drafts should keep commands in code spans.
+user's review of the exact payload still matters.
+
+Command matching fails closed. Inside code spans and fences, `hack` in any case and
+every word after it read as a command. In prose, so does a lowercase `hack`, even
+when the next word is not a command; a capitalized `Hack` in prose is the product
+name and is not matched. Prose is redacted to the end of its line, keeping only
+registered error codes, so drafts should keep commands in code spans. Flag values
+are always replaced, including enum and number values the spec could validate.
 
 Skill candidates and where their patterns live now:
 

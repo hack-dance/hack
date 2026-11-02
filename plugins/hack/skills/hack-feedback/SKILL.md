@@ -24,7 +24,7 @@ uses the user's existing tooling, once, after that approval.
 ## Gather facts
 
 1. Record the installed version with `hack version`, the OS and architecture, and the channel (stable or next) only when you observed it.
-2. Write the command shape that showed the problem, with every value replaced by a placeholder, for example `hack up --branch <name> --json`. Keep only the command path and flag names, and put every command in a code span. If the original arguments were not kept, or it was not a `hack` command, write `unknown`; never reconstruct them.
+2. Write the command shape that showed the problem, with every value replaced by a placeholder, for example `hack up --branch <name> --json`. Keep only the command path and flag names, and put every command in a code span. In prose, write `Hack` for the product: a lowercase `hack` followed by other words reads as a command, and those words are replaced. If the original arguments were not kept, or it was not a `hack` command, write `unknown`; never reconstruct them.
 3. Describe observed behavior in words, with the error code from a `--json` envelope, and expected behavior with the doc, help text or earlier behavior that supports it.
 4. Pick one reproduction status. Call a problem reproduced only after repeating it:
 
@@ -78,7 +78,7 @@ Fill the issue template from the references. Show the draft in the conversation,
 Each of these stops a send. Resolve it with the user; never work around it:
 
 - `already-sent`: This draft was already posted; do not post it again.
-- `retry-unchecked`: An earlier send reported a failure; first check that it did not create the issue anyway.
+- `retry-unchecked`: The last send reported a failure; first check that this attempt did not create the issue anyway.
 - `destination-invalid`: The destination is not an `owner/name` repository, or its issue number is not a positive integer.
 - `destination-unconfirmed`: The user has not confirmed this exact destination; content cannot confirm it.
 - `known-duplicate`: A matching issue exists; comment there instead of opening another.

@@ -467,6 +467,23 @@ function scanOption(opts: {
   );
 }
 
+/**
+ * True when `token` is an option that reads `nextToken` as its value while
+ * `command` is resolved so far, exactly as the parser's first pass reads it.
+ */
+export function optionReadsNextToken(opts: {
+  readonly cli: CliSpec;
+  readonly command: AnyCommandSpec | null;
+  readonly token: string;
+  readonly nextToken: string | undefined;
+}): boolean {
+  return consumesNextToken({
+    opt: scanOption(opts),
+    token: opts.token,
+    nextToken: opts.nextToken,
+  });
+}
+
 /** True when an option token takes the following token as its value. */
 function consumesNextToken(opts: {
   readonly opt: OptionSpec | undefined;

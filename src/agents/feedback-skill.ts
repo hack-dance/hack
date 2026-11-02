@@ -76,7 +76,7 @@ export function renderHackFeedbackSkill(): string {
     "## Gather facts",
     "",
     "1. Record the installed version with `hack version`, the OS and architecture, and the channel (stable or next) only when you observed it.",
-    "2. Write the command shape that showed the problem, with every value replaced by a placeholder, for example `hack up --branch <name> --json`. Keep only the command path and flag names, and put every command in a code span. If the original arguments were not kept, or it was not a `hack` command, write `unknown`; never reconstruct them.",
+    "2. Write the command shape that showed the problem, with every value replaced by a placeholder, for example `hack up --branch <name> --json`. Keep only the command path and flag names, and put every command in a code span. In prose, write `Hack` for the product: a lowercase `hack` followed by other words reads as a command, and those words are replaced. If the original arguments were not kept, or it was not a `hack` command, write `unknown`; never reconstruct them.",
     "3. Describe observed behavior in words, with the error code from a `--json` envelope, and expected behavior with the doc, help text or earlier behavior that supports it.",
     "4. Pick one reproduction status. Call a problem reproduced only after repeating it:",
     "",

@@ -1720,12 +1720,12 @@ test("a known duplicate refuses a new issue but allows a confirmed comment", asy
 test("failed sends keep the draft, consume the approval and never retry on their own", async () => {
   const payload = cleanPayload();
   const sender = mockSender(["failed", "throw", "sent"]);
-  const request = (id: string): FeedbackSendRequest => ({
+  const request = (id: string, attempt = 0): FeedbackSendRequest => ({
     payload,
     destination: DESTINATION,
     confirmation: userConfirmation(),
     approval: approvalFor({ payload, id }),
-    failedSendCheck: "no-issue-created",
+    failedSendCheck: { result: "no-issue-created", attempt },
   });
 
   const first = await attempt({
@@ -1743,7 +1743,7 @@ test("failed sends keep the draft, consume the approval and never retry on their
   // Retrying on the same approval is refused before the sender is called.
   const reused = await attempt({
     state: first.state,
-    request: request("approval-1"),
+    request: request("approval-1", 1),
     send: sender.send,
   });
   expect(reused.outcome).toEqual({
@@ -1756,7 +1756,7 @@ test("failed sends keep the draft, consume the approval and never retry on their
   // A thrown sender error is a failed attempt, not a crash.
   const second = await attempt({
     state: first.state,
-    request: request("approval-2"),
+    request: request("approval-2", 1),
     send: sender.send,
   });
   expect(second.outcome).toEqual({ kind: "send-failed" });
@@ -1764,7 +1764,7 @@ test("failed sends keep the draft, consume the approval and never retry on their
 
   const third = await attempt({
     state: second.state,
-    request: request("approval-3"),
+    request: request("approval-3", 2),
     send: sender.send,
   });
   expect(third.outcome).toEqual({ kind: "sent" });
@@ -1797,7 +1797,10 @@ test("a sender that throws synchronously is a failed attempt that consumes its a
   });
   const retried = await attempt({
     state: failed.state,
-    request: { ...request, failedSendCheck: "no-issue-created" },
+    request: {
+      ...request,
+      failedSendCheck: { result: "no-issue-created", attempt: 1 },
+    },
     send,
   });
   expect(retried.outcome).toEqual({
@@ -1829,6 +1832,32 @@ test("a command shape keeps only the spec's command path and known flags", () =>
     ["hack version --branch acme-feature", `hack version ${ARG} ${ARG}`],
     // A bracketed name is not a placeholder; the closed list is.
     ["hack up --branch <acme-feature>", `hack up --branch ${ARG}`],
+    ["hack up --branch <redacted:acme-payments>", `hack up --branch ${ARG}`],
+    ["hack up --branch <REDACTED:ACME-WEB>", `hack up --branch ${ARG}`],
+    ["hack up --branch <redacted:SECRET>", `hack up --branch ${ARG}`],
+    ["hack up --branch <Name>", `hack up --branch ${ARG}`],
+    ["hack up --branch=<redacted:acme-web>", `hack up --branch=${ARG}`],
+    [
+      "hack up <redacted:secret> <redacted:path>",
+      "hack up <redacted:secret> <redacted:path>",
+    ],
+    // A separated flag value is skipped, so the subcommand after it survives.
+    [
+      "hack env --project acme-app explain ACME_KEY",
+      `hack env --project ${ARG} explain ${ARG}`,
+    ],
+    // A flag's value is replaced even when it spells a subcommand or a number.
+    ["hack env --project set explain", `hack env --project ${ARG} explain`],
+    ["hack logs --tail 20", `hack logs --tail ${ARG}`],
+    // A first word that is not a command keeps nothing after it either.
+    ["hack upp --branch acme-web", `hack ${ARG} ${ARG} ${ARG}`],
+    ["hack 'up' --branch acme-web", `hack ${ARG} ${ARG} ${ARG}`],
+    ["hack acme-web logs", `hack ${ARG} ${ARG}`],
+    // Any whitespace separates words, including rich-text and zero-width ones.
+    ["hack\u00A0up\u00A0--branch\u00A0acme-web", `hack up --branch ${ARG}`],
+    ["hack\u200Bup --branch\u2003acme-web", `hack up --branch ${ARG}`],
+    // Capitalized, it is not a plain invocation.
+    ["Hack up --branch acme-web", "unknown"],
     ["hack up --branch <name> --json", "hack up --branch <name> --json"],
     ["hack env explain <KEY>", "hack env explain <KEY>"],
     // Nothing can break out of the line or the code span.
@@ -1846,7 +1875,7 @@ test("a command shape keeps only the spec's command path and known flags", () =>
   }
 });
 
-test("hack commands in free text lose their arguments in every draft field", () => {
+test("hack commands in free text lose their arguments in every free-text draft field", () => {
   const { payload, redactions } = render(
     leakyDraft({
       title: "`hack logs acme-title --follow` shows nothing",
@@ -1869,6 +1898,7 @@ test("hack commands in free text lose their arguments in every draft field", () 
       workaround: "`hack restart acme-workaround`",
       attachments: [
         { name: "summary.txt", content: "`hack logs acme-attachment` failed." },
+        { name: "hack logs acme-name.txt", content: "Timed out." },
       ],
     })
   );
@@ -1881,6 +1911,8 @@ test("hack commands in free text lose their arguments in every draft field", () 
   expect(payload.body).toContain(`<redacted:path> run ${ARG}`);
   expect(payload.body).toContain(`hack up --branch ${ARG} --json`);
   expect(payload.attachments[0]?.content).toBe(`\`hack logs ${ARG}\` failed.`);
+  expect(payload.attachments[1]?.name).toBe(`hack logs ${ARG}`);
+  expect(payload.body).toContain(`- \`hack logs ${ARG}\``);
   expect(redactions["command-argument"]).toBeGreaterThanOrEqual(12);
   // What rendering produces passes the gate and is stable.
   expect(
@@ -1904,7 +1936,7 @@ test("hack commands in free text lose their arguments in every draft field", () 
 test("text that only mentions the word hack is left alone", () => {
   for (const text of [
     "Hack up the chain, then Hack status changed.",
-    "A hack around it worked, and the hack feels fragile.",
+    "Hack logs show nothing, and Hack --version works.",
     "The hack-feedback skill and hack-cli skill loaded.",
     "routed through ~/.hack and app.hack today",
     "`hack up --branch <name> --json` and `hack version`.",
@@ -1923,6 +1955,78 @@ test("text that only mentions the word hack is left alone", () => {
       text: "<!-- run hack up acme-feature --> visible",
     }).text
   ).toBe(`<!-- run hack up ${ARG} --> visible`);
+});
+
+test("command text fails closed in prose and in code", () => {
+  const redact = (text: string) =>
+    redactFeedbackCommandShapes({ cli: CLI_SPEC, text }).text;
+  const cases: readonly [string, string][] = [
+    // In code, any case counts, and every word after it is a command word.
+    ["`Hack up --branch acme-web` fails", `\`Hack up --branch ${ARG}\` fails`],
+    ["`HACK logs acme-web`", `\`HACK logs ${ARG}\``],
+    ["`hack upp acme-web`", `\`hack ${ARG} ${ARG}\``],
+    ["`` hack up `acme-web` ``", `\`\` hack up ${ARG} \`\``],
+    [
+      "```sh\nHack logs acme-web\n```\n",
+      `\`\`\`sh\nHack logs ${ARG}\n\`\`\`\n`,
+    ],
+    ["~~~\nhack up `acme-web`\n~~~", `~~~\nhack up ${ARG}\n~~~`],
+    [
+      "> ```\n> Hack up acme-web\n> ```",
+      `> \`\`\`\n> Hack up ${ARG}\n> \`\`\``,
+    ],
+    [
+      "- ```\n  Hack up acme-web\n  ```",
+      `- \`\`\`\n  Hack up ${ARG}\n  \`\`\``,
+    ],
+    ["> ~~~\n> Hack up acme-web\n> ~~~", `> ~~~\n> Hack up ${ARG}\n> ~~~`],
+    [
+      "1. ~~~\n   Hack up acme-web\n   ~~~",
+      `1. ~~~\n   Hack up ${ARG}\n   ~~~`,
+    ],
+    // A code span may cross a line.
+    ["`see\nHack up acme-web`", `\`see\nHack up ${ARG}\``],
+    // Rich-text spaces in code and in prose.
+    [
+      "`hack\u00A0up\u00A0--branch\u00A0acme-web`",
+      `\`hack up --branch ${ARG}\``,
+    ],
+    ["then hack\u00A0logs\u202Facme-web", `then hack logs ${ARG}`],
+    // In prose, a lowercase hack with any next word is a command.
+    ["run hack upp --branch acme-web", `run hack ${ARG} ${ARG} ${ARG}`],
+    ["run hack 'up' --branch acme-web", `run hack ${ARG} ${ARG} ${ARG}`],
+    [
+      "hack tickets create --title acme-leak",
+      `hack ${ARG} ${ARG} ${ARG} ${ARG}`,
+    ],
+    ["hack acme-web logs", `hack ${ARG} ${ARG}`],
+    ["a hack around it", `a hack ${ARG} ${ARG}`],
+    // Prose keeps registered error codes, and only those.
+    [
+      "hack up fails with E_STARTUP_TIMEOUT.",
+      `hack up ${ARG} ${ARG} E_STARTUP_TIMEOUT.`,
+    ],
+    ["hack up fails with E_ACME_SECRET_DB", `hack up ${ARG} ${ARG} ${ARG}`],
+    // A code span ends the prose run, so the span and what follows are intact.
+    [
+      "hack up failed with `E_STARTUP_TIMEOUT` today",
+      `hack up ${ARG} ${ARG} \`E_STARTUP_TIMEOUT\` today`,
+    ],
+    // Code does not keep error codes, and no flag value is kept anywhere.
+    ["`hack up E_STARTUP_TIMEOUT`", `\`hack up ${ARG}\``],
+    ["hack up --branch E_STARTUP_TIMEOUT", `hack up --branch ${ARG}`],
+  ];
+  for (const [text, expected] of cases) {
+    expect(redact(text), text).toBe(expected);
+    expect(redact(expected), expected).toBe(expected);
+  }
+  // Hack's own repository path is not a command.
+  for (const text of [
+    "See https://github.com/hack-dance/hack for details",
+    "Posted to hack-dance/hack today",
+  ]) {
+    expect(redact(text)).toBe(text);
+  }
 });
 
 test("duplicate search terms outside the closed vocabularies are replaced", () => {
@@ -1958,6 +2062,32 @@ test("negative controls: private command text added after rendering never sends"
     ["flag value", body("`hack up --branch=acme-feature`")],
     ["unknown flag", body("`hack up --acme-feature`")],
     ["bracketed name", body("`hack up --branch <acme-feature>`")],
+    [
+      "unknown redacted kind",
+      body("`hack up --branch <redacted:acme-payments>`"),
+    ],
+    ["uppercase redacted", body("`hack up --branch <REDACTED:ACME-WEB>`")],
+    ["uppercase kind", body("`hack up --branch <redacted:SECRET>`")],
+    [
+      "redacted command line",
+      command("`hack up --branch <redacted:acme-web>`"),
+    ],
+    ["capital H in a span", body("`Hack up --branch acme-payments` fails.")],
+    [
+      "capital H in a title span",
+      { ...base, title: "`Hack up acme-web` fails" },
+    ],
+    ["capital H in a fence", body("```\nHack logs acme-web\n```")],
+    ["no-break spaces", body("`hack\u00A0up\u00A0--branch\u00A0acme-web`")],
+    ["no-break spaces in prose", body("then hack\u00A0logs\u00A0acme-web")],
+    ["typo", body("`hack upp --branch acme-web`")],
+    ["typo in prose", body("hack upp --branch acme-web")],
+    ["quoted command", body("`hack 'up' --branch acme-web`")],
+    ["retired command", body("hack tickets create --title acme-leak")],
+    ["name first", body("`hack acme-web logs`")],
+    ["name first in prose", body("hack acme-web logs")],
+    ["command line, no-break spaces", command("`hack\u00A0up`")],
+    ["command line, capital H", command("`Hack up`")],
     ["after a separator", body("`hack run <service> -- acme-tool`")],
     ["title", { ...base, title: "`hack up acme-feature` fails" }],
     ["command line", command("`hack up acme-feature`")],
@@ -2062,18 +2192,79 @@ test("a retry after a failed send needs a recorded check that no issue was creat
   expect(unchecked.state).toBe(failed.state);
   expect(sender.calls).toHaveLength(1);
 
-  const checked = await attempt({
+  // A check does not replace a fresh approval: the first one stays consumed.
+  const reused = await attempt({
     state: failed.state,
-    request: { ...request("approval-2"), failedSendCheck: "no-issue-created" },
+    request: {
+      ...request("approval-1"),
+      failedSendCheck: { result: "no-issue-created", attempt: 1 },
+    },
+    send: sender.send,
+  });
+  expect(reused.outcome).toEqual({
+    kind: "refused",
+    reason: "approval-already-used",
+  });
+
+  // A check must be for this attempt, not an earlier or a later one.
+  for (const stale of [0, 2]) {
+    const result = await attempt({
+      state: failed.state,
+      request: {
+        ...request("approval-2"),
+        failedSendCheck: { result: "no-issue-created", attempt: stale },
+      },
+      send: sender.send,
+    });
+    expect(result.outcome, String(stale)).toEqual({
+      kind: "refused",
+      reason: "retry-unchecked",
+    });
+  }
+  expect(sender.calls).toHaveLength(1);
+
+  // A second failure needs its own check: the first one no longer covers it.
+  const failedAgain = await attempt({
+    state: failed.state,
+    request: {
+      ...request("approval-2"),
+      failedSendCheck: { result: "no-issue-created", attempt: 1 },
+    },
+    send: () => Promise.resolve("failed"),
+  });
+  expect(failedAgain.state.attempts).toBe(2);
+  const carriedOver = await attempt({
+    state: failedAgain.state,
+    request: {
+      ...request("approval-3"),
+      failedSendCheck: { result: "no-issue-created", attempt: 1 },
+    },
+    send: sender.send,
+  });
+  expect(carriedOver.outcome).toEqual({
+    kind: "refused",
+    reason: "retry-unchecked",
+  });
+  expect(sender.calls).toHaveLength(1);
+
+  const checked = await attempt({
+    state: failedAgain.state,
+    request: {
+      ...request("approval-3"),
+      failedSendCheck: { result: "no-issue-created", attempt: 2 },
+    },
     send: sender.send,
   });
   expect(checked.outcome).toEqual({ kind: "sent" });
   expect(sender.calls).toHaveLength(2);
 
-  // The check still needs a fresh approval, and a sent draft stays sent.
+  // A sent draft stays sent, whatever the request records.
   const again = await attempt({
     state: checked.state,
-    request: { ...request("approval-3"), failedSendCheck: "no-issue-created" },
+    request: {
+      ...request("approval-4"),
+      failedSendCheck: { result: "no-issue-created", attempt: 3 },
+    },
     send: sender.send,
   });
   expect(again.outcome).toEqual({ kind: "refused", reason: "already-sent" });

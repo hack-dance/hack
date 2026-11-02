@@ -592,14 +592,15 @@ input and without writing anything:
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
 per-checkout values you don't want to commit.
 
-In a project with `.hack/hack.env.json` and no env layers yet, `hack env set --local` refuses and
-writes nothing for a plaintext value, because that project's migration copies `.hack/.env` values to
-tracked layers. Use `hack env add` with the same flags, which migrates first and then writes the
-machine-local layer. That migration still copies values already in `.hack/.env`, and a `plain_env`
-value exported in your shell, to tracked layers.
-With `--secret`, the value goes to the secret backend, and a key the contract declares as `keychain`
-reaches a tracked layer as ciphertext when the project migrates. Without `hack.env.json`, `--local`
-still writes `.hack/.env`.
+With no env layers yet, `hack env set --local` writes legacy `.hack/.env` (or
+`.hack/.env.<overlay>`), including when a `hack.env.json` contract exists.
+Use `hack env add --local` to migrate first and then write the machine-local layer.
+Contract migration writes `plain_env` values from legacy dotenv files (or the shell)
+to the gitignored machine-local layer, never a tracked layer. It reports each moved
+key and destination path, without values. It refuses a local destination already
+tracked by Git. Values declared as `keychain` migrate to tracked layers as ciphertext.
+Without `hack.env.json`, `set --local` still writes `.hack/.env`; if a contract is
+added later, migration keeps those values machine-local too.
 
 Repeating `hack env add` or `hack env set` with the value already stored is a no-op: when
 the existing secret decrypts to the same value under the current key, its ciphertext is
@@ -1044,7 +1045,10 @@ That migrates the repo into:
 
 - `.hack/hack.env.default.yaml`
 - `.hack/hack.env.<overlay>.yaml`
+- `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml` for plain values
 - `.hack.secret.key` when needed
+
+Tracked layers receive secret-backed ciphertext, not legacy plaintext.
 
 Doctor offers legacy dotenv files for cleanup only when every parsed entry was
 delivered to an env layer. Files containing undeclared or undelivered entries stay
@@ -1053,6 +1057,8 @@ also applies to untracked overlays such as `.env.bak` and `.env.example`.
 Migration refuses a legacy `.env.default` overlay before writing env layers,
 because it would overwrite the base `hack.env.default.yaml` layer. Rename that
 legacy overlay and update its project references before retrying.
+It also refuses `.env.local`, whose tracked overlay path would collide with the
+machine-local base layer. Rename that legacy overlay before migration.
 If a legacy dotenv file cannot be read, migration refuses cleanup and leaves
 legacy artifacts in place. Env layers may already have been written; check read
 access and preserve the remaining entries before cleaning up manually.

@@ -4894,6 +4894,10 @@ export async function migrateLegacyProjectEnv(opts: {
 }): Promise<{
   readonly wroteFiles: readonly string[];
   readonly migratedOverlays: readonly string[];
+  readonly movedPlainValues: readonly {
+    readonly key: string;
+    readonly path: string;
+  }[];
   readonly legacyDetected: boolean;
   readonly updatedProjectConfig: boolean;
   readonly cleanupCandidates: readonly string[];
@@ -4911,6 +4915,7 @@ export async function migrateLegacyProjectEnv(opts: {
     return {
       wroteFiles: [],
       migratedOverlays: [],
+      movedPlainValues: [],
       legacyDetected: false,
       updatedProjectConfig: false,
       cleanupCandidates: [],
@@ -4934,6 +4939,11 @@ export async function migrateLegacyProjectEnv(opts: {
       "Refusing legacy env migration: .env.default would overwrite the base hack.env.default.yaml layer. Rename the legacy default overlay and update its project references before retrying. No env migration files were written."
     );
   }
+  if (overlayNames.includes("local")) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .env.local would collide with the machine-local hack.env.local.yaml layer. Rename the legacy local overlay and update its project references before retrying. No env migration files were written."
+    );
+  }
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
   )
@@ -4948,10 +4958,60 @@ export async function migrateLegacyProjectEnv(opts: {
     new Map(baseResolved.values.map((entry) => [entry.key, entry.value]))
   );
   const wroteFiles: string[] = [];
+  const movedPlainValues: { key: string; path: string }[] = [];
+  /** Keep plaintext in ignored layers; hydration preserves other entries and refuses unsafe targets. */
+  const migratePlainValues = async (migration: {
+    readonly resolvedValues: typeof baseResolved.values;
+    readonly envName: string | null;
+    readonly baseValues: ReadonlyMap<string, string | null> | null;
+  }) => {
+    const values = buildMigratedValues({
+      resolvedValues: migration.resolvedValues.filter(
+        (entry) => entry.source === "plain_env"
+      ),
+      baseValues: migration.baseValues,
+      keyText: null,
+    });
+    let hasEntries = false;
+    for (const [scope, entries] of Object.entries(values)) {
+      const plainEntries = new Map<string, string>();
+      for (const [key, value] of Object.entries(entries)) {
+        if (typeof value === "string") {
+          plainEntries.set(key, value);
+        }
+      }
+      if (plainEntries.size === 0) {
+        continue;
+      }
+      hasEntries = true;
+      const result = await hydrateProjectEnvLocalLayer({
+        projectRoot: opts.projectRoot,
+        projectDir: opts.projectDir,
+        envName: migration.envName,
+        scope,
+        entries: plainEntries,
+        secret: false,
+      });
+      if (result.changed && !wroteFiles.includes(result.filePath)) {
+        wroteFiles.push(result.filePath);
+      }
+      for (const key of plainEntries.keys()) {
+        movedPlainValues.push({ key, path: result.filePath });
+      }
+    }
+    return hasEntries;
+  };
+  await migratePlainValues({
+    resolvedValues: baseResolved.values,
+    envName: null,
+    baseValues: null,
+  });
   const defaultConfig = buildMigratedProjectEnvConfig({
     environment: "default",
     values: buildMigratedValues({
-      resolvedValues: baseResolved.values,
+      resolvedValues: baseResolved.values.filter(
+        (entry) => entry.source === "keychain"
+      ),
       baseValues: null,
       keyText: keyInfo?.keyText ?? null,
     }),
@@ -4980,10 +5040,19 @@ export async function migrateLegacyProjectEnv(opts: {
       resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlayName}`),
       new Map(overlayResolved.values.map((entry) => [entry.key, entry.value]))
     );
+    const hasPlainOverlayEntries = await migratePlainValues({
+      resolvedValues: overlayResolved.values,
+      envName: overlayName,
+      baseValues: new Map(
+        baseResolved.values.map((value) => [value.key, value.value])
+      ),
+    });
     const overlayConfig = buildMigratedProjectEnvConfig({
       environment: overlayName,
       values: buildMigratedValues({
-        resolvedValues: overlayResolved.values,
+        resolvedValues: overlayResolved.values.filter(
+          (entry) => entry.source === "keychain"
+        ),
         baseValues: new Map(
           baseResolved.values.map((value) => [value.key, value.value])
         ),
@@ -4993,7 +5062,7 @@ export async function migrateLegacyProjectEnv(opts: {
     const hasOverlayEntries = Object.entries(overlayConfig.values).some(
       ([scope, values]) => scope !== "global" || Object.keys(values).length > 0
     );
-    if (!hasOverlayEntries) {
+    if (!(hasOverlayEntries || hasPlainOverlayEntries)) {
       continue;
     }
 
@@ -5042,6 +5111,7 @@ export async function migrateLegacyProjectEnv(opts: {
   return {
     wroteFiles,
     migratedOverlays: overlayNames,
+    movedPlainValues,
     legacyDetected: true,
     updatedProjectConfig: configCleanup.changed,
     cleanupCandidates: cleanupCandidates.allowed,

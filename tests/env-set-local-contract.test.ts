@@ -10,14 +10,9 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { LEGACY_ENV_LOCAL_CONTRACT_MESSAGE } from "../src/cli/env-arguments.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
-/*
- * HACK-1710: in a project with a `hack.env.json` contract and no env layers,
- * `hack env set --local` wrote `.hack/.env`, and the contract migration then
- * copied the value to tracked `hack.env.default.yaml`.
- */
+/** Contract migration must keep legacy plaintext machine-local (HACK-1712/1713). */
 
 const ENTRYPOINT = resolve(import.meta.dir, "..", "index.ts");
 const VALUE = ["synthetic", "local", "1710"].join("-");
@@ -43,7 +38,7 @@ afterEach(async () => {
   for (const root of roots.splice(0)) {
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 async function createProject(opts: {
   readonly contract: boolean;
@@ -151,26 +146,25 @@ const setLocal = (project: Project) =>
   runEnv(project, ["set", "LOCAL_KEY", "--local"]);
 
 test(
-  "with a contract and no layers, set --local refuses and writes nothing",
+  "with a contract and no layers, set --local writes legacy dotenv",
   async () => {
     const project = await createProject({ contract: true });
-    const before = await tree(project);
 
     const run = await setLocal(project);
 
-    expect(run.exitCode).not.toBe(0);
-    expect(run.output).toContain(LEGACY_ENV_LOCAL_CONTRACT_MESSAGE);
+    expect(run.exitCode).toBe(0);
+    const files = await tree(project);
+    expect(files[".hack/hack.env.default.yaml"]).toBeUndefined();
+    expect(files[".hack/.env"]).toContain(VALUE);
     expect(run.output).not.toContain(VALUE);
-    expect(await tree(project)).toEqual(before);
   },
   CLI_TEST_TIMEOUT_MS
 );
 
 test(
-  "set --env staging --local refuses the same way",
+  "set --env staging --local writes the legacy overlay",
   async () => {
     const project = await createProject({ contract: true });
-    const before = await tree(project);
 
     const run = await runEnv(project, [
       "set",
@@ -180,30 +174,35 @@ test(
       "--local",
     ]);
 
-    expect(run.exitCode).not.toBe(0);
-    expect(run.output).toContain(LEGACY_ENV_LOCAL_CONTRACT_MESSAGE);
-    expect(await tree(project)).toEqual(before);
+    expect(run.exitCode).toBe(0);
+    const files = await tree(project);
+    expect(files[".hack/hack.env.default.yaml"]).toBeUndefined();
+    expect(files[".hack/.env.staging"]).toContain(VALUE);
+    expect(run.output).not.toContain(VALUE);
   },
   CLI_TEST_TIMEOUT_MS
 );
 
 test(
-  "with a mirrored backend, the refusal writes neither .env nor the store",
+  "with a mirrored backend, set --local writes legacy dotenv",
   async () => {
     const project = await createProject({ contract: true, mirrored: true });
-    const before = await tree(project);
 
-    const run = await setLocal(project);
+    const run = await runEnv(project, ["set", "LOCAL_KEY", "--local"], {
+      HACK_SECRETS_FILE_KEY: ["synthetic", "file", "1712"].join("-"),
+    });
 
-    expect(run.exitCode).not.toBe(0);
-    expect(run.output).toContain(LEGACY_ENV_LOCAL_CONTRACT_MESSAGE);
-    expect(await tree(project)).toEqual(before);
+    expect(run.exitCode).toBe(0);
+    const files = await tree(project);
+    expect(files[".hack/hack.env.default.yaml"]).toBeUndefined();
+    expect(files[".hack/.env"]).toContain(VALUE);
+    expect(run.output).not.toContain(VALUE);
   },
   CLI_TEST_TIMEOUT_MS
 );
 
 test(
-  "the remedy the refusal names keeps the value out of tracked layers",
+  "env add keeps the value out of tracked layers",
   async () => {
     const project = await createProject({ contract: true });
 
@@ -225,7 +224,7 @@ test(
 );
 
 test(
-  "the remedy with --env writes that overlay's local layer, not the base",
+  "env add with --env writes that overlay's local layer, not the base",
   async () => {
     const project = await createProject({ contract: true });
 
@@ -247,7 +246,7 @@ test(
 );
 
 test(
-  "--secret --local isn't refused, because the value goes to the store and not .env",
+  "--secret --local writes the store and not .env",
   async () => {
     const project = await createProject({ contract: true, mirrored: true });
 
@@ -257,7 +256,6 @@ test(
       { HACK_SECRETS_FILE_KEY: ["synthetic", "file", "1710"].join("-") }
     );
 
-    expect(run.output).not.toContain(LEGACY_ENV_LOCAL_CONTRACT_MESSAGE);
     expect(run.exitCode).toBe(0);
     const files = await tree(project);
     expect(files[".hack/.env"]).toBeUndefined();
@@ -275,6 +273,161 @@ test(
 
     expect(run.exitCode).toBe(0);
     expect((await tree(project))[".hack/.env"]).toContain(VALUE);
+  },
+  CLI_TEST_TIMEOUT_MS
+);
+
+async function runDoctor(project: Project) {
+  const tools = join(project.root, "tools");
+  await mkdir(tools, { recursive: true });
+  await writeFile(join(tools, "bun"), "#!/bin/sh\necho 1.4.2\n", {
+    mode: 0o700,
+  });
+  await writeFile(
+    join(tools, "docker"),
+    '#!/bin/sh\ncase "$1" in\ninfo|version) exit 0;;\nnetwork) echo "[]"; exit 0;;\nps) echo "[]"; exit 0;;\n*) exit 0;;\nesac\n',
+    { mode: 0o700 }
+  );
+  await writeFile(join(tools, "mutagen"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o700,
+  });
+  const proc = Bun.spawn(
+    [
+      process.env.HACK_TEST_CLI_BINARY ?? process.execPath,
+      ...(process.env.HACK_TEST_CLI_BINARY ? [] : [ENTRYPOINT]),
+      "doctor",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      project.projectRoot,
+    ],
+    {
+      cwd: project.projectRoot,
+      env: privateCliEnv({
+        root: project.root,
+        env: {
+          PATH: `${tools}:/usr/bin:/bin`,
+          HACK_MUTAGEN_PATH: join(tools, "mutagen"),
+          HACK_HOME: join(project.root, "hack-home"),
+          HACK_GLOBAL_CONFIG_PATH: join(project.root, "hack-config.json"),
+          HACK_LOGGER: "console",
+          HACK_NO_INTERACTIVE: "1",
+          NO_COLOR: "1",
+          HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  running.add(proc);
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  running.delete(proc);
+  return { exitCode, output: stdout + stderr };
+}
+
+async function git(project: Project, args: string[]) {
+  const proc = Bun.spawn(["git", ...args], {
+    cwd: project.projectRoot,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  expect(code, stderr).toBe(0);
+  return stdout;
+}
+
+for (const lateContract of [false, true]) {
+  test(
+    lateContract
+      ? "HACK-1713: no-contract set --local then doctor with a new contract keeps plaintext local"
+      : "HACK-1712: doctor moves a contract dotenv value to an ignored local layer without output or tracked leakage",
+    async () => {
+      const project = await createProject({ contract: !lateContract });
+      await git(project, ["init", "--quiet"]);
+      if (lateContract) {
+        expect((await setLocal(project)).exitCode).toBe(0);
+        expect(
+          await readFile(join(project.projectDir, ".env"), "utf8")
+        ).toContain(VALUE);
+        await writeFile(join(project.projectDir, "hack.env.json"), CONTRACT);
+      }
+      await git(project, [
+        "add",
+        ".hack/hack.env.json",
+        ".hack/hack.config.json",
+        ".hack/docker-compose.yml",
+      ]);
+      if (!lateContract) {
+        await writeFile(
+          join(project.projectDir, ".env"),
+          `LOCAL_KEY=${VALUE}\n`
+        );
+      }
+      const run = await runDoctor(project);
+      expect(run.output).not.toContain(VALUE);
+      expect(run.exitCode, run.output).toBe(0);
+      const local = join(project.projectDir, "hack.env.local.yaml");
+      expect(
+        await readFile(
+          join(project.projectDir, "hack.env.default.yaml"),
+          "utf8"
+        )
+      ).not.toContain(VALUE);
+      expect(await readFile(local, "utf8")).toContain(VALUE);
+      expect(run.output).toContain(
+        "Moved LOCAL_KEY to .hack/hack.env.local.yaml"
+      );
+      expect(await git(project, ["check-ignore", "--", local])).toContain(
+        "hack.env.local.yaml"
+      );
+      await git(project, ["add", "."]);
+      const tracked = (await git(project, ["ls-files", "-z"]))
+        .split("\0")
+        .filter(Boolean);
+      expect(tracked).not.toContain(".hack/hack.env.local.yaml");
+      for (const path of tracked) {
+        expect(
+          await readFile(join(project.projectRoot, path), "utf8")
+        ).not.toContain(VALUE);
+      }
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+}
+
+test(
+  "doctor refuses the reserved local overlay without exposing or losing plaintext",
+  async () => {
+    const project = await createProject({ contract: true });
+    await git(project, ["init", "--quiet"]);
+    await writeFile(join(project.projectDir, ".env"), `LOCAL_KEY=${VALUE}\n`);
+    await writeFile(
+      join(project.projectDir, ".env.local"),
+      `LOCAL_KEY=${VALUE}-local\n`
+    );
+    const run = await runDoctor(project);
+    expect(run.exitCode).toBe(1);
+    expect(run.output).not.toContain(VALUE);
+    expect(run.output).toContain(".env.local would collide");
+    expect(await readFile(join(project.projectDir, ".env"), "utf8")).toContain(
+      VALUE
+    );
+    expect(
+      await readFile(join(project.projectDir, "hack.env.json"), "utf8")
+    ).toBe(CONTRACT);
+    await expect(
+      readFile(join(project.projectDir, "hack.env.default.yaml"), "utf8")
+    ).rejects.toMatchObject({ code: "ENOENT" });
   },
   CLI_TEST_TIMEOUT_MS
 );

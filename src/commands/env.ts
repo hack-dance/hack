@@ -11,6 +11,7 @@ import {
 } from "../cli/command.ts";
 import {
   assertLegacyEnvScope,
+  LEGACY_ENV_LOCAL_CONTRACT_MESSAGE,
   parseApplyServiceOption,
   parseEnvGetArguments,
   parseEnvScopeOption,
@@ -20,6 +21,7 @@ import {
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
+import { PROJECT_ENV_CONTRACT_FILENAME } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
@@ -32,7 +34,7 @@ import {
   assertEnvValueStdinUsage,
   readEnvValueFromStdin,
 } from "../lib/env-value-stdin.ts";
-import { readTextFile } from "../lib/fs.ts";
+import { pathExists, readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import type {
@@ -1927,6 +1929,17 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   // than write the global value, before stdin is read.
   assertLegacyEnvScope({ scope });
   const storeSecret = args.options.secret === true;
+  // Before stdin is read or anything is written. A secret goes to the store, not
+  // to .hack/.env, so the contract migration can't copy its plaintext to a tracked layer.
+  if (
+    args.options.local === true &&
+    !storeSecret &&
+    (await pathExists(
+      resolve(project.projectDir, PROJECT_ENV_CONTRACT_FILENAME)
+    ))
+  ) {
+    throw new CliUsageError(LEGACY_ENV_LOCAL_CONTRACT_MESSAGE);
+  }
   const runtimeConfig = await readHackEnvRuntimeConfig({
     projectDir: project.projectDir,
   });

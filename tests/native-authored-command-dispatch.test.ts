@@ -489,7 +489,6 @@ macTest(
     // The native plan request hangs until the CLI's cancellation kills it, so
     // SIGINT lands in preflight, before any startup intent is reserved.
     const planning = join(selected.root, "native-plan-started");
-    const planPid = join(selected.root, "native-plan.pid");
     await Bun.write(
       selected.native,
       `#!${process.execPath}
@@ -497,7 +496,6 @@ const args=process.argv.slice(2);
 if(args[2]!=='graph'||args[3]!=='native'||args[4]!=='plan'){
  await Bun.write(${JSON.stringify(join(selected.root, "runtime-called"))}, 'unexpected-effect'); process.exit(2);
 }
-await Bun.write(${JSON.stringify(planPid)}, String(process.pid));
 await Bun.write(${JSON.stringify(planning)}, 'planning');
 await Bun.sleep(20_000);
 process.exit(2);
@@ -565,18 +563,6 @@ process.exit(2);
       if (child.exitCode === null) {
         child.kill("SIGKILL");
         await child.exited;
-      }
-      const pid = Number(
-        await Bun.file(planPid)
-          .text()
-          .catch(() => "")
-      );
-      if (Number.isSafeInteger(pid) && pid > 0) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          // Already ended by the CLI's cancellation.
-        }
       }
     }
   },

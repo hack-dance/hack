@@ -235,6 +235,9 @@ function freezeEnv(opts: {
     HACK_HOME: opts.ctx.hackHome,
     DOCKER_HOST: `unix://${join(opts.ctx.tempRoot, "no-docker.sock")}`,
     HACK_MUTAGEN_PATH: join(opts.ctx.tempRoot, "no-mutagen"),
+    // Opts in to the `doctor --fix` hackd start: the freeze covers that step,
+    // and this scenario stops the daemon itself when it finishes.
+    HACK_DAEMON_AUTOSTART_DISABLE: "0",
   };
 }
 

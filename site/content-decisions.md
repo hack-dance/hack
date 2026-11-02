@@ -28,33 +28,12 @@ benchmark receipts and historical design notes stay outside that allowlist. Stab
 Compose setup leads; native v5 installation and project adoption remain separate
 and experimental. A site build is not a runtime acceptance or release claim.
 
-## Explicit-agent v5 publication choice
+## Released next.6 publication
 
-The recommended v5 setup is CLI plus versioned docs, with separately selected
-skills or MCP. Editorial overrides replace the pinned integrations, agent-first,
-project-setup, core and CLI-overview tutorials. The new integrations page links
-the reviewed next.5 native marketplace and manifests, names the exact seven
-skills, and distinguishes local source registration from client installation.
-The official OpenAI packaging guide supplies the local marketplace registration
-command and client-directory route; no client loading was performed here.
+V5 now selects released next.6 at `44aaf5156426dfcbb1c8a189b8e20531e5b95613`. The shell bootstrap and standalone manager shipped in PR525; opt-in agent setup and retirement of automatic injection shipped in PR531. The guide retains its route but no longer claims unreleased provenance. Source-reviewed backend selection includes an explicit Compose override, with shared stable-home cautions.
 
-Next.5 is not a hook-free artifact: its Codex manifest selects skills, whose text
-still includes guidance-maintenance recommendations; Claude selects primer hooks
-and Cursor selects rules. Core removal is a separate, pending dependency. The
-short historical compatibility page records shipped availability and source
-links without a runnable repair/export tutorial.
+The prior next.5 originals remain intact. New release snapshots live under `docs/versions/v5/originals/next6/` and have independent hashes in the manifest. V4 remains unchanged. The next.1 Python candidate-install recipe is curated as history. Detailed next.5 field audits retain explicit historical per-page provenance rather than being silently relabeled as next.6. See the next.6 release-contract page for changed interfaces and remaining field-coverage limits.
 
-Eight agent-management leaves and init's optional handoff flag are intentionally
-omitted from the recommended v5 command reference and LLM corpus. Setup-sync
-report types are also excluded from that slice. V4 and every hashed original
-remain intact; this editorial choice does not assert runtime removal in next.5.
-Env injection, lifecycle definition freshness and runtime ownership are unrelated
-and remain documented.
+Generation owns ignored content, navigation, version labels and LLM exports. Site source loaders consume those generated collections; there is no separate site/lib version pin. Publication controls admit only the two scoped opt-in examples on the source-labeled setup guide and continue rejecting automatic instruction-management recipes.
 
-Publication checks exercise both versions, reject retiring command/flag/tutorial
-patterns in staged v5 pages and full LLM exports, preserve unrelated runtime
-language, and require the explicit plugin/MCP artifact boundaries. All original
-manifest hashes are checked even when an editorial override replaces a page.
-
-Independent source review corrections: native-candidate is now an explicit editorial\noverride too; its MCP install/remove/reinstall passage is excluded while its original\nhash is retained. Core and project setup lead with native preparation/executable\nselection and refer Compose onboarding to v4. The copyable agent handoff requires\nsubstituting the actual preview host before publication; directory source links use\nthe pinned GitHub tree route. Publication controls include absolute/channel CLI\nspellings and native-versus-Compose entry-page negative controls.\n
-The agent-setup-v5-branch guide is an explicit per-page source exception: unreleased PR531 at af71a8407d14a0dd27f7073a43010fff3a4bd219. Its title, footer and LLM index/export identify that source. Default v5 runtime/reference content stays pinned to released next.5; v4 and all original snapshot hashes remain unchanged. Only the two reviewed opt-in setup examples are allowed on this guide; retiring automatic instruction management remains excluded. This adds no release, installed-client or runtime acceptance claim.
+Fresh installation and local manager status are evidence for that bounded path only. Cross-version upgrade/rollback, initialized data, native application and installed-client acceptance remain open. No deployment or preview runtime was performed by this docs worker.

@@ -81,7 +81,6 @@ test("doctor refuses native input before probing or repairing global runtime", a
             env: {
               HACK_HOME: join(root, "state"),
               HACK_GLOBAL_CONFIG_PATH: join(root, "state", "hack.config.json"),
-              HACK_DAEMON_DISABLE: "1",
               HACK_NO_INTERACTIVE: "1",
               HACK_LOGGER: "console",
               XDG_CACHE_HOME: cache,

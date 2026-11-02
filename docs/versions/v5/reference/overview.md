@@ -1,5 +1,7 @@
 # Reference and contracts
 
+Current release: next.6 at `44aaf5156426dfcbb1c8a189b8e20531e5b95613`. Start with [release contracts](next6-contracts.md) and the refreshed generated reference. Detailed next.5 field inventories below are historical audits, with explicit source labels; their counts are not current next.6 totals.
+
 Start with the [CLI overview](../../cli.md) to choose a command and the
 [generated command reference](../../reference/cli.md) for usage and flags. [Command and output contracts](command-contracts.md) adds the deeper leaf sections, complete public flag inventory and command-specific JSON/log records.
 Read [Run and inspect](../guides/run-project.md) for a task sequence rather than

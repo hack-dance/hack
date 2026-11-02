@@ -12,7 +12,9 @@ export function isVersionedSearchUrl(
     return false;
   }
   const parsed = new URL(value, "https://hack.foo");
-  if (parsed.origin !== "https://hack.foo") return false;
+  if (parsed.origin !== "https://hack.foo") {
+    return false;
+  }
   const path = parsed.pathname;
   const root = `/docs/${version}`;
   return path === root || path.startsWith(`${root}/`);

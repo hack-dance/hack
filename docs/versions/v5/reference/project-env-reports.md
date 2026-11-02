@@ -1,5 +1,7 @@
 # Project inventory and environment reports
 
+Historical next.5 field audit. For released next.6 changes and current command sources, see [next.6 release contracts](next6-contracts.md). These field inventories have not been requalified against next.6; they do not override its current generated command reference.
+
 Public report shapes at `28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc`. This page describes CLI projections, not private daemon/compiler/guest protocols. See [Command and output contracts](command-contracts.md) for envelope and exit semantics.
 
 ## Project inventory

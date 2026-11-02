@@ -1,8 +1,12 @@
 # Getting started
 
 Complete [Install](install.md) and [Native preparation](../guides/native-candidate.md)
-first. This version documents the published next.5 native candidate. For Compose,
-choose v4 in Docs version; this launcher's backend cannot be overridden to Compose.
+first. This version documents the published next.6 native candidate. For Compose,
+choose v4 in Docs version; native execution is the default. Explicit Compose selection is described in [Install](install.md).
+
+This guide uses the native path. Cross-version upgrade/rollback, initialized data,
+native application and client acceptance remain open; the fresh-install check
+does not qualify those paths.
 
 ## Prepare one project
 

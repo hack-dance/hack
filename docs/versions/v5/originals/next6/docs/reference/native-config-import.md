@@ -1,0 +1,271 @@
+# Read-only native import preview
+
+`hack config import --dry-run --path /exact/project/root --json` previews a
+bounded conversion of the active `.hack/hack.config.json` and
+`.hack/docker-compose.yml` pair. It does not discover an ancestor project.
+The JSON report contains source document names, field pointers, line/column
+positions, mapping status and fixed refusal codes. Human output uses the same
+information. Neither output includes authored values, compiler plans or hashes.
+`--dry-run` is required; adoption and draft export are unavailable.
+
+A complete preview means every authored field belongs to the supported subset
+and the resulting private candidate passes the matching native compiler in memory.
+It does not write `hack.project.json`, change active input selection, register
+projects, read managed environment values or keys, or inspect/change engine
+resources. Any refusal discards the private candidate; no partial conversion is
+reported as successful.
+
+An unchanged project that uses an external network (one that the
+`HACK_NATIVE_ADAPTATION` selection does not list in `isolatedNetworks`), a reserved
+ownership label, a build outside the basic form below, or a non-arm64 platform
+stays on the Compose backend in v5. Native `up` refuses those features before any work, and
+`hack doctor` reports them; see
+[Compose projects that stay on the Compose backend](../guides/native-candidate.md#compose-projects-that-stay-on-the-compose-backend).
+That check uses the same basic build mapping as this preview.
+
+## Supported subset
+
+| Legacy input | Native mapping |
+| --- | --- |
+| Required explicit canonical `name` | The same project name; no directory-name fallback |
+| String `$schema` | Editor metadata; no runtime field |
+| `defaultEnvConfig`, `default_env_config`, `env.defaultOverlay`, `env.default_overlay` | `environment.default_overlay`; all present aliases must select the same overlay |
+| Boolean `worktree.auto_branch` / `autoBranch` and `inherit_local` / `inheritLocal` | The equivalent native worktree policy; conflicting aliases refuse |
+| Optional Compose `name` | Must exactly equal the explicit project name |
+| Image-only services and explicit completion jobs | The same logical workload names and image strings |
+| Basic build-only services and explicit completion jobs | String context or a closed object containing `context`, `dockerfile`, `target`; legacy `.hack` context rebased to the checkout root |
+| Array or bounded string `command` and `entrypoint` | Explicit native exec arrays; Compose string words are split without an implicit shell, complete `$$` pairs become literal `$` arguments, and an empty entrypoint remains explicit |
+| `working_dir`, boolean `init` | `working_directory`, `init` |
+| `pull_policy` of `always`, `never`, `missing` for images, or `build` for builds | The same authored acquisition intent; omitted policy stays omitted |
+| Service `restart` of `no`, `always`, `unless-stopped`, `on-failure[:N]` | Native restart intent; retry counts must fit a positive u32; jobs accept only explicit `no` or omission |
+| String `stop_signal`, `stop_grace_period` | Native shutdown signal/grace, validated by the compiler |
+| String environment map or `KEY=value` list | Native `default` bindings, preserving managed-value precedence and empty values |
+| One explicitly declared project-owned Compose `bridge` network with boolean `internal`, attached explicitly to every workload and optional static aliases | The same logical native bridge policy and per-workload aliases; no implicit default attachment or physical-ID claim |
+| Nonempty canonical `profiles` lists | Native workload selection and the union of declared profiles |
+| Short `depends_on` lists, or long edges with `service_started` / `service_healthy` | Native service `started` / `ready` edges; `required` must be absent/true and `restart` absent/false |
+| Long edges with `service_completed_successfully` | The referenced declaration becomes a native job; the edge becomes `job` / `completed` |
+| Exact `hack.service.one-shot: "true"` label map or singleton `hack.service.one-shot=true` label list | An explicit standalone native job; the known marker is consumed as semantic provenance, without adding resource labels |
+| `healthcheck.test: [CMD, executable, ...args]` with authored positive `interval`, `timeout`, `retries` | Native exec readiness; complete argument dollar pairs decode once, and the compiler validates timings |
+| File-only top-level `configs` and `secrets` | Checkout-relative native file declarations, rebased from the known `.hack` Compose source directory |
+| Explicit service `configs` and `secrets` grants | Native read-only file mounts with canonical Linux targets and normalized `0444` permission intent |
+
+Names in this slice use lowercase letters, digits and single hyphen separators.
+Overlay aliases additionally accept ASCII case, underscores and spaces and apply
+the existing overlay-name normalization; path-like or punctuation-based spellings
+refuse. All alias spellings and their original source positions remain in the
+report. In command and entrypoint arrays or strings, every dollar must be part
+of a complete `$$` pair; the report marks decoded or split fields as normalized
+while retaining the raw authored source. String words support ASCII space,
+tab, CR and LF separators, single or double quoting, adjacent quoted segments,
+empty quoted arguments and backslash escapes. They never imply `/bin/sh -c`;
+an explicit shell executable and `-c` argument remain ordinary exec words.
+Unquoted shell control characters, unmatched quotes, dangling escapes, a first
+empty executable word, single or odd dollars, `$VAR` and `${VAR}` refuse.
+Omitted or explicit null command/entrypoint keeps Compose's image-default behavior. Empty or
+whitespace-only entrypoint explicitly clears the image entrypoint; empty or
+whitespace-only command refuses because the native command model cannot express
+Compose's explicit empty override. Outside argv and basic build paths, dollars in runtime strings and NUL in runtime values refuse
+rather than inheriting ambient environment. Environment list entries without `=`, duplicate
+names, nulls and non-string values refuse.
+
+Every unknown field remains a refusal, including fields in inactive profiles.
+Advanced builds, volumes/bind mounts, other network shapes, ports, other labels,
+routes, host/lifecycle settings, `env_file`, deployment options and extensions
+are outside the first slice. They cannot be silently omitted from a complete
+conversion.
+
+The network mapping accepts one or exactly two named non-default, non-ingress
+bridges. Each requires explicit `internal: true` or `false` and optional
+`driver: bridge`; every workload, including inactive jobs, must explicitly
+attach to one or both declared bridges. Each declared bridge must be used. Unknown
+network/attachment fields, custom physical names, external networks, IPAM,
+driver options, implicit or mixed default attachments, and duplicate or
+workload-colliding aliases refuse. Import preview preserves the authored
+logical topology; it does not claim that a running Compose bridge belongs to
+the project. The separate adoption owner must prove the existing bridge and
+container endpoints before a retained-ID transition.
+
+Completion roles are discovered before declarations are converted, including
+inactive declarations. A completed target or explicit one-shot keeps its authored
+argv, entrypoint, environment and other supported fields under `jobs`; original
+field positions remain in the report with native job targets. Unmarked installers,
+command text, service names, `restart: no` and observed exit zero do not infer jobs.
+The same target cannot also satisfy a started or healthy service edge. Undeclared
+completed targets, optional or restart-propagating edges, mixed or noncanonical
+one-shot labels, job health checks and non-`no` job restart policies refuse. Omitted
+job restart stays omitted; no native default is invented. Supported profile fields
+remain authored selection, and unsupported fields in inactive jobs still refuse.
+
+This is pure conversion, not retained-job adoption. Versions 1–5 do not qualify job
+ordering, completion, recovery or replay. The distinct [version-7 retained owner](native-compose-adoption.md)
+qualifies only its closed static/default-network family. A job import preview does not upgrade a
+receipt, launch or recreate a container, transfer ownership, or qualify application
+migration. Two-worktree data acceptance remains a separate live gate.
+
+The service-only adoption baseline continues to refuse jobs. Only the version-7
+owner selects its distinct completed-job baseline after verifying the closed
+static family. Symbolic conversion is not an ownership grant.
+
+Pure preview can preserve a completed job's explicit attachment and aliases on
+these owned bridges. Retained storage/adoption still refuses custom-network
+job combinations: neither the job nor network receipt proves their combined
+ordering, endpoint ownership, recovery or replay.
+
+Health intervals and timeouts must use integer `ms`, `s`, `m` or `h` durations
+that fit the compiler's positive u32 milliseconds. Missing or zero timings,
+`CMD-SHELL`, string probes, `NONE`, disabled probes, `start_period` and
+`start_interval` refuse: image health settings and image `SHELL` are not acquired,
+and the native contract cannot express all of those options. Explicit `disable:
+false` is the default enabled setting. Optional edges and restart propagation
+refuse. Completed-job conversion is supported as described above; retained-job
+execution has its own version and family boundary. Unknown HTTP/TCP fields also refuse.
+The compiler rejects missing, cyclic or inactive dependency targets and ready
+edges whose target has no explicit readiness. Refusals include inactive profiles.
+
+## File declarations and grants
+
+Only own `{file: string}` declarations are supported, including unused declarations.
+Relative paths are lexically rebased from `.hack` into the checkout; `../settings`
+becomes `settings`. Absolute paths, checkout escapes and unsupported source options
+refuse. No referenced material is read or inspected. Complete dollar pairs in file
+paths and grant targets decode once; ambient interpolation refuses.
+
+Declaring a file does not grant access. Explicit short or long workload grants map
+to read-only mounts. A short config targets `/<name>`; a short secret targets
+`/run/secrets/<name>`. Long grants require `source` and may select a canonical
+absolute target; a secret basename target is placed under `/run/secrets`.
+Omitted mode, quoted `"0444"` and numeric `292` normalize to `"0444"`.
+UID/GID, alternate modes and unknown grant fields refuse, including inactive
+services and converted jobs. Bare YAML `0444` becomes unsupported decimal `444`; explicit `0o444`
+retains the parser's compatibility refusal. Quoted `"0444"` and numeric `292`
+are supported. The compiler validates source references and target overlaps.
+For converted jobs, grant provenance retains the original `/services/<name>`
+source positions and points to the published `/jobs/<name>/mounts` fields.
+File recognition remains preview-only; combining a job or build with a file
+grant does not authorize retained adoption of any of those feature families.
+
+These are Linux declaration defaults. Compose's file-backed binds can ignore
+permission options, so this preview does not establish original file modes or
+runtime binding equivalence. The ordinary retained-adoption baseline still refuses
+file declarations and grants before private values, keys or engine probes. The
+separate [retained-file owner](native-compose-adoption.md) requires original bind
+and material proof for its closed config-0444 and protected secret-0400/0600 subset;
+preview completeness does not provide that authority or qualify ordinary secret
+permissions. See Docker's
+[config grants](https://docs.docker.com/reference/compose-file/services/#configs)
+and [secret grants](https://docs.docker.com/reference/compose-file/services/#secrets).
+
+## Pure basic build preview
+
+The [Compose build contract](https://docs.docker.com/reference/compose-file/build/)
+allows a short context string or an object. This preview accepts only relative
+local context paths and optional relative `dockerfile` and canonical `target`.
+It converts the raw `.hack/docker-compose.yml` declaration: legacy context paths
+start at `.hack/`, while native contexts start at the checkout root. Thus
+`build: ..` maps to native context `.`, `build: .` maps to `.hack`, and
+`context: ../app` maps to `app`. An object without `context` uses the legacy
+default directory `.hack`. An omitted Dockerfile remains omitted for the native
+compiler's `Dockerfile` default; an explicit Dockerfile stays relative to the
+build context. Lexical path normalization and complete `$$` pair decoding do not
+read files or evaluate environment variables. Source pointers and positions
+remain those of the raw declaration, and the report contains no path values.
+For a converted job, native build target pointers use `/jobs/<name>/build` while
+source pointers retain the original `/services/<name>/build` declaration.
+
+Context paths escaping the checkout root, Dockerfiles escaping their context,
+absolute/home-relative/remote paths, ambiguous dollar expressions and malformed
+fields refuse. Build arguments, cache options, SSH, secrets, labels, network,
+inline Dockerfiles, platforms, tags and every other build option remain refused,
+even when empty or in an inactive profile. `build.pull` is unsupported; the
+workload's `pull_policy: build` is a separate supported acquisition requirement.
+Combined `build` and `image` refuse because the native model requires exactly one
+source. Invalid builds cannot fall back to an authored image or a default policy.
+
+Long directory binds with explicit `bind.create_host_path: false` can map to
+native source mounts. Literal relative sources are resolved from the legacy
+`.hack/docker-compose.yml` directory, then expressed relative to the checkout;
+`../src` becomes `src`, and `..` becomes `.`. Read-only and read-write access are
+preserved. Absolute paths, checkout escapes, interpolation, propagation,
+consistency and SELinux options refuse. Explicit Git and managed-state source
+subdirectories also refuse; an existing whole-checkout bind remains possible.
+
+Short bind syntax has different missing-path behavior: Compose may create a host
+directory. It therefore remains refused by general conversion preview. The
+separate [retained directory owner](native-compose-adoption.md#retained-directory-binds)
+can qualify a short bind only after verifying that the exact authored directory
+already exists and is mounted by the original container with identical access.
+Neither path creates missing directories. Directory/file-grant and other retained
+feature intersections remain unqualified.
+
+This expands read-only preview only. The image-only retained baseline remains
+closed. A separate [proof-bearing basic-build owner](native-compose-adoption.md#retained-basic-builds)
+qualifies current included source and exact existing images before adoption; a
+complete pure preview never supplies that authority. The mapper runs no Compose
+normalization, builder or runtime command, and does not validate Dockerfile
+contents, path existence or filesystem identity. The authoritative compiler still
+must validate the whole private candidate before a complete CLI preview; actual
+build import and adoption acceptance remain open.
+
+The maintained config-only correspondence gate is
+`bun scripts/check-native-config-import-build.ts`. Select the prepared matching
+sidecar with an absolute `HACK_CONFIG_COMPILER_BINARY` and the installed standalone
+Compose plugin with an absolute `HACK_IMPORT_COMPOSE_BINARY`. It compares the
+actual normalized Compose projections of the raw legacy and compiled/rendered
+native inputs for default context, checkout-root context, nested Dockerfile/stage
+and literal dollars, including an inactive profile selected explicitly for the
+comparison. Context and lexically resolved Dockerfile paths must match; stage, source and
+policy presence must remain exact. These are Compose's serialized config strings,
+including its escaped-dollar representation; the comparison does not decode them
+again or certify the builder's actual filesystem paths. No builder or engine command is admitted.
+Compose receives an isolated empty Docker configuration and a nonexistent engine
+socket. The aggregate gate is bounded to 90 seconds with bounded child captures.
+An optional fresh absolute `HACK_IMPORT_BUILD_EVIDENCE_DIR` retains private
+captures and the result; a failure keeps its temporary evidence and returns
+nonzero. The result records matched projections and requires the command's final
+zero exit; it cannot independently certify completion after a late write or
+cancellation. This proves config correspondence, not build or adoption acceptance.
+
+## Parsing and input boundary
+
+The pinned maintained `yaml` AST parser checks decoded key uniqueness, strict
+syntax and source positions. JSON additionally passes strict `JSON.parse` syntax
+validation before AST inspection; escaped equivalent JSON keys still refuse.
+Exactly one document is required. YAML anchors, aliases, merge keys, explicit tags
+and directives refuse. YAML 1.1 compatibility warnings also refuse, so ambiguous
+plain scalars such as `on` require explicit quotes. Input bytes, AST nodes and
+depth have fixed budgets. Parser diagnostics contain no source excerpts.
+
+Selected files must be bounded readable regular files with one hard link.
+Symlinked roots/directories/files, missing or competing authored inputs, invalid
+UTF-8 and changed input identities or bytes refuse. Stable descriptor reads and
+final rechecks surround compiler validation; they do not lock external editors.
+Cancellation stops the owned compiler and returns a fixed redacted error.
+
+Presence of root `.env`, `.hack/.env` or `.hack/hack.local.json` explicitly
+refuses this first slice without reading them. Linked worktrees and separate Git
+directories use `.git` files; those layouts explicitly refuse, including when
+the selected project is nested beneath that Git root. Ordinary `.git` directories
+are inspected only for marker type and identity.
+
+The private owner result freezes its report and candidate. The candidate is
+non-enumerable and available only through explicit private API access; ordinary
+JSON serialization and object spread contain the report alone. Public callers
+must never serialize that candidate into logs, receipts or command output.
+
+## Identity and remaining adoption work
+
+Preview preserves the explicit logical project name, service names and supported
+authored intent. It does not transfer registry IDs, Compose project/resource
+ownership, named volumes, checkout/worktree identity or saved runtime generations.
+Existing managed environment files remain untouched; their values are not copied
+into the authored candidate.
+
+NC04 adoption remains open. Locked publication, input-family transition, local and
+linked-worktree policy, unsupported intent conversion, existing resource ownership,
+volume reuse and recovery require separate implementation and acceptance.
+A successful preview is neither execution admission nor application acceptance.
+
+The separate private [legacy Compose binding prerequisite](native-compose-adoption.md)
+can verify qualified existing instance and named-volume identities without changing
+configuration or resources. It does not expand this command's conversion subset
+or complete the adoption transaction.

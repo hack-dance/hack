@@ -1,5 +1,7 @@
 # MCP fields and results
 
+Historical next.5 field audit. For released next.6 changes and current command sources, see [next.6 release contracts](next6-contracts.md). These field inventories have not been requalified against next.6; they do not override its current generated command reference.
+
 Exact tool inputs for v5 (next.5). Start with [Agent integrations](../../integrations.md) for setup. These are MCP JSON input names, not CLI flag spellings.
 
 Registration does not establish backend compatibility. In particular, the native candidate has a narrower admission contract; a retained Compose tool is not an alternative native lifecycle API. A successful command result is not application health or readiness.

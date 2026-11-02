@@ -1,5 +1,7 @@
 # Configuration fields
 
+Historical next.5 field audit. For released next.6 changes and current command sources, see [next.6 release contracts](next6-contracts.md). These field inventories have not been requalified against next.6; they do not override its current generated command reference.
+
 This reference describes v5 (next.5). Use [Environment and secrets](../../env.md) and [Lifecycle](../../lifecycle.md) for workflows. Fields below come from the version-pinned schema and readers, not a newer checkout.
 
 The published native launcher accepts a narrower authored project model. This legacy JSON/Compose reference does not establish native feature support. Start with [Native configuration import](../../reference/native-config-import.md) and the authored schemas linked from [Reference](overview.md).

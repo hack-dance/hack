@@ -3927,6 +3927,22 @@ for (const refused of [
     reason: '"SETTING" for "api" in "default"',
   },
   {
+    name: "a tracked service deletion with no global value",
+    files: {
+      "hack.env.default.yaml": "  global: {}\n  api:\n    SETTING: null\n",
+    },
+    legacy: { ".env": `SETTING=${SCOPED_LEGACY_VALUE}\n` },
+    reason: '"SETTING" for "api" in "default"',
+  },
+  {
+    name: "a tracked host deletion with no global value",
+    files: {
+      "hack.env.default.yaml": "  global: {}\n  host:\n    SETTING: null\n",
+    },
+    legacy: { ".env": `SETTING=${SCOPED_LEGACY_VALUE}\n` },
+    reason: '"SETTING" for "host" in "default"',
+  },
+  {
     name: "a tracked overlay's service value, from the base file",
     files: {
       "hack.env.default.yaml": "  global: {}\n",

@@ -5,7 +5,7 @@ import { expect, expectExit, runCommand, type Scenario } from "../harness.ts";
 
 const OWNER = "hack.e2e.domain-owner";
 const BRANCH = "domain-proof";
-const IMAGE = "node:24.11.0-bookworm-slim";
+const IMAGE = "node:24.22.1-bookworm-slim";
 const TIMEOUT = 60_000;
 
 /** Explicit opt-in: uses existing ingress, never installs DNS or trust. Native DNS qualification is separate. */

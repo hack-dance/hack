@@ -14,7 +14,7 @@ let group = 0,
   started = false;
 try {
   if (
-    Bun.version !== "1.4.2" ||
+    Bun.version !== "1.4.4" ||
     !["--check", "--write"].includes(process.argv[2] ?? "")
   ) {
     throw new Error("Pinned helper generation refused");

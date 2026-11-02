@@ -63,7 +63,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Resolve version
         id: version
         env:
@@ -108,7 +108,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -209,7 +209,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Render formula
         env:
           GH_TOKEN: ${{ github.token }}

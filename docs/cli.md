@@ -480,8 +480,10 @@ Linked worktrees read eligible primary-checkout local env overrides and managed
 extra-host aliases at command time. Later primary changes are visible without
 copying files. Tracked project config, generated overrides, runtime state and other
 ignored files stay checkout-local. Set `worktree.inherit_local` to `false` in the
-worktree's `hack.config.json` to disable inheritance. Slim/Codex execution mode and
-CI (`CI=1` or `CI=true`) disable this inheritance automatically.
+worktree's `hack.config.json` to disable inheritance. `HACK_WORKTREE_INHERIT_LOCAL=0`
+does the same for the Compose path; the experimental graph runner follows the config
+setting only. Slim/Codex execution mode and CI (`CI=1` or `CI=true`) disable this
+inheritance automatically.
 
 For Compose aliases, explicit local `internal.extra_hosts` takes precedence over
 inherited dynamic aliases, and local dynamic aliases take precedence over both.

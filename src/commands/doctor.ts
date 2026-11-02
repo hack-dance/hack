@@ -43,6 +43,7 @@ import {
   LEGACY_GRAFANA_HOST,
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
+  PROJECT_ENV_STATE_FILENAME,
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
@@ -2780,10 +2781,12 @@ async function checkProjectEnvMaterialization({
     };
   }
 
+  // Recorded state means modern inputs once existed; inspect it for staleness.
   if (
-    !(await projectEnvConfigExists({
-      projectDir: ctx.projectDir,
-    }))
+    !(
+      (await projectEnvConfigExists({ projectDir: ctx.projectDir })) ||
+      (await pathExists(resolve(ctx.projectDir, PROJECT_ENV_STATE_FILENAME)))
+    )
   ) {
     return {
       name: "env materialization",

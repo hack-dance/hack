@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs/promises";
 import {
   chmod,
   mkdir,
@@ -15,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
+  LegacyDotenvMigrationRefusalError,
   migrateLegacyProjectEnv,
   resolveProjectEnvConfig,
   setProjectEnvValue,
@@ -450,3 +452,33 @@ test.skipIf(process.platform !== "linux" || process.geteuid?.() === 0)(
     expect(await readdir(f.linked)).toEqual(entries);
   }
 );
+
+// Branch coverage only, on every platform: the failure is injected, so this says nothing
+// about when a real permission reaches this code. The test above is the native evidence.
+test("injected: a failed listing of the primary's env layers refuses, before any write", async () => {
+  const f = await legacyLinkedCheckout();
+  const entries = await readdir(f.linked);
+  const original = fs.readdir;
+  const spy = spyOn(fs, "readdir").mockImplementation(((
+    ...args: Parameters<typeof original>
+  ) => {
+    if (String(args[0]) === f.primary) {
+      return Promise.reject(
+        Object.assign(new Error("EACCES"), { code: "EACCES" })
+      );
+    }
+    return original(...args);
+  }) as typeof original);
+
+  let result: unknown;
+  try {
+    result = await f.migrate();
+  } finally {
+    spy.mockRestore();
+  }
+
+  expect(result).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  expect((result as Error).message).toContain("can't be listed");
+  expect((result as Error).message).toContain("Nothing was written");
+  expect(await readdir(f.linked)).toEqual(entries);
+});

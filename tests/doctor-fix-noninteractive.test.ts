@@ -862,13 +862,13 @@ test("doctor contract migration keeps base and untracked overlays with undeliver
     await lstat(resolve(projectDir, ".env.same")).catch(() => null)
   ).toBeNull();
   expect(
-    await readFile(resolve(projectDir, "hack.env.default.yaml"), "utf8")
+    await readFile(resolve(projectDir, "hack.env.local.yaml"), "utf8")
   ).toContain("synthetic-delivered");
   expect(
-    await readFile(resolve(projectDir, "hack.env.bak.yaml"), "utf8")
+    await readFile(resolve(projectDir, "hack.env.bak.local.yaml"), "utf8")
   ).toContain("synthetic-backup");
   expect(
-    await readFile(resolve(projectDir, "hack.env.example.yaml"), "utf8")
+    await readFile(resolve(projectDir, "hack.env.example.local.yaml"), "utf8")
   ).toContain("synthetic-example");
 });
 

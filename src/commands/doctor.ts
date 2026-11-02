@@ -1,6 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
 import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../agents/integration-revision.ts";
@@ -3698,11 +3698,17 @@ function renderSkippedDoctorFixSteps(): void {
 
 function buildEnvMigrationNote(opts: {
   readonly migrated: LegacyProjectEnvMigration;
+  readonly projectRoot: string;
   /** Only the migration without a contract makes every value global. */
   readonly globalDelivery: boolean;
 }): string {
   const { migrated } = opts;
   const notes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
+  for (const moved of migrated.movedPlainValues) {
+    notes.push(
+      `Moved ${moved.key} to ${relative(opts.projectRoot, moved.path)} (values omitted).`
+    );
+  }
   if (migrated.updatedProjectConfig) {
     notes.push("Updated .hack/hack.config.json for the modern env format.");
   }
@@ -3801,7 +3807,11 @@ async function maybeMigrateProjectEnvConfig(opts: {
     return;
   }
   note(
-    buildEnvMigrationNote({ migrated, globalDelivery: !hasContract }),
+    buildEnvMigrationNote({
+      migrated,
+      projectRoot: project.projectRoot,
+      globalDelivery: !hasContract,
+    }),
     "doctor"
   );
 

@@ -7214,7 +7214,12 @@ async function assertLocalBaseIsTheDefaultEnvLayer(opts: {
   readonly projectDir: string;
   readonly baseToMigrate: Readonly<Record<string, unknown>>;
 }): Promise<void> {
-  if (Object.keys(opts.baseToMigrate).length === 0) {
+  // Inside git, tracking decides what this file is, and the tracked-layer check
+  // refuses with the remedy that works there.
+  if (
+    Object.keys(opts.baseToMigrate).length === 0 ||
+    (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+  ) {
     return;
   }
   const localBasePath = resolveProjectEnvLocalConfigPath({
@@ -7744,7 +7749,7 @@ async function readLegacyDotenvCleanupEntries(opts: {
   return parseDotEnv(source.text);
 }
 
-async function collectLegacyProjectEnvCleanupCandidates(opts: {
+export async function collectLegacyProjectEnvCleanupCandidates(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly overlayNames: readonly string[];

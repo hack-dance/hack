@@ -6526,6 +6526,199 @@ async function assertBaseDoesNotOutrankTrackedOverlays(opts: {
   }
 }
 
+/** `layer` with the migration's planned global values added, as the merge will write it. */
+function layerWithPlannedGlobals(opts: {
+  readonly layer: ProjectEnvConfig | null;
+  readonly environment: string;
+  readonly planned: Readonly<Record<string, ProjectEnvStoredValue>>;
+}): ProjectEnvConfig | null {
+  if (Object.keys(opts.planned).length === 0) {
+    return opts.layer;
+  }
+  const layer =
+    opts.layer ??
+    buildMigratedProjectEnvConfig({
+      environment: opts.environment,
+      values: { global: {} },
+    });
+  return {
+    ...layer,
+    values: {
+      ...layer.values,
+      global: { ...layer.values.global, ...opts.planned },
+    },
+  };
+}
+
+/** `keys` whose scoped value or scoped deletion the planned layers replace for one target. */
+function scopedValuesReplacedForTarget(opts: {
+  readonly target: {
+    readonly name: string;
+    readonly scopeNames: readonly string[];
+    readonly before: Readonly<Record<string, string>>;
+  };
+  readonly keys: readonly string[];
+  readonly envLayers: readonly (ProjectEnvConfig | null)[];
+  readonly plannedLayers: readonly (ProjectEnvConfig | null)[];
+  readonly envName: string | null;
+}): readonly string[] {
+  const { target } = opts;
+  const globalBefore = resolveEffectiveStoredEntries({
+    layers: opts.envLayers,
+    scopeNames: ["global"],
+  });
+  const before = resolveEffectiveStoredEntries({
+    layers: opts.envLayers,
+    scopeNames: target.scopeNames,
+  });
+  const after = resolveEffectiveStoredEntries({
+    layers: opts.plannedLayers,
+    scopeNames: target.scopeNames,
+  });
+  return opts.keys.flatMap((key) => {
+    const entry = before[key];
+    // A scoped value, or a scoped deletion that hides a global one.
+    const scoped = entry ? entry.scope !== "global" : key in globalBefore;
+    const value = after[key]?.value;
+    const replaced =
+      scoped &&
+      value !== undefined &&
+      !isProjectEnvSecretValue(value) &&
+      String(value) !== target.before[key];
+    return replaced
+      ? [
+          `${JSON.stringify(key)} for ${JSON.stringify(entry?.scope ?? target.name)} in ${JSON.stringify(opts.envName ?? "default")}`,
+        ]
+      : [];
+  });
+}
+
+/**
+ * Which service and host values a planned local write would replace in one env.
+ * A later layer beats an earlier one whatever their scopes, so a local global
+ * value outranks a service or host value in a tracked layer, while a scoped value
+ * in the same local layer still wins. So this resolves the layers as they will be,
+ * not by comparing scopes. Returns names only.
+ */
+async function scopedValuesReplacedInEnv(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly envName: string | null;
+  readonly planned: ReadonlyMap<
+    string,
+    Readonly<Record<string, ProjectEnvStoredValue>>
+  >;
+}): Promise<readonly string[]> {
+  const layers = await readProjectEnvLayers(opts);
+  const resolved = await resolveProjectEnvConfig(opts);
+  if (!(layers && resolved)) {
+    return [];
+  }
+  const { selection, envLayers } = layers;
+  const plannedBase = opts.planned.get(selection.localDefaultPath) ?? {};
+  const plannedOverlay =
+    (selection.localOverlayPath &&
+      opts.planned.get(selection.localOverlayPath)) ||
+    {};
+  const keys = Object.keys({ ...plannedBase, ...plannedOverlay });
+  if (keys.length === 0) {
+    return [];
+  }
+  // The two machine-local layers always come last (readProjectEnvLayers).
+  const plannedLayers = [
+    ...envLayers.slice(0, -2),
+    layerWithPlannedGlobals({
+      layer: envLayers.at(-2) ?? null,
+      environment: "default",
+      planned: plannedBase,
+    }),
+    layerWithPlannedGlobals({
+      layer: envLayers.at(-1) ?? null,
+      environment: selection.effectiveEnv ?? "default",
+      planned: plannedOverlay,
+    }),
+  ];
+  const projection = projectEnvProjection({
+    layers,
+    serviceNames: opts.serviceNames,
+  });
+  const targets = [
+    ...projection.serviceTargets.flatMap((target) => [
+      {
+        name: target.serviceName,
+        scopeNames: target.composeScopeNames,
+        before: resolved.serviceEnv[target.serviceName] ?? {},
+      },
+      {
+        name: target.serviceName,
+        scopeNames: target.hostScopeNames,
+        before: resolved.hostTargetEnv[target.serviceName] ?? {},
+      },
+    ]),
+    {
+      name: PROJECT_ENV_HOST_SCOPE as string,
+      scopeNames: projection.globalHostScopeNames,
+      before: resolved.hostTargetEnv.global ?? {},
+    },
+  ];
+  const replaced = targets.flatMap((target) =>
+    scopedValuesReplacedForTarget({
+      target,
+      keys,
+      envLayers,
+      plannedLayers,
+      envName: opts.envName,
+    })
+  );
+  return [...new Set(replaced)];
+}
+
+/**
+ * Refuses a planned local write that would replace a service or host value from
+ * an env layer, in the base or in any overlay. That target would silently change
+ * value and stop receiving later team changes to the key. Names only.
+ */
+async function assertMigrationKeepsScopedValues(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly overlayNames: readonly string[];
+  readonly localWrites: readonly PlannedEnvLayerWrite[];
+}): Promise<void> {
+  if (opts.localWrites.length === 0) {
+    return;
+  }
+  const planned = new Map(
+    opts.localWrites.map((write) => [
+      write.path,
+      write.config.values.global ?? {},
+    ])
+  );
+  const overlays = new Set([
+    ...opts.overlayNames,
+    ...(await listProjectEnvOverlayNames({ projectDir: opts.projectDir })),
+  ]);
+  const replaced: string[] = [];
+  for (const envName of [null, ...overlays]) {
+    replaced.push(
+      ...(await scopedValuesReplacedInEnv({
+        projectRoot: opts.projectRoot,
+        projectDir: opts.projectDir,
+        serviceNames: opts.serviceNames,
+        envName,
+        planned,
+      }))
+    );
+  }
+  if (replaced.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `a legacy env file sets ${replaced.sort().join(", ")}, and its migrated value would replace what that env layer gives that target, because a machine-local global value outranks a service or host value in an earlier layer. Remove the key from the legacy file, or change that value in its env layer, then retry.`,
+    });
+  }
+}
+
 /**
  * An existing machine-local layer the migration may add to, or null when absent.
  * Refuses one it can't read or parse, or that isn't a regular file: `.config`
@@ -6775,7 +6968,8 @@ async function publishMigratedLegacyLayers(opts: {
  *   machine-local layer, a Compose `env_file` on a file the migration leaves
  *   out or on an overlay a launch without `--env` would not select, a Compose
  *   `environment` or `env_file` entry the migrated value would override, a
- *   service that would gain values a legacy file gave only to others, an
+ *   service that would gain values a legacy file gave only to others, a
+ *   service or host value in an env layer that a migrated value would replace, an
  *   `env_file` order that gives a key a different value from the layers, a Compose
  *   input that hides `env_file` from this check, a line Compose reads differently
  *   from Hack, a key that does not match `^[A-Z_][A-Z0-9_]*$`
@@ -6928,6 +7122,13 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     projectDir: opts.projectDir,
     overlayNames,
     legacyValues,
+  });
+  await assertMigrationKeepsScopedValues({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    serviceNames: opts.serviceNames,
+    overlayNames,
+    localWrites,
   });
   const merges = await planLocalLayerMerges({ localWrites });
   for (const write of localWrites) {

@@ -579,6 +579,13 @@ mod tests {
     }
     impl Job {
         fn new(timeout_ms: u64) -> Self {
+            Self::spawn(timeout_ms, true)
+        }
+        /// `leader: false` spawns the child in this test process's group instead of its own.
+        /// Its identity then records `process_group = pid`, the leadership `verify` requires,
+        /// so every group signal is authorized but finds no such group (`ESRCH`, tolerated):
+        /// the child outlives each SIGKILL, as a kill that never takes effect would.
+        fn spawn(timeout_ms: u64, leader: bool) -> Self {
             let root = crate::private_test_root(
                 &std::env::temp_dir().canonicalize().unwrap(),
                 "hkl-node-run",
@@ -586,14 +593,16 @@ mod tests {
             let store = Store::open(&root, true).unwrap();
             let id = "a".repeat(64);
             super::super::test_support::job(&store, &id, "running", timeout_ms);
-            let mut child = Command::new("/bin/sh")
+            let mut command = Command::new("/bin/sh");
+            command
                 .args(["-c", "trap '' TERM; echo ready; read line; exit 3"])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .process_group(0)
-                .spawn()
-                .unwrap();
+                .stderr(Stdio::piped());
+            if leader {
+                command.process_group(0);
+            }
+            let mut child = command.spawn().unwrap();
             let stdin = child.stdin.take();
             // Exactly the handshake line: run_child later drains the rest of stdout.
             let mut ready = [0_u8; 6];
@@ -604,7 +613,9 @@ mod tests {
                 .read_exact(&mut ready)
                 .unwrap();
             assert_eq!(&ready, b"ready\n");
-            let identity = super::super::ownership::observe(child.id() as i32).unwrap();
+            let mut identity = super::super::ownership::observe(child.id() as i32).unwrap();
+            assert_eq!(identity.process_group == identity.pid, leader);
+            identity.process_group = identity.pid;
             Self {
                 root,
                 store,
@@ -796,6 +807,43 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure.message, "Child termination deadline exceeded.");
         // SIGTERM was ignored and Gone never authorized SIGKILL: still alive.
+        assert!(!exit_published(pid));
+        drop(job.stdin.take());
+        assert_eq!(job.child.wait().unwrap().code(), Some(3));
+    }
+
+    /// Hang guard for a stop whose SIGKILL never takes effect. The correct path quarantines
+    /// about `TERMINATION_GRACE` after the first SIGKILL; only a grace that is re-anchored
+    /// on every later SIGKILL, and so never expires, should reach this.
+    const UNSETTLED_KILL_HANG_GUARD: Duration = Duration::from_secs(60);
+
+    /// HACK-1457: the grace after this owner's first SIGKILL is anchored once. A child that
+    /// outlives every SIGKILL is re-authorized and signalled again on each later pass; if
+    /// each of those re-anchored the grace, the termination deadline would never pass.
+    #[test]
+    fn repeated_kills_of_a_child_that_never_exits_keep_the_first_kill_anchor() {
+        use super::super::ownership::Observed;
+        let mut job = Job::spawn(50, false);
+        let pid = job.pid();
+        let recorded = job.identity.clone();
+        let begun = Instant::now();
+        let mut checks = 0;
+        let failure = job
+            .run(&mut |observed| {
+                assert_eq!(observed, pid);
+                assert!(
+                    begun.elapsed() < UNSETTLED_KILL_HANG_GUARD,
+                    "E_TEST_KILL_GRACE_REANCHORED"
+                );
+                checks += 1;
+                Ok(Observed::Present(recorded.clone()))
+            })
+            .unwrap_err();
+        assert_eq!(failure.message, "Child termination deadline exceeded.");
+        // The SIGTERM check, the first SIGKILL, and at least the SIGKILL of the pass that
+        // quarantined: a re-anchoring regression had a later SIGKILL to re-anchor on.
+        assert!(checks >= 3, "E_TEST_KILL_NOT_REPEATED");
+        // Every group signal found no group: the child still waits for its input.
         assert!(!exit_published(pid));
         drop(job.stdin.take());
         assert_eq!(job.child.wait().unwrap().code(), Some(3));

@@ -1,6 +1,4 @@
 import { isCancel, password, text } from "@clack/prompts";
-
-import { secrets } from "bun";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import {
@@ -8,6 +6,7 @@ import {
   confirmSafe,
   requireInteractive,
 } from "../lib/interactivity.ts";
+import { nativeKeychain as secrets } from "../lib/native-keychain.ts";
 import { logger } from "../ui/logger.ts";
 
 const DEFAULT_SECRETS_SERVICE = "hack-cli" as const;

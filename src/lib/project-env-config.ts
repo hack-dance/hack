@@ -6449,7 +6449,13 @@ export async function canMigrateCheckoutLegacyDotenv(opts: {
  * The recovery keeps each key's declared scope, because `--local` alone would
  * deliver it to every service. An overlay file's own value moves to that overlay's
  * machine-local layer, which outranks the local base, so the overlay command only
- * changes it later.
+ * changes it later. Names from the repository are quoted, because these commands get
+ * pasted. Only a name the CLI accepts unchanged gets a command: `--env base`, for
+ * example, selects no overlay, so following it would replace the base value. Any other
+ * name is reported.
+ *
+ * It also refuses when a mirrored backend's key isn't available, because the shell
+ * value might be the only one.
  */
 function assertNoShellValuesInContractMigration(opts: {
   readonly values: readonly ProcessOnlyContractValue[];
@@ -6470,7 +6476,7 @@ function assertNoShellValuesInContractMigration(opts: {
   const undetermined = opts.values.some((value) => value.undetermined);
   const sentences = [
     undetermined
-      ? `the contract declares ${parts.join(", ")} as plain_env, your shell sets it, and the secret backend's key isn't available, so the value may come only from your shell, and migrating could write it to a tracked env layer. No key was created. Make the backend's key available and retry. If the backend has nothing stored yet and HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK isn't set, the steps below also work, and the migration then creates its key.`
+      ? `the contract declares ${parts.join(", ")} as plain_env, your shell sets it, and the secret backend's key isn't available, so the value may come only from your shell, and migrating could save it to a plaintext file on this machine without you asking. No key was created. Make the backend's key available and retry. If the backend has nothing stored yet and HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK isn't set, the steps below also work, and the migration then creates its key.`
       : `the contract declares ${parts.join(", ")} as plain_env, and the value comes only from your shell, so migrating would save it to a plaintext file on this machine without you asking.`,
   ];
   if (malformed > 0) {

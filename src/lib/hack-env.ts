@@ -7,7 +7,7 @@ import {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
-import { readTextFile } from "./fs.ts";
+import { readOptionalTextFile, readTextFile } from "./fs.ts";
 import { ensureHackGitInfoExclude } from "./git-info-exclude.ts";
 import { getString, isRecord } from "./guards.ts";
 import {
@@ -192,10 +192,21 @@ export async function readHackEnvContract(opts: {
   readonly projectDir: string;
 }): Promise<HackEnvReadResult> {
   const path = resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME);
-  const text = await readTextFile(path);
-  if (text === null) {
+  const read = await readOptionalTextFile(path);
+  if (read.kind === "absent") {
     return { path, exists: false, contract: defaultHackEnvContract() };
   }
+  // A contract that can't be opened isn't a project without one: callers that took it
+  // for absent created layers that bypass .hack/.env, or ignored its scopes.
+  if (read.kind === "unreadable") {
+    return {
+      path,
+      exists: true,
+      contract: defaultHackEnvContract(),
+      parseError: "the file can't be read",
+    };
+  }
+  const { text } = read;
 
   let parsed: unknown;
   try {

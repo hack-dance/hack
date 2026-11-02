@@ -913,3 +913,50 @@ for (const kind of ["mode 000", "directory", "dangling link"] as const) {
     }
   );
 }
+
+for (const kind of ["mode 000", "directory", "dangling link"] as const) {
+  test.skipIf(kind === "mode 000" && process.geteuid?.() === 0)(
+    `an implicit migration refuses a hack.env.json that can't be opened (${kind}), before any layer`,
+    async () => {
+      const repo = await createContractRepo({
+        files: { ".env": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+      });
+      const contract = resolve(repo.projectDir, "hack.env.json");
+      if (kind === "mode 000") {
+        await chmod(contract, 0o000);
+      } else {
+        await rm(contract);
+        if (kind === "directory") {
+          await mkdir(contract);
+        } else {
+          await symlink(resolve(repo.root, "contract-that-is-gone"), contract);
+        }
+      }
+      const before = (await readdir(repo.projectDir)).sort();
+
+      const run = await runHack({
+        repo,
+        args: [
+          "env",
+          "add",
+          "NEW_SETTING",
+          "--local",
+          "--value-stdin",
+          "--path",
+          repo.projectRoot,
+        ],
+        stdin: "new-value\n",
+      });
+      if (kind === "mode 000") {
+        await chmod(contract, 0o600);
+      }
+
+      expect(run.exitCode).not.toBe(0);
+      expect(run.output).toContain("hack.env.json can't be read");
+      expect(run.output).not.toContain(DOTENV_VALUE);
+      expect(run.output).not.toContain("new-value");
+      expect((await readdir(repo.projectDir)).sort()).toEqual(before);
+    },
+    60_000
+  );
+}

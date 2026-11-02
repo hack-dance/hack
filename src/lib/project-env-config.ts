@@ -5071,16 +5071,8 @@ export async function migrateLegacyProjectEnv(opts: {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const contract = await readHackEnvContract({ projectDir: opts.projectDir });
   // Read as an empty contract, it would migrate nothing and offer .env and the contract
-  // for cleanup. One that can't be opened reads as no contract at all, which would ignore
-  // its scopes and still offer it for cleanup. The parser's message isn't repeated,
-  // because it can quote the file.
-  const contractEntry = await readOptionalTextFile(
-    resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME)
-  );
-  if (
-    contractEntry.kind === "unreadable" ||
-    (contract.exists && contract.parseError !== undefined)
-  ) {
+  // for cleanup. The parser's message isn't repeated, because it can quote the file.
+  if (contract.exists && contract.parseError !== undefined) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
       reason:

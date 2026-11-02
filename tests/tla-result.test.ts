@@ -5,6 +5,11 @@ import {
   runTlaSequence,
   validateTlaChecks,
 } from "../scripts/check-tla-models.ts";
+import {
+  assertPinnedBun,
+  bunTestBannerPattern,
+  parsePinnedBun,
+} from "../scripts/lib/pinned-bun.ts";
 import type { TlaCheck } from "../scripts/lib/tla-checks.ts";
 import {
   type TlaExpectation,
@@ -349,5 +354,40 @@ describe("TLC toolchain", () => {
         expected: { kind: "invariant", property: "Guarded" },
       })
     ).toBe(false);
+  });
+});
+
+describe("pinned Bun for formal checks", () => {
+  test("accepts only an exact bun@x.y.z packageManager", () => {
+    expect(parsePinnedBun("bun@1.4.4")).toBe("1.4.4");
+    for (const value of ["bun@latest", "bun@1.4", "npm@1.4.4", undefined]) {
+      expect(() => parsePinnedBun(value)).toThrow("exact bun@x.y.z");
+    }
+  });
+
+  test("refuses any runtime other than the package.json pin", async () => {
+    const { packageManager } = await Bun.file(
+      resolve(import.meta.dir, "../package.json")
+    ).json();
+    const pinned = parsePinnedBun(packageManager);
+    expect(await assertPinnedBun(pinned)).toBe(pinned);
+    await expect(assertPinnedBun(`${pinned}-other`)).rejects.toThrow(
+      `Use the pinned Bun ${pinned}`
+    );
+  });
+
+  test("mise selects the same Bun as package.json", async () => {
+    const mise = await Bun.file(
+      resolve(import.meta.dir, "../mise.toml")
+    ).text();
+    const selected = /^bun = "([^"]+)"$/m.exec(mise)?.[1];
+    expect(selected).toBe(await assertPinnedBun());
+  });
+
+  test("the banner pattern matches only that exact version", () => {
+    const banner = new RegExp(`^${bunTestBannerPattern("1.4.4")}$`);
+    expect(banner.test("bun test v1.4.4 (38afee6c8)")).toBe(true);
+    expect(banner.test("bun test v1.3.9 (cf6cdbbb)")).toBe(false);
+    expect(banner.test("bun test v1x4x4 (38afee6c8)")).toBe(false);
   });
 });

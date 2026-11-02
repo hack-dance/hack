@@ -110,6 +110,13 @@ restored baselines. A disposable model with `Starting` disabled under `P5.cfg`
 reported `Deadlock reached.` with exit 11, confirming that active-state deadlocks
 are detected. The disposable control was removed; product source is unchanged.
 
+The replay and checker runtime follows the `packageManager` pin in `package.json`.
+Moving that pin from Bun 1.3.9 to 1.4.4 changed no result: direct replays on both
+versions gave the same exit, marker, named `PropertyViolation` and pass/fail counts,
+and `bun run check:tla` on 1.4.4 retained every baseline, control, mutation, replay
+and restored baseline above. Replay schedules use controlled children and no timers,
+and TLC runs under Java. Any later pin change must pass this command on the new Bun.
+
 ## Findings and limits
 
 - **F1 / P1:** starting a second exported `runJob` for one stored ID while the first

@@ -8,8 +8,8 @@ mise exec -- bun install --frozen-lockfile
 mise exec -- bun run check:tla --download
 ```
 
-The repository check command is **`bun run check:tla`**. With Bun 1.3.9 and Java 17
-already selected, run it directly. `--download` only bootstraps a missing jar;
+The repository check command is **`bun run check:tla`**. With the Bun version pinned by
+`package.json` and Java 17 already selected, run it directly. `--download` only bootstraps a missing jar;
 subsequent checks use the verified cache. Alternatively, `TLA2TOOLS_JAR` selects an
 existing jar and `JAVA_BIN` selects Java 17. Every jar is checked against the same
 committed SHA-256 before execution; a mismatch fails without replacing the file.

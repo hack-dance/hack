@@ -3,6 +3,7 @@
 // property catalogs and domain-specific result checks are intentionally external.
 import { mkdir } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { assertPinnedBun } from "./lib/pinned-bun.ts";
 import { CHECKS, type TlaCheck } from "./lib/tla-checks.ts";
 import { type TlaExpectation, verifyTlaResult } from "./lib/tla-result.ts";
 import {
@@ -205,9 +206,7 @@ async function main(): Promise<void> {
   if (args.some((arg) => arg !== "--download")) {
     throw new Error("Usage: bun scripts/check-tla-models.ts [--download]");
   }
-  if (Bun.version !== "1.3.9") {
-    throw new Error(`Use the pinned Bun 1.3.9; running ${Bun.version}.`);
-  }
+  await assertPinnedBun();
   validateTlaChecks(CHECKS);
   const root = resolve(import.meta.dir, "..");
   const jar = await resolveTlaJar({

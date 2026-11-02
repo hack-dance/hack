@@ -1,6 +1,7 @@
 import { cp, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { assertPinnedBun, bunTestBannerPattern } from "./lib/pinned-bun.ts";
 
 /** Expected findings, not a claim that the requested product guarantees pass. */
 export const replayManifest = [
@@ -34,19 +35,20 @@ type StrictReplayOptions = {
 export async function runStrictReplay(
   opts: StrictReplayOptions
 ): Promise<void> {
-  if (Bun.version !== "1.3.9") {
-    throw new Error("Supervisor replays require Bun 1.3.9");
-  }
+  const bunVersion = await assertPinnedBun();
   const dataRoot = await mkdtemp(join(tmpdir(), "hack-supervisor-data-"));
   try {
-    await runReplayProcess({ ...opts, dataRoot });
+    await runReplayProcess({ ...opts, bunVersion, dataRoot });
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
   }
 }
 
 async function runReplayProcess(
-  opts: StrictReplayOptions & { readonly dataRoot: string }
+  opts: StrictReplayOptions & {
+    readonly bunVersion: string;
+    readonly dataRoot: string;
+  }
 ): Promise<void> {
   const proc = Bun.spawn(
     [process.execPath, "test", `./${testFile}`, "--timeout", "10000"],
@@ -84,7 +86,9 @@ async function runReplayProcess(
     if (
       timedOut ||
       exitCode !== (violation ? 1 : 0) ||
-      !/^bun test v1\.3\.9 \([a-z0-9]+\)$/.test(banner ?? "") ||
+      !new RegExp(`^${bunTestBannerPattern(opts.bunVersion)}$`).test(
+        banner ?? ""
+      ) ||
       marker !== expectedMarker ||
       extra.length !== 0 ||
       !summary.test(stderr) ||
@@ -196,6 +200,7 @@ async function checkActual(label: string): Promise<void> {
 
 /** Extra implementation evidence; this is not a sixth formal property. */
 async function checkStartupPersistence(): Promise<void> {
+  const bunVersion = await assertPinnedBun();
   const dataRoot = await mkdtemp(
     join(tmpdir(), "hack-supervisor-startup-data-")
   );
@@ -229,7 +234,7 @@ async function checkStartupPersistence(): Promise<void> {
       ]);
       if (
         exitCode !== 0 ||
-        !/^bun test v1\.3\.9 \([a-z0-9]+\)\n$/.test(stdout) ||
+        !new RegExp(`^${bunTestBannerPattern(bunVersion)}\\n$`).test(stdout) ||
         !/\b2 pass\s+0 fail\b/.test(stderr)
       ) {
         throw new Error("Startup persistence characterization failed");
@@ -256,11 +261,15 @@ async function main(): Promise<void> {
   try {
     await cp(join(repoRoot, "src"), join(scratch, "src"), { recursive: true });
     await mkdir(join(scratch, "tests"));
-    await mkdir(join(scratch, "scripts"));
+    await mkdir(join(scratch, "scripts/lib"), { recursive: true });
     await cp(join(repoRoot, testFile), join(scratch, testFile));
     await cp(
       import.meta.path,
       join(scratch, "scripts/check-supervisor-replays.ts")
+    );
+    await cp(
+      join(repoRoot, "scripts/lib/pinned-bun.ts"),
+      join(scratch, "scripts/lib/pinned-bun.ts")
     );
     await symlink(
       join(repoRoot, "node_modules"),

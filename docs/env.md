@@ -596,8 +596,9 @@ Calls to the OS keychain (macOS Keychain, or the Secret Service over the D-Bus s
 Linux) are bounded too. With no desktop session, a locked keychain, or a session bus that never
 answers, the call fails after 60 seconds with a fixed message instead of waiting. The outcome of a
 timed-out write or delete is unknown, so check it once the keychain responds. For unattended
-hosts, use the `encrypted_file` secrets backend. `HACK_KEYCHAIN_TIMEOUT_MS` sets this deadline
-(1,000–600,000 ms).
+hosts, use the `encrypted_file` secrets backend with its key file in place or
+`HACK_SECRETS_FILE_KEY` set; without either, that backend also reads its key from the keychain.
+`HACK_KEYCHAIN_TIMEOUT_MS` sets this deadline (1,000–600,000 ms).
 
 `--local` writes to the worktree-local override file (`.hack/hack.env.local.yaml` or
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for

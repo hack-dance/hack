@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -365,9 +366,40 @@ test(
   { timeout: 30_000 }
 );
 
-// The keychain path is exercised only on Linux, where the session bus can be
-// replaced with a silent socket. On macOS it would reach the real keychain.
-test.skipIf(process.platform !== "linux")(
+/**
+ * `Bun.secrets` on Linux loads libsecret at call time. Without it the call
+ * fails fast and never reaches the session bus, so the deadline cannot be
+ * exercised end to end; the facade's deadline itself is proven
+ * deterministically in `tests/native-keychain.test.ts`.
+ */
+const LIBSECRET_DIRS = [
+  "/usr/lib",
+  "/usr/lib64",
+  "/lib",
+  "/lib64",
+  "/usr/lib/x86_64-linux-gnu",
+  "/usr/lib/aarch64-linux-gnu",
+  "/lib/x86_64-linux-gnu",
+  "/lib/aarch64-linux-gnu",
+];
+
+function linuxHasLibsecret(): boolean {
+  if (process.platform !== "linux") {
+    return false;
+  }
+  return LIBSECRET_DIRS.some((dir) =>
+    existsSync(join(dir, "libsecret-1.so.0"))
+  );
+}
+
+const KEYCHAIN_CAN_STALL = linuxHasLibsecret();
+if (!KEYCHAIN_CAN_STALL) {
+  console.info(
+    "Skipping the end-to-end keychain deadline case: it needs Linux with libsecret, so the call can block on a silent session bus. macOS is skipped because the case would reach the real keychain."
+  );
+}
+
+test.skipIf(!KEYCHAIN_CAN_STALL)(
   "an unresponsive keychain fails at its deadline instead of hanging",
   async () => {
     const projectRoot = await createKeychainProject();
@@ -382,11 +414,12 @@ test.skipIf(process.platform !== "linux")(
     expectBoundedExit(result);
     expect(result.exitCode).toBe(1);
     expectValueFree(result, secret);
-    // Hosts without libsecret fail fast before reaching the bus; with it, the
-    // call blocks on the silent bus and must end in the closed refusal.
-    if (result.elapsedMs >= KEYCHAIN_DEADLINE_MS) {
-      expect(result.stderr).toContain("The OS keychain did not answer");
-    }
+    // libsecret is present, so the call blocks on the silent bus: only the
+    // deadline can end it, and only with the closed refusal.
+    expect(result.stderr).toContain(
+      "The OS keychain did not answer a set request"
+    );
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(KEYCHAIN_DEADLINE_MS);
   },
   { timeout: 30_000 }
 );

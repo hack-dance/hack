@@ -6,6 +6,7 @@ import {
 } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { CliUsageError } from "../cli/command.ts";
 import type {
   CloudSecretProvider,
   SecretsBackend,
@@ -14,7 +15,10 @@ import type {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
-import { nativeKeychain as secrets } from "./native-keychain.ts";
+import {
+  NativeKeychainTimeoutError,
+  nativeKeychain as secrets,
+} from "./native-keychain.ts";
 import {
   decodeCanonicalBase64,
   publishPrivateFileExclusive,
@@ -677,16 +681,12 @@ async function resolveEncryptedFileKeyMaterial(input?: {
         name: ENCRYPTED_FILE_KEY_NAME,
       })
     )?.trim();
-  } catch {
-    encryptedFileKeyFailureCooldownUntilMs =
-      Date.now() + ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS;
-    throw new Error(
-      buildEncryptedBackendKeyRecoveryMessage({
-        keyPath: configuredKeyPath,
-        storePath: input?.storePath,
-        reason: "keychain_access_failed",
-      })
-    );
+  } catch (error: unknown) {
+    throw keychainKeyAccessError({
+      error,
+      keyPath: configuredKeyPath,
+      storePath: input?.storePath,
+    });
   }
   if (existing) {
     if (allowKeyProvisioning && configuredKeyPath) {
@@ -720,16 +720,12 @@ async function resolveEncryptedFileKeyMaterial(input?: {
       name: ENCRYPTED_FILE_KEY_NAME,
       value: generated,
     });
-  } catch {
-    encryptedFileKeyFailureCooldownUntilMs =
-      Date.now() + ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS;
-    throw new Error(
-      buildEncryptedBackendKeyRecoveryMessage({
-        keyPath: configuredKeyPath,
-        storePath: input?.storePath,
-        reason: "keychain_access_failed",
-      })
-    );
+  } catch (error: unknown) {
+    throw keychainKeyAccessError({
+      error,
+      keyPath: configuredKeyPath,
+      storePath: input?.storePath,
+    });
   }
   cachedEncryptedFileKey = generated;
   encryptedFileKeyFailureCooldownUntilMs = 0;
@@ -737,6 +733,35 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     key: generated,
     source: "generated",
   };
+}
+
+/**
+ * Map a failed keychain call for the encrypted_file key. An invalid
+ * `HACK_KEYCHAIN_TIMEOUT_MS` keeps its own usage refusal (no keychain call was
+ * made, so no cooldown). A timeout keeps its closed message, which reports an
+ * unknown outcome for a write, and starts the cooldown like any other failure.
+ * Other failures become the fixed recovery message.
+ */
+function keychainKeyAccessError(input: {
+  readonly error: unknown;
+  readonly keyPath: string | undefined;
+  readonly storePath: string | undefined;
+}): Error {
+  if (input.error instanceof CliUsageError) {
+    return input.error;
+  }
+  encryptedFileKeyFailureCooldownUntilMs =
+    Date.now() + ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS;
+  if (input.error instanceof NativeKeychainTimeoutError) {
+    return input.error;
+  }
+  return new Error(
+    buildEncryptedBackendKeyRecoveryMessage({
+      keyPath: input.keyPath,
+      storePath: input.storePath,
+      reason: "keychain_access_failed",
+    })
+  );
 }
 
 async function canBootstrapEncryptedFileKey(input: {

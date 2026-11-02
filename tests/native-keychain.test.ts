@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 import { CliUsageError } from "../src/cli/command.ts";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
@@ -88,3 +91,77 @@ test("the keychain deadline override accepts only a bounded integer and refuses 
   expect(message).toContain(NATIVE_KEYCHAIN_TIMEOUT_ENV);
   expect(message).not.toContain(supplied);
 });
+
+test(
+  "an invalid override reaches the encrypted_file key lookup as its own usage refusal",
+  async () => {
+    // Fresh process: the key lookup caches key material at module level. The
+    // override is resolved before any keychain call, so none is made here.
+    const root = await mkdtemp(join(tmpdir(), "hack-keychain-override-"));
+    try {
+      const projectDir = join(root, "repo", ".hack");
+      await mkdir(projectDir, { recursive: true });
+      await writeFile(join(root, "hack.config.json"), "{}\n");
+      await writeFile(
+        join(projectDir, "hack.config.json"),
+        `${JSON.stringify({
+          name: "keychain-override",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              encryptedFile: {
+                path: "secrets.enc.json",
+                keyPath: "missing.key",
+              },
+            },
+          },
+        })}\n`
+      );
+      // A non-empty store with no key file: lookup falls through to the keychain.
+      await writeFile(
+        join(root, "repo", "secrets.enc.json"),
+        '{"ciphertext":"existing"}\n'
+      );
+      const script = `
+        const { resolveSecretStore } = await import(${JSON.stringify(resolve(import.meta.dir, "../src/lib/secret-store.ts"))});
+        const { CliUsageError } = await import(${JSON.stringify(resolve(import.meta.dir, "../src/cli/command.ts"))});
+        try {
+          await resolveSecretStore({ projectName: "keychain-override", projectDir: ${JSON.stringify(projectDir)} });
+          console.log(JSON.stringify({ ok: true }));
+        } catch (error) {
+          console.log(JSON.stringify({ usage: error instanceof CliUsageError, message: String(error?.message) }));
+        }
+      `;
+      const supplied = `bad-${crypto.randomUUID()}`;
+      const proc = Bun.spawn([process.execPath, "-e", script], {
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: root,
+          HACK_GLOBAL_CONFIG_PATH: join(root, "hack.config.json"),
+          [NATIVE_KEYCHAIN_TIMEOUT_ENV]: supplied,
+          DBUS_SESSION_BUS_ADDRESS: `unix:path=${join(root, "missing-bus.sock")}`,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+      const [stdout, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        proc.exited,
+      ]);
+      expect(exitCode).toBe(0);
+      const outcome = JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}") as {
+        readonly usage?: boolean;
+        readonly message?: string;
+      };
+      expect(outcome.usage).toBe(true);
+      expect(outcome.message).toContain(NATIVE_KEYCHAIN_TIMEOUT_ENV);
+      expect(outcome.message).not.toContain("encrypted backend key");
+      expect(outcome.message).not.toContain(supplied);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  { timeout: 30_000 }
+);

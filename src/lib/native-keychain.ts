@@ -52,7 +52,7 @@ export class NativeKeychainTimeoutError extends ClosedCliError {
 
   constructor(operation: NativeKeychainOperation) {
     super(
-      `The OS keychain did not answer a ${operation} request before the deadline (${NATIVE_KEYCHAIN_TIMEOUT_ENV}, default ${NATIVE_KEYCHAIN_TIMEOUT_MS / 1000}s). ${OUTCOME[operation]} Unlock the keychain in a desktop session, or configure the encrypted_file secrets backend for headless use.`
+      `The OS keychain did not answer a ${operation} request before the deadline (${NATIVE_KEYCHAIN_TIMEOUT_ENV}, default ${NATIVE_KEYCHAIN_TIMEOUT_MS / 1000}s). ${OUTCOME[operation]} Unlock the keychain in a desktop session. For headless use, configure the encrypted_file secrets backend with its key file in place or HACK_SECRETS_FILE_KEY set; without either it also reads its key from the keychain.`
     );
     this.name = "NativeKeychainTimeoutError";
     this.operation = operation;

@@ -1575,6 +1575,18 @@ test("migrateLegacyProjectEnv blocks cleanup for compose-referenced legacy env f
       resolvedPath: resolve(repo.projectDir, ".env.production"),
     },
   ]);
+  expect(
+    await listProjectEnvOverlayNames({ projectDir: repo.projectDir })
+  ).toContain("production");
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.production.yaml"), "utf8")
+  ).not.toContain("https://prod.example.com");
+  expect(
+    await readFile(
+      resolve(repo.projectDir, "hack.env.production.local.yaml"),
+      "utf8"
+    )
+  ).toContain("https://prod.example.com");
   expect(migrated.cleanupCandidates).toEqual([
     resolve(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
   ]);
@@ -1612,6 +1624,93 @@ async function createGitWorktree(opts: {
     opts.projectRoot
   );
 }
+
+test("contract migration in a linked worktree keeps plaintext in that worktree's local layer", async () => {
+  const repo = await createRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "LOCAL_FIXTURE", source: "plain_env", services: ["api"] }],
+    })
+  );
+  await initializeGitRepo({ projectRoot: repo.projectRoot });
+  const worktreeRoot = resolve(repo.tempRoot, "linked");
+  await createGitWorktree({
+    projectRoot: repo.projectRoot,
+    worktreeRoot,
+    branch: "migration-local-fixture",
+  });
+  const projectDir = resolve(worktreeRoot, ".hack");
+  await writeFile(
+    resolve(projectDir, ".env"),
+    "LOCAL_FIXTURE=synthetic-linked-local\n"
+  );
+  await migrateLegacyProjectEnv({
+    projectRoot: worktreeRoot,
+    projectDir,
+    projectName: "project-env-test",
+    serviceNames: ["api", "web"],
+    materialize: false,
+  });
+  expect(
+    await readFile(resolve(projectDir, "hack.env.local.yaml"), "utf8")
+  ).toContain("synthetic-linked-local");
+  expect(
+    await readFile(resolve(projectDir, "hack.env.default.yaml"), "utf8")
+  ).not.toContain("synthetic-linked-local");
+  await expect(
+    readFile(resolve(repo.projectDir, "hack.env.local.yaml"), "utf8")
+  ).rejects.toMatchObject({ code: "ENOENT" });
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: worktreeRoot,
+    projectDir,
+    serviceNames: ["api", "web"],
+  });
+  expect(resolved?.serviceEnv.api?.LOCAL_FIXTURE).toBe(
+    "synthetic-linked-local"
+  );
+  expect(resolved?.serviceEnv.web?.LOCAL_FIXTURE).toBeUndefined();
+});
+
+test("contract migration refuses aliases with the compatibility local base before writes", async () => {
+  const repo = await createRepo();
+  const legacyLocal = "version: 1\nenvironment: local\nvalues:\n  global: {}\n";
+  await writeFile(resolve(repo.projectDir, "hack.env.local.yaml"), legacyLocal);
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "LOCAL_FIXTURE", source: "plain_env" }],
+    })
+  );
+  await initializeGitRepo({ projectRoot: repo.projectRoot });
+  const base = "LOCAL_FIXTURE=synthetic-base\n";
+  const overlay = "LOCAL_FIXTURE=synthetic-overlay\n";
+  await writeFile(resolve(repo.projectDir, ".env"), base);
+  await writeFile(resolve(repo.projectDir, ".env.default.local"), overlay);
+  await expect(
+    migrateLegacyProjectEnv({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      projectName: "project-env-test",
+      serviceNames: ["api", "web"],
+      materialize: false,
+    })
+  ).rejects.toThrow("env layer destination paths collide");
+  expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toBe(base);
+  expect(
+    await readFile(resolve(repo.projectDir, ".env.default.local"), "utf8")
+  ).toBe(overlay);
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.local.yaml"), "utf8")
+  ).toBe(legacyLocal);
+  for (const name of ["hack.env.default.yaml", "hack.env.default.local.yaml"]) {
+    await expect(
+      readFile(resolve(repo.projectDir, name), "utf8")
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  }
+});
 
 async function initializeGitRepo(opts: {
   readonly projectRoot: string;

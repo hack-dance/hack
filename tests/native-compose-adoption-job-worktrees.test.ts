@@ -14,6 +14,7 @@ import {
   createCompletedJobFixturePhases,
   createCompletedJobFixtureSettlement,
 } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
+import { waitForFileContent } from "./helpers/wait-for-file-content.ts";
 
 const ID = "a".repeat(64);
 const IMAGE = `sha256:${"d".repeat(64)}`;
@@ -118,8 +119,10 @@ test("dependent attempts correspond exactly to successful job attempts rather th
   }
 });
 
+const READY_BUDGET_MS = 2000;
+/** A barrier only: a case that reads the file uses waitForFileContent. */
 async function waitForFile(path: string) {
-  const deadline = Date.now() + 2000;
+  const deadline = Date.now() + READY_BUDGET_MS;
   while (Date.now() < deadline) {
     if (await Bun.file(path).exists()) {
       return;
@@ -492,8 +495,12 @@ test("inherited-pipe descendants withhold cancellation settlement without signal
         finished = true;
       }
     );
-    await waitForFile(ready);
-    const descendantPid = Number(await Bun.file(ready).text());
+    const descendantPid = await waitForFileContent({
+      path: ready,
+      budgetMs: READY_BUDGET_MS,
+      what: "descendant pid",
+      complete: (text) => (text === "" ? undefined : Number(text)),
+    });
     expect(Number.isSafeInteger(descendantPid) && descendantPid > 0).toBe(true);
     expect(Number.isSafeInteger(leaderPid) && leaderPid > 0).toBe(true);
     await waitForAbsent(leaderPid);

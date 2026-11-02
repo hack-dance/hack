@@ -74,9 +74,13 @@ fn partial_hello_has_fixed_deadline_and_never_connects() {
     let (listener, endpoint, authority, credential) = fixture();
     let mut reactor = reactor(1);
     let (server, mut client) = transport_pair();
+    // Long enough to outlast a loaded host's delays below, and shorter than the reactor's
+    // own connect timeout so the bracket can tell the two apart.
+    let budget = Duration::from_secs(4);
+    assert!(budget < reactor.limits.connect_timeout);
     let admitted = Instant::now();
     reactor
-        .admit(server, &endpoint, &authority, MAX_CONNECT_BUDGET)
+        .admit(server, &endpoint, &authority, budget)
         .unwrap();
     let returned = Instant::now();
     let (_, hello) = credential.begin().unwrap();
@@ -85,7 +89,7 @@ fn partial_hello_has_fixed_deadline_and_never_connects() {
     let deadline = reactor.handshakes[0].deadline;
     // The deadline comes from the admitted budget alone.
     assert!(
-        admitted + MAX_CONNECT_BUDGET <= deadline && deadline <= returned + MAX_CONNECT_BUDGET,
+        admitted + budget <= deadline && deadline <= returned + budget,
         "E_TEST_HANDSHAKE_DEADLINE_NOT_FROM_BUDGET"
     );
     client.write_all(&hello[1..2]).unwrap();

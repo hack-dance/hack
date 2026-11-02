@@ -5,9 +5,13 @@ import {
   assertEnvValueStdinUsage,
   ENV_VALUE_STDIN_MAX_BYTES,
   ENV_VALUE_STDIN_REFUSAL_REASONS,
+  ENV_VALUE_STDIN_TIMEOUT_ENV,
+  ENV_VALUE_STDIN_TIMEOUT_MAX_MS,
+  ENV_VALUE_STDIN_TIMEOUT_MS,
   EnvValueStdinError,
   type EnvValueStdinSource,
   readEnvValueFromStdin,
+  resolveEnvValueStdinTimeoutMs,
   stripOneTrailingNewline,
 } from "../src/lib/env-value-stdin.ts";
 
@@ -214,6 +218,97 @@ describe("readEnvValueFromStdin", () => {
     expect(error.reason).toBe("read_failed");
     expect(error.cause).toBeUndefined();
     expectValueFree(error, SENTINEL);
+  });
+});
+
+/**
+ * A pipe whose writer never closes: optional bytes arrive, then nothing and
+ * no end of input. Proves the read deadline instead of an indefinite wait.
+ */
+function stalledSource(chunks: readonly string[]): EnvValueStdinSource & {
+  canceled: boolean;
+} {
+  const encoder = new TextEncoder();
+  const state = {
+    canceled: false,
+    isTTY: false,
+    open: () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) {
+            controller.enqueue(encoder.encode(chunk));
+          }
+        },
+        cancel() {
+          state.canceled = true;
+        },
+      }),
+  };
+  return state;
+}
+
+describe("read deadline", () => {
+  test("an open pipe with no input fails closed at the deadline", async () => {
+    const source = stalledSource([]);
+    const started = performance.now();
+    const error = await refusal(
+      readEnvValueFromStdin({ source, timeoutMs: 50 })
+    );
+    expect(error.reason).toBe("timeout");
+    expect(performance.now() - started).toBeLessThan(5000);
+    expect(source.canceled).toBe(true);
+  });
+
+  test("a value without end of input fails closed and value-free", async () => {
+    const value = crypto.randomUUID();
+    const source = stalledSource([`${value}\n`]);
+    const error = await refusal(
+      readEnvValueFromStdin({ source, timeoutMs: 50 })
+    );
+    expect(error.reason).toBe("timeout");
+    expect(error.message).toContain(ENV_VALUE_STDIN_TIMEOUT_ENV);
+    expect(error.message).toContain("Nothing was stored.");
+    expect(source.canceled).toBe(true);
+    expectValueFree(error, value);
+  });
+
+  test("input that ends before the deadline is read normally", async () => {
+    const value = await readEnvValueFromStdin({
+      source: sourceFrom({ chunks: [SENTINEL] }),
+      timeoutMs: 5000,
+    });
+    expect(value).toBe(SENTINEL);
+  });
+
+  test("the deadline override accepts only a bounded integer and refuses closed", () => {
+    const resolve = (raw: string | undefined): number =>
+      resolveEnvValueStdinTimeoutMs({ [ENV_VALUE_STDIN_TIMEOUT_ENV]: raw });
+    expect(resolve(undefined)).toBe(ENV_VALUE_STDIN_TIMEOUT_MS);
+    expect(resolve("1500")).toBe(1500);
+    expect(resolve(String(ENV_VALUE_STDIN_TIMEOUT_MAX_MS))).toBe(
+      ENV_VALUE_STDIN_TIMEOUT_MAX_MS
+    );
+    for (const invalid of [
+      "",
+      "0",
+      "999",
+      "-5",
+      "1.5",
+      "1e3",
+      " 1500",
+      `x${SENTINEL}`,
+      String(ENV_VALUE_STDIN_TIMEOUT_MAX_MS + 1),
+    ]) {
+      let caught: unknown;
+      try {
+        resolve(invalid);
+      } catch (error: unknown) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(CliUsageError);
+      expect((caught as Error).message).toContain(ENV_VALUE_STDIN_TIMEOUT_ENV);
+      expectValueFree(caught, SENTINEL);
+    }
   });
 });
 

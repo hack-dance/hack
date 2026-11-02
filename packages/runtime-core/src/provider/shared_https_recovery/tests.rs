@@ -62,9 +62,7 @@ fn fixture(present_socket: bool) -> Fixture {
     let frontend_sha = executable(&frontend);
     let runtime_sha = executable(&runtime);
     let caddy_sha = executable(&caddy);
-    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = reserved.local_addr().unwrap().port();
-    drop(reserved);
+    let port = crate::provider::test_socket::unallocated_tcp_port();
     let generation = "a".repeat(32);
     let run = "b".repeat(32);
     let mut lease = Lease {

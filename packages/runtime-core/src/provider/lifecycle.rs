@@ -1998,9 +1998,21 @@ impl Drop for VmLock {
     }
 }
 
+/// The bound [`lock_absent_disks`] gives the disk-handle scan: the production stop-path
+/// bound [`disk_handles::STOP_HANDLE_WAIT`].
+#[cfg(not(test))]
+const STOP_SCAN_WAIT: Duration = disk_handles::STOP_HANDLE_WAIT;
+/// The unit-test build of [`STOP_SCAN_WAIT`]. Release-check fixtures prove what the scan
+/// reports (status 1, no output), not how fast it reports it, and they run beside other
+/// tests' work; on a loaded host one scan took longer than 5 s and the fixture failed as
+/// `provider_timeout_uncertain` before its result under test (HACK-1457). The production
+/// bounds themselves are tested on a fake clock in [`disk_handles`].
+#[cfg(test)]
+const STOP_SCAN_WAIT: Duration = super::test_executable::LOADED_HOST_SCAN_WAIT;
+
 /// Keep this guard through alias restoration and the stopped receipt.
 fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<VmLock, CandidateError> {
-    lock_absent_disks_within(candidate, owner, disk_handles::STOP_HANDLE_WAIT)
+    lock_absent_disks_within(candidate, owner, STOP_SCAN_WAIT)
 }
 
 /// [`lock_absent_disks`] with a caller-chosen bound on the disk-handle scan

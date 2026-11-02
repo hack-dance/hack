@@ -4898,6 +4898,10 @@ export async function migrateLegacyProjectEnv(opts: {
   readonly cleanupCandidates: readonly string[];
   readonly blockedCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
+  readonly retainedEnvFiles: readonly {
+    readonly path: string;
+    readonly keys: readonly string[];
+  }[];
 }> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
@@ -4911,6 +4915,7 @@ export async function migrateLegacyProjectEnv(opts: {
       cleanupCandidates: [],
       blockedCleanupCandidates: [],
       composeEnvFileReferences: [],
+      retainedEnvFiles: [],
     };
   }
 
@@ -4929,6 +4934,13 @@ export async function migrateLegacyProjectEnv(opts: {
     ? await ensureProjectEnvSecretKey({ projectRoot: opts.projectRoot })
     : null;
 
+  // An overlay may inherit an equal base value without writing its own entry.
+  // Keep the full resolved delivery per source file, including inherited values.
+  const deliveredValues = new Map<string, ReadonlyMap<string, string | null>>();
+  deliveredValues.set(
+    resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+    new Map(baseResolved.values.map((entry) => [entry.key, entry.value]))
+  );
   const wroteFiles: string[] = [];
   const defaultConfig = buildMigratedProjectEnvConfig({
     environment: "default",
@@ -4958,6 +4970,10 @@ export async function migrateLegacyProjectEnv(opts: {
       projectName: opts.projectName,
       envName: overlayName,
     });
+    deliveredValues.set(
+      resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlayName}`),
+      new Map(overlayResolved.values.map((entry) => [entry.key, entry.value]))
+    );
     const overlayConfig = buildMigratedProjectEnvConfig({
       environment: overlayName,
       values: buildMigratedValues({
@@ -5013,6 +5029,7 @@ export async function migrateLegacyProjectEnv(opts: {
     overlayNames,
     materialize: opts.materialize,
     configCleanupCandidates: configCleanup.cleanupCandidates,
+    deliveredValues,
     composeEnvFileReferences,
   });
 
@@ -5023,6 +5040,7 @@ export async function migrateLegacyProjectEnv(opts: {
     updatedProjectConfig: configCleanup.changed,
     cleanupCandidates: cleanupCandidates.allowed,
     blockedCleanupCandidates: cleanupCandidates.blocked,
+    retainedEnvFiles: cleanupCandidates.retainedEnvFiles,
     composeEnvFileReferences,
   };
 }
@@ -5143,11 +5161,19 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
   readonly projectDir: string;
   readonly overlayNames: readonly string[];
   readonly materialize: boolean;
+  readonly deliveredValues: ReadonlyMap<
+    string,
+    ReadonlyMap<string, string | null>
+  >;
   readonly configCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
 }): Promise<{
   readonly allowed: readonly string[];
   readonly blocked: readonly string[];
+  readonly retainedEnvFiles: readonly {
+    readonly path: string;
+    readonly keys: readonly string[];
+  }[];
 }> {
   const candidates = new Set<string>();
   candidates.add(resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME));
@@ -5166,10 +5192,25 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
   const blockedPaths = new Set(
     opts.composeEnvFileReferences.map((reference) => reference.resolvedPath)
   );
+  const retainedEnvFiles: { path: string; keys: string[] }[] = [];
   const allowed: string[] = [];
   const blocked: string[] = [];
   for (const path of candidates) {
     if (await pathExists(path)) {
+      // Value retention is independent of Compose references: repairing Compose
+      // must never promote a file holding undelivered values into cleanup.
+      const delivered = opts.deliveredValues.get(path);
+      if (delivered) {
+        const entries = parseDotEnv((await readTextFile(path)) ?? "");
+        const keys = Object.entries(entries)
+          .filter(([key, value]) => delivered.get(key) !== value)
+          .map(([key]) => key)
+          .sort();
+        if (keys.length > 0) {
+          retainedEnvFiles.push({ path, keys });
+          continue;
+        }
+      }
       if (blockedPaths.has(path)) {
         blocked.push(path);
       } else {
@@ -5178,6 +5219,7 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
     }
   }
   return {
+    retainedEnvFiles,
     allowed: allowed.sort((left, right) => left.localeCompare(right)),
     blocked: blocked.sort((left, right) => left.localeCompare(right)),
   };

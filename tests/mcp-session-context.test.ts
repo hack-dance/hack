@@ -170,6 +170,19 @@ test("session paths resolve relative overrides against the captured checkout", (
   expect(Object.isFrozen(context)).toBe(true);
 });
 
+test.each([
+  ["empty", ""],
+  ["whitespace", "  "],
+  ["relative", "relative-home"],
+])("session state stays out of the checkout with %s HOME", (_label, home) => {
+  const context = captureMcpSessionContext({
+    cwd: "/tmp/captured-session",
+    env: { HOME: home },
+  });
+  expect(context.hackHome.startsWith("/tmp/captured-session")).toBe(false);
+  expect(context.hackHome.endsWith("/.hack")).toBe(true);
+});
+
 test("32 MCP sessions can share a process without mixing command context", async () => {
   const sessions = await Promise.all(
     Array.from({ length: 32 }, (_, index) => fixture(`session-${index}`))

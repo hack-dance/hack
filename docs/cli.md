@@ -679,7 +679,8 @@ files ever leak into git, `hack doctor --fix` untracks them (the files stay on d
 `.branch/compose.<branch>.runtime.override.yml` for branch instances. See [Architecture](architecture.md)
 for the full file map.
 
-The global config root defaults to `~/.hack`; override it with `HACK_HOME`.
+The global config root defaults to `~/.hack`; override it with `HACK_HOME` (an absolute path;
+a relative value is refused). An empty or relative `HOME` falls back to the OS home directory.
 
 ## Lifecycle
 

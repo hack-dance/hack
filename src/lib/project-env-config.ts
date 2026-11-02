@@ -57,6 +57,7 @@ import {
   readHackEnvContract,
   resolveHackEnv,
 } from "./hack-env.ts";
+import { resolveUserHomeDir } from "./home-dir.ts";
 import {
   isOwnedLegacyAdoptionManagedEnvAdmission,
   type LegacyAdoptionManagedEnvAdmission,
@@ -5663,12 +5664,11 @@ function resolveConfiguredProjectPath(opts: {
   readonly configuredPath: string;
 }): string {
   const raw = opts.configuredPath.trim();
-  const home = (process.env.HOME ?? "").trim();
   if (raw === "~") {
-    return home;
+    return resolveUserHomeDir();
   }
   if (raw.startsWith("~/")) {
-    return resolve(home, raw.slice(2));
+    return resolve(resolveUserHomeDir(), raw.slice(2));
   }
   if (raw.startsWith("/")) {
     return raw;

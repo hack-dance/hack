@@ -1,6 +1,7 @@
 import { userInfo } from "node:os";
 import { dirname, resolve } from "node:path";
 import { GLOBAL_PROJECTS_REGISTRY_FILENAME } from "../constants.ts";
+import { normalizeHomeDir } from "../lib/home-dir.ts";
 import type { McpCommandAdmission } from "./command-admission.ts";
 
 export type McpSessionContext = {
@@ -30,7 +31,11 @@ export function captureMcpSessionContext(opts: {
   const override = env.HACK_HOME?.trim();
   const hackHome = override
     ? resolve(cwd, override)
-    : resolve(cwd, (env.HOME ?? userInfo().homedir).trim(), ".hack");
+    : resolve(
+        // An empty or relative HOME must not put global state under the checkout.
+        normalizeHomeDir(env.HOME) ?? resolve(userInfo().homedir),
+        ".hack"
+      );
   const configOverride = env.HACK_GLOBAL_CONFIG_PATH?.trim();
   const registryRoot = configOverride
     ? dirname(resolve(cwd, configOverride))

@@ -12,8 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { readHackHomeOverride } from "../src/lib/home-dir.ts";
 import { createMcpServer } from "../src/mcp/server.ts";
 import { captureMcpSessionContext } from "../src/mcp/session-context.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const clients: Client[] = [];
 const roots: string[] = [];
@@ -154,20 +156,68 @@ test("MCP path authorization uses only that session's registry", async () => {
   ).toBe(true);
 });
 
-test("session paths resolve relative overrides against the captured checkout", () => {
+test("session paths use absolute overrides", () => {
   const context = captureMcpSessionContext({
     cwd: "/tmp/captured-session",
     env: {
-      HACK_HOME: ".state",
-      HACK_GLOBAL_CONFIG_PATH: ".registry/config.json",
+      HACK_HOME: "/tmp/hack-state",
+      HACK_GLOBAL_CONFIG_PATH: "/tmp/hack-registry/config.json",
     },
   });
-  expect(context.hackHome).toBe("/tmp/captured-session/.state");
-  expect(context.registryPath).toBe(
-    "/tmp/captured-session/.registry/projects.json"
-  );
+  expect(context.hackHome).toBe("/tmp/hack-state");
+  expect(context.registryPath).toBe("/tmp/hack-registry/projects.json");
   expect(Object.isFrozen(context.env)).toBe(true);
   expect(Object.isFrozen(context)).toBe(true);
+});
+
+test.each([
+  ["HACK_HOME", ".state"],
+  ["HACK_HOME", "state/nested"],
+  ["HACK_GLOBAL_CONFIG_PATH", ".registry/config.json"],
+])("a session refuses a relative %s %s like the CLI", (name, value) => {
+  const capture = () =>
+    captureMcpSessionContext({
+      cwd: "/tmp/captured-session",
+      env: { HOME: "/tmp/hack-home", [name]: value },
+    });
+  expect(capture).toThrow(
+    `${name} must be an absolute path (got a relative path: ${JSON.stringify(value)}).`
+  );
+});
+
+test("a session refuses HACK_HOME with the CLI's exact error", () => {
+  const saved = process.env.HACK_HOME;
+  process.env.HACK_HOME = "relative-state";
+  try {
+    let cliMessage = "";
+    try {
+      readHackHomeOverride();
+    } catch (error: unknown) {
+      cliMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(cliMessage).toContain("HACK_HOME must be an absolute path");
+    expect(() =>
+      captureMcpSessionContext({
+        cwd: "/tmp/captured-session",
+        env: { HACK_HOME: "relative-state" },
+      })
+    ).toThrow(cliMessage);
+  } finally {
+    restoreEnv("HACK_HOME", saved);
+  }
+});
+
+test("a blank override counts as unset, as in the CLI", () => {
+  const context = captureMcpSessionContext({
+    cwd: "/tmp/captured-session",
+    env: {
+      HOME: "/tmp/hack-home",
+      HACK_HOME: "  ",
+      HACK_GLOBAL_CONFIG_PATH: "",
+    },
+  });
+  expect(context.hackHome).toBe("/tmp/hack-home/.hack");
+  expect(context.registryPath).toBe("/tmp/hack-home/.hack/projects.json");
 });
 
 test.each([

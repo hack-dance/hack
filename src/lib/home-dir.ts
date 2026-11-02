@@ -63,14 +63,29 @@ export function resolveUserHomeDir({
  * would be as wrong as writing under the cwd.
  */
 export function readHackHomeOverride(): string | null {
-  const raw = (process.env.HACK_HOME ?? "").trim();
+  return readAbsolutePathOverride({
+    name: "HACK_HOME",
+    value: process.env.HACK_HOME,
+  });
+}
+
+/**
+ * Read a path override from a caller's env: null when unset or whitespace-only,
+ * and refused when relative, because a relative value names a different place
+ * for each process that reads it.
+ */
+export function readAbsolutePathOverride(opts: {
+  readonly name: string;
+  readonly value: string | undefined;
+}): string | null {
+  const raw = (opts.value ?? "").trim();
   if (raw.length === 0) {
     return null;
   }
   const normalized = normalizeHomeDir(raw);
   if (!normalized) {
     throw new Error(
-      `HACK_HOME must be an absolute path (got a relative path: ${JSON.stringify(raw)}).`
+      `${opts.name} must be an absolute path (got a relative path: ${JSON.stringify(raw)}).`
     );
   }
   return normalized;

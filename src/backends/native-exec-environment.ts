@@ -7,6 +7,19 @@ import type {
   NativeProjectRunScope,
 } from "./native-project-run.ts";
 
+/** Marks a selection that no longer matches the run's recorded startup selection. */
+class SelectionChanged extends Error {}
+
+/**
+ * Both refusals keep `E_CONFIG_INVALID` for JSON callers. The messages differ:
+ * a changed selection needs a restart; an unresolvable environment needs its
+ * configuration or values repaired.
+ */
+const SELECTION_CHANGED_MESSAGE =
+  "Native fresh exec selection changed since startup: the service, environment or overlay this run started with is no longer selected. Restart the project to apply the current configuration; no command was requested. Values omitted.";
+const ENVIRONMENT_UNAVAILABLE_MESSAGE =
+  "Native fresh exec environment could not be resolved; no command was requested. Values omitted.";
+
 /** Resolve fresh selected-service values in memory using explicit startup selectors. */
 export async function prepareNativeExecEnvironment(opts: {
   readonly scope: NativeProjectRunScope;
@@ -39,7 +52,7 @@ export async function prepareNativeExecEnvironment(opts: {
       !input.serviceNames.includes(opts.service) ||
       input.effectiveEnvName !== opts.run.effectiveEnvName
     ) {
-      throw new Error("selection changed");
+      throw new SelectionChanged();
     }
     const selected = opts.run.effectiveEnvName;
     if (
@@ -51,7 +64,7 @@ export async function prepareNativeExecEnvironment(opts: {
         ].includes(basename(path))
       )
     ) {
-      throw new Error("selected overlay missing");
+      throw new SelectionChanged();
     }
     if (opts.run.aws) {
       input = (
@@ -62,11 +75,13 @@ export async function prepareNativeExecEnvironment(opts: {
       ).input;
     }
     return input.managedEnvironment[opts.service] ?? {};
-  } catch {
+  } catch (error) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
       message:
-        "Native fresh exec environment is unavailable or changed; no command was requested. Values omitted.",
+        error instanceof SelectionChanged
+          ? SELECTION_CHANGED_MESSAGE
+          : ENVIRONMENT_UNAVAILABLE_MESSAGE,
     });
   }
 }

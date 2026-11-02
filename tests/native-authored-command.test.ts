@@ -490,7 +490,12 @@ macTest(
   "signals await the exact owner result and remove command listeners",
   async () => {
     const selected = await fixture();
-    for (const outcome of ["removed", "retained"] as const) {
+    for (const outcome of [
+      "not-started",
+      "removed",
+      "unreserved",
+      "retained",
+    ] as const) {
       const before = [
         process.listenerCount("SIGINT"),
         process.listenerCount("SIGTERM"),
@@ -517,7 +522,9 @@ macTest(
       await entered.promise;
       process.emit("SIGINT");
       const value = await result;
-      if (outcome === "removed") {
+      if (outcome !== "retained") {
+        // A cancellation that retained nothing, including one in preflight
+        // (`not-started`), is a cancel rather than a startup failure.
         expect(value).toBe(130);
       } else {
         expect(value).toBeInstanceOf(HackCliError);

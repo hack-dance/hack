@@ -6859,6 +6859,28 @@ function layerWithPlannedGlobals(opts: {
   };
 }
 
+/**
+ * The scope whose deletion is the last word on `key`, in resolution order, whether
+ * or not a global value exists for it to hide. Null when the last word isn't a
+ * scoped deletion. Resolved entries can't show this: a deletion leaves no entry.
+ */
+function scopeDeletingKey(opts: {
+  readonly layers: readonly (ProjectEnvConfig | null)[];
+  readonly scopeNames: readonly string[];
+  readonly key: string;
+}): string | null {
+  let deletedBy: string | null = null;
+  for (const layer of opts.layers) {
+    for (const scope of opts.scopeNames) {
+      const value = layer?.values[scope]?.[opts.key];
+      if (value !== undefined) {
+        deletedBy = value === null && scope !== "global" ? scope : null;
+      }
+    }
+  }
+  return deletedBy;
+}
+
 /** `keys` whose scoped value or scoped deletion the planned layers replace for one target. */
 function scopedValuesReplacedForTarget(opts: {
   readonly target: {
@@ -6872,10 +6894,6 @@ function scopedValuesReplacedForTarget(opts: {
   readonly envName: string | null;
 }): readonly string[] {
   const { target } = opts;
-  const globalBefore = resolveEffectiveStoredEntries({
-    layers: opts.envLayers,
-    scopeNames: ["global"],
-  });
   const before = resolveEffectiveStoredEntries({
     layers: opts.envLayers,
     scopeNames: target.scopeNames,
@@ -6886,17 +6904,24 @@ function scopedValuesReplacedForTarget(opts: {
   });
   return opts.keys.flatMap((key) => {
     const entry = before[key];
-    // A scoped value, or a scoped deletion that hides a global one.
-    const scoped = entry ? entry.scope !== "global" : key in globalBefore;
+    // A scoped value, or a scoped deletion, with or without a global value to hide.
+    const scope = entry
+      ? entry.scope
+      : scopeDeletingKey({
+          layers: opts.envLayers,
+          scopeNames: target.scopeNames,
+          key,
+        });
     const value = after[key]?.value;
     const replaced =
-      scoped &&
+      scope !== null &&
+      scope !== "global" &&
       value !== undefined &&
       !isProjectEnvSecretValue(value) &&
       String(value) !== target.before[key];
     return replaced
       ? [
-          `${JSON.stringify(key)} for ${JSON.stringify(entry?.scope ?? target.name)} in ${JSON.stringify(opts.envName ?? "default")}`,
+          `${JSON.stringify(key)} for ${JSON.stringify(scope)} in ${JSON.stringify(opts.envName ?? "default")}`,
         ]
       : [];
   });

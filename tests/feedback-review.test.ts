@@ -724,9 +724,9 @@ function leakyDraft(
   overrides: Partial<FeedbackDraftInput> = {}
 ): FeedbackDraftInput {
   return {
-    title: "`hack up` times out for /Users/example/acme-app",
+    title: "Times out for /Users/example/acme-app: `hack up`",
     category: "lifecycle",
-    observed: `\`hack up --branch acme-feature --json\` exited 1 with E_STARTUP_TIMEOUT; DB_PASSWORD=${FAKE.password} was set.`,
+    observed: `DB_PASSWORD=${FAKE.password} was set, and E_STARTUP_TIMEOUT came from \`hack up --branch acme-feature --json\`.`,
     expected: "The branch instance starts beside the primary instance.",
     reproduction: {
       status: "partially-reproduced",
@@ -1090,7 +1090,7 @@ test("negative controls: edits after review, re-added secrets and hidden attachm
       { ...reviewed, body: `${reviewed.body}\nOne more detail.\n` },
       "payload-changed",
     ],
-    [{ ...reviewed, title: `${reviewed.title} (edited)` }, "payload-changed"],
+    [{ ...reviewed, title: `Edited: ${reviewed.title}` }, "payload-changed"],
     [listed, "payload-changed"],
     [
       {
@@ -1445,7 +1445,7 @@ test("negative control: an attachment listed only where a reader cannot see it n
     withAttachments("- `dump.log`: from <redacted:path>, see `<details>`"),
     beforeHeading("<!-- template hint -->", "- `dump.log`"),
     beforeHeading(
-      "From <redacted:path>, run ``hack run <script>`` and `<details>`.",
+      "With `<details>`, from <redacted:path>, run ``hack run <script>``.",
       "- `dump.log`"
     ),
     // A plain code block is shown as text, also when its language is
@@ -1878,9 +1878,9 @@ test("a command shape keeps only the spec's command path and known flags", () =>
 test("hack commands in free text lose their arguments in every free-text draft field", () => {
   const { payload, redactions } = render(
     leakyDraft({
-      title: "`hack logs acme-title --follow` shows nothing",
+      title: "Nothing shown by `hack logs acme-title --follow`",
       observed:
-        "Ran `hack up acme-code-span` and then hack logs acme-prose --follow, and `/opt/bin/hack run acme-path` too.",
+        "Ran `hack up acme-code-span`\nAnd then hack logs acme-prose --follow\nAnd `/opt/bin/hack run acme-path`",
       expected: "`hack up --branch acme-expected` should work.",
       reproduction: {
         status: "reproduced",
@@ -1904,13 +1904,12 @@ test("hack commands in free text lose their arguments in every free-text draft f
   );
   const everything = JSON.stringify(payload);
   expect(everything).not.toContain("acme");
-  expect(payload.title).toBe(`\`hack logs ${ARG} --follow\` shows nothing`);
+  expect(payload.title).toBe(`Nothing shown by \`hack logs ${ARG} --follow\``);
   expect(payload.body).toContain(`\`hack up ${ARG}\``);
-  // Unquoted prose has no end marker, so everything up to the code span goes.
-  expect(payload.body).toContain(`then hack logs ${ARG} ${ARG} ${ARG} \``);
+  expect(payload.body).toContain(`then hack logs ${ARG} --follow\n`);
   expect(payload.body).toContain(`<redacted:path> run ${ARG}`);
   expect(payload.body).toContain(`hack up --branch ${ARG} --json`);
-  expect(payload.attachments[0]?.content).toBe(`\`hack logs ${ARG}\` failed.`);
+  expect(payload.attachments[0]?.content).toBe(`\`hack logs ${ARG}\` ${ARG}`);
   expect(payload.attachments[1]?.name).toBe(`hack logs ${ARG}`);
   expect(payload.body).toContain(`- \`hack logs ${ARG}\``);
   expect(redactions["command-argument"]).toBeGreaterThanOrEqual(12);
@@ -1938,10 +1937,13 @@ test("text that only mentions the word hack is left alone", () => {
     "Hack up the chain, then Hack status changed.",
     "Hack logs show nothing, and Hack --version works.",
     "The hack-feedback skill and hack-cli skill loaded.",
+    "Some text\n    Hack up the chain",
     "routed through ~/.hack and app.hack today",
-    "`hack up --branch <name> --json` and `hack version`.",
+    "`hack up --branch <name> --json`.",
+    "Error `E_STARTUP_TIMEOUT` came first: `hack version`.",
+    "It failed with E_STARTUP_TIMEOUT: hack up E_STARTUP_TIMEOUT.",
     "hack status.",
-    "Ran `hack up`, then `hack ps`; see hack down.",
+    "Ran `hack up`.\nThen `hack ps`.\nSee hack down.",
   ]) {
     expect(redactFeedbackCommandShapes({ cli: CLI_SPEC, text })).toEqual({
       text,
@@ -1954,7 +1956,7 @@ test("text that only mentions the word hack is left alone", () => {
       cli: CLI_SPEC,
       text: "<!-- run hack up acme-feature --> visible",
     }).text
-  ).toBe(`<!-- run hack up ${ARG} --> visible`);
+  ).toBe(`<!-- run hack up ${ARG} --> ${ARG}`);
 });
 
 test("command text fails closed in prose and in code", () => {
@@ -1962,7 +1964,7 @@ test("command text fails closed in prose and in code", () => {
     redactFeedbackCommandShapes({ cli: CLI_SPEC, text }).text;
   const cases: readonly [string, string][] = [
     // In code, any case counts, and every word after it is a command word.
-    ["`Hack up --branch acme-web` fails", `\`Hack up --branch ${ARG}\` fails`],
+    ["`Hack up --branch acme-web` fails", `\`Hack up --branch ${ARG}\` ${ARG}`],
     ["`HACK logs acme-web`", `\`HACK logs ${ARG}\``],
     ["`hack upp acme-web`", `\`hack ${ARG} ${ARG}\``],
     ["`` hack up `acme-web` ``", `\`\` hack up ${ARG} \`\``],
@@ -2007,11 +2009,95 @@ test("command text fails closed in prose and in code", () => {
       `hack up ${ARG} ${ARG} E_STARTUP_TIMEOUT.`,
     ],
     ["hack up fails with E_ACME_SECRET_DB", `hack up ${ARG} ${ARG} ${ARG}`],
-    // A code span ends the prose run, so the span and what follows are intact.
+    // A command stays open to the line end, across spans and prose. Prose keeps
+    // registered error codes and punctuation; code keeps nothing.
+    ["hack up --branch `acme-web`", `hack up --branch \`${ARG}\``],
+    ["`hack up --branch` `acme-web`", `\`hack up --branch\` \`${ARG}\``],
+    [
+      "`hack up --branch` and `acme-web`",
+      `\`hack up --branch\` ${ARG} \`${ARG}\``,
+    ],
+    ["`hack up` for acme-web.", `\`hack up\` ${ARG} ${ARG}`],
+    [
+      "`hack up`, E_STARTUP_TIMEOUT, acme-web",
+      `\`hack up\`, E_STARTUP_TIMEOUT, ${ARG}`,
+    ],
     [
       "hack up failed with `E_STARTUP_TIMEOUT` today",
-      `hack up ${ARG} ${ARG} \`E_STARTUP_TIMEOUT\` today`,
+      `hack up ${ARG} ${ARG} \`${ARG}\` ${ARG}`,
     ],
+    [
+      "`hack up` then `hack ps acme-web`",
+      `\`hack up\` ${ARG} \`${ARG} ${ARG} ${ARG}\``,
+    ],
+    // The next line starts clean, and only a real line break ends the command.
+    ["`hack up` x\nacme-web stays", `\`hack up\` ${ARG}\nacme-web stays`],
+    ["hack up \\\n  `acme-web`", `hack up \`${ARG}\``],
+    // An HTML comment end stops nothing in prose, and is a word in code.
+    ["hack up --> --branch acme-web", `hack up --> --branch ${ARG}`],
+    ["hack up acme-a-->acme-b", `hack up ${ARG}-->${ARG}`],
+    ["`hack up --> --branch acme-web`", `\`hack up ${ARG} --branch ${ARG}\``],
+    ["`hack up acme-a-->acme-b`", `\`hack up ${ARG}\``],
+    ["`hack --> up acme-web`", `\`hack ${ARG} up ${ARG}\``],
+    [
+      "```\nHack up --> --branch acme-web\n```",
+      `\`\`\`\nHack up ${ARG} --branch ${ARG}\n\`\`\``,
+    ],
+    // A marked line does not close a fence, and only the raw line can.
+    [
+      "```\n- ```\nHack up acme-web\n```",
+      `\`\`\`\n- \`\`\`\nHack up ${ARG}\n\`\`\``,
+    ],
+    [
+      "```\n> ```\nHack up acme-web\n```",
+      `\`\`\`\n> \`\`\`\nHack up ${ARG}\n\`\`\``,
+    ],
+    [
+      "> ~~~\n> x\n> ~~~\nHack up acme-web",
+      `> ~~~\n> x\n> ~~~\nHack up ${ARG}`,
+    ],
+    // An indented line after a blank line is code; a plain continuation is not.
+    ["Intro.\n\n    Hack up acme-web\n", `Intro.\n\n    Hack up ${ARG}\n`],
+    ["    Hack up acme-web", `    Hack up ${ARG}`],
+    ["\tHack up acme-web", `\tHack up ${ARG}`],
+    ["x\n\n    a\n    Hack up acme-web", `x\n\n    a\n    Hack up ${ARG}`],
+    // Any format character separates words and may sit inside the word hack.
+    ["`hack\u00ADup acme-web`", `\`hack up ${ARG}\``],
+    ["`hack\u2061up acme-web`", `\`hack up ${ARG}\``],
+    ["`hack\u180Eup acme-web`", `\`hack up ${ARG}\``],
+    ["`h\u00ADack up acme-web`", `\`hack up ${ARG}\``],
+    ["`Ha\u200Dck up acme-web`", `\`Hack up ${ARG}\``],
+    ["then ha\u2060ck up acme-web", `then hack up ${ARG}`],
+    // Repository prefixes, launchers and versions are commands.
+    [
+      "`bunx github:hack-dance/hack up --branch acme-web`",
+      `\`bunx github:hack-dance/hack up --branch ${ARG}\``,
+    ],
+    [
+      "hack-dance/hack up --branch acme-web",
+      `hack-dance/hack up --branch ${ARG}`,
+    ],
+    ["See hack-dance/hack for acme-web", `See hack-dance/hack ${ARG} ${ARG}`],
+    [
+      "https://github.com/hack-dance/hack for acme-web",
+      `https://github.com/hack-dance/hack ${ARG} ${ARG}`,
+    ],
+    ["`hack-local up --branch acme-web`", `\`hack-local up --branch ${ARG}\``],
+    ["hack-local acme-web", `hack-local ${ARG}`],
+    [
+      "`hack@latest up --branch acme-web`",
+      `\`hack@latest up --branch ${ARG}\``,
+    ],
+    ["`hack@5.0.0-next.4 up acme-web`", `\`hack@5.0.0-next.4 up ${ARG}\``],
+    [
+      "`hack-dance/hack#main up acme-web`",
+      `\`hack-dance/hack#main up ${ARG}\``,
+    ],
+    // A joined spelling that is not a known one loses its suffix.
+    ["`hack-acme-fork up`", "`hack up`"],
+    ["`hack@acme-fork up`", "`hack up`"],
+    ["hack-acme-fork up --json", "hack up --json"],
+    ["`hack-feedback acme-web`", `\`hack ${ARG}\``],
     // Code does not keep error codes, and no flag value is kept anywhere.
     ["`hack up E_STARTUP_TIMEOUT`", `\`hack up ${ARG}\``],
     ["hack up --branch E_STARTUP_TIMEOUT", `hack up --branch ${ARG}`],
@@ -2022,8 +2108,13 @@ test("command text fails closed in prose and in code", () => {
   }
   // Hack's own repository path is not a command.
   for (const text of [
-    "See https://github.com/hack-dance/hack for details",
-    "Posted to hack-dance/hack today",
+    "See https://github.com/hack-dance/hack",
+    "Posted to hack-dance/hack.",
+    "Posted to hack-dance/hack",
+    "See hack-dance/hack#12 today",
+    "See https://github.com/hack-dance/hack/issues/12 today",
+    "See `hack-dance/hack`",
+    "The hack-feedback skill and hack-cli skill.",
   ]) {
     expect(redact(text)).toBe(text);
   }
@@ -2073,6 +2164,27 @@ test("negative controls: private command text added after rendering never sends"
       command("`hack up --branch <redacted:acme-web>`"),
     ],
     ["capital H in a span", body("`Hack up --branch acme-payments` fails.")],
+    ["name quoted after prose", body("hack up --branch `acme-web`")],
+    ["name in a second span", body("`hack up --branch` `acme-web`")],
+    ["name in a span after prose", body("`hack up` on `acme-web`")],
+    ["name in prose after a span", body("`hack up` on acme-web")],
+    ["comment end in a span", body("`hack up --> --branch acme-web`")],
+    ["comment end first in a span", body("`hack --> acme-web`")],
+    ["comment end in a fence", body("```\nHack up --> acme-web\n```")],
+    ["comment end in prose", body("hack up --> --branch acme-web")],
+    ["marked line in a fence", body("```\n- ```\nHack up acme-web\n```")],
+    ["indented code", body("\n    Hack up --branch acme-web")],
+    ["soft hyphen separator", body("`Hack\u00ADup acme-web`")],
+    ["format character in the word", body("`Ha\u2061ck up acme-web`")],
+    ["vowel separator", body("`hack\u180Eup acme-web`")],
+    [
+      "github launcher",
+      body("`bunx github:hack-dance/hack up --branch acme-web`"),
+    ],
+    ["repository prefix", body("hack-dance/hack up --branch acme-web")],
+    ["launcher suffix", body("`hack-local up --branch acme-web`")],
+    ["version-joined", body("`hack@latest up --branch acme-web`")],
+    ["private joined spelling", body("`hack-acme-fork up`")],
     [
       "capital H in a title span",
       { ...base, title: "`Hack up acme-web` fails" },

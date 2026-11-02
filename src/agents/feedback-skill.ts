@@ -76,7 +76,7 @@ export function renderHackFeedbackSkill(): string {
     "## Gather facts",
     "",
     "1. Record the installed version with `hack version`, the OS and architecture, and the channel (stable or next) only when you observed it.",
-    "2. Write the command shape that showed the problem, with every value replaced by a placeholder, for example `hack up --branch <name> --json`. Keep only the command path and flag names, and put every command in a code span. In prose, write `Hack` for the product: a lowercase `hack` followed by other words reads as a command, and those words are replaced. If the original arguments were not kept, or it was not a `hack` command, write `unknown`; never reconstruct them.",
+    "2. Write the command shape that showed the problem, with every value replaced by a placeholder, for example `hack up --branch <name> --json`. Keep only the command path and flag names, put every command in a code span, and end the line with it: every later word on that line, in prose or in another code span, is replaced, except registered error codes in prose. So give each command its own line and put an error code before it. In prose, write `Hack` for the product: a lowercase `hack` followed by other words reads as a command. If the original arguments were not kept, or it was not a `hack` command, write `unknown`; never reconstruct them.",
     "3. Describe observed behavior in words, with the error code from a `--json` envelope, and expected behavior with the doc, help text or earlier behavior that supports it.",
     "4. Pick one reproduction status. Call a problem reproduced only after repeating it:",
     "",
@@ -192,10 +192,10 @@ export function renderFeedbackIssueTemplateFile(): string {
 /** A synthetic report that follows every rule; rendered in the examples. */
 export const FEEDBACK_EXAMPLE_DRAFT: FeedbackDraftInput = {
   title:
-    "`hack up --branch` times out with E_STARTUP_TIMEOUT while the primary instance runs",
+    "E_STARTUP_TIMEOUT while the primary instance runs: `hack up --branch`",
   category: "lifecycle",
   observed:
-    "`hack up --branch <name> --json` exited 1 with `E_STARTUP_TIMEOUT` after about two minutes. `hack ps --json` then listed the branch instance's `<service>` as starting, not healthy.",
+    "After about two minutes, `E_STARTUP_TIMEOUT` and exit 1 came from `hack up --branch <name> --json`.\n\nThe branch instance's `<service>` was listed as starting, not healthy, by `hack ps --json`.",
   expected:
     "The branch instance starts beside the primary instance, as the hack-branches skill describes, or fails with a code that names the blocked service.",
   reproduction: {
@@ -203,7 +203,7 @@ export const FEEDBACK_EXAMPLE_DRAFT: FeedbackDraftInput = {
     steps: [
       "Start the primary instance with `hack up`.",
       "Run `hack up --branch <name> --json`.",
-      "Stop it with `hack down --branch <name>` and repeat step 2.",
+      "Repeat step 2 after stopping it with `hack down --branch <name>`.",
     ],
     note: "Two of three attempts timed out; the third started normally.",
   },
@@ -220,7 +220,7 @@ export const FEEDBACK_EXAMPLE_DRAFT: FeedbackDraftInput = {
     },
     {
       class: "observed",
-      text: "`hack ps --json` showed `<service>` as starting for the branch instance only.",
+      text: "Only the branch instance's `<service>` showed as starting in `hack ps --json`.",
     },
     {
       class: "source",

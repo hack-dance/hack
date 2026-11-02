@@ -1167,28 +1167,59 @@ const SAFE_COMMAND_PLACEHOLDER = new RegExp(
 );
 /** Sentence punctuation that may follow a command word in prose. */
 const COMMAND_WORD_PUNCTUATION = /[.,;:!?)\]]+$/;
-const ZERO_WIDTH = "\\u200B|\\u200C|\\u200D|\\u2060";
+const ONLY_PUNCTUATION = /^[.,;:!?)\]]+$/;
 /**
- * What separates command words: any whitespace except a line break, which
- * covers every Unicode space such as a no-break space from rich text, plus
- * zero-width characters and a shell line continuation.
+ * One unit of what separates command words: any whitespace except a line
+ * break, which covers every Unicode space such as a no-break space from rich
+ * text, any invisible format character, and a shell line continuation.
  */
-const COMMAND_GAP = String.raw`(?:[^\S\r\n]|${ZERO_WIDTH}|\\\r?\n)+`;
+const COMMAND_GAP_UNIT = String.raw`[^\S\r\n]|\p{Cf}|\\\r?\n`;
+const COMMAND_GAP = `(?:${COMMAND_GAP_UNIT})+`;
 const COMMAND_SEPARATOR = new RegExp(COMMAND_GAP, "u");
+const FORMAT_CHARACTERS = /\p{Cf}/gu;
 /**
- * A `hack` invocation: every word after it to the end of the line or an HTML
- * comment end. `.hack`, `hack-feedback` and Hack's own repository path never
- * match. Whether the next word is a command decides nothing, so a typo, a
- * quoted or retired command and a name placed first all fail closed.
+ * The word `hack`, also with format characters inside it, and with a joined
+ * launcher suffix or version such as `hack-local` or `hack@latest`. A `/` never
+ * joins, so `hack-dance/hack` reads as the word `hack` after a path prefix.
  */
-const COMMAND_MENTION_SOURCE = String.raw`(?<![\w.-]|hack-dance/)(hack)((?:${COMMAND_GAP}(?!--!?>)(?:(?!${ZERO_WIDTH})\S)+)+)`;
+const COMMAND_WORD = String.raw`h\p{Cf}*a\p{Cf}*c\p{Cf}*k(?:[-@#](?:(?!\p{Cf})[^\s\x60/])+)?`;
+/**
+ * Where a command starts. `.hack` and `.hack-next` never match. A bare
+ * repository reference does not either, because a URL path or the end of the
+ * text has no gap and words after it. `hack-dance/hack up` does, like any other
+ * path prefix: a repository exemption here would keep its arguments.
+ */
+const COMMAND_START_SOURCE = String.raw`(?<![\w.-])(${COMMAND_WORD})(?=${COMMAND_GAP_UNIT}|$)`;
 /** In prose only lowercase counts, because `Hack` is the product's name. */
-const PROSE_COMMAND_MENTION = new RegExp(COMMAND_MENTION_SOURCE, "gu");
+const PROSE_COMMAND_START = new RegExp(COMMAND_START_SOURCE, "gu");
 /** In code nothing else explains the word, so any case counts. */
-const CODE_COMMAND_MENTION = new RegExp(COMMAND_MENTION_SOURCE, "giu");
+const CODE_COMMAND_START = new RegExp(COMMAND_START_SOURCE, "giu");
+const LITERAL_LINE_BREAK = String.raw`[\r\n]+`;
+const CODE_COMMAND_TOKENS = new RegExp(
+  String.raw`(${COMMAND_GAP})|((?:(?!\p{Cf})\S)+)|(${LITERAL_LINE_BREAK})`,
+  "gu"
+);
+/**
+ * In prose an HTML comment end is its own token and stays, so a comment still
+ * closes and nothing after it becomes hidden. Comments are not parsed in code,
+ * so there it is an argument like any other.
+ */
+const PROSE_COMMAND_TOKENS = new RegExp(
+  String.raw`(${COMMAND_GAP})|(--!?>|(?:(?!--!?>|\p{Cf})\S)+)|(${LITERAL_LINE_BREAK})`,
+  "gu"
+);
+const COMMENT_END = /^--!?>$/;
+/** A line break, unless a shell line continuation carries the command over. */
+const COMMAND_LINE_BREAK = /((?<!\\)\r?\n)/;
+/** Spellings that keep their suffix, and read as a command in prose whatever follows. */
+const KNOWN_COMMAND_LAUNCHER = /^hack(?:-(?:local|next))?$/i;
+const KNOWN_COMMAND_VERSION =
+  /^hack[@#](?:v?\d+(?:\.\d+)*(?:-next\.\d+)?|latest|next|main)$/i;
 const LINE_START = /(?<=\n)/;
 const LINE_END = /\r?\n$/;
-/** Quote and list markers, so a fence inside a container still reads as one. */
+const BLANK_LINE = /^\s*$/;
+const INDENTED_CODE_LINE = /^(?: {4}| {0,3}\t)/;
+/** Quote and list markers, so a fence inside a container still opens one. */
 const FENCE_CONTAINER = /^[\s>]*(?:(?:[-*+]|\d+[.)])\s+)?[\s>]*/;
 const SEARCH_TERM_SEPARATOR = /\s+/;
 const COMMAND_LINE = /^\s*(?:[-*+]\s+)?\**Command:\**\s*(.*?)\s*$/gim;
@@ -1199,6 +1230,12 @@ type RedactedCommandText = {
   readonly text: string;
   /** How many tokens were replaced; zero when the text was already clean. */
   readonly redacted: number;
+};
+
+/** One word of a command, and whether it was written inside code. */
+type CommandToken = {
+  readonly text: string;
+  readonly code: boolean;
 };
 
 function findSubcommand(
@@ -1235,6 +1272,10 @@ function walkCommandTokens(
     if (token === "--") {
       break;
     }
+    // An earlier pass's placeholder for an unknown flag does not end the path.
+    if (token === COMMAND_ARGUMENT) {
+      continue;
+    }
     if (token.startsWith("-")) {
       const nextToken = tokens[index + 1];
       if (optionReadsNextToken({ cli, command, token, nextToken })) {
@@ -1270,16 +1311,19 @@ function walkCommandTokens(
  * a {@link SAFE_COMMAND_PLACEHOLDER}. No text from the input survives except
  * words the spec defines, so a private name has nowhere to stay.
  *
- * Unquoted prose runs to the end of its line, so `keepErrorCodes` keeps a
- * registered error code that follows the command in a sentence. A flag's value
- * is always replaced, even when it is an enum or a number the spec could check.
+ * Prose after a command runs to the end of its line, so a prose token also
+ * keeps a registered error code, sentence punctuation and an HTML comment end.
+ * Code keeps none of these. A flag's value is always replaced, even when it is
+ * an enum or a number the spec could check.
  */
 function normalizeCommandTokens(opts: {
   readonly cli: CliSpec;
-  readonly tokens: readonly string[];
-  readonly keepErrorCodes: boolean;
+  readonly tokens: readonly CommandToken[];
 }): { readonly tokens: readonly string[]; readonly redacted: number } {
-  const { path, values, flags } = walkCommandTokens(opts.cli, opts.tokens);
+  const { path, values, flags } = walkCommandTokens(
+    opts.cli,
+    opts.tokens.map((token) => token.text)
+  );
   let redacted = 0;
   let afterSeparator = false;
   const placeholder = (token: string): string => {
@@ -1289,36 +1333,38 @@ function normalizeCommandTokens(opts: {
     redacted += 1;
     return COMMAND_ARGUMENT;
   };
-  const argument = (token: string): string =>
-    opts.keepErrorCodes &&
-    KNOWN_ERROR_CODES.has(token.replace(COMMAND_WORD_PUNCTUATION, ""))
-      ? token
-      : placeholder(token);
+  const argument = ({ text, code }: CommandToken): string =>
+    !code &&
+    (ONLY_PUNCTUATION.test(text) ||
+      KNOWN_ERROR_CODES.has(text.replace(COMMAND_WORD_PUNCTUATION, "")))
+      ? text
+      : placeholder(text);
   const normalized = opts.tokens.map((token, index) => {
-    if (path.has(index)) {
-      return token;
+    const { text, code } = token;
+    if (path.has(index) || (!code && COMMENT_END.test(text))) {
+      return text;
     }
     if (values.has(index)) {
-      return placeholder(token);
+      return placeholder(text);
     }
     if (afterSeparator) {
       return argument(token);
     }
-    if (token === "--") {
+    if (text === "--") {
       afterSeparator = true;
-      return token;
+      return text;
     }
-    if (!token.startsWith("-")) {
+    if (!text.startsWith("-")) {
       return argument(token);
     }
-    const equals = token.indexOf("=");
-    const name = equals === -1 ? token : token.slice(0, equals);
+    const equals = text.indexOf("=");
+    const name = equals === -1 ? text : text.slice(0, equals);
     if (!flags.has(name)) {
-      return placeholder(token);
+      return placeholder(text);
     }
     return equals === -1
-      ? token
-      : `${name}=${placeholder(token.slice(equals + 1))}`;
+      ? text
+      : `${name}=${placeholder(text.slice(equals + 1))}`;
   });
   return { tokens: normalized, redacted };
 }
@@ -1343,20 +1389,57 @@ function normalizeFeedbackCommandShape(opts: {
   }
   const { tokens, redacted } = normalizeCommandTokens({
     cli: opts.cli,
-    tokens: rest,
-    keepErrorCodes: false,
+    tokens: rest.map((text) => ({ text, code: true })),
   });
   return { text: [HACK_WORD, ...tokens].join(" "), redacted };
 }
 
-type CommandTextSegment = {
+/**
+ * A run of text on one line. A `delimiter` is a code span's backticks or a line
+ * break: it is kept as it is and never holds a command word.
+ */
+type CommandTextPiece = {
   readonly text: string;
-  readonly code: boolean;
+  readonly kind: "prose" | "code" | "delimiter";
 };
 
+/**
+ * For each line, whether it is code that is not a code span: a fence or its
+ * content, or an indented code line. Being wrong in the direction of code is
+ * safe, since it only makes matching stricter. So a fence opens inside a quote
+ * or list, only the raw line can close it, and a quoted fence runs to the end
+ * of the text. A line indented after a blank line reads as code even where it
+ * may belong to a list item.
+ */
+function codeBlockLines(lines: readonly string[]): readonly boolean[] {
+  let fence: string | undefined;
+  let afterBlank = true;
+  let afterIndented = false;
+  return lines.map((line) => {
+    if (fence !== undefined) {
+      const close = FENCE_CLOSE.exec(line)?.[1];
+      if (
+        close !== undefined &&
+        close.charAt(0) === fence.charAt(0) &&
+        close.length >= fence.length
+      ) {
+        fence = undefined;
+      }
+      return true;
+    }
+    const open = FENCE_OPEN.exec(line.replace(FENCE_CONTAINER, ""));
+    fence = open?.[1] ?? open?.[2];
+    const indented =
+      INDENTED_CODE_LINE.test(line) && (afterBlank || afterIndented);
+    afterBlank = BLANK_LINE.test(line);
+    afterIndented = indented;
+    return fence !== undefined || indented;
+  });
+}
+
 /** Split prose at code spans. A backtick run with no partner stays prose. */
-function splitCodeSpans(block: string): readonly CommandTextSegment[] {
-  const segments: CommandTextSegment[] = [];
+function splitCodeSpans(block: string): readonly CommandTextPiece[] {
+  const pieces: CommandTextPiece[] = [];
   let start = 0;
   let index = block.indexOf("`");
   while (index !== -1) {
@@ -1366,81 +1449,196 @@ function splitCodeSpans(block: string): readonly CommandTextSegment[] {
       index = block.indexOf("`", index + run);
       continue;
     }
-    // The opening run is its own segment, so it is never read as a command word.
-    segments.push(
-      { text: block.slice(start, index), code: false },
-      { text: block.slice(index, index + run), code: false },
-      { text: block.slice(index + run, close), code: true }
+    pieces.push(
+      { text: block.slice(start, index), kind: "prose" },
+      { text: block.slice(index, index + run), kind: "delimiter" },
+      { text: block.slice(index + run, close), kind: "code" },
+      { text: block.slice(close, close + run), kind: "delimiter" }
     );
-    start = close;
-    index = block.indexOf("`", close + run);
+    start = close + run;
+    index = block.indexOf("`", start);
   }
-  segments.push({ text: block.slice(start), code: false });
-  return segments;
+  pieces.push({ text: block.slice(start), kind: "prose" });
+  return pieces;
 }
 
-/**
- * Split text into prose and code. Being wrong in the direction of code is safe,
- * since it only makes matching stricter, so a fence is recognized inside a
- * quote or list and a code span may cross lines.
- */
-function commandTextSegments(text: string): readonly CommandTextSegment[] {
-  const lines = text.split(LINE_START);
-  const fenced = fencedCodeLines(
-    lines.map((line) => line.replace(LINE_END, "").replace(FENCE_CONTAINER, ""))
+/** Text as lines of prose and code pieces; a code span may cross lines. */
+function commandTextLines(text: string): readonly CommandTextPiece[][] {
+  const rawLines = text.split(LINE_START);
+  const inCodeBlock = codeBlockLines(
+    rawLines.map((line) => line.replace(LINE_END, ""))
   );
-  const segments: CommandTextSegment[] = [];
+  const lines: CommandTextPiece[][] = [[]];
+  const add = (piece: CommandTextPiece): void => {
+    for (const [index, part] of piece.text
+      .split(COMMAND_LINE_BREAK)
+      .entries()) {
+      if (index % 2 === 1) {
+        lines.at(-1)?.push({ text: part, kind: "delimiter" });
+        lines.push([]);
+      } else if (part !== "") {
+        lines.at(-1)?.push({ text: part, kind: piece.kind });
+      }
+    }
+  };
   let index = 0;
-  while (index < lines.length) {
-    const code = fenced[index] ?? false;
+  while (index < rawLines.length) {
+    const code = inCodeBlock[index] ?? false;
     let block = "";
-    while (index < lines.length && (fenced[index] ?? false) === code) {
-      block += lines[index] ?? "";
+    while (index < rawLines.length && (inCodeBlock[index] ?? false) === code) {
+      block += rawLines[index] ?? "";
       index += 1;
     }
     if (code) {
-      segments.push({ text: block, code });
+      add({ text: block, kind: "code" });
     } else {
-      segments.push(...splitCodeSpans(block));
+      for (const piece of splitCodeSpans(block)) {
+        add(piece);
+      }
     }
   }
-  return segments;
+  return lines;
+}
+
+/**
+ * The tail of a line after a command word, as text with its words pulled out.
+ * Every gap becomes one space; delimiters stay as they are.
+ */
+function commandTail(
+  pieces: readonly CommandTextPiece[]
+): readonly (string | CommandToken)[] {
+  const parts: (string | CommandToken)[] = [];
+  for (const { text, kind } of pieces) {
+    if (kind === "delimiter") {
+      parts.push(text);
+      continue;
+    }
+    const code = kind === "code";
+    const tokens = code ? CODE_COMMAND_TOKENS : PROSE_COMMAND_TOKENS;
+    for (const [, gap, token, lineBreak] of text.matchAll(tokens)) {
+      if (token) {
+        parts.push({ text: token, code });
+      } else {
+        parts.push(gap ? " " : (lineBreak ?? ""));
+      }
+    }
+  }
+  return parts;
+}
+
+function isCommandToken(part: string | CommandToken): part is CommandToken {
+  return typeof part !== "string";
+}
+
+/**
+ * Whether a word with a joined suffix reads as a command. In code it always
+ * does. In prose `hack-feedback skill` does not, so such a word needs a known
+ * launcher spelling, or a flag or top-level command after it.
+ */
+function startsCommandInProse(opts: {
+  readonly cli: CliSpec;
+  readonly word: string;
+  readonly next: string;
+}): boolean {
+  return (
+    KNOWN_COMMAND_LAUNCHER.test(opts.word) ||
+    opts.next.startsWith("-") ||
+    findSubcommand(opts.cli.commands, opts.next) !== undefined
+  );
+}
+
+/** A joined word keeps its spelling only when no private text can be in it. */
+function normalizeCommandWord(word: string): RedactedCommandText {
+  return KNOWN_COMMAND_LAUNCHER.test(word) || KNOWN_COMMAND_VERSION.test(word)
+    ? { text: word, redacted: 0 }
+    : { text: HACK_WORD, redacted: 1 };
+}
+
+/** The first command on a line, and every part of the line after its word. */
+function findLineCommand(
+  cli: CliSpec,
+  pieces: readonly CommandTextPiece[]
+):
+  | {
+      readonly before: string;
+      readonly word: string;
+      readonly tail: readonly (string | CommandToken)[];
+    }
+  | undefined {
+  for (const [index, piece] of pieces.entries()) {
+    if (piece.kind === "delimiter") {
+      continue;
+    }
+    const code = piece.kind === "code";
+    const starts = code ? CODE_COMMAND_START : PROSE_COMMAND_START;
+    for (const match of piece.text.matchAll(starts)) {
+      const end = match.index + match[0].length;
+      const tail = commandTail([
+        { text: piece.text.slice(end), kind: piece.kind },
+        ...pieces.slice(index + 1),
+      ]);
+      const word = (match[1] ?? "").replace(FORMAT_CHARACTERS, "");
+      const next = tail.find(isCommandToken)?.text;
+      if (
+        next !== undefined &&
+        (code || startsCommandInProse({ cli, word, next }))
+      ) {
+        const earlier = pieces.slice(0, index).map((part) => part.text);
+        return {
+          before: [...earlier, piece.text.slice(0, match.index)].join(""),
+          word,
+          tail,
+        };
+      }
+    }
+  }
+  return;
 }
 
 /**
  * Normalize every `hack` invocation in free text, as
- * {@link normalizeFeedbackCommandShape} does. This fails closed: a lowercase
- * `hack` followed by words in prose, and `hack` in any case inside a code span
- * or fence, is always read as a command, so "a hack around it" loses its
- * arguments too. Rendering replaces them, and the gate refuses text that still
- * needs this. Text that needs no change comes back exactly as it was, which
- * keeps this idempotent.
+ * {@link normalizeFeedbackCommandShape} does. This fails closed:
+ *
+ * - `hack` in any case inside code, and a lowercase `hack` in prose, always
+ *   starts a command, so "a hack around it" loses its arguments too.
+ * - A command stays open to the end of its line, across code spans and the
+ *   prose between them, so a name quoted after it is an argument as well.
+ *
+ * Rendering replaces the arguments, and the gate refuses text that still needs
+ * this. A command therefore belongs last on its line. Text that needs no change
+ * comes back exactly as it was, which keeps this idempotent.
  */
 export function redactFeedbackCommandShapes(opts: {
   readonly cli: CliSpec;
   readonly text: string;
 }): RedactedCommandText {
   let redacted = 0;
-  const text = commandTextSegments(opts.text)
-    .map((segment) =>
-      segment.text.replace(
-        segment.code ? CODE_COMMAND_MENTION : PROSE_COMMAND_MENTION,
-        (mention: string, word: string, args: string) => {
-          const normalized = normalizeCommandTokens({
-            cli: opts.cli,
-            tokens: args.split(COMMAND_SEPARATOR).filter(Boolean),
-            keepErrorCodes: !segment.code,
-          });
-          if (normalized.redacted === 0) {
-            return mention;
-          }
-          redacted += normalized.redacted;
-          return [word, ...normalized.tokens].join(" ");
-        }
-      )
-    )
-    .join("");
-  return { text, redacted };
+  const lines = commandTextLines(opts.text).map((pieces) => {
+    const unchanged = pieces.map((piece) => piece.text).join("");
+    const command = findLineCommand(opts.cli, pieces);
+    if (!command) {
+      return unchanged;
+    }
+    const word = normalizeCommandWord(command.word);
+    const normalized = normalizeCommandTokens({
+      cli: opts.cli,
+      tokens: command.tail.filter(isCommandToken),
+    });
+    if (word.redacted + normalized.redacted === 0) {
+      return unchanged;
+    }
+    redacted += word.redacted + normalized.redacted;
+    let next = 0;
+    const tail = command.tail.map((part) => {
+      if (typeof part === "string") {
+        return part;
+      }
+      next += 1;
+      return normalized.tokens[next - 1] ?? COMMAND_ARGUMENT;
+    });
+    return `${command.before}${word.text}${tail.join("")}`;
+  });
+  return { text: lines.join(""), redacted };
 }
 
 function collectCommandNames(

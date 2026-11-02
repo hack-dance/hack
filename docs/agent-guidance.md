@@ -142,12 +142,17 @@ single-label machine name, a bare username, a relative project path or a project
 service, branch, repository or organization name in prose can still pass, so the
 user's review of the exact payload still matters.
 
-Command matching fails closed. Inside code spans and fences, `hack` in any case and
-every word after it read as a command. In prose, so does a lowercase `hack`, even
-when the next word is not a command; a capitalized `Hack` in prose is the product
-name and is not matched. Prose is redacted to the end of its line, keeping only
-registered error codes, so drafts should keep commands in code spans. Flag values
-are always replaced, including enum and number values the spec could validate.
+Command matching fails closed. Inside code spans, fences and indented code, `hack`
+in any case starts a command. In prose, so does a lowercase `hack`, even when the
+next word is not a command; a capitalized `Hack` in prose is the product name and is
+not matched. Launcher and version spellings such as `hack-local` and `hack@latest`,
+and a repository prefix such as `hack-dance/hack up`, count too; a bare repository
+reference with no words after it does not. A command stays open to the end of its
+line, across code spans and the prose between them. Every later word on that line is
+an argument: prose keeps registered error codes, sentence punctuation and an HTML
+comment end, and code keeps none of them. So a draft should end each line with its
+command and put any error code before it. Flag values are always replaced, including
+enum and number values the spec could validate.
 
 Skill candidates and where their patterns live now:
 

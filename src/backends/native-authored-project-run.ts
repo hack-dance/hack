@@ -818,9 +818,10 @@ export async function withNativeAuthoredProjectStatus<T>(
 /**
  * Read-only selection for explicit `down --recover` (HACK-1312): true only when
  * this scope retains nothing a recovery owner could act on. That means no saved
- * Ready mapping, startup intent, frontend recovery intent, live-stop or hook
+ * Ready mapping, startup intent, unfinished frontend recovery intent, live-stop or hook
  * owner record, and none of the mutation, admission or recovery evidence the
- * saved-status owner checks. Nothing is created, locked or repaired. Any
+ * saved-status owner checks. Authenticated completed recovery is history.
+ * Nothing is created, locked or repaired. Any
  * refusal returns false, so the stored-generation owner keeps its own refusals.
  */
 export async function nativeAuthoredProjectNothingToRecover(
@@ -844,7 +845,14 @@ export async function nativeAuthoredProjectNothingToRecover(
       return true;
     });
   } catch {
-    return false;
+    try {
+      const { nativeAuthoredCompletedRecoveryIsEmpty } = await import(
+        "./native-authored-project-recovery.ts"
+      );
+      return await nativeAuthoredCompletedRecoveryIsEmpty(scope);
+    } catch {
+      return false;
+    }
   }
 }
 /** Publish the authenticated admitted owner once. Interrupted publication never replaces an existing run. */

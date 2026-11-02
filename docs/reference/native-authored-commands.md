@@ -223,6 +223,12 @@ nor acquires managed values or starts a provider.
 Omit `--profile` to recover the stored generation; explicit empty or named profile
 overrides both refuse.
 
+Repeating `down --recover` after confirmed retirement is a read-only no-op,
+including when authenticated completed recovery history remains. It does not
+contact the native runtime or acquire recovery locks. Incomplete recovery,
+pending writes, retained owner records and changed history still select recovery
+or refuse; they do not qualify for the no-op.
+
 When the selection has a retained startup intent but no Ready mapping and no
 recovery intent, `down --recover` takes a different path. It handles only an
 incomplete startup that never reserved runtime state. One example is an attempt

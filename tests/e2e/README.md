@@ -372,7 +372,9 @@ The scenario requires these results:
   payload may contain U+FFFD, so a split code point fails the run. Where the
   cut falls varies from run to run, so a single pass does not prove that this
   run cut inside a code point; `tests/mcp-logs-contract.test.ts` covers that
-  case deterministically.
+  case deterministically. The scenario's SDK client keeps its default read limit,
+  so a result over that limit closes the session. `tests/mcp-tool-result-size.test.ts`
+  covers the result limit without Docker.
 - With `DOCKER_HOST` pointing at a missing socket, a snapshot and a tail both
   return the closed `backend_error`. The tail ends at end of stream, not at
   `maxMs`.

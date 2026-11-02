@@ -1208,7 +1208,7 @@ files, when:
   removes only the link, never its target.
 
 With `hack.env.json`, the migration refuses (`E_CONFIG_INVALID`) when a `plain_env` value comes only
-from your shell, because it would otherwise be written to a tracked layer. This applies to commands
+from your shell, because it would otherwise be saved to a plaintext file you didn't ask for. This applies to commands
 that migrate implicitly, such as `hack env exec`. Simply skipping the value isn't enough, because
 env layers don't read the contract, so services would stop receiving it. The error names the key and
 never the value, and gives the commands for the scope the contract declares:
@@ -1239,7 +1239,8 @@ With `hack.env.json`, the migration also refuses (`E_CONFIG_INVALID`), writing n
 overlay named `default`, `local` or `<name>.local`, in any case, that sets a value of its own, because
 it would replace the base layer or write a machine-local file, and a contract service that isn't a
 valid env scope when a value would be written for it, because no read could parse that layer. A
-legacy `.env.default` refuses even when it sets no value of its own. A
+legacy `.env.default` or `.env.local` refuses even when it sets no value of its own, and so does a
+different-case spelling of either, through the destination check. A
 secret backend's key may already have been created by then. The migration also refuses, writing nothing
 itself, a `hack.env.json` it can't open or read as a contract, and it doesn't quote the file. Earlier
 `hack doctor` steps, such as creating `.hack/.gitignore`, can still have run.

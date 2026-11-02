@@ -407,6 +407,28 @@ for (const lateContract of [false, true]) {
 }
 
 test(
+  "doctor refuses a local overlay file even when it adds no value of its own",
+  async () => {
+    const project = await createProject({ contract: true });
+    await git(project, ["init", "--quiet"]);
+    const text = `LOCAL_KEY=${VALUE}\n`;
+    await writeFile(join(project.projectDir, ".env"), text);
+    await writeFile(join(project.projectDir, ".env.local"), text);
+    const run = await runDoctor(project);
+    expect(run.exitCode).toBe(1);
+    expect(run.output).not.toContain(VALUE);
+    expect(run.output).toContain(".env.local would collide");
+    expect(await readFile(join(project.projectDir, ".env.local"), "utf8")).toBe(
+      text
+    );
+    await expect(
+      readFile(join(project.projectDir, "hack.env.default.yaml"), "utf8")
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  },
+  CLI_TEST_TIMEOUT_MS
+);
+
+test(
   "doctor refuses the reserved local overlay without exposing or losing plaintext",
   async () => {
     const project = await createProject({ contract: true });

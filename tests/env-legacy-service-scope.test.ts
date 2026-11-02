@@ -23,6 +23,7 @@ import {
 } from "../src/constants.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
+  collectLegacyProjectEnvCleanupCandidates,
   ENV_SCOPE_INVALID_MESSAGE,
   findUnmigratedLegacyDotenv,
   inspectProjectEnvMaterialization,
@@ -4298,7 +4299,7 @@ test("a layer with an invalid scope name refuses as unreadable, before the scope
 });
 
 for (const [name, defaultValues] of [
-  ["a value", "  global: {}\n"],
+  ["no value", "  global: {}\n"],
   ["a scoped deletion", "  global: {}\n  api:\n    KEPT_SETTING: null\n"],
 ] as const) {
   test(`outside git, a local layer that is the \`local\` overlay refuses, with ${name} in the base layer`, async () => {
@@ -4325,6 +4326,92 @@ for (const [name, defaultValues] of [
     });
   });
 }
+
+test("outside git, setting that local layer's environment to default, as the refusal says, lets the migration deliver", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  await writeFile(resolve(repo.projectDir, "hack.env.local.yaml"), LAYER_EMPTY);
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    LISTED_COMPOSE
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+
+  expect(migrated.retainedEnvFiles).toEqual([]);
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    serviceNames: ["api"],
+    envName: null,
+  });
+  expect(resolved?.hostTargetEnv.global?.KEPT_SETTING).toBe(KEPT_VALUE);
+});
+
+test("in git, a tracked local layer still in the working tree gets the tracked-layer refusal and its remedy", async () => {
+  const repo = await createLegacyRepo();
+  await git({ repo, args: ["init", "-q"] });
+  const localPath = resolve(repo.projectDir, "hack.env.local.yaml");
+  await writeFile(localPath, LAYER);
+  await git({ repo, args: ["add", "-f", ".hack/hack.env.local.yaml"] });
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `OTHER_SETTING=${KEPT_VALUE}\n`
+  );
+
+  await expectMigrationRefusal({
+    repo,
+    code: "E_PATH_CONFLICT",
+    reason: `git tracks the machine-local env layer ${localPath}`,
+    hidden: [KEPT_VALUE],
+  });
+}, 60_000);
+
+test("cleanup keeps a legacy file holding a value its env doesn't receive, naming the key, and offers one it does", async () => {
+  const repo = await writeTeammateCheckout();
+  const envPath = resolve(repo.projectDir, ".env");
+  const collect = (delivered: string | null) =>
+    collectLegacyProjectEnvCleanupCandidates({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      overlayNames: [],
+      materialize: false,
+      deliveredValues: new Map([
+        [
+          envPath,
+          new Map(delivered === null ? [] : [["KEPT_SETTING", delivered]]),
+        ],
+      ]),
+      configCleanupCandidates: [],
+      composeEnvFileReferences: [],
+    });
+
+  const undelivered = await collect(null);
+  expect(undelivered.retainedEnvFiles).toEqual([
+    { path: envPath, keys: ["KEPT_SETTING"] },
+  ]);
+  expect(undelivered.allowed).not.toContain(envPath);
+  expect(undelivered.blocked).not.toContain(envPath);
+  expect(JSON.stringify(undelivered)).not.toContain(KEPT_VALUE);
+
+  const different = await collect("another-value");
+  expect(different.retainedEnvFiles).toEqual([
+    { path: envPath, keys: ["KEPT_SETTING"] },
+  ]);
+
+  const delivered = await collect(KEPT_VALUE);
+  expect(delivered.retainedEnvFiles).toEqual([]);
+  expect(delivered.allowed).toContain(envPath);
+});
 
 test("a migrated legacy file whose values its env now receives isn't retained, and waits on its Compose listing", async () => {
   const repo = await writeTeammateCheckout();

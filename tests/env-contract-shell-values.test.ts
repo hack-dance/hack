@@ -418,7 +418,7 @@ test("a corrupt mirrored store stops the migration with its own error, not a she
   expect(await snapshotTree(repo)).toEqual(before);
 });
 
-test("with the key unset in the shell, the backend isn't read before the migration's own setup", async () => {
+test("with the key unset in the shell, the migration reaches its own setup with no shell-value refusal", async () => {
   process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
   const repo = await createContractRepo({
     secrets: (projectRoot) => ({
@@ -439,7 +439,7 @@ test("with the key unset in the shell, the backend isn't read before the migrati
   ).toEqual([]);
 });
 
-test("a dotenv value wins over the shell with no backend read at all", async () => {
+test("a dotenv value wins over the shell, with no shell-value refusal", async () => {
   process.env[SHELL_KEY] = SHELL_VALUE;
   process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
   const repo = await createContractRepo({

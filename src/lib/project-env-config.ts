@@ -6438,23 +6438,18 @@ export async function canMigrateCheckoutLegacyDotenv(opts: {
 
 /**
  * Refuses when a contract value comes only from this process's environment. A
- * repository's contract can name any variable, and this migration writes plain
- * values to tracked layers, so a shell credential could be committed. Skipping it
- * isn't enough: env layers don't read the contract, so a service that received it
+ * repository's contract can name any variable, and this migration saves plain
+ * values to disk, so a shell credential would land in a plaintext file nobody asked
+ * for. Skipping it isn't enough: env layers don't read the contract, so a service that received it
  * would silently stop.
  *
  * Checking the base covers every overlay. An overlay falls back to the process only
  * when its own sources and the base's lack the key, and then the base does too.
  *
  * The recovery keeps each key's declared scope, because `--local` alone would
- * deliver it to every service. A local base outranks tracked overlays, so an overlay
- * that supplies the key itself also needs a local value, or it would take the base's.
- * Names from the repository are quoted, because these commands get pasted. Only a
- * name the CLI accepts unchanged gets a command: `--env base`, for example, selects no
- * overlay, so following it would replace the base value. Any other name is reported.
- *
- * It also refuses when a mirrored backend's key isn't available, because the shell
- * value might be the only one.
+ * deliver it to every service. An overlay file's own value moves to that overlay's
+ * machine-local layer, which outranks the local base, so the overlay command only
+ * changes it later.
  */
 function assertNoShellValuesInContractMigration(opts: {
   readonly values: readonly ProcessOnlyContractValue[];
@@ -6476,7 +6471,7 @@ function assertNoShellValuesInContractMigration(opts: {
   const sentences = [
     undetermined
       ? `the contract declares ${parts.join(", ")} as plain_env, your shell sets it, and the secret backend's key isn't available, so the value may come only from your shell, and migrating could write it to a tracked env layer. No key was created. Make the backend's key available and retry. If the backend has nothing stored yet and HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK isn't set, the steps below also work, and the migration then creates its key.`
-      : `the contract declares ${parts.join(", ")} as plain_env, and the value comes only from your shell, so migrating would write it to a tracked env layer.`,
+      : `the contract declares ${parts.join(", ")} as plain_env, and the value comes only from your shell, so migrating would save it to a plaintext file on this machine without you asking.`,
   ];
   if (malformed > 0) {
     sentences.push(
@@ -6554,7 +6549,7 @@ function assertNoShellValuesInContractMigration(opts: {
     );
     if (overlayCommands.length > 0) {
       sentences.push(
-        `A local base outranks tracked overlays, so also set the value each overlay file holds, or that env takes the base value: ${overlayCommands.join("; ")}.`
+        `The migration moves each overlay file's own value to that overlay's machine-local layer, so it keeps it. To change it later: ${overlayCommands.join("; ")}.`
       );
     }
     sentences.push(
@@ -6585,9 +6580,10 @@ const CONTRACT_LAYER_REFUSAL_CLOSING =
  * anything, because it has no rollback and a retry finds layers and does nothing.
  * An overlay named `default` would land on the base layer, and `local` on the
  * machine-local one. A scope a layer can't hold would leave a layer no read can parse.
- * Only an entry that would be written counts, so another reserved overlay that adds
- * nothing to the base, or a scope with no value, still migrates; `.env.default` is
- * refused separately, whatever it holds. Names only, JSON-quoted.
+ * Only an entry that would be written counts, so a `<name>.local` overlay that adds
+ * nothing to the base, or a scope with no value, still migrates. `.env.default` and
+ * `.env.local` are refused separately, whatever they hold, and a case variant of
+ * either by the destination preflight. Names only, JSON-quoted.
  */
 function assertContractMigrationLayersAreWritable(opts: {
   readonly baseValues: readonly ResolvedContractMigrationValue[];
@@ -7444,7 +7440,12 @@ async function assertLocalBaseIsTheDefaultEnvLayer(opts: {
   readonly projectDir: string;
   readonly baseToMigrate: Readonly<Record<string, unknown>>;
 }): Promise<void> {
-  if (Object.keys(opts.baseToMigrate).length === 0) {
+  // Inside git, tracking decides what this file is, and the tracked-layer check
+  // refuses with the remedy that works there.
+  if (
+    Object.keys(opts.baseToMigrate).length === 0 ||
+    (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+  ) {
     return;
   }
   const localBasePath = resolveProjectEnvLocalConfigPath({
@@ -7974,7 +7975,7 @@ async function readLegacyDotenvCleanupEntries(opts: {
   return parseDotEnv(source.text);
 }
 
-async function collectLegacyProjectEnvCleanupCandidates(opts: {
+export async function collectLegacyProjectEnvCleanupCandidates(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly overlayNames: readonly string[];

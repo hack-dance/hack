@@ -1162,9 +1162,10 @@ files, when:
   entry, a secret's `environment:`), or it is a `COMPOSE_*` setting (`E_CONFIG_INVALID`). Compose
   takes it from `.hack/.env` today, but the overlay value would apply after the migration. Make
   the two files agree or stop using the key in Compose;
-- a migrated `.hack/.env` value would replace what a tracked overlay delivers for a key its legacy
-  overlay file doesn't set (`E_CONFIG_INVALID`), because a local base outranks tracked overlays. Set
-  the value you want in that legacy overlay file, or remove the key from `.hack/.env`;
+- a migrated `.hack/.env` value would replace what an overlay's layers deliver for a key its legacy
+  overlay file doesn't set (`E_CONFIG_INVALID`), because a local base outranks tracked and inherited
+  overlay layers. Remove the key from `.hack/.env`, or set the value you want in that legacy overlay
+  file, creating it if needed;
 - `.hack/.env` has a state file, env layers exist, and its text isn't what `hack env materialize`
   would write (`E_PATH_CONFLICT`). The file is out of date or was edited by hand, and Hack can't
   tell which. If it's generated, move any value of your own with `hack env set`, then run

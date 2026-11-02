@@ -6501,7 +6501,10 @@ async function overlaysAffectedByMigration(opts: {
           PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
           -suffix.length
         );
-        if (parseEnvConfigSelection(name) === name) {
+        if (
+          parseEnvConfigSelection(name) === name &&
+          !isReservedLegacyOverlayName(name)
+        ) {
           names.add(name);
         }
       }
@@ -6511,9 +6514,9 @@ async function overlaysAffectedByMigration(opts: {
 }
 
 /**
- * Refuses when a migrated base value would replace what a tracked overlay
- * delivers for a key its legacy overlay file doesn't set. The local base outranks
- * tracked overlays, so that env would silently change value and stop receiving
+ * Refuses when a migrated base value would replace what an overlay's layers
+ * deliver for a key its legacy overlay file doesn't set. The local base outranks
+ * tracked and inherited overlay layers, so that env would silently change value and stop receiving
  * later team changes to the key. Names keys and overlays, never values.
  */
 async function assertBaseDoesNotOutrankTrackedOverlays(opts: {
@@ -6551,7 +6554,7 @@ async function assertBaseDoesNotOutrankTrackedOverlays(opts: {
   if (conflicts.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `.hack/.env sets ${conflicts.sort().join(", ")}, and its migrated value would replace what that overlay's env layers deliver. Set the value you want in that legacy overlay file, or remove the key from .hack/.env, then retry.`,
+      reason: `.hack/.env sets ${conflicts.sort().join(", ")}, and its migrated value would replace what that overlay's env layers deliver. Remove the key from .hack/.env, or set the value you want in that legacy overlay file, creating it if needed, then retry.`,
     });
   }
 }

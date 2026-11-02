@@ -425,3 +425,12 @@ test("an inherited overlay that doesn't set the migrated key doesn't stop the mi
     SETTING: "legacy-value",
   });
 });
+
+test("a reserved overlay name in the primary checkout isn't treated as an overlay", async () => {
+  const f = await legacyLinkedCheckout();
+  await config(f.primary, "hack.env.local.local.yaml", {
+    global: { SETTING: "primary-reserved" },
+  });
+
+  expect(await f.migrate()).not.toBeInstanceOf(Error);
+});

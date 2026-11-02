@@ -203,7 +203,7 @@ export async function readHackEnvContract(opts: {
       path,
       exists: true,
       contract: defaultHackEnvContract(),
-      parseError: "the file can't be read",
+      parseError: CONTRACT_UNREADABLE,
     };
   }
   const { text } = read;
@@ -894,12 +894,20 @@ function buildHackEnvMutationSourceMismatchMessage(input: {
   return `Env key "${input.key}" is declared as source "plain_env" in ${input.contractPath}. Use "hack env set ${input.key}=…" or update the contract source before writing. Hack will not write this key through the secret backend until the contract source changes.`;
 }
 
+const CONTRACT_UNREADABLE = "the file can't be read";
+
+function describeContractProblem(parseError: string): string {
+  return parseError === CONTRACT_UNREADABLE
+    ? "can't be read"
+    : `is malformed (${parseError})`;
+}
+
 function buildHackEnvMalformedContractMessage(input: {
   readonly key: string;
   readonly contractPath: string;
   readonly parseError: string;
 }): string {
-  return `Env contract ${input.contractPath} is malformed (${input.parseError}). Fix or remove the contract file before writing "${input.key}". Hack will not fall back to the default contract while mutation-source validation cannot trust the declared storage rules.`;
+  return `Env contract ${input.contractPath} ${describeContractProblem(input.parseError)}. Fix or remove the contract file before writing "${input.key}". Hack will not fall back to the default contract while mutation-source validation cannot trust the declared storage rules.`;
 }
 
 function describePortableState(input: {

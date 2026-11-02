@@ -119,7 +119,10 @@ import {
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
-import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
+import {
+  inspectHackEnvOverlayWarnings,
+  readHackEnvContract,
+} from "../lib/hack-env.ts";
 import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
@@ -3751,7 +3754,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
     project.projectDir,
     PROJECT_ENV_CONTRACT_FILENAME
   );
-  const hasContract = await pathExists(contractPath);
+  // A dangling link is a contract that can't be opened, not a project without one.
+  const { exists: hasContract } = await readHackEnvContract({
+    projectDir: project.projectDir,
+  });
 
   const cfg = await readProjectConfig(project);
   const projectName = (

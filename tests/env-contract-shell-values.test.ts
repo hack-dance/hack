@@ -914,6 +914,68 @@ for (const kind of ["mode 000", "directory", "dangling link"] as const) {
   );
 }
 
+test("env set says a contract it can't open can't be read, not that it's malformed", async () => {
+  const repo = await createContractRepo({ files: {} });
+  const contract = resolve(repo.projectDir, "hack.env.json");
+  await rm(contract);
+  await symlink(resolve(repo.root, "contract-that-is-gone"), contract);
+
+  const run = await runHack({
+    repo,
+    args: [
+      "env",
+      "set",
+      "NEW_SETTING",
+      "--value-stdin",
+      "--path",
+      repo.projectRoot,
+    ],
+    stdin: "new-value\n",
+  });
+
+  expect(run.exitCode).not.toBe(0);
+  expect(run.output).toContain("hack.env.json can't be read");
+  expect(run.output).not.toContain("is malformed");
+  expect(run.output).not.toContain("new-value");
+}, 60_000);
+
+test("doctor names a contract it can't open as the migration source, not as absent", async () => {
+  const repo = await createContractRepo({
+    files: { ".env": `${SHELL_KEY}=${DOTENV_VALUE}\n` },
+  });
+  const contract = resolve(repo.projectDir, "hack.env.json");
+  await rm(contract);
+  await symlink(resolve(repo.root, "contract-that-is-gone"), contract);
+  const tools = resolve(repo.root, "doctor-tools");
+  await mkdir(tools);
+  for (const tool of ["hack", "docker", "mutagen"]) {
+    await writeFile(join(tools, tool), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  }
+
+  const run = await runHack({
+    repo,
+    args: [
+      "doctor",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      repo.projectRoot,
+    ],
+    env: {
+      HACK_LOGGER: "console",
+      HACK_MUTAGEN_PATH: join(tools, "mutagen"),
+      PATH: `${tools}:/usr/bin:/bin`,
+    },
+  });
+
+  expect(run.output).toContain("hack.env.json can't be read");
+  expect(run.output).not.toContain("no hack.env.json");
+  expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toContain(
+    DOTENV_VALUE
+  );
+  expect(run.output).not.toContain(DOTENV_VALUE);
+}, 90_000);
+
 for (const kind of ["mode 000", "directory", "dangling link"] as const) {
   test.skipIf(kind === "mode 000" && process.geteuid?.() === 0)(
     `an implicit migration refuses a hack.env.json that can't be opened (${kind}), before any layer`,

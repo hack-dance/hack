@@ -327,9 +327,10 @@ test("without the guard, an early leak cascades into a later file", async () => 
   expect(run.output).toContain(
     "(fail) a later file still finds executables on PATH"
   );
-  // The deleted proxy still routes a later file's loopback fetch.
+  // Since Bun 1.4.4 a delete reaches the native environment, so a deleted
+  // proxy no longer routes a later file's loopback fetch.
   expect(run.output).toContain(
-    "(fail) a later file still reaches a loopback server directly"
+    "(pass) a later file still reaches a loopback server directly"
   );
 }, 60_000);
 
@@ -342,7 +343,8 @@ test("the guard names each leaking file, restores state, and later files pass", 
   expect(run.output).toContain(
     "b-leak-in-hooks.test.ts left process state changed after the file finished: cwd changed; env HACK_HOME added"
   );
-  expect(run.output).toContain(
+  // Since Bun 1.4.4 a set-then-deleted proxy leaves no native change to name.
+  expect(run.output).not.toContain(
     "c-leak-native-proxy.test.ts left Bun's native environment changed after the file finished: native env HTTP_PROXY changed."
   );
   expect(run.output).toContain(
@@ -354,7 +356,7 @@ test("the guard names each leaking file, restores state, and later files pass", 
   expect(run.output).toContain(
     "(pass) a later test that emits SIGUSR2 is not charged with an earlier listener"
   );
-  expect(run.output).toContain("3 test file(s) leaked process state");
+  expect(run.output).toContain("2 test file(s) leaked process state");
   expect(run.output).not.toContain("127.0.0.1:9");
   expect(run.output).not.toContain("Executable not found");
   expect(run.output).toContain("LATER-FILE-PASSED");
@@ -414,17 +416,17 @@ async function runRestoreEnvProbe(mode: string): Promise<unknown> {
   return JSON.parse(stdout);
 }
 
-test("restoreEnv leaves no proxy in Bun's native environment; a bare delete does", async () => {
+test("neither restoreEnv nor, since Bun 1.4.4, a bare delete leaves a native proxy", async () => {
   expect(await runRestoreEnvProbe("restore-env")).toEqual({
     js: null,
     set: ["HTTP_PROXY"],
     after: [],
   });
-  // If a Bun upgrade makes deletes reach the native environment, this fails
-  // and the empty-assignment workaround in restoreEnv can go.
+  // Bun 1.4.2 kept the deleted key here. If a Bun upgrade brings that back, this
+  // fails and the empty assignment in restoreEnv is needed again.
   expect(await runRestoreEnvProbe("bare-delete")).toEqual({
     js: null,
     set: ["HTTP_PROXY"],
-    after: ["HTTP_PROXY"],
+    after: [],
   });
 }, 30_000);

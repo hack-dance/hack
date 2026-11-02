@@ -394,8 +394,9 @@ const realSpawnSync = Bun.spawnSync.bind(Bun);
  * `process.env` does not show all of it. Bun 1.4 starts this environment
  * from the startup environment and copies later assignments to the proxy
  * keys (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lower-case forms)
- * into it, but a delete never reaches it. A test that sets a proxy and then
- * deletes it leaves `process.env` looking clean while every later `fetch` in
+ * into it. Under Bun 1.4.2 a delete never reached it (Bun 1.4.4 fixed this; the
+ * check stays to catch a regression). A test that set a proxy and then
+ * deleted it left `process.env` looking clean while every later `fetch` in
  * the process, loopback included, still goes through that proxy (HACK-1327).
  * `restoreEnv` in `tests/helpers/env.ts` avoids this by assigning "" first.
  * Other keys never change here: Bun does not copy assignments to them.

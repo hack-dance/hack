@@ -68,6 +68,7 @@ import {
   createMcpOutputBudget,
   MCP_OUTPUT_LIMIT_BYTES,
 } from "./output-budget.ts";
+import { boundMcpToolResult } from "./result-budget.ts";
 import {
   captureMcpSessionContext,
   type McpSessionContext,
@@ -1433,28 +1434,32 @@ function installTypedToolDispatch(opts: {
   opts.server.server.setRequestHandler(
     CallToolRequestSchema,
     async (request, extra): Promise<CallToolResult> => {
-      const entry = opts.tools.get(request.params.name);
-      if (!entry) {
-        return buildUntypedToolError(MCP_UNKNOWN_TOOL_MESSAGE);
-      }
-      try {
-        const result = await entry.call(request.params.arguments, extra);
-        if (
-          !(
-            result.isError ||
-            outputSchema.safeParse(result.structuredContent).success
-          )
-        ) {
+      const dispatch = async (): Promise<CallToolResult> => {
+        const entry = opts.tools.get(request.params.name);
+        if (!entry) {
+          return buildUntypedToolError(MCP_UNKNOWN_TOOL_MESSAGE);
+        }
+        try {
+          const result = await entry.call(request.params.arguments, extra);
+          if (
+            !(
+              result.isError ||
+              outputSchema.safeParse(result.structuredContent).success
+            )
+          ) {
+            return buildUntypedToolError(
+              `Output validation error: Invalid structured content for tool ${request.params.name}`
+            );
+          }
+          return result;
+        } catch (error) {
           return buildUntypedToolError(
-            `Output validation error: Invalid structured content for tool ${request.params.name}`
+            error instanceof Error ? error.message : String(error)
           );
         }
-        return result;
-      } catch (error) {
-        return buildUntypedToolError(
-          error instanceof Error ? error.message : String(error)
-        );
-      }
+      };
+      // The one exit for every tool result: see boundMcpToolResult.
+      return boundMcpToolResult(await dispatch());
     }
   );
 }

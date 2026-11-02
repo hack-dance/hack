@@ -260,9 +260,12 @@ import {
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import {
+  describeUnmigratedLegacyDotenv,
   discoverComposeServiceNames,
   ensureHackDirGitignore,
+  findUnmigratedLegacyDotenv,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
+  hasUnmigratedLegacyDotenv,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
@@ -1321,6 +1324,16 @@ export async function resolveModernComposeEnvOverrides(opts: {
   });
   if (!modern) {
     return null;
+  }
+  const unmigrated = await findUnmigratedLegacyDotenv({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    serviceNames: opts.allServiceNames,
+  });
+  if (hasUnmigratedLegacyDotenv(unmigrated)) {
+    logger.warn({
+      message: `This checkout ${describeUnmigratedLegacyDotenv(unmigrated)} in its legacy .hack/.env files, and the env layers don't deliver those values, so services that rely on them may not get them. Run \`hack doctor --migrate-env-config\`, which moves them to this checkout's local layers or says what to change first.`,
+    });
   }
   const lifecycleEnv = selectProjectEnvValuesForExecutionTarget({
     resolved: modern,

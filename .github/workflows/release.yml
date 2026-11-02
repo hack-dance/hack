@@ -200,7 +200,7 @@ jobs:
       - name: Checkout hack
         uses: useblacksmith/checkout@v1
       - name: Checkout tap repo
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
         with:
           repository: hack-dance/homebrew-tap
           token: ${{ secrets.RELEASE_PAT }}

@@ -1228,6 +1228,7 @@ With `hack.env.json`, the migration also refuses (`E_CONFIG_INVALID`), writing n
 overlay named `default`, `local` or `<name>.local`, in any case, that sets a value of its own, because
 it would replace the base layer or write a machine-local file, and a contract service that isn't a
 valid env scope when a value would be written for it, because no read could parse that layer. A
+legacy `.env.default` refuses even when it sets no value of its own. A
 secret backend's key may already have been created by then. The migration also refuses, writing nothing
 itself, a `hack.env.json` it can't open or read as a contract, and it doesn't quote the file. Earlier
 `hack doctor` steps, such as creating `.hack/.gitignore`, can still have run.

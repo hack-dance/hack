@@ -510,6 +510,10 @@ printf 'relay-guest-absent-v1\n'
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Hang guard for a fixture shell to exit or print its marker, not a correctness bound:
+    /// on a loaded host spawning `/bin/sh` alone took longer than the former 2 s (HACK-1457,
+    /// load average ~230). Only a fixture that never exits or never prints should reach it.
+    const FIXTURE_SHELL_HANG_GUARD: Duration = Duration::from_secs(60);
     #[test]
     fn marker_is_exact_canonical_and_port_bound() {
         assert_eq!(
@@ -661,9 +665,9 @@ mod tests {
             )
             .unwrap();
             if command == "exit 7" {
-                let deadline = Instant::now() + Duration::from_secs(2);
+                let deadline = Instant::now() + FIXTURE_SHELL_HANG_GUARD;
                 while handle.poll_exit().unwrap().is_none() {
-                    assert!(Instant::now() < deadline);
+                    assert!(Instant::now() < deadline, "E_TEST_FIXTURE_SHELL_HANG");
                     std::thread::sleep(Duration::from_millis(2));
                 }
                 assert_eq!(handle.status.unwrap().code(), Some(7));
@@ -708,12 +712,12 @@ mod tests {
         assert_eq!(handle.boot, "boot");
         assert_eq!(handle.slot, 7);
         assert_eq!(handle.stop_user(), "1001:1002");
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + FIXTURE_SHELL_HANG_GUARD;
         let ready = loop {
             if let Some(ready) = handle.poll_ready().unwrap() {
                 break ready;
             }
-            assert!(Instant::now() < deadline);
+            assert!(Instant::now() < deadline, "E_TEST_FIXTURE_SHELL_HANG");
             std::thread::sleep(Duration::from_millis(2));
         };
         assert_eq!(ready.pid, 42);

@@ -62,7 +62,7 @@ refer to `hack-dance/hack`.
 
 | Threat | Mitigation on `next` |
 | --- | --- |
-| A secret passed as a command argument lands in shell history and in `ps` output that other local users can read. | `--value-stdin` on `hack env add` and `hack env set` reads the value from stdin (at most 64 KiB, fixed refusals that never repeat the input). See `src/lib/env-value-stdin.ts` (`readEnvValueFromStdin`, `assertEnvValueStdinUsage`), #308. The hidden prompt stays available in a terminal. |
+| A secret passed as a command argument lands in shell history and in `ps` output that other local users can read. | `--value-stdin` on `hack env add` and `hack env set` reads the value from stdin (at most 64 KiB, read to end of input within a 30-second deadline, fixed refusals that never repeat the input). The stdin deadline is proven by `tests/env-value-stdin-bounds-cli.test.ts`. OS keychain calls have a 60-second deadline with a closed refusal (`src/lib/native-keychain.ts`); `tests/native-keychain.test.ts` proves the deadline with a call that never settles. The end-to-end keychain case in `tests/env-value-stdin-bounds-cli.test.ts` runs only on Linux hosts with libsecret installed and is skipped elsewhere, so hosted CI may not run it. See `src/lib/env-value-stdin.ts` (`readEnvValueFromStdin`, `assertEnvValueStdinUsage`), #308. The hidden prompt stays available in a terminal. |
 | A mistyped `KEY=value` argument is echoed back in an error, or turned into a file name or overlay name. | Key, scope and `--env` arguments are validated before any file access, and the refusal text never contains the argument: `src/cli/env-arguments.ts`, `src/cli/env-selection.ts`, `parseEnvConfigSelection` in `src/lib/project.ts`, the shared check in `src/cli/run.ts` (#308). `--project` and `--target` follow the same rule through `src/cli/project-selector.ts` (`parseProjectSelectorOption`, `unknownProjectMessage`, `resolveRegisteredProjectOption`) and the `runCli` check (#318). Proven by `tests/env-key-argument-redaction-cli.test.ts` and `tests/project-target-argument-redaction-cli.test.ts`. |
 | Diagnostics print key bytes or absolute paths. | The `hack doctor` env key check uses closed codes and project-relative subjects only: `src/lib/doctor-env-key.ts` (#309). Envelope and key-file failures use one fixed message: `src/lib/private-file.ts`, `src/lib/project-env-config.ts`, `src/lib/secret-store.ts` (#288). |
 | Host command records keep arguments or env values. | `hack host exec` and `hack env exec` records are payload-free (see [host command lifetime](../env.md#host-command-lifetime-and-diagnostics)). |
@@ -169,7 +169,8 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    path-based, not descriptor-relative `openat`/`renameat`: an ancestor directory
    swapped after the last check can still redirect an operation. This residual race
    remains open; ordinary outside-link redirection is refused. In-project dangling
-   links retain set/unset's prior replacement behavior; strict reads refuse them.
+   links are refused by `hack env set`, `hack env unset` and strict reads; `hack env add`
+   replaces them.
 6. **`encrypted_file` key file reads.** Key writes now use the
    `src/lib/private-file.ts` helpers: explicit provisioning replaces the key
    atomically, and first-use generation publishes it exclusively. `readEncryptedFileKey`

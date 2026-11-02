@@ -1,6 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,6 +20,7 @@ import {
   assertNativeComposeStorageCarrierStable,
   assertNativeComposeStorageCarrierStateUnchanged,
   assertNativeComposeStorageDockerImage,
+  createNativeComposeDockerStorageXattrCarrier,
   nativeComposeStorageCarrierBudgetReason,
 } from "../src/lib/native-compose-storage-witness-docker.ts";
 import {
@@ -1412,4 +1413,50 @@ test("an exhausted xattr carrier lifetime refuses with the storage budget reason
   } finally {
     clock.mockRestore();
   }
+});
+
+test("a cancelled docker carrier lifetime names the cancellation, never unclassified", async () => {
+  // HACK-1365: the docker carrier's lifetime check (every probe, and the helper
+  // start's pre-spawn check) refused a cancelled carrier with a plain refusal,
+  // so the boundary reported `unclassified`. A spawned fake docker would leave
+  // its marker; the cancelled carrier must refuse before any spawn.
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-storage-docker-cancel-"))
+  );
+  roots.push(root);
+  const bin = join(root, "bin");
+  await mkdir(bin);
+  const marker = join(root, "spawned");
+  await Bun.write(join(bin, "docker"), `#!/bin/sh\n: > '${marker}'\nexit 1\n`);
+  await chmod(join(bin, "docker"), 0o755);
+  const cancelled = new AbortController();
+  cancelled.abort();
+  const path = process.env.PATH;
+  process.env.PATH = bin;
+  const caught = await (async () => {
+    try {
+      await createNativeComposeDockerStorageXattrCarrier({
+        // Neither is read before the first lifetime check refuses.
+        authority: {} as never,
+        store: {} as never,
+        engineId,
+        signal: cancelled.signal,
+        // Also past its budget: a cancellation is never reported as the budget.
+        deadline: Date.now() - 1,
+        originalCommandRecords: true,
+      });
+    } catch (error: unknown) {
+      return error;
+    } finally {
+      process.env.PATH = path;
+    }
+  })();
+  expect((caught as Error).message).toBe(
+    "Native storage witnesses require a matching pinned Linux helper dependency already cached for this daemon; no image is pulled or emulated automatically."
+  );
+  expect(nativeComposeEffectRefusal(caught)).toEqual({
+    stage: "storage-dependency",
+    reason: "probe-cancel",
+  });
+  expect(await Bun.file(marker).exists()).toBe(false);
 });

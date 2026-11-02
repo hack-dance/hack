@@ -89,8 +89,10 @@ so a prefix cannot masquerade as a complete result. The log tools
 but reaching it is a cutoff: the result is `ok: true` with `outputTruncated: true`,
 `data.cutoff` set to the `bytes` bound, and the events parsed before the cut. See
 [MCP logs contract](../reference/mcp-logs.md). Run the equivalent CLI command when
-full output is needed. The budget bounds captured bytes, not total process memory
-or JSON response size.
+full output is needed. The budget bounds captured bytes, not total process memory.
+A separate limit keeps each serialized result under 9.5 MiB, below the 10 MiB at
+which SDK clients close the connection. See
+[Result size limit](../reference/mcp-tools.md#result-size-limit).
 
 The [MCP tool contract](../reference/mcp-tools.md) lists every tool with its
 annotations, inputs, the CLI command it runs and its result shape.

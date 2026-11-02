@@ -3583,13 +3583,17 @@ async function runDoctorFix(opts: {
 
   await maybeInstallMutagenForDoctorFix();
   await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
-  await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
+  // Let env migration refuse before creating an unrelated missing gitignore.
+  if (!opts.migrateEnvConfig) {
+    await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
+  }
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
   await maybeRepairHackd();
   // Env migration changes project files only, so it runs before the Docker
   // gate: an unreachable Docker never skips a requested migration.
   if (opts.migrateEnvConfig) {
     await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
+    await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   }
 
   const dockerOk = await dockerInfoOk();
@@ -3800,6 +3804,13 @@ async function maybeMigrateProjectEnvConfig(opts: {
     buildEnvMigrationNote({ migrated, globalDelivery: !hasContract }),
     "doctor"
   );
+
+  for (const retained of migrated.retainedEnvFiles) {
+    note(
+      `Kept ${retained.path}: keys not preserved in env layers: ${retained.keys.join(", ")} (values omitted).`,
+      "env cleanup"
+    );
+  }
 
   let composeRepaired = false;
   if (migrated.composeEnvFileReferences.length > 0) {

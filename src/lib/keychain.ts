@@ -1,3 +1,5 @@
+import { nativeKeychain } from "./native-keychain.ts";
+
 /** The single boundary for native keychain access, injectable for isolated callers. */
 export type KeychainBackend = {
   get(input: { service: string; name: string }): Promise<string | null>;
@@ -43,12 +45,5 @@ export function createKeychainBackend({
   };
 }
 
-export const keychain = createKeychainBackend({
-  backend: {
-    get: async (input) => await Bun.secrets.get(input),
-    set: async (input) => {
-      await Bun.secrets.set(input);
-    },
-    delete: async (input) => await Bun.secrets.delete(input),
-  },
-});
+/** The gate runs first, then every native call is deadline-bounded. */
+export const keychain = createKeychainBackend({ backend: nativeKeychain });

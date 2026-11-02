@@ -1,6 +1,10 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { secrets } from "bun";
 import { createKeychainBackend, keychain } from "../src/lib/keychain.ts";
+import {
+  NATIVE_KEYCHAIN_TIMEOUT_ENV,
+  NativeKeychainTimeoutError,
+} from "../src/lib/native-keychain.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -85,5 +89,32 @@ test("existing keychain stores honor changes to the flag without native calls", 
     ).toBeNull();
   } finally {
     restoreEnv("HACK_GLOBAL_CONFIG_PATH", previousConfig);
+  }
+});
+
+test("the shared keychain gates first, then bounds the native call", async () => {
+  const input = { service: "guard", name: "SECRET_TWO" };
+  const savedTimeout = process.env[NATIVE_KEYCHAIN_TIMEOUT_ENV];
+  const hung = spyOn(secrets, "get").mockImplementation(
+    () => new Promise<string | null>(() => undefined)
+  );
+  // Raced, so a missing gate or deadline fails here instead of hanging the file.
+  const settled = () =>
+    Promise.race([
+      keychain.get(input).catch((error: unknown) => error),
+      Bun.sleep(3000).then(() => "unsettled"),
+    ]);
+  try {
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+    expect(String(await settled())).toContain("disabled");
+    expect(hung).not.toHaveBeenCalled();
+
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "0";
+    process.env[NATIVE_KEYCHAIN_TIMEOUT_ENV] = "1000";
+    expect(await settled()).toBeInstanceOf(NativeKeychainTimeoutError);
+    expect(hung).toHaveBeenCalledTimes(1);
+  } finally {
+    hung.mockRestore();
+    restoreEnv(NATIVE_KEYCHAIN_TIMEOUT_ENV, savedTimeout);
   }
 });

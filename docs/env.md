@@ -603,6 +603,18 @@ input and without writing anything:
 - a value argument alongside the flag, including `KEY=value`
 - a missing key argument
 - empty input, input over 64 KiB, invalid UTF-8, or a NUL byte
+- input that has not reached end of file within 30 seconds, for example a pipe whose writer
+  never closes it, or an inherited stdin that nothing writes to. Close the pipe after writing
+  the value, or redirect from a file. `HACK_ENV_VALUE_STDIN_TIMEOUT_MS` sets the deadline
+  (1,000–600,000 ms).
+
+Calls to the OS keychain (macOS Keychain, or the Secret Service over the D-Bus session bus on
+Linux) are bounded too. With no desktop session, a locked keychain, or a session bus that never
+answers, the call fails after 60 seconds with a fixed message instead of waiting. The outcome of a
+timed-out write or delete is unknown, so check it once the keychain responds. For unattended
+hosts, use the `encrypted_file` secrets backend with its key file in place or
+`HACK_SECRETS_FILE_KEY` set; without either, that backend also reads its key from the keychain.
+`HACK_KEYCHAIN_TIMEOUT_MS` sets this deadline (1,000–600,000 ms).
 
 `--local` writes to the worktree-local override file (`.hack/hack.env.local.yaml` or
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for

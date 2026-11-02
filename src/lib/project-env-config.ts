@@ -6479,6 +6479,38 @@ async function readValidatedLegacyDotenvFiles(opts: {
 }
 
 /**
+ * Overlays a migrated local value can affect: this checkout's, plus any with only a
+ * primary checkout's local layer, which a linked worktree inherits below its own.
+ */
+async function overlaysAffectedByMigration(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<readonly string[]> {
+  const names = new Set(
+    await listProjectEnvOverlayNames({ projectDir: opts.projectDir })
+  );
+  const primaryDir = await resolvePrimaryLocalProjectDir(opts);
+  if (primaryDir !== null) {
+    const suffix = `.${PROJECT_ENV_LOCAL_SEGMENT}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`;
+    for (const entry of await readdir(primaryDir)) {
+      if (
+        entry.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        entry.endsWith(suffix)
+      ) {
+        const name = entry.slice(
+          PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
+          -suffix.length
+        );
+        if (parseEnvConfigSelection(name) === name) {
+          names.add(name);
+        }
+      }
+    }
+  }
+  return [...names].sort((left, right) => left.localeCompare(right));
+}
+
+/**
  * Refuses when a migrated base value would replace what a tracked overlay
  * delivers for a key its legacy overlay file doesn't set. The local base outranks
  * tracked overlays, so that env would silently change value and stop receiving
@@ -6496,9 +6528,7 @@ async function assertBaseDoesNotOutrankTrackedOverlays(opts: {
     ...opts,
     envName: null,
   });
-  for (const overlayName of await listProjectEnvOverlayNames({
-    projectDir: opts.projectDir,
-  })) {
+  for (const overlayName of await overlaysAffectedByMigration(opts)) {
     const delivered = await deliveredLayerValuesForMigration({
       ...opts,
       envName: overlayName,
@@ -6697,7 +6727,7 @@ async function assertMigrationKeepsScopedValues(opts: {
   );
   const overlays = new Set([
     ...opts.overlayNames,
-    ...(await listProjectEnvOverlayNames({ projectDir: opts.projectDir })),
+    ...(await overlaysAffectedByMigration(opts)),
   ]);
   const replaced: string[] = [];
   for (const envName of [null, ...overlays]) {

@@ -1118,6 +1118,11 @@ files, when:
 - in a git checkout, git does not ignore a machine-local layer it would write, for
   example because `.hack/.gitignore` is read-only and lacks Hack's managed block
   (`E_PATH_CONFLICT`). Make `.hack/.gitignore` writable, or ignore the path, and retry;
+- a migrated value would replace a service or host value in an env layer, in the base or in
+  an overlay, including an overlay a linked worktree inherits from its primary checkout
+  (`E_CONFIG_INVALID`). A machine-local global value outranks a service or host value in an
+  earlier layer, so that target would silently switch. The error names the keys, targets and
+  envs, never values. Remove the key from the legacy file, or change that value in its layer;
 - a key the legacy files set is also set in a Compose service's own `environment`
   (`E_CONFIG_INVALID`). Compose ranks `environment` above `env_file`, but migrated values
   become global layer values that Hack applies after `environment`, so the service would

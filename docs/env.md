@@ -1046,6 +1046,17 @@ That migrates the repo into:
 - `.hack/hack.env.<overlay>.yaml`
 - `.hack.secret.key` when needed
 
+Doctor offers legacy dotenv files for cleanup only when every parsed entry was
+delivered to an env layer. Files containing undeclared or undelivered entries stay
+on disk; the cleanup report lists their key names and omits their values. This
+also applies to untracked overlays such as `.env.bak` and `.env.example`.
+Migration refuses a legacy `.env.default` overlay before writing env layers,
+because it would overwrite the base `hack.env.default.yaml` layer. Rename that
+legacy overlay and update its project references before retrying.
+If a legacy dotenv file cannot be read, migration refuses cleanup and leaves
+legacy artifacts in place. Env layers may already have been written; check read
+access and preserve the remaining entries before cleaning up manually.
+
 `hack doctor` also warns when a repo still depends on the old format.
 For modern env repos, `hack doctor` also warns when materialized compatibility output in
 `.hack/.env` or `.hack/.env.state.json` is stale and points to `hack env materialize`.

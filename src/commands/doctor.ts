@@ -3546,12 +3546,18 @@ async function runDoctorFix(opts: {
 
   await maybeInstallMutagenForDoctorFix();
   await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
-  await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
+  // Let env migration refuse before creating an unrelated missing gitignore.
+  if (!opts.migrateEnvConfig) {
+    await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
+  }
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
   await maybeRepairHackd();
 
   const dockerOk = await dockerInfoOk();
   if (!dockerOk) {
+    if (opts.migrateEnvConfig) {
+      await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
+    }
     note(
       "Docker is not reachable; daemon repairs were still applied, but Docker-backed fixes were skipped.",
       "doctor"
@@ -3587,6 +3593,7 @@ async function runDoctorFix(opts: {
   await maybeMigrateDnsmasq();
   if (opts.migrateEnvConfig) {
     await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
+    await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   }
 
   renderSkippedDoctorFixSteps();
@@ -3727,6 +3734,13 @@ async function maybeMigrateProjectEnvConfig(opts: {
     );
   }
   note(migrationNotes.join("\n"), "doctor");
+
+  for (const retained of migrated.retainedEnvFiles) {
+    note(
+      `Kept ${retained.path}: keys not preserved in env layers: ${retained.keys.join(", ")} (values omitted).`,
+      "env cleanup"
+    );
+  }
 
   let blockedCleanupCandidates = [...migrated.blockedCleanupCandidates];
   if (migrated.composeEnvFileReferences.length > 0) {

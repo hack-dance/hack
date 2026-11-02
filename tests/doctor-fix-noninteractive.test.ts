@@ -615,3 +615,194 @@ test("doctor --fix refuses an outside .hack and preserves its override (HACK-131
   expect(notes).not.toContain(canary);
   expect(notes).not.toContain(outside);
 }, 30_000);
+
+test("doctor contract migration keeps base and untracked overlays with undelivered entries (HACK-1695)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  await writeFile(
+    resolve(projectDir, "hack.env.json"),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "A", source: "plain_env" }],
+    })
+  );
+  const files = {
+    ".env": "A=synthetic-delivered\nUNDECLARED=synthetic-base-only\n",
+    ".env.bak": "A=synthetic-backup\nBACKUP_ONLY=synthetic-backup-only\n",
+    ".env.example":
+      "A=synthetic-example\nEXAMPLE_ONLY=synthetic-example-only\n",
+    ".env.qa": "A=synthetic-qa\n",
+    ".env.same": "A=synthetic-delivered\n",
+    ".env.empty": "A=\n",
+  };
+  for (const [name, text] of Object.entries(files)) {
+    await writeFile(resolve(projectDir, name), text);
+  }
+  await writeFile(
+    resolve(projectDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.19\n    env_file: [./.env, ./.env.bak]\n"
+  );
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli([
+      "doctor",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      projectRoot,
+    ])
+  ).toBe(0);
+  const notes = noteCalls.join("\n");
+  for (const name of [
+    ".env",
+    ".env.bak",
+    ".env.example",
+    ".env.empty",
+  ] as const) {
+    expect(await readFile(resolve(projectDir, name), "utf8")).toBe(files[name]);
+  }
+  for (const key of ["UNDECLARED", "BACKUP_ONLY", "EXAMPLE_ONLY"]) {
+    expect(notes).toContain(
+      `keys not preserved in env layers: ${key} (values omitted)`
+    );
+  }
+  for (const text of Object.values(files)) {
+    for (const line of text.trim().split("\n")) {
+      const value = line.split("=")[1];
+      if (value) {
+        expect(notes).not.toContain(value);
+      }
+    }
+  }
+  expect(
+    await lstat(resolve(projectDir, ".env.qa")).catch(() => null)
+  ).toBeNull();
+  expect(
+    await lstat(resolve(projectDir, ".env.same")).catch(() => null)
+  ).toBeNull();
+  expect(
+    await readFile(resolve(projectDir, "hack.env.default.yaml"), "utf8")
+  ).toContain("synthetic-delivered");
+  expect(
+    await readFile(resolve(projectDir, "hack.env.bak.yaml"), "utf8")
+  ).toContain("synthetic-backup");
+  expect(
+    await readFile(resolve(projectDir, "hack.env.example.yaml"), "utf8")
+  ).toContain("synthetic-example");
+});
+
+test("doctor migration refusal leaves a missing .hack/.gitignore unwritten (HACK-1695)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  await writeFile(
+    resolve(projectDir, "hack.env.json"),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "TOKEN", source: "keychain" }],
+    })
+  );
+  await mkdir(resolve(projectRoot, ".hack.secret.key"));
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli([
+      "doctor",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      projectRoot,
+    ])
+  ).toBe(1);
+  expect(
+    await lstat(resolve(projectDir, ".gitignore")).catch(() => null)
+  ).toBeNull();
+  expect(
+    await lstat(resolve(projectDir, "hack.env.default.yaml")).catch(() => null)
+  ).toBeNull();
+});
+
+test("doctor refuses a default overlay that would overwrite the migrated base (HACK-1695)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  await writeFile(
+    resolve(projectDir, "hack.env.json"),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "A", source: "plain_env" }],
+    })
+  );
+  const base = "A=synthetic-collision-base\n";
+  const overlay = "A=synthetic-collision-overlay\n";
+  await writeFile(resolve(projectDir, ".env"), base);
+  await writeFile(resolve(projectDir, ".env.default"), overlay);
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli([
+      "doctor",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      projectRoot,
+    ])
+  ).toBe(1);
+  expect(await readFile(resolve(projectDir, ".env"), "utf8")).toBe(base);
+  expect(await readFile(resolve(projectDir, ".env.default"), "utf8")).toBe(
+    overlay
+  );
+  expect(
+    await lstat(resolve(projectDir, "hack.env.default.yaml")).catch(() => null)
+  ).toBeNull();
+  expect(
+    await lstat(resolve(projectDir, ".gitignore")).catch(() => null)
+  ).toBeNull();
+  expect(
+    await lstat(resolve(projectDir, "hack.env.json")).catch(() => null)
+  ).not.toBeNull();
+  expect(noteCalls.join("\n")).not.toContain("synthetic-collision-base");
+  expect(noteCalls.join("\n")).not.toContain("synthetic-collision-overlay");
+});
+
+for (const filename of [".env", ".env.bak"]) {
+  test.skipIf(process.getuid?.() === 0)(
+    `doctor refuses cleanup when ${filename} cannot be read (HACK-1695)`,
+    async () => {
+      const projectRoot = await createProjectWithStaleDaemonPid();
+      const projectDir = resolve(projectRoot, ".hack");
+      await writeFile(
+        resolve(projectDir, "hack.env.json"),
+        JSON.stringify({
+          version: 1,
+          vars: [{ key: "A", source: "plain_env" }],
+        })
+      );
+      const file = resolve(projectDir, filename);
+      const text =
+        "A=synthetic-unreadable-declared\nUNREADABLE_ONLY=synthetic-unreadable-only\n";
+      await writeFile(file, text);
+      await chmod(file, 0o000);
+      try {
+        const { runCli } = await import("../src/cli/run.ts");
+        expect(
+          await runCli([
+            "doctor",
+            "--migrate-env-config",
+            "--no-interactive",
+            "--path",
+            projectRoot,
+          ])
+        ).toBe(1);
+        expect(await lstat(file).catch(() => null)).not.toBeNull();
+        expect(
+          await lstat(resolve(projectDir, "hack.env.json")).catch(() => null)
+        ).not.toBeNull();
+        expect(noteCalls.join("\n")).not.toContain("can now be removed");
+        expect(noteCalls.join("\n")).not.toContain(
+          "synthetic-unreadable-declared"
+        );
+        expect(noteCalls.join("\n")).not.toContain("synthetic-unreadable-only");
+      } finally {
+        await chmod(file, 0o600);
+      }
+      expect(await readFile(file, "utf8")).toBe(text);
+    }
+  );
+}

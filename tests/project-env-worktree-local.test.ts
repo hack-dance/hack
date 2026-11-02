@@ -22,6 +22,7 @@ import {
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolvePrimaryLocalProjectDir } from "../src/lib/worktree-local-config.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const tempDirs = new Set<string>();
 const envKeys = [
@@ -41,7 +42,9 @@ beforeEach(() => {
     delete process.env[key];
   }
   // Isolate the code under test from host Git configuration as well.
-  Object.assign(process.env, gitIsolationEnv);
+  for (const [key, value] of Object.entries(gitIsolationEnv)) {
+    process.env[key] = value;
+  }
 });
 
 afterEach(async () => {
@@ -74,7 +77,7 @@ async function git(cwd: string, args: string[]): Promise<void> {
     "init.templateDir=",
   ];
   const result = Bun.spawnSync(["git", "-C", cwd, ...isolation, ...args], {
-    env: { ...process.env, ...gitIsolationEnv },
+    env: { PATH: process.env.PATH ?? "", ...gitIsolationEnv },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -304,11 +307,9 @@ test.each([
   const target = resolve(sandbox, "redirected.yaml");
   await rename(path, target);
   await symlink(target, path);
-  // On next, the effective-path layer guard may refuse the default file first.
+  // On next, the env layer guard refuses a link that leaves the project first.
   await expect(resolveProjectEnvConfig(options)).rejects.toThrow(
-    name === "local"
-      ? "Refused env layer"
-      : `Refusing redirected or non-regular primary local env file: ${path}`
+    "Refused env layer"
   );
 });
 
@@ -446,11 +447,13 @@ async function runHack(cwd: string, args: string[], sandbox: string) {
     ["bun", resolve(import.meta.dir, "../index.ts"), ...args],
     {
       cwd,
-      env: {
-        ...process.env,
-        HACK_GLOBAL_CONFIG_PATH: resolve(sandbox, "global.config.json"),
-        HACK_NO_INTERACTIVE: "1",
-      },
+      env: privateCliEnv({
+        root: sandbox,
+        env: {
+          HACK_GLOBAL_CONFIG_PATH: resolve(sandbox, "global.config.json"),
+          HACK_NO_INTERACTIVE: "1",
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

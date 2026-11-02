@@ -414,6 +414,17 @@ test(
           })
         ).toBe(0);
         phase(`lifecycle-${index + 1}-${operation}-return`);
+        const routingRoot = join(h.home, "compose-routing");
+        const attemptRoots = (
+          await fs.readdir(routingRoot, { recursive: true })
+        ).filter((path) => path.endsWith("/attempts"));
+        expect(attemptRoots).toHaveLength(1);
+        for (const path of attemptRoots) {
+          expect(await fs.readdir(join(routingRoot, path))).toHaveLength(2);
+          expect(
+            await fs.readdir(join(routingRoot, path, "..", "retired"))
+          ).toHaveLength(0);
+        }
       }
       await store.withLease({
         generation: active,
@@ -426,7 +437,7 @@ test(
       phase("saved-lease-return");
       expect((await h.receipt()).publication?.phase).toBe("active");
       expectRetainedResourcesOnly();
-      expect(h.commands.length).toBeLessThanOrEqual(7300);
+      expect(h.commands.length).toBeLessThanOrEqual(6500);
       expect(volumeInspections()).toBeLessThanOrEqual(114);
       phase("assertions-complete");
     } catch (error: unknown) {

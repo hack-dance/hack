@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
+import { inspectNativeComposeContainers } from "./native-compose-batch-inspect.ts";
 import {
   type NativeComposeIngressBinding,
   observeNativeComposeIngress,
@@ -272,15 +273,16 @@ async function observe(opts: {
     [];
   const expected: BoundNativeComposeProxyRoute[] = [];
   let stopped = true;
-  for (const original of binding.containers) {
-    const found = rows(
-      await probe(["container", "inspect", "--format", CONTAINER, original.id])
-    );
-    const row = found[0];
+  for (const {
+    resource: original,
+    row,
+  } of await inspectNativeComposeContainers({
+    resources: binding.containers,
+    format: CONTAINER,
+    probe,
+  })) {
     if (
       !(
-        found.length === 1 &&
-        row &&
         keys(
           row,
           "created,id,native,networks,number,oneoff,paused,project,running,service,sites"

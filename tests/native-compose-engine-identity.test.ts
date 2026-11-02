@@ -621,7 +621,7 @@ test("pure socket path binding refuses ancestor rebinding even to the same targe
   const alias = join(root, "pure-parent");
   await symlink(root, alias);
   const bound = bindNativeComposeEngineSocketPath(join(alias, "engine.sock"));
-  await unlink(alias);
+  await rename(alias, join(root, "pure-parent-original"));
   await symlink(root, alias);
   expect(() => bound.assertFresh()).toThrow(NativeComposeEngineIdentityError);
   expect(requests).toHaveLength(0);

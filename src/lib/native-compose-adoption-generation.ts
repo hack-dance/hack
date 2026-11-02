@@ -2876,6 +2876,14 @@ async function mutateRetainedContainersWithinBudget(
     : undefined;
   let routeAttempt: NativeComposeRouteAttempt | undefined;
   try {
+    if (routeClaims && loaded.manifest.routingClaims) {
+      await routeClaims.compact({
+        references: [
+          loaded.manifest.routingClaims,
+          ...(state.routingOperation ? [state.routingOperation.reference] : []),
+        ],
+      });
+    }
     await admitCandidate(ctx, loaded.inputs, captured.binary);
     const services = loaded.inputs.binding.containers.map(
       (container) => container.service
@@ -3232,6 +3240,11 @@ async function mutateRetainedContainersWithinBudget(
       state,
       beforeCommit ? { beforeCommit } : undefined
     );
+    if (routeClaims && routeAttempt && loaded.manifest.routingClaims) {
+      await routeClaims.compact({
+        references: [loaded.manifest.routingClaims, routeAttempt.reference],
+      });
+    }
     return 0;
   } finally {
     await routeClaims?.close();

@@ -249,6 +249,21 @@ else {
     input
   ) => {
     const args = [...input];
+    if (
+      args[1] === "inspect" &&
+      args[0] === "container" &&
+      args.length > 5 &&
+      (!args[3]?.includes('"sites"') || args[3]?.includes('"created"'))
+    ) {
+      const start = commands.length;
+      const rows: string[] = [];
+      for (const id of args.slice(4)) {
+        rows.push(await probe([...args.slice(0, 4), id]));
+      }
+      commands.splice(start);
+      commands.push(args);
+      return rows.join("\n");
+    }
     commands.push(args);
     const [kind, action] = args,
       format = args[args.indexOf("--format") + 1] ?? "",

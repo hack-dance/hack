@@ -8,6 +8,8 @@ import {
   open,
   readdir,
   realpath,
+  rename,
+  rmdir,
   unlink,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -450,6 +452,12 @@ async function readPrivate(path: string): Promise<Read> {
 }
 
 export type NativeComposeRouteClaims = {
+  /** After committing saved references under the instance lock, retire settled
+   * unreferenced attempts only when surviving journals prove every active claim.
+   * Reserved and uncertain attempts are always preserved. */
+  compact(opts: {
+    readonly references: readonly NativeComposeRouteReference[];
+  }): Promise<void>;
   /** The caller's instance mutation lock must cover the complete operation. */
   acquire(opts: {
     readonly hostnames: readonly string[];
@@ -619,6 +627,8 @@ export async function openNativeComposeRouteClaims(opts: {
     await make(ownerRoot);
     const attemptsRoot = join(ownerRoot, "attempts");
     await make(attemptsRoot);
+    const retiredRoot = join(ownerRoot, "retired");
+    await make(retiredRoot);
     const releasesRoot = join(ownerRoot, "releases");
     await make(releasesRoot);
     const claimPath = (hostname: string) =>
@@ -817,7 +827,8 @@ export async function openNativeComposeRouteClaims(opts: {
         return result;
       };
       const result: Journal[] = [];
-      for (const name of (await readdir(attemptsRoot)).sort()) {
+      const names = (await readdir(attemptsRoot)).sort();
+      for (const name of names) {
         const record = await journalAt({ name, bounded });
         if (record) {
           result.push(record);
@@ -1153,7 +1164,105 @@ export async function openNativeComposeRouteClaims(opts: {
       });
       await removeEntries(entries);
     };
+    const forgetDirectory = async (path: string) => {
+      const index = directories.findIndex(
+        (directory) => directory.path === path
+      );
+      if (index < 0) {
+        refuse();
+      }
+      const [held] = directories.splice(index, 1);
+      await held?.handle.close();
+      for (const key of immutable.keys()) {
+        if (key.startsWith(`${path}/`)) {
+          immutable.delete(key);
+        }
+      }
+    };
+    const cleanRetired = async () => {
+      const names = await readdir(retiredRoot);
+      for (const name of names) {
+        if (!TOKEN.test(name)) {
+          refuse();
+        }
+        const path = join(retiredRoot, name);
+        if (!directories.some((directory) => directory.path === path)) {
+          directories.push(await holdDirectory(path, true));
+        }
+        // Retirement is already durable. A crash during cleanup may leave any
+        // subset of these files; none grants claim or completion authority.
+        for (const file of await readdir(path)) {
+          if (
+            ![
+              "intent",
+              "reserved",
+              "armed",
+              "complete",
+              "retained",
+              "stopped",
+              "aborted",
+            ].some((kind) => file === `${kind}.json`)
+          ) {
+            refuse();
+          }
+          const selected = join(path, file);
+          await exactUnlink(selected, await read(selected));
+        }
+        await check();
+        await rmdir(path);
+        await forgetDirectory(path);
+      }
+      await directories
+        .find((directory) => directory.path === retiredRoot)
+        ?.handle.sync();
+    };
     return {
+      compact: (options) =>
+        guard(async () => {
+          const references = options.references.map(snapshotReference);
+          await cleanRetired();
+          const records = await journals();
+          const pinned = new Set(
+            references.map((reference) => find(records, reference))
+          );
+          const survivors = records.filter(
+            (record) =>
+              pinned.has(record) ||
+              !(
+                record.aborted ||
+                record.stopped ||
+                (record.complete && !record.retained)
+              )
+          );
+          const current = await activeEntries(records);
+          const surviving = await activeEntries(survivors);
+          if (
+            [...current.entries].some(
+              ([name, entry]) => !equal(surviving.entries.get(name), entry)
+            )
+          ) {
+            // An old attempt is still the sole witness for a live claim.
+            return;
+          }
+          for (const record of records) {
+            if (survivors.includes(record)) {
+              continue;
+            }
+            const path = join(attemptsRoot, record.intent.attemptId);
+            await check();
+            // Atomic namespace removal precedes file deletion. Interrupted cleanup
+            // never exposes a partial journal to the authoritative attempts scan.
+            await rename(path, join(retiredRoot, record.intent.attemptId));
+            await forgetDirectory(path);
+            await directories
+              .find((directory) => directory.path === attemptsRoot)
+              ?.handle.sync();
+            await directories
+              .find((directory) => directory.path === retiredRoot)
+              ?.handle.sync();
+          }
+          await cleanRetired();
+        }),
       acquire: (options) =>
         guard(async () => {
           const generationIdentity = options.generationIdentity;

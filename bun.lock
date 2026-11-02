@@ -30,7 +30,7 @@
         "cz-conventional-changelog": "3.3.0",
         "husky": "^9.1.7",
         "prettier": "3.7.4",
-        "prettier-plugin-sort-imports": "^1.8.9",
+        "prettier-plugin-sort-imports": "^1.8.11",
         "semantic-release": "25.0.2",
         "turbo": "^2.5.8",
         "ultracite": "7.0.12",
@@ -1001,7 +1001,7 @@
 
     "prettier": ["prettier@3.7.4", "", { "bin": { "prettier": "bin/prettier.cjs" } }, "sha512-v6UNi1+3hSlVvv8fSaoUbggEM5VErKmmpGA7Pl3HF8V6uKY7rvClBOJlH6yNwQtfTueNkGVpOv/mtWL9L4bgRA=="],
 
-    "prettier-plugin-sort-imports": ["prettier-plugin-sort-imports@1.8.9", "", { "dependencies": { "prettier": "^3.1.1" }, "peerDependencies": { "typescript": ">4.0.0" } }, "sha512-DWGenlVAOqUZzlCpksqfmBMtgZAAofj6wV91rwoGh3ibVuVoOjxxTL3PnPzEzRru88AOUGShxi5RgTfSWpzMrA=="],
+    "prettier-plugin-sort-imports": ["prettier-plugin-sort-imports@1.8.11", "", { "dependencies": { "prettier": "^3.1.1" }, "peerDependencies": { "typescript": ">4.0.0" } }, "sha512-ApmZkEmNh2Fi6TAcYNgUR15rsP1+omX43+8neY+MXfNZ7JQwrqSdjzKhLUYTtaLo52aaC9gCs+lJaYSU8oSJJA=="],
 
     "pretty-ms": ["pretty-ms@9.3.0", "", { "dependencies": { "parse-ms": "^4.0.0" } }, "sha512-gjVS5hOP+M3wMm5nmNOucbIrqudzs9v/57bWRHQWLYklXqoXKrVfYW2W9+glfGsqtPgpiz5WwyEEB+ksXIx3gQ=="],
 

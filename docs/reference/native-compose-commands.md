@@ -366,7 +366,8 @@ cardinality, program/storage mounts and policy stability. A re-inspected carrier
 whose creation time, policy or stopped state changed reports
 `helper-policy-stability`, and a saved material binding that changed during a
 carrier step, or before a verification's deferred evidence retirement, reports
-`private-state`. A policy or state refusal keeps its reason even when it is
+`private-state`, as does an original command owner vetoed before that
+retirement. A policy or state refusal keeps its reason even when it is
 caught after the carrier's deadline. A timeout,
 budget or otherwise unclassified refusal that finds its carrier's storage budget
 exhausted, and not cancelled, reports `storage-budget`, which names

@@ -15,7 +15,6 @@ import {
   renderMcpPluginManifests,
   renderMcpServers,
   renderPluginReferences,
-  renderPluginRule,
   renderPluginSkill,
 } from "../scripts/generate-agent-plugins.ts";
 import { FOCUSED_SKILLS } from "../src/agents/focused-skills.ts";
@@ -189,11 +188,11 @@ test("the hack package is skills-only and hack-mcp carries the only MCP declarat
     join(repoRoot, "plugins/hack/.claude-plugin/plugin.json")
   );
   expect(claude.skills).toBe("./skills/");
-  expect(claude.hooks).toBe("./hooks/claude-hooks.json");
+  expect(claude).not.toHaveProperty("hooks");
   const cursor = await readJsonObject(
     join(repoRoot, "plugins/hack/.cursor-plugin/plugin.json")
   );
-  expect(cursor.rules).toBe("./rules/");
+  expect(cursor).not.toHaveProperty("rules");
 });
 
 test("negative control: re-adding MCP to the skills package fails the shape check and generation", async () => {
@@ -424,10 +423,10 @@ test("bundled skills and rule match current canonical guidance", async () => {
   expect(await Bun.file(join(root, "skills/hack-remote/SKILL.md")).text()).toBe(
     renderHackRemoteSkill()
   );
-  expect(await Bun.file(join(root, "rules/hack.mdc")).text()).toBe(
-    renderPluginRule()
+  expect(await Bun.file(join(root, "rules/hack.mdc")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "hooks/claude-hooks.json")).exists()).toBe(
+    false
   );
-  expect(renderPluginRule()).toContain("alwaysApply: false");
   const pkg = await Bun.file(join(repoRoot, "package.json")).json();
   for (const client of ["codex", "claude", "cursor"]) {
     const manifest = await Bun.file(
@@ -546,7 +545,8 @@ test("release preparation updates both manifests and rendered guidance after bum
   const skill = await Bun.file(
     join(tempDir, "plugins/hack/skills/hack-cli/SKILL.md")
   ).text();
-  expect(skill).toContain("hack CLI v9.8.7");
+  expect(skill).toContain("does not inject project instructions");
+  expect(skill).not.toContain("Integration freshness");
   expect(skill).not.toContain("hack CLI v0.0.1");
 }, 15_000);
 
@@ -766,8 +766,6 @@ test("generated guidance surfaces never pin models, override permissions or run 
     "plugins/hack/.codex-plugin/plugin.json",
     "plugins/hack/.claude-plugin/plugin.json",
     "plugins/hack/.cursor-plugin/plugin.json",
-    "plugins/hack/hooks/claude-hooks.json",
-    "plugins/hack/rules/hack.mdc",
     "plugins/hack/skills/hack-cli/SKILL.md",
     ".claude-plugin/marketplace.json",
     ".cursor-plugin/marketplace.json",
@@ -784,8 +782,8 @@ test("generated guidance surfaces never pin models, override permissions or run 
   expect(
     await Bun.file(
       join(repoRoot, "plugins/hack/hooks/claude-hooks.json")
-    ).text()
-  ).toContain(HOOK_COMMAND);
+    ).exists()
+  ).toBe(false);
 });
 
 test("policy scan counts only parsed files and fails closed on unparsed config", () => {
@@ -964,3 +962,53 @@ test("shipped skill inventory matches the generator and the integration doc", as
   }
   expect(doc).not.toContain("both skills");
 }, 15_000);
+
+test("install guidance branches on installed schema and real release assets without a Python default", () => {
+  const skill = renderHackInstallSkill();
+  const v2 =
+    skill
+      .split("### Standalone v2 channel")[1]
+      ?.split("### New Python-free installation")[0] ?? "";
+  expect(v2).toContain("hack.prerelease-install/v2");
+  expect(v2).toContain("<verified-root>/bin/hack-next");
+  expect(v2).not.toContain("manager.py");
+  const operations = [...v2.matchAll(/"\$candidate" --manager (\w+)/g)].map(
+    (match) => match[1]
+  );
+  expect(operations).toEqual(["status", "upgrade", "rollback", "stable"]);
+  expect(v2).toContain('export PATH="$HOME/.hack-next/bin:$PATH"');
+  const fresh =
+    skill
+      .split("### New Python-free installation")[1]
+      ?.split("### Legacy v1 channel")[0] ?? "";
+  for (const asset of [
+    "hack-next-install.sh",
+    "hack-next-manager-darwin-arm64",
+    "INSTALLER-SHA256SUMS",
+  ]) {
+    expect(fresh).toContain(asset);
+  }
+  expect(fresh).toContain("report that the Python-free route is unavailable");
+  expect(fresh).toContain("Do not silently install Python");
+  expect(fresh).toContain("next.5");
+  const reading = skill.split("## Further reading")[1] ?? "";
+  expect(reading).toContain("[Legacy v1/Python candidate installation guide]");
+  expect(reading).toContain("not v2 standalone instructions");
+  expect(reading).toContain("verify actual release asset availability");
+  expect(reading).not.toContain("[Candidate installation guide]");
+  expect(fresh).not.toMatch(/https:\/\/[^\s]+\/hack-next-install\.sh/);
+  const legacy =
+    skill
+      .split("### Legacy v1 channel")[1]
+      ?.split("## Plugin and MCP selection")[0] ?? "";
+  expect(legacy).toContain("hack.prerelease-install/v1");
+  expect(legacy).toContain(
+    "explicitly accepts the legacy Python-dependent path"
+  );
+  expect(legacy).toContain("separate root");
+  expect(skill).toContain(
+    "verified executable in a separately scoped integration"
+  );
+  expect(skill).toContain("Never use a stable MCP tool to mutate a candidate");
+  expect(skill).toContain("does not establish that every optional setup or");
+});

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { fstatSync } from "node:fs";
 import {
   link,
@@ -16,7 +16,10 @@ import {
   holdDirectory,
   writeExclusive,
 } from "../src/lib/native-compose-private-state.ts";
-import { runNativeComposeStorageDockerCommand } from "../src/lib/native-compose-storage-witness-docker.ts";
+import {
+  nativeComposeStorageCarrierReason,
+  runNativeComposeStorageDockerCommand,
+} from "../src/lib/native-compose-storage-witness-docker.ts";
 import {
   createNativeComposeStorageDockerEmptyLeaf,
   holdNativeComposeStorageDockerIo,
@@ -241,4 +244,69 @@ test("fixed wrapper quota bounds capture growth and oversized output cannot be a
     await f.io.close();
     await f.directory.file.close();
   }
+});
+
+/**
+ * Runs one unrecorded command (the path of every identity read) while its
+ * exited group answers `EPERM` to `kill(-group, 0)` for the first `eperm`
+ * probes, as macOS can just after the group's last member exits (HACK-1463).
+ * Every other signal and probe reaches the real `process.kill`.
+ */
+async function withGroupProbeEperm(eperm: number) {
+  const f = await fixture();
+  const files = {
+    held: [f.directory],
+    path: f.root,
+    input: f.input,
+    inputInfo: f.inputInfo,
+    requestText: f.text,
+    captures: [] as { path: string; info: typeof f.inputInfo }[],
+  };
+  const kill = process.kill.bind(process);
+  let answered = 0;
+  const probe = spyOn(process, "kill").mockImplementation(((
+    pid: number,
+    signal?: string | number
+  ) => {
+    if (pid < 0 && signal === 0 && answered < eperm) {
+      answered += 1;
+      throw Object.assign(new Error("synthetic EPERM"), { code: "EPERM" });
+    }
+    return kill(pid, signal);
+  }) as typeof process.kill);
+  try {
+    const outcome = await runNativeComposeStorageDockerCommand({
+      files,
+      context: {
+        signal: new AbortController().signal,
+        deadline: Date.now() + 10_000,
+      },
+      args: ["/bin/echo", "synthetic"],
+      timeoutMs: 10_000,
+      beforeSpawn: () => undefined,
+      assertAdmitted: async () => undefined,
+    }).then(
+      (result) => ({ result, error: null as unknown }),
+      (error: unknown) => ({ result: null, error })
+    );
+    return { ...outcome, answered };
+  } finally {
+    probe.mockRestore();
+    await f.io.close();
+    await f.directory.file.close();
+  }
+}
+test("an exited command whose group briefly answers EPERM is awaited until it is absent", async () => {
+  const outcome = await withGroupProbeEperm(3);
+  expect(outcome.error).toBeNull();
+  expect(outcome.answered).toBe(3);
+  expect(outcome.result).toEqual({ exitCode: 0, stdout: "synthetic\n" });
+});
+test("a group that keeps answering EPERM is never taken as absent and refuses at its budget", async () => {
+  const outcome = await withGroupProbeEperm(Number.POSITIVE_INFINITY);
+  expect(outcome.result).toBeNull();
+  expect((outcome.error as Error).message).toContain("values omitted");
+  expect(nativeComposeStorageCarrierReason(outcome.error)).toBe("probe-budget");
+  // Probed every 20 ms across the fixed 3 s unrecorded group budget.
+  expect(outcome.answered).toBeGreaterThan(1);
 });

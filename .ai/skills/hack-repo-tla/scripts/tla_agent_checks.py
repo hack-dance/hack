@@ -21,9 +21,9 @@ from typing import Any, Iterable
 JAVA_TOOL = "java@temurin-17.0.20+101"
 APALACHE_JAVA_TOOL = "java@temurin-21.0.12+101.0.LTS"
 TLA_VERSION = "1.7.4"
-APALACHE_VERSION = "0.62.2"
+APALACHE_VERSION = "0.62.4"
 TLA_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
-APALACHE_SHA256 = "95746f11062b2dea716052c8f03258496a194afc4e9dd29e985f488ea3e90b76"
+APALACHE_SHA256 = "8ac8488422c30d552735bae11b92a2d014d8e02e8608702acc08f9a2d8a9abb2"
 TLA_JAR_URL = f"https://github.com/tlaplus/tlaplus/releases/download/v{TLA_VERSION}/tla2tools.jar"
 APALACHE_TGZ_URL = (
     f"https://github.com/apalache-mc/apalache/releases/download/v{APALACHE_VERSION}/apalache.tgz"

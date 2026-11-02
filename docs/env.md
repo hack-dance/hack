@@ -231,8 +231,8 @@ A `null` result means no modern env configuration exists; it does not inspect or
 resolve legacy `.env` or secret-store values. Callers retain responsibility for
 their existing legacy fallback. Selected managed-env layer reads distinguish a
 missing path from a failed read or a dangling symlink. Only regular files
-(including readable symlinks to regular files) are read; invalid or unreadable
-layers throw a value-free error without YAML excerpts or a nested cause. Project configuration
+(including readable symlinks to regular files inside the real project root) are read;
+invalid or unreadable layers throw a value-free error without YAML excerpts or a nested cause. Project configuration
 selection keeps its existing semantics. Metadata inspection never writes key
 files or materializes `.env`.
 
@@ -592,6 +592,15 @@ input and without writing anything:
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
 per-checkout values you don't want to commit.
 
+In a project with `.hack/hack.env.json` and no env layers yet, `hack env set --local` refuses and
+writes nothing for a plaintext value, because that project's migration copies `.hack/.env` values to
+tracked layers. Use `hack env add` with the same flags, which migrates first and then writes the
+machine-local layer. That migration still copies values already in `.hack/.env`, and a `plain_env`
+value exported in your shell, to tracked layers.
+With `--secret`, the value goes to the secret backend, and a key the contract declares as `keychain`
+reaches a tracked layer as ciphertext when the project migrates. Without `hack.env.json`, `--local`
+still writes `.hack/.env`.
+
 Repeating `hack env add` or `hack env set` with the value already stored is a no-op: when
 the existing secret decrypts to the same value under the current key, its ciphertext is
 kept, so once Hack has written the file it stays byte-identical and Git shows no change.
@@ -609,9 +618,23 @@ new layer, so `.hack/.gitignore` ignores `.hack.env*.tmp`, and you can delete it
 does not remove it on the next write, because another write may still be using it. The
 rename has these effects:
 
-- a symlinked env file keeps its link; the new contents land at the file the link points
-  to, and the staging file is created next to that file
-- a symlink whose target does not exist is replaced by a regular file
+- a symlinked YAML env layer is allowed only when its fully resolved path stays inside
+  the project's real root. Relative links and link chains are resolved at each hop; a
+  root behind a symlink works too. An allowed link keeps its link, the write lands at
+  its target, and the staging file is created next to that target
+- outside targets (including dangling outside links), sibling-prefix escapes and link
+  loops are refused with a closed, value-free error before reading values from stdin
+  or writing decrypted or hydrated output. This applies to the base, tracked overlays
+  and local layers, including init scaffold writes; mutation discovery checks all named
+  YAML layers, including case-variant names on case-insensitive filesystems.
+  `hack doctor --fix` reports an error for a `.hack` linked outside the project
+  and leaves the link and outside files in place
+- an in-project symlink whose target does not exist keeps the existing behavior: the
+  link is replaced by a regular file. Strict planning and hydrate reads still refuse
+  dangling links
+- the writer rechecks both the layer and its resolved destination before staging and
+  commit. These path checks narrow concurrent-swap races; they are not an atomic
+  filesystem fence against a directory changed after the last check
 - a hard link is broken: the env file gets a new inode, and any other name for the old
   file keeps the previous contents
 - the directory must be writable, even when the env file itself is writable; if it is
@@ -1022,6 +1045,17 @@ That migrates the repo into:
 - `.hack/hack.env.default.yaml`
 - `.hack/hack.env.<overlay>.yaml`
 - `.hack.secret.key` when needed
+
+Doctor offers legacy dotenv files for cleanup only when every parsed entry was
+delivered to an env layer. Files containing undeclared or undelivered entries stay
+on disk; the cleanup report lists their key names and omits their values. This
+also applies to untracked overlays such as `.env.bak` and `.env.example`.
+Migration refuses a legacy `.env.default` overlay before writing env layers,
+because it would overwrite the base `hack.env.default.yaml` layer. Rename that
+legacy overlay and update its project references before retrying.
+If a legacy dotenv file cannot be read, migration refuses cleanup and leaves
+legacy artifacts in place. Env layers may already have been written; check read
+access and preserve the remaining entries before cleaning up manually.
 
 `hack doctor` also warns when a repo still depends on the old format.
 For modern env repos, `hack doctor` also warns when materialized compatibility output in

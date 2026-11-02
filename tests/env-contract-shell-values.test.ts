@@ -270,8 +270,9 @@ for (const services of [undefined, ["api"]] as const) {
     });
     expect(migrated.exitCode).toBe(0);
     expect((await set({ flags: [], value: SHELL_VALUE })).exitCode).toBe(0);
-    // Without this step, the local base above would replace staging's value.
-    expect(await valueFor(repo, "api", "staging")).toBe(SHELL_VALUE);
+    // The migration moved staging's own value to its machine-local layer, which
+    // outranks the local base above, so setting the base doesn't replace it.
+    expect(await valueFor(repo, "api", "staging")).toBe(DOTENV_VALUE);
     expect(
       (await set({ flags: ["--env", "staging"], value: DOTENV_VALUE })).exitCode
     ).toBe(0);

@@ -6492,7 +6492,17 @@ async function overlaysAffectedByMigration(opts: {
   const primaryDir = await resolvePrimaryLocalProjectDir(opts);
   if (primaryDir !== null) {
     const suffix = `.${PROJECT_ENV_LOCAL_SEGMENT}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`;
-    for (const entry of await readdir(primaryDir)) {
+    // macOS drops inheritance before this when the directory can't be listed; Linux gets here.
+    let entries: readonly string[];
+    try {
+      entries = await readdir(primaryDir);
+    } catch {
+      throw new LegacyDotenvMigrationRefusalError({
+        code: "E_CONFIG_INVALID",
+        reason: `the primary checkout's env layers in ${primaryDir} can't be listed, so the migration can't tell which overlays it would change. Fix that directory's permissions, then retry.`,
+      });
+    }
+    for (const entry of entries) {
       if (
         entry.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
         entry.endsWith(suffix)
@@ -6554,7 +6564,7 @@ async function assertBaseDoesNotOutrankTrackedOverlays(opts: {
   if (conflicts.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `.hack/.env sets ${conflicts.sort().join(", ")}, and its migrated value would replace what that overlay's env layers deliver. Remove the key from .hack/.env, or set the value you want in that legacy overlay file, creating it if needed, then retry.`,
+      reason: `.hack/.env sets ${conflicts.sort().join(", ")}, and its migrated value would replace what that overlay's env layers deliver. Remove the key from .hack/.env, or set the value you want in that legacy overlay file, creating it if needed; the Compose env_file checks then apply to that file. Then retry.`,
     });
   }
 }

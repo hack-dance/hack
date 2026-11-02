@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -434,3 +435,18 @@ test("a reserved overlay name in the primary checkout isn't treated as an overla
 
   expect(await f.migrate()).not.toBeInstanceOf(Error);
 });
+
+test.skipIf(process.platform !== "linux" || process.geteuid?.() === 0)(
+  "on Linux, a primary checkout whose env layers can't be listed refuses, before any write",
+  async () => {
+    const f = await legacyLinkedCheckout();
+    const entries = await readdir(f.linked);
+    await chmod(f.primary, 0o300);
+
+    const result = await f.migrate();
+    await chmod(f.primary, 0o700);
+
+    expect((result as Error).message).toContain("can't be listed");
+    expect(await readdir(f.linked)).toEqual(entries);
+  }
+);

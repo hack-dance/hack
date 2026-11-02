@@ -35,6 +35,7 @@ import {
   replaceLocalLayerPrivately,
   resolveProjectEnvConfig,
   selectProjectEnvValues,
+  setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolveEnvMeta } from "../src/lib/project-meta.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -4071,4 +4072,197 @@ test("a migrated value that doesn't change a scoped result still migrates", asyn
     serviceEnv: { api: { OTHER: SCOPED_VALUE, SETTING: SCOPED_LEGACY_VALUE } },
     hostTargetEnv: { global: { SETTING: SCOPED_LEGACY_VALUE } },
   });
+});
+
+/** A repo with an empty tracked layer, and a secret set in `scope` through the real writer. */
+async function repoWithScopedSecret(opts: {
+  readonly plaintext: string;
+  readonly local: boolean;
+}): Promise<Repo> {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    scopedLayer("default", `  global:\n    SETTING: ${SCOPED_GLOBAL_VALUE}\n`)
+  );
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "api",
+    key: "SETTING",
+    value: opts.plaintext,
+    secret: true,
+    local: opts.local,
+  });
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `SETTING=${SCOPED_LEGACY_VALUE}\n`
+  );
+  return repo;
+}
+
+async function migrateWithServices(
+  repo: Repo,
+  serviceNames: readonly string[]
+): Promise<unknown> {
+  return await migrateLegacyProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    projectName: "env-legacy-scope",
+    serviceNames: [...serviceNames],
+    materialize: false,
+    migrateUndeclaredDotenv: true,
+  }).catch((caught: unknown) => caught);
+}
+
+test("scoped coverage: both a service and a host value in one layer are named, and every target keeps its value", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    scopedLayer(
+      "default",
+      `  global:\n    SETTING: ${SCOPED_GLOBAL_VALUE}\n  api:\n    SETTING: ${SCOPED_VALUE}\n  host:\n    SETTING: host-${SCOPED_VALUE}\n`
+    )
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `SETTING=${SCOPED_LEGACY_VALUE}\n`
+  );
+  const before = await effectiveValues(repo, [null]);
+
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason:
+      '"SETTING" for "api" in "default", "SETTING" for "host" in "default"',
+    hidden: [SCOPED_LEGACY_VALUE, SCOPED_GLOBAL_VALUE, SCOPED_VALUE],
+  });
+
+  expect(await effectiveValues(repo, [null])).toEqual(before);
+  expect(before.default).toMatchObject({
+    serviceEnv: { api: { SETTING: SCOPED_VALUE } },
+    hostTargetEnv: {
+      api: { SETTING: `host-${SCOPED_VALUE}` },
+      global: { SETTING: `host-${SCOPED_VALUE}` },
+    },
+  });
+});
+
+test("scoped coverage: a Compose service named host is treated as a service, not the host scope", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  host:\n    image: alpine:3.20\n    env_file:\n      - path: .env\n        required: false\n"
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    scopedLayer(
+      "default",
+      `  global:\n    SETTING: ${SCOPED_GLOBAL_VALUE}\n  host:\n    SETTING: ${SCOPED_VALUE}\n`
+    )
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `SETTING=${SCOPED_LEGACY_VALUE}\n`
+  );
+
+  const result = await migrateWithServices(repo, ["host"]);
+
+  expect(result).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  expect((result as Error).message).toContain(
+    '"SETTING" for "host" in "default"'
+  );
+  expect(await readdir(repo.projectDir)).not.toContain("hack.env.local.yaml");
+});
+
+test("scoped coverage: a migrated value that would replace a scoped secret refuses, showing neither value", async () => {
+  const plaintext = `secret-${SCOPED_VALUE}`;
+  const repo = await repoWithScopedSecret({ plaintext, local: false });
+  const layer = await readFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    "utf8"
+  );
+  expect(layer).toContain("secure:");
+  expect(layer).not.toContain(plaintext);
+
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: '"SETTING" for "api" in "default"',
+    hidden: [plaintext, SCOPED_LEGACY_VALUE, "v1:"],
+  });
+
+  expect(await effectiveValues(repo, [null])).toMatchObject({
+    default: { serviceEnv: { api: { SETTING: plaintext } } },
+  });
+});
+
+test("scoped coverage: a scoped secret that opens to the migrated value still migrates", async () => {
+  const repo = await repoWithScopedSecret({
+    plaintext: SCOPED_LEGACY_VALUE,
+    local: false,
+  });
+
+  expect(await migrateWithServices(repo, ["api"])).not.toBeInstanceOf(Error);
+  expect(await effectiveValues(repo, [null])).toMatchObject({
+    default: { serviceEnv: { api: { SETTING: SCOPED_LEGACY_VALUE } } },
+  });
+});
+
+test("scoped coverage: a scoped secret in the same local layer outranks the migrated global value", async () => {
+  const plaintext = `secret-${SCOPED_VALUE}`;
+  const repo = await repoWithScopedSecret({ plaintext, local: true });
+
+  expect(await migrateWithServices(repo, ["api"])).not.toBeInstanceOf(Error);
+  expect(await effectiveValues(repo, [null])).toMatchObject({
+    default: {
+      serviceEnv: { api: { SETTING: plaintext } },
+      hostTargetEnv: { global: { SETTING: SCOPED_LEGACY_VALUE } },
+    },
+  });
+});
+
+test("scoped coverage: a value under a scope Compose doesn't know refuses, naming that scope", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    scopedLayer(
+      "default",
+      `  global: {}\n  retired-worker:\n    SETTING: ${SCOPED_VALUE}\n`
+    )
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `SETTING=${SCOPED_LEGACY_VALUE}\n`
+  );
+
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: '"SETTING" for "retired-worker" in "default"',
+    hidden: [SCOPED_LEGACY_VALUE, SCOPED_VALUE],
+  });
+});
+
+test("scoped coverage: a layer with an invalid scope name refuses closed, before any write", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    scopedLayer(
+      "default",
+      `  global: {}\n  "Bad Scope!":\n    SETTING: ${SCOPED_VALUE}\n`
+    )
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `SETTING=${SCOPED_LEGACY_VALUE}\n`
+  );
+  const entries = await readdir(repo.projectDir);
+
+  const result = await migrateWithServices(repo, ["api"]);
+
+  expect(result).toBeInstanceOf(Error);
+  expect((result as Error).message).not.toContain(SCOPED_VALUE);
+  expect((result as Error).message).not.toContain(SCOPED_LEGACY_VALUE);
+  expect(await readdir(repo.projectDir)).toEqual(entries);
 });

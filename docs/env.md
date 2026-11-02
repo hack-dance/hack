@@ -1165,7 +1165,7 @@ files, when:
 - a migrated `.hack/.env` value would replace what an overlay's layers deliver for a key its legacy
   overlay file doesn't set (`E_CONFIG_INVALID`), because a local base outranks tracked and inherited
   overlay layers. Remove the key from `.hack/.env`, or set the value you want in that legacy overlay
-  file, creating it if needed;
+  file, creating it if needed; the Compose `env_file` checks above then apply to that file;
 - `.hack/.env` has a state file, env layers exist, and its text isn't what `hack env materialize`
   would write (`E_PATH_CONFLICT`). The file is out of date or was edited by hand, and Hack can't
   tell which. If it's generated, move any value of your own with `hack env set`, then run

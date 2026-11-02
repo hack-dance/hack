@@ -10,6 +10,7 @@ import {
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: Array<{
@@ -54,8 +55,8 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
-  process.env.HOME = originalHome;
-  process.env.SHELL = originalShell;
+  restoreEnv("HOME", originalHome);
+  restoreEnv("SHELL", originalShell);
 });
 
 afterAll(() => {

@@ -14,6 +14,7 @@ import type {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
+import { resolveUserHomeDir } from "./home-dir.ts";
 import { isKeychainDisabled, keychain } from "./keychain.ts";
 
 const ENCRYPTED_FILE_KEY_ENV = "HACK_SECRETS_FILE_KEY";
@@ -418,9 +419,8 @@ function resolveConfiguredPath(input: {
   readonly projectDir?: string;
 }): string {
   const raw = input.path.trim();
-  const home = (process.env.HOME ?? "").trim();
   if (raw === "~") {
-    return home;
+    return resolveUserHomeDir();
   }
   if (raw === "~/.hack" || raw.startsWith("~/.hack/")) {
     // "~/.hack" is the canonical global hack dir; route it through the seam so
@@ -431,7 +431,7 @@ function resolveConfiguredPath(input: {
       : resolveGlobalHackDir();
   }
   if (raw.startsWith("~/")) {
-    return resolve(home, raw.slice(2));
+    return resolve(resolveUserHomeDir(), raw.slice(2));
   }
   if (raw.startsWith("/")) {
     return raw;
@@ -439,7 +439,7 @@ function resolveConfiguredPath(input: {
   if (input.projectDir) {
     return resolve(input.projectDir, "..", raw);
   }
-  return resolve(home, raw);
+  return resolve(resolveUserHomeDir(), raw);
 }
 
 export async function provisionEncryptedFileKey(input: {

@@ -96,7 +96,8 @@ import {
   applyBranchToHosts,
   rewriteCaddyLabelForBranch,
 } from "../lib/branch-hosts.ts";
-import { resolveEffectiveBranch, touchBranchUsage } from "../lib/branches.ts";
+import { recordBranchUsage } from "../lib/branch-usage.ts";
+import { resolveEffectiveBranch } from "../lib/branches.ts";
 import {
   type CliResult,
   emitCliResult,
@@ -3621,17 +3622,17 @@ function resolveBranchAliasHost(opts: {
   });
 }
 
-async function touchBranchUsageIfNeeded(opts: {
+async function recordBranchUsageIfNeeded(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly branch: string | null;
 }): Promise<void> {
   if (!opts.branch) {
     return;
   }
-  const res = await touchBranchUsage({
+  // Usage is machine-local state; never write the tracked hack.branches.json.
+  const res = await recordBranchUsage({
     projectDir: opts.project.projectDir,
     branch: opts.branch,
-    createIfMissing: true,
   });
   if (res.error) {
     logger.warn({
@@ -5898,7 +5899,7 @@ async function runUpCommand({
     });
   }
 
-  await touchBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({ project, branch });
   const remoteUpCode = await runRemoteLifecycleCommand({
     project,
     action: "up",
@@ -6367,7 +6368,7 @@ async function runDownCommand({
     requestedTarget: args.options.target,
   });
   if (remoteDownCode !== null) {
-    await touchBranchUsageIfNeeded({ project, branch });
+    await recordBranchUsageIfNeeded({ project, branch });
     if (json) {
       return emitRemoteLifecycleJson({
         action: "down",
@@ -6412,7 +6413,7 @@ async function runDownCommand({
       },
     });
   }
-  await touchBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({ project, branch });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
   const cachePruneCandidates =
     pruneCaches && runtime
@@ -7087,7 +7088,7 @@ async function runRestartCommand({
   });
   const profiles = parseCsvList(args.options.profile);
 
-  await touchBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({ project, branch });
   const remoteRestartCode = await runRemoteLifecycleCommand({
     project,
     action: "restart",
@@ -7589,7 +7590,7 @@ async function handleRun({
     envOption: args.options.env,
   });
 
-  await touchBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({ project, branch });
   const service = (args.positionals.service ?? "").trim();
   if (service.length === 0) {
     throw new CliUsageError("Missing required argument: service");
@@ -7723,7 +7724,7 @@ async function handleExec({
     envOption: args.options.env,
   });
 
-  await touchBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({ project, branch });
   const service = (args.positionals.service ?? "").trim();
   if (service.length === 0) {
     throw new CliUsageError("Missing required argument: service");

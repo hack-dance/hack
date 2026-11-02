@@ -1,7 +1,7 @@
 {
   "name": "@hack/db",
   "private": true,
-  "version": "4.2.2",
+  "version": "4.2.7",
   "type": "module",
   "main": "src/client.ts",
   "module": "src/client.ts",
@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.1",
-    "drizzle-orm": "^0.44.5",
+    "drizzle-orm": "0.45.2",
     "zod": "^4.1.12"
   },
   "devDependencies": {

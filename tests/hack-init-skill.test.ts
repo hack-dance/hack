@@ -19,6 +19,7 @@ import {
   removeHackInitSkill,
   renderHackInitSkill,
 } from "../src/agents/hack-init-skill.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -31,7 +32,7 @@ afterEach(async () => {
   if (originalHome === undefined) {
     Reflect.deleteProperty(process.env, "HOME");
   } else {
-    process.env.HOME = originalHome;
+    restoreEnv("HOME", originalHome);
   }
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });

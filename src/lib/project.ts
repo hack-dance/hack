@@ -341,6 +341,8 @@ export interface ProjectWorktreeConfig {
    * target the base instance from linked worktrees.
    */
   readonly autoBranch?: boolean;
+  /** Inherit primary checkout local env overlays in linked worktrees (default: true). */
+  readonly inheritLocal?: boolean;
 }
 
 /**
@@ -957,8 +959,12 @@ function parseWorktreeConfig(
   const autoBranch = parseOptionalBoolean(
     value.auto_branch ?? value.autoBranch
   );
+  const inheritLocal = parseOptionalBoolean(
+    value.inherit_local ?? value.inheritLocal
+  );
 
   const out: ProjectWorktreeConfig = {
+    ...(inheritLocal !== undefined ? { inheritLocal } : {}),
     ...(autoBranch !== undefined ? { autoBranch } : {}),
   };
   return Object.keys(out).length > 0 ? out : undefined;

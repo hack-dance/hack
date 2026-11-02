@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { confirm, isCancel, password, select, text } from "@clack/prompts";
 import { YAML } from "bun";
@@ -39,6 +38,7 @@ import {
   serializeEnvClassificationForJson,
   serializeEnvStorageForJson as serializeEnvStorageForJsonShape,
 } from "../lib/hack-env-status.ts";
+import { resolveUserHomeDir } from "../lib/home-dir.ts";
 import { runObservedHostCommand } from "../lib/host-command-observation.ts";
 import {
   canPrompt,
@@ -564,7 +564,7 @@ function normalizeGlobalEncryptedFileConfigPath(input: {
     return raw;
   }
 
-  const home = (process.env.HOME ?? homedir()).trim();
+  const home = resolveUserHomeDir();
   const globalConfigDir = dirname(resolveGlobalConfigPath());
   const resolvedPath = resolve(globalConfigDir, raw);
   if (home.length > 0 && resolvedPath.startsWith(`${home}/`)) {

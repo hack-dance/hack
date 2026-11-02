@@ -1,12 +1,12 @@
 import { rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-
 import {
   ensureDir,
   pathExists,
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { readHomeEnv } from "../lib/home-dir.ts";
 import {
   checkHackInitSkill,
   installHackInitSkill,
@@ -225,7 +225,8 @@ function resolveCodexSkillPath(opts: {
   if (!root) {
     return {
       ok: false,
-      message: "HOME is not set; cannot resolve Codex skill path.",
+      message:
+        "HOME is not set to an absolute path; cannot resolve Codex skill path.",
     };
   }
 
@@ -236,8 +237,7 @@ function resolveCodexSkillPath(opts: {
 }
 
 function resolveHomeDir(): string | null {
-  const home = (process.env.HOME ?? "").trim();
-  return home.length > 0 ? home : null;
+  return readHomeEnv();
 }
 
 function resolveInstallStatus(opts: {

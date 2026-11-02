@@ -8,6 +8,12 @@ import {
 } from "../cli/command.ts";
 import { optOpenPreference, optPath, optProject } from "../cli/options.ts";
 import { DEFAULT_PROJECT_TLD, HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
+import {
+  forgetBranchUsage,
+  mergeBranchUsage,
+  readBranchUsage,
+  recordBranchUsage,
+} from "../lib/branch-usage.ts";
 import { readBranchesFile, writeBranchesFile } from "../lib/branches.ts";
 import {
   parseOpenHostPreference,
@@ -124,36 +130,21 @@ const handleBranchAdd: CommandHandlerFor<typeof branchAddSpec> = async ({
     return 1;
   }
 
+  // The tracked registry only records identity and creation time; volatile
+  // usage goes to machine-local state so the committed file stays stable.
   const file = { ...read.file };
   const existingIndex = file.branches.findIndex((entry) => entry.slug === slug);
+  const existing = existingIndex >= 0 ? file.branches[existingIndex] : null;
 
-  if (existingIndex >= 0) {
-    const existing = file.branches[existingIndex];
-    if (!existing) {
-      file.branches = [
-        ...file.branches,
-        {
-          name: nameRaw,
-          slug,
-          ...(note ? { note } : {}),
-          created_at: nowIso,
-          last_used_at: nowIso,
-        },
-      ];
-      await writeBranchesFile({ path: read.path, file });
-      logger.success({ message: `Added branch "${slug}"` });
-      return 0;
-    }
-    const updated = {
+  if (existing) {
+    file.branches = [...file.branches];
+    file.branches[existingIndex] = {
       ...existing,
       name: nameRaw,
       slug,
       ...(note ? { note } : {}),
       created_at: existing.created_at ?? nowIso,
-      last_used_at: nowIso,
     };
-    file.branches = [...file.branches];
-    file.branches[existingIndex] = updated;
   } else {
     file.branches = [
       ...file.branches,
@@ -162,17 +153,18 @@ const handleBranchAdd: CommandHandlerFor<typeof branchAddSpec> = async ({
         slug,
         ...(note ? { note } : {}),
         created_at: nowIso,
-        last_used_at: nowIso,
       },
     ];
   }
 
   await writeBranchesFile({ path: read.path, file });
+  await recordBranchUsage({
+    projectDir: project.projectDir,
+    branch: slug,
+    nowIso,
+  });
   logger.success({
-    message:
-      existingIndex >= 0
-        ? `Updated branch "${slug}"`
-        : `Added branch "${slug}"`,
+    message: existing ? `Updated branch "${slug}"` : `Added branch "${slug}"`,
   });
   return 0;
 };
@@ -204,7 +196,8 @@ const handleBranchList: CommandHandlerFor<typeof branchListSpec> = async ({
     return 0;
   }
 
-  const rows = [...read.file.branches]
+  const usage = await readBranchUsage({ projectDir: project.projectDir });
+  const rows = mergeBranchUsage({ branches: read.file.branches, usage })
     .sort((a, b) => a.slug.localeCompare(b.slug))
     .map((entry) => [
       entry.name,
@@ -264,6 +257,14 @@ const handleBranchRemove: CommandHandlerFor<typeof branchRemoveSpec> = async ({
     path: read.path,
     file: { ...read.file, branches: next },
   });
+  for (const removed of read.file.branches) {
+    if (!next.includes(removed)) {
+      await forgetBranchUsage({
+        projectDir: project.projectDir,
+        branch: removed.slug,
+      });
+    }
+  }
   logger.success({ message: `Removed branch "${slug}".` });
   return 0;
 };

@@ -431,6 +431,7 @@ export function renderProjectConfigSchemaJson(): string {
         additionalProperties: true,
         properties: {
           auto_branch: { type: "boolean" },
+          inherit_local: { type: "boolean" },
         },
       },
       sessions: {
@@ -932,7 +933,12 @@ export function renderProjectBranchesSchemaJson(): string {
             },
             note: { type: "string" },
             created_at: { type: "string", format: "date-time" },
-            last_used_at: { type: "string", format: "date-time" },
+            last_used_at: {
+              type: "string",
+              format: "date-time",
+              description:
+                "Deprecated: read-only legacy value. Usage is now machine-local in .hack/.internal/branch-usage.json.",
+            },
           },
         },
       },

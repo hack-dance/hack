@@ -21,6 +21,7 @@ import {
 } from "../src/constants.ts";
 import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: string[][] = [];
@@ -254,13 +255,13 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
-  process.env.USER = originalUser;
-  process.env.HACK_LOGGER = originalLogger;
+  restoreEnv("HOME", originalHome);
+  restoreEnv("USER", originalUser);
+  restoreEnv("HACK_LOGGER", originalLogger);
   if (originalNoInteractive === undefined) {
     Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
   } else {
-    process.env.HACK_NO_INTERACTIVE = originalNoInteractive;
+    restoreEnv("HACK_NO_INTERACTIVE", originalNoInteractive);
   }
   resetGumPathCacheForTests();
 });

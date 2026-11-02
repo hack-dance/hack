@@ -8,7 +8,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { homedir, hostname, tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { confirm, isCancel, text } from "@clack/prompts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -21,6 +21,7 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { createGatewayClient } from "../control-plane/sdk/gateway-client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { pathExists } from "../lib/fs.ts";
+import { resolveUserHomeDir } from "../lib/home-dir.ts";
 import {
   cancelNodePairingSession,
   consumeNodePairingSession,
@@ -5555,12 +5556,16 @@ async function ensureNodePairSshReady(input: {
   if (!source.ok) {
     return source;
   }
-  const keyPath = join(homedir(), ".ssh", DEFAULT_NODE_PAIR_SSH_KEY_NAME);
+  const keyPath = join(
+    resolveUserHomeDir(),
+    ".ssh",
+    DEFAULT_NODE_PAIR_SSH_KEY_NAME
+  );
   const keyPair = await ensureNodePairSshKey({ keyPath });
   if (!keyPair.ok) {
     return keyPair;
   }
-  const configPath = join(homedir(), ".ssh", "config");
+  const configPath = join(resolveUserHomeDir(), ".ssh", "config");
   const configWrite = await upsertNodePairSshConfig({
     host: source.host,
     user: source.user,
@@ -5638,7 +5643,7 @@ async function ensureNodePairSshKey(input: {
 > {
   const keyPath = input.keyPath;
   const publicKeyPath = `${keyPath}.pub`;
-  const sshDir = join(homedir(), ".ssh");
+  const sshDir = join(resolveUserHomeDir(), ".ssh");
   try {
     await mkdir(sshDir, { recursive: true });
     await chmod(sshDir, 0o700);
@@ -5770,7 +5775,7 @@ async function upsertNodePairSshConfig(input: {
     port: input.port,
     keyPath: input.keyPath,
   });
-  const configDir = join(homedir(), ".ssh");
+  const configDir = join(resolveUserHomeDir(), ".ssh");
   try {
     await mkdir(configDir, { recursive: true });
   } catch {

@@ -34,6 +34,9 @@ alive. You do not need gateway, remote nodes, or extension setup to use this pat
   checkout via the shared git common dir. A detached linked worktree has no branch name to derive;
   pass `--branch <name>`, or set `worktree.auto_branch=false` when intentionally targeting the base
   instance.
+- Linked worktrees read the primary checkout's local env overlays live, below their own
+  local overrides. Set `worktree.inherit_local=false` or `HACK_WORKTREE_INHERIT_LOCAL=0`
+  to opt out. CI and slim execution skip inheritance. See [Env & secrets](env.md#merge-rules).
 
 ## When to leave core
 

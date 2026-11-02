@@ -9,6 +9,7 @@ import {
   resolveOnboardingAgents,
   runOnboardingHandoff,
 } from "../src/agents/onboarding-handoff.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalPath: string | undefined;
@@ -31,7 +32,7 @@ afterEach(async () => {
   if (originalPath === undefined) {
     Reflect.deleteProperty(process.env, "PATH");
   } else {
-    process.env.PATH = originalPath;
+    restoreEnv("PATH", originalPath);
   }
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });

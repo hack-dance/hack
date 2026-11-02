@@ -85,7 +85,23 @@ any e2e result.
   removed in a `finally` (skip with `HACK_E2E_KEEP=1`).
 - Docker scenarios run `hack down` (primary + branch instances) AND a raw
   `docker compose -p <project> down --volumes --remove-orphans` sweep in
-  their own `finally`, keyed by the random fixture name.
+  their own `finally`, keyed by the random fixture name (`<name>` and
+  `<name>--<branch>`, the CLI's branch-instance project name).
+- Every fixture name the run generates is recorded as owned
+  (`docker-ownership.ts`), with a per-process journal under
+  `$TMPDIR/hack-e2e-ownership/` (override: `HACK_E2E_OWNERSHIP_DIR`). Only
+  Compose resources whose `com.docker.compose.project` label is an owned
+  name, or `<owned name>--<branch>`, are ever removed; nothing is pruned, and
+  fixtures from other concurrent runs are left alone.
+- Network leak check: after each docker scenario the harness lists the
+  scenario's owned networks. Any network left after the scenario's own
+  cleanup FAILS the scenario; the harness then removes the scenario's owned
+  containers, networks and volumes and verifies the networks are gone. The
+  run prints `fixture networks: before=N after=M left by this run=K` and
+  exits 1 if `K > 0`.
+- Interrupts: SIGINT/SIGTERM/SIGHUP sweep the run's owned resources before
+  exiting. A run killed with SIGKILL leaves its journal behind; the next
+  docker run reclaims the journal's resources once that process is gone.
 - The canary restores the real registry snapshot best-effort if a leak is
   ever detected (and aborts the run).
 

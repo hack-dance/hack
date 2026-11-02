@@ -17,6 +17,7 @@ import {
   resolveHackEnv,
   selectHackEnvValues,
 } from "../lib/hack-env.ts";
+import { readHomeEnv } from "../lib/home-dir.ts";
 import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
 import {
   defaultProjectSlugFromPath,
@@ -804,7 +805,7 @@ async function handleSessionPicker(): Promise<number> {
   const options = buildSessionPickerOptions({
     sessions,
     projects,
-    home: process.env.HOME ?? "",
+    home: readHomeEnv() ?? "",
   });
 
   if (options.length === 0) {

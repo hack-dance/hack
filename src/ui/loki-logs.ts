@@ -22,6 +22,23 @@ export interface LokiLogsParams {
   readonly start?: Date;
   readonly end?: Date;
   readonly streamContext?: LogStreamContext;
+  /** Follow mode: print a stderr hint when no line arrives within this many ms (0 disables). */
+  readonly emptyHintMs?: number;
+}
+
+const DEFAULT_TAIL_EMPTY_HINT_MS = 5000;
+
+export function renderLokiTailEmptyHint(opts: {
+  readonly query: string;
+  readonly waitedMs: number;
+}): string {
+  const seconds = Math.round(opts.waitedMs / 1000);
+  return [
+    `No log lines from Loki for ${opts.query} after ${seconds}s; still following.`,
+    "Loki follow streams recent and new lines only, so a short-lived service that already exited may show nothing here.",
+    "Try `hack logs --loki --no-follow --since 24h` for history, or `hack logs --compose` for container logs.",
+    "",
+  ].join("\n");
 }
 
 type LokiLabelSet = Record<string, string>;
@@ -316,6 +333,22 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
 
   let closed = false;
   let exitCode = 0;
+  let sawLine = false;
+
+  const emptyHintMs = opts.emptyHintMs ?? DEFAULT_TAIL_EMPTY_HINT_MS;
+  const emptyHintTimer =
+    emptyHintMs > 0
+      ? setTimeout(() => {
+          if (!(closed || sawLine)) {
+            process.stderr.write(
+              renderLokiTailEmptyHint({
+                query: opts.query,
+                waitedMs: emptyHintMs,
+              })
+            );
+          }
+        }, emptyHintMs)
+      : null;
 
   const stop = () => {
     if (closed) {
@@ -370,6 +403,7 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
         showProjectPrefix: opts.showProjectPrefix,
       });
       for (const [tsNs, line] of s.values) {
+        sawLine = true;
         if (opts.json) {
           const entry = parseLokiLogLine({
             labels: s.stream,
@@ -399,6 +433,9 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
       resolve();
     });
   });
+  if (emptyHintTimer) {
+    clearTimeout(emptyHintTimer);
+  }
 
   if (opts.json && opts.streamContext) {
     writeLogStreamEvent({

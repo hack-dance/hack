@@ -10,6 +10,7 @@ import {
 import { handleEnvRoutes } from "../src/daemon/routes/env.ts";
 import { ensureDir, writeTextFileIfChanged } from "../src/lib/fs.ts";
 import { upsertProjectRegistration } from "../src/lib/projects-registry.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 function mockRequest(opts: {
   readonly method: string;
@@ -95,12 +96,12 @@ describe("handleEnvRoutes", () => {
 
   afterEach(async () => {
     if (originalConfigPath !== undefined) {
-      process.env.HACK_GLOBAL_CONFIG_PATH = originalConfigPath;
+      restoreEnv("HACK_GLOBAL_CONFIG_PATH", originalConfigPath);
     } else {
       Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
     }
     if (originalSecretsKey !== undefined) {
-      process.env.HACK_SECRETS_FILE_KEY = originalSecretsKey;
+      restoreEnv("HACK_SECRETS_FILE_KEY", originalSecretsKey);
     } else {
       Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
     }
@@ -227,7 +228,7 @@ describe("handleEnvRoutes", () => {
       if (previousAuthBrokerUrl === undefined) {
         Reflect.deleteProperty(process.env, "HACK_AUTH_BROKER_URL");
       } else {
-        process.env.HACK_AUTH_BROKER_URL = previousAuthBrokerUrl;
+        restoreEnv("HACK_AUTH_BROKER_URL", previousAuthBrokerUrl);
       }
     }
   });

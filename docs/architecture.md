@@ -181,6 +181,11 @@ sequenceDiagram
 - **compose**: fast, direct `docker compose logs`
 - **loki**: searchable history + LogQL filters
 
+Follow mode uses compose unless `logs.follow_backend` is `loki`. Loki follow tails over a
+WebSocket and only streams recent and new lines, so a short-lived service that already exited
+can show nothing. If no line arrives within 5 seconds, `hack logs` prints a stderr hint
+pointing to `hack logs --loki --no-follow --since 24h` (history) and `hack logs --compose`.
+
 NDJSON streaming (`hack logs --json`) emits `start`, `log`, `error`, and `end` events for MCP/TUI
 consumers.
 
@@ -301,7 +306,8 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
 
 ## Files and directories
 
-- `~/.hack/` (default; override the whole root with `HACK_HOME`)
+- `~/.hack/` (default; override the whole root with `HACK_HOME`, which must be an absolute path.
+  An empty or relative `HOME` is treated as unset, so global state never lands under the cwd.)
   - `hack.config.json` (global config: control-plane defaults, gateway bind/port/allowWrites,
     extension settings)
   - `daemon/hackd.sock`
@@ -322,7 +328,8 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
 - `<repo>/.hack/`
   - `docker-compose.yml`
   - `hack.config.json`
-  - `hack.branches.json` (optional)
+  - `hack.branches.json` (optional committed branch registry; written only by `hack branch add`/
+    `remove`, never by runtime commands)
   - `.gitignore` (committed, self-healing on `init`/`up`; covers machine-local generated files —
     `.internal/`, `.branch/`, `.env`, `.env.state.json`, and `hack.env*.local.yaml`. The retired
     `tickets/` path stays ignored only to contain legacy machine-local caches during upgrades. If
@@ -336,6 +343,7 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
   - `.internal/compose.env.override.yml`
   - `.internal/compose.runtime.override.yml`
   - `.internal/extra-hosts.json`
+  - `.internal/branch-usage.json` (machine-local branch `last_used_at`, written by runtime commands)
   - `.internal/lifecycle/state.json` and `.internal/lifecycle/*.log`
   - `.branch/compose.<branch>.override.yml`
   - `.branch/compose.<branch>.runtime.override.yml`

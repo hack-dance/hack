@@ -7,6 +7,7 @@ import {
   checkSharedHackSkill,
   installSharedHackSkill,
 } from "../src/agents/shared-skill.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempHome: string | null = null;
 let originalHome: string | undefined;
@@ -21,7 +22,7 @@ afterEach(async () => {
   if (originalHome === undefined) {
     Reflect.deleteProperty(process.env, "HOME");
   } else {
-    process.env.HOME = originalHome;
+    restoreEnv("HOME", originalHome);
   }
   if (tempHome) {
     await rm(tempHome, { recursive: true, force: true });

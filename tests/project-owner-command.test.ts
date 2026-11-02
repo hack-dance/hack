@@ -7,6 +7,7 @@ import {
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_FILENAME,
 } from "../src/constants.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -29,9 +30,9 @@ afterEach(async () => {
     tempDir = null;
   }
   if (originalLogger !== undefined) {
-    process.env.HACK_LOGGER = originalLogger;
+    restoreEnv("HACK_LOGGER", originalLogger);
   } else {
-    process.env.HACK_LOGGER = undefined;
+    Reflect.deleteProperty(process.env, "HACK_LOGGER");
   }
 });
 

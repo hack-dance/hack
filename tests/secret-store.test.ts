@@ -7,12 +7,14 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   provisionEncryptedFileKey,
   resolveSecretStore,
+  resolveSecretStoreDescriptor,
 } from "../src/lib/secret-store.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let previousHome: string | undefined;
@@ -36,22 +38,25 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = previousHome;
+  restoreEnv("HOME", previousHome);
   if (previousGlobalConfigPath !== undefined) {
-    process.env.HACK_GLOBAL_CONFIG_PATH = previousGlobalConfigPath;
+    restoreEnv("HACK_GLOBAL_CONFIG_PATH", previousGlobalConfigPath);
   } else {
-    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   }
   if (previousSecretsKey !== undefined) {
-    process.env.HACK_SECRETS_FILE_KEY = previousSecretsKey;
+    restoreEnv("HACK_SECRETS_FILE_KEY", previousSecretsKey);
   } else {
-    process.env.HACK_SECRETS_FILE_KEY = undefined;
+    Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
   }
   if (previousDisableKeychainFallback !== undefined) {
     process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK =
       previousDisableKeychainFallback;
   } else {
-    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = undefined;
+    Reflect.deleteProperty(
+      process.env,
+      "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK"
+    );
   }
 });
 
@@ -153,7 +158,7 @@ test("encrypted_file backend reads key material from configured keyPath when env
   if (!tempDir) {
     throw new Error("Missing temp dir");
   }
-  process.env.HACK_SECRETS_FILE_KEY = undefined;
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
   const storePath = join(tempDir, "secrets.enc.json");
   const keyPath = join(tempDir, "secrets-file.key");
   await writeFile(keyPath, "stable-file-key\n");
@@ -191,7 +196,7 @@ test("project config resolves encrypted_file paths relative to the repo root", a
   if (!tempDir) {
     throw new Error("Missing temp dir");
   }
-  process.env.HACK_SECRETS_FILE_KEY = undefined;
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
   const projectRoot = join(tempDir, "repo");
   const projectDir = join(projectRoot, ".hack");
   const storePath = join(projectRoot, ".hack-secrets.enc.json");
@@ -249,7 +254,7 @@ test("encrypted_file backend returns recovery guidance when key material is miss
   if (!tempDir) {
     throw new Error("Missing temp dir");
   }
-  process.env.HACK_SECRETS_FILE_KEY = undefined;
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
   process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "true";
   const projectRoot = join(tempDir, "repo-missing-key");
   const projectDir = join(projectRoot, ".hack");
@@ -297,6 +302,46 @@ test("encrypted_file backend returns recovery guidance when key material is miss
   expect(persisted).toContain('"ciphertext"');
   await expect(access(keyPath)).rejects.toThrow();
 });
+
+// HACK-1357: "~" paths must never resolve under the cwd when HOME is empty
+// or relative. Only the descriptor is resolved; nothing is read or written.
+for (const [label, home] of [
+  ["empty", ""],
+  ["relative", "relative-home"],
+] as const) {
+  test(`encrypted_file "~" paths stay out of the cwd with ${label} HOME`, async () => {
+    const previousHackHome = process.env.HACK_HOME;
+    Reflect.deleteProperty(process.env, "HACK_HOME");
+    try {
+      for (const path of [
+        "~",
+        "~/hack-1357-secrets.enc.json",
+        "relative.json",
+      ]) {
+        await writeGlobalConfig({
+          value: {
+            controlPlane: {
+              secrets: { backend: "encrypted_file", encryptedFile: { path } },
+            },
+          },
+        });
+        process.env.HOME = home;
+        const descriptor = await resolveSecretStoreDescriptor({
+          projectName: "app",
+        });
+        const location = descriptor.location;
+        expect(location.startsWith("/")).toBe(true);
+        expect(
+          location === process.cwd() || location.startsWith(`${process.cwd()}/`)
+        ).toBe(false);
+        expect(location.startsWith(homedir())).toBe(true);
+        process.env.HOME = tempDir ?? "";
+      }
+    } finally {
+      restoreEnv("HACK_HOME", previousHackHome);
+    }
+  });
+}
 
 async function writeGlobalConfig(input: {
   readonly value: Record<string, unknown>;

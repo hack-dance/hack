@@ -747,8 +747,10 @@ command is running, remove both and retry. `hack env hydrate` reports the same m
 when it cannot get the env file's lock.
 
 `.hack/.internal/` is ignored by the managed `.hack/.gitignore`, so lock files never show
-in `git status`. If `.hack/.internal` is a symlink or not a directory, these commands
-refuse with one `E_PATH_CONFLICT` line instead of creating the lock through it. If you cannot write the directory that
+in `git status`. If `.hack/.internal` is a symlink, dangling or not, these commands
+refuse with one `E_PATH_CONFLICT` line instead of creating the lock through it. If it is a
+regular file, they refuse with one `E_CONFIG_INVALID` line (`Cannot inspect Hack project
+inputs...`) and write nothing. If you cannot write the directory that
 holds the env file (for example a read-only checkout), no lock is taken: no command can
 replace the file there, so a command that changes nothing still succeeds and one that
 would change the file is refused as before.

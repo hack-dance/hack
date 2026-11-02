@@ -567,100 +567,107 @@ async function routeStore(
   return result;
 }
 
-test.each([
-  "complete",
-  "failed",
-] as const)("dependent route finalizer %s preserves receipt ordering and hostname handoff", async (outcome) => {
-  const root = await fixture();
-  const owner = await store(root);
-  const old = await activate(owner);
-  const claims = await routeStore(root, owner.identity);
-  const foreign = await routeStore(root, {
-    composeProject: "foreign-finalizer-fixture",
-    ownerToken: "e".repeat(32),
-  });
-  const oldHost = "old.fixture.test";
-  const newHost = "new.fixture.test";
-  const oldClaim = await claims.acquire({
-    hostnames: [oldHost],
-    generationIdentity: old.generationId,
-  });
-  await claims.markEffectsPossible(oldClaim);
-  await claims.complete({
-    attempt: oldClaim,
-    assertTransition: async () => {},
-  });
-  let ownershipChecks = 0;
-  await owner.withMutation(async (mutation) => {
-    const generation = await publish(mutation);
-    const attempt = await claims.acquire({
-      hostnames: [oldHost, newHost],
-      generationIdentity: generation.generationId,
+/**
+ * Each case opens three private stores and takes real route claims through
+ * acquire, complete and hostname handoff. Under load the cases went past Bun's
+ * 5 s default in 2 of 10 runs (HACK-1459).
+ */
+const DEPENDENT_ROUTE_FINALIZER_BUDGET_MS = 30_000;
+test.each(["complete", "failed"] as const)(
+  "dependent route finalizer %s preserves receipt ordering and hostname handoff",
+  async (outcome) => {
+    const root = await fixture();
+    const owner = await store(root);
+    const old = await activate(owner);
+    const claims = await routeStore(root, owner.identity);
+    const foreign = await routeStore(root, {
+      composeProject: "foreign-finalizer-fixture",
+      ownerToken: "e".repeat(32),
     });
-    const effect = mutation.runEffect({
-      generation,
-      operation: "up",
-      assertFresh: async () => {},
-      assertOwned: async () => {
-        ownershipChecks += 1;
-      },
-      effect: async () => {
-        await claims.markEffectsPossible(attempt);
-        return { outcome: "complete", value: 0 };
-      },
-      beforeComplete: async () => {
-        const pending = await owner.loadCurrent();
-        expect(pending.generation?.generationId).toBe(old.generationId);
-        expect(pending.pending?.generationId).toBe(generation.generationId);
-        expect(ownershipChecks).toBe(3);
-        await claims.complete({
-          attempt,
-          assertTransition: async () => {
-            if (outcome === "failed") {
-              throw new Error("private-finalizer-canary");
-            }
-          },
-        });
-        await claims.release({
-          keepHostnames: [newHost],
-          assertAbsent: async () => {},
-        });
-        const handoff = await foreign.acquire({
-          hostnames: [oldHost],
-          generationIdentity: "f".repeat(32),
-        });
-        await foreign.rollback(handoff);
-      },
+    const oldHost = "old.fixture.test";
+    const newHost = "new.fixture.test";
+    const oldClaim = await claims.acquire({
+      hostnames: [oldHost],
+      generationIdentity: old.generationId,
     });
-    if (outcome === "failed") {
-      await rejected(effect, "E_NATIVE_COMPOSE_UNCERTAIN");
-      await claims.retain(attempt);
-      expect((await claims.reopen(attempt.reference)).phase).toBe("retained");
-      for (const hostname of [oldHost, newHost]) {
-        await expect(
-          foreign.acquire({
-            hostnames: [hostname],
+    await claims.markEffectsPossible(oldClaim);
+    await claims.complete({
+      attempt: oldClaim,
+      assertTransition: async () => {},
+    });
+    let ownershipChecks = 0;
+    await owner.withMutation(async (mutation) => {
+      const generation = await publish(mutation);
+      const attempt = await claims.acquire({
+        hostnames: [oldHost, newHost],
+        generationIdentity: generation.generationId,
+      });
+      const effect = mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {
+          ownershipChecks += 1;
+        },
+        effect: async () => {
+          await claims.markEffectsPossible(attempt);
+          return { outcome: "complete", value: 0 };
+        },
+        beforeComplete: async () => {
+          const pending = await owner.loadCurrent();
+          expect(pending.generation?.generationId).toBe(old.generationId);
+          expect(pending.pending?.generationId).toBe(generation.generationId);
+          expect(ownershipChecks).toBe(3);
+          await claims.complete({
+            attempt,
+            assertTransition: async () => {
+              if (outcome === "failed") {
+                throw new Error("private-finalizer-canary");
+              }
+            },
+          });
+          await claims.release({
+            keepHostnames: [newHost],
+            assertAbsent: async () => {},
+          });
+          const handoff = await foreign.acquire({
+            hostnames: [oldHost],
             generationIdentity: "f".repeat(32),
-          })
-        ).rejects.toThrow();
+          });
+          await foreign.rollback(handoff);
+        },
+      });
+      if (outcome === "failed") {
+        await rejected(effect, "E_NATIVE_COMPOSE_UNCERTAIN");
+        await claims.retain(attempt);
+        expect((await claims.reopen(attempt.reference)).phase).toBe("retained");
+        for (const hostname of [oldHost, newHost]) {
+          await expect(
+            foreign.acquire({
+              hostnames: [hostname],
+              generationIdentity: "f".repeat(32),
+            })
+          ).rejects.toThrow();
+        }
+        await rejected(publish(mutation), "E_NATIVE_COMPOSE_UNCERTAIN");
+      } else {
+        expect(await effect).toEqual({ outcome: "complete", value: 0 });
       }
-      await rejected(publish(mutation), "E_NATIVE_COMPOSE_UNCERTAIN");
-    } else {
-      expect(await effect).toEqual({ outcome: "complete", value: 0 });
-    }
-    const saved = await owner.loadCurrent();
-    expect(saved.generation?.generationId).toBe(
-      outcome === "complete" ? generation.generationId : old.generationId
-    );
-    expect(saved.pending?.generationId ?? null).toBe(
-      outcome === "complete" ? null : generation.generationId
-    );
-    expect(ownershipChecks).toBe(outcome === "complete" ? 4 : 3);
-    expect(await Bun.file(receiptPath(owner)).text()).not.toContain(
-      "private-finalizer-canary"
-    );
-  });
-});
+      const saved = await owner.loadCurrent();
+      expect(saved.generation?.generationId).toBe(
+        outcome === "complete" ? generation.generationId : old.generationId
+      );
+      expect(saved.pending?.generationId ?? null).toBe(
+        outcome === "complete" ? null : generation.generationId
+      );
+      expect(ownershipChecks).toBe(outcome === "complete" ? 4 : 3);
+      expect(await Bun.file(receiptPath(owner)).text()).not.toContain(
+        "private-finalizer-canary"
+      );
+    });
+  },
+  DEPENDENT_ROUTE_FINALIZER_BUDGET_MS
+);
 
 test.each([
   "incomplete",

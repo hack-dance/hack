@@ -1,10 +1,12 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
+import { chmod, rename } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   DEFAULT_NATIVE_STORAGE_TIMEOUT_MS,
 } from "../src/lib/compose-startup-budget.ts";
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
+import { nativeComposeStopOwnershipTimeoutMs } from "../src/lib/native-compose-ownership.ts";
 import { nativeComposeRetainedVolumesValid } from "../src/lib/native-compose-retained-storage.ts";
 import {
   enrollNativeComposeStorageWitness,
@@ -60,6 +62,37 @@ function recover(root: string) {
     RECOVERY_DEADLINE_MS,
     CLI_COMMAND_TIMEOUT_MS
   );
+}
+
+/**
+ * Longer than the 15 s floor of an ownership query in `down`, so the slow-engine
+ * case fails with `probe-timeout` if the query ignores the stop's budget. On a
+ * loaded host (HACK-1459) many slow stand-in processes add up to the same wait.
+ */
+const SLOW_OWNERSHIP_QUERY_MS = 16_000;
+
+/**
+ * Delays the next Docker read once, then runs the stand-in as usual. The marker
+ * file proves the delay ran, so the case cannot pass without a slow query.
+ */
+async function delayNextDockerRead(root: string, delayMs: number) {
+  const docker = join(root, "docker");
+  const standIn = join(root, "docker-stand-in");
+  const armed = join(root, "docker-delay-armed");
+  await rename(docker, standIn);
+  await Bun.write(armed, "");
+  await Bun.write(
+    docker,
+    `#!${process.execPath}
+import {rm} from "node:fs/promises";
+const claimed=await rm(${JSON.stringify(armed)}).then(()=>true,()=>false);
+if(claimed)await Bun.sleep(${delayMs});
+const child=Bun.spawn([${JSON.stringify(standIn)},...process.argv.slice(2)],{stdio:["inherit","inherit","inherit"]});
+process.exit(await child.exited);
+`
+  );
+  await chmod(docker, 0o700);
+  return armed;
 }
 
 /**
@@ -245,6 +278,43 @@ for (const ambient of AMBIENT_DOCKER_SELECTIONS) {
     });
   });
 }
+
+test("the ownership query in down follows the stop budget between its floor and the probe ceiling", () => {
+  expect(nativeComposeStopOwnershipTimeoutMs(1000)).toBe(15_000);
+  expect(nativeComposeStopOwnershipTimeoutMs(15_000)).toBe(15_000);
+  expect(nativeComposeStopOwnershipTimeoutMs(30_000)).toBe(30_000);
+  expect(nativeComposeStopOwnershipTimeoutMs(60_000)).toBe(60_000);
+  expect(nativeComposeStopOwnershipTimeoutMs(RECOVERY_DEADLINE_MS)).toBe(
+    60_000
+  );
+  expect(nativeComposeStopOwnershipTimeoutMs(3_600_000)).toBe(60_000);
+});
+
+test("explicit saved recovery keeps its ownership query alive on a slow engine within the stop budget", async () => {
+  const { root, witnesses, generationId } = await prepared(false);
+  const requests = await Bun.file(join(root, "requests")).text();
+  await Bun.write(
+    join(root, ".hack/hack.project.json"),
+    "malformed authored source"
+  );
+  await Bun.write(
+    join(root, ".hack/hack.env.default.yaml"),
+    "malformed private env"
+  );
+  const armed = await delayNextDockerRead(root, SLOW_OWNERSHIP_QUERY_MS);
+  const recovery = await recover(root);
+  expect(await Bun.file(armed).exists()).toBe(false);
+  expect(recovery.code).toBe(1);
+  expect(JSON.parse(recovery.stdout)).toMatchObject({
+    ok: false,
+    error: { code: "E_COMPOSE_FAILED" },
+  });
+  expect(await Bun.file(join(root, "engine")).exists()).toBe(false);
+  await noRecoveryHelperRequests(root, requests);
+  const current = await saved(root);
+  expect(current.storageWitnesses).toEqual(witnesses);
+  expect(current.pending?.generationId).toBe(generationId);
+});
 
 test("source CLI reports and explicitly stops saved resources for unknown enrolled preflight helper with no main pending", async () => {
   const root = await legacyStorageFixture();

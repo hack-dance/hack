@@ -16,6 +16,8 @@ const OUTPUT_LIMIT = 8 * 1024 * 1024;
 const STDERR_LIMIT = 16 * 1024;
 const ARGUMENT_LIMIT = 16 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
+/** The most {@link createNativeComposeProbe} accepts for one acquisition. */
+const MAX_PROBE_TIMEOUT_MS = 60_000;
 const PROJECT_LABEL = "com.docker.compose.project";
 const PREFIX = "io.hack.native-config";
 
@@ -1377,6 +1379,22 @@ function batches(resources: readonly Inventory[]): Inventory[][] {
 }
 
 /**
+ * Aggregate bound of one ownership query inside a native `down`, from the stop's
+ * budget (`HACK_COMPOSE_STARTUP_TIMEOUT_MS`). A fixed 15 s bound refused a healthy
+ * but slow engine as `probe-timeout` while most of that budget remained
+ * (HACK-1459). A shorter budget never shortens the query below the 15 s default,
+ * and a hung engine is still refused within the probe's 60 s ceiling.
+ */
+export function nativeComposeStopOwnershipTimeoutMs(
+  stopBudgetMs: number
+): number {
+  return Math.min(
+    MAX_PROBE_TIMEOUT_MS,
+    Math.max(DEFAULT_TIMEOUT_MS, stopBudgetMs)
+  );
+}
+
+/**
  * One bounded aggregate Docker acquisition; callers supply only fixed read commands.
  * Lifecycle polling must issue a fresh owner for each capture, rather than reuse
  * an acquisition whose aggregate deadline or output allowance has expired.
@@ -1393,7 +1411,11 @@ export function createNativeComposeProbe(
 ): (args: readonly string[]) => Promise<string> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (
-    !(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60_000)
+    !(
+      Number.isSafeInteger(timeoutMs) &&
+      timeoutMs >= 1 &&
+      timeoutMs <= MAX_PROBE_TIMEOUT_MS
+    )
   ) {
     probeRefused("E_NATIVE_COMPOSE_OWNERSHIP", "operation");
   }

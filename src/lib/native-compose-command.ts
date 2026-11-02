@@ -103,6 +103,7 @@ import {
   NativeComposeOwnershipError,
   type NativeComposeOwnershipObservation,
   type NativeComposeOwnershipOptions,
+  nativeComposeStopOwnershipTimeoutMs,
   observeSavedNativeComposeOwned,
   waitNativeComposeStartupOwned,
 } from "./native-compose-ownership.ts";
@@ -431,6 +432,13 @@ async function ownershipSelection(opts: {
     expectedWorkloadNetworks,
     ...(opts.operation === "down" && opts.recover
       ? { recovery: "down" as const }
+      : {}),
+    ...(opts.operation === "down"
+      ? {
+          timeoutMs: nativeComposeStopOwnershipTimeoutMs(
+            resolveComposeStartupTimeoutMs()
+          ),
+        }
       : {}),
     signal: opts.signal,
   };

@@ -1,7 +1,8 @@
 # Supervisor verification coverage
 
-- Usage: [supervisor-usage.md](../../docs/supervisor-usage.md).
-- Reviewed derivation: [statechart.md](../../docs/statechart.md), committed in
+- Scope: the supervisor job lifecycle only. No other control-plane state is modeled.
+- Usage: [supervisor-job-walkthrough.md](../../docs/supervisor-job-walkthrough.md).
+- Reviewed derivation: [supervisor-job-statechart.md](../../docs/supervisor-job-statechart.md), committed in
   `c0c96649a492cca26f68a77ecc62d9a8a53517a5`; review corrections committed in
   `7903351ccfb18664ad894ae98ca6371779424935` before the first specification.
 - One repository rerun command: **`bun run check:tla`**. See
@@ -155,7 +156,17 @@ and TLC runs under Java. Any later pin change must pass this command on the new 
 
 Initial verification sync is `08e0412a9fa063c33f4145b569c36afc5810e606` for every row.
 The artifact-only documentation/checker commits do not advance that source marker.
-After source changes, use `tlaplus-workbench-maintain`: inspect the covered diff,
-new callers/writers and renamed paths, update/review the saved chart, run the command
-including mutations and replays, and advance only confirmed per-check sync markers.
+After changes to the covered source: inspect the covered diff, new callers/writers
+and renamed paths, update and review the statechart and walkthrough, run
+`bun run check:tla` including mutations and replays, and advance only confirmed
+per-check sync markers.
 Do not weaken a property or accept unexpected passes merely to make the wrapper green.
+
+The default test suite runs the actual-code replays, so a change to recorded behavior
+fails there. A failure that starts with `Recorded finding no longer holds` or
+`Recorded pass no longer holds` means the actual code no longer matches
+`replayManifest` in `scripts/check-supervisor-replays.ts`. If the change is intended,
+update that manifest, the model and its expectation in `scripts/lib/tla-checks.ts`,
+and the affected rows here in the same change. If not, fix the code. A failure that
+says `rejected replay evidence` is not a changed finding: the replay did not produce
+a complete named result.

@@ -76,32 +76,26 @@ async function runReplayProcess(
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
     ]);
-    const violation = opts.expected === "VIOLATION";
-    const [banner, marker, ...extra] = stdout.trim().split("\n");
-    const expectedMarker = replayMarker({
+    const observed = observedReplayOutcome({
       replay: opts.replay,
-      outcome: opts.expected,
+      bunVersion: opts.bunVersion,
+      exitCode,
+      timedOut,
+      stdout,
+      stderr,
     });
-    const summary = violation ? /\b0 pass\s+1 fail\b/ : /\b1 pass\s+0 fail\b/;
-    if (
-      timedOut ||
-      exitCode !== (violation ? 1 : 0) ||
-      !new RegExp(`^${bunTestBannerPattern(opts.bunVersion)}$`).test(
-        banner ?? ""
-      ) ||
-      marker !== expectedMarker ||
-      extra.length !== 0 ||
-      !summary.test(stderr) ||
-      (violation &&
-        !stderr.includes(
-          `PropertyViolation: Requested property violated: ${opts.replay.property}`
-        )) ||
-      /unhandled|error between tests|timed out/i.test(stderr)
-    ) {
+    if (observed === opts.expected) {
+      return;
+    }
+    // Scratch runs test temporary controls, so only actual code can contradict a record.
+    if (observed !== undefined && opts.root === undefined) {
       throw new Error(
-        `${opts.replay.id} ${opts.replay.property}: rejected replay evidence (exit=${exitCode}, timeout=${timedOut}); expected ${opts.expected}`
+        recordedResultChangedMessage({ replay: opts.replay, observed })
       );
     }
+    throw new Error(
+      `${opts.replay.id} ${opts.replay.property}: rejected replay evidence (exit=${exitCode}, timeout=${timedOut}); expected ${opts.expected}`
+    );
   } finally {
     clearTimeout(timer);
     if (proc.exitCode === null) {
@@ -109,6 +103,68 @@ async function runReplayProcess(
       await proc.exited;
     }
   }
+}
+
+type ReplayOutcome = "PASS" | "VIOLATION";
+
+/**
+ * One complete, named result of a strict replay, or undefined for anything else:
+ * setup errors, unrelated failures and timeouts are never evidence of an outcome.
+ */
+export function observedReplayOutcome(opts: {
+  readonly replay: Replay;
+  readonly bunVersion: string;
+  readonly exitCode: number;
+  readonly timedOut: boolean;
+  readonly stdout: string;
+  readonly stderr: string;
+}): ReplayOutcome | undefined {
+  const [banner, marker, ...extra] = opts.stdout.trim().split("\n");
+  if (
+    opts.timedOut ||
+    extra.length !== 0 ||
+    !new RegExp(`^${bunTestBannerPattern(opts.bunVersion)}$`).test(
+      banner ?? ""
+    ) ||
+    /unhandled|error between tests|timed out/i.test(opts.stderr)
+  ) {
+    return;
+  }
+  const passed =
+    opts.exitCode === 0 &&
+    marker === replayMarker({ replay: opts.replay, outcome: "PASS" }) &&
+    /\b1 pass\s+0 fail\b/.test(opts.stderr);
+  if (passed) {
+    return "PASS";
+  }
+  const violated =
+    opts.exitCode === 1 &&
+    marker === replayMarker({ replay: opts.replay, outcome: "VIOLATION" }) &&
+    /\b0 pass\s+1 fail\b/.test(opts.stderr) &&
+    opts.stderr.includes(
+      `PropertyViolation: Requested property violated: ${opts.replay.property}`
+    );
+  return violated ? "VIOLATION" : undefined;
+}
+
+/** What a contributor sees when product behavior no longer matches the manifest. */
+export function recordedResultChangedMessage(opts: {
+  readonly replay: Replay;
+  readonly observed: ReplayOutcome;
+}): string {
+  const { id, property } = opts.replay;
+  const change =
+    opts.observed === "PASS"
+      ? `Recorded finding no longer holds: ${id} ${property} now passes against the actual code.`
+      : `Recorded pass no longer holds: ${id} ${property} is now violated by the actual code.`;
+  const intent =
+    opts.observed === "PASS"
+      ? "If your change fixed this on purpose, record the fix"
+      : "If this is a regression, fix the code. If the guarantee changed on purpose, record it";
+  return [
+    change,
+    `${intent}: set ${id} to actual "${opts.observed}" in replayManifest (scripts/check-supervisor-replays.ts), then update the ${id} TLA+ model, its expectation in scripts/lib/tla-checks.ts and its row in specs/fv/COVERAGE.md, and run bun run check:tla.`,
+  ].join("\n");
 }
 
 type Replacement = { readonly before: string; readonly after: string };
@@ -237,7 +293,9 @@ async function checkStartupPersistence(): Promise<void> {
         !new RegExp(`^${bunTestBannerPattern(bunVersion)}\\n$`).test(stdout) ||
         !/\b2 pass\s+0 fail\b/.test(stderr)
       ) {
-        throw new Error("Startup persistence characterization failed");
+        throw new Error(
+          "Startup persistence characterization failed; run bun test ./tests/supervisor-startup-replay.test.ts for the reason"
+        );
       }
       process.stdout.write(
         "characterization startup persistence (running status, job.started): BUG REPRODUCED\n"

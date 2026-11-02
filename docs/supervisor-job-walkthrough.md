@@ -1,9 +1,9 @@
-# Supervisor verification walkthrough
+# Supervisor job verification walkthrough
 
-This walkthrough describes source revision
-`08e0412a9fa063c33f4145b569c36afc5810e606`, before modeling. The supervisor is an
-unsupported experimental surface; verification does not change that support status.
-See [the reviewed statechart](statechart.md) for transition IDs and property hypotheses.
+This walkthrough describes supervisor job behavior at source revision
+`08e0412a9fa063c33f4145b569c36afc5810e606`. The supervisor is an unsupported
+experimental surface; verification does not change that support status. See
+[the statechart](supervisor-job-statechart.md) for transition IDs and property derivations.
 
 A caller uses `createSupervisorService().createJob` with a project directory and a
 command. The service generates a UUID, writes queued metadata and a creation event,
@@ -13,11 +13,11 @@ fresh instances. Cancellation handles exist only in the instance that started a 
 Reading metadata is not proof that a local cancellation handle exists.
 
 The runner reads metadata and selects the command, then writes `starting`, appends
-`job.starting`, and spawns. It subsequently writes `running` and `job.started` before
+`job.starting`, and spawns. It then writes `running` and `job.started` before
 calling `onSpawn`. During those awaits the process exists but cancellation is not yet
 registered. A spawn failure records `failed`. A storage failure after spawn can leave
-a live child without a registered handle; that window is documented, not a recovery
-mechanism in the model.
+a live child without a registered handle; the model documents that window and adds
+no recovery for it.
 
 For normal completion the runner waits for process exit and both output streams to
 drain. It claims a terminal outcome synchronously, then writes status and event.
@@ -38,7 +38,7 @@ which can settle without stopping a spawned child. No automatic recovery retries
 the failed terminal persistence operation.
 
 The store reads and rewrites whole metadata files. An event append and its subsequent
-metadata update are separate operations. The model must preserve the status/event
+metadata update are separate operations. The model preserves the status/event
 boundary. It restricts store interleavings where necessary and does not prove file
 atomicity, cross-process coordination, or event sequence uniqueness under concurrent
 writers. Existing service tests exercise failures before and after event append.
@@ -67,13 +67,12 @@ the job model does not imply durable shell recovery or shell retry guarantees.
 ## Verification procedure
 
 Use the Bun version pinned by `package.json` and the repository Java selection.
-From the repository root, run `bun run check:tla`. The command will verify the pinned
-TLC jar, run each actual-code property separately, check passing reference controls
-and must-fail mutations, replay the schedules against imported implementation code,
-exercise isolated real-code mutations, and rerun the baseline. Tool failures and
-unexpected passes must fail the command. Expected reproduced bugs are reported by
-name; a successful harness does not mean the stronger product guarantees hold.
+From the repository root, run `bun run check:tla`. The command verifies the pinned
+TLC jar, runs each actual-code property separately, checks passing reference controls
+and must-fail mutations, replays the schedules against imported implementation code,
+exercises isolated real-code mutations, and reruns the baseline. Tool failures and
+unexpected passes fail the command. Expected reproduced bugs are reported by name; a
+successful harness does not mean the stronger product guarantees hold.
 
-The implementation and exact outcomes will be recorded in
-`specs/fv/COVERAGE.md`. This pre-model walkthrough intentionally records hypotheses,
-not TLC results. Product fixes require a separate change and are outside this task.
+`specs/fv/COVERAGE.md` records the exact outcomes. This walkthrough describes behavior
+and does not record TLC results. Product fixes are separate changes.

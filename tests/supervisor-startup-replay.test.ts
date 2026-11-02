@@ -93,13 +93,18 @@ for (const failurePoint of ["running-status", "job.started"] as const) {
         "job.failed",
       ]);
       expect(events.at(-1)?.payload?.error).toBe(fault.message);
-      expect(alive).toBe(true);
-      expect(await service.cancelJob(input)).toEqual({
-        ok: false,
-        status: "not_running",
-      });
-      expect(alive).toBe(true);
-      expect(signals).toBe(0);
+      const aliveAfterFailure = alive;
+      const cancellation = await service.cancelJob(input);
+      if (
+        !(aliveAfterFailure && alive) ||
+        signals !== 0 ||
+        cancellation.ok ||
+        cancellation.status !== "not_running"
+      ) {
+        throw new Error(
+          `Recorded finding no longer holds: a ${failurePoint} startup failure no longer leaves a live, uncancellable child. If your change fixed this on purpose, remove this characterization from tests/supervisor-startup-replay.test.ts, update checkStartupPersistence in scripts/check-supervisor-replays.ts and the startup finding in specs/fv/COVERAGE.md, and run bun run check:tla.`
+        );
+      }
     } finally {
       alive = false;
       exited.resolve(0);

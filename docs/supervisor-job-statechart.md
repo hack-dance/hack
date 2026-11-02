@@ -1,6 +1,6 @@
 # Supervisor job statechart and property derivation
 
-- Walkthrough: [supervisor-usage.md](supervisor-usage.md).
+- Walkthrough: [supervisor-job-walkthrough.md](supervisor-job-walkthrough.md).
 - Source revision: `08e0412a9fa063c33f4145b569c36afc5810e606`; no uncommitted product changes.
 - Saved before modeling: 2026-10-23. The reviewed documentation is committed before any project TLA+ file.
 - Boundary: the exported job runner, filesystem job store, service composition, and adjacent shell service. These are unsupported experimental surfaces, explicitly inspected for this verification task.

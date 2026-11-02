@@ -2,6 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  observedReplayOutcome,
+  type Replay,
+  recordedResultChangedMessage,
+  replayManifest,
+  replayMarker,
+  runStrictReplay,
+} from "../scripts/check-supervisor-replays.ts";
+import {
   runTlaSequence,
   validateTlaChecks,
 } from "../scripts/check-tla-models.ts";
@@ -390,4 +398,75 @@ describe("pinned Bun for formal checks", () => {
     expect(banner.test("bun test v1.3.9 (cf6cdbbb)")).toBe(false);
     expect(banner.test("bun test v1x4x4 (38afee6c8)")).toBe(false);
   });
+});
+
+describe("supervisor replay evidence", () => {
+  const bunVersion = "1.4.4";
+  const banner = "bun test v1.4.4 (38afee6c8)";
+  const replay = replayManifest[0] as Replay;
+  const violationStderr = `PropertyViolation: Requested property violated: ${replay.property}\n 0 pass\n 1 fail\n`;
+  const violation = {
+    replay,
+    bunVersion,
+    exitCode: 1,
+    timedOut: false,
+    stdout: `${banner}\n${replayMarker({ replay, outcome: "VIOLATION" })}\n`,
+    stderr: violationStderr,
+  };
+  const pass = {
+    ...violation,
+    exitCode: 0,
+    stdout: `${banner}\n${replayMarker({ replay, outcome: "PASS" })}\n`,
+    stderr: " 1 pass\n 0 fail\n",
+  };
+
+  test("recognizes only complete named outcomes", () => {
+    expect(observedReplayOutcome(violation)).toBe("VIOLATION");
+    expect(observedReplayOutcome(pass)).toBe("PASS");
+  });
+
+  test("never treats other failures as a changed outcome", () => {
+    for (const rejected of [
+      { ...violation, timedOut: true },
+      { ...violation, stderr: " 0 pass\n 1 fail\n" },
+      { ...violation, stdout: `${banner}\n` },
+      {
+        ...violation,
+        stdout: `bun test v1.3.9 (cf6cdbbb)\n${violation.stdout}`,
+      },
+      { ...violation, stdout: `${violation.stdout}extra\n` },
+      { ...violation, stderr: `${violationStderr}Unhandled error\n` },
+      { ...pass, exitCode: 1 },
+      { ...pass, stderr: " 0 pass\n 1 fail\n" },
+    ]) {
+      expect(observedReplayOutcome(rejected)).toBeUndefined();
+    }
+  });
+
+  test("a fixed finding says so and names the manifest", () => {
+    const message = recordedResultChangedMessage({ replay, observed: "PASS" });
+    expect(message).toContain("Recorded finding no longer holds");
+    expect(message).toContain(`${replay.id} ${replay.property}`);
+    expect(message).toContain(`actual "PASS" in replayManifest`);
+    expect(message).toContain("bun run check:tla");
+  });
+
+  test("a lost pass is reported as a possible regression", () => {
+    const message = recordedResultChangedMessage({
+      replay,
+      observed: "VIOLATION",
+    });
+    expect(message).toContain("Recorded pass no longer holds");
+    expect(message).toContain("If this is a regression, fix the code");
+  });
+
+  test("actual code and scratch controls report differently", async () => {
+    const root = resolve(import.meta.dir, "..");
+    await expect(runStrictReplay({ replay, expected: "PASS" })).rejects.toThrow(
+      "Recorded pass no longer holds"
+    );
+    await expect(
+      runStrictReplay({ replay, expected: "PASS", root })
+    ).rejects.toThrow("rejected replay evidence");
+  }, 30_000);
 });

@@ -171,18 +171,66 @@ test("session paths use absolute overrides", () => {
 });
 
 test.each([
-  ["HACK_HOME", ".state"],
-  ["HACK_HOME", "state/nested"],
-  ["HACK_GLOBAL_CONFIG_PATH", ".registry/config.json"],
-])("a session refuses a relative %s %s like the CLI", (name, value) => {
+  ".state",
+  "state/nested",
+])("a session refuses a relative HACK_HOME %s like the CLI", (value) => {
   const capture = () =>
     captureMcpSessionContext({
       cwd: "/tmp/captured-session",
-      env: { HOME: "/tmp/hack-home", [name]: value },
+      env: { HOME: "/tmp/hack-home", HACK_HOME: value },
     });
   expect(capture).toThrow(
-    `${name} must be an absolute path (got a relative path: ${JSON.stringify(value)}).`
+    `HACK_HOME must be an absolute path (got a relative path: ${JSON.stringify(value)}).`
   );
+});
+
+test("a relative HACK_GLOBAL_CONFIG_PATH resolves against the session cwd, like its children", () => {
+  const context = captureMcpSessionContext({
+    cwd: "/tmp/captured-session",
+    env: {
+      HOME: "/tmp/hack-home",
+      HACK_GLOBAL_CONFIG_PATH: ".registry/config.json",
+    },
+  });
+  expect(context.registryPath).toBe(
+    "/tmp/captured-session/.registry/projects.json"
+  );
+  expect(context.hackHome).toBe("/tmp/hack-home/.hack");
+});
+
+test("a session with a relative HACK_GLOBAL_CONFIG_PATH starts and reads that registry", async () => {
+  const { project, registryDir, state } = await fixture("relative-config");
+  const relativeRegistry = join(project, ".registry");
+  await mkdir(relativeRegistry);
+  await writeFile(
+    join(relativeRegistry, "projects.json"),
+    await readFile(join(registryDir, "projects.json"))
+  );
+  // Without the registry above, the absolute fixture's project would be unknown.
+  await rm(join(registryDir, "projects.json"));
+  const server = createMcpServer({
+    cwd: project,
+    env: {
+      ...process.env,
+      HOME: project,
+      HACK_HOME: state,
+      HACK_GLOBAL_CONFIG_PATH: ".registry/config.json",
+      HACK_MCP_COMMAND: "./command",
+      SYNTHETIC_SESSION_MARKER: "relative-config",
+    },
+  });
+  const client = new Client({ name: "relative-config-fixture", version: "1" });
+  clients.push(client);
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const result = await client.callTool({
+    name: "hack.project.status",
+    arguments: { projectName: "shared-name" },
+  });
+  expect(result.isError).toBeUndefined();
+  expect(result.structuredContent).toMatchObject({ ok: true });
 });
 
 test("a session refuses HACK_HOME with the CLI's exact error", () => {

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DAEMON_LAUNCHD_LABEL } from "../src/constants.ts";
 import {
+  hasBoundedLaunchdOutput,
   renderLaunchdPlist,
   resolveLaunchdHackBinPath,
 } from "../src/daemon/launchd.ts";
@@ -12,8 +13,6 @@ describe("launchd plist generation", () => {
       home: "/Users/testuser",
       runAtLoad: false,
       guiSessionOnly: true,
-      stdoutPath: "/Users/testuser/.hack/daemon/hackd.stdout.log",
-      stderrPath: "/Users/testuser/.hack/daemon/hackd.stderr.log",
     });
 
     expect(plist).toContain('<?xml version="1.0" encoding="UTF-8"?>');
@@ -28,6 +27,10 @@ describe("launchd plist generation", () => {
     expect(plist).toContain("<string>/Users/testuser</string>");
     expect(plist).toContain("<key>StandardOutPath</key>");
     expect(plist).toContain("<key>StandardErrorPath</key>");
+    expect(hasBoundedLaunchdOutput({ plistText: plist })).toBe(true);
+    expect(plist).not.toContain("hackd.stderr.log");
+    const legacyPlist = plist.replaceAll("/dev/null", "/tmp/hackd.log");
+    expect(hasBoundedLaunchdOutput({ plistText: legacyPlist })).toBe(false);
     expect(plist).toContain("<key>LimitLoadToSessionType</key>");
     expect(plist).toContain("<string>Aqua</string>");
   });
@@ -38,8 +41,6 @@ describe("launchd plist generation", () => {
       home: "/Users/developer",
       runAtLoad: true,
       guiSessionOnly: true,
-      stdoutPath: "/Users/developer/.hack/daemon/hackd.stdout.log",
-      stderrPath: "/Users/developer/.hack/daemon/hackd.stderr.log",
     });
 
     expect(plist).toContain("<key>RunAtLoad</key>");
@@ -54,8 +55,6 @@ describe("launchd plist generation", () => {
       home: "/Users/testuser",
       runAtLoad: false,
       guiSessionOnly: false,
-      stdoutPath: "/Users/testuser/.hack/daemon/hackd.stdout.log",
-      stderrPath: "/Users/testuser/.hack/daemon/hackd.stderr.log",
     });
 
     expect(plist).not.toContain("<key>LimitLoadToSessionType</key>");
@@ -68,8 +67,6 @@ describe("launchd plist generation", () => {
       home: "/Users/testuser",
       runAtLoad: false,
       guiSessionOnly: true,
-      stdoutPath: "/Users/testuser/.hack/daemon/hackd.stdout.log",
-      stderrPath: "/Users/testuser/.hack/daemon/hackd.stderr.log",
     });
 
     expect(plist).toContain("<key>KeepAlive</key>");
@@ -83,8 +80,6 @@ describe("launchd plist generation", () => {
       home: "/Users/testuser",
       runAtLoad: false,
       guiSessionOnly: true,
-      stdoutPath: "/Users/testuser/.hack/daemon/hackd.stdout.log",
-      stderrPath: "/Users/testuser/.hack/daemon/hackd.stderr.log",
     });
 
     expect(plist).toContain("<key>PATH</key>");
@@ -102,8 +97,6 @@ describe("launchd plist generation", () => {
       home: "/Users/testuser",
       runAtLoad: true,
       guiSessionOnly: true,
-      stdoutPath: "/Users/testuser/.hack/daemon/hackd.stdout.log",
-      stderrPath: "/Users/testuser/.hack/daemon/hackd.stderr.log",
     });
 
     expect(plist).toMatch(/^<\?xml version="1\.0" encoding="UTF-8"\?>/);

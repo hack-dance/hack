@@ -437,3 +437,31 @@ Missing, malformed, or custom-only route declarations produce an explicit error
 instead of guessing; pass an explicit URL for custom routes. Doctor retains the
 legacy DNS check, checks `.hack.local` separately, and selects the configured
 Grafana route for reachability. These reads do not prove the service is running.
+
+### Daemon diagnostic limits
+
+`hackd.log` is capped at 5 MiB. The single daemon writer clears the file before
+an append would exceed that limit, including an oversized log from an older
+version. A single oversized record retains only its final 5 MiB and may begin
+mid-line. `hack daemon logs` shows this bounded window, not lifetime history.
+
+LaunchAgent stdout and stderr go to `/dev/null`; daemon messages remain in
+`hackd.log`. This avoids an unbounded duplicate of foreground warnings and also
+bounds output outside the logger. Early startup failures outside the logger are
+not retained; run `hack daemon start --foreground` to diagnose those failures.
+Installing the service or the normal daemon-start plist repair migrates existing
+output settings. Old `hackd.stdout.log` and `hackd.stderr.log` files are left
+untouched; the bound applies once the new plist is loaded.
+
+Code inspection identifies the Docker event reconnect loop as a sustained warning
+source: a failed connection emits both its stderr diagnostic and an exit warning,
+then retries with a delay capped at two seconds. This identifies a volume source,
+not the exact composition of any historical log.
+
+The v5 CLI uses this same daemon logger and LaunchAgent policy. The separate
+`hack-local` checkout launcher directly executes the native candidate and does
+not create a launcher output file. Its guest engine startup log retains at most
+5 MiB per engine start, then drains further output to `/dev/null` without stopping
+the engine. This preserves startup diagnostics; later engine messages are not
+retained after the cap. Provider-owned VM console logs are outside this daemon
+log contract.

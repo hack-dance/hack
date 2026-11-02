@@ -875,9 +875,10 @@ test("a directory at the layer path is a closed E_PATH_CONFLICT", async () => {
     args: setArgs(repo, "NEW_SETTING"),
     stdin: `${NEW_VALUE}\n`,
   });
+  // The env format check (HACK-1370) refuses before the atomic writer runs.
   expectOneLineRefusal(
     run,
-    `E_PATH_CONFLICT: Refusing to replace ${repo.tracked}: it is not a regular file.`
+    `E_PATH_CONFLICT: Refusing to choose the env format: ${repo.tracked} is not a regular file`
   );
 }, 60_000);
 

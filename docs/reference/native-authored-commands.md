@@ -109,7 +109,9 @@ reports `not_started`. Any other inspection result keeps the attempt retained.
 Examples include `native_graph_receipt` for damaged or foreign evidence,
 `native_graph_foreground` for a published owner, and a stopped runtime. This
 applies only to attempts without lifecycle hooks, host processes or a live-stop
-owner. A canceled `unreserved` startup exits 130, like confirmed removal.
+owner. A canceled startup that retains nothing (`not-started`, such as Ctrl-C
+during preflight, `unreserved`, or confirmed removal) prints a cancellation note
+and exits 130; a canceled start that retained evidence still fails.
 Readiness requires authenticated current observations and unchanged input before
 publication. The foreground owner remains attached until owned shutdown finishes;
 Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged

@@ -430,7 +430,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack env explain` | `--env`, `--service`, `--target` | Per invocation; reports source, precedence and delivery without the value. | Not needed. | Reads files; no runtime required. |
 | `hack env apply` | `--env`, `--service` | Runs `hack restart <service>` with the same `--env`, recreating one service. | This is the refresh path for one service. | `--service` is required. |
 | `hack env add` | `--env`, `--service` | Selects the file written (`hack.env.<name>.yaml`, or the base file for `base`/`default`/`none`; `--local` writes the local variant). | Running workloads keep old values until `hack env apply` or `hack restart`. | Mutates only env files. |
-| `hack env set` | `--env`, `--service` | Alias for `hack env add`. | Same as `hack env add`. | Mutates only env files. |
+| `hack env set` | `--env`, `--service` | Alias for `hack env add`, except that it refuses a dangling layer link. | Same as `hack env add`. | Mutates only env files. |
 | `hack env hydrate` | `--env`, `--service` | Selects the local file written, as for `hack env add --local`; imports every entry in one commit. | Same as `hack env add`. | Mutates only the machine-local env file; refuses a git-tracked one. |
 | `hack env unset` | `--env`, `--service` | Selects the file the key is removed from, as for `hack env add`. | Same as `hack env add`. | Mutates only env files. |
 | `hack env materialize` | `--env`, `--service` | Writes `.hack/.env` once, at invocation. | Rerun `hack env materialize`. | Compatibility output for external tools; runtime injection does not depend on it. |
@@ -562,6 +562,7 @@ hack env add API_BASE_URL https://api.example.com --local
 ```
 
 `hack env set` still works as a compatibility alias for `hack env add`, but `add` is the primary UX now.
+The two differ on an in-project dangling layer link: `set` refuses it and `add` replaces it.
 
 ### Entering secret values
 
@@ -629,9 +630,9 @@ rename has these effects:
   YAML layers, including case-variant names on case-insensitive filesystems.
   `hack doctor --fix` reports an error for a `.hack` linked outside the project
   and leaves the link and outside files in place
-- an in-project symlink whose target does not exist keeps the existing behavior: the
-  link is replaced by a regular file. Strict planning and hydrate reads still refuse
-  dangling links
+- `hack env set` and `hack env unset` refuse an in-project symlink whose target does not
+  exist with `E_PATH_CONFLICT`, and strict planning and hydrate reads refuse it too. Replace
+  or remove the link, then retry. `hack env add` replaces that link with a regular file
 - the writer rechecks both the layer and its resolved destination before staging and
   commit. These path checks narrow concurrent-swap races; they are not an atomic
   filesystem fence against a directory changed after the last check
@@ -1046,9 +1047,201 @@ That migrates the repo into:
 - `.hack/hack.env.<overlay>.yaml`
 - `.hack.secret.key` when needed
 
-`hack doctor` also warns when a repo still depends on the old format.
+A repo that has no `.hack/hack.env.json` is migrated as well. Its values live only in
+`.hack/.env` and `.hack/.env.<overlay>`, which are gitignored and may hold passwords or
+API keys, so the migration keeps them out of tracked files: each `.hack/.env` entry
+becomes a plaintext global value in the gitignored machine-local layer
+`hack.env.local.yaml`, and each overlay entry that differs from `.hack/.env` becomes a
+global value in `hack.env.<overlay>.local.yaml`. These machine-local layers are created
+as private (mode 0600) files and never replace an existing entry. The tracked `hack.env.default.yaml`, and
+`hack.env.<overlay>.yaml` for each migrated overlay, are written with no values, so the
+repo switches to env layers. Teammates do not receive these values through git; share
+the ones they need with `hack env set` (plain settings) or `hack env set --secret`
+(encrypted) after the migration.
+
+A repo with no legacy env file gets only an empty `hack.env.default.yaml`.
+
+Once this is committed, a teammate's own `.hack/.env` and overlays may stop reaching services,
+because their checkout now uses env layers. Hack compares those files with what the layers
+deliver. For any value the layers don't deliver, `hack up` warns and doctor reports it. For a
+value in `.hack/.env`, `hack env materialize` also refuses, so the file isn't replaced; it doesn't
+write overlay files, so an overlay value doesn't stop it. They run
+`hack doctor --migrate-env-config` to move those values to their own local layers, adding to a
+local layer that already exists and making it private (mode 0600). A value equal to what the
+layers deliver isn't copied, so later team changes still reach them. A key the local layer sets
+differently refuses (`E_PATH_CONFLICT`), and so does a local layer that can't be read as an env
+layer (`E_CONFIG_INVALID`), which is left as it is. Adding to a layer drops its YAML comments. Messages name valid keys, count malformed entries and name unreadable files,
+and never show a value. This comparison skips a `.hack/.env` with a valid materialization state.
+A migration that runs for another reason, such as an overlay value, also checks that file's text,
+as described below. With nothing else to migrate, doctor reports that the project already uses env
+layers without checking the text, and a later `hack env materialize` replaces the file. Tell
+teammates when you commit the migration.
+
+Migrated values are global, so a service added later receives them too, and so do host lifecycle
+hooks. A migrated value also takes precedence over the same variable exported in your shell,
+including for Compose interpolation.
+
+This migration refuses, with a one-line `E_*` error, writes nothing and keeps the legacy
+files, when:
+
+- a key does not match `^[A-Z_][A-Z0-9_]*$`, for example a lowercase name or a line
+  that starts with `export ` (`E_CONFIG_INVALID`). The error counts the keys per file but
+  does not show them, because a malformed line may hold a value. Rename or remove them;
+- a legacy file is named `.hack/.env.default`, `.hack/.env.local` or
+  `.hack/.env.<name>.local`, whose layer would be the default or a machine-local layer
+  rather than an overlay (`E_CONFIG_INVALID`). Rename or remove it;
+- a legacy `.hack/.env.<name>` file has a name that is not an overlay name (lowercase
+  letters, digits and single dashes), such as `.env.staging.old` or `.env.Prod`
+  (`E_CONFIG_INVALID`). The error names such files. Rename or remove them; a renamed
+  overlay is then selected by its new name (`--env <new-name>`). Template and
+  backup copies (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.bak`,
+  `.env.backup`, `.env.old`, `.env.orig`) are not overlays: they are neither migrated
+  nor offered for cleanup;
+- Compose `env_file` uses one of those template or backup copies (`E_CONFIG_INVALID`), so
+  its values would be lost. Rename the file to an overlay name or move it out of `.hack`,
+  and update `env_file` to match;
+- Compose `env_file` uses an overlay such as `.env.staging` that holds values of its own
+  and is not `env.defaultOverlay` (`E_CONFIG_INVALID`). Compose loads that file on every
+  launch, but after the migration a launch without `--env` would not select the overlay,
+  so the service would lose those values. Set `env.defaultOverlay` to it, or remove the
+  `env_file` entry and select the overlay with `--env`;
+- an entry named like an env layer (`.hack/hack.env.*.yaml`) is a dangling symlink, a
+  directory or another non-file (`E_PATH_CONFLICT`). With a symlinked layer inside the project,
+  or with nothing to move, `hack doctor` reports that the repo already uses env layers and
+  migrates nothing, and it never writes through the link. It can still remove `.hack/.env*`
+  entries from `env_file` in the Compose file, and a service then stops receiving a value only
+  that file set, so move such values first with `hack env set --local`. A `.hack` or a layer
+  linked outside the project is refused with a closed error, and the link and outside files
+  stay as they are;
+- git tracks a machine-local layer it would write, or, in a git checkout, git cannot
+  report whether it does (`E_PATH_CONFLICT`);
+- in a git checkout, git does not ignore a machine-local layer it would write, for
+  example because `.hack/.gitignore` is read-only and lacks Hack's managed block
+  (`E_PATH_CONFLICT`). Make `.hack/.gitignore` writable, or ignore the path, and retry;
+- a migrated value would replace a service or host value in an env layer, in the base or in
+  an overlay, including an overlay a linked worktree inherits from its primary checkout
+  (`E_CONFIG_INVALID`). A machine-local global value outranks a service or host value in an
+  earlier layer, so that target would silently switch. The error names the keys, targets and
+  envs, never values. Remove the key from the legacy file, or change that value in its layer;
+- a key the legacy files set is also set in a Compose service's own `environment`
+  (`E_CONFIG_INVALID`). Compose ranks `environment` above `env_file`, but migrated values
+  become global layer values that Hack applies after `environment`, so the service would
+  switch to the `.env` value. This includes an entry that only refers to its own key
+  (`PORT: ${PORT}`), whose result can differ when an overlay or the shell sets the key. The error names the keys and services, never values.
+  Remove the key from the `.hack/.env` file or from that service's `environment`, then retry;
+- a service does not list a legacy file with values to migrate in `env_file` (`E_CONFIG_INVALID`).
+  Migrated values are global and reach every service, including third-party images, so that
+  service would receive values it never had. This includes a file no service lists, whose values
+  today reach only Compose interpolation. Listing the file for each service is how you accept
+  that. Otherwise, move those values out of the file and set them with
+  `hack env set --service` after migrating, or keep them in your shell. Values Compose interpolates
+  need the shell or a listed file, because service values do not reach interpolation. The error
+  names files, services and keys, never values;
+- Compose uses a top-level `include`, a service `extends`, a `!reset` or `!override` tag, a
+  variable or a `~` in an `env_file` path, a file listed twice in one `env_file`, or a `format`
+  on an `env_file` entry (`E_CONFIG_INVALID`), so the migration cannot tell which values services
+  receive. Write those `env_file` entries directly in the Compose file, each file once, with a
+  plain path and no `format`;
+- a key the legacy files set is also set in another file a Compose service uses as
+  `env_file` (`E_CONFIG_INVALID`), including as `export KEY=value`, `KEY: value`, a bare `KEY`
+  or after a closing quote (`A='x' KEY=value`), for the same reason: that file stays in Compose, but the
+  migrated value would override it. The check does not look at the order of the entries,
+  or expand variables in an `env_file` path. Remove the key from one of the files, then retry;
+- a legacy entry is one Compose reads differently from Hack (`E_CONFIG_INVALID`): an unquoted
+  inline comment (`PORT=3000 # dev`), a `$` outside single quotes, a `\` in a quoted value (such
+  as `\n` in a PEM key), text after a closing quote (`A='x' B=2`), or a line without `=` (`A: 1`,
+  or a bare `A`). The value would change or be lost. The error counts entries per file and never
+  shows them. Write each value on its own line, in single quotes, with real line breaks and no
+  backslashes, or remove the line;
+- a service lists legacy files in an order that gives a key a different value from the migrated
+  layers (`E_CONFIG_INVALID`), such as `env_file: [.env.staging, .env]` with `.env.staging` as the
+  default overlay. Compose lets the last file win, but the default overlay always wins over
+  `.hack/.env` in env layers. List `.env` first, or make the files agree;
+- the default overlay sets a key differently from `.hack/.env`, and Compose reads that key: its
+  name appears anywhere in the Compose file or another `env_file` (`${KEY}`, a bare `build.args`
+  entry, a secret's `environment:`), or it is a `COMPOSE_*` setting (`E_CONFIG_INVALID`). Compose
+  takes it from `.hack/.env` today, but the overlay value would apply after the migration. Make
+  the two files agree or stop using the key in Compose;
+- a migrated `.hack/.env` value would replace what an overlay's layers deliver for a key its legacy
+  overlay file doesn't set (`E_CONFIG_INVALID`), because a local base outranks tracked and inherited
+  overlay layers. Remove the key from `.hack/.env`, or set the value you want in that legacy overlay
+  file, creating it if needed; the Compose `env_file` checks above then apply to that file;
+- `.hack/.env` has a state file, env layers exist, and its text isn't what `hack env materialize`
+  would write (`E_PATH_CONFLICT`). The file is out of date or was edited by hand, and Hack can't
+  tell which. If it's generated, move any value of your own with `hack env set`, then run
+  `hack env materialize`, which replaces it. If it's your own file, delete `.hack/.env.state.json`
+  so it's read as a legacy file, but not for generated output, whose values would then migrate as
+  your own. When the text does match, the migration doesn't read the file or offer it for cleanup;
+- `.hack/.env` has a state entry that can't be read or parsed, such as a dangling link, and env
+  layers exist (`E_PATH_CONFLICT`). If `.env` is your own file, delete `.hack/.env.state.json`. If
+  it's generated output you don't need, delete both, then run `hack env materialize`;
+- a legacy file sets a key that Docker, its build tools or the process read from their
+  environment (`E_CONFIG_INVALID`): `DOCKER_*`, `BUILDKIT_*`, `BUILDX_*`, a proxy setting,
+  `SOURCE_DATE_EPOCH`, `HOME` or `PATH`. After the migration it would reach the Docker client too.
+  Remove it from the legacy file, and set it in your shell or for one service with
+  `hack env set --service --local` after migrating;
+- the Compose file is not a single YAML document this check can read, such as several `---`
+  documents (`E_CONFIG_INVALID`). Merge it into one document;
+- `.hack/.env` or a legacy overlay is a symlink to a file outside `.hack`
+  (`E_PATH_CONFLICT`), so its values would be copied from elsewhere into this project's
+  layers. Replace the link with a regular file in `.hack`, or remove it;
+- the Compose file exists but cannot be read (`E_PERMISSION`), so the migration can't tell which
+  values services receive. Make it a readable regular file, then retry;
+- an env layer can't be read or resolved (`E_CONFIG_INVALID`), for example it doesn't parse or its
+  project env key is missing, including a layer for an overlay you don't use, so the migration
+  can't tell which values the layers already deliver. The error names the file or gives the
+  `hack env list` command that shows the problem. Fix it, then retry;
+- a legacy `.hack/.env` or overlay file exists but cannot be read, for example mode 000
+  or a dangling symlink (`E_PERMISSION`), so its values would be lost. A symlinked overlay
+  that resolves to a readable file inside `.hack` is migrated like a regular one; cleanup
+  removes only the link, never its target.
+
+With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
+symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a
+configured default overlay is a symlink, wherever it points, because this migration writes
+`plain_env` values to tracked layers and another file's values, such as a machine-local
+`.env.local`, could then be committed.
+
+Without `hack.env.json`, nothing lists values kept in a secret backend, so none are
+migrated: set them again with `hack env set --secret` after the migration. In that case `.hack/hack.config.json`, and
+any secret backend it configures, is left unchanged. The migration changes project files
+only, so it runs even when Docker is not reachable; the other `--migrate-env-config`
+repairs still need Docker. As with any migration, `hack doctor` then offers to remove the
+legacy `.hack/.env*` files that Compose no longer references (a non-interactive run
+accepts). Files Compose still names as `env_file` are offered only when the Compose repair
+removed those references. Without `hack.env.json`, a legacy file that git tracks, or one
+whose status git cannot report in a git checkout, is never offered, because the migrated
+values now live only in this machine's local layers.
+
+`hack doctor` also warns when a repo still depends on the old format. Its `env mode`
+check reports an error, not the legacy format, when a `.hack/hack.env.*.yaml` entry is a
+dangling symlink or another non-file.
 For modern env repos, `hack doctor` also warns when materialized compatibility output in
 `.hack/.env` or `.hack/.env.state.json` is stale and points to `hack env materialize`.
+
+The legacy `.hack/.env` holds one value per key, with no per-service values. In a legacy
+project, `hack env set` and `hack env unset` change only that global value, so they refuse
+`--service <service>` with a usage error instead of ignoring it (an invalid scope is refused
+the same way in both formats). `--service global`, or no `--service`, still works. Migrate to
+env layers first with `hack doctor --migrate-env-config`, which also converts a project that
+has only `.hack/.env` (see above), then set or unset the service-scoped value.
+
+Values migrated from `.hack/.env` live in the machine-local layer, and a later layer wins
+over a more specific scope in an earlier one. So to override a migrated key for one service,
+add `--local`: `hack env set KEY --service api --local`. Without it the new value goes to the
+tracked default layer, where the migrated global value in `hack.env.local.yaml` still wins
+and the command has no effect on the runtime value.
+
+`hack env set` and `hack env unset` choose between the env layers and the legacy file by
+looking for `.hack/hack.env.*.yaml` entries, `hack.env.default.yaml` included. A regular
+file, or a symlink inside the project to one, counts as an env layer. An entry linked outside
+the project is refused with a closed error. Any other entry with a layer name, such
+as a dangling symlink or a directory, is refused with `E_PATH_CONFLICT`. Nothing is
+written either way, and neither silently selects the legacy `.hack/.env`. Replace or remove the entry,
+then retry. Reads refuse the same way: `hack env list`, `hack env explain` and runtime
+env injection stop with `E_PATH_CONFLICT` on a selected layer entry that is not a regular
+file (such as a dangling `hack.env.default.yaml`), and with a closed one-line error on one
+that cannot be read, instead of falling back to the legacy file.
 
 ## Compatibility notes
 

@@ -43,6 +43,7 @@ import {
   HACK_PROJECT_DIR_PRIMARY,
   LEGACY_GRAFANA_HOST,
   PROJECT_ENV_CONTRACT_FILENAME,
+  PROJECT_ENV_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
@@ -160,6 +161,7 @@ import {
 } from "../lib/project.ts";
 import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
+  canMigrateCheckoutLegacyDotenv,
   discoverComposeServiceNames,
   ensureHackDirGitignore,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
@@ -168,8 +170,10 @@ import {
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   type LegacyComposeEnvFileReference,
+  type LegacyProjectEnvMigration,
   migrateLegacyProjectEnv,
-  projectEnvConfigExists,
+  ProjectEnvLayerPathConflictError,
+  projectEnvConfigExistsForMutation,
   removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
@@ -2653,11 +2657,11 @@ async function checkProjectEnvMode({
     };
   }
 
-  if (
-    await projectEnvConfigExists({
-      projectDir: ctx.projectDir,
-    })
-  ) {
+  const format = await doctorEnvFormat({ projectDir: ctx.projectDir });
+  if (format.kind === "conflict") {
+    return { name: "env mode", status: "error", message: format.message };
+  }
+  if (format.kind === "layers") {
     const defaultOverlay =
       cfg.env?.defaultOverlay ?? cfg.defaultEnvConfig ?? null;
     return {
@@ -2687,6 +2691,31 @@ async function checkProjectEnvMode({
   };
 }
 
+/**
+ * The env format the doctor checks report, decided by the same check that
+ * `hack env set`/`unset` use. A dangling or non-file `.hack/hack.env.*.yaml`
+ * entry is a conflict to report, never a silent "legacy format" (HACK-1370).
+ */
+async function doctorEnvFormat(opts: {
+  readonly projectDir: string;
+}): Promise<
+  | { readonly kind: "layers" | "legacy" }
+  | { readonly kind: "conflict"; readonly message: string }
+> {
+  try {
+    return (await projectEnvConfigExistsForMutation({
+      projectDir: opts.projectDir,
+    }))
+      ? { kind: "layers" }
+      : { kind: "legacy" };
+  } catch (error: unknown) {
+    if (error instanceof ProjectEnvLayerPathConflictError) {
+      return { kind: "conflict", message: error.message };
+    }
+    throw error;
+  }
+}
+
 async function checkProjectEnvOverlayWarnings({
   startDir,
 }: {
@@ -2710,11 +2739,15 @@ async function checkProjectEnvOverlayWarnings({
     };
   }
 
-  if (
-    await projectEnvConfigExists({
-      projectDir: ctx.projectDir,
-    })
-  ) {
+  const format = await doctorEnvFormat({ projectDir: ctx.projectDir });
+  if (format.kind === "conflict") {
+    return {
+      name: "env overlay warnings",
+      status: "warn",
+      message: "Skipped: an env layer entry is unusable (see env mode)",
+    };
+  }
+  if (format.kind === "layers") {
     const serviceNames = await discoverComposeServiceNames({
       composeFile: ctx.composeFile,
     });
@@ -2780,11 +2813,15 @@ async function checkProjectEnvMaterialization({
     };
   }
 
-  if (
-    !(await projectEnvConfigExists({
-      projectDir: ctx.projectDir,
-    }))
-  ) {
+  const format = await doctorEnvFormat({ projectDir: ctx.projectDir });
+  if (format.kind === "conflict") {
+    return {
+      name: "env materialization",
+      status: "warn",
+      message: "Skipped: an env layer entry is unusable (see env mode)",
+    };
+  }
+  if (format.kind === "legacy") {
     return {
       name: "env materialization",
       status: "ok",
@@ -3549,6 +3586,11 @@ async function runDoctorFix(opts: {
   await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
   await maybeRepairHackd();
+  // Env migration changes project files only, so it runs before the Docker
+  // gate: an unreachable Docker never skips a requested migration.
+  if (opts.migrateEnvConfig) {
+    await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
+  }
 
   const dockerOk = await dockerInfoOk();
   if (!dockerOk) {
@@ -3585,9 +3627,6 @@ async function runDoctorFix(opts: {
   await maybeExportCaddyCaCert({ paths });
   await maybeRepairMacHostTlsTrust();
   await maybeMigrateDnsmasq();
-  if (opts.migrateEnvConfig) {
-    await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
-  }
 
   renderSkippedDoctorFixSteps();
 }
@@ -3653,6 +3692,24 @@ function renderSkippedDoctorFixSteps(): void {
   );
 }
 
+function buildEnvMigrationNote(opts: {
+  readonly migrated: LegacyProjectEnvMigration;
+  /** Only the migration without a contract makes every value global. */
+  readonly globalDelivery: boolean;
+}): string {
+  const { migrated } = opts;
+  const notes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
+  if (migrated.updatedProjectConfig) {
+    notes.push("Updated .hack/hack.config.json for the modern env format.");
+  }
+  if (opts.globalDelivery) {
+    notes.push(
+      "Migrated values are global: every service, including one added later, and every host lifecycle hook now receives them."
+    );
+  }
+  return notes.join("\n");
+}
+
 async function maybeMigrateProjectEnvConfig(opts: {
   readonly startDir: string;
 }): Promise<void> {
@@ -3661,10 +3718,23 @@ async function maybeMigrateProjectEnvConfig(opts: {
     return;
   }
 
+  // The migration writes env layers, so it decides the format like
+  // `hack env set`: a symlinked layer counts as an env layer (never written
+  // through), and a dangling or non-file layer entry refuses closed with
+  // E_PATH_CONFLICT instead of being replaced.
   if (
-    await projectEnvConfigExists({
+    (await projectEnvConfigExistsForMutation({
       projectDir: project.projectDir,
-    })
+    })) &&
+    // A checkout whose legacy files hold values its layers don't deliver still
+    // needs migrating, for example after a teammate's migration was committed.
+    !(await canMigrateCheckoutLegacyDotenv({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      serviceNames: await discoverComposeServiceNames({
+        composeFile: project.composeFile,
+      }),
+    }))
   ) {
     note("Project already uses the new env config files.", "doctor");
     await maybeRepairModernProjectComposeEnvReferences({
@@ -3674,13 +3744,14 @@ async function maybeMigrateProjectEnvConfig(opts: {
     return;
   }
 
+  // A project without the hack.env.json contract keeps its values only in
+  // .hack/.env and .hack/.env.<overlay>; it is migrated from those files.
+  // `hack env set`/`unset --service` refusals in such a project point here.
   const contractPath = resolve(
     project.projectDir,
     PROJECT_ENV_CONTRACT_FILENAME
   );
-  if (!(await pathExists(contractPath))) {
-    return;
-  }
+  const hasContract = await pathExists(contractPath);
 
   const cfg = await readProjectConfig(project);
   const projectName = (
@@ -3694,8 +3765,12 @@ async function maybeMigrateProjectEnvConfig(opts: {
   note(
     [
       "Detected legacy project env files.",
-      `- source: ${contractPath} and current local env state`,
-      `- target: ${resolve(project.projectDir, "hack.env.default.yaml")}`,
+      hasContract
+        ? `- source: ${contractPath} and current local env state`
+        : `- source: ${resolve(project.projectDir, PROJECT_ENV_FILENAME)} and its overlays (no ${PROJECT_ENV_CONTRACT_FILENAME}; secret-backend values are not migrated)`,
+      hasContract
+        ? `- target: ${resolve(project.projectDir, "hack.env.default.yaml")}`
+        : `- target: values go to the gitignored ${resolve(project.projectDir, "hack.env.local.yaml")} (and hack.env.<overlay>.local.yaml); ${resolve(project.projectDir, "hack.env.default.yaml")} is written with no values`,
       "- runtime: direct env injection by default; .hack/.env becomes compatibility-only",
     ].join("\n"),
     "env migration"
@@ -3715,20 +3790,18 @@ async function maybeMigrateProjectEnvConfig(opts: {
     projectName,
     serviceNames,
     materialize: false,
+    migrateUndeclaredDotenv: true,
   });
   if (migrated.wroteFiles.length === 0) {
     note("Legacy env migration found nothing to write.", "doctor");
     return;
   }
-  const migrationNotes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
-  if (migrated.updatedProjectConfig) {
-    migrationNotes.push(
-      "Updated .hack/hack.config.json for the modern env format."
-    );
-  }
-  note(migrationNotes.join("\n"), "doctor");
+  note(
+    buildEnvMigrationNote({ migrated, globalDelivery: !hasContract }),
+    "doctor"
+  );
 
-  let blockedCleanupCandidates = [...migrated.blockedCleanupCandidates];
+  let composeRepaired = false;
   if (migrated.composeEnvFileReferences.length > 0) {
     note(
       buildComposeEnvRepairNote({
@@ -3757,7 +3830,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
           ].join("\n"),
           "compose env repair"
         );
-        blockedCleanupCandidates = [];
+        composeRepaired = true;
       } else {
         note(
           "No compose env_file updates were needed; legacy compatibility files remain blocked from cleanup.",
@@ -3772,10 +3845,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
     }
   }
 
-  const cleanupCandidates = [
-    ...migrated.cleanupCandidates,
-    ...blockedCleanupCandidates,
-  ].sort((left, right) => left.localeCompare(right));
+  const cleanupCandidates = doctorEnvCleanupCandidates({
+    migrated,
+    composeRepaired,
+  });
   if (cleanupCandidates.length === 0) {
     return;
   }
@@ -3803,6 +3876,25 @@ async function maybeMigrateProjectEnvConfig(opts: {
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
   }
+}
+
+/**
+ * Legacy env files doctor offers to delete after a migration. Files compose
+ * still names as `env_file` (`blockedCleanupCandidates`) are offered only when
+ * the compose repair removed those references; deleting them otherwise would
+ * break the next `hack up`.
+ */
+export function doctorEnvCleanupCandidates(opts: {
+  readonly migrated: Pick<
+    LegacyProjectEnvMigration,
+    "cleanupCandidates" | "blockedCleanupCandidates"
+  >;
+  readonly composeRepaired: boolean;
+}): string[] {
+  return [
+    ...opts.migrated.cleanupCandidates,
+    ...(opts.composeRepaired ? opts.migrated.blockedCleanupCandidates : []),
+  ].sort((left, right) => left.localeCompare(right));
 }
 
 function buildComposeEnvRepairNote(opts: {
@@ -3949,11 +4041,20 @@ async function buildEnvMigrationPlanStep(opts: {
     return "Skip env migration because no project was detected from this path.";
   }
 
-  if (
-    await projectEnvConfigExists({
+  // The same format decision as the migration itself. A layer entry it refuses is
+  // reported as a plan; a path leaving the project still stops the run (HACK-1685).
+  let modernExists: boolean;
+  try {
+    modernExists = await projectEnvConfigExistsForMutation({
       projectDir: opts.project.projectDir,
-    })
-  ) {
+    });
+  } catch (error: unknown) {
+    if (error instanceof ProjectEnvLayerPathConflictError) {
+      return `Refuse env migration (E_PATH_CONFLICT) because ${error.path} is not a regular env layer file.`;
+    }
+    throw error;
+  }
+  if (modernExists) {
     return "Skip env migration because this project already uses hack.env.*.yaml.";
   }
 
@@ -3965,7 +4066,7 @@ async function buildEnvMigrationPlanStep(opts: {
     return "Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.";
   }
 
-  return "Skip env migration because no legacy project env config was found.";
+  return "Prompt to migrate legacy env values (.hack/.env and its overlays, no .hack/hack.env.json) to the gitignored machine-local hack.env.local.yaml and hack.env.<overlay>.local.yaml layers.";
 }
 
 /**

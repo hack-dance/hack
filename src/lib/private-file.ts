@@ -382,6 +382,12 @@ export async function replacePrivateFileAtomic(
     readonly text: string;
     /** Permission bits for the new file; defaults to 0600. */
     readonly mode?: number;
+    /**
+     * Runs after staging and fsync, immediately before the rename. A throw
+     * abandons the replacement and removes the staging file, so a caller can
+     * make its last compare-and-swap check here.
+     */
+    readonly beforeRename?: () => Promise<void>;
   }
 ): Promise<void> {
   const mode = (opts.mode ?? 0o600) & 0o777;
@@ -400,6 +406,7 @@ export async function replacePrivateFileAtomic(
     await file.sync();
     await recheckRealDirectories({ directories, refusal: opts.refusal });
     await observeReplaceableTarget(opts);
+    await opts.beforeRename?.();
     await rename(staging, opts.path);
     committed = true;
   } catch (error: unknown) {

@@ -20,6 +20,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { YAML } from "bun";
 
 import {
   GLOBAL_DAEMON_DIR_NAME,
@@ -52,6 +53,8 @@ const noteCalls: string[] = [];
  * default, so the untrack step stays idle unless a test sets it.
  */
 let trackedGeneratedPaths: string[] = [];
+/** Exit code of the mocked `docker info`; 0 (reachable) unless a test sets it. */
+let dockerInfoExitCode = 0;
 
 const dnsMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -91,7 +94,7 @@ const shellMock = await registerScopedModuleMock({
     exec: async (cmd: readonly string[]) => {
       execCalls.push([...cmd]);
       if (cmd[0] === "docker" && cmd[1] === "info") {
-        return { exitCode: 0, stdout: "", stderr: "" };
+        return { exitCode: dockerInfoExitCode, stdout: "", stderr: "" };
       }
       if (cmd[0] === "docker" && cmd[1] === "network" && cmd[2] === "inspect") {
         return { exitCode: 0, stdout: "[]", stderr: "" };
@@ -173,6 +176,7 @@ beforeEach(async () => {
   execCalls.length = 0;
   noteCalls.length = 0;
   trackedGeneratedPaths = [];
+  dockerInfoExitCode = 0;
 });
 
 afterEach(async () => {
@@ -210,7 +214,7 @@ async function createProjectWithStaleDaemonPid(): Promise<string> {
   await mkdir(resolve(projectRoot, ".hack"), { recursive: true });
   await writeFile(
     resolve(projectRoot, ".hack", "docker-compose.yml"),
-    "services:\n  api:\n    image: alpine:3.19\n"
+    "services:\n  api:\n    image: alpine:3.19\n    env_file:\n      - path: .env\n        required: false\n"
   );
 
   // Stale daemon pid: a pid that cannot be running (very large, unlikely to
@@ -615,3 +619,180 @@ test("doctor --fix refuses an outside .hack and preserves its override (HACK-131
   expect(notes).not.toContain(canary);
   expect(notes).not.toContain(outside);
 }, 30_000);
+
+for (const docker of [
+  { label: "reachable", exitCode: 0 },
+  { label: "unreachable", exitCode: 1 },
+] as const) {
+  test(`doctor --migrate-env-config migrates a project with only .hack/.env while Docker is ${docker.label} (HACK-1370)`, async () => {
+    const projectRoot = await createProjectWithStaleDaemonPid();
+    const projectDir = resolve(projectRoot, ".hack");
+    const value = ["synthetic", "doctor", "migrate", "4c2d"].join("-");
+    await writeFile(resolve(projectDir, ".env"), `LEGACY_SETTING=${value}\n`);
+    dockerInfoExitCode = docker.exitCode;
+
+    const { runCli } = await import("../src/cli/run.ts");
+    const code = await runCli([
+      "doctor",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      projectRoot,
+    ]);
+    // An unreachable Docker is still reported as a failed check (exit 1), but
+    // the requested migration, which needs no Docker, has run.
+    expect(code).toBe(docker.exitCode === 0 ? 0 : 1);
+
+    // The gitignored value lands in the machine-local layer; the tracked
+    // default layer only switches the format.
+    const localPath = resolve(projectDir, "hack.env.local.yaml");
+    const layerPath = resolve(projectDir, "hack.env.default.yaml");
+    expect(YAML.parse(await readFile(localPath, "utf8"))).toMatchObject({
+      environment: "default",
+      values: { global: { LEGACY_SETTING: value } },
+    });
+    expect(YAML.parse(await readFile(layerPath, "utf8"))).toMatchObject({
+      environment: "default",
+      values: { global: {} },
+    });
+    expect(await readFile(layerPath, "utf8")).not.toContain(value);
+    const notes = noteCalls.join("\n");
+    expect(notes).toContain(`Wrote ${localPath}, ${layerPath}`);
+    expect(notes).not.toContain(value);
+    expect(notes.includes("Docker is not reachable")).toBe(
+      docker.exitCode !== 0
+    );
+  }, 30_000);
+}
+
+test("doctor --migrate-env-config treats a symlinked overlay as env layers and never writes through it (HACK-1370)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  const owned = ["synthetic", "owned", "77d1"].join("-");
+  const legacy = ["synthetic", "legacy", "b9e0"].join("-");
+  await writeFile(resolve(projectDir, ".env"), `OWNED=${legacy}\n`);
+  await writeFile(resolve(projectDir, ".env.staging"), `OWNED=${legacy}-s\n`);
+  const target = resolve(projectRoot, "linked-staging.yaml");
+  const targetText = `version: 1\nenvironment: staging\nsecretsprovider: project_key\nvalues:\n  global:\n    OWNED: ${owned}\n`;
+  await writeFile(target, targetText);
+  const link = resolve(projectDir, "hack.env.staging.yaml");
+  await symlink(target, link);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli([
+    "doctor",
+    "--migrate-env-config",
+    "--no-interactive",
+    "--path",
+    projectRoot,
+  ]);
+  expect(code).toBe(0);
+  expect(noteCalls.join("\n")).toContain(
+    "Project already uses the new env config files."
+  );
+  // The link and its target are untouched; nothing was migrated or cleaned.
+  expect(await readlink(link)).toBe(target);
+  expect(await readFile(target, "utf8")).toBe(targetText);
+  expect(await readFile(resolve(projectDir, ".env"), "utf8")).toContain(legacy);
+  expect(await readFile(resolve(projectDir, ".env.staging"), "utf8")).toContain(
+    legacy
+  );
+  for (const name of ["hack.env.default.yaml", "hack.env.local.yaml"]) {
+    expect(await lstat(resolve(projectDir, name)).catch(() => null)).toBeNull();
+  }
+}, 30_000);
+
+test("doctor --migrate-env-config refuses a .env no service lists, and keeps it (HACK-1370)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  const legacy = ["synthetic", "legacy", "4c2e"].join("-");
+  await writeFile(
+    resolve(projectDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.19\n"
+  );
+  await writeFile(resolve(projectDir, ".env"), `OWNED=${legacy}\n`);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli([
+    "doctor",
+    "--migrate-env-config",
+    "--no-interactive",
+    "--path",
+    projectRoot,
+  ]);
+  expect(code).not.toBe(0);
+  expect(await readFile(resolve(projectDir, ".env"), "utf8")).toContain(legacy);
+  expect(
+    await lstat(resolve(projectDir, "hack.env.local.yaml")).catch(() => null)
+  ).toBeNull();
+}, 30_000);
+
+test("doctor --migrate-env-config moves a checkout's own .env that Compose still lists, after a teammate's layers landed (HACK-1370)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  const legacy = ["synthetic", "legacy", "71ab"].join("-");
+  await writeFile(
+    resolve(projectDir, "hack.env.default.yaml"),
+    "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  await writeFile(resolve(projectDir, ".env"), `OWNED=${legacy}\n`);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli([
+    "doctor",
+    "--migrate-env-config",
+    "--no-interactive",
+    "--path",
+    projectRoot,
+  ]);
+  expect(code).toBe(0);
+  expect(noteCalls.join("\n")).not.toContain(legacy);
+  expect(
+    await readFile(resolve(projectDir, "hack.env.local.yaml"), "utf8")
+  ).toContain(legacy);
+}, 30_000);
+
+test("doctor --migrate-env-config refuses a dangling default layer with E_PATH_CONFLICT and keeps it (HACK-1370)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  const legacy = ["synthetic", "legacy", "0a6f"].join("-");
+  await writeFile(resolve(projectDir, ".env"), `OWNED=${legacy}\n`);
+  const link = resolve(projectDir, "hack.env.default.yaml");
+  const missing = resolve(projectDir, "missing-layer.yaml");
+  await symlink(missing, link);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli([
+    "doctor",
+    "--migrate-env-config",
+    "--no-interactive",
+    "--path",
+    projectRoot,
+  ]);
+  expect(code).toBe(1);
+  // Still the same dangling link; the legacy file is kept and nothing else
+  // was written.
+  expect((await lstat(link)).isSymbolicLink()).toBe(true);
+  expect(await readlink(link)).toBe(missing);
+  expect(await readFile(resolve(projectDir, ".env"), "utf8")).toContain(legacy);
+  expect(
+    await lstat(resolve(projectDir, "hack.env.local.yaml")).catch(() => null)
+  ).toBeNull();
+  expect(noteCalls.join("\n")).not.toContain(legacy);
+}, 30_000);
+
+test("doctor offers files compose still references for cleanup only after the compose repair removed them (HACK-1370)", async () => {
+  const { doctorEnvCleanupCandidates } = await import(
+    "../src/commands/doctor.ts"
+  );
+  const migrated = {
+    cleanupCandidates: ["/p/.hack/.env.staging"],
+    blockedCleanupCandidates: ["/p/.hack/.env"],
+  };
+  expect(
+    doctorEnvCleanupCandidates({ migrated, composeRepaired: false })
+  ).toEqual(["/p/.hack/.env.staging"]);
+  expect(
+    doctorEnvCleanupCandidates({ migrated, composeRepaired: true })
+  ).toEqual(["/p/.hack/.env", "/p/.hack/.env.staging"]);
+});

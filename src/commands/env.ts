@@ -10,6 +10,7 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import {
+  assertLegacyEnvScope,
   LEGACY_ENV_LOCAL_CONTRACT_MESSAGE,
   parseApplyServiceOption,
   parseEnvGetArguments,
@@ -22,6 +23,7 @@ import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { PROJECT_ENV_CONTRACT_FILENAME } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
 import {
@@ -75,13 +77,18 @@ import {
 } from "../lib/project.ts";
 import {
   assertProjectEnvLayerPaths,
+  assertValidProjectEnvScopeName,
+  describeUnmigratedLegacyDotenv,
   discoverComposeServiceNames,
   ENV_KEY_INVALID_MESSAGE,
+  findUnmigratedLegacyDotenv,
+  hasUnmigratedLegacyDotenv,
   hydrateProjectEnvLocalLayer,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
   projectEnvConfigExists,
+  projectEnvConfigExistsForMutation,
   readMaterializedProjectEnv,
   resolveProjectEnvConfig,
   resolveProjectEnvValue,
@@ -1879,6 +1886,11 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
       hasPositionalValue: valueFromSpec !== null,
     });
   }
+  // Refuse an invalid scope in either env format before the project is read,
+  // with the same closed one-line refusal as `env add`.
+  const scope = assertValidProjectEnvScopeName({
+    scopeName: args.options.service,
+  });
 
   const project = await resolveProjectForEnv({
     ctx,
@@ -1895,7 +1907,9 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     envOption: args.options.env,
   });
 
-  const modernExists = await projectEnvConfigExists({
+  // A layer entry that is not a usable file is refused here instead of
+  // silently selecting the legacy .hack/.env.
+  const modernExists = await projectEnvConfigExistsForMutation({
     projectDir: project.projectDir,
   });
   if (modernExists) {
@@ -1911,6 +1925,9 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     });
   }
 
+  // The legacy .hack/.env has no per-service values: refuse a scope rather
+  // than write the global value, before stdin is read.
+  assertLegacyEnvScope({ scope });
   const storeSecret = args.options.secret === true;
   // Before stdin is read or anything is written. A secret goes to the store, not
   // to .hack/.env, so the contract migration can't copy its plaintext to a tracked layer.
@@ -2095,6 +2112,19 @@ const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
   const serviceNames = await discoverComposeServiceNames({
     composeFile: project.composeFile,
   });
+  // Materialize replaces only `.hack/.env`, so overlay values stay where they are.
+  const unmigrated = await findUnmigratedLegacyDotenv({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    serviceNames,
+    baseOnly: true,
+  });
+  if (hasUnmigratedLegacyDotenv(unmigrated)) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: `Refusing to materialize: this checkout ${describeUnmigratedLegacyDotenv(unmigrated)} in its legacy .hack/.env files, and the env layers don't deliver those values, so they could be lost. Run \`hack doctor --migrate-env-config\` first, or remove what you don't need.`,
+    });
+  }
   const result = await materializeProjectEnv({
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
@@ -2332,12 +2362,18 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     envOption: args.options.env,
   });
 
-  const modernExists = await projectEnvConfigExists({
+  const modernExists = await projectEnvConfigExistsForMutation({
     projectDir: project.projectDir,
   });
   if (!modernExists) {
-    // Validate the key before resolving a secret store, so a refused key
-    // never reaches a backend.
+    // The legacy .hack/.env has no per-service values: refuse a scope rather
+    // than remove the global value. Validate the scope and key before
+    // resolving a secret store, so a refused argument never reaches a backend.
+    assertLegacyEnvScope({
+      scope: assertValidProjectEnvScopeName({
+        scopeName: args.options.service,
+      }),
+    });
     const key = await resolveEnvKey({
       key: (args.positionals.key ?? "").trim(),
     });

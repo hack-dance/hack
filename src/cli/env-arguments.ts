@@ -35,6 +35,27 @@ export function parseEnvScopeOption(input: {
 }
 
 /**
+ * Refusal of a non-global `--service` for `hack env set`/`unset` in a project
+ * that still uses the legacy `.hack/.env` file. That file holds one value per
+ * key, so honoring the scope is impossible and ignoring it would change the
+ * global value instead.
+ */
+export const LEGACY_ENV_SERVICE_SCOPE_MESSAGE =
+  '--service needs env layers, but this project uses the legacy .hack/.env file, which has no per-service values. Migrate to env layers with `hack doctor --migrate-env-config` (see "Legacy repos and migration" in docs/env.md), or omit --service to change the global value.';
+
+/**
+ * `hack env set`/`unset --service` for a legacy `.hack/.env` project: only the
+ * global scope (omitted, empty or `global`) is accepted. Pass the scope after
+ * an invalid one has been refused, and call it before stdin is read or any
+ * file or secret store is touched.
+ */
+export function assertLegacyEnvScope(input: { readonly scope: string }): void {
+  if (input.scope !== "global") {
+    throw new CliUsageError(LEGACY_ENV_SERVICE_SCOPE_MESSAGE);
+  }
+}
+
+/**
  * `hack env set --local` in a project with a `hack.env.json` contract and no env
  * layers. The plaintext path writes `.hack/.env`, and the contract migration copies
  * that file's values to tracked layers, so `--local` would not stay local.

@@ -13,7 +13,7 @@ import type { ProjectOwnershipConfig } from "./project.ts";
 import { readProjectConfig } from "./project.ts";
 import {
   discoverComposeServiceNames,
-  projectEnvConfigExists,
+  projectEnvConfigExistsForMutation,
   resolveProjectEnvConfig,
 } from "./project-env-config.ts";
 import { assertLegacyProjectDirectory } from "./project-input-selection.ts";
@@ -322,16 +322,38 @@ export async function resolveEnvMeta(opts: {
   };
 }
 
+function invalidModernEnvMeta(opts: {
+  readonly projectDir: string;
+  readonly error: unknown;
+}): EnvMeta {
+  return {
+    contractPath: resolve(opts.projectDir, "hack.env.default.yaml"),
+    contractExists: true,
+    contractParseError:
+      opts.error instanceof Error
+        ? opts.error.message
+        : "Invalid modern env config.",
+    vars: [],
+    missingRequired: [],
+  };
+}
+
 async function resolveModernEnvMeta(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly composeFile: string;
 }): Promise<EnvMeta | null> {
-  if (
-    !(await projectEnvConfigExists({
+  // The mutation format check: a dangling or non-file layer entry is reported
+  // as an invalid env config instead of reading as "legacy" (HACK-1370).
+  let layersInUse: boolean;
+  try {
+    layersInUse = await projectEnvConfigExistsForMutation({
       projectDir: opts.projectDir,
-    }))
-  ) {
+    });
+  } catch (error: unknown) {
+    return invalidModernEnvMeta({ projectDir: opts.projectDir, error });
+  }
+  if (!layersInUse) {
     return null;
   }
 
@@ -347,14 +369,7 @@ async function resolveModernEnvMeta(opts: {
       serviceNames,
     });
   } catch (error: unknown) {
-    return {
-      contractPath: resolve(opts.projectDir, "hack.env.default.yaml"),
-      contractExists: true,
-      contractParseError:
-        error instanceof Error ? error.message : "Invalid modern env config.",
-      vars: [],
-      missingRequired: [],
-    };
+    return invalidModernEnvMeta({ projectDir: opts.projectDir, error });
   }
   if (!resolved) {
     return null;

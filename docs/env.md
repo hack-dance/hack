@@ -1118,6 +1118,11 @@ files, when:
 - in a git checkout, git does not ignore a machine-local layer it would write, for
   example because `.hack/.gitignore` is read-only and lacks Hack's managed block
   (`E_PATH_CONFLICT`). Make `.hack/.gitignore` writable, or ignore the path, and retry;
+- a migrated value would replace a service or host value in an env layer, in the base or in
+  an overlay, including an overlay a linked worktree inherits from its primary checkout
+  (`E_CONFIG_INVALID`). A machine-local global value outranks a service or host value in an
+  earlier layer, so that target would silently switch. The error names the keys, targets and
+  envs, never values. Remove the key from the legacy file, or change that value in its layer;
 - a key the legacy files set is also set in a Compose service's own `environment`
   (`E_CONFIG_INVALID`). Compose ranks `environment` above `env_file`, but migrated values
   become global layer values that Hack applies after `environment`, so the service would
@@ -1157,9 +1162,10 @@ files, when:
   entry, a secret's `environment:`), or it is a `COMPOSE_*` setting (`E_CONFIG_INVALID`). Compose
   takes it from `.hack/.env` today, but the overlay value would apply after the migration. Make
   the two files agree or stop using the key in Compose;
-- a migrated `.hack/.env` value would replace what a tracked overlay delivers for a key its legacy
-  overlay file doesn't set (`E_CONFIG_INVALID`), because a local base outranks tracked overlays. Set
-  the value you want in that legacy overlay file, or remove the key from `.hack/.env`;
+- a migrated `.hack/.env` value would replace what an overlay's layers deliver for a key its legacy
+  overlay file doesn't set (`E_CONFIG_INVALID`), because a local base outranks tracked and inherited
+  overlay layers. Remove the key from `.hack/.env`, or set the value you want in that legacy overlay
+  file, creating it if needed; the Compose `env_file` checks above then apply to that file;
 - `.hack/.env` has a state file, env layers exist, and its text isn't what `hack env materialize`
   would write (`E_PATH_CONFLICT`). The file is out of date or was edited by hand, and Hack can't
   tell which. If it's generated, move any value of your own with `hack env set`, then run

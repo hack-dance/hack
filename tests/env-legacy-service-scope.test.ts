@@ -4166,6 +4166,17 @@ test("scoped coverage: a Compose service named host is treated as a service, not
     `SETTING=${SCOPED_LEGACY_VALUE}\n`
   );
 
+  // The projection that differs: with a service named host, the global host target
+  // doesn't read the host scope.
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    serviceNames: ["host"],
+    envName: null,
+  });
+  expect(resolved?.serviceEnv.host?.SETTING).toBe(SCOPED_VALUE);
+  expect(resolved?.hostTargetEnv.global?.SETTING).toBe(SCOPED_GLOBAL_VALUE);
+
   const result = await migrateWithServices(repo, ["host"]);
 
   expect(result).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
@@ -4244,7 +4255,7 @@ test("scoped coverage: a value under a scope Compose doesn't know refuses, namin
   });
 });
 
-test("scoped coverage: a layer with an invalid scope name refuses closed, before any write", async () => {
+test("a layer with an invalid scope name refuses as unreadable, before the scoped-value check or any write", async () => {
   const repo = await createLegacyRepo();
   await writeFile(
     resolve(repo.projectDir, "hack.env.default.yaml"),
@@ -4261,7 +4272,10 @@ test("scoped coverage: a layer with an invalid scope name refuses closed, before
 
   const result = await migrateWithServices(repo, ["api"]);
 
-  expect(result).toBeInstanceOf(Error);
+  expect(result).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  expect((result as Error).message).toContain(
+    "an env layer can't be read or resolved"
+  );
   expect((result as Error).message).not.toContain(SCOPED_VALUE);
   expect((result as Error).message).not.toContain(SCOPED_LEGACY_VALUE);
   expect(await readdir(repo.projectDir)).toEqual(entries);

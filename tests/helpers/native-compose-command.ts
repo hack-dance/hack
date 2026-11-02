@@ -1,5 +1,12 @@
 import { afterEach, expect } from "bun:test";
-import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { nativeComposeStorageDockerFixtureScript } from "./native-compose-storage-docker.ts";
@@ -7,7 +14,11 @@ import { privateCliEnv } from "./private-cli-env.ts";
 
 const roots: string[] = [];
 const cleanupGuards = new Map<string, () => boolean>();
+const requestLoggers: Bun.Server<undefined>[] = [];
 afterEach(async () => {
+  for (const server of requestLoggers.splice(0)) {
+    server.stop(true);
+  }
   await Promise.all(
     roots.splice(0).map((root) => {
       if (cleanupGuards.get(root)?.() === false) {
@@ -163,12 +174,29 @@ else {
 `
   );
   const docker = join(root, "docker");
+  // Storage commands inherit a per-file capture quota. Their cumulative test
+  // log is instrumentation, so write it in the parent rather than consuming
+  // that quota in the synthetic Docker child. Await the acknowledgement so
+  // request order and observations after invoke() remain exact.
+  const requestLogger = opts.storage
+    ? Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        async fetch(request) {
+          await appendFile(join(root, "requests"), await request.text());
+          return new Response(null, { status: 204 });
+        },
+      })
+    : null;
+  if (requestLogger) {
+    requestLoggers.push(requestLogger);
+  }
   await Bun.write(
     docker,
     `#!${process.execPath}
 import {appendFile,rm} from "node:fs/promises";
 const root=${JSON.stringify(root)};const args=process.argv.slice(2);
-await appendFile(root+"/requests",JSON.stringify(args)+"\\n");
+${requestLogger ? `const logged=await fetch(${JSON.stringify(requestLogger.url.href)},{method:"POST",body:JSON.stringify(args)+"\\n"});if(!logged.ok)throw new Error("fixture request log failed");` : 'await appendFile(root+"/requests",JSON.stringify(args)+"\\n");'}
 const engine=root+"/engine";
 const volumes=root+"/volumes";
 ${opts.storage ? nativeComposeStorageDockerFixtureScript(root) : ""}

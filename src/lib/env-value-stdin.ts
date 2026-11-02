@@ -1,4 +1,5 @@
 import { CliUsageError } from "../cli/command.ts";
+import { resolveTimeoutOverrideMs } from "./duration.ts";
 
 /**
  * Non-argv value input for `hack env add|set --value-stdin`.
@@ -15,12 +16,31 @@ import { CliUsageError } from "../cli/command.ts";
  *   stripped, so `printf '%s\n' "$v"` and `printf '%s' "$v"` store the same
  *   value. Any further trailing newlines are preserved as part of the value.
  * - Empty input (after that strip), invalid UTF-8, and NUL bytes are refused.
+ * - The whole read, up to end of input, is bounded by
+ *   {@link ENV_VALUE_STDIN_TIMEOUT_MS} (overridable with
+ *   {@link ENV_VALUE_STDIN_TIMEOUT_ENV}). A producer that never closes its end
+ *   of the pipe, or a caller whose stdin is an inherited open pipe nobody
+ *   writes to, gets a closed `timeout` refusal instead of an indefinite wait.
+ *   On timeout the stream is canceled and every buffered byte is wiped.
  *
  * Every refusal is a closed, value-free {@link EnvValueStdinError}: messages
  * are fixed strings and never include caller input, byte content, or the
  * underlying read error.
  */
 export const ENV_VALUE_STDIN_MAX_BYTES = 64 * 1024;
+
+/**
+ * Deadline for reading `--value-stdin` to end of input. Long enough for a
+ * secret manager that waits on a human approval before writing, short enough
+ * that an unclosed pipe fails visibly instead of hanging an automation run.
+ */
+export const ENV_VALUE_STDIN_TIMEOUT_MS = 30_000;
+
+/** Upper bound accepted from {@link ENV_VALUE_STDIN_TIMEOUT_ENV}. */
+export const ENV_VALUE_STDIN_TIMEOUT_MAX_MS = 10 * 60_000;
+
+/** Positive integer milliseconds overriding {@link ENV_VALUE_STDIN_TIMEOUT_MS}. */
+export const ENV_VALUE_STDIN_TIMEOUT_ENV = "HACK_ENV_VALUE_STDIN_TIMEOUT_MS";
 
 export const ENV_VALUE_STDIN_REFUSAL_REASONS = [
   "interactive_tty",
@@ -29,6 +49,7 @@ export const ENV_VALUE_STDIN_REFUSAL_REASONS = [
   "invalid_utf8",
   "nul_byte",
   "read_failed",
+  "timeout",
   "positional_value",
   "missing_key",
 ] as const;
@@ -45,6 +66,7 @@ const REFUSAL_MESSAGES: Readonly<Record<EnvValueStdinRefusalReason, string>> = {
   nul_byte:
     "--value-stdin input contains a NUL byte, which env values cannot carry. Nothing was stored.",
   read_failed: "--value-stdin could not read stdin. Nothing was stored.",
+  timeout: `--value-stdin did not reach end of input before the read deadline (${ENV_VALUE_STDIN_TIMEOUT_ENV}, default ${ENV_VALUE_STDIN_TIMEOUT_MS / 1000}s). Close the pipe after writing the value, or redirect stdin from a file. Nothing was stored.`,
   positional_value:
     "--value-stdin cannot be combined with a value argument (including KEY=value). Pass only the key and pipe the value. Nothing was stored.",
   missing_key:
@@ -76,6 +98,22 @@ function processStdinSource(): EnvValueStdinSource {
 }
 
 /**
+ * Resolve the stdin read deadline from {@link ENV_VALUE_STDIN_TIMEOUT_ENV}.
+ * A set value must be an integer from 1000 to {@link ENV_VALUE_STDIN_TIMEOUT_MAX_MS};
+ * anything else is refused with a fixed usage error.
+ */
+export function resolveEnvValueStdinTimeoutMs(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): number {
+  return resolveTimeoutOverrideMs({
+    name: ENV_VALUE_STDIN_TIMEOUT_ENV,
+    fallback: ENV_VALUE_STDIN_TIMEOUT_MS,
+    max: ENV_VALUE_STDIN_TIMEOUT_MAX_MS,
+    env,
+  });
+}
+
+/**
  * Refuse `--value-stdin` argument combinations before reading anything.
  *
  * @param input.hasKey - Whether a key argument was supplied.
@@ -99,6 +137,8 @@ export function assertEnvValueStdinUsage(input: {
  *
  * @param input.source - Stdin source; defaults to the process stdin.
  * @param input.maxBytes - Byte bound; defaults to {@link ENV_VALUE_STDIN_MAX_BYTES}.
+ * @param input.timeoutMs - Deadline for reaching end of input; defaults to
+ *   {@link resolveEnvValueStdinTimeoutMs}.
  * @returns The decoded value with exactly one trailing newline removed.
  * @throws EnvValueStdinError for every refusal (closed, value-free).
  */
@@ -106,15 +146,17 @@ export async function readEnvValueFromStdin(
   input: {
     readonly source?: EnvValueStdinSource;
     readonly maxBytes?: number;
+    readonly timeoutMs?: number;
   } = {}
 ): Promise<string> {
   const source = input.source ?? processStdinSource();
   const maxBytes = input.maxBytes ?? ENV_VALUE_STDIN_MAX_BYTES;
+  const timeoutMs = input.timeoutMs ?? resolveEnvValueStdinTimeoutMs();
   if (source.isTTY) {
     throw new EnvValueStdinError("interactive_tty");
   }
 
-  const bytes = await readBounded({ source, maxBytes });
+  const bytes = await readBounded({ source, maxBytes, timeoutMs });
   const decoded = decodeUtf8(bytes);
   bytes.fill(0);
   if (decoded.includes("\0")) {
@@ -130,6 +172,7 @@ export async function readEnvValueFromStdin(
 async function readBounded(input: {
   readonly source: EnvValueStdinSource;
   readonly maxBytes: number;
+  readonly timeoutMs: number;
 }): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -146,14 +189,26 @@ async function readBounded(input: {
     }
   };
 
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"timeout">((resolveDeadline) => {
+    timer = setTimeout(() => resolveDeadline("timeout"), input.timeoutMs);
+  });
+  let timedOut = false;
+
   try {
     while (true) {
-      let result: Awaited<ReturnType<typeof reader.read>>;
+      let result: Awaited<ReturnType<typeof reader.read>> | "timeout";
       try {
-        result = await reader.read();
+        result = await Promise.race([reader.read(), deadline]);
       } catch {
         wipeChunks();
         throw new EnvValueStdinError("read_failed");
+      }
+      if (result === "timeout") {
+        timedOut = true;
+        wipeChunks();
+        await reader.cancel().catch(() => undefined);
+        throw new EnvValueStdinError("timeout");
       }
       if (result.done) {
         break;
@@ -168,7 +223,10 @@ async function readBounded(input: {
       chunks.push(result.value);
     }
   } finally {
-    reader.releaseLock();
+    clearTimeout(timer);
+    if (!timedOut) {
+      reader.releaseLock();
+    }
   }
 
   const out = new Uint8Array(total);

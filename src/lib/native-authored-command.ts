@@ -221,12 +221,28 @@ function assertForegroundOptions(options: NativeComposeCommandOptions): void {
   }
 }
 
+/**
+ * What a canceled start left behind, for outcomes that retain nothing. A
+ * canceled start that retained evidence still fails, so the operator inspects it.
+ */
+const CANCELED_STARTUP_NOTES: Readonly<
+  Partial<Record<NativeAuthoredProjectStartError["outcome"], string>>
+> = {
+  "not-started":
+    "Native project start was canceled; nothing was started and no startup intent was reserved.",
+  removed:
+    "Native project start was canceled; its native cleanup was confirmed.",
+  unreserved:
+    "Native project start was canceled; no runtime state was reserved and its startup intent was retired.",
+};
+
 function startupFailure(error: unknown): number {
   if (error instanceof NativeAuthoredProjectStartError) {
-    if (
-      error.canceled &&
-      (error.outcome === "removed" || error.outcome === "unreserved")
-    ) {
+    const canceledNote = error.canceled
+      ? CANCELED_STARTUP_NOTES[error.outcome]
+      : undefined;
+    if (canceledNote) {
+      logger.info({ message: canceledNote });
       return 130;
     }
     if (nativeCodesReportRuntimeNotRunning(error)) {

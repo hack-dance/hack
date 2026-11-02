@@ -248,3 +248,34 @@ test("a child --version reaches the native one-off instead of printing Hack's ve
   // The one-off reached the runtime (which reports itself stopped).
   expect((await nativeCalls(f.root)).length).toBeGreaterThan(0);
 }, 30_000);
+
+test("native exec and run against a stopped runtime say so and how to recover", async () => {
+  const f = await fixture({ nativeCode: "runtime_not_running" });
+  for (const args of [
+    ["exec", "web", "ls"],
+    ["run", "web", "ls"],
+  ]) {
+    const result = await cli({ fixture: f, args });
+    const output = result.stdout + result.stderr;
+    expect(result.code).toBe(1);
+    expect(output).toContain(
+      "E_DOCKER_UNAVAILABLE: Native runtime is not running; no dependency refresh or command was requested. Start the native runtime and retry."
+    );
+    expect(output).not.toContain("identity or outcome is unconfirmed");
+    expect(output).not.toMatch(STACK_FRAME);
+  }
+  // Each command stopped at the refused dependency refresh; nothing else ran.
+  const refresh = `--candidate-root ${join(f.root, "native-home")} graph refresh-dependencies --run-id ${run.run} --json`;
+  expect(await nativeCalls(f.root)).toEqual([refresh, refresh]);
+}, 30_000);
+
+test("other refused dependency refreshes keep the unconfirmed refusal", async () => {
+  const f = await fixture({ nativeCode: "graph_dependency_refresh_refused" });
+  const result = await cli({ fixture: f, args: ["exec", "web", "ls"] });
+  const output = result.stdout + result.stderr;
+  expect(result.code).toBe(1);
+  expect(output).toContain(
+    "Native dependency refresh identity or outcome is unconfirmed; inspect the owned graph before retrying. No request or command was replayed. Native diagnostic: graph_dependency_refresh_refused."
+  );
+  expect(output).not.toMatch(STACK_FRAME);
+}, 30_000);

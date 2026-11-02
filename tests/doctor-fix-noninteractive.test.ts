@@ -719,3 +719,44 @@ test("doctor migration refusal leaves a missing .hack/.gitignore unwritten (HACK
     await lstat(resolve(projectDir, "hack.env.default.yaml")).catch(() => null)
   ).toBeNull();
 });
+
+test("doctor refuses a default overlay that would overwrite the migrated base (HACK-1695)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  await writeFile(
+    resolve(projectDir, "hack.env.json"),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "A", source: "plain_env" }],
+    })
+  );
+  const base = "A=synthetic-collision-base\n";
+  const overlay = "A=synthetic-collision-overlay\n";
+  await writeFile(resolve(projectDir, ".env"), base);
+  await writeFile(resolve(projectDir, ".env.default"), overlay);
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli([
+      "doctor",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      projectRoot,
+    ])
+  ).toBe(1);
+  expect(await readFile(resolve(projectDir, ".env"), "utf8")).toBe(base);
+  expect(await readFile(resolve(projectDir, ".env.default"), "utf8")).toBe(
+    overlay
+  );
+  expect(
+    await lstat(resolve(projectDir, "hack.env.default.yaml")).catch(() => null)
+  ).toBeNull();
+  expect(
+    await lstat(resolve(projectDir, ".gitignore")).catch(() => null)
+  ).toBeNull();
+  expect(
+    await lstat(resolve(projectDir, "hack.env.json")).catch(() => null)
+  ).not.toBeNull();
+  expect(noteCalls.join("\n")).not.toContain("synthetic-collision-base");
+  expect(noteCalls.join("\n")).not.toContain("synthetic-collision-overlay");
+});

@@ -4928,6 +4928,11 @@ export async function migrateLegacyProjectEnv(opts: {
   const overlayNames = await discoverLegacyOverlayNames({
     projectDir: opts.projectDir,
   });
+  if (overlayNames.includes("default")) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .env.default would overwrite the base hack.env.default.yaml layer. Rename the legacy default overlay and update its project references before retrying. No env migration files were written."
+    );
+  }
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
   )

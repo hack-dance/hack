@@ -1050,6 +1050,9 @@ Doctor offers legacy dotenv files for cleanup only when every parsed entry was
 delivered to an env layer. Files containing undeclared or undelivered entries stay
 on disk; the cleanup report lists their key names and omits their values. This
 also applies to untracked overlays such as `.env.bak` and `.env.example`.
+Migration refuses a legacy `.env.default` overlay before writing env layers,
+because it would overwrite the base `hack.env.default.yaml` layer. Rename that
+legacy overlay and update its project references before retrying.
 
 `hack doctor` also warns when a repo still depends on the old format.
 For modern env repos, `hack doctor` also warns when materialized compatibility output in

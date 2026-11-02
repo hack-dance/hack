@@ -1249,6 +1249,17 @@ removed those references. Without `hack.env.json`, a legacy file that git tracks
 whose status git cannot report in a git checkout, is never offered, because the migrated
 values now live only in this machine's local layers.
 
+Doctor offers legacy dotenv files for cleanup only when every parsed entry was
+delivered to an env layer. Files containing undeclared or undelivered entries stay
+on disk; the cleanup report lists their key names and omits their values. This
+also applies to untracked overlays such as `.env.bak` and `.env.example`.
+Migration refuses a legacy `.env.default` overlay before writing env layers,
+because it would overwrite the base `hack.env.default.yaml` layer. Rename that
+legacy overlay and update its project references before retrying.
+If a legacy dotenv file cannot be read, migration refuses cleanup and leaves
+legacy artifacts in place. Env layers may already have been written; check read
+access and preserve the remaining entries before cleaning up manually.
+
 `hack doctor` also warns when a repo still depends on the old format. Its `env mode`
 check reports an error, not the legacy format, when a `.hack/hack.env.*.yaml` entry is a
 dangling symlink or another non-file.

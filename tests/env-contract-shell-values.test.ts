@@ -790,15 +790,20 @@ for (const file of [
   });
 }
 
-test("an overlay .env.default that adds nothing to the base still migrates", async () => {
+test("an overlay .env.default refuses even when it adds nothing to the base", async () => {
   const repo = await createContractRepo({
     files: {
       ".env": `${SHELL_KEY}=${DOTENV_VALUE}\n`,
       ".env.default": `${SHELL_KEY}=${DOTENV_VALUE}\n`,
     },
   });
-  await migrate(repo);
-  expect(await valueFor(repo, "api")).toBe(DOTENV_VALUE);
+  const before = await snapshotTree(repo);
+
+  const error = await migrate(repo).catch((caught: unknown) => caught);
+
+  expect((error as Error).message).toContain(".env.default would overwrite");
+  expect((error as Error).message).not.toContain(DOTENV_VALUE);
+  expect(await snapshotTree(repo)).toEqual(before);
 });
 
 test("step 1 refuses a contract scope a layer can't hold, before any write", async () => {

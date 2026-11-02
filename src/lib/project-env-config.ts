@@ -5038,6 +5038,10 @@ export type LegacyProjectEnvMigration = {
   readonly cleanupCandidates: readonly string[];
   readonly blockedCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
+  readonly retainedEnvFiles: readonly {
+    readonly path: string;
+    readonly keys: readonly string[];
+  }[];
 };
 
 /**
@@ -5091,6 +5095,7 @@ export async function migrateLegacyProjectEnv(opts: {
       cleanupCandidates: [],
       blockedCleanupCandidates: [],
       composeEnvFileReferences: [],
+      retainedEnvFiles: [],
     };
   }
   // Callers gate on projectEnvConfigExists, which reads a dangling default
@@ -5108,6 +5113,7 @@ export async function migrateLegacyProjectEnv(opts: {
       cleanupCandidates: [],
       blockedCleanupCandidates: [],
       composeEnvFileReferences: [],
+      retainedEnvFiles: [],
     };
   }
 
@@ -5155,12 +5161,24 @@ export async function migrateLegacyProjectEnv(opts: {
     overlays: overlaysResolved,
   });
 
+  if (overlayNames.includes("default")) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .env.default would overwrite the base hack.env.default.yaml layer. Rename the legacy default overlay and update its project references before retrying. No env migration files were written."
+    );
+  }
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
   )
     ? await ensureProjectEnvSecretKey({ projectRoot: opts.projectRoot })
     : null;
 
+  // An overlay may inherit an equal base value without writing its own entry.
+  // Keep the full resolved delivery per source file, including inherited values.
+  const deliveredValues = new Map<string, ReadonlyMap<string, string | null>>();
+  deliveredValues.set(
+    resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+    new Map(baseResolved.values.map((entry) => [entry.key, entry.value]))
+  );
   const wroteFiles: string[] = [];
   const defaultConfig = buildMigratedProjectEnvConfig({
     environment: "default",
@@ -5187,6 +5205,10 @@ export async function migrateLegacyProjectEnv(opts: {
   }
 
   for (const { name: overlayName, values: overlayValues } of overlaysResolved) {
+    deliveredValues.set(
+      resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlayName}`),
+      new Map(overlayValues.map((entry) => [entry.key, entry.value]))
+    );
     const overlayConfig = buildMigratedProjectEnvConfig({
       environment: overlayName,
       values: buildMigratedValues({
@@ -5243,6 +5265,7 @@ export async function migrateLegacyProjectEnv(opts: {
     overlayNames,
     materialize: opts.materialize,
     configCleanupCandidates: configCleanup.cleanupCandidates,
+    deliveredValues,
     composeEnvFileReferences,
   });
 
@@ -5253,6 +5276,7 @@ export async function migrateLegacyProjectEnv(opts: {
     updatedProjectConfig: configCleanup.changed,
     cleanupCandidates: cleanupCandidates.allowed,
     blockedCleanupCandidates: cleanupCandidates.blocked,
+    retainedEnvFiles: cleanupCandidates.retainedEnvFiles,
     composeEnvFileReferences,
   };
 }
@@ -6410,8 +6434,9 @@ const CONTRACT_LAYER_REFUSAL_CLOSING =
  * anything, because it has no rollback and a retry finds layers and does nothing.
  * An overlay named `default` would land on the base layer, and `local` on the
  * machine-local one. A scope a layer can't hold would leave a layer no read can parse.
- * Only an entry that would be written counts, so an overlay that adds nothing to the
- * base, or a scope with no value, still migrates. Names only, JSON-quoted.
+ * Only an entry that would be written counts, so another reserved overlay that adds
+ * nothing to the base, or a scope with no value, still migrates; `.env.default` is
+ * refused separately, whatever it holds. Names only, JSON-quoted.
  */
 function assertContractMigrationLayersAreWritable(opts: {
   readonly baseValues: readonly ResolvedContractMigrationValue[];
@@ -7473,6 +7498,9 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     overlayNames,
     // Generated output wasn't read, so its values aren't in any layer this run wrote.
     materialize: opts.materialize || generatedBase,
+    // No retention check here: every entry in a selected file is in a layer by now,
+    // or the migration refused, and files it didn't select are never candidates.
+    deliveredValues: new Map(),
     configCleanupCandidates: [],
     composeEnvFileReferences,
   });
@@ -7496,6 +7524,7 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     cleanupCandidates: allowedCleanup,
     blockedCleanupCandidates: blockedCleanup,
     composeEnvFileReferences,
+    retainedEnvFiles: cleanupCandidates.retainedEnvFiles,
   };
 }
 
@@ -7698,16 +7727,37 @@ function buildMigratedValues(opts: {
   return values;
 }
 
+/** Cleanup requires readable contents, even when legacy resolution treated a read failure as absence. */
+async function readLegacyDotenvCleanupEntries(opts: {
+  readonly path: string;
+}): Promise<Readonly<Record<string, string>>> {
+  const source = await readOptionalTextFile(opts.path);
+  if (source.kind !== "text") {
+    throw new ClosedCliError(
+      `Refusing legacy env cleanup: could not read ${opts.path}. No legacy files were removed; env layers may already have been written. Check read access before cleaning up manually (values omitted).`
+    );
+  }
+  return parseDotEnv(source.text);
+}
+
 async function collectLegacyProjectEnvCleanupCandidates(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly overlayNames: readonly string[];
   readonly materialize: boolean;
+  readonly deliveredValues: ReadonlyMap<
+    string,
+    ReadonlyMap<string, string | null>
+  >;
   readonly configCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
 }): Promise<{
   readonly allowed: readonly string[];
   readonly blocked: readonly string[];
+  readonly retainedEnvFiles: readonly {
+    readonly path: string;
+    readonly keys: readonly string[];
+  }[];
 }> {
   const candidates = new Set<string>();
   candidates.add(resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME));
@@ -7726,10 +7776,25 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
   const blockedPaths = new Set(
     opts.composeEnvFileReferences.map((reference) => reference.resolvedPath)
   );
+  const retainedEnvFiles: { path: string; keys: string[] }[] = [];
   const allowed: string[] = [];
   const blocked: string[] = [];
   for (const path of candidates) {
     if (await pathExists(path)) {
+      // Value retention is independent of Compose references: repairing Compose
+      // must never promote a file holding undelivered values into cleanup.
+      const delivered = opts.deliveredValues.get(path);
+      if (delivered) {
+        const entries = await readLegacyDotenvCleanupEntries({ path });
+        const keys = Object.entries(entries)
+          .filter(([key, value]) => delivered.get(key) !== value)
+          .map(([key]) => key)
+          .sort();
+        if (keys.length > 0) {
+          retainedEnvFiles.push({ path, keys });
+          continue;
+        }
+      }
       if (blockedPaths.has(path)) {
         blocked.push(path);
       } else {
@@ -7738,6 +7803,7 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
     }
   }
   return {
+    retainedEnvFiles,
     allowed: allowed.sort((left, right) => left.localeCompare(right)),
     blocked: blocked.sort((left, right) => left.localeCompare(right)),
   };

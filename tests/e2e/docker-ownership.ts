@@ -95,7 +95,6 @@ export function isOwnedComposeProject(opts: {
 }
 
 const recordedNames = new Set<string>();
-let journalPath: string | null = null;
 
 /** Directory holding per-process ownership journals. */
 export function ownershipJournalDir(): string {
@@ -103,6 +102,10 @@ export function ownershipJournalDir(): string {
   return override && override.length > 0
     ? override
     : join(tmpdir(), "hack-e2e-ownership");
+}
+
+function ownershipJournalPath(): string {
+  return join(ownershipJournalDir(), `${process.pid}.json`);
 }
 
 /**
@@ -123,20 +126,16 @@ export function ownedFixtureNames(): ReadonlySet<string> {
 }
 
 function writeJournal(): void {
-  const dir = ownershipJournalDir();
-  journalPath ??= join(dir, `${process.pid}.json`);
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(ownershipJournalDir(), { recursive: true });
   writeFileSync(
-    journalPath,
+    ownershipJournalPath(),
     `${JSON.stringify({ pid: process.pid, names: [...recordedNames] })}\n`
   );
 }
 
 /** Remove this process's journal once its resources are verified gone. */
 export async function clearOwnershipJournal(): Promise<void> {
-  if (journalPath !== null) {
-    await rm(journalPath, { force: true });
-  }
+  await rm(ownershipJournalPath(), { force: true });
 }
 
 /**

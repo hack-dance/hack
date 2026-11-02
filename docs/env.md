@@ -599,6 +599,8 @@ Contract migration writes `plain_env` values from legacy dotenv files (or the sh
 to the gitignored machine-local layer, never a tracked layer. It reports each moved
 key and destination path, without values. It refuses a local destination already
 tracked by Git. Values declared as `keychain` migrate to tracked layers as ciphertext.
+Migration requires effective ignore protection before writing plaintext. It refuses
+an outdated read-only `.hack/.gitignore` or a local destination that Git does not ignore.
 Without `hack.env.json`, `set --local` still writes `.hack/.env`; if a contract is
 added later, migration keeps those values machine-local too.
 
@@ -1059,6 +1061,10 @@ because it would overwrite the base `hack.env.default.yaml` layer. Rename that
 legacy overlay and update its project references before retrying.
 It also refuses `.env.local`, whose tracked overlay path would collide with the
 machine-local base layer. Rename that legacy overlay before migration.
+All tracked and effective local destinations are checked for collisions before any
+writes, including compatibility paths. For example, `.env.staging` together with
+`.env.staging.local` is refused because both would write `hack.env.staging.local.yaml`.
+Collision checks include case-only aliases for checkouts with case-insensitive filenames.
 If a legacy dotenv file cannot be read, migration refuses cleanup and leaves
 legacy artifacts in place. Env layers may already have been written; check read
 access and preserve the remaining entries before cleaning up manually.

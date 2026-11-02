@@ -1673,6 +1673,45 @@ test("contract migration in a linked worktree keeps plaintext in that worktree's
   expect(resolved?.serviceEnv.web?.LOCAL_FIXTURE).toBeUndefined();
 });
 
+test("contract migration refuses aliases with the compatibility local base before writes", async () => {
+  const repo = await createRepo();
+  const legacyLocal = "version: 1\nenvironment: local\nvalues:\n  global: {}\n";
+  await writeFile(resolve(repo.projectDir, "hack.env.local.yaml"), legacyLocal);
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "LOCAL_FIXTURE", source: "plain_env" }],
+    })
+  );
+  await initializeGitRepo({ projectRoot: repo.projectRoot });
+  const base = "LOCAL_FIXTURE=synthetic-base\n";
+  const overlay = "LOCAL_FIXTURE=synthetic-overlay\n";
+  await writeFile(resolve(repo.projectDir, ".env"), base);
+  await writeFile(resolve(repo.projectDir, ".env.default.local"), overlay);
+  await expect(
+    migrateLegacyProjectEnv({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      projectName: "project-env-test",
+      serviceNames: ["api", "web"],
+      materialize: false,
+    })
+  ).rejects.toThrow("env layer destination paths collide");
+  expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toBe(base);
+  expect(
+    await readFile(resolve(repo.projectDir, ".env.default.local"), "utf8")
+  ).toBe(overlay);
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.local.yaml"), "utf8")
+  ).toBe(legacyLocal);
+  for (const name of ["hack.env.default.yaml", "hack.env.default.local.yaml"]) {
+    await expect(
+      readFile(resolve(repo.projectDir, name), "utf8")
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  }
+});
+
 async function initializeGitRepo(opts: {
   readonly projectRoot: string;
 }): Promise<void> {

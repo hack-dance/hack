@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -428,6 +429,75 @@ test(
     await expect(
       readFile(join(project.projectDir, "hack.env.default.yaml"), "utf8")
     ).rejects.toMatchObject({ code: "ENOENT" });
+  },
+  CLI_TEST_TIMEOUT_MS
+);
+
+test(
+  "doctor migration refuses an outdated read-only ignore file before writing plaintext",
+  async () => {
+    const project = await createProject({ contract: true });
+    await git(project, ["init", "--quiet"]);
+    const envPath = join(project.projectDir, ".env");
+    const ignorePath = join(project.projectDir, ".gitignore");
+    const original = `LOCAL_KEY=${VALUE}\n`;
+    await writeFile(envPath, original);
+    await writeFile(ignorePath, "# outdated fixture rules\n");
+    await chmod(ignorePath, 0o444);
+    const run = await runDoctor(project);
+    expect(run.exitCode).toBe(1);
+    expect(run.output).not.toContain(VALUE);
+    expect(run.output).toContain(".hack/.gitignore is read-only");
+    expect(await readFile(envPath, "utf8")).toBe(original);
+    expect(await readFile(ignorePath, "utf8")).toBe(
+      "# outdated fixture rules\n"
+    );
+    expect(
+      await readFile(join(project.projectDir, "hack.env.json"), "utf8")
+    ).toBe(CONTRACT);
+    for (const name of ["hack.env.local.yaml", "hack.env.default.yaml"]) {
+      await expect(
+        readFile(join(project.projectDir, name), "utf8")
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  },
+  CLI_TEST_TIMEOUT_MS
+);
+
+test.each(["staging.local", "staging.LOCAL"])(
+  "doctor migration refuses aliased overlay %s and keeps every legacy source",
+  async (overlayName) => {
+    const project = await createProject({ contract: true });
+    await git(project, ["init", "--quiet"]);
+    const sources = {
+      ".env": `LOCAL_KEY=${VALUE}\n`,
+      ".env.staging": `LOCAL_KEY=${VALUE}-staging\n`,
+      [`.env.${overlayName}`]: `LOCAL_KEY=${VALUE}-other\n`,
+    };
+    for (const [name, text] of Object.entries(sources)) {
+      await writeFile(join(project.projectDir, name), text);
+    }
+    const run = await runDoctor(project);
+    expect(run.exitCode).toBe(1);
+    expect(run.output).not.toContain(VALUE);
+    expect(run.output).toContain("env layer destination paths collide");
+    for (const [name, text] of Object.entries(sources)) {
+      expect(await readFile(join(project.projectDir, name), "utf8")).toBe(text);
+    }
+    expect(
+      await readFile(join(project.projectDir, "hack.env.json"), "utf8")
+    ).toBe(CONTRACT);
+    for (const name of [
+      "hack.env.default.yaml",
+      "hack.env.local.yaml",
+      "hack.env.staging.yaml",
+      "hack.env.staging.local.yaml",
+      "hack.env.staging.local.local.yaml",
+    ]) {
+      await expect(
+        readFile(join(project.projectDir, name), "utf8")
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    }
   },
   CLI_TEST_TIMEOUT_MS
 );

@@ -815,6 +815,38 @@ export async function withNativeAuthoredProjectStatus<T>(
     return result;
   });
 }
+/**
+ * Read-only selection for explicit `down --recover` (HACK-1312): true only when
+ * this scope retains nothing a recovery owner could act on. That means no saved
+ * Ready mapping, startup intent, frontend recovery intent, live-stop or hook
+ * owner record, and none of the mutation, admission or recovery evidence the
+ * saved-status owner checks. Nothing is created, locked or repaired. Any
+ * refusal returns false, so the stored-generation owner keeps its own refusals.
+ */
+export async function nativeAuthoredProjectNothingToRecover(
+  opts: NativeAuthoredProjectRunScope
+): Promise<boolean> {
+  const scope = { ...opts };
+  try {
+    const empty = await withNativeAuthoredProjectStatus(
+      scope,
+      async (saved) => await Promise.resolve(!(saved.ready || saved.pending))
+    );
+    if (!empty) {
+      return false;
+    }
+    return await storage(scope, false, async (store) => {
+      if (store) {
+        const key = digest(JSON.stringify(store.identity.branch));
+        await absent(liveStopPath(store));
+        await absent(join(store.root.path, `${key}.hooks.json`));
+      }
+      return true;
+    });
+  } catch {
+    return false;
+  }
+}
 /** Publish the authenticated admitted owner once. Interrupted publication never replaces an existing run. */
 export async function saveNativeAuthoredProjectRun(
   opts: NativeAuthoredProjectRunScope & {

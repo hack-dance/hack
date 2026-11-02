@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -167,6 +168,26 @@ test("doctor rejects mutating repair flags combined with json", () => {
       migrateEnvConfig: false,
     })
   ).not.toThrow();
+});
+
+test("doctor remediation plan treats a dangling contract as a contract, not as absent", async () => {
+  const root = await createDoctorTestProject({ legacy: true });
+  try {
+    const contract = resolve(root, ".hack", "hack.env.json");
+    await rm(contract);
+    await symlink(resolve(root, "contract-that-is-gone"), contract);
+
+    const lines = await buildDoctorRemediationPlanLines({
+      startDir: root,
+      migrateEnvConfig: true,
+    });
+
+    expect(lines.at(-1)).toBe(
+      "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml."
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("doctor remediation plan mentions env migration when requested for a legacy project", async () => {

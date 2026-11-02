@@ -5,7 +5,9 @@
  * A collection ends in exactly one outcome:
  * - `complete`: the backend reached end of stream and exited 0.
  * - `cutoff`: the MCP server stopped collection at one of its own bounds. This
- *   is a success; `data.cutoff` names the bound and its effective limit.
+ *   is a success; `data.cutoff` names the bound and its effective limit. The
+ *   result can also gain or replace a byte cutoff after classification, when
+ *   `boundMcpToolResult` removes events to fit the message limit.
  * - `backend_error`: the log backend reported failure (a stream `error` event,
  *   a failing `end` event, or a non-zero exit the server did not cause). This
  *   is a closed error, never a truncated success.
@@ -32,7 +34,9 @@ export type McpLogStopReason =
 /** The bound that ended a successful, incomplete collection. */
 export type McpLogCutoff = {
   /** `events` counts `type: "log"` events only; `bytes` is the shared stdout
-   * plus stderr capture budget; `time` is the collection window. */
+   * plus stderr capture budget, or the serialized result limit when
+   * `boundMcpToolResult` removed events after collection; `time` is the
+   * collection window. */
   readonly bound: "events" | "bytes" | "time";
   readonly limit: number;
 };

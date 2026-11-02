@@ -272,11 +272,20 @@ test("a later file still reaches a loopback server directly", async () => {
 // No process.env operation leaves a hidden native change under Bun 1.4.4, so this
 // fixture presents one to the guard's own native reader at the file boundary.
 const LEAK_NATIVE_ENV = `import { test } from "bun:test";
-import { captureNativeEnv, setNativeEnvSourceForGuardTest } from ${JSON.stringify(GUARD_HELPER)};
-test("leaves Bun's native environment changed", () => {
+import { captureNativeEnv, setNativeEnvOnceForGuardTest } from ${JSON.stringify(GUARD_HELPER)};
+test("presents a changed native environment through the guard-test seam", () => {
   const changed = new Map(captureNativeEnv() ?? []);
   changed.set("HTTP_PROXY", "http://127.0.0.1:9");
-  setNativeEnvSourceForGuardTest(() => changed);
+  setNativeEnvOnceForGuardTest(changed);
+});
+`;
+
+// The seam answers one read, the guard's check at the boundary, so a later file
+// is read by the real reader again.
+const NATIVE_READER_BACK = `import { expect, test } from "bun:test";
+import { captureNativeEnv } from ${JSON.stringify(GUARD_HELPER)};
+test("a later file gets the real native reader back", () => {
+  expect(captureNativeEnv()?.get("HTTP_PROXY")).toBeUndefined();
 });
 `;
 
@@ -307,6 +316,7 @@ async function runNestedSuite(opts: {
     LEAK_LISTENER
   );
   await writeFile(join(suite, "c3-leak-native-env.test.ts"), LEAK_NATIVE_ENV);
+  await writeFile(join(suite, "c4-native-reader.test.ts"), NATIVE_READER_BACK);
   await writeFile(join(suite, "d-later.test.ts"), LATER);
   const child = Bun.spawn(
     [
@@ -317,6 +327,7 @@ async function runNestedSuite(opts: {
       "./c-leak-native-proxy.test.ts",
       "./c2-leak-signal-listener.test.ts",
       "./c3-leak-native-env.test.ts",
+      "./c4-native-reader.test.ts",
       "./d-later.test.ts",
     ],
     {
@@ -349,6 +360,9 @@ test("without the guard, an early leak cascades into a later file", async () => 
 }, 60_000);
 
 test("the guard names each leaking file, restores state, and later files pass", async () => {
+  // The native leak here comes from the seam, so no real proxy exists and the
+  // later loopback fetch would go direct anyway. This shows the guard detects
+  // and reports it, not that its repair (disableNativeProxies) works.
   const run = await runNestedSuite({ preload: true });
   expect(run.code).not.toBe(0);
   expect(run.output).toContain(
@@ -374,6 +388,9 @@ test("the guard names each leaking file, restores state, and later files pass", 
     "c3-leak-native-env.test.ts left Bun's native environment changed after the file finished: native env HTTP_PROXY changed"
   );
   expect(run.output).toContain("3 test file(s) leaked process state");
+  expect(run.output).toContain(
+    "(pass) a later file gets the real native reader back"
+  );
   expect(run.output).not.toContain("127.0.0.1:9");
   expect(run.output).not.toContain("Executable not found");
   expect(run.output).toContain("LATER-FILE-PASSED");

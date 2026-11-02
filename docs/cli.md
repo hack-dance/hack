@@ -500,7 +500,7 @@ Compose-input handling is a separate qualification boundary.
 
 ### Branch registry and usage
 
-Runtime commands never write tracked files. `hack up/down/restart/run/exec/logs` record when a
+Runtime commands never write tracked files. `hack up/down/restart/run/exec` record when a
 branch instance was last used in machine-local `.hack/.internal/branch-usage.json` (ignored by the
 committed `.hack/.gitignore`, one per checkout), so `git status` stays clean in a linked worktree.
 

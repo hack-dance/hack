@@ -5,7 +5,7 @@ import { getString, isRecord } from "./guards.ts";
 
 /**
  * Machine-local branch usage, kept under `.hack/.internal/` so runtime
- * commands (up/down/restart/run/exec/logs) never write a tracked file.
+ * commands (up/down/restart/run/exec) never write a tracked file.
  *
  * The committed `hack.branches.json` only holds the explicit registry
  * (`hack branch add/remove`). Its legacy `last_used_at` values are read as a

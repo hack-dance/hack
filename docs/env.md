@@ -1119,6 +1119,10 @@ files, when:
   that file set, so move such values first with `hack env set --local`. A `.hack` or a layer
   linked outside the project is refused with a closed error, and the link and outside files
   stay as they are;
+- outside a git checkout, `hack.env.local.yaml` sets `environment: local`, so it serves as the
+  `local` overlay and base values written there wouldn't reach the default env
+  (`E_CONFIG_INVALID`). If it's meant to be your machine-local layer, set its `environment` to
+  `default`, then retry;
 - git tracks a machine-local layer it would write, or, in a git checkout, git cannot
   report whether it does (`E_PATH_CONFLICT`);
 - in a git checkout, git does not ignore a machine-local layer it would write, for

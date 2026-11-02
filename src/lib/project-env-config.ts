@@ -6434,7 +6434,7 @@ async function assertNoLegacyDotenvLinks(opts: {
   if (linked.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_PATH_CONFLICT",
-      reason: `${linked.join(", ")} ${linked.length === 1 ? "is a symlink" : "are symlinks"}, and this migration writes plain_env values to tracked env layers, so another file's values could be committed. Replace the link with a regular file, or remove it, then retry.`,
+      reason: `${linked.join(", ")} ${linked.length === 1 ? "is a symlink" : "are symlinks"}, and this migration must not pull another file's values into this project's env layers. Replace the link with a regular file, or remove it, then retry.`,
     });
   }
 }
@@ -7204,6 +7204,37 @@ async function publishMigratedLegacyLayers(opts: {
   return wroteFiles;
 }
 
+/**
+ * Refuses when `hack.env.local.yaml` serves as the `local` env overlay rather than the
+ * machine-local base. Base values written there would reach `--env local` and not the
+ * default env, past the scoped-value check, which models the machine-local base slot.
+ */
+async function assertLocalBaseIsTheDefaultEnvLayer(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly baseToMigrate: Readonly<Record<string, unknown>>;
+}): Promise<void> {
+  if (Object.keys(opts.baseToMigrate).length === 0) {
+    return;
+  }
+  const localBasePath = resolveProjectEnvLocalConfigPath({
+    projectDir: opts.projectDir,
+    envName: null,
+  });
+  const effectivePath = await resolveProjectEnvEffectiveLocalConfigPath({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    envName: null,
+  });
+  if (effectivePath !== localBasePath) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason:
+        "hack.env.local.yaml is this project's `local` env overlay, so migrated values would reach `--env local` and not the default env. If it's meant to be your machine-local layer, set its `environment` to `default`, then retry.",
+    });
+  }
+}
+
 /** What each selected legacy file's env receives now, so cleanup can compare, not assume. */
 async function deliveredValuesPerLegacyFile(opts: {
   readonly projectRoot: string;
@@ -7325,6 +7356,7 @@ async function migrateUndeclaredLegacyDotenv(opts: {
       envName: null,
     }),
   });
+  await assertLocalBaseIsTheDefaultEnvLayer({ ...opts, baseToMigrate });
   const localWrites: PlannedEnvLayerWrite[] = [];
   const trackedWrites: PlannedEnvLayerWrite[] = [
     {

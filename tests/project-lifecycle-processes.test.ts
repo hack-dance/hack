@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -19,6 +19,23 @@ import { restoreEnv } from "./helpers/env.ts";
 
 const tempDirs = new Set<string>();
 const originalHome = process.env.HOME;
+const trustKeys = [
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "CURL_CA_BUNDLE",
+  "GIT_SSL_CAINFO",
+  "REQUESTS_CA_BUNDLE",
+  "HACK_HOST_TRUST_BUNDLE",
+  "HACK_LOCAL_CA_CERT",
+] as const;
+const originalTrust = Object.fromEntries(
+  trustKeys.map((key) => [key, process.env[key]])
+);
+beforeEach(() => {
+  for (const key of trustKeys) {
+    delete process.env[key];
+  }
+});
 
 afterEach(async () => {
   for (const tempDir of tempDirs) {
@@ -26,6 +43,14 @@ afterEach(async () => {
   }
   tempDirs.clear();
   restoreEnv("HOME", originalHome);
+  for (const key of trustKeys) {
+    const value = originalTrust[key];
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
 });
 
 test("readLifecycleState preserves lifecycle pane and process group metadata", async () => {

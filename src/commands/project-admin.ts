@@ -2,14 +2,16 @@ import { resolve } from "node:path";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optJson, optPath, optProject } from "../cli/options.ts";
-import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
+import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import {
   findProjectContext,
   readProjectConfig,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
-import { resolveRegisteredProjectByName } from "../lib/projects-registry.ts";
 import { display } from "../ui/display.ts";
+import { targetCommand, targetSpec } from "./project-target.ts";
+import { taskCommand, taskSpec } from "./project-task.ts";
 
 const ownerShowOptions = [optPath, optProject, optJson] as const;
 
@@ -37,7 +39,7 @@ const projectSpec = defineCommand({
   group: "Project",
   options: [],
   positionals: [],
-  subcommands: [ownerSpec],
+  subcommands: [ownerSpec, targetSpec, taskSpec],
 } as const);
 
 const handleOwnerShow: CommandHandlerFor<typeof ownerShowSpec> = async ({
@@ -90,7 +92,7 @@ const ownerCommand = {
 
 export const projectCommand = {
   ...projectSpec,
-  subcommands: [ownerCommand],
+  subcommands: [ownerCommand, targetCommand, taskCommand],
 } as const;
 
 async function resolveProjectTarget(input: {
@@ -98,22 +100,14 @@ async function resolveProjectTarget(input: {
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
 }) {
-  if (input.pathOpt && input.projectOpt) {
+  if (input.pathOpt && input.projectOpt !== undefined) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (input.projectOpt) {
-    const name = sanitizeProjectSlug(input.projectOpt);
-    if (name.length === 0) {
-      throw new CliUsageError("Invalid --project value.");
-    }
-    const project = await resolveRegisteredProjectByName({ name });
-    if (!project) {
-      throw new CliUsageError(
-        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
-      );
-    }
-    return project;
+  if (input.projectOpt !== undefined) {
+    return await resolveRegisteredProjectOption({
+      projectOpt: input.projectOpt,
+    });
   }
 
   const startDir = input.pathOpt
@@ -121,9 +115,7 @@ async function resolveProjectTarget(input: {
     : input.cwd;
   const project = await findProjectContext(startDir);
   if (!project) {
-    throw new Error(
-      `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`
-    );
+    throw new MissingProjectContextError();
   }
   return project;
 }

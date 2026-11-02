@@ -5,7 +5,6 @@ import {
   renderHelpMarkdownForPath,
 } from "../src/cli/help.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
-import { restoreEnv } from "./helpers/env.ts";
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -24,7 +23,7 @@ afterEach(() => {
   if (originalAck === undefined) {
     Reflect.deleteProperty(process.env, "HACK_EXPERIMENTAL_ACK");
   } else {
-    restoreEnv("HACK_EXPERIMENTAL_ACK", originalAck);
+    process.env.HACK_EXPERIMENTAL_ACK = originalAck;
   }
 });
 

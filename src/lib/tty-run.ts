@@ -8,12 +8,21 @@ export async function runWithTerminalGroup(opts: {
   readonly command: readonly string[];
   readonly cwd?: string;
   readonly env: Record<string, string>;
-  readonly stdout?: "inherit" | "stderr";
+  readonly stdout?: RunOptions["stdout"];
+  readonly stderr?: RunOptions["stderr"];
   readonly stdin?: RunOptions["stdin"];
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  readonly beforeSpawn?: RunOptions["beforeSpawn"];
   readonly onSpawn?: RunOptions["onSpawn"];
   readonly onExit?: RunOptions["onExit"];
 }): Promise<number> {
+  // Awaited supervisor setup must not retain mutable caller options or argv.
+  const options = { ...opts, command: [...opts.command], env: { ...opts.env } };
+  const signal = options.signal;
+  if (signal?.aborted) {
+    return 143;
+  }
   const terminal = openTerminalControl();
   const parentGroup = terminal.group();
   const originalAttributes = terminal.attributes();
@@ -36,12 +45,22 @@ export async function runWithTerminalGroup(opts: {
   const invocation = Bun.main.startsWith("/$bunfs/")
     ? [process.execPath]
     : [process.execPath, entrypoint];
+  try {
+    options.beforeSpawn?.();
+  } catch (error) {
+    terminal.close();
+    throw error;
+  }
+  if (signal?.aborted) {
+    terminal.close();
+    return 143;
+  }
   const child = Bun.spawn([...invocation, TTY_SUPERVISOR_ARGUMENT], {
-    cwd: opts.cwd,
-    env: opts.env,
-    stdin: opts.stdin ?? "inherit",
-    stdout: opts.stdout === "stderr" ? 2 : "inherit",
-    stderr: "inherit",
+    cwd: options.cwd,
+    env: options.env,
+    stdin: options.stdin ?? "inherit",
+    stdout: options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit"),
+    stderr: options.stderr ?? "inherit",
     ipc(message: unknown) {
       if (
         typeof message !== "object" ||
@@ -84,7 +103,7 @@ export async function runWithTerminalGroup(opts: {
   function observeSpawn(pid: number): void {
     spawnObservation = Promise.resolve()
       .then(() =>
-        opts.onSpawn?.({
+        options.onSpawn?.({
           pid,
           ownsProcessGroup: true,
           processGroupId: child.pid,
@@ -107,7 +126,7 @@ export async function runWithTerminalGroup(opts: {
       cancel("SIGTERM", 1, true);
       return;
     }
-    child.send({ kind: "start", command: [...opts.command] });
+    child.send({ kind: "start", command: [...options.command] });
   }
   function cancel(
     signal: "SIGINT" | "SIGTERM",
@@ -164,8 +183,13 @@ export async function runWithTerminalGroup(opts: {
   process.on("SIGTERM", terminate);
   process.on("SIGTSTP", suspend);
   process.on("SIGCONT", resume);
-  if (opts.timeoutMs !== undefined) {
-    timeout = setTimeout(() => cancel("SIGTERM", 124, true), opts.timeoutMs);
+  const disposeAbort = observeAbort(signal, () => {
+    if (cancellationCode === null) {
+      terminate();
+    }
+  });
+  if (options.timeoutMs !== undefined) {
+    timeout = setTimeout(() => cancel("SIGTERM", 124, true), options.timeoutMs);
   }
   let result: RunExitEvent;
   try {
@@ -186,6 +210,7 @@ export async function runWithTerminalGroup(opts: {
     process.off("SIGTERM", terminate);
     process.off("SIGTSTP", suspend);
     process.off("SIGCONT", resume);
+    disposeAbort();
     if (cancellationCode !== null || !acknowledged) {
       if (ready) {
         signalOwnedGroup(child.pid, "SIGKILL");
@@ -199,8 +224,32 @@ export async function runWithTerminalGroup(opts: {
   if (observationError) {
     throw observationError;
   }
-  await opts.onExit?.(result);
+  await options.onExit?.(result);
   return result.exitCode;
+}
+
+function observeAbort(
+  signal: AbortSignal | undefined,
+  cancel: () => void
+): () => void {
+  let active = true;
+  const onAbort = () => {
+    // The caller can abort from an earlier OS handler; preserve that dispatch's
+    // signal-specific exit code before considering generic signal cancellation.
+    queueMicrotask(() => {
+      if (active) {
+        cancel();
+      }
+    });
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) {
+    onAbort();
+  }
+  return () => {
+    active = false;
+    signal?.removeEventListener("abort", onAbort);
+  };
 }
 
 function readAccounting(

@@ -1,15 +1,6 @@
 import { stat } from "node:fs/promises";
 
 import { resolve } from "node:path";
-import {
-  BoxRenderable,
-  createCliRenderer,
-  dim,
-  fg,
-  ScrollBoxRenderable,
-  TextRenderable,
-  t,
-} from "@opentui/core";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -835,25 +826,35 @@ type AuditLine = {
   readonly formatted: string;
 };
 
-class WrappedTextRenderable extends TextRenderable {
-  protected override onResize(width: number, height: number): void {
-    super.onResize(width, height);
-    if (this.wrapMode !== "none" && width > 0) {
-      this.textBufferView.setWrapWidth(width);
-    }
-  }
-
-  public syncWrapWidth(): void {
-    const width = Math.floor(this.width);
-    if (this.wrapMode !== "none" && width > 0) {
-      this.textBufferView.setWrapWidth(width);
-    }
-  }
-}
-
 async function runRemoteMonitor(opts: {
   readonly project: ResolvedProject;
 }): Promise<number> {
+  const {
+    BoxRenderable,
+    createCliRenderer,
+    dim,
+    fg,
+    ScrollBoxRenderable,
+    TextRenderable,
+    t,
+  } = await import("@opentui/core");
+
+  class WrappedTextRenderable extends TextRenderable {
+    protected override onResize(width: number, height: number): void {
+      super.onResize(width, height);
+      if (this.wrapMode !== "none" && width > 0) {
+        this.textBufferView.setWrapWidth(width);
+      }
+    }
+
+    public syncWrapWidth(): void {
+      const width = Math.floor(this.width);
+      if (this.wrapMode !== "none" && width > 0) {
+        this.textBufferView.setWrapWidth(width);
+      }
+    }
+  }
+
   let statusTimer: ReturnType<typeof setInterval> | null = null;
   let auditTimer: ReturnType<typeof setInterval> | null = null;
   let isActive = true;

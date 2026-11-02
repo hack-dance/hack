@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
-import { restoreEnv } from "./helpers/env.ts";
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -32,12 +31,12 @@ afterEach(async () => {
   if (originalLogger === undefined) {
     Reflect.deleteProperty(process.env, "HACK_LOGGER");
   } else {
-    restoreEnv("HACK_LOGGER", originalLogger);
+    process.env.HACK_LOGGER = originalLogger;
   }
   if (originalProjectEnvKey === undefined) {
     Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");
   } else {
-    restoreEnv("HACK_ENV_SECRET_KEY", originalProjectEnvKey);
+    process.env.HACK_ENV_SECRET_KEY = originalProjectEnvKey;
   }
 });
 
@@ -89,7 +88,9 @@ test("modern env list rejects unknown service scopes", async () => {
   ]);
 
   expect(result.exitCode).toBe(1);
-  expect(result.stderr).toContain("Unknown env scope: typo_service");
+  expect(result.stderr).toContain("Unknown env scope:");
+  expect(result.stderr).toContain("Configured scopes: global, api");
+  expect(result.stderr).not.toContain("typo_service");
 });
 
 test("env explain reports precedence and delivery without revealing values", async () => {

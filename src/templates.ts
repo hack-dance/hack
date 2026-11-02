@@ -1,9 +1,12 @@
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_COREDNS_IP,
+  DEFAULT_GRAFANA_HOST,
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_LOGGING_NETWORK,
   DEFAULT_LOKI_HOST,
+  DEFAULT_NEW_PROJECT_TLD,
+  DEFAULT_OAUTH_ALIAS_ROOT,
   DEFAULT_OAUTH_ALIAS_TLD,
   DEFAULT_PROJECT_TLD,
   DEFAULT_SCHEMAS_HOST,
@@ -16,7 +19,11 @@ import {
   GLOBAL_GRAFANA_DATASOURCE_FILENAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOKI_CONFIG_FILENAME,
+  LEGACY_GRAFANA_HOST,
+  LEGACY_LOKI_HOST,
+  LEGACY_SCHEMAS_HOST,
 } from "./constants.ts";
+import { parseDefaultDomain } from "./lib/default-domain.ts";
 
 export function renderGlobalCaddyCompose(opts?: {
   readonly useStaticCoreDnsIp?: boolean;
@@ -28,7 +35,7 @@ export function renderGlobalCaddyCompose(opts?: {
     "name: hack-dev-proxy",
     "services:",
     "  caddy:",
-    "    image: lucaslorentz/caddy-docker-proxy:2.10",
+    "    image: lucaslorentz/caddy-docker-proxy:2.10.0-alpine",
     "    command:",
     "      - docker-proxy",
     "      - --polling-interval",
@@ -43,7 +50,7 @@ export function renderGlobalCaddyCompose(opts?: {
     "    extra_hosts:",
     '      - "host.docker.internal:host-gateway"',
     "    labels:",
-    `      caddy: ${DEFAULT_SCHEMAS_HOST}`,
+    `      caddy: ${DEFAULT_SCHEMAS_HOST}, ${LEGACY_SCHEMAS_HOST}`,
     "      caddy.root: /srv/schemas",
     '      caddy.file_server: ""',
     "      caddy.tls: internal",
@@ -81,19 +88,32 @@ export function renderGlobalCaddyCompose(opts?: {
 
 export function renderGlobalCoreDnsConfig(opts?: {
   readonly useStaticCaddyIp?: boolean;
+  readonly defaultDomain?: string;
 }): string {
   const useStaticCaddyIp = opts?.useStaticCaddyIp === true;
+  const defaultDomain = parseDefaultDomain(
+    opts?.defaultDomain ?? DEFAULT_NEW_PROJECT_TLD
+  );
+  const builtInDomains: ReadonlySet<string> = new Set([
+    DEFAULT_PROJECT_TLD,
+    DEFAULT_NEW_PROJECT_TLD,
+    DEFAULT_OAUTH_ALIAS_ROOT,
+  ]);
+  const builtInPattern = "(.*)\\.hack(\\..*)?\\.?";
+  const pattern = builtInDomains.has(defaultDomain)
+    ? `${builtInPattern}$`
+    : `(?:${builtInPattern}|(.*)\\.${defaultDomain.replaceAll(".", "\\.")}\\.?)$`;
   return [
     ".:53 {",
     ...(useStaticCaddyIp
       ? [
           "  template IN A {",
-          "    match (.*)\\.hack(\\..*)?\\.?$",
+          `    match ${pattern}`,
           `    answer "{{ .Name }} 30 IN A ${DEFAULT_CADDY_IP}"`,
           "    fallthrough",
           "  }",
         ]
-      : ["  rewrite name regex (.*)\\.hack(\\..*)?\\.?$ caddy"]),
+      : [`  rewrite name regex ${pattern} caddy`]),
     "  forward . 127.0.0.11",
     "  cache 30",
     "}",
@@ -113,7 +133,7 @@ export function renderGlobalLoggingCompose(): string {
     "      - loki-data:/loki",
     `      - ./${GLOBAL_LOKI_CONFIG_FILENAME}:/etc/loki/config.yaml:ro`,
     "    labels:",
-    `      caddy: ${DEFAULT_LOKI_HOST}`,
+    `      caddy: ${DEFAULT_LOKI_HOST}, ${LEGACY_LOKI_HOST}`,
     '      caddy.reverse_proxy: "{{upstreams 3100}}"',
     "      caddy.tls: internal",
     "    networks:",
@@ -124,8 +144,9 @@ export function renderGlobalLoggingCompose(): string {
     "    image: grafana/alloy:v1.12.0",
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock",
+    `      - ${GLOBAL_ALLOY_DATA_VOLUME}:${GLOBAL_ALLOY_STORAGE_PATH}`,
     `      - ./${GLOBAL_ALLOY_FILENAME}:/etc/alloy/config.alloy:ro`,
-    "    command: run /etc/alloy/config.alloy",
+    `    command: run --storage.path=${GLOBAL_ALLOY_STORAGE_PATH} /etc/alloy/config.alloy`,
     "    networks:",
     `      - ${DEFAULT_LOGGING_NETWORK}`,
     "",
@@ -139,7 +160,7 @@ export function renderGlobalLoggingCompose(): string {
     `      - ./${GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME}:/etc/grafana/provisioning/dashboards/hack-dashboards.yaml:ro`,
     `      - ./${GLOBAL_GRAFANA_DASHBOARDS_DIR}:/var/lib/grafana/dashboards:ro`,
     "    labels:",
-    `      caddy: logs.${DEFAULT_PROJECT_TLD}`,
+    `      caddy: ${DEFAULT_GRAFANA_HOST}, ${LEGACY_GRAFANA_HOST}`,
     '      caddy.reverse_proxy: "{{upstreams 3000}}"',
     "      caddy.tls: internal",
     "    networks:",
@@ -155,14 +176,62 @@ export function renderGlobalLoggingCompose(): string {
     "volumes:",
     "  loki-data:",
     "  grafana-data:",
+    `  ${GLOBAL_ALLOY_DATA_VOLUME}:`,
     "",
   ].join("\n");
 }
+
+/**
+ * Named volume that holds Alloy's component data, above all the
+ * `loki.source.docker` positions file (`positions.yml`). Without it the
+ * positions live in the container's writable layer, so every recreated Alloy
+ * container (`hack global down` then `hack global up`, or an image change)
+ * read every retained container log again and could resend entries Loki
+ * already held. `docker compose down` keeps named volumes;
+ * `hack global logs-reset` (`down -v`) removes it together with Loki's data.
+ */
+export const GLOBAL_ALLOY_DATA_VOLUME = "alloy-data";
+
+/**
+ * Alloy's `--storage.path` inside the container: the directory the official
+ * image creates for it and names in its default command. The image's default
+ * command is replaced to point at the mounted config, so the flag is repeated
+ * explicitly; without it Alloy falls back to `data-alloy/` under its working
+ * directory, outside the volume.
+ */
+export const GLOBAL_ALLOY_STORAGE_PATH = "/var/lib/alloy/data";
 
 // Back-compat alias (internal). Promtail has been replaced by Grafana Alloy.
 export function renderGlobalPromtailYaml(): string {
   return renderGlobalAlloyConfig();
 }
+
+/**
+ * Docker discovery poll interval for the global Alloy config. A container that
+ * starts, exits and is removed within one interval can still be missed; one
+ * that exits but is kept (the Compose default) is shipped on the next poll.
+ */
+export const GLOBAL_ALLOY_DOCKER_REFRESH_INTERVAL = "5s";
+
+/**
+ * Container states Alloy discovers. `exited` is what lets short-lived Compose
+ * services reach Loki; the others match Docker's default running-only listing.
+ */
+export const GLOBAL_ALLOY_DOCKER_STATUSES = [
+  "running",
+  "restarting",
+  "paused",
+  "exited",
+] as const;
+
+/**
+ * Minimum level of Alloy's own log output. Alloy's container is itself a
+ * Compose service that Alloy ships to Loki, so info-level component logs (a
+ * "finished transferring logs" line on every log reopen, which repeats every
+ * 5 seconds for each kept exited container that never logged a line) would
+ * grow Loki without bound.
+ */
+export const GLOBAL_ALLOY_LOG_LEVEL = "warn";
 
 export function renderGlobalAlloyConfig(): string {
   // Docs:
@@ -170,9 +239,67 @@ export function renderGlobalAlloyConfig(): string {
   // - https://grafana.com/docs/alloy/latest/reference/components/discovery/discovery.relabel/
   // - https://grafana.com/docs/alloy/latest/reference/components/loki/loki.source.docker/
   // - https://grafana.com/docs/alloy/latest/reference/components/loki/loki.write/
+  //
+  // Short-lived containers (HACK-1277): discovery.docker polls the Docker API and,
+  // by default, lists only running containers once a minute. A one-shot Compose
+  // service that started and exited between two polls was never tailed, so Loki
+  // had nothing while `docker compose logs` still showed its output. Docker sets
+  // `all=true` when a `status` filter is present, so exited containers are listed
+  // too and loki.source.docker ships their retained logs. The poll interval is
+  // shortened so a container removed soon after it exits (for example
+  // `docker compose run --rm`) has a smaller window to be missed.
+  //
+  // Cost (Alloy v1.12.0, internal/component/loki/source/docker/runner.go):
+  // loki.source.docker calls ContainerInspect on every discovered target every
+  // 5s, running or exited, for as long as Docker keeps the container. It then
+  // reopens the log (one more inspect call and one logs call) when
+  // `res.State.Running || finished.Unix() >= t.target.Last()` and the log is
+  // not already open. `finished` is `State.FinishedAt` in whole seconds (0
+  // when unparsable). `Last()` is the wall-clock unix second at which Alloy
+  // last processed a line from the container (dockertarget/target.go stores
+  // `time.Now()` after each line); it starts at 0 when the target is created
+  // and is not kept in the positions file. A reopen asks Docker for lines
+  // `since` the position, a whole second that Docker includes, so it reads at
+  // least the container's last line again and moves `Last()` past `finished`.
+  // For an exited container:
+  // - one that never logged a line keeps `Last()` at 0 and is reopened every
+  //   5s for as long as Docker keeps it;
+  // - one whose last line Alloy read in or before the second it finished (it
+  //   logged and then exited while followed), or whose lines the positions
+  //   file already covers (after an Alloy restart), is reopened once, resends
+  //   its last logged second, and then stays closed (a second reopen happens
+  //   only when the first falls within the second the container finished);
+  // - one whose last line Alloy read in a later second than it finished in
+  //   is not reopened.
+  // Discovery exposes no container state or exit time, so the config cannot
+  // age kept containers out; removing them (`hack down`,
+  // `docker compose down`) ends the inspect calls. Each reopen also logs an
+  // info line ("finished transferring logs"); Alloy runs as a Compose service,
+  // so those lines would be shipped into Loki, one every 5s for each kept
+  // container that never logged. The `logging` block keeps Alloy's own output
+  // at warn and above.
+  //
+  // Read positions are written under `--storage.path`, which the logging
+  // compose maps to the GLOBAL_ALLOY_DATA_VOLUME volume, so a recreated Alloy
+  // container resumes after the last line it shipped instead of reading every
+  // retained log again. A position is a whole second and Docker's `since`
+  // includes that second, so lines from the last second Alloy read can be sent
+  // again.
   return [
+    "logging {",
+    `  level  = "${GLOBAL_ALLOY_LOG_LEVEL}"`,
+    '  format = "logfmt"',
+    "}",
+    "",
     'discovery.docker "local" {',
-    '  host = "unix:///var/run/docker.sock"',
+    '  host             = "unix:///var/run/docker.sock"',
+    `  refresh_interval = "${GLOBAL_ALLOY_DOCKER_REFRESH_INTERVAL}"`,
+    "",
+    "  // Include exited containers so one-shot services are shipped after they stop.",
+    "  filter {",
+    '    name   = "status"',
+    `    values = [${GLOBAL_ALLOY_DOCKER_STATUSES.map((status) => `"${status}"`).join(", ")}]`,
+    "  }",
     "}",
     "",
     'discovery.relabel "docker_compose" {',
@@ -203,6 +330,22 @@ export function renderGlobalAlloyConfig(): string {
     '    action        = "replace"',
     '    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]',
     '    target_label  = "project"',
+    "  }",
+    "",
+    "  // Keep each container's target identity stable when it stops: an exited",
+    "  // container loses its IP, endpoint and published ports. loki.source.docker",
+    "  // keys tailers and read positions by the full label set, so a changed set",
+    "  // would re-read (duplicate) the container's whole log. Nothing below uses",
+    "  // the network or port metadata.",
+    "  rule {",
+    '    action = "labeldrop"',
+    '    regex  = "__meta_docker_(network|port)_.+"',
+    "  }",
+    "",
+    "  rule {",
+    '    action        = "replace"',
+    '    source_labels = ["__meta_docker_container_id"]',
+    '    target_label  = "__address__"',
     "  }",
     "}",
     "",
@@ -311,6 +454,10 @@ export const HACK_DIR_GITIGNORE_END_MARKER = "# end managed by hack" as const;
  * the `.hack/` directory. Root-level `.hack.secret.key` stays in the root
  * `.gitignore` (see `ensureProjectEnvSecretKey`). The retired `tickets/`
  * entry remains upgrade-safe so existing machine-local caches cannot be staged.
+ * `.hack.env*.tmp` covers the `.<layer>.<uuid>.tmp` staging sibling that
+ * `writeTextFileAtomicIfChanged` leaves behind when an env layer write is
+ * killed before its commit rename; it holds a whole layer, including
+ * machine-local values, so it must never be staged.
  */
 export const HACK_DIR_GITIGNORE_ENTRIES = [
   ".internal/",
@@ -319,6 +466,7 @@ export const HACK_DIR_GITIGNORE_ENTRIES = [
   ".env.state.json",
   "hack.env.local.yaml",
   "hack.env.*.local.yaml",
+  ".hack.env*.tmp",
   "tickets/",
 ] as const;
 
@@ -431,6 +579,7 @@ export function renderProjectConfigSchemaJson(): string {
         additionalProperties: true,
         properties: {
           auto_branch: { type: "boolean" },
+          inherit_local: { type: "boolean" },
         },
       },
       sessions: {

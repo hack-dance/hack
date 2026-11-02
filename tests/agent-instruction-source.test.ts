@@ -1,5 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,11 +12,11 @@ import {
   installCursorRules,
   renderCursorRules,
 } from "../src/agents/cursor.ts";
+import { renderAgentInitPatterns } from "../src/agents/init-patterns.ts";
 import {
   INSTRUCTION_SECTIONS,
   type InstructionSurface,
 } from "../src/agents/instruction-source.ts";
-import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../src/agents/integration-revision.ts";
 import { renderAgentPrimer } from "../src/agents/primer.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
@@ -25,6 +24,10 @@ import {
   renderAgentDocsSnippet,
   upsertAgentDocs,
 } from "../src/mcp/agent-docs.ts";
+import {
+  extractHackInvocations,
+  findGuidanceCommandIssues,
+} from "./helpers/cli-guidance-commands.ts";
 
 const RENDERED_SURFACES: Readonly<Record<InstructionSurface, string>> = {
   docs: renderAgentDocsSnippet(),
@@ -33,39 +36,10 @@ const RENDERED_SURFACES: Readonly<Record<InstructionSurface, string>> = {
   primer: renderAgentPrimer(),
 };
 
-const TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set(
-  CLI_SPEC.commands.map((command) => command.name)
-);
-
-/** Subcommand tokens allowed even though they are not top-level CLI commands. */
-const COMMAND_TOKEN_ALLOWLIST: ReadonlySet<string> = new Set([]);
-
-const BACKTICK_SEGMENT_PATTERN = /`([^`]+)`/g;
-
-/**
- * Extract the first subcommand token of every backtick-quoted `hack ...`
- * invocation in a rendered surface. Composite tokens like `up/down` are split
- * so each part is validated individually.
- */
-function extractHackSubcommandTokens(rendered: string): string[] {
-  const tokens: string[] = [];
-  for (const match of rendered.matchAll(BACKTICK_SEGMENT_PATTERN)) {
-    const segment = (match[1] ?? "").trim();
-    if (!(segment === "hack" || segment.startsWith("hack "))) {
-      continue;
-    }
-    const first = segment.slice("hack ".length).trim().split(/\s+/)[0] ?? "";
-    if (first.length === 0 || first.startsWith("-") || first.startsWith("<")) {
-      continue;
-    }
-    for (const part of first.split("/")) {
-      if (part.length > 0) {
-        tokens.push(part);
-      }
-    }
-  }
-  return tokens;
-}
+/** Rendered guidance outside the canonical sections that agents also execute. */
+const SUPPLEMENTAL_SURFACES: Readonly<Record<string, string>> = {
+  "agent patterns": renderAgentInitPatterns(),
+};
 
 let tempDir: string | null = null;
 
@@ -81,17 +55,79 @@ async function setupTempRepo(): Promise<string> {
   return tempDir;
 }
 
-test("every documented hack subcommand exists in CLI_SPEC", () => {
-  for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
-    const unknown = extractHackSubcommandTokens(rendered).filter(
-      (token) =>
-        !(TOP_LEVEL_COMMANDS.has(token) || COMMAND_TOKEN_ALLOWLIST.has(token))
-    );
+test("every documented hack command path and long flag exists in CLI_SPEC", () => {
+  for (const [surface, rendered] of Object.entries({
+    ...RENDERED_SURFACES,
+    ...SUPPLEMENTAL_SURFACES,
+  })) {
     expect(
-      unknown,
-      `surface "${surface}" references unknown hack subcommands`
+      extractHackInvocations(rendered).length,
+      `surface "${surface}" has no hack invocations to validate`
+    ).toBeGreaterThan(0);
+    expect(
+      findGuidanceCommandIssues({ cli: CLI_SPEC, rendered }),
+      `surface "${surface}" references unknown hack commands or flags`
     ).toEqual([]);
   }
+});
+
+test("guidance command validator rejects unknown nested subcommands and flags", () => {
+  for (const fixture of [
+    "`hack env bogus`",
+    "`hack up --no-such-flag`",
+    "`hack agent patterns --json`",
+    "`hack setup claude|bogus`",
+    "`hack up/down --json`",
+    "`hack bogus`",
+  ]) {
+    expect(
+      findGuidanceCommandIssues({ cli: CLI_SPEC, rendered: fixture }),
+      `validator accepted ${fixture}`
+    ).not.toEqual([]);
+  }
+  for (const fixture of [
+    "`hack up/down/restart/doctor --json`",
+    "`hack init --with claude|codex`",
+    "`hack setup claude|codex`",
+    "`hack run <service> -- <cmd...> --child-flag`",
+    "```sh\nhack logs --no-follow --tail 100\n```",
+  ]) {
+    expect(
+      findGuidanceCommandIssues({ cli: CLI_SPEC, rendered: fixture }),
+      `validator rejected ${fixture}`
+    ).toEqual([]);
+  }
+  expect(
+    findGuidanceCommandIssues({
+      cli: CLI_SPEC,
+      rendered: "```sh\nhack env bogus\n```",
+    })
+  ).not.toEqual([]);
+});
+
+test("canonical guidance states run separators, adopt limits, and pipe hazards", () => {
+  for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
+    expect(rendered, `surface "${surface}"`).toContain(
+      "`hack run <service> -- <cmd...>`"
+    );
+    expect(rendered, `surface "${surface}"`).not.toContain(
+      "`hack run <service> <cmd...>`"
+    );
+    expect(rendered, `surface "${surface}"`).toContain(
+      "do not pipe `hack` output through `| tail` or `| grep`"
+    );
+  }
+  for (const surface of ["docs", "skill"] as const) {
+    const rendered = RENDERED_SURFACES[surface];
+    expect(rendered).toContain(
+      "Adopt only checks that every configured singleton port is already occupied; that is not a health, identity, or readiness check"
+    );
+    expect(rendered).toContain("`lifecycle.up.before` identity check");
+    expect(rendered).not.toContain("reuses a healthy existing listener");
+  }
+  expect(renderAgentInitPatterns()).toContain(
+    "`hack run <service> -- <cmd...>`"
+  );
 });
 
 test("no stale command patterns in any surface", () => {
@@ -112,12 +148,10 @@ test("retired Tickets do not appear in generated agent guidance", () => {
 
 test("active contributor guidance and examples do not advertise retired Tickets", async () => {
   const guidancePaths = [
-    "WORKFLOW.md",
+    "AGENTS.md",
     ".hack/README.md",
-    ".factory/library/architecture.md",
-    ".factory/library/environment.md",
-    ".factory/library/user-testing.md",
-    ".factory/skills/control-plane-worker/SKILL.md",
+    ".ai/skills/hack-repo-code-quality/SKILL.md",
+    ".ai/skills/hack-repo-verify/SKILL.md",
   ];
   const retiredGuidancePattern =
     /`hack(?: x)? tickets\b|optional local tickets|tickets extension|dance\.hack\.tickets/i;
@@ -140,69 +174,28 @@ test("active contributor guidance and examples do not advertise retired Tickets"
   expect(await Bun.file("examples/tickets/README.md").exists()).toBe(false);
 });
 
-test("all generated surfaces keep freshness checks scoped and optional", () => {
-  for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
-    expect(rendered, `surface "${surface}" lacks freshness status`).toContain(
-      "Integration freshness"
-    );
-    expect(rendered).toContain("authorized project scope");
-    expect(rendered).not.toContain("hack setup sync --all-scopes --check");
-    expect(rendered).toContain("hack setup sync --all-scopes");
-    expect(rendered).toContain("restart only if");
-    expect(rendered).not.toContain("At session start, audit");
-  }
-});
-
-test("checked-in agent examples use the current integration contract", async () => {
-  const maintenance = INSTRUCTION_SECTIONS.find(
-    (section) => section.id === "maintenance"
-  );
-  expect(maintenance).toBeDefined();
-  const freshness = INSTRUCTION_SECTIONS.find(
-    (section) => section.id === "freshness"
-  );
-  expect(freshness).toBeDefined();
-
-  for (const path of [
-    "examples/basic/AGENTS.md",
-    "examples/basic/CLAUDE.md",
-    ".codex/skills/hack-cli/SKILL.md",
-    ".cursor/rules/hack.mdc",
-  ]) {
-    const content = await Bun.file(path).text();
-    expect(content).toContain(
-      `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``
-    );
-    for (const bullet of [
-      ...(maintenance?.bullets ?? []),
-      ...(freshness?.bullets.slice(1) ?? []),
-    ]) {
-      expect(content, `${path} lacks current maintenance guidance`).toContain(
-        bullet
-      );
-    }
-  }
-
-  const cliGuide = await Bun.file("docs/cli.md").text();
-  expect(cliGuide).not.toContain(
-    "`hack doctor --fix` never inspect or rewrite"
-  );
-});
-
-test("agent integration content revision changes with canonical guidance", () => {
-  const revision = createHash("sha256")
-    .update(
-      JSON.stringify(
-        INSTRUCTION_SECTIONS.filter((section) => section.id !== "freshness")
-      )
-    )
-    .digest("hex")
-    .slice(0, 12);
-  expect(HACK_AGENT_INTEGRATION_CONTENT_REVISION).toBe(revision);
+test("rendered guidance retires automatic instructions and freshness", () => {
   for (const rendered of Object.values(RENDERED_SURFACES)) {
+    expect(rendered).not.toContain("Integration freshness");
+    expect(rendered).not.toContain("hack setup sync");
+    expect(rendered).toContain("does not inject project instructions");
     expect(rendered).toContain(
-      `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``
+      "Existing customized and legacy files are preserved"
     );
+  }
+});
+
+test("optional plugin uses current guidance without updating contributor or historical examples", async () => {
+  const content = await Bun.file(
+    "plugins/hack/skills/hack-cli/SKILL.md"
+  ).text();
+  expect(content).toContain("explicit opt-ins");
+  expect(content).not.toContain("Integration freshness");
+});
+
+test("rendered guidance has no runtime freshness marker requirement", () => {
+  for (const rendered of Object.values(RENDERED_SURFACES)) {
+    expect(rendered).not.toContain("Content revision:");
   }
 });
 
@@ -219,6 +212,18 @@ test("all surfaces contain the canonical bullets for their tagged sections", () 
     }
   }
   expect(misses).toEqual([]);
+});
+
+test("agent guidance retains explicit skills and independently selected MCP", () => {
+  const section = INSTRUCTION_SECTIONS.find(
+    (section) => section.id === "agent-setup"
+  );
+  expect(section).toBeDefined();
+  const text = section?.bullets.join("\n");
+  expect(text).toContain("invoke its skills");
+  expect(text).toContain("no automatic hooks, rules or MCP server");
+  expect(text).toContain("verified executable and candidate bundle selection");
+  expect(text).toContain("never injects AGENTS.md or CLAUDE.md");
 });
 
 test("linked worktree guidance is present in every surface", () => {
@@ -323,4 +328,19 @@ test("contributors share one baseline without per-edit repository-wide hooks", a
   expect(await Bun.file(".cursor/hooks.json").exists()).toBe(false);
   const settings = await Bun.file(".claude/settings.json").json();
   expect(settings.hooks).toBeUndefined();
+});
+
+test("rendered routing guidance distinguishes new defaults and legacy aliases", () => {
+  for (const surface of ["docs", "skill", "primer"] as const) {
+    expect(RENDERED_SURFACES[surface]).toContain(
+      "new-project default: `<project>.hack.local`"
+    );
+    expect(RENDERED_SURFACES[surface]).toContain(
+      "legacy `.hack` fallbacks remain supported"
+    );
+    expect(RENDERED_SURFACES[surface]).toContain("`<project>.hack.gy`");
+    expect(RENDERED_SURFACES[surface]).not.toContain(
+      "default: `<project>.hack`)"
+    );
+  }
 });

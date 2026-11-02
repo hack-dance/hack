@@ -1,0 +1,3 @@
+SPECIFICATION Spec
+INVARIANT Invariant_TypeOK
+INVARIANT Invariant_ApprovedIsTerminal

@@ -22,12 +22,12 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.4"
+          bun-version: "1.4.2"
 
       - name: Setup QEMU
         uses: docker/setup-qemu-action@v3

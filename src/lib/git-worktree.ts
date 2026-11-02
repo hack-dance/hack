@@ -3,6 +3,8 @@ import { dirname, isAbsolute, resolve } from "node:path";
 
 import { exec } from "./shell.ts";
 
+const SIMPLE_QUOTED_BRANCH = /^'refs\/heads\/([^'"\s\\]+)' $/;
+
 async function tryRealpath(path: string): Promise<string> {
   try {
     return await realpath(path);
@@ -117,6 +119,79 @@ export async function resolveGitCurrentBranch(opts: {
   }
   const branch = result.stdout.trim();
   return branch.length > 0 ? branch : null;
+}
+
+/**
+ * Resolves registration metadata with one Git child for ordinary checkouts.
+ * Unborn HEAD emits only identity and uses the existing branch lookup, keeping
+ * its two-child cost. Git remains authoritative for escaped or unusual refs.
+ */
+export async function resolveGitRegistrationMetadata(opts: {
+  readonly repoRoot: string;
+}): Promise<{
+  readonly repoIdentity: string | null;
+  readonly gitBranch: string | null;
+}> {
+  let result: Awaited<ReturnType<typeof exec>> | null = null;
+  try {
+    result = await exec(
+      [
+        "git",
+        "-C",
+        opts.repoRoot,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+        "--sq",
+        "--symbolic-full-name",
+        "--revs-only",
+        "HEAD",
+      ],
+      { stdin: "ignore" }
+    );
+  } catch {
+    // Fall back independently: identity and branch failures have separate meaning.
+  }
+  const parsed =
+    result?.exitCode === 0 ? parseRegistrationMetadata(result.stdout) : null;
+  if (parsed) {
+    return {
+      repoIdentity: await tryRealpath(parsed.repoIdentity),
+      gitBranch:
+        parsed.gitBranch === undefined
+          ? await resolveGitCurrentBranch(opts)
+          : parsed.gitBranch,
+    };
+  }
+  return {
+    repoIdentity: await resolveGitRepositoryIdentity(opts),
+    gitBranch: await resolveGitCurrentBranch(opts),
+  };
+}
+
+function parseRegistrationMetadata(stdout: string): {
+  readonly repoIdentity: string;
+  readonly gitBranch: string | null | undefined;
+} | null {
+  // --sq applies only after --git-common-dir. The raw path ends in LF; the
+  // optional quoted ref does not. Split at the last LF to preserve newline paths.
+  const separator = stdout.lastIndexOf("\n");
+  if (separator < 1 || stdout.includes("\0")) {
+    return null;
+  }
+  const repoIdentity = stdout.slice(0, separator);
+  const ref = stdout.slice(separator + 1);
+  if (
+    !isAbsolute(repoIdentity) ||
+    (ref !== "" && !(ref.startsWith("'") && ref.endsWith("' ")))
+  ) {
+    return null;
+  }
+  const simpleBranch = SIMPLE_QUOTED_BRANCH.exec(ref)?.[1];
+  return {
+    repoIdentity,
+    gitBranch: ref === "'HEAD' " ? null : simpleBranch,
+  };
 }
 
 export type GitWorktreeListEntry = {

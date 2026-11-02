@@ -1,5 +1,6 @@
 import { cancel } from "@clack/prompts";
 import {
+  ClosedCliError,
   emitCliResult,
   errorResult,
   errorResultFromUnknown,
@@ -12,13 +13,17 @@ import {
   CliUsageError,
   collectAllowedOptionNames,
   collectUnionOptionNames,
+  hackOwnedArgv,
   hasHandler,
   parseCliArgv,
   parseOptionsForCommand,
   parsePositionalsForCommand,
   resolveCommand,
 } from "./command.ts";
+import { resolveRequestedEnvName } from "./env-selection.ts";
 import { printHelpForPath } from "./help.ts";
+import { optEnv, optProject } from "./options.ts";
+import { parseProjectSelectorOption } from "./project-selector.ts";
 import { CLI_SPEC } from "./spec.ts";
 
 function isTruthyEnv(value: string | undefined): boolean {
@@ -27,7 +32,11 @@ function isTruthyEnv(value: string | undefined): boolean {
 }
 
 export async function runCli(argv: readonly string[]): Promise<number> {
-  const jsonRequested = argv.includes("--json");
+  // Only Hack's own argv selects the JSON error envelope: a child command's
+  // `--json` (as in `hack run web tool --json`) belongs to the child.
+  const jsonRequested = hackOwnedArgv(CLI_SPEC, argv).includes("--json");
+  // Set once argument parsing succeeded and the handler owns the request.
+  let handlerPath: readonly string[] | undefined;
   try {
     const cli = CLI_SPEC;
     const allowUnknownOptions = shouldAllowUnknownOptions({
@@ -80,6 +89,14 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       resolved.command.options,
       parsed.values
     );
+    validateSharedEnvSelection({
+      command: resolved.command,
+      parsedValues: parsed.values,
+    });
+    validateSharedProjectSelection({
+      command: resolved.command,
+      parsedValues: parsed.values,
+    });
     const pos = parsePositionalsForCommand(
       resolved.command.positionals,
       resolved.remainingPositionals
@@ -90,6 +107,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       jsonRequested: parsed.values.json === true,
     });
 
+    handlerPath = resolved.path.map((command) => command.name);
     return await resolved.command.handler({
       ctx: { cwd: process.cwd(), cli },
       args: {
@@ -99,7 +117,26 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       },
     });
   } catch (error: unknown) {
-    return await handleRunCliError({ error, jsonRequested });
+    const sensitiveError = resolveSensitiveOutputError(argv);
+    if (sensitiveError !== undefined) {
+      // Never echo parser/backend errors: these may contain values or ciphertext.
+      process.stderr.write(`${sensitiveError}\n`);
+      return 1;
+    }
+    return await handleRunCliError({ error, jsonRequested, handlerPath });
+  }
+}
+
+/** Recover command identity even when strict parsing rejected its arguments. */
+function resolveSensitiveOutputError(
+  argv: readonly string[]
+): string | undefined {
+  try {
+    const parsed = parseCliArgv(CLI_SPEC, argv, { allowUnknownOptions: true });
+    return resolveCommand(CLI_SPEC, parsed.positionals).command
+      ?.sensitiveOutputError;
+  } catch {
+    return undefined;
   }
 }
 
@@ -108,10 +145,21 @@ export async function runCli(argv: readonly string[]): Promise<number> {
  * stays a single parseable envelope for every error class (usage errors
  * included — they emit E_USAGE and skip the printed help); the human-readable
  * message still reaches stderr.
+ *
+ * Without `--json`, known errors ({@link HackCliError}, {@link ClosedCliError})
+ * print their closed message only, plus the stack when `HACK_DEBUG=1`. Any
+ * other exception is unexpected and always prints its stack.
+ *
+ * A usage error found while parsing arguments prints the help, since the
+ * arguments themselves were wrong. Once a command handler owns the request
+ * (`handlerPath` is set), a {@link CliUsageError} it throws is a refusal of a
+ * well-formed request: it prints the message and a one-line pointer to the
+ * command's help, never the full help.
  */
-async function handleRunCliError(opts: {
+export async function handleRunCliError(opts: {
   readonly error: unknown;
   readonly jsonRequested: boolean;
+  readonly handlerPath?: readonly string[];
 }): Promise<number> {
   const { error, jsonRequested } = opts;
   if (error instanceof CliUsageError) {
@@ -124,7 +172,11 @@ async function handleRunCliError(opts: {
       return 1;
     }
     logger.error({ message: error.message });
-    await printHelpForPath(CLI_SPEC, []);
+    if (opts.handlerPath === undefined) {
+      await printHelpForPath(CLI_SPEC, []);
+    } else {
+      process.stderr.write(`${usageHint(opts.handlerPath)}\n`);
+    }
     return 1;
   }
 
@@ -135,15 +187,47 @@ async function handleRunCliError(opts: {
 
   if (error instanceof HackCliError) {
     logger.error({ message: `${error.code}: ${error.message}` });
+    if (error.detail !== undefined) {
+      // Loaded only for a detailed error, off the ordinary CLI start path.
+      const { nativeComposeEffectRefusalSummary } = await import(
+        "../lib/native-compose-effect-diagnostics.ts"
+      );
+      const summary = nativeComposeEffectRefusalSummary(error.detail);
+      if (summary) {
+        logger.error({ message: summary });
+      }
+    }
+    logDebugStack(error);
     return 1;
   }
 
+  if (error instanceof ClosedCliError) {
+    // A known refusal: its message is the whole report. A stack would only
+    // repeat it with internal frames.
+    logger.error({ message: error.message });
+    logDebugStack(error);
+    return 1;
+  }
+
+  // Unexpected exceptions keep their stack: it is the only lead to the bug.
   const message = error instanceof Error ? error.message : "Unknown error";
   cancel(message);
   if (error instanceof Error && error.stack) {
     logger.error({ message: error.stack });
   }
   return 1;
+}
+
+/** One-line pointer to a command's help, printed after a handler refusal. */
+export function usageHint(path: readonly string[]): string {
+  return `See \`${["hack", ...path].join(" ")} --help\` for usage.`;
+}
+
+/** Known errors show their stack only on request (`HACK_DEBUG=1`). */
+function logDebugStack(error: Error): void {
+  if (isTruthyEnv(process.env.HACK_DEBUG) && error.stack) {
+    logger.error({ message: error.stack });
+  }
 }
 
 /**
@@ -238,6 +322,43 @@ function validateResolvedCommandOptions(opts: {
     throw new CliUsageError(
       `Option(s) not valid for "${opts.command.name}": ${disallowed.map((option) => `--${option}`).join(", ")}`
     );
+  }
+}
+
+/**
+ * Refuse an unusable shared `--env` value before the handler runs, so no
+ * command discovers a project, migrates or reads files, or starts a child
+ * process with it. The refusal is fixed text that never includes the value.
+ */
+function validateSharedEnvSelection(opts: {
+  readonly command: AnyCommandSpec;
+  readonly parsedValues: Record<string, unknown>;
+}): void {
+  if (!opts.command.options.includes(optEnv)) {
+    return;
+  }
+  const value = opts.parsedValues[optEnv.name];
+  if (typeof value === "string") {
+    resolveRequestedEnvName({ envOption: value });
+  }
+}
+
+/**
+ * Refuse a malformed shared `--project` value before the handler runs, so no
+ * command reads the registry, discovers a project or starts a child process
+ * with a value-bearing argument. The refusal is fixed text that never
+ * includes the argument or a slug derived from it.
+ */
+function validateSharedProjectSelection(opts: {
+  readonly command: AnyCommandSpec;
+  readonly parsedValues: Record<string, unknown>;
+}): void {
+  if (!opts.command.options.includes(optProject)) {
+    return;
+  }
+  const value = opts.parsedValues[optProject.name];
+  if (typeof value === "string") {
+    parseProjectSelectorOption({ projectOpt: value });
   }
 }
 

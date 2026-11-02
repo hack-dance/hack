@@ -1,0 +1,651 @@
+import { randomUUID } from "node:crypto";
+import { link, lstat, mkdir, readdir, rename, unlink } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
+import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
+import {
+  type ComposeEnvOverrideContent,
+  classifyComposeEnvOverrideText,
+} from "./compose-managed-env.ts";
+import { isRecord } from "./guards.ts";
+import {
+  inspectLegacyComposeAdoptionSelectionDetail,
+  type LegacyComposeAdoptionPending,
+} from "./native-compose-adoption-marker.ts";
+import {
+  type ReplaceablePrivateFileOptions,
+  readReplaceablePrivateFile,
+  replacePrivateFileAtomic,
+} from "./private-file.ts";
+
+/**
+ * At-rest ownership of `.hack/.internal/compose.env.override.yml`.
+ *
+ * Invariant: Hack writes this file with environment values that are only
+ * `${NAME}` Compose references (see `renderComposeEnvReferenceOverride`). The
+ * resolved values reach Compose through its process environment, so no
+ * decrypted value is written to disk by any Compose command, including a
+ * failed, interrupted or killed one. The path stays stable because Compose
+ * records it in each container's `config_files` label.
+ *
+ * Files written by earlier Hack versions can still hold literal values. A
+ * Compose command that renders the override replaces such a file, one that
+ * renders none removes it, `hack down` removes it, and `hack doctor` reports
+ * it with an authorized `--fix` removal. A value-free file is never removed
+ * here, even when a concurrent Compose command replaces the inspected file
+ * between inspection and removal: it is put back. It is absent only between
+ * the move aside and the put-back, so a Compose process that opens it in that
+ * moment fails and must be retried. Nothing here returns or logs a value from
+ * the file.
+ *
+ * Exception: a saved `hack config adopt` generation pins the override's bytes
+ * and inode in its integrity proof, and adopted commands never write it. While
+ * such a generation exists (prepared, active or pending), nothing here removes
+ * the file, because removal would make the adoption unloadable; the supported
+ * way to drop its values is rollback (`hack config adopt --rollback`, or
+ * `--recover --rollback` while a switch is pending, after first settling an
+ * interrupted preparation stop or retained command), `hack up`, then adopting
+ * again. New adoptions refuse a literal override (`hack config adopt`).
+ */
+export const COMPOSE_ENV_OVERRIDE_FILENAME = "compose.env.override.yml";
+
+const REFUSAL =
+  "Refused the generated Compose env override: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Replace it with a regular file or directory and retry; values omitted.";
+
+/** Absolute path of the generated env override for a project directory. */
+export function composeEnvOverridePath(opts: {
+  readonly projectDir: string;
+}): string {
+  return resolve(opts.projectDir, ".internal", COMPOSE_ENV_OVERRIDE_FILENAME);
+}
+
+/**
+ * The project directory (`.hack`) and its `.internal` child. Every read,
+ * write, removal and aside sweep requires both to be real directories, checked
+ * without following a symlink, so no operation here reaches outside the
+ * project through a linked directory.
+ */
+function overrideDirectories(path: string): readonly string[] {
+  const internal = dirname(path);
+  return [dirname(internal), internal];
+}
+
+function fileOptions(path: string): ReplaceablePrivateFileOptions {
+  return {
+    path,
+    directories: overrideDirectories(path),
+    refusal: () => new Error(REFUSAL),
+  };
+}
+
+type HeldDirectory = {
+  readonly path: string;
+  readonly dev: number;
+  readonly ino: number;
+};
+
+/**
+ * No-follow ownership check of the override's directories, the same one the
+ * writer applies before it writes: `absent` when either is missing, `refused`
+ * when either is a symlink or not a directory, else their identities so a
+ * later step can confirm they were not swapped. Other filesystem errors
+ * propagate.
+ */
+async function holdOverrideDirectories(
+  path: string
+): Promise<
+  | { readonly kind: "absent" | "refused" }
+  | { readonly kind: "real"; readonly directories: readonly HeldDirectory[] }
+> {
+  const directories: HeldDirectory[] = [];
+  for (const directory of overrideDirectories(path)) {
+    let info: Awaited<ReturnType<typeof lstat>>;
+    try {
+      info = await lstat(directory);
+    } catch (error: unknown) {
+      if (isRecord(error) && error.code === "ENOENT") {
+        return { kind: "absent" };
+      }
+      throw error;
+    }
+    if (!info.isDirectory()) {
+      return { kind: "refused" };
+    }
+    directories.push({ path: directory, dev: info.dev, ino: info.ino });
+  }
+  return { kind: "real", directories };
+}
+
+/** True while every held directory is still the same real directory. */
+async function sameDirectories(
+  directories: readonly HeldDirectory[]
+): Promise<boolean> {
+  for (const held of directories) {
+    const current = await lstat(held.path).catch(() => null);
+    if (
+      !current?.isDirectory() ||
+      current.dev !== held.dev ||
+      current.ino !== held.ino
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Writes value-free override text atomically with mode 0600 when the content
+ * or the permissions differ. `text` must come from
+ * `renderComposeEnvReferenceOverride`; a literal value is refused before any
+ * write so a caller bug cannot put a value at rest.
+ */
+export async function writeComposeEnvOverride(opts: {
+  readonly projectDir: string;
+  readonly text: string;
+  /** Clock for the stale-aside age check; tests only, no authority. */
+  readonly now?: () => number;
+}): Promise<string> {
+  if (classifyComposeEnvOverrideText(opts.text).kind !== "references") {
+    throw new Error(
+      "Refused to write a Compose env override that holds literal values; values omitted."
+    );
+  }
+  const path = composeEnvOverridePath(opts);
+  // Refuse a linked `.hack` or `.internal` before mkdir can create anything
+  // through it; the read and replace below check both again.
+  if ((await holdOverrideDirectories(path)).kind === "refused") {
+    throw new Error(REFUSAL);
+  }
+  await mkdir(dirname(path), { recursive: true });
+  const options = fileOptions(path);
+  const existing = await readReplaceablePrivateFile(options);
+  if (existing?.text !== opts.text || (existing.mode & 0o077) !== 0) {
+    await replacePrivateFileAtomic({ ...options, text: opts.text });
+  }
+  // An aside left by a crashed removal can hold values, so a rendering command
+  // sweeps stale ones too, once the directories passed the symlink checks
+  // above. Best effort: `hack doctor` reports what remains.
+  await removeStaleAsidesIfOwned({ path, now: opts.now ?? Date.now }).catch(
+    () => 0
+  );
+  return path;
+}
+
+/**
+ * At-rest state of the generated override; counts only, never values.
+ * `refused`: the override, `.hack` or `.hack/.internal` is a symlink or not a
+ * regular file or directory. Nothing behind it is read, and nothing here
+ * removes or replaces it.
+ */
+export type ComposeEnvOverrideAtRest =
+  | { readonly kind: "absent"; readonly path: string }
+  | { readonly kind: "unreadable"; readonly path: string }
+  | { readonly kind: "refused"; readonly path: string }
+  | (ComposeEnvOverrideContent & { readonly path: string });
+
+/**
+ * Reports what the generated override holds without following a symlink at
+ * the file, `.hack` or `.hack/.internal`; any of those is `refused`.
+ */
+export async function inspectComposeEnvOverrideAtRest(opts: {
+  readonly projectDir: string;
+}): Promise<ComposeEnvOverrideAtRest> {
+  const path = composeEnvOverridePath(opts);
+  return { ...(await inspectEntry(path)), path };
+}
+
+async function inspectEntry(
+  path: string
+): Promise<
+  | { readonly kind: "absent" | "unreadable" | "refused" }
+  | ComposeEnvOverrideContent
+> {
+  const held = await holdOverrideDirectories(path).catch(() => null);
+  if (!held) {
+    return { kind: "unreadable" };
+  }
+  if (held.kind !== "real") {
+    return { kind: held.kind };
+  }
+  let current: Awaited<ReturnType<typeof readReplaceablePrivateFile>>;
+  try {
+    current = await readReplaceablePrivateFile(fileOptions(path));
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === REFUSAL) {
+      // Classify only through the directories held above: a swapped one is
+      // refused, never looked through.
+      if (!(await sameDirectories(held.directories))) {
+        return { kind: "refused" };
+      }
+      const info = await lstat(path).catch(() => null);
+      if (!info) {
+        return { kind: "absent" };
+      }
+      // A regular file that changed during the read may hold values; a
+      // symlink or other entry is refused.
+      return info.isFile() ? { kind: "unverifiable" } : { kind: "refused" };
+    }
+    return { kind: "unreadable" };
+  }
+  if (current === null) {
+    return { kind: "absent" };
+  }
+  return classifyComposeEnvOverrideText(current.text);
+}
+
+/** Private sibling that holds an entry only between its move and its unlink. */
+const ASIDE_PATTERN = /^\.compose\.env\.override\.yml\.[0-9a-f-]{36}\.remove$/;
+/** An aside is stale (its owner crashed) once its rename is this old. */
+const STALE_ASIDE_MS = 60_000;
+
+/**
+ * Removes the override only while it still holds (or may hold) literal
+ * values: `plaintext` always, `unverifiable` when `includeUnverifiable` is set.
+ * Returns the state that was acted on.
+ *
+ * Ownership: nothing is swept, moved or removed unless `.hack` and
+ * `.hack/.internal` are real directories (no-follow, as the writer checks),
+ * and they are checked again before each move and unlink. A symlinked or
+ * non-regular override is `refused` and left in place.
+ *
+ * Race safety: the entry is first moved aside with one atomic rename, and the
+ * moved entry itself is classified again. If a concurrent Compose command had
+ * already replaced the inspected file with a value-free one, that file is put
+ * back with a no-clobber link (a still newer file at the path wins), so a
+ * value-free override is never removed. An aside left by a crash between the
+ * move and the unlink is removed by a later call once it is stale.
+ */
+export async function removePlaintextComposeEnvOverride(opts: {
+  readonly projectDir: string;
+  readonly includeUnverifiable?: boolean;
+  /** Race-test observation point between inspection and the move; no authority. */
+  readonly afterInspect?: () => Promise<void>;
+  /** Clock for the stale-aside age check; tests only, no authority. */
+  readonly now?: () => number;
+}): Promise<{
+  readonly removed: boolean;
+  readonly state: ComposeEnvOverrideAtRest;
+  /** True when a saved adoption may pin the file, so it was kept. */
+  readonly adoptionBound: boolean;
+  /** Stale asides of crashed removals that this call deleted. */
+  readonly asidesRemoved: number;
+}> {
+  const path = composeEnvOverridePath(opts);
+  const held = await holdOverrideDirectories(path);
+  if (held.kind !== "real") {
+    return {
+      removed: false,
+      adoptionBound: false,
+      asidesRemoved: 0,
+      state: { kind: held.kind, path },
+    };
+  }
+  const asidesRemoved = await removeStaleAsides({
+    path,
+    directories: held.directories,
+    now: opts.now ?? Date.now,
+  });
+  const eligible = (state: { readonly kind: string }) =>
+    state.kind === "plaintext" ||
+    (state.kind === "unverifiable" && opts.includeUnverifiable === true);
+  const state = await inspectComposeEnvOverrideAtRest(opts);
+  const kept = { removed: false, adoptionBound: false, asidesRemoved };
+  if (!eligible(state)) {
+    return { ...kept, state };
+  }
+  if (await composeEnvOverrideAdoptionBound(opts)) {
+    return { ...kept, state, adoptionBound: true };
+  }
+  await opts.afterInspect?.();
+  const info = await lstat(path).catch(() => null);
+  if (!info || info.isDirectory()) {
+    return { ...kept, state };
+  }
+  if (!(await sameDirectories(held.directories))) {
+    return { ...kept, state: { kind: "refused", path } };
+  }
+  const aside = join(
+    dirname(path),
+    `.${COMPOSE_ENV_OVERRIDE_FILENAME}.${randomUUID()}.remove`
+  );
+  try {
+    await rename(path, aside);
+  } catch (error: unknown) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return { ...kept, state: { kind: "absent", path } };
+    }
+    throw error;
+  }
+  const movedInfo = await lstat(aside);
+  const moved = await inspectEntry(aside);
+  if (movedInfo.isDirectory() || !eligible(moved)) {
+    await restoreAside({ aside, path, regular: movedInfo.isFile() });
+    return { ...kept, state: { ...moved, path } };
+  }
+  await unlinkIfPresent(aside);
+  return { ...kept, removed: true, state };
+}
+
+/**
+ * True when a saved `hack config adopt` generation may pin the override: its
+ * private state exists and is not rolled back. Prepared, active and pending
+ * generations bind the file's bytes and inode in their integrity proof, so
+ * removing or replacing it makes the adoption refuse to load. An adoption
+ * state that cannot be read safely counts as bound. Reads the adoption
+ * receipt status only; never a key or value.
+ */
+export async function composeEnvOverrideAdoptionBound(opts: {
+  readonly projectDir: string;
+}): Promise<boolean> {
+  return (await composeEnvOverrideAdoptionBinding(opts)).bound;
+}
+
+/**
+ * How a saved adoption binds the override: `bound` as in
+ * {@link composeEnvOverrideAdoptionBound}, and `pending` naming what a
+ * pending binding adoption waits on (false when it is not pending). A pending
+ * adoption fences `hack down` and plain `hack config adopt --rollback`, and
+ * each pending kind accepts one explicit recovery command first (HACK-1318,
+ * HACK-1414). Unreadable adoption state is bound and not pending.
+ */
+export async function composeEnvOverrideAdoptionBinding(opts: {
+  readonly projectDir: string;
+}): Promise<{
+  readonly bound: boolean;
+  readonly pending: false | LegacyComposeAdoptionPending;
+}> {
+  const projectDir = resolve(opts.projectDir);
+  if (basename(projectDir) !== HACK_PROJECT_DIR_PRIMARY) {
+    return { bound: false, pending: false };
+  }
+  try {
+    const detail = await inspectLegacyComposeAdoptionSelectionDetail({
+      projectRoot: dirname(projectDir),
+    });
+    return {
+      bound: detail !== null && detail.status !== "rolled-back",
+      pending: detail?.pending ?? false,
+    };
+  } catch {
+    return { bound: true, pending: false };
+  }
+}
+
+/** Puts a moved entry back unless a newer one already holds the path. */
+async function restoreAside(opts: {
+  readonly aside: string;
+  readonly path: string;
+  readonly regular: boolean;
+}): Promise<void> {
+  if (opts.regular) {
+    try {
+      await link(opts.aside, opts.path);
+    } catch (error: unknown) {
+      if (
+        !(isRecord(error) && ["EEXIST", "ENOENT"].includes(String(error.code)))
+      ) {
+        throw error;
+      }
+    }
+    await unlinkIfPresent(opts.aside);
+    return;
+  }
+  if (!(await lstat(opts.path).catch(() => null))) {
+    await rename(opts.aside, opts.path);
+  }
+}
+
+/**
+ * Removes stale regular-file asides; they are never a current override. The
+ * rename that created an aside updated its ctime, so a fresh one may still
+ * belong to a concurrent call and is left alone.
+ */
+async function removeStaleAsides(opts: {
+  readonly path: string;
+  readonly directories: readonly HeldDirectory[];
+  readonly now: () => number;
+}): Promise<number> {
+  const asides = await listAsides(opts);
+  for (const aside of asides.stale) {
+    if (!(await sameDirectories(opts.directories))) {
+      throw new Error(REFUSAL);
+    }
+    await unlinkIfPresent(aside);
+  }
+  return asides.stale.length;
+}
+
+/** Sweeps stale asides only while both directories are real; else none. */
+async function removeStaleAsidesIfOwned(opts: {
+  readonly path: string;
+  readonly now: () => number;
+}): Promise<number> {
+  const held = await holdOverrideDirectories(opts.path);
+  return held.kind === "real"
+    ? await removeStaleAsides({ ...opts, directories: held.directories })
+    : 0;
+}
+
+/**
+ * Regular-file asides of crashed or in-flight removals, split by age. Lists
+ * only the held `.internal` directory: a swap before or during the listing is
+ * refused rather than listed through.
+ */
+async function listAsides(opts: {
+  readonly path: string;
+  readonly directories: readonly HeldDirectory[];
+  readonly now: () => number;
+}): Promise<{ readonly stale: string[]; readonly fresh: string[] }> {
+  const directory = dirname(opts.path);
+  if (!(await sameDirectories(opts.directories))) {
+    throw new Error(REFUSAL);
+  }
+  const names = await readdir(directory).catch(() => []);
+  if (!(await sameDirectories(opts.directories))) {
+    throw new Error(REFUSAL);
+  }
+  const stale: string[] = [];
+  const fresh: string[] = [];
+  for (const name of names) {
+    if (!ASIDE_PATTERN.test(name)) {
+      continue;
+    }
+    const aside = join(directory, name);
+    const info = await lstat(aside).catch(() => null);
+    if (info?.isFile()) {
+      (opts.now() - info.ctimeMs > STALE_ASIDE_MS ? stale : fresh).push(aside);
+    }
+  }
+  return { stale, fresh };
+}
+
+async function unlinkIfPresent(path: string): Promise<void> {
+  try {
+    await unlink(path);
+  } catch (error: unknown) {
+    if (!(isRecord(error) && error.code === "ENOENT")) {
+      throw error;
+    }
+  }
+}
+
+/**
+ * Everything `hack doctor` checks about Compose env at rest. Counts only;
+ * never a key or value.
+ */
+export type ComposeEnvAtRestReport = {
+  readonly override: ComposeEnvOverrideAtRest;
+  /** A saved adoption may pin the override; see {@link composeEnvOverrideAdoptionBound}. */
+  readonly adoptionBound: boolean;
+  /** What the pinning adoption's pending or interrupted operation or switch
+   * waits on, which decides the recovery command that releases the file; see
+   * {@link composeEnvOverrideAdoptionBinding}. False when not pending or not
+   * bound. */
+  readonly adoptionPending: false | LegacyComposeAdoptionPending;
+  /** Asides left by interrupted removals; each may hold literal values. */
+  readonly asides: { readonly stale: number; readonly fresh: number };
+};
+
+/** Read-only inspection for the doctor check and its `--fix` plan. */
+export async function inspectComposeEnvAtRest(opts: {
+  readonly projectDir: string;
+  /** Clock for the stale-aside age check; tests only, no authority. */
+  readonly now?: () => number;
+}): Promise<ComposeEnvAtRestReport> {
+  const override = await inspectComposeEnvOverrideAtRest(opts);
+  // Asides are listed only inside real directories, never through a link.
+  const held = await holdOverrideDirectories(override.path).catch(() => null);
+  const asides =
+    held?.kind === "real"
+      ? await listAsides({
+          path: override.path,
+          directories: held.directories,
+          now: opts.now ?? Date.now,
+        })
+      : { stale: [], fresh: [] };
+  const binding = composeEnvOverrideMayHoldValues(override)
+    ? await composeEnvOverrideAdoptionBinding(opts)
+    : ({ bound: false, pending: false } as const);
+  return {
+    override,
+    adoptionBound: binding.bound,
+    adoptionPending: binding.bound ? binding.pending : false,
+    asides: { stale: asides.stale.length, fresh: asides.fresh.length },
+  };
+}
+
+function composeEnvOverrideMayHoldValues(
+  state: ComposeEnvOverrideAtRest
+): boolean {
+  return state.kind === "plaintext" || state.kind === "unverifiable";
+}
+
+/**
+ * What `hack doctor --fix` may remove: the override while it may hold values
+ * and no saved adoption pins it, and stale asides. A fresh aside may belong to
+ * a removal still in progress and is left to that removal.
+ */
+export function composeEnvAtRestRepairs(report: ComposeEnvAtRestReport): {
+  readonly override: boolean;
+  readonly asides: boolean;
+} {
+  return {
+    override:
+      composeEnvOverrideMayHoldValues(report.override) && !report.adoptionBound,
+    asides: report.asides.stale > 0,
+  };
+}
+
+/** Supported way to drop values that a saved adoption pins; see the module doc. */
+export const ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
+  "To drop them, stop the adopted containers ('hack down'), run 'hack config adopt --rollback', run 'hack up' so Hack rewrites the file with references only, then adopt again with 'hack config adopt --stop'.";
+/**
+ * The same, while the pinning adoption has a pending switch: `hack down` and
+ * plain `--rollback` refuse in that state, and only explicit recovery releases
+ * the switch (HACK-1318, HACK-1391).
+ */
+export const PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
+  "To drop them, release the pending adoption switch with 'hack config adopt --recover --rollback' (plain rollback and 'hack down' refuse while it is pending), run 'hack up' so Hack rewrites the file with references only, then adopt again with 'hack config adopt --stop'.";
+/**
+ * The same, after an interrupted `hack config adopt --stop` before
+ * publication: there is no switch yet, so `--recover --rollback` refuses as
+ * well as plain rollback and `hack down`. Only `--recover --stop` retries the
+ * stop; publication then refuses the bound literal override and journals the
+ * switch that `--recover --rollback` releases (HACK-1318, HACK-1414).
+ */
+export const INTERRUPTED_PREPARATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
+  "To drop them, first retry the interrupted adoption stop with 'hack config adopt --recover --stop' (rollback and 'hack down' refuse until it finishes); it then refuses to publish over this file and leaves the adoption switch pending. Release that switch with 'hack config adopt --recover --rollback', run 'hack up' so Hack rewrites the file with references only, then adopt again with 'hack config adopt --stop'.";
+/**
+ * The same, after an interrupted retained-container command of an active
+ * adoption: rollback (plain or `--recover`) and plain `hack down` refuse until
+ * `hack down --recover` stops the originals and settles it (HACK-1414).
+ */
+export const INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
+  "To drop them, first settle the interrupted adopted command with 'hack down --recover', which stops the adopted containers (rollback and plain 'hack down' refuse until it finishes). Then run 'hack config adopt --rollback', run 'hack up' so Hack rewrites the file with references only, then adopt again with 'hack config adopt --stop'.";
+
+/** The next step for a report whose override a saved adoption pins. */
+export function adoptedComposeEnvOverrideNextStep(
+  report: Pick<ComposeEnvAtRestReport, "adoptionPending">
+): string {
+  switch (report.adoptionPending) {
+    case "switch":
+      return PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
+    case "preparation-stop":
+      return INTERRUPTED_PREPARATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
+    case "retained-operation":
+      return INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
+    default:
+      return ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
+  }
+}
+
+/**
+ * Doctor status and message. Names the project-relative path and counts only;
+ * never a key or value.
+ */
+export function describeComposeEnvAtRest(opts: {
+  readonly report: ComposeEnvAtRestReport;
+  readonly projectDirName: string;
+}): { readonly status: "ok" | "warn"; readonly message: string } {
+  const file = `${opts.projectDirName}/.internal/${COMPOSE_ENV_OVERRIDE_FILENAME}`;
+  const described = describeOverride({
+    state: opts.report.override,
+    file,
+    projectDirName: opts.projectDirName,
+    adoptionBound: opts.report.adoptionBound,
+    adoptionNextStep: adoptedComposeEnvOverrideNextStep(opts.report),
+  });
+  const asides = opts.report.asides.stale + opts.report.asides.fresh;
+  if (asides === 0) {
+    return described;
+  }
+  const leftover = `${asides} leftover removal file(s) (${opts.projectDirName}/.internal/.${COMPOSE_ENV_OVERRIDE_FILENAME}.<id>.remove) from an interrupted removal may hold env values (values omitted). Run 'hack doctor --fix' to remove those older than a minute.`;
+  return {
+    status: "warn",
+    message:
+      described.status === "ok" ? leftover : `${described.message} ${leftover}`,
+  };
+}
+
+function describeOverride(opts: {
+  readonly state: ComposeEnvOverrideAtRest;
+  readonly file: string;
+  readonly projectDirName: string;
+  readonly adoptionBound: boolean;
+  readonly adoptionNextStep: string;
+}): { readonly status: "ok" | "warn"; readonly message: string } {
+  const { state, file } = opts;
+  const next = opts.adoptionBound
+    ? `A saved 'hack config adopt' generation pins this file, so 'hack doctor --fix' keeps it: removing it would break the adoption. ${opts.adoptionNextStep}`
+    : "Run 'hack doctor --fix' to remove it; Compose commands now write references only.";
+  switch (state.kind) {
+    case "absent":
+      return { status: "ok", message: "No generated Compose env override" };
+    case "references":
+      return {
+        status: "ok",
+        message: `${file} holds env references only (no values at rest)`,
+      };
+    case "plaintext":
+      return {
+        status: "warn",
+        message: `${file} holds ${state.values} literal env value(s) for ${state.services} service(s), written by an earlier Hack version (values omitted). ${next}`,
+      };
+    case "unverifiable":
+      return {
+        status: "warn",
+        message: `${file} is not a Compose override Hack can verify and may hold env values (values omitted). ${next}`,
+      };
+    case "unreadable":
+      return {
+        status: "warn",
+        message: `${file} could not be read, so Hack cannot confirm it holds no env values. Check its owner and permissions.`,
+      };
+    case "refused":
+      return {
+        status: "warn",
+        message: `Refused to inspect ${file}: it, ${opts.projectDirName} or ${opts.projectDirName}/.internal is a symlink or not a regular file or directory. Hack does not follow or change it, and 'hack doctor --fix' leaves it in place (values omitted). Replace it with a regular file or directory.`,
+      };
+    default:
+      return state satisfies never;
+  }
+}

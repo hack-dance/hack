@@ -1,0 +1,14 @@
+{
+  "name": "hack-mcp",
+  "version": "4.2.1",
+  "description": "Opt-in Hack MCP server (`hack mcp serve`) for agent clients without shell access.",
+  "author": {
+    "name": "Hack Dance LLC",
+    "url": "https://github.com/hack-dance"
+  },
+  "homepage": "https://github.com/hack-dance/hack",
+  "repository": "https://github.com/hack-dance/hack",
+  "license": "MIT",
+  "keywords": ["local-development", "developer-tools", "agents", "mcp"],
+  "mcpServers": "./.mcp.json"
+}

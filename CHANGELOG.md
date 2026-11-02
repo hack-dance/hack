@@ -1,21 +1,3 @@
-## [4.2.4](https://github.com/hack-dance/hack/compare/v4.2.3...v4.2.4) (2026-10-27)
-
-### Bug Fixes
-
-* **deps:** bump zod to 4.6.7 for GHSA-mrhx-c7xc-m3w5 (HACK-1394) ([#513](https://github.com/hack-dance/hack/issues/513)) ([75225e0](https://github.com/hack-dance/hack/commit/75225e00452aedffbed0345cbde982cafbc74b13)), closes [#59](https://github.com/hack-dance/hack/issues/59) [#456](https://github.com/hack-dance/hack/issues/456)
-
-## [4.2.3](https://github.com/hack-dance/hack/compare/v4.2.2...v4.2.3) (2026-10-27)
-
-### Bug Fixes
-
-* **deps:** security bumps for next, MCP SDK, drizzle-orm (HACK-1394) ([#456](https://github.com/hack-dance/hack/issues/456)) ([739c4e5](https://github.com/hack-dance/hack/commit/739c4e5776eb144e005aa7ad1a6251163a985f6c))
-
-## [4.2.2](https://github.com/hack-dance/hack/compare/v4.2.1...v4.2.2) (2026-10-23)
-
-### Bug Fixes
-
-* make keychain tests hermetic ([#423](https://github.com/hack-dance/hack/issues/423)) ([4c194a1](https://github.com/hack-dance/hack/commit/4c194a124d7baf7273121c4b7d96fb02d53edfcf))
-
 ## [4.2.1](https://github.com/hack-dance/hack/compare/v4.2.0...v4.2.1) (2026-09-17)
 
 ### Bug Fixes

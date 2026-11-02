@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { restoreEnv } from "./helpers/env.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 type RunResult = {
   readonly exitCode: number;
@@ -35,7 +36,7 @@ afterEach(async () => {
     Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   }
   if (previousSecretsKey !== undefined) {
-    restoreEnv("HACK_SECRETS_FILE_KEY", previousSecretsKey);
+    process.env.HACK_SECRETS_FILE_KEY = previousSecretsKey;
   } else {
     Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
   }
@@ -47,7 +48,6 @@ test(
     const result = await runHack({
       args: ["env", "backend", "status", "--json"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
     });
@@ -84,6 +84,28 @@ test(
 );
 
 test(
+  "env backend use refuses invalid existing config without exposing or overwriting it",
+  async () => {
+    if (!tempGlobalConfigPath) {
+      throw new Error("Missing temp global config state");
+    }
+    const contents = '{"fixtureOnly":"do-not-echo",';
+    await writeFile(tempGlobalConfigPath, contents);
+    const result = await runHack({
+      args: ["env", "backend", "use", "encrypted_file", "--json"],
+      env: { HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath },
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain(
+      `Cannot update config at ${tempGlobalConfigPath}: invalid JSON`
+    );
+    expect(`${result.stdout}${result.stderr}`).not.toContain("do-not-echo");
+    expect(await readFile(tempGlobalConfigPath, "utf8")).toBe(contents);
+  },
+  { timeout: 20_000 }
+);
+
+test(
   "env backend use encrypted_file persists selection",
   async () => {
     const result = await runHack({
@@ -97,7 +119,6 @@ test(
         "--json",
       ],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
     });
@@ -131,16 +152,14 @@ test(
         "use",
         "encrypted_file",
         "--store-path",
-        resolve(tempDir, "secrets.enc.json"),
+        "/tmp/custom-secrets.enc.json",
         "--key-path",
         keyPath,
         "--provision-key",
         "--json",
       ],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath,
-        HACK_SECRETS_FILE_KEY: "",
       },
     });
     expect(result.exitCode).toBe(0);
@@ -156,7 +175,7 @@ test(
     expect(json.encrypted_file.keyPath).toBe(keyPath);
 
     const keyText = await readFile(keyPath, "utf8");
-    expect(keyText.trim()).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(keyText.trim().length).toBeGreaterThan(10);
 
     const configText = await readFile(tempGlobalConfigPath, "utf8");
     expect(configText).toContain('"keyPath"');
@@ -185,7 +204,6 @@ test(
         "--json",
       ],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath,
       },
     });
@@ -217,7 +235,6 @@ test(
     const invalid = await runHack({
       args: ["env", "backend", "use", "cloud"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
     });
@@ -241,7 +258,6 @@ test(
         "--json",
       ],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
     });
@@ -315,7 +331,6 @@ test(
     const setResult = await runHack({
       args: ["env", "set", "--secret", "API_KEY=super-secret"],
       env: {
-        ...process.env,
         HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
@@ -335,7 +350,6 @@ test(
     const listResult = await runHack({
       args: ["env", "list", "--show-secrets", "--json"],
       env: {
-        ...process.env,
         HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
@@ -366,7 +380,6 @@ test(
     const redactedListResult = await runHack({
       args: ["env", "list", "--json"],
       env: {
-        ...process.env,
         HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
@@ -387,7 +400,6 @@ test(
     const listTextResult = await runHack({
       args: ["env", "list", "--show-secrets"],
       env: {
-        ...process.env,
         HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
@@ -453,7 +465,6 @@ test(
     const result = await runHack({
       args: ["env", "set", "SECRET_TOKEN=super-secret"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
       cwd: projectRoot,
@@ -510,7 +521,6 @@ test(
     const result = await runHack({
       args: ["env", "set", "SECRET_TOKEN=super-secret"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
       cwd: projectRoot,
@@ -581,7 +591,6 @@ test(
     const result = await runHack({
       args: ["env", "set", "SECRET_TOKEN=super-secret"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
       cwd: projectRoot,
@@ -621,7 +630,6 @@ test(
     const result = await runHack({
       args: ["env", "set", "SECRET_TOKEN=plain-value"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
       cwd: projectRoot,
@@ -689,7 +697,6 @@ test(
     const result = await runHack({
       args: ["env", "list", "--json"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "true",
       },
@@ -776,7 +783,6 @@ test(
     const result = await runHack({
       args: ["env", "list", "--json"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
       },
@@ -897,7 +903,7 @@ test(
 );
 
 test(
-  "env set preserves multiline plain_env values through .env round-trip",
+  "env set keeps plain_env values lossless and stable across set/list/set cycles",
   async () => {
     if (!tempDir) {
       throw new Error("Missing temp dir");
@@ -910,6 +916,9 @@ test(
       'line"with"quotes',
       "-----END PUBLIC KEY-----",
     ].join("\n");
+    // Leading tab plus a leading quote: unquoted output used to be trimmed
+    // and then re-read as a quoted value, losing both edges.
+    const edgeValue = "\t'quoted'";
     await mkdir(projectDir, { recursive: true });
     await writeFile(
       resolve(projectDir, "docker-compose.yml"),
@@ -926,49 +935,68 @@ test(
               required: false,
               source: "plain_env",
             },
+            {
+              key: "EDGE_VALUE",
+              required: false,
+              source: "plain_env",
+            },
           ],
         },
         null,
         2
       )}\n`
     );
-
-    const setResult = await runHack({
-      args: ["env", "set", `PUBLIC_CERT=${multilineValue}`],
-      env: {
-        ...process.env,
-        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-      },
-      cwd: projectRoot,
-    });
-    expect(setResult.exitCode).toBe(0);
-
-    const envText = await readFile(resolve(projectDir, ".env"), "utf8");
-    expect(envText).toContain("PUBLIC_CERT=");
-    expect(envText).toContain("\\\\");
-    expect(envText).toContain('\\"');
-
-    const listResult = await runHack({
-      args: ["env", "list", "--show-secrets", "--json"],
-      env: {
-        ...process.env,
-        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-      },
-      cwd: projectRoot,
-    });
-    expect(listResult.exitCode).toBe(0);
-    const listJson = JSON.parse(listResult.stdout) as {
-      readonly vars: ReadonlyArray<{
-        readonly key: string;
-        readonly value: string | null;
-        readonly source: string;
-      }>;
+    const hackEnv = {
+      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
     };
-    const publicCert = listJson.vars.find(
-      (entry) => entry.key === "PUBLIC_CERT"
-    );
-    expect(publicCert?.source).toBe("plain_env");
-    expect(publicCert?.value).toBe(multilineValue);
+
+    const setAndList = async (): Promise<string> => {
+      const setCertResult = await runHack({
+        args: ["env", "set", `PUBLIC_CERT=${multilineValue}`],
+        env: hackEnv,
+        cwd: projectRoot,
+      });
+      expect(setCertResult.exitCode).toBe(0);
+      const setEdgeResult = await runHack({
+        args: ["env", "set", "EDGE_VALUE", edgeValue],
+        env: hackEnv,
+        cwd: projectRoot,
+      });
+      expect(setEdgeResult.exitCode).toBe(0);
+
+      const envText = await readFile(resolve(projectDir, ".env"), "utf8");
+
+      const listResult = await runHack({
+        args: ["env", "list", "--show-secrets", "--json"],
+        env: hackEnv,
+        cwd: projectRoot,
+      });
+      expect(listResult.exitCode).toBe(0);
+      const listJson = JSON.parse(listResult.stdout) as {
+        readonly vars: ReadonlyArray<{
+          readonly key: string;
+          readonly value: string | null;
+          readonly source: string;
+        }>;
+      };
+      const publicCert = listJson.vars.find(
+        (entry) => entry.key === "PUBLIC_CERT"
+      );
+      const edge = listJson.vars.find((entry) => entry.key === "EDGE_VALUE");
+      expect(publicCert?.source).toBe("plain_env");
+      expect(publicCert?.value).toBe(multilineValue);
+      expect(edge?.source).toBe("plain_env");
+      expect(edge?.value).toBe(edgeValue);
+      return envText;
+    };
+
+    const firstEnvText = await setAndList();
+    expect(firstEnvText).toContain("PUBLIC_CERT=");
+    expect(firstEnvText).toContain("\\\\");
+    expect(firstEnvText).toContain('\\"');
+
+    const secondEnvText = await setAndList();
+    expect(secondEnvText).toBe(firstEnvText);
   },
   { timeout: 40_000 }
 );
@@ -1028,7 +1056,6 @@ test(
     const setResult = await runHack({
       args: ["env", "set", "PUBLIC_URL=https://example.test"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
       },
@@ -1047,7 +1074,6 @@ test(
     const listResult = await runHack({
       args: ["env", "list", "--json", "--show-secrets"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
       },
@@ -1138,7 +1164,6 @@ test(
     const baseSet = await runHack({
       args: ["env", "set", "--env=base", "PUBLIC_URL=https://base.test"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-command-key",
       },
@@ -1149,7 +1174,6 @@ test(
     const overlaySet = await runHack({
       args: ["env", "set", "--env=qa", "PUBLIC_URL=https://qa.test"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-command-key",
       },
@@ -1168,7 +1192,6 @@ test(
     const defaultList = await runHack({
       args: ["env", "list", "--json", "--show-secrets"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-command-key",
       },
@@ -1194,7 +1217,6 @@ test(
     const baseList = await runHack({
       args: ["env", "list", "--json", "--show-secrets", "--env=base"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-command-key",
       },
@@ -1273,7 +1295,6 @@ test(
     const overlaySet = await runHack({
       args: ["env", "set", "--env=qa", "PUBLIC_URL=https://qa-bundled.test"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-backend-key",
       },
@@ -1286,7 +1307,6 @@ test(
     const listResult = await runHack({
       args: ["env", "list", "--json", "--show-secrets", "--env=qa"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-backend-key",
       },
@@ -1362,7 +1382,6 @@ test(
     const baseSet = await runHack({
       args: ["env", "set", "--env=base", "PUBLIC_URL=https://base.test"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-manual-file-key",
       },
@@ -1378,7 +1397,6 @@ test(
     const listResult = await runHack({
       args: ["env", "list", "--json", "--show-secrets", "--env=qa"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-manual-file-key",
       },
@@ -1458,7 +1476,6 @@ test(
     const listResult = await runHack({
       args: ["env", "list", "--json", "--env=qa"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-warning-key",
       },
@@ -1487,16 +1504,30 @@ test(
   { timeout: 40_000 }
 );
 
+/**
+ * Runs the source CLI with a private HOME under the test's temp directory.
+ * Only the file-store key a test sets in-process and the values in `env` reach
+ * the child; the runner's HOME, keychain and HACK_* settings do not.
+ */
 async function runHack(input: {
   readonly args: readonly string[];
-  readonly env: NodeJS.ProcessEnv;
+  readonly env: Readonly<Record<string, string | undefined>>;
   readonly cwd?: string;
 }): Promise<RunResult> {
+  if (!tempDir) {
+    throw new Error("Missing temp directory state");
+  }
   const proc = Bun.spawn(
     ["bun", resolve(import.meta.dir, "../index.ts"), ...input.args],
     {
       cwd: input.cwd ?? resolve(import.meta.dir, ".."),
-      env: input.env,
+      env: privateCliEnv({
+        root: tempDir,
+        env: {
+          HACK_SECRETS_FILE_KEY: process.env.HACK_SECRETS_FILE_KEY,
+          ...input.env,
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

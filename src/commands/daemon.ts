@@ -15,6 +15,7 @@ import {
   kickstartLaunchdService,
   type LaunchdServiceStatus,
   repairLaunchdProgramIfInvalid,
+  resolveLaunchdAccess,
   uninstallLaunchdService,
 } from "../daemon/launchd.ts";
 import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
@@ -31,6 +32,7 @@ import {
   type DaemonStatusReport,
   readDaemonStatus,
 } from "../daemon/status.ts";
+import { HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { pathExists, readTextFile } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -687,6 +689,7 @@ async function handleDaemonInstall({
     logger.warn({ message: "launchd integration is only available on macOS" });
     return 1;
   }
+  assertLaunchdAccess();
 
   const paths = resolveDaemonPaths({});
   const controlPlane = await readControlPlaneConfig({});
@@ -766,6 +769,22 @@ async function handleDaemonInstall({
   return 0;
 }
 
+/**
+ * Refuses an explicit `daemon install`/`uninstall` closed when this process
+ * may not manage the per-user launchd service (an isolated HACK_HOME or
+ * HACK_LAUNCHD_DISABLE=1). Nothing is read or written before the refusal.
+ */
+function assertLaunchdAccess(): void {
+  const access = resolveLaunchdAccess();
+  if (!access.allowed) {
+    throw new HackCliError({
+      code: "E_PERMISSION",
+      message: access.message,
+      detail: { reason: access.reason },
+    });
+  }
+}
+
 function resolveRunAtLoadOption(opts: {
   readonly runAtLoadOpt: boolean | undefined;
   readonly noRunAtLoadOpt: boolean | undefined;
@@ -804,6 +823,7 @@ async function handleDaemonUninstall({
     logger.warn({ message: "launchd integration is only available on macOS" });
     return 1;
   }
+  assertLaunchdAccess();
 
   const paths = resolveDaemonPaths({});
   const result = await uninstallLaunchdService({ paths });

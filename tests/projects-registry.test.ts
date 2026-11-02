@@ -114,7 +114,7 @@ test("upsertProjectRegistration returns conflict when name is taken", async () =
   expect(res.status).toBe("conflict");
 });
 
-test("upsertProjectRegistration moves entry when old path missing", async () => {
+test("upsertProjectRegistration refuses an unrelated checkout when the old path is missing", async () => {
   const registryPath = join(tempDir!, ".hack", "projects.json");
   await writeJson(registryPath, {
     version: 1,
@@ -130,24 +130,26 @@ test("upsertProjectRegistration moves entry when old path missing", async () => 
     ],
   });
 
+  const before = await readFile(registryPath, "utf8");
   const incoming = await createProject({ rootName: "repo-b", name: "alpha" });
   const res = await upsertProjectRegistration({
     project: incoming,
     nowIso: "2025-01-02T00:00:00Z",
   });
-  expect(res.status).toBe("updated");
-
-  const registry = await readProjectsRegistry();
-  expect(registry.projects[0]?.projectDir).toBe(
-    await realpath(incoming.projectDir)
-  );
+  expect(res.status).toBe("conflict");
+  expect(await readFile(registryPath, "utf8")).toBe(before);
 });
 
-test("upsertProjectRegistration clears stale registry lock", async () => {
+test("upsertProjectRegistration recovers a confirmed dead registry owner", async () => {
   const project = await createProject({ rootName: "repo-a", name: "alpha" });
   const lockPath = join(tempDir!, ".hack", "projects.json.lock");
   await mkdir(dirname(lockPath), { recursive: true });
-  await writeFile(lockPath, "123\n");
+  const child = Bun.spawn([process.execPath, "-e", "process.exit(0)"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await child.exited;
+  await writeFile(lockPath, `${child.pid}\n`);
   const staleTime = new Date(Date.now() - 60_000);
   await utimes(lockPath, staleTime, staleTime);
 

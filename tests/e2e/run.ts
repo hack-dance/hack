@@ -1,18 +1,69 @@
-import { runIsolationCanary, runScenarios, type Scenario } from "./harness.ts";
+import {
+  blockedLaunchctlCalls,
+  describeLaunchAgentChange,
+  fingerprintLaunchAgentPlist,
+  realHackdLaunchAgentPath,
+  runIsolationCanary,
+  runScenarios,
+  type Scenario,
+  selectScenarios,
+} from "./harness.ts";
+import { nativeConfigNetworksScenario } from "./native-config-networks-acceptance.ts";
 import { agentDocsSyncScenario } from "./scenarios/agent-docs-sync.ts";
+import { agentSurfaceFreezeScenario } from "./scenarios/agent-surface-freeze.ts";
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
+import { composeConfigHashDriftScenario } from "./scenarios/compose-config-hash-drift.ts";
 import { dependencyCacheScenario } from "./scenarios/dependency-cache.ts";
+import { dependencyCacheBootstrapScenario } from "./scenarios/dependency-cache-bootstrap.ts";
+import { dependencyCachePackageScenario } from "./scenarios/dependency-cache-package.ts";
+import { dependencyCacheProtocolScenario } from "./scenarios/dependency-cache-protocol.ts";
 import { doctorScenario } from "./scenarios/doctor.ts";
+import { domainMigrationScenario } from "./scenarios/domain-migration.ts";
+import { domainMigrationFilesScenario } from "./scenarios/domain-migration-files.ts";
 import { envSecretsScenario } from "./scenarios/env-secrets.ts";
+import { execStaleEnvScenario } from "./scenarios/exec-stale-env.ts";
 import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
 import { lifecycleSessionRecoveryScenario } from "./scenarios/lifecycle-session-recovery.ts";
+import { mcpLogsComposeScenario } from "./scenarios/mcp-logs-compose.ts";
+import { nativeComposeAdoptionJobWorktreesScenario } from "./scenarios/native-compose-adoption-job-worktrees.ts";
+import { nativeComposeAdoptionRoutingWorktreesScenario } from "./scenarios/native-compose-adoption-routing-worktrees.ts";
+import { nativeComposeAdoptionSourceBindWorktreesScenario } from "./scenarios/native-compose-adoption-source-bind-worktrees.ts";
+import {
+  nativeComposeAdoptionBranchWorktreesScenario,
+  nativeComposeAdoptionBuildWorktreesScenario,
+  nativeComposeAdoptionDependencyWorktreesScenario,
+  nativeComposeAdoptionLocalWorktreesScenario,
+  nativeComposeAdoptionManagedWorktreesScenario,
+  nativeComposeAdoptionNetworkHealthWorktreesScenario,
+  nativeComposeAdoptionNetworkWorktreesScenario,
+  nativeComposeAdoptionPluralNetworkWorktreesScenario,
+  nativeComposeAdoptionStringWorktreesScenario,
+  nativeComposeAdoptionWorktreesScenario,
+} from "./scenarios/native-compose-adoption-worktrees.ts";
+import { nativeConfigBuildScenario } from "./scenarios/native-config-build.ts";
+import { nativeConfigComposeScenario } from "./scenarios/native-config-compose.ts";
+import { nativeConfigDownHooksScenario } from "./scenarios/native-config-down-hooks.ts";
+import {
+  nativeConfigFilesScenario,
+  nativeConfigFileUnknownStopScenario,
+} from "./scenarios/native-config-files.ts";
+import { nativeConfigProcessPolicyScenario } from "./scenarios/native-config-process-policy.ts";
+import { nativeConfigProtectedFilesScenario } from "./scenarios/native-config-protected-files.ts";
+import { nativeConfigRoutingScenario } from "./scenarios/native-config-routing.ts";
+import { nativeConfigVmFilesScenario } from "./scenarios/native-config-vm-files.ts";
+import { patternP01DependencyBootstrapScenario } from "./scenarios/pattern-p01-dependency-bootstrap.ts";
+import { patternP02PortableToolchainScenario } from "./scenarios/pattern-p02-portable-toolchain.ts";
+import { patternP07CapabilityOverlaysScenario } from "./scenarios/pattern-p07-capability-overlays.ts";
+import { portableBootstrapNegativesScenario } from "./scenarios/portable-bootstrap-negatives.ts";
+import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
 import { upDownScenario } from "./scenarios/up-down.ts";
 import { worktreeBranchDefaultScenario } from "./scenarios/worktree-branch-default.ts";
 import { worktreeParallelUpScenario } from "./scenarios/worktree-parallel-up.ts";
 import { worktreeRegistryScenario } from "./scenarios/worktree-registry.ts";
 import { worktreeSecretsScenario } from "./scenarios/worktree-secrets.ts";
+import { parseShard, type ShardSelection, selectShard } from "./shard.ts";
 
 /**
  * hack CLI end-to-end runner.
@@ -21,6 +72,9 @@ import { worktreeSecretsScenario } from "./scenarios/worktree-secrets.ts";
  *   bun tests/e2e/run.ts                    # tier 1 (local) scenarios
  *   HACK_E2E_DOCKER=1 bun tests/e2e/run.ts  # + tier 2 (docker) scenarios
  *   bun tests/e2e/run.ts --only=init,doctor # subset by name
+ *   bun tests/e2e/run.ts --shard=2/4        # one deterministic CI shard of
+ *                                           # the default set (not with --only)
+ *   # Host-ingress scenarios require explicit --only plus their prerequisites.
  *   bun tests/e2e/run.ts --list             # list scenarios and exit
  *   HACK_E2E_KEEP=1 ...                     # keep temp fixtures for debugging
  *   HACK_E2E_CLI_BIN=./dist/hack ...        # exercise the compiled binary
@@ -28,10 +82,11 @@ import { worktreeSecretsScenario } from "./scenarios/worktree-secrets.ts";
  *   HACK_E2E_REQUIRE_TMUX=1 ...              # fail if tmux recovery cannot run
  *
  * Exit codes: 0 all pass/skip, 1 any scenario failed, 2 isolation canary
- * failed (nothing ran).
+ * failed (nothing ran) or the launchd canary saw the real hackd plist change
+ * or a refused hackd launchctl call (HACK-1313).
  */
 
-const ALL_SCENARIOS: readonly Scenario[] = [
+export const ALL_SCENARIOS: readonly Scenario[] = [
   automationCheckScenario,
   initScenario,
   envSecretsScenario,
@@ -39,22 +94,71 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   worktreeRegistryScenario,
   worktreeBranchDefaultScenario,
   agentDocsSyncScenario,
+  agentSurfaceFreezeScenario,
   doctorScenario,
+  domainMigrationFilesScenario,
   lifecycleSessionRecoveryScenario,
   cachePruneScenario,
   dependencyCacheScenario,
+  dependencyCacheBootstrapScenario,
+  dependencyCacheProtocolScenario,
+  dependencyCachePackageScenario,
+  patternP01DependencyBootstrapScenario,
+  patternP02PortableToolchainScenario,
+  patternP07CapabilityOverlaysScenario,
+  domainMigrationScenario,
   upDownScenario,
+  execStaleEnvScenario,
+  portableMultiserviceScenario,
+  portableBootstrapNegativesScenario,
+  composeConfigHashDriftScenario,
+  mcpLogsComposeScenario,
+  nativeConfigComposeScenario,
+  nativeConfigBuildScenario,
+  nativeConfigDownHooksScenario,
+  nativeConfigFilesScenario,
+  nativeConfigFileUnknownStopScenario,
+  nativeConfigProtectedFilesScenario,
+
+  nativeConfigVmFilesScenario,
+  nativeConfigProcessPolicyScenario,
+  nativeConfigRoutingScenario,
+  nativeConfigNetworksScenario,
+  nativeComposeAdoptionWorktreesScenario,
+  nativeComposeAdoptionBranchWorktreesScenario,
+  nativeComposeAdoptionStringWorktreesScenario,
+  nativeComposeAdoptionNetworkWorktreesScenario,
+  nativeComposeAdoptionPluralNetworkWorktreesScenario,
+  nativeComposeAdoptionNetworkHealthWorktreesScenario,
+  nativeComposeAdoptionManagedWorktreesScenario,
+  nativeComposeAdoptionLocalWorktreesScenario,
+  nativeComposeAdoptionDependencyWorktreesScenario,
+  nativeComposeAdoptionBuildWorktreesScenario,
+  nativeComposeAdoptionJobWorktreesScenario,
+  nativeComposeAdoptionRoutingWorktreesScenario,
+  nativeComposeAdoptionSourceBindWorktreesScenario,
   lifecycleHostProcessScenario,
   worktreeParallelUpScenario,
 ];
 
 type CliArgs = {
   readonly only: readonly string[];
+  readonly shard: ShardSelection | null;
   readonly list: boolean;
 };
 
+const USAGE =
+  "Usage: bun tests/e2e/run.ts [--list] [--only=name,name | --shard=i/n]\n";
+
+function usageError(message: string): CliArgs {
+  process.stdout.write(`${message}\n${USAGE}`);
+  process.exitCode = 2;
+  return { only: [], shard: null, list: true };
+}
+
 function parseArgs(argv: readonly string[]): CliArgs {
   const only: string[] = [];
+  let shard: ShardSelection | null = null;
   let list = false;
   for (const arg of argv) {
     if (arg === "--list") {
@@ -67,26 +171,64 @@ function parseArgs(argv: readonly string[]): CliArgs {
           .map((name) => name.trim())
           .filter((name) => name.length > 0)
       );
+    } else if (arg.startsWith("--shard=")) {
+      shard = parseShard(arg.slice("--shard=".length));
+      if (shard === null) {
+        return usageError("Invalid --shard (expected i/n with 1 <= i <= n)");
+      }
     } else {
-      process.stdout.write(`Unknown argument: ${arg}\n`);
-      process.stdout.write(
-        "Usage: bun tests/e2e/run.ts [--list] [--only=name,name]\n"
-      );
-      process.exitCode = 2;
-      return { only: [], list: true };
+      return usageError(`Unknown argument: ${arg}`);
     }
   }
-  return { only, list };
+  if (shard !== null && only.length > 0) {
+    return usageError("--shard and --only cannot be combined");
+  }
+  return { only, shard, list };
 }
 
-async function main(): Promise<void> {
-  const args = parseArgs(Bun.argv.slice(2));
-  if (args.list) {
-    for (const scenario of ALL_SCENARIOS) {
+/** The default scenario set split for `selection`; see tests/e2e/shard.ts. */
+export function shardScenarioNames(
+  selection: ShardSelection
+): readonly string[] {
+  return selectShard({
+    names: selectScenarios({ scenarios: ALL_SCENARIOS }).map(
+      (scenario) => scenario.name
+    ),
+    selection,
+  });
+}
+
+function printScenarioList(shardNames: readonly string[] | null): void {
+  for (const scenario of ALL_SCENARIOS) {
+    if (shardNames === null || shardNames.includes(scenario.name)) {
       process.stdout.write(
         `${scenario.name.padEnd(26)} ${scenario.tier.padEnd(6)} ${scenario.summary}\n`
       );
     }
+  }
+}
+
+function printShardPlan(opts: {
+  readonly selection: ShardSelection;
+  readonly names: readonly string[];
+}): void {
+  process.stdout.write(
+    `== hack e2e: shard ${opts.selection.index}/${opts.selection.count} (${opts.names.length} scenarios) ==\n${opts.names.join("\n")}\n\n`
+  );
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(Bun.argv.slice(2));
+  const shardNames = args.shard ? shardScenarioNames(args.shard) : null;
+  if (args.shard && shardNames?.length === 0) {
+    process.stdout.write(
+      `Shard ${args.shard.index}/${args.shard.count} selects no scenarios\n`
+    );
+    process.exitCode = 2;
+    return;
+  }
+  if (args.list) {
+    printScenarioList(shardNames);
     return;
   }
 
@@ -101,6 +243,44 @@ async function main(): Promise<void> {
     return;
   }
 
+  // HACK-1313: HOME stays real here, so the user's hackd LaunchAgent plist is
+  // reachable. Fingerprint it (hash + mtime only) around the whole run.
+  const launchAgentPath = realHackdLaunchAgentPath();
+  const launchAgentBefore = await fingerprintLaunchAgentPlist({
+    path: launchAgentPath,
+  });
+  try {
+    await runSuite({ args, shardNames });
+  } finally {
+    const change = describeLaunchAgentChange({
+      before: launchAgentBefore,
+      after: await fingerprintLaunchAgentPlist({ path: launchAgentPath }),
+    });
+    const blocked = blockedLaunchctlCalls();
+    if (change !== null || blocked.length > 0) {
+      process.stdout.write(
+        [
+          "LAUNCHD CANARY FAILED — the run reached the real hackd launchd service.",
+          change === null
+            ? "hackd LaunchAgent plist unchanged."
+            : `hackd LaunchAgent plist changed during the run: ${change}`,
+          blocked.length === 0
+            ? "No hackd launchctl calls were refused."
+            : `Refused hackd launchctl calls: ${blocked.join(", ")}`,
+          "A concurrent `hack daemon install` outside this run also trips this check.",
+          "",
+        ].join("\n")
+      );
+      process.exitCode = 2;
+    }
+  }
+}
+
+async function runSuite(opts: {
+  readonly args: CliArgs;
+  readonly shardNames: readonly string[] | null;
+}): Promise<void> {
+  const { args, shardNames } = opts;
   process.stdout.write("== hack e2e: isolation canary ==\n");
   const canary = await runIsolationCanary();
   if (!canary.ok) {
@@ -112,6 +292,9 @@ async function main(): Promise<void> {
   process.stdout.write(
     `canary ok — isolated registry at ${canary.registryPath}\n\n`
   );
+  if (args.shard && shardNames) {
+    printShardPlan({ selection: args.shard, names: shardNames });
+  }
 
   const dockerEnabled = (process.env.HACK_E2E_DOCKER ?? "") === "1";
   const requireDocker = (process.env.HACK_E2E_REQUIRE_DOCKER ?? "") === "1";
@@ -119,7 +302,7 @@ async function main(): Promise<void> {
   const outcomes = await runScenarios({
     scenarios: ALL_SCENARIOS,
     dockerEnabled,
-    only: args.only,
+    only: shardNames ?? args.only,
     keepTempDirs,
   });
 
@@ -133,4 +316,6 @@ async function main(): Promise<void> {
       : 0;
 }
 
-await main();
+if (import.meta.main) {
+  await main();
+}

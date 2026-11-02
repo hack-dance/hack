@@ -13,8 +13,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - caddy_data:/data
       - ../schemas:/srv/schemas:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     labels:
-      caddy: schemas.hack
+      caddy: schemas.hack.local, schemas.hack
       caddy.root: /srv/schemas
       caddy.file_server: ""
       caddy.tls: internal
@@ -23,6 +25,7 @@ services:
     networks:
       default:
         ipv4_address: 172.30.0.2
+
   coredns:
     image: coredns/coredns:1.11.1
     command: -conf /etc/coredns/Corefile

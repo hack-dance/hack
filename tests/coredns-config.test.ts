@@ -52,3 +52,19 @@ test("renderGlobalCoreDnsConfig matches .hack aliases and forwards external DNS"
   expect(matcher.test("core.sickemail.hack.gy")).toBe(true);
   expect(matcher.test("example.com")).toBe(false);
 });
+
+test("configured custom domain gets a narrow CoreDNS route without broad external capture", () => {
+  const staticConfig = renderGlobalCoreDnsConfig({
+    useStaticCaddyIp: true,
+    defaultDomain: "project.example.test",
+  });
+  expect(staticConfig).toContain("(.*)\\.project\\.example\\.test\\.?)$");
+  expect(staticConfig.match(/template IN A/g)).toHaveLength(1);
+  const dynamicConfig = renderGlobalCoreDnsConfig({
+    defaultDomain: "project.example.test",
+  });
+  expect(dynamicConfig).toContain(
+    "(.*)\\.project\\.example\\.test\\.?)$ caddy"
+  );
+  expect(dynamicConfig).toContain("forward . 127.0.0.11");
+});

@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
+  type AnyCommandSpec,
+  builtinOptions,
   collectAllowedOptionNames,
+  type OptionSpec,
+  parseCliArgv,
   parseOptionsForCommand,
   parsePositionalsForCommand,
   resolveCommand,
@@ -48,6 +52,15 @@ test("parsePositionalsForCommand throws on extra args", () => {
   ).toThrow("Unexpected arguments");
 });
 
+test("parsePositionalsForCommand never echoes the extra arguments", () => {
+  // An extra argument is often a pasted `KEY=value`; only the count is shown.
+  expect(() =>
+    parsePositionalsForCommand([], ["API_TOKEN=synthetic-extra-4c2d", "more"])
+  ).toThrow(
+    "Unexpected arguments: 2 more than this command accepts. They are not shown because they may contain values."
+  );
+});
+
 test("parseOptionsForCommand converts number options", () => {
   const opts = [
     {
@@ -84,6 +97,77 @@ test("resolveCommand exposes host exec path", () => {
     "exec",
   ]);
   expect(resolved.remainingPositionals).toEqual(["bun", "test"]);
+});
+
+/**
+ * argv is parsed with the resolved command's options plus the global and
+ * built-in ones, so a spelling may mean different options in different
+ * commands (`-p` is `--path` for project commands and `--port` for `ssh`).
+ * Within one command's scope, each long and short spelling must name exactly
+ * one option, or the parser would silently pick one of them.
+ */
+test("each command scope declares every option spelling once", () => {
+  const conflicts: string[] = [];
+  const check = (opts: {
+    readonly owner: string;
+    readonly options: readonly OptionSpec[];
+  }) => {
+    const seen = new Map<string, OptionSpec>();
+    for (const option of opts.options) {
+      for (const spelling of [option.long, option.short]) {
+        if (spelling === undefined) {
+          continue;
+        }
+        const previous = seen.get(spelling);
+        if (previous !== undefined && previous !== option) {
+          conflicts.push(
+            `${opts.owner}: ${spelling} names ${previous.long} and ${option.long}`
+          );
+        }
+        seen.set(spelling, option);
+      }
+    }
+  };
+  const shared = [...builtinOptions(), ...CLI_SPEC.globalOptions];
+  check({ owner: "hack", options: shared });
+  const walk = (
+    commands: readonly AnyCommandSpec[],
+    parent: readonly string[]
+  ) => {
+    for (const command of commands) {
+      const path = [...parent, command.name];
+      check({
+        owner: ["hack", ...path].join(" "),
+        options: [...shared, ...command.options],
+      });
+      walk(command.subcommands, path);
+    }
+  };
+  walk(CLI_SPEC.commands, []);
+
+  expect(conflicts).toEqual([]);
+});
+
+test("boolean config adopt --rollback does not consume the next flag", () => {
+  const adopt = parseCliArgv(CLI_SPEC, [
+    "config",
+    "adopt",
+    "--rollback",
+    "--json",
+  ]);
+  expect(adopt.values.rollback).toBe(true);
+  expect(adopt.values.json).toBe(true);
+  expect(adopt.positionals).toEqual(["config", "adopt"]);
+
+  const migrate = parseCliArgv(CLI_SPEC, [
+    "setup",
+    "migrate",
+    "--rollback-manifest",
+    "manifest.json",
+    "--json",
+  ]);
+  expect(migrate.values["rollback-manifest"]).toBe("manifest.json");
+  expect(migrate.values.json).toBe(true);
 });
 
 test("dispatch rejects retired GitHub PR automation flags as unknown", async () => {

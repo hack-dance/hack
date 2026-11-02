@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const cases = [
   {
@@ -73,24 +74,38 @@ for (const scenario of cases) {
   test.skipIf(!Bun.which("python3"))(
     `TTY ${scenario.name} preserves terminal ownership and cleans only owned processes`,
     async () => {
-      const proc = Bun.spawn(
-        [
-          "python3",
-          resolve(import.meta.dir, "fixtures/tty-cancellation.py"),
-          "probe",
-          process.execPath,
-          resolve(import.meta.dir, "../index.ts"),
-          scenario.signal,
-          scenario.behavior,
-          scenario.mode,
-        ],
-        { stdin: "ignore", stdout: "pipe", stderr: "pipe" }
-      );
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
+      // The probe passes its env, plus a private HACK_HOME, to the CLI.
+      const root = await mkdtemp(join(tmpdir(), "hack-tty-env-"));
+      let stdout: string;
+      let stderr: string;
+      let exitCode: number;
+      try {
+        const proc = Bun.spawn(
+          [
+            "python3",
+            resolve(import.meta.dir, "fixtures/tty-cancellation.py"),
+            "probe",
+            process.execPath,
+            resolve(import.meta.dir, "../index.ts"),
+            scenario.signal,
+            scenario.behavior,
+            scenario.mode,
+          ],
+          {
+            env: privateCliEnv({ root }),
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          }
+        );
+        [stdout, stderr, exitCode] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
       expect(stderr).toBe("");
       expect(exitCode).toBe(0);
       const outcome = JSON.parse(stdout);
@@ -183,7 +198,12 @@ test.skipIf(!Bun.which("python3"))(
           "exit",
           "paused",
         ],
-        { stdin: "ignore", stdout: "pipe", stderr: "pipe" }
+        {
+          env: privateCliEnv({ root: directory }),
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        }
       );
       const [stdout, stderr, exit] = await Promise.all([
         new Response(probe.stdout).text(),

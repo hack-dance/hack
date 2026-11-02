@@ -1,5 +1,9 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as nodeCrypto from "node:crypto";
+import { writeFileSync } from "node:fs";
 import {
+  chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -9,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { YAML } from "bun";
 
 import {
   PROJECT_COMPOSE_FILENAME,
@@ -18,23 +23,30 @@ import {
   PROJECT_ENV_KEY_FILENAME,
   PROJECT_ENV_STATE_FILENAME,
 } from "../src/constants.ts";
+import { resetHackGitInfoExcludeCacheForTests } from "../src/lib/git-info-exclude.ts";
 import { upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { readProjectDefaultEnvConfig } from "../src/lib/project.ts";
 import {
   assertValidProjectEnvScopeName,
+  ENV_SCOPE_UNKNOWN_MESSAGE,
+  ensureHackDirGitignore,
   ensureProjectEnvSecretKey,
+  HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   listProjectEnvOverlayNames,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
+  removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
   resolveProjectEnvLocalConfigPath,
   resolveProjectEnvSharedKeyPath,
+  selectProjectEnvValues,
   selectProjectEnvValuesForExecutionTarget,
   setProjectEnvValue,
+  unknownProjectEnvScopeMessage,
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
@@ -373,15 +385,50 @@ test("materializeProjectEnv rejects unknown service scopes", async () => {
     secret: false,
   });
 
-  await expect(
-    materializeProjectEnv({
-      projectRoot: repo.projectRoot,
-      projectDir: repo.projectDir,
-      envName: null,
-      serviceName: "typo_service",
-      serviceNames: ["api", "web"],
-    })
-  ).rejects.toThrow("Unknown env scope: typo_service");
+  const error = await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceName: "typo_service",
+    serviceNames: ["api", "web"],
+  }).then(
+    () => null,
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(Error);
+  const message = (error as Error).message;
+  // Configured scope names come from compose/env files and may be listed;
+  // the requested argument never is.
+  expect(message).toBe(
+    `${ENV_SCOPE_UNKNOWN_MESSAGE} Configured scopes: global, api, web.`
+  );
+  expect(message).not.toContain("typo_service");
+});
+
+test("unknown-scope refusals list configured scopes but never the request", () => {
+  const canary = "api_token=unknown-scope-canary-7c2e";
+  const resolved = {
+    globalEnv: {},
+    serviceEnv: { web: {}, api: {} },
+    hostTargetEnv: {},
+  } as unknown as Parameters<typeof selectProjectEnvValues>[0]["resolved"];
+  for (const scopeName of [canary, "constructor", "__proto__", "toString"]) {
+    let message = "";
+    try {
+      selectProjectEnvValues({ resolved, scopeName });
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toBe(
+      `${ENV_SCOPE_UNKNOWN_MESSAGE} Configured scopes: global, api, web.`
+    );
+    expect(message).not.toContain(scopeName);
+  }
+
+  const many = unknownProjectEnvScopeMessage({
+    configuredScopes: Array.from({ length: 30 }, (_, i) => `svc${i + 100}`),
+  });
+  expect(many).toContain("(and 11 more)");
 });
 
 test("project env scopes accept compose-compatible underscores and dots", () => {
@@ -398,6 +445,51 @@ test("project env scopes accept compose-compatible underscores and dots", () => 
     scope: "api_worker.v2",
     key: "SERVICE_TOKEN",
   });
+});
+
+test("env key and scope refusals never echo the rejected argument", async () => {
+  const canary = "echo-canary-lib-5e1c";
+  const refusal = (fn: () => unknown): string => {
+    try {
+      fn();
+    } catch (error: unknown) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    throw new Error("expected a refusal");
+  };
+  const messages = [
+    refusal(() => parseProjectEnvTarget({ keyOrPath: `API_TOKEN=${canary}` })),
+    refusal(() =>
+      parseProjectEnvTarget({ keyOrPath: `API_TOKEN=${canary}.tail` })
+    ),
+    refusal(() => parseProjectEnvTarget({ keyOrPath: canary })),
+    refusal(() => parseProjectEnvTarget({ keyOrPath: `api.${canary}` })),
+    refusal(() =>
+      parseProjectEnvTarget({ keyOrPath: `Bad${canary}.API_TOKEN` })
+    ),
+    refusal(() =>
+      assertValidProjectEnvScopeName({ scopeName: `Bad${canary}` })
+    ),
+  ];
+  for (const message of messages) {
+    expect(message).toMatch(/^Invalid env (key|scope): /);
+    expect(message).not.toContain(canary);
+    expect(message).not.toContain("API_TOKEN=");
+  }
+
+  const repo = await createRepo();
+  const write = setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: `API_TOKEN=${canary}`,
+    value: canary,
+    secret: true,
+  });
+  await expect(write).rejects.toThrow("Invalid env key: keys must match");
+  const error = await write.catch((caught: unknown) => caught);
+  expect(error instanceof Error ? error.message : "").not.toContain(canary);
 });
 
 test("resolveProjectEnvConfig falls back to HACK_ENV_SECRET_KEY when the key file is missing", async () => {
@@ -891,6 +983,92 @@ test("setProjectEnvValue writes local override ignore rules to the committed .ha
     "utf8"
   );
   expect(excludeText).not.toContain("hack.env");
+});
+
+test("setProjectEnvValue --local keeps a read-only outdated .hack/.gitignore and warns instead of failing (HACK-1363)", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+  const gitignore = resolve(repo.projectDir, ".gitignore");
+  await writeFile(gitignore, "my-own-entry\n");
+  await chmod(gitignore, 0o444);
+  // Captured from process.stderr, not a logger spy: the warning must bypass
+  // the UI logger (whose clack backend prints to stdout), and another file's
+  // scoped logger mock in the same Bun process would hide a logger spy.
+  const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    await setProjectEnvValue({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      scope: "global",
+      key: "LOCAL_ONLY",
+      value: "true",
+      secret: false,
+      local: true,
+    });
+
+    const localOverlay = await readFile(
+      resolveProjectEnvLocalConfigPath({
+        projectDir: repo.projectDir,
+        envName: null,
+      }),
+      "utf8"
+    );
+    expect(localOverlay).toContain('LOCAL_ONLY: "true"');
+    expect(await readFile(gitignore, "utf8")).toBe("my-own-entry\n");
+    expect((await lstat(gitignore)).mode & 0o777).toBe(0o444);
+    expect(
+      stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .filter((chunk) => chunk.includes(".hack/.gitignore"))
+    ).toEqual([`WARN: ${HACK_DIR_GITIGNORE_READ_ONLY_WARNING}\n`]);
+  } finally {
+    stderr.mockRestore();
+    await chmod(gitignore, 0o644);
+  }
+});
+
+test("materializeProjectEnv keeps .hack/.env out of git status through info/exclude", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "GLOBAL_FLAG",
+    value: "1",
+    secret: false,
+  });
+  resetHackGitInfoExcludeCacheForTests();
+  const exclude = resolve(repo.projectRoot, ".git", "info", "exclude");
+  expect(await readFile(exclude, "utf8")).not.toContain("/.hack/.env");
+
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(
+    await Bun.file(resolve(repo.projectDir, PROJECT_ENV_FILENAME)).exists()
+  ).toBe(true);
+  const excludeText = await readFile(exclude, "utf8");
+  expect(excludeText).toContain("/.hack/.env\n");
+  expect(excludeText).toContain("/.hack/.env.state.json\n");
+  expect(await Bun.file(resolve(repo.projectDir, ".gitignore")).exists()).toBe(
+    false
+  );
+  const status = await runGit(
+    ["status", "--porcelain", "--untracked-files=all"],
+    repo.projectRoot
+  );
+  expect(status.split("\n").sort()).toEqual([
+    "?? .hack/docker-compose.yml",
+    "?? .hack/hack.config.json",
+    "?? .hack/hack.env.default.yaml",
+  ]);
 });
 
 test("normal git clones keep generated env keys at the repo root", async () => {
@@ -1397,6 +1575,18 @@ test("migrateLegacyProjectEnv blocks cleanup for compose-referenced legacy env f
       resolvedPath: resolve(repo.projectDir, ".env.production"),
     },
   ]);
+  expect(
+    await listProjectEnvOverlayNames({ projectDir: repo.projectDir })
+  ).toContain("production");
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.production.yaml"), "utf8")
+  ).not.toContain("https://prod.example.com");
+  expect(
+    await readFile(
+      resolve(repo.projectDir, "hack.env.production.local.yaml"),
+      "utf8"
+    )
+  ).toContain("https://prod.example.com");
   expect(migrated.cleanupCandidates).toEqual([
     resolve(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
   ]);
@@ -1435,6 +1625,94 @@ async function createGitWorktree(opts: {
   );
 }
 
+test("contract migration in a linked worktree keeps plaintext in that worktree's local layer", async () => {
+  const repo = await createRepo();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "LOCAL_FIXTURE", source: "plain_env", services: ["api"] }],
+    })
+  );
+  await initializeGitRepo({ projectRoot: repo.projectRoot });
+  const worktreeRoot = resolve(repo.tempRoot, "linked");
+  await createGitWorktree({
+    projectRoot: repo.projectRoot,
+    worktreeRoot,
+    branch: "migration-local-fixture",
+  });
+  const projectDir = resolve(worktreeRoot, ".hack");
+  await writeFile(
+    resolve(projectDir, ".env"),
+    "LOCAL_FIXTURE=synthetic-linked-local\n"
+  );
+  await migrateLegacyProjectEnv({
+    projectRoot: worktreeRoot,
+    projectDir,
+    projectName: "project-env-test",
+    serviceNames: ["api", "web"],
+    materialize: false,
+  });
+  expect(
+    await readFile(resolve(projectDir, "hack.env.local.yaml"), "utf8")
+  ).toContain("synthetic-linked-local");
+  expect(
+    await readFile(resolve(projectDir, "hack.env.default.yaml"), "utf8")
+  ).not.toContain("synthetic-linked-local");
+  await expect(
+    readFile(resolve(repo.projectDir, "hack.env.local.yaml"), "utf8")
+  ).rejects.toMatchObject({ code: "ENOENT" });
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: worktreeRoot,
+    projectDir,
+    serviceNames: ["api", "web"],
+  });
+  expect(resolved?.serviceEnv.api?.LOCAL_FIXTURE).toBe(
+    "synthetic-linked-local"
+  );
+  expect(resolved?.serviceEnv.web?.LOCAL_FIXTURE).toBeUndefined();
+});
+
+test("a contract migration with a compatibility local base already uses env layers, so an aliasing overlay writes nothing", async () => {
+  const repo = await createRepo();
+  const legacyLocal = "version: 1\nenvironment: local\nvalues:\n  global: {}\n";
+  await writeFile(resolve(repo.projectDir, "hack.env.local.yaml"), legacyLocal);
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "LOCAL_FIXTURE", source: "plain_env" }],
+    })
+  );
+  await initializeGitRepo({ projectRoot: repo.projectRoot });
+  const base = "LOCAL_FIXTURE=synthetic-base\n";
+  const overlay = "LOCAL_FIXTURE=synthetic-overlay\n";
+  await writeFile(resolve(repo.projectDir, ".env"), base);
+  await writeFile(resolve(repo.projectDir, ".env.default.local"), overlay);
+  const migrated = await migrateLegacyProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    projectName: "project-env-test",
+    serviceNames: ["api", "web"],
+    materialize: false,
+  });
+  expect(migrated.legacyDetected).toBe(false);
+  expect(migrated.wroteFiles).toEqual([]);
+  expect(migrated.cleanupCandidates).toEqual([]);
+  expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toBe(base);
+  expect(
+    await readFile(resolve(repo.projectDir, ".env.default.local"), "utf8")
+  ).toBe(overlay);
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.local.yaml"), "utf8")
+  ).toBe(legacyLocal);
+  for (const name of ["hack.env.default.yaml", "hack.env.default.local.yaml"]) {
+    await expect(
+      readFile(resolve(repo.projectDir, name), "utf8")
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  }
+});
+
 async function initializeGitRepo(opts: {
   readonly projectRoot: string;
 }): Promise<void> {
@@ -1443,3 +1721,465 @@ async function initializeGitRepo(opts: {
   await runGit(["add", "."], opts.projectRoot);
   await runGit(["commit", "-m", "test: seed env fixture"], opts.projectRoot);
 }
+
+test.each([
+  false,
+  true,
+])("legacy env mutation owners refuse native input without changing bytes (legacy conflict: %s)", async (legacy) => {
+  const repo = await createRepo();
+  const nativePath = join(repo.projectDir, "hack.project.json");
+  const envPath = join(repo.projectDir, ".env");
+  const contractPath = join(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME);
+  await writeFile(nativePath, "{malformed native marker\n");
+  await writeFile(envPath, "PUBLIC_FIXTURE=preserve\n");
+  await writeFile(
+    contractPath,
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "PUBLIC_FIXTURE", source: "plain_env" }],
+    })
+  );
+  if (!legacy) {
+    await unlink(repo.composeFile);
+    await unlink(repo.configFile);
+  }
+  const existingPaths = [
+    nativePath,
+    envPath,
+    contractPath,
+    ...(legacy ? [repo.composeFile, repo.configFile] : []),
+  ];
+  const before = await Promise.all(
+    existingPaths.map(async (path) => ({ path, bytes: await readFile(path) }))
+  );
+  const mutation = {
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "PUBLIC_FIXTURE",
+  };
+  const operations = [
+    () =>
+      migrateLegacyProjectEnv({
+        ...repo,
+        projectName: "fixture",
+        serviceNames: ["api"],
+        materialize: true,
+      }),
+    () =>
+      repairLegacyComposeEnvFileReferences({
+        composeFile: repo.composeFile,
+        projectDir: repo.projectDir,
+      }),
+    () =>
+      setProjectEnvValue({
+        ...mutation,
+        value: "changed",
+        secret: true,
+        local: true,
+      }),
+    () => unsetProjectEnvValue(mutation),
+    () => materializeProjectEnv({ ...repo, serviceNames: ["api"] }),
+    () => ensureProjectEnvSecretKey({ projectRoot: repo.projectRoot }),
+    () => ensureHackDirGitignore({ projectDir: repo.projectDir }),
+    () =>
+      removeLegacyProjectEnvArtifacts({
+        projectRoot: repo.projectRoot,
+        paths: [envPath, contractPath],
+      }),
+  ];
+  for (const operation of operations) {
+    await expect(operation()).rejects.toThrow(
+      legacy ? "E_NATIVE_PROJECT_CONFLICT" : "E_NATIVE_PROJECT_UNSUPPORTED"
+    );
+    for (const file of before) {
+      expect(await readFile(file.path)).toEqual(file.bytes);
+    }
+  }
+  for (const path of [
+    join(repo.projectRoot, PROJECT_ENV_KEY_FILENAME),
+    join(repo.projectRoot, ".gitignore"),
+    join(repo.projectDir, ".gitignore"),
+    join(repo.projectDir, "hack.env.default.yaml"),
+    join(repo.projectDir, PROJECT_ENV_STATE_FILENAME),
+  ]) {
+    expect(await Bun.file(path).exists()).toBe(false);
+  }
+});
+
+test("Compose env repair rechecks native selection after reading the repair input", async () => {
+  const repo = await createRepo();
+  const contents = "services:\n  api:\n    env_file: .env\n";
+  await writeFile(repo.composeFile, contents);
+  await expect(
+    repairLegacyComposeEnvFileReferences({
+      projectDir: repo.projectDir,
+      get composeFile() {
+        writeFileSync(join(repo.projectDir, "hack.project.json"), "{}\n");
+        return repo.composeFile;
+      },
+    })
+  ).rejects.toThrow("E_NATIVE_PROJECT_CONFLICT");
+  expect(await readFile(repo.composeFile, "utf8")).toBe(contents);
+});
+
+const ENVELOPE_KEY = "synthetic-envelope-key-for-tests-only";
+const ENVELOPE_SENTINEL = "synthetic-envelope-plaintext-never-in-errors";
+
+type EnvelopeParts = {
+  readonly iv: Buffer;
+  readonly tag: Buffer;
+  readonly ciphertext: Buffer;
+};
+
+/** Encrypts the sentinel with the real mutation owner and returns the v1 value. */
+async function encryptedEnvelopeFixture(): Promise<{
+  readonly repo: Awaited<ReturnType<typeof createRepo>>;
+  readonly secure: string;
+}> {
+  const repo = await createRepo();
+  await writeFile(
+    resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME),
+    `${ENVELOPE_KEY}\n`
+  );
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "TOKEN",
+    value: ENVELOPE_SENTINEL,
+    secret: true,
+  });
+  const parsed: unknown = YAML.parse(
+    await readFile(resolve(repo.projectDir, "hack.env.default.yaml"), "utf8")
+  );
+  const secure = (
+    parsed as { values?: { global?: { TOKEN?: { secure?: unknown } } } }
+  ).values?.global?.TOKEN?.secure;
+  if (typeof secure !== "string") {
+    throw new Error("missing synthetic envelope");
+  }
+  return { repo, secure };
+}
+
+function envelopeParts(secure: string): EnvelopeParts {
+  const [, iv = "", tag = "", ciphertext = ""] = secure.split(":");
+  return {
+    iv: Buffer.from(iv, "base64"),
+    tag: Buffer.from(tag, "base64"),
+    ciphertext: Buffer.from(ciphertext, "base64"),
+  };
+}
+
+function envelope(parts: EnvelopeParts): string {
+  return [
+    "v1",
+    parts.iv.toString("base64"),
+    parts.tag.toString("base64"),
+    parts.ciphertext.toString("base64"),
+  ].join(":");
+}
+
+async function writeSecureValue(opts: {
+  readonly repo: Awaited<ReturnType<typeof createRepo>>;
+  readonly secure: string;
+}): Promise<void> {
+  await writeFile(
+    resolve(opts.repo.projectDir, "hack.env.default.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "default",
+      secretsprovider: "project_key",
+      values: { global: { TOKEN: { secure: opts.secure } } },
+    })
+  );
+}
+
+const ENVELOPE_MUTATIONS: ReadonlyArray<
+  readonly [string, (secure: string) => string]
+> = [
+  ...[4, 8, 12].map(
+    (bytes) =>
+      [
+        `${bytes}-byte tag`,
+        (secure: string) => {
+          const parts = envelopeParts(secure);
+          return envelope({ ...parts, tag: parts.tag.subarray(0, bytes) });
+        },
+      ] as const
+  ),
+  [
+    "16-byte IV",
+    (secure) => {
+      const parts = envelopeParts(secure);
+      return envelope({
+        ...parts,
+        iv: Buffer.concat([parts.iv, Buffer.alloc(4)]),
+      });
+    },
+  ],
+  [
+    "base64 with !",
+    (secure) => {
+      const [prefix, iv, tag, ciphertext = ""] = secure.split(":");
+      return [prefix, iv, tag, `!${ciphertext.slice(1)}`].join(":");
+    },
+  ],
+  [
+    "base64 with whitespace",
+    (secure) => {
+      const [prefix, iv = "", tag, ciphertext] = secure.split(":");
+      return [prefix, `${iv.slice(0, 4)} ${iv.slice(4)}`, tag, ciphertext].join(
+        ":"
+      );
+    },
+  ],
+  [
+    "truncated ciphertext",
+    (secure) => {
+      const parts = envelopeParts(secure);
+      return envelope({
+        ...parts,
+        ciphertext: parts.ciphertext.subarray(0, -1),
+      });
+    },
+  ],
+  [
+    "bit-flipped ciphertext",
+    (secure) => {
+      const parts = envelopeParts(secure);
+      const ciphertext = Buffer.from(parts.ciphertext);
+      ciphertext[0] = (ciphertext[0] ?? 0) ^ 1;
+      return envelope({ ...parts, ciphertext });
+    },
+  ],
+  [
+    "oversized ciphertext",
+    (secure) =>
+      envelope({
+        ...envelopeParts(secure),
+        ciphertext: Buffer.alloc(1024 * 1024 + 1, 7),
+      }),
+  ],
+];
+
+for (const [name, mutate] of ENVELOPE_MUTATIONS) {
+  test(`legacy secure env value with ${name} refuses with a fixed redacted error`, async () => {
+    const { repo, secure } = await encryptedEnvelopeFixture();
+    const mutated = mutate(secure);
+    expect(mutated).not.toBe(secure);
+    await writeSecureValue({ repo, secure: mutated });
+
+    const error = await resolveProjectEnvConfig({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      serviceNames: ["api"],
+    }).then(
+      () => null,
+      (caught: unknown) => caught
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    const message = error instanceof Error ? error.message : "";
+    expect(message).toBe("Invalid secure env value.");
+    for (const privateText of [ENVELOPE_SENTINEL, ENVELOPE_KEY]) {
+      expect(String(error)).not.toContain(privateText);
+    }
+  });
+}
+
+test("legacy secure env value with the wrong key refuses with the same fixed error", async () => {
+  const { repo } = await encryptedEnvelopeFixture();
+  await writeFile(
+    resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME),
+    "synthetic-wrong-key\n"
+  );
+  await expect(
+    resolveProjectEnvConfig({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      serviceNames: ["api"],
+    })
+  ).rejects.toThrow("Invalid secure env value.");
+});
+
+test("legacy v1 secure values round-trip, including the empty value", async () => {
+  const { repo } = await encryptedEnvelopeFixture();
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "EMPTY",
+    value: "",
+    secret: true,
+  });
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api"],
+  });
+  expect(resolved?.globalEnv.TOKEN).toBe(ENVELOPE_SENTINEL);
+  expect(resolved?.globalEnv.EMPTY).toBe("");
+});
+
+/** Byte bound shared by the legacy and native v1 ciphertext parsers. */
+const ENVELOPE_CIPHERTEXT_LIMIT = 1024 * 1024;
+
+/**
+ * Seals plaintext exactly as the v1 owner does (AES-256-GCM, SHA-256 of the
+ * trimmed key text, 16-byte tag) but with a caller-chosen IV length. Node and
+ * Bun accept any non-empty GCM IV, so a refusal of these authentic envelopes
+ * can only come from the parser's own IV and size guards, not from GCM
+ * authentication.
+ */
+function sealProjectEnvValue(opts: {
+  readonly plaintext: string;
+  readonly ivBytes: number;
+}): string {
+  const key = nodeCrypto
+    .createHash("sha256")
+    .update(ENVELOPE_KEY, "utf8")
+    .digest();
+  const iv = nodeCrypto.randomBytes(opts.ivBytes);
+  const cipher = nodeCrypto.createCipheriv("aes-256-gcm", key, iv, {
+    authTagLength: 16,
+  });
+  const ciphertext = Buffer.concat([
+    cipher.update(opts.plaintext, "utf8"),
+    cipher.final(),
+  ]);
+  return envelope({ iv, tag: cipher.getAuthTag(), ciphertext });
+}
+
+type LegacyTokenOutcome =
+  | { readonly value: string | undefined }
+  | { readonly error: unknown };
+
+async function resolveLegacyToken(opts: {
+  readonly repo: Awaited<ReturnType<typeof createRepo>>;
+}): Promise<LegacyTokenOutcome> {
+  try {
+    const resolved = await resolveProjectEnvConfig({
+      projectRoot: opts.repo.projectRoot,
+      projectDir: opts.repo.projectDir,
+      envName: null,
+      serviceNames: ["api"],
+    });
+    return { value: resolved?.globalEnv.TOKEN };
+  } catch (error: unknown) {
+    return { error };
+  }
+}
+
+function expectFixedEnvelopeRefusal(outcome: LegacyTokenOutcome): void {
+  const error = "error" in outcome ? outcome.error : null;
+  expect(error).toBeInstanceOf(Error);
+  expect(error instanceof Error ? error.message : "").toBe(
+    "Invalid secure env value."
+  );
+  for (const privateText of [ENVELOPE_SENTINEL, ENVELOPE_KEY]) {
+    expect(String(error)).not.toContain(privateText);
+  }
+}
+
+test("legacy test-sealed 12-byte-IV value at the ciphertext bound decrypts with the tag length pinned (control)", async () => {
+  const { repo } = await encryptedEnvelopeFixture();
+  const plaintext = `${ENVELOPE_SENTINEL}${"a".repeat(
+    ENVELOPE_CIPHERTEXT_LIMIT - ENVELOPE_SENTINEL.length
+  )}`;
+  await writeSecureValue({
+    repo,
+    secure: sealProjectEnvValue({ plaintext, ivBytes: 12 }),
+  });
+  const decipher = spyOn(nodeCrypto, "createDecipheriv");
+  try {
+    const outcome = await resolveLegacyToken({ repo });
+    expect("value" in outcome ? outcome.value : null).toBe(plaintext);
+    // The tag length is pinned by option rather than left to the runtime default.
+    expect(decipher).toHaveBeenCalled();
+    for (const call of decipher.mock.calls) {
+      const options: unknown = call[3];
+      expect(options).toEqual({ authTagLength: 16 });
+    }
+  } finally {
+    decipher.mockRestore();
+  }
+});
+
+for (const ivBytes of [8, 16]) {
+  test(`legacy authentic value sealed with a ${ivBytes}-byte IV refuses before decipher`, async () => {
+    const { repo } = await encryptedEnvelopeFixture();
+    await writeSecureValue({
+      repo,
+      secure: sealProjectEnvValue({ plaintext: ENVELOPE_SENTINEL, ivBytes }),
+    });
+    const decipher = spyOn(nodeCrypto, "createDecipheriv");
+    try {
+      expectFixedEnvelopeRefusal(await resolveLegacyToken({ repo }));
+      expect(decipher).not.toHaveBeenCalled();
+    } finally {
+      decipher.mockRestore();
+    }
+  });
+}
+
+test("legacy authentic value one byte over the ciphertext bound refuses before decipher", async () => {
+  const { repo } = await encryptedEnvelopeFixture();
+  await writeSecureValue({
+    repo,
+    secure: sealProjectEnvValue({
+      plaintext: "a".repeat(ENVELOPE_CIPHERTEXT_LIMIT + 1),
+      ivBytes: 12,
+    }),
+  });
+  const decipher = spyOn(nodeCrypto, "createDecipheriv");
+  try {
+    expectFixedEnvelopeRefusal(await resolveLegacyToken({ repo }));
+    expect(decipher).not.toHaveBeenCalled();
+  } finally {
+    decipher.mockRestore();
+  }
+});
+
+// Structural mutations must be refused by the explicit parser guards before any
+// decipher exists, so the refusal does not depend on runtime GCM defaults.
+for (const name of [
+  "4-byte tag",
+  "8-byte tag",
+  "12-byte tag",
+  "16-byte IV",
+  "base64 with !",
+  "base64 with whitespace",
+  "oversized ciphertext",
+]) {
+  test(`legacy secure env value with ${name} refuses before decipher`, async () => {
+    const mutate = ENVELOPE_MUTATIONS.find(([label]) => label === name)?.[1];
+    if (!mutate) {
+      throw new Error("missing envelope mutation");
+    }
+    const { repo, secure } = await encryptedEnvelopeFixture();
+    await writeSecureValue({ repo, secure: mutate(secure) });
+    const decipher = spyOn(nodeCrypto, "createDecipheriv");
+    try {
+      expectFixedEnvelopeRefusal(await resolveLegacyToken({ repo }));
+      expect(decipher).not.toHaveBeenCalled();
+    } finally {
+      decipher.mockRestore();
+    }
+  });
+}
+
+test("legacy secure env value with a 16-byte tag of the wrong value refuses", async () => {
+  const { repo, secure } = await encryptedEnvelopeFixture();
+  const parts = envelopeParts(secure);
+  const tag = Buffer.from(parts.tag);
+  tag[15] = (tag[15] ?? 0) ^ 1;
+  await writeSecureValue({ repo, secure: envelope({ ...parts, tag }) });
+  expectFixedEnvelopeRefusal(await resolveLegacyToken({ repo }));
+});

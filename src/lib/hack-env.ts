@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import {
   PROJECT_ENV_CONTRACT_FILENAME,
@@ -6,8 +6,14 @@ import {
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
-import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
+import { withEnvLayerLock } from "./env-layer-lock.ts";
+import { readTextFile } from "./fs.ts";
+import { ensureHackGitInfoExclude } from "./git-info-exclude.ts";
 import { getString, isRecord } from "./guards.ts";
+import {
+  readPrivateEnvFile,
+  writePrivateEnvFileIfChanged,
+} from "./private-env-file.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
 import type { SecretStoreDescriptor } from "./secret-store.ts";
 import {
@@ -214,6 +220,58 @@ export async function readHackEnvContract(opts: {
   }
 
   return { path, exists: true, contract: contract.contract };
+}
+
+/**
+ * Read one declared legacy value using the existing backend and precedence.
+ * Only this key (overlay, then base fallback) is requested from the backend.
+ * A backend's sealed bundle may internally require whole-bundle decryption.
+ */
+export async function resolveHackEnvValue(opts: {
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly envName?: string | null;
+  readonly scope?: string;
+  readonly key: string;
+}): Promise<string | null> {
+  const read = await readHackEnvContract({ projectDir: opts.projectDir });
+  if (read.parseError) {
+    throw new Error("Invalid env contract");
+  }
+  const scope = opts.scope ?? "global";
+  const contractVar = read.contract.vars.find(
+    (entry) =>
+      entry.key === opts.key &&
+      (entry.services === null ||
+        (scope !== "global" && entry.services.includes(scope)))
+  );
+  if (!contractVar) {
+    return null;
+  }
+  const runtimeConfig = await readHackEnvRuntimeConfig(opts);
+  const selection = await resolveHackEnvSelection(opts);
+  const needsStore =
+    contractVar.source === "keychain" || runtimeConfig.storePlaintextInBackend;
+  const secretStore = needsStore
+    ? await resolveSecretStore({ ...opts, allowKeyProvisioning: false })
+    : { get: async () => null };
+  const baseText = await readTextFile(
+    resolve(opts.projectDir, PROJECT_ENV_FILENAME)
+  );
+  const overlayText =
+    selection.overlayPath === null
+      ? null
+      : await readTextFile(selection.overlayPath);
+  const state = await resolveHackEnvValueState({
+    contractVar,
+    preserveEmpty: true,
+    storePlaintextInBackend: runtimeConfig.storePlaintextInBackend,
+    effectiveEnvName: selection.effectiveEnv,
+    baseDotenv: baseText === null ? {} : parseDotEnv(baseText),
+    overlayDotenv: overlayText === null ? {} : parseDotEnv(overlayText),
+    secretStore,
+  });
+  return state.value;
 }
 
 export async function resolveHackEnv(opts: {
@@ -445,38 +503,85 @@ export function resolveEnvSecretKey(opts: {
   return envName.length > 0 ? `env.${envName}.${opts.key}` : opts.key;
 }
 
+/**
+ * Sets one key in a project dotenv file (`.hack/.env` or `.hack/.env.<name>`)
+ * with a private atomic write. Before writing, best-effort, it keeps the project dir's
+ * machine-local files out of `git status` through the repository's
+ * `info/exclude` (see `ensureHackGitInfoExclude`); it never writes the
+ * working tree for that.
+ *
+ * Concurrency: the read, merge and write run under the file's env layer lock
+ * (`withEnvLayerLock`), so concurrent sets and removals of different keys all
+ * survive; a writer that waits longer than the bounded wait refuses closed
+ * without writing.
+ */
 export async function upsertDotEnvValue(opts: {
   readonly envFile: string;
   readonly key: string;
   readonly value: string;
+  /** Bounded wait for the layer lock; tests only. */
+  readonly layerLockTimeoutMs?: number;
 }): Promise<{ readonly changed: boolean }> {
-  const existingText = (await readTextFile(opts.envFile)) ?? "";
-  const env = parseDotEnv(existingText);
-  const nextEnv: Record<string, string> = { ...env, [opts.key]: opts.value };
-  const nextText = serializeDotEnvStable(nextEnv);
-  const result = await writeTextFileIfChanged(opts.envFile, nextText);
-  return { changed: result.changed };
+  // Refuse a symlinked file or `.hack` before the lock creates anything.
+  await readPrivateEnvFile({ envFile: opts.envFile });
+  return await withEnvLayerLock({
+    layerPath: opts.envFile,
+    timeoutMs: opts.layerLockTimeoutMs,
+    run: async () => {
+      const existingText =
+        (await readPrivateEnvFile({ envFile: opts.envFile })) ?? "";
+      const env = parseDotEnv(existingText);
+      const nextEnv: Record<string, string> = {
+        ...env,
+        [opts.key]: opts.value,
+      };
+      const nextText = serializeDotEnvStable(nextEnv);
+      // After the read, so a refused (for example symlinked) file never spawns git.
+      await ensureHackGitInfoExclude({ projectDir: dirname(opts.envFile) });
+      return await writePrivateEnvFileIfChanged({
+        envFile: opts.envFile,
+        text: nextText,
+      });
+    },
+  });
 }
 
+/** Removes one key from a project dotenv file; locked like {@link upsertDotEnvValue}. */
 export async function removeDotEnvKey(opts: {
   readonly envFile: string;
   readonly key: string;
+  /** Bounded wait for the layer lock; tests only. */
+  readonly layerLockTimeoutMs?: number;
 }): Promise<{ readonly changed: boolean }> {
-  const existingText = (await readTextFile(opts.envFile)) ?? "";
-  const env = parseDotEnv(existingText);
-  if (!(opts.key in env)) {
+  const preflight = await readPrivateEnvFile({ envFile: opts.envFile });
+  if (preflight === null || !(opts.key in parseDotEnv(preflight))) {
+    // Nothing to remove: take no lock and create nothing.
     return { changed: false };
   }
-  const nextEnv: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (key === opts.key) {
-      continue;
-    }
-    nextEnv[key] = value;
-  }
-  const nextText = serializeDotEnvStable(nextEnv);
-  const result = await writeTextFileIfChanged(opts.envFile, nextText);
-  return { changed: result.changed };
+  return await withEnvLayerLock({
+    layerPath: opts.envFile,
+    timeoutMs: opts.layerLockTimeoutMs,
+    run: async () => {
+      const existingText =
+        (await readPrivateEnvFile({ envFile: opts.envFile })) ?? "";
+      const env = parseDotEnv(existingText);
+      if (!(opts.key in env)) {
+        return { changed: false };
+      }
+      const nextEnv: Record<string, string> = {};
+      for (const [key, value] of Object.entries(env)) {
+        if (key === opts.key) {
+          continue;
+        }
+        nextEnv[key] = value;
+      }
+      const nextText = serializeDotEnvStable(nextEnv);
+      return await writePrivateEnvFileIfChanged({
+        envFile: opts.envFile,
+        text: nextText,
+      });
+    },
+  });
 }
 
 export function resolveKeychainServiceName(opts: {
@@ -763,12 +868,21 @@ async function resolveHackEnvSelection(opts: {
   };
 }
 
+/** Legacy injection treats empty plaintext as unset; explicit get preserves it. */
+function isPresentEnvValue(
+  value: unknown,
+  preserveEmpty = false
+): value is string {
+  return typeof value === "string" && (preserveEmpty || value.length > 0);
+}
+
 async function resolveSecretValue(opts: {
   readonly secretStore: {
     readonly get: (input: { readonly key: string }) => Promise<string | null>;
   };
   readonly key: string;
   readonly envName?: string | null;
+  readonly preserveEmpty?: boolean;
 }): Promise<string | null> {
   if (opts.envName) {
     const overlayValue = await opts.secretStore.get({
@@ -777,7 +891,7 @@ async function resolveSecretValue(opts: {
         envName: opts.envName,
       }),
     });
-    if (typeof overlayValue === "string" && overlayValue.length > 0) {
+    if (isPresentEnvValue(overlayValue, opts.preserveEmpty)) {
       return overlayValue;
     }
   }
@@ -787,6 +901,7 @@ async function resolveSecretValue(opts: {
 
 async function resolveHackEnvValueState(opts: {
   readonly contractVar: HackEnvVar;
+  readonly preserveEmpty?: boolean;
   readonly storePlaintextInBackend: boolean;
   readonly effectiveEnvName: string | null;
   readonly baseDotenv: Readonly<Record<string, string>>;
@@ -798,6 +913,7 @@ async function resolveHackEnvValueState(opts: {
   if (opts.contractVar.source === "keychain") {
     return await resolveSecretBackedValueState({
       contractVar: opts.contractVar,
+      preserveEmpty: opts.preserveEmpty,
       secretStore: opts.secretStore,
       envName: opts.effectiveEnvName,
     });
@@ -805,6 +921,7 @@ async function resolveHackEnvValueState(opts: {
 
   return await resolvePlaintextValueState({
     contractVar: opts.contractVar,
+    preserveEmpty: opts.preserveEmpty,
     storePlaintextInBackend: opts.storePlaintextInBackend,
     envName: opts.effectiveEnvName,
     baseDotenv: opts.baseDotenv,
@@ -815,6 +932,7 @@ async function resolveHackEnvValueState(opts: {
 
 async function resolveSecretBackedValueState(opts: {
   readonly contractVar: HackEnvVar;
+  readonly preserveEmpty?: boolean;
   readonly secretStore: {
     readonly get: (input: { readonly key: string }) => Promise<string | null>;
   };
@@ -824,6 +942,7 @@ async function resolveSecretBackedValueState(opts: {
     secretStore: opts.secretStore,
     key: opts.contractVar.key,
     envName: opts.envName,
+    preserveEmpty: opts.preserveEmpty,
   });
   return {
     key: opts.contractVar.key,
@@ -837,6 +956,7 @@ async function resolveSecretBackedValueState(opts: {
 
 async function resolvePlaintextValueState(opts: {
   readonly contractVar: HackEnvVar;
+  readonly preserveEmpty?: boolean;
   readonly storePlaintextInBackend: boolean;
   readonly envName: string | null;
   readonly baseDotenv: Readonly<Record<string, string>>;
@@ -852,10 +972,7 @@ async function resolvePlaintextValueState(opts: {
         envName: opts.envName,
       }),
     });
-    if (
-      typeof fromOverlayPortableBackend === "string" &&
-      fromOverlayPortableBackend.length > 0
-    ) {
+    if (isPresentEnvValue(fromOverlayPortableBackend, opts.preserveEmpty)) {
       return {
         key: opts.contractVar.key,
         required: opts.contractVar.required,
@@ -868,7 +985,7 @@ async function resolvePlaintextValueState(opts: {
   }
 
   const fromOverlayDotenv = opts.overlayDotenv[opts.contractVar.key] ?? null;
-  if (typeof fromOverlayDotenv === "string" && fromOverlayDotenv.length > 0) {
+  if (isPresentEnvValue(fromOverlayDotenv, opts.preserveEmpty)) {
     return {
       key: opts.contractVar.key,
       required: opts.contractVar.required,
@@ -883,10 +1000,7 @@ async function resolvePlaintextValueState(opts: {
     const fromBasePortableBackend = await opts.secretStore.get({
       key: opts.contractVar.key,
     });
-    if (
-      typeof fromBasePortableBackend === "string" &&
-      fromBasePortableBackend.length > 0
-    ) {
+    if (isPresentEnvValue(fromBasePortableBackend, opts.preserveEmpty)) {
       return {
         key: opts.contractVar.key,
         required: opts.contractVar.required,
@@ -899,7 +1013,7 @@ async function resolvePlaintextValueState(opts: {
   }
 
   const fromBaseDotenv = opts.baseDotenv[opts.contractVar.key] ?? null;
-  if (typeof fromBaseDotenv === "string" && fromBaseDotenv.length > 0) {
+  if (isPresentEnvValue(fromBaseDotenv, opts.preserveEmpty)) {
     return {
       key: opts.contractVar.key,
       required: opts.contractVar.required,
@@ -911,7 +1025,7 @@ async function resolvePlaintextValueState(opts: {
   }
 
   const fromProcess = process.env[opts.contractVar.key];
-  if (typeof fromProcess === "string" && fromProcess.length > 0) {
+  if (isPresentEnvValue(fromProcess, opts.preserveEmpty)) {
     return {
       key: opts.contractVar.key,
       required: opts.contractVar.required,

@@ -1,6 +1,6 @@
 {
   "name": "hack",
-  "version": "4.2.4",
+  "version": "4.2.1",
   "description": "Operate and onboard Hack-managed local development environments.",
   "author": {
     "name": "Hack Dance LLC",
@@ -13,11 +13,11 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Hack",
-    "shortDescription": "Run local development through Hack",
+    "shortDescription": "Run projects with Hack",
     "longDescription": "Operate Hack-managed services, logs, environments, workspaces, and agent-assisted project onboarding from Codex.",
     "developerName": "Hack Dance LLC",
     "category": "Developer Tools",
-    "capabilities": ["Local development", "Project onboarding", "MCP tools"],
+    "capabilities": ["Local development", "Project onboarding"],
     "websiteURL": "https://github.com/hack-dance/hack",
     "defaultPrompt": [
       "Start this Hack project and verify its services.",
@@ -25,6 +25,5 @@
       "Diagnose this Hack project's local runtime."
     ],
     "brandColor": "#FF5C35"
-  },
-  "mcpServers": "./.mcp.json"
+  }
 }

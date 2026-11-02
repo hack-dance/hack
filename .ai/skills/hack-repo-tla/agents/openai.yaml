@@ -1,0 +1,7 @@
+interface:
+  display_name: "Hack TLA+ Checks"
+  short_description: "Use TLA+ to check agent workflows"
+  default_prompt: "Use $hack-repo-tla to formalize the risky workflow, run TLC first, and turn any counterexample into practical regression tests."
+
+policy:
+  allow_implicit_invocation: true

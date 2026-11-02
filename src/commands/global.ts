@@ -1,6 +1,15 @@
-import { dirname, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
-import type { CliContext, CommandArgs } from "../cli/command.ts";
+import {
+  type NativeRuntimeSelection,
+  resolveNativeRuntimeSelection,
+} from "../backends/native-runtime-client.ts";
+import type {
+  CliContext,
+  CommandArgs,
+  CommandHandlerFor,
+} from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 
 import {
@@ -13,11 +22,13 @@ import {
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_COREDNS_IP,
+  DEFAULT_GRAFANA_HOST,
   DEFAULT_HOST_DNS_IP,
   DEFAULT_INGRESS_GATEWAY,
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_INGRESS_SUBNET,
   DEFAULT_LOGGING_NETWORK,
+  DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_ROOT,
   DEFAULT_PROJECT_TLD,
   GLOBAL_ALLOY_FILENAME,
@@ -42,7 +53,11 @@ import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
 import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
-import { getLaunchdServiceStatus } from "../daemon/launchd.ts";
+import { resolveDaemonAutostartAccess } from "../daemon/client.ts";
+import {
+  getLaunchdServiceStatus,
+  resolveLaunchdAccess,
+} from "../daemon/launchd.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
@@ -50,6 +65,11 @@ import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
+import {
+  managedLocalDomains,
+  parseDefaultDomain,
+  resolveDefaultDomain,
+} from "../lib/default-domain.ts";
 import {
   isSlimExecutionMode,
   renderSlimModeUnavailableMessage,
@@ -76,9 +96,36 @@ import {
   resolveHackLocalCaCertPath,
 } from "../lib/local-ca.ts";
 import {
+  checkMacCaTrust,
+  inspectMacCaEligibility,
+} from "../lib/mac-ca-trust.ts";
+import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
 } from "../lib/mutagen.ts";
+import type { NativeDnsActivationInspection } from "../lib/native-domain-dns-activate.ts";
+import { activateNativeDomainDns } from "../lib/native-domain-dns-activate.ts";
+import { createNativeDnsAuthorizer } from "../lib/native-domain-dns-authorization.ts";
+import { deactivateNativeDomainDns } from "../lib/native-domain-dns-deactivate.ts";
+import { createNativeDnsHostDependencies } from "../lib/native-domain-dns-host.ts";
+import { prepareNativeDnsLaunchdRestart } from "../lib/native-domain-dns-launchd.ts";
+import {
+  type NativeDnsReceipt,
+  planNativeDomainDns,
+} from "../lib/native-domain-dns-plan.ts";
+import {
+  inspectNativeDnsHost,
+  readStableNativeDnsFile,
+} from "../lib/native-domain-dns-snapshot.ts";
+import {
+  describeHackLocalRollback,
+  describeHackLocalRoute,
+  inspectHackLocalRoute,
+  reportHackLocalRoute,
+  rollbackHackLocalRoute,
+  selectNativeDnsCommandDomain,
+} from "../lib/native-hack-local-route.ts";
+import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local-route-host.ts";
 import { isLinux, isMac } from "../lib/os.ts";
 import {
   reconcileRemoteCaddyRoutesStack,
@@ -186,6 +233,76 @@ const globalInstallSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const globalDnsPreviewSpec = defineCommand({
+  name: "preview",
+  summary:
+    "Preview a scoped native custom-domain DNS claim or the hack.local relay repair without changing the host",
+  group: "Global",
+  options: [
+    optJson,
+    defineOption({
+      name: "domain",
+      type: "string",
+      long: "--domain",
+      valueHint: "v5.hack.gy",
+      description:
+        "Suffix to inspect: a custom suffix, or hack.local for the native relay repair (default: a custom global default_domain)",
+    } as const),
+  ] as const,
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const globalDnsActivateSpec = defineCommand({
+  name: "activate",
+  summary: "Activate only the selected native custom-domain DNS suffix",
+  group: "Global",
+  options: [
+    defineOption({
+      name: "domain",
+      type: "string",
+      long: "--domain",
+      valueHint: "v5.hack.gy",
+      description:
+        "Custom suffix to activate (default: a custom global default_domain)",
+    } as const),
+  ] as const,
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const globalDnsDeactivateSpec = defineCommand({
+  name: "deactivate",
+  summary:
+    "Remove an owned native custom-domain DNS suffix, or undo the hack.local relay repair",
+  group: "Global",
+  options: [
+    defineOption({
+      name: "domain",
+      type: "string",
+      long: "--domain",
+      valueHint: "v5.hack.gy",
+      description:
+        "Custom suffix to deactivate, or hack.local to undo the native relay repair (default: a custom global default_domain)",
+    } as const),
+  ] as const,
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const globalDnsSpec = defineCommand({
+  name: "dns",
+  summary: "Manage scoped native custom-domain DNS",
+  group: "Global",
+  options: [],
+  positionals: [],
+  subcommands: [
+    withHandler(globalDnsPreviewSpec, handleGlobalDnsPreview),
+    withHandler(globalDnsActivateSpec, handleGlobalDnsActivate),
+    withHandler(globalDnsDeactivateSpec, handleGlobalDnsDeactivate),
+  ],
+} as const);
+
 const globalUpSpec = defineCommand({
   name: "up",
   summary: "Start global infra containers",
@@ -258,7 +375,8 @@ const globalTrustSpec = defineCommand({
 
 const globalLogsResetSpec = defineCommand({
   name: "logs-reset",
-  summary: "Wipe Loki/Grafana volumes (fresh logs + dashboards)",
+  summary:
+    "Wipe Loki, Grafana and Alloy volumes (fresh logs, dashboards and Alloy read positions)",
   group: "Global",
   options: [],
   positionals: [],
@@ -278,6 +396,7 @@ export const globalCommand = defineCommand({
   ...globalSpec,
   subcommands: [
     withHandler(globalInstallSpec, async () => await globalInstall()),
+    globalDnsSpec,
     withHandler(globalUpSpec, async () => await globalUp()),
     withHandler(globalDownSpec, async () => await globalDown()),
     withHandler(globalStatusSpec, handleGlobalStatus),
@@ -289,6 +408,320 @@ export const globalCommand = defineCommand({
     withHandler(globalAuthorizeSpec, async () => await globalAuthorize()),
   ],
 } as const);
+
+async function selectGlobalDnsDomain(opts: {
+  readonly verb: "preview" | "activate" | "deactivate";
+  readonly option: string | undefined;
+}) {
+  const explicit =
+    opts.option === undefined ? undefined : parseDefaultDomain(opts.option);
+  return selectNativeDnsCommandDomain({
+    verb: opts.verb,
+    explicit,
+    configuredDefault: explicit ?? (await resolveDefaultDomain()),
+  });
+}
+
+async function handleGlobalDnsPreview({
+  args,
+}: Parameters<
+  CommandHandlerFor<typeof globalDnsPreviewSpec>
+>[0]): Promise<number> {
+  const selected = await selectGlobalDnsDomain({
+    verb: "preview",
+    option: args.options.domain,
+  });
+  const runtime = resolveNativeRuntimeSelection();
+  if (!(runtime && isMac())) {
+    logger.error({
+      message:
+        "Native DNS preview requires an explicitly selected macOS native candidate.",
+    });
+    return 1;
+  }
+  if (selected.kind === "hack-local") {
+    const report = reportHackLocalRoute(
+      await inspectHackLocalRoute(
+        await createNativeHackLocalRouteDependencies({ runtime })
+      )
+    );
+    if (args.options.json) {
+      console.log(JSON.stringify({ ok: true, data: report }));
+    } else {
+      logger.info({ message: describeHackLocalRoute(report) });
+    }
+    return 0;
+  }
+  const { domain } = selected;
+  const { inspection, receiptPath } = await inspectNativeDnsPlan({
+    runtime,
+    domain,
+  });
+  const { plan } = inspection;
+  const output = {
+    domain: plan.domain,
+    status: plan.status,
+    dnsmasqPath: plan.dnsmasqPath,
+    resolverPath: plan.resolverPath,
+    receiptPath,
+    address: DEFAULT_HOST_DNS_IP,
+    activation: plan.activation,
+  };
+  if (args.options.json) {
+    console.log(JSON.stringify({ ok: true, data: output }));
+  } else {
+    logger.info({
+      message: [
+        `Native DNS ${plan.status} for *.${domain}`,
+        `dnsmasq: ${plan.dnsmasqPath}`,
+        `resolver: ${plan.resolverPath}`,
+        `private receipt: ${receiptPath}`,
+        ...plan.activation,
+      ].join("\n"),
+    });
+  }
+  return 0;
+}
+
+async function handleGlobalDnsActivate({
+  args,
+}: Parameters<
+  CommandHandlerFor<typeof globalDnsActivateSpec>
+>[0]): Promise<number> {
+  const selected = await selectGlobalDnsDomain({
+    verb: "activate",
+    option: args.options.domain,
+  });
+  const runtime = resolveNativeRuntimeSelection();
+  if (!(runtime && isMac())) {
+    logger.error({
+      message:
+        "Native DNS activation requires an explicitly selected macOS native candidate.",
+    });
+    return 1;
+  }
+  if (selected.kind !== "custom") {
+    logger.error({
+      message: "hack.local is repaired with hack doctor --fix, not activated.",
+    });
+    return 1;
+  }
+  const { domain } = selected;
+  const initial = await inspectNativeDnsPlan({ runtime, domain });
+  if (
+    initial.inspection.plan.status === "available" &&
+    !isInteractiveTerminal()
+  ) {
+    logger.error({
+      message:
+        "Native DNS activation requires interactive confirmation and a macOS administrator prompt.",
+    });
+    return 1;
+  }
+  const restartDnsmasq = await prepareNativeDnsLaunchdRestart({
+    dnsmasqBinary: initial.dnsmasqBinary,
+    mainConfigPath: initial.mainConfigPath,
+    includeDir: initial.includeDir,
+    inspectedArgs: initial.dnsmasqArgs,
+  });
+  const inspectPlan = async () => {
+    const current = await inspectNativeDnsPlan({ runtime, domain });
+    if (
+      current.inspection.fingerprint !== initial.inspection.fingerprint ||
+      current.receiptPath !== initial.receiptPath ||
+      current.dnsmasqBinary !== initial.dnsmasqBinary ||
+      current.mainConfigPath !== initial.mainConfigPath ||
+      current.includeDir !== initial.includeDir
+    ) {
+      throw new Error("Native DNS inputs changed before activation");
+    }
+    return current.inspection;
+  };
+  const authorize = createNativeDnsAuthorizer({ action: "activate", domain });
+  const deps = createNativeDnsHostDependencies({
+    receiptPath: initial.receiptPath,
+    dnsmasqPath: initial.inspection.plan.dnsmasqPath,
+    resolverPath: initial.inspection.plan.resolverPath,
+    dnsmasqBinary: initial.dnsmasqBinary,
+    dnsmasqMainConfigPath: initial.mainConfigPath,
+    dnsmasqIncludeDir: initial.includeDir,
+    inspectPlan,
+    authorize,
+    restartDnsmasq,
+    flushDnsCache: flushMacDnsCachePrivileged,
+  });
+  if (initial.inspection.plan.status === "active") {
+    await deps.verifyLiveDns(initial.inspection.plan);
+    logger.success({
+      message: `Native DNS for *.${domain} is active and verified.`,
+    });
+    return 0;
+  }
+  if (initial.receipt?.state === "inactive") {
+    await deps.adoptReceipt(initial.inspection.plan.inactiveReceipt);
+  }
+  await activateNativeDomainDns({ dependencies: deps });
+  logger.success({
+    message: `Native DNS for *.${domain} is active. Check the exact app origin with hack doctor --browser-url.`,
+  });
+  return 0;
+}
+
+async function handleGlobalDnsDeactivate({
+  args,
+}: Parameters<
+  CommandHandlerFor<typeof globalDnsDeactivateSpec>
+>[0]): Promise<number> {
+  const selected = await selectGlobalDnsDomain({
+    verb: "deactivate",
+    option: args.options.domain,
+  });
+  const runtime = resolveNativeRuntimeSelection();
+  if (!(runtime && isMac())) {
+    logger.error({
+      message:
+        "Native DNS deactivation requires an explicitly selected macOS native candidate.",
+    });
+    return 1;
+  }
+  if (selected.kind === "hack-local") {
+    const result = await rollbackHackLocalRoute(
+      await createNativeHackLocalRouteDependencies({ runtime })
+    );
+    const message = describeHackLocalRollback(result);
+    if (result.outcome === "refused") {
+      logger.error({ message });
+      return 1;
+    }
+    logger.success({ message });
+    return 0;
+  }
+  const { domain } = selected;
+  const initial = await inspectNativeDnsPlan({ runtime, domain });
+  if (initial.inspection.plan.status === "available") {
+    if (initial.receipt?.state === "inactive") {
+      const deps = createNativeDnsHostDependencies({
+        receiptPath: initial.receiptPath,
+        dnsmasqPath: initial.inspection.plan.dnsmasqPath,
+        resolverPath: initial.inspection.plan.resolverPath,
+        dnsmasqBinary: initial.dnsmasqBinary,
+        dnsmasqMainConfigPath: initial.mainConfigPath,
+        dnsmasqIncludeDir: initial.includeDir,
+        inspectPlan: async () => initial.inspection,
+        authorize: async () => false,
+        restartDnsmasq: restartMacDnsmasq,
+        flushDnsCache: flushMacDnsCachePrivileged,
+      });
+      await deps.verifyDeactivatedDns(initial.inspection.plan);
+    }
+    logger.success({ message: `No active native DNS claim for *.${domain}.` });
+    return 0;
+  }
+  if (!isInteractiveTerminal()) {
+    logger.error({
+      message:
+        "Native DNS deactivation requires interactive confirmation and a macOS administrator prompt.",
+    });
+    return 1;
+  }
+  const restartDnsmasq = await prepareNativeDnsLaunchdRestart({
+    dnsmasqBinary: initial.dnsmasqBinary,
+    mainConfigPath: initial.mainConfigPath,
+    includeDir: initial.includeDir,
+    inspectedArgs: initial.dnsmasqArgs,
+  });
+  const inspectPlan = async () => {
+    const current = await inspectNativeDnsPlan({ runtime, domain });
+    if (
+      current.inspection.fingerprint !== initial.inspection.fingerprint ||
+      current.receiptPath !== initial.receiptPath ||
+      current.dnsmasqBinary !== initial.dnsmasqBinary ||
+      current.mainConfigPath !== initial.mainConfigPath ||
+      current.includeDir !== initial.includeDir
+    ) {
+      throw new Error("Native DNS inputs changed before deactivation");
+    }
+    return current.inspection;
+  };
+  const authorize = createNativeDnsAuthorizer({
+    action: "deactivate",
+    domain,
+  });
+  const deps = createNativeDnsHostDependencies({
+    receiptPath: initial.receiptPath,
+    dnsmasqPath: initial.inspection.plan.dnsmasqPath,
+    resolverPath: initial.inspection.plan.resolverPath,
+    dnsmasqBinary: initial.dnsmasqBinary,
+    dnsmasqMainConfigPath: initial.mainConfigPath,
+    dnsmasqIncludeDir: initial.includeDir,
+    inspectPlan,
+    authorize,
+    restartDnsmasq,
+    flushDnsCache: flushMacDnsCachePrivileged,
+  });
+  await deactivateNativeDomainDns({
+    dependencies: deps,
+    receiptPath: initial.receiptPath,
+  });
+  logger.success({
+    message: `Owned native DNS claim for *.${domain} was removed; fallback resolution verified.`,
+  });
+  return 0;
+}
+
+async function inspectNativeDnsPlan(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly domain: string;
+}): Promise<{
+  readonly inspection: NativeDnsActivationInspection;
+  readonly receiptPath: string;
+  readonly dnsmasqBinary: string;
+  readonly dnsmasqArgs: readonly string[];
+  readonly mainConfigPath: string;
+  readonly includeDir: string;
+  readonly receipt: NativeDnsReceipt | null;
+}> {
+  const prefix = await resolveBrewPrefix();
+  const host = await inspectNativeDnsHost({ brewPrefix: prefix });
+  const receiptPath = join(
+    opts.runtime.home,
+    "native-dns",
+    `${opts.domain}.json`
+  );
+  const receiptText = await readStableNativeDnsFile(receiptPath);
+  let receipt: NativeDnsReceipt | null = null;
+  if (receiptText !== null) {
+    try {
+      receipt = JSON.parse(receiptText) as NativeDnsReceipt;
+    } catch {
+      throw new Error(
+        "Private native DNS receipt is invalid; refusing to infer ownership"
+      );
+    }
+  }
+  const plan = planNativeDomainDns({
+    domain: opts.domain,
+    ...host,
+    receipt,
+    ...(opts.domain.endsWith(".hack.gy")
+      ? { builtInParentClaim: "hack.gy" as const }
+      : {}),
+  });
+  return {
+    inspection: {
+      plan,
+      fingerprint: createHash("sha256")
+        .update(JSON.stringify({ host, receiptText }), "utf8")
+        .digest("hex"),
+    },
+    receiptPath,
+    dnsmasqBinary: host.dnsmasqArgs[0] ?? "",
+    dnsmasqArgs: host.dnsmasqArgs,
+    mainConfigPath: host.mainConfig.path,
+    includeDir: host.includeDir,
+    receipt,
+  };
+}
 
 function getGlobalPaths() {
   const root = resolveGlobalHackDir();
@@ -489,6 +922,13 @@ function networkHasSubnet(raw: string, subnet: string): boolean {
 }
 
 async function globalInstall(): Promise<number> {
+  if (resolveNativeRuntimeSelection()) {
+    logger.error({
+      message:
+        "Native global DNS/TLS installation needs a scoped host-domain plan; hack global install would start the Docker stack and may change v4 routing. Use hack doctor --browser-url https://your-app.hack.local to verify the current native route.",
+    });
+    return 1;
+  }
   const slimExit = failIfSlimMode({
     feature: "hack global install",
     alternative:
@@ -497,6 +937,8 @@ async function globalInstall(): Promise<number> {
   if (slimExit !== null) {
     return slimExit;
   }
+
+  await preflightCustomDomainDnsClaim();
 
   const s = spinner();
   await ensureOptionalInstallDependencies({ spinner: s });
@@ -510,7 +952,7 @@ async function globalInstall(): Promise<number> {
   note(
     [
       "Next:",
-      "- Open https://logs.hack",
+      `- Open https://${DEFAULT_GRAFANA_HOST}`,
       "- Start a repo with: hack init && hack up",
     ].join("\n"),
     "Global install"
@@ -646,6 +1088,7 @@ async function writeGlobalInstallAssets(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
   readonly useStaticIps: boolean;
 }): Promise<void> {
+  const defaultDomain = await resolveDefaultDomain();
   await writeWithPromptIfDifferent(
     opts.paths.caddyCompose,
     renderGlobalCaddyCompose({
@@ -655,7 +1098,10 @@ async function writeGlobalInstallAssets(opts: {
   );
   await writeWithPromptIfDifferent(
     opts.paths.coreDnsConfig,
-    renderGlobalCoreDnsConfig({ useStaticCaddyIp: opts.useStaticIps })
+    renderGlobalCoreDnsConfig({
+      useStaticCaddyIp: opts.useStaticIps,
+      defaultDomain,
+    })
   );
   await writeWithPromptIfDifferent(
     opts.paths.loggingCompose,
@@ -726,8 +1172,8 @@ async function bootstrapMacGlobalInstall(): Promise<void> {
     // Mirror globalTrust: the host trust env (Bun/Node/curl/git) is
     // independent of the macOS System keychain step — prepare it regardless
     // so non-interactive installs still get CLI-tool trust.
-    await configureMacHostTlsTrust({ certPath });
-    if (!trustReady) {
+    const hostTrustReady = await configureMacHostTlsTrust({ certPath });
+    if (hostTrustReady && !trustReady) {
       note(
         "Host trust env is prepared, but the browser will still show warnings for https://*.hack until the System keychain step runs. Run `hack global trust` interactively to finish it.",
         "TLS"
@@ -757,7 +1203,7 @@ async function globalLogsReset(): Promise<number> {
 
   const ok = await confirmSafe({
     message:
-      "This will stop the logging stack and delete ALL Loki logs and Grafana state (volumes).\nContinue?",
+      "This will stop the logging stack and delete its volumes: ALL Loki logs, Grafana state and Alloy read positions.\nContinue?",
     initialValue: false,
     nonInteractive: "accept-default",
   });
@@ -1185,7 +1631,31 @@ async function maybeOfferMacDnsRecoveryAuthorization(): Promise<void> {
   }
 }
 
-async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
+/**
+ * The macOS `hack global install` offer to run `hack daemon install`, which
+ * installs the per-user hackd launchd service and starts hackd through it.
+ * Non-interactive runs accept the offer.
+ *
+ * HACK-1368: `hack daemon install` runs through the first `hack` on PATH,
+ * which for a candidate run is the stable CLI, so it would install and start
+ * the stable hackd. A candidate run, or any run with
+ * `HACK_DAEMON_AUTOSTART_DISABLE=1`, skips the offer through
+ * {@link resolveDaemonAutostartAccess} before it reads launchd state or
+ * prompts. Exported for tests.
+ */
+export async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
+  const autostart = resolveDaemonAutostartAccess();
+  if (!autostart.allowed) {
+    logger.info({
+      message: `Skipping hackd launchd setup: ${autostart.message}`,
+    });
+    return;
+  }
+  const access = resolveLaunchdAccess();
+  if (!access.allowed) {
+    logger.info({ message: `Skipping hackd launchd setup: ${access.message}` });
+    return;
+  }
   const paths = resolveDaemonPaths({});
   const launchdStatus = await getLaunchdServiceStatus({ paths });
   if (launchdStatus.installed) {
@@ -1245,6 +1715,38 @@ async function writeWithPromptIfDifferent(
   }
 
   await writeTextFileIfChanged(absolutePath, content);
+}
+
+/**
+ * The `daemon.autoStart` step of `hack global up`: runs `hack daemon start`
+ * through the first `hack` on PATH and only warns when it fails.
+ *
+ * HACK-1368: for a candidate run that `hack` is the stable CLI, so a candidate
+ * run, or any run with `HACK_DAEMON_AUTOSTART_DISABLE=1`, skips the step
+ * through {@link resolveDaemonAutostartAccess}, as the implicit autostart in
+ * `requestDaemonJson` does. A denied run reads no config and spawns nothing.
+ */
+async function ensureHackdForGlobalUp(): Promise<void> {
+  const access = resolveDaemonAutostartAccess();
+  if (!access.allowed) {
+    logger.info({ message: `Skipping hackd start: ${access.message}` });
+    return;
+  }
+  const controlPlane = await readControlPlaneConfig({});
+  if (!controlPlane.config.daemon.autoStart) {
+    return;
+  }
+  logger.step({ message: "Ensuring hackd is running…" });
+  const invocation = await resolveHackInvocation();
+  const daemonExit = await run(
+    [invocation.bin, ...invocation.args, "daemon", "start"],
+    {
+      stdin: "ignore",
+    }
+  );
+  if (daemonExit !== 0) {
+    logger.warn({ message: "Unable to start hackd (continuing)" });
+  }
 }
 
 export async function globalUp(): Promise<number> {
@@ -1315,20 +1817,7 @@ export async function globalUp(): Promise<number> {
     }
   }
 
-  const controlPlane = await readControlPlaneConfig({});
-  if (controlPlane.config.daemon.autoStart) {
-    logger.step({ message: "Ensuring hackd is running…" });
-    const invocation = await resolveHackInvocation();
-    const daemonExit = await run(
-      [invocation.bin, ...invocation.args, "daemon", "start"],
-      {
-        stdin: "ignore",
-      }
-    );
-    if (daemonExit !== 0) {
-      logger.warn({ message: "Unable to start hackd (continuing)" });
-    }
-  }
+  await ensureHackdForGlobalUp();
 
   logger.step({ message: "Starting Caddy…" });
   const caddyExit = await run(
@@ -1817,7 +2306,7 @@ async function globalDown(): Promise<number> {
 
   if (isMac()) {
     const ok = await confirmSafe({
-      message: `Stop dnsmasq? (disables *.${DEFAULT_PROJECT_TLD} and *.${DEFAULT_OAUTH_ALIAS_ROOT} DNS; requires sudo)`,
+      message: `Stop dnsmasq? (disables *.${DEFAULT_PROJECT_TLD}, *.${DEFAULT_NEW_PROJECT_TLD} and *.${DEFAULT_OAUTH_ALIAS_ROOT} DNS; requires sudo)`,
       initialValue: false,
       nonInteractive: "accept-default",
     });
@@ -2695,6 +3184,14 @@ function buildGatewayUrl(opts: {
 }
 
 async function globalTrust(): Promise<number> {
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    logger.warn({
+      message:
+        "Native trust needs an exact reviewed HTTPS origin. Run hack doctor --fix --browser-url https://your-app.hack.local while its native app is running. No Docker-era CA was installed.",
+    });
+    return 1;
+  }
   const slimExit = failIfSlimMode({
     feature: "hack global trust",
   });
@@ -2739,9 +3236,9 @@ async function globalTrust(): Promise<number> {
     // it regardless so non-interactive runs still get CLI-tool trust even
     // when the keychain step was skipped (declined, or sudo would have
     // prompted for a password with no TTY to answer it).
-    await configureMacHostTlsTrust({
-      certPath,
-    });
+    if (!(await configureMacHostTlsTrust({ certPath }))) {
+      return 1;
+    }
     if (!trustReady) {
       note(
         "Host trust env is prepared, but the browser will still show warnings for https://*.hack until the System keychain step runs. Run `hack global trust` interactively to finish it.",
@@ -2956,6 +3453,11 @@ async function hasMkcertLocalCa({
 async function ensureMacHackDns(opts: {
   readonly targetIp: string;
 }): Promise<void> {
+  const domains = managedLocalDomains(await resolveDefaultDomain());
+  const customDomain = domains.at(-1);
+  if (domains.length > 3 && customDomain) {
+    await assertCustomResolverAvailable(customDomain);
+  }
   const brewOk = await ensureBrewForDnsmasq();
   if (!brewOk) {
     return;
@@ -2968,11 +3470,59 @@ async function ensureMacHackDns(opts: {
 
   const brewPrefix = await resolveBrewPrefix();
   const dnsmasqConf = resolve(brewPrefix, "etc", "dnsmasq.conf");
-  await ensureDnsmasqHackAliases({ dnsmasqConf, targetIp: opts.targetIp });
-  await ensureMacResolverFiles();
+  await ensureDnsmasqHackAliases({
+    dnsmasqConf,
+    targetIp: opts.targetIp,
+    domains,
+  });
+  await ensureMacResolverFiles(domains);
   await restartMacDnsmasq();
   await flushMacDnsCachePrivileged();
-  noteDnsConfigured({ dnsmasqConf, targetIp: opts.targetIp });
+  noteDnsConfigured({ dnsmasqConf, targetIp: opts.targetIp, domains });
+}
+
+async function preflightCustomDomainDnsClaim(): Promise<void> {
+  const domains = managedLocalDomains(await resolveDefaultDomain());
+  const customDomain = domains.length > 3 ? domains.at(-1) : undefined;
+  if (!(isMac() && customDomain)) {
+    return;
+  }
+  await assertCustomResolverAvailable(customDomain);
+  const brew = await findExecutableInPath("brew");
+  if (!brew) {
+    return;
+  }
+  const brewPrefix = await resolveBrewPrefix();
+  const conf = await readTextFile(resolve(brewPrefix, "etc", "dnsmasq.conf"));
+  assertCustomDnsmasqClaimAvailable({
+    domain: customDomain,
+    content: conf ?? "",
+  });
+}
+
+function assertCustomDnsmasqClaimAvailable(opts: {
+  readonly domain: string;
+  readonly content: string;
+}): void {
+  const prefix = `address=/.${opts.domain}/`;
+  const managedTargets: ReadonlySet<string> = new Set([
+    DEFAULT_CADDY_IP,
+    DEFAULT_HOST_DNS_IP,
+    "::1",
+  ]);
+  const claim = opts.content
+    .split("\n")
+    .map((line) => line.trim())
+    .find(
+      (line) =>
+        line.startsWith(prefix) &&
+        !managedTargets.has(line.slice(prefix.length))
+    );
+  if (claim) {
+    throw new Error(
+      `Existing dnsmasq claim for .${opts.domain}; resolve it before global install`
+    );
+  }
 }
 
 async function ensureBrewForDnsmasq(): Promise<boolean> {
@@ -3031,21 +3581,30 @@ async function resolveBrewPrefix(): Promise<string> {
 async function ensureDnsmasqHackAliases(opts: {
   readonly dnsmasqConf: string;
   readonly targetIp: string;
+  readonly domains: readonly string[];
 }): Promise<void> {
-  const desiredLines = [
-    `address=/.${DEFAULT_PROJECT_TLD}/${opts.targetIp}`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${opts.targetIp}`,
-  ] as const;
+  const desiredLines = opts.domains.map(
+    (domain) => `address=/.${domain}/${opts.targetIp}`
+  );
   const legacyHostTarget =
     opts.targetIp === DEFAULT_CADDY_IP ? DEFAULT_HOST_DNS_IP : DEFAULT_CADDY_IP;
-  const legacyLines = [
-    `address=/.${DEFAULT_PROJECT_TLD}/${legacyHostTarget}`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${legacyHostTarget}`,
-    `address=/.${DEFAULT_PROJECT_TLD}/::1`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/::1`,
-  ] as const;
+  const legacyLines = opts.domains.flatMap((domain) => [
+    `address=/.${domain}/${legacyHostTarget}`,
+    `address=/.${domain}/::1`,
+  ]);
 
   const existing = (await readTextFile(opts.dnsmasqConf)) ?? "";
+  const builtInDomains: ReadonlySet<string> = new Set([
+    DEFAULT_PROJECT_TLD,
+    DEFAULT_NEW_PROJECT_TLD,
+    DEFAULT_OAUTH_ALIAS_ROOT,
+  ]);
+  for (const domain of opts.domains) {
+    if (builtInDomains.has(domain)) {
+      continue;
+    }
+    assertCustomDnsmasqClaimAvailable({ domain, content: existing });
+  }
   const migrated = removeLegacyDnsmasqLines({
     content: existing,
     legacyLines,
@@ -3056,7 +3615,7 @@ async function ensureDnsmasqHackAliases(opts: {
   const shouldWrite = migrated.changed || missing.length > 0;
   if (!shouldWrite) {
     logger.info({
-      message: `dnsmasq already configured for .${DEFAULT_PROJECT_TLD} and .${DEFAULT_OAUTH_ALIAS_ROOT}`,
+      message: `dnsmasq already configured for ${opts.domains.map((domain) => `*.${domain}`).join(", ")}`,
     });
     return;
   }
@@ -3108,15 +3667,44 @@ function buildDnsmasqConf(opts: {
   return `${existing}\n${opts.lines.join("\n")}\n`;
 }
 
-async function ensureMacResolverFiles(): Promise<void> {
-  await maybeWriteResolver({ domain: DEFAULT_PROJECT_TLD });
-  await maybeWriteResolver({ domain: DEFAULT_OAUTH_ALIAS_ROOT });
+async function ensureMacResolverFiles(
+  domains: readonly string[]
+): Promise<void> {
+  const builtInDomains: ReadonlySet<string> = new Set([
+    DEFAULT_PROJECT_TLD,
+    DEFAULT_NEW_PROJECT_TLD,
+    DEFAULT_OAUTH_ALIAS_ROOT,
+  ]);
+  for (const domain of domains) {
+    await maybeWriteResolver({
+      domain,
+      refuseForeign: !builtInDomains.has(domain),
+    });
+  }
+}
+
+async function assertCustomResolverAvailable(domain: string): Promise<void> {
+  const resolverPath = `/etc/resolver/${domain}`;
+  const existing = await readTextFile(resolverPath);
+  if (existing !== null && existing.trim() !== "nameserver 127.0.0.1") {
+    throw new Error(
+      `Existing resolver ${resolverPath} is not Hack-owned; refusing to overwrite it`
+    );
+  }
 }
 
 async function maybeWriteResolver(opts: {
   readonly domain: string;
+  readonly refuseForeign: boolean;
 }): Promise<void> {
   const resolverPath = `/etc/resolver/${opts.domain}`;
+  if (opts.refuseForeign) {
+    await assertCustomResolverAvailable(opts.domain);
+    const existing = await readTextFile(resolverPath);
+    if (existing !== null) {
+      return;
+    }
+  }
   const resolverOk = await confirmSafe({
     message: `Write ${resolverPath} (requires sudo)?`,
     initialValue: true,
@@ -3141,16 +3729,18 @@ async function maybeWriteResolver(opts: {
 function noteDnsConfigured(opts: {
   readonly dnsmasqConf: string;
   readonly targetIp: string;
+  readonly domains: readonly string[];
 }): void {
   const targetLabel =
     opts.targetIp === DEFAULT_CADDY_IP ? "container ingress" : "localhost";
   note(
     [
-      `DNS configured: *.${DEFAULT_PROJECT_TLD} → ${opts.targetIp} (${targetLabel})`,
-      `DNS configured: *.${DEFAULT_OAUTH_ALIAS_ROOT} → ${opts.targetIp} (${targetLabel})`,
+      ...opts.domains.map(
+        (domain) =>
+          `DNS configured: *.${domain} → ${opts.targetIp} (${targetLabel})`
+      ),
       `- dnsmasq: ${opts.dnsmasqConf}`,
-      `- resolver: /etc/resolver/${DEFAULT_PROJECT_TLD}`,
-      `- resolver: /etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT}`,
+      ...opts.domains.map((domain) => `- resolver: /etc/resolver/${domain}`),
     ].join("\n"),
     "DNS"
   );
@@ -3376,20 +3966,18 @@ async function ensureMacTrustCaddyLocalCa(input: {
     return false;
   }
 
-  // Fast-path: already trusted.
-  const existing = await exec(
-    [
-      "security",
-      "find-certificate",
-      "-c",
-      "Caddy Local Authority",
-      "/Library/Keychains/System.keychain",
-    ],
-    { stdin: "ignore" }
-  );
-  if (existing.exitCode === 0) {
+  const existing = await checkMacCaTrust(input);
+  if (!existing.installable) {
+    logger.warn({
+      message:
+        existing.issue ??
+        "Current Caddy Local CA is not eligible for installation",
+    });
+    return false;
+  }
+  if (existing.trusted) {
     logger.info({
-      message: "Caddy Local CA already present in System keychain",
+      message: "Current Caddy Local CA is trusted in macOS System keychain",
     });
     return true;
   }
@@ -3427,6 +4015,16 @@ async function ensureMacTrustCaddyLocalCa(input: {
     return false;
   }
 
+  const installed = await checkMacCaTrust(input);
+  if (!installed.trusted) {
+    logger.warn({
+      message:
+        installed.issue ??
+        "macOS TLS trust verification failed after installation",
+    });
+    return false;
+  }
+
   logger.success({ message: "Trusted Caddy Local CA (macOS System keychain)" });
   note(
     [
@@ -3440,7 +4038,12 @@ async function ensureMacTrustCaddyLocalCa(input: {
 
 async function configureMacHostTlsTrust(input: {
   readonly certPath: string;
-}): Promise<void> {
+}): Promise<boolean> {
+  const eligibility = await inspectMacCaEligibility(input);
+  if (!eligibility.installable) {
+    logger.warn({ message: eligibility.issue });
+    return false;
+  }
   const bundlePath = await writeMacHostTrustBundle({
     certPath: input.certPath,
   });
@@ -3480,6 +4083,7 @@ async function configureMacHostTlsTrust(input: {
     ].join("\n"),
     "Host TLS"
   );
+  return true;
 }
 
 async function writeMacHostTrustBundle(input: {

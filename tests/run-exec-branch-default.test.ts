@@ -41,7 +41,7 @@ afterEach(async () => {
   if (originalLogger === undefined) {
     Reflect.deleteProperty(process.env, "HACK_LOGGER");
   } else {
-    restoreEnv("HACK_LOGGER", originalLogger);
+    process.env.HACK_LOGGER = originalLogger;
   }
 });
 

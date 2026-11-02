@@ -1,3 +1,7 @@
+import {
+  beginNativeCpuChild,
+  nativeCpuCommandCategory,
+} from "./native-cpu-diagnostics.ts";
 import { readSubprocessResourceUsage } from "./process-resource-usage.ts";
 import { hasControllingTerminal } from "./tty-process-group.ts";
 
@@ -10,6 +14,8 @@ export interface ExecResult {
 export interface ExecOptions {
   readonly cwd?: string;
   readonly env?: Record<string, string>;
+  /** Inherited variables to drop from the child env (before `env` applies). */
+  readonly unsetEnvKeys?: readonly string[];
   readonly stdin?: "inherit" | "pipe" | "ignore";
   readonly timeoutMs?: number;
 }
@@ -24,11 +30,12 @@ export interface ExecOptions {
  * behavior identical for normal runs while honoring runtime PATH.
  */
 function buildSpawnEnv(
-  override: Record<string, string> | undefined
+  override: Record<string, string> | undefined,
+  unsetKeys: readonly string[] = []
 ): Record<string, string> {
   const base: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string") {
+    if (typeof value === "string" && !unsetKeys.includes(key)) {
       base[key] = value;
     }
   }
@@ -41,7 +48,7 @@ export async function exec(
 ): Promise<ExecResult> {
   const proc = Bun.spawn([...cmd], {
     cwd: opts.cwd,
-    env: buildSpawnEnv(opts.env),
+    env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),
     stdin: opts.stdin ?? "inherit",
     stdout: "pipe",
     stderr: "pipe",
@@ -52,10 +59,12 @@ export async function exec(
     pid: proc.pid,
     timeoutMs: opts.timeoutMs,
   });
+  const observeCpu = beginNativeCpuChild(proc, nativeCpuCommandCategory(cmd));
 
   const stdoutText = await streamToText(proc.stdout);
   const stderrText = await streamToText(proc.stderr);
   const exitCode = await proc.exited;
+  observeCpu(exitCode);
   timeout.dispose();
 
   return {
@@ -68,20 +77,41 @@ export async function exec(
 export interface RunOptions {
   readonly cwd?: string;
   readonly env?: Record<string, string>;
+  /** Remove explicitly unset authored destinations from the inherited host environment. */
+  readonly unsetEnvKeys?: readonly string[];
   readonly stdin?: "inherit" | "pipe" | "ignore";
   /**
    * Route the child's stdout to THIS process's stderr (fd 2). Used by
    * `--json` code paths where stdout must stay a single parseable
-   * envelope while subprocess output remains visible to humans.
+   * envelope while subprocess output remains visible to humans. Ignore output
+   * when an owned mutation would disclose private resource identities.
    */
-  readonly stdout?: "inherit" | "stderr";
+  readonly stdout?: "inherit" | "stderr" | "ignore";
+  readonly stderr?: "inherit" | "ignore";
+  /** Non-TTY owner-supplied descriptors. The caller holds them through settlement;
+   * run captures numbers synchronously and never reopens names or closes the FDs. */
+  readonly privateIo?: {
+    readonly stdin: number;
+    readonly stdout: number;
+    readonly stderr: number;
+  };
   readonly timeoutMs?: number;
   /** Forward cancellation to an owned command process group, preserving TTY input. */
   readonly forwardSignals?: boolean;
+  /**
+   * Cancel the same owned process group as OS forwarding. Pre-aborted admission
+   * returns 143 without spawning or invoking observations. The reason is private.
+   */
+  readonly signal?: AbortSignal;
+  /** Synchronous admission after awaited setup, immediately before spawning. */
+  readonly beforeSpawn?: () => void;
   readonly onSpawn?: (event: {
     readonly pid: number;
     readonly ownsProcessGroup: boolean;
     readonly processGroupId?: number;
+    /** One-use continuation for a caller's fixed pre-exec STOP handshake.
+     * Uses only the captured live child; never signals a former process group. */
+    readonly resumeSuspended?: () => boolean;
   }) => Promise<void>;
   readonly onExit?: (event: RunExitEvent) => Promise<void>;
 }
@@ -99,50 +129,101 @@ export async function run(
   cmd: readonly string[],
   opts: RunOptions = {}
 ): Promise<number> {
+  const options = {
+    ...opts,
+    env: opts.env ? { ...opts.env } : undefined,
+    unsetEnvKeys: opts.unsetEnvKeys ? [...opts.unsetEnvKeys] : undefined,
+    privateIo: opts.privateIo ? { ...opts.privateIo } : undefined,
+  };
+  const command = [...cmd];
   if (
-    opts.forwardSignals &&
+    options.privateIo &&
+    (options.forwardSignals === true ||
+      !(
+        typeof options.timeoutMs === "number" &&
+        Number.isFinite(options.timeoutMs) &&
+        options.timeoutMs > 0
+      ) ||
+      ![
+        options.privateIo.stdin,
+        options.privateIo.stdout,
+        options.privateIo.stderr,
+      ].every((fd) => Number.isInteger(fd) && fd >= 0 && fd <= 2_147_483_647))
+  ) {
+    throw new Error(
+      "Private subprocess descriptors require a non-TTY owned invocation."
+    );
+  }
+  const signal = options.signal;
+  if (signal?.aborted) {
+    return 143;
+  }
+  const beforeSpawn = options.beforeSpawn;
+  if (
+    options.forwardSignals &&
     (process.stdin.isTTY || hasControllingTerminal())
   ) {
     const { runWithTerminalGroup } = await import("./tty-run.ts");
     return await runWithTerminalGroup({
-      command: cmd,
-      cwd: opts.cwd,
-      env: buildSpawnEnv(opts.env),
-      stdout: opts.stdout,
-      stdin: opts.stdin,
-      timeoutMs: opts.timeoutMs,
-      onSpawn: opts.onSpawn,
-      onExit: opts.onExit,
+      command,
+      cwd: options.cwd,
+      env: buildSpawnEnv(options.env, options.unsetEnvKeys),
+      stdout: options.stdout,
+      stderr: options.stderr,
+      stdin: options.stdin,
+      timeoutMs: options.timeoutMs,
+      signal,
+      beforeSpawn,
+      onSpawn: options.onSpawn,
+      onExit: options.onExit,
     });
   }
   const ownsProcessGroup =
-    opts.timeoutMs !== undefined || opts.forwardSignals === true;
-  const proc = Bun.spawn([...cmd], {
-    cwd: opts.cwd,
-    env: buildSpawnEnv(opts.env),
-    stdin: opts.stdin ?? "inherit",
-    stdout: opts.stdout === "stderr" ? 2 : "inherit",
-    stderr: "inherit",
+    options.timeoutMs !== undefined ||
+    options.forwardSignals === true ||
+    signal !== undefined;
+  beforeSpawn?.();
+  if (signal?.aborted) {
+    return 143;
+  }
+  const proc = Bun.spawn(command, {
+    cwd: options.cwd,
+    env: buildSpawnEnv(options.env, options.unsetEnvKeys),
+    stdin: options.privateIo?.stdin ?? options.stdin ?? "inherit",
+    stdout:
+      options.privateIo?.stdout ??
+      (options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit")),
+    stderr: options.privateIo?.stderr ?? options.stderr ?? "inherit",
     detached: ownsProcessGroup,
   });
+  const observeCpu = beginNativeCpuChild(
+    proc,
+    nativeCpuCommandCategory(command)
+  );
   const timeout = installSubprocessTimeout({
     pid: proc.pid,
-    timeoutMs: opts.timeoutMs,
+    timeoutMs: options.timeoutMs,
   });
-  const cancellation = opts.forwardSignals
-    ? installSubprocessSignalForwarding({
-        pid: proc.pid,
-      })
-    : null;
+  const cancellation =
+    options.forwardSignals || signal
+      ? installSubprocessSignalForwarding({
+          pid: proc.pid,
+          forwardSignals: options.forwardSignals === true,
+          signal,
+        })
+      : null;
   // Observe completion immediately: diagnostic setup must not keep deadlines armed
   // after the command has exited. Record callbacks still finish in spawn/exit order.
+  let originalExited = false;
   const completion = (async (): Promise<RunExitEvent> => {
     try {
       const exitCode = await proc.exited;
+      originalExited = true;
+      const diagnosticUsage = observeCpu(exitCode);
       const code =
         cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
-      const usage = opts.onExit
-        ? readSubprocessResourceUsage(proc)
+      const usage = options.onExit
+        ? (diagnosticUsage ?? readSubprocessResourceUsage(proc))
         : { cpuTimeMs: null, maxRssBytes: null };
       return {
         finishedAt: new Date().toISOString(),
@@ -152,24 +233,51 @@ export async function run(
         ...usage,
       };
     } finally {
+      originalExited = true;
       timeout.dispose();
       cancellation?.dispose();
     }
   })();
+  let resumed = false;
+  const resumeSuspended = () => {
+    if (
+      !options.privateIo ||
+      resumed ||
+      originalExited ||
+      proc.exitCode !== null
+    ) {
+      return false;
+    }
+    resumed = true;
+    try {
+      // Bun 1.4.2's Subprocess.kill(SIGCONT) does not resume a stopped child on
+      // macOS. Delivery remains inside this original owner, to its captured PID
+      // before observed completion; no saved/reacquired PID or group is used.
+      process.kill(proc.pid, "SIGCONT");
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const [result] = await Promise.all([
     completion,
-    opts.onSpawn?.({ pid: proc.pid, ownsProcessGroup }),
+    options.onSpawn?.({ pid: proc.pid, ownsProcessGroup, resumeSuspended }),
   ]);
-  await opts.onExit?.(result);
+  await options.onExit?.(result);
   return result.exitCode;
 }
 
 /** Detached noninteractive children keep cancellation scoped to their group. */
-function installSubprocessSignalForwarding(opts: { readonly pid: number }): {
+function installSubprocessSignalForwarding(opts: {
+  readonly pid: number;
+  readonly forwardSignals: boolean;
+  readonly signal?: AbortSignal;
+}): {
   readonly dispose: () => void;
   readonly exitCode: () => number | null;
 } {
   let exitCode: number | null = null;
+  let active = true;
   let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
   const send = (signal: NodeJS.Signals): void => {
     try {
@@ -189,13 +297,30 @@ function installSubprocessSignalForwarding(opts: { readonly pid: number }): {
   };
   const onInterrupt = (): void => cancel("SIGINT");
   const onTerminate = (): void => cancel("SIGTERM");
-  process.on("SIGINT", onInterrupt);
-  process.on("SIGTERM", onTerminate);
+  const onAbort = (): void => {
+    // A caller's earlier OS handler may abort this signal in the same dispatch.
+    // Let the existing OS owner retain SIGINT's 130 before generic abort's 143.
+    queueMicrotask(() => {
+      if (active && exitCode === null) {
+        onTerminate();
+      }
+    });
+  };
+  if (opts.forwardSignals) {
+    process.on("SIGINT", onInterrupt);
+    process.on("SIGTERM", onTerminate);
+  }
+  opts.signal?.addEventListener("abort", onAbort, { once: true });
+  if (opts.signal?.aborted) {
+    onAbort();
+  }
   return {
     exitCode: () => exitCode,
     dispose: () => {
+      active = false;
       process.off("SIGINT", onInterrupt);
       process.off("SIGTERM", onTerminate);
+      opts.signal?.removeEventListener("abort", onAbort);
       if (forceKillTimer) {
         clearTimeout(forceKillTimer);
       }
@@ -253,6 +378,49 @@ async function streamToText(
     return "";
   }
   return await new Response(stream).text();
+}
+
+/**
+ * Collect a readable stream into memory under a byte budget. `onOverflow` is
+ * the caller's own closed refusal and must throw once `limit` is exceeded; it
+ * never receives stream content. The reader is cancelled on abort, on overflow
+ * and after completion so a stopped child never blocks on a full pipe, and the
+ * stream lock is always released. The returned bytes are a fresh copy.
+ */
+export async function readBoundedStream(
+  stream: ReadableStream<Uint8Array>,
+  limit: number,
+  signal: AbortSignal | undefined,
+  onOverflow: () => never
+): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  const cancel = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) {
+    cancel();
+  }
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) {
+        break;
+      }
+      size += next.value.byteLength;
+      if (size > limit) {
+        onOverflow();
+      }
+      chunks.push(next.value);
+    }
+    return Buffer.concat(chunks, size);
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+    cancel();
+    reader.releaseLock();
+  }
 }
 
 /**

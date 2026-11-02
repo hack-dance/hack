@@ -10,14 +10,20 @@ export const DEFAULT_COREDNS_IP = "172.30.0.53" as const;
 export const DEFAULT_HOST_DNS_IP = "127.0.0.1" as const;
 
 export const DEFAULT_PROJECT_TLD = "hack" as const;
-export const DEFAULT_GRAFANA_HOST = `logs.${DEFAULT_PROJECT_TLD}` as const;
-export const DEFAULT_LOKI_HOST = `loki.${DEFAULT_PROJECT_TLD}` as const;
-export const DEFAULT_SCHEMAS_HOST = `schemas.${DEFAULT_PROJECT_TLD}` as const;
+/** New project names; the legacy suffix remains the fallback for existing configs. */
+export const DEFAULT_NEW_PROJECT_TLD = "hack.local" as const;
+export const DEFAULT_GRAFANA_HOST = `logs.${DEFAULT_NEW_PROJECT_TLD}` as const;
+export const DEFAULT_LOKI_HOST = `loki.${DEFAULT_NEW_PROJECT_TLD}` as const;
+export const DEFAULT_SCHEMAS_HOST =
+  `schemas.${DEFAULT_NEW_PROJECT_TLD}` as const;
+export const LEGACY_GRAFANA_HOST = `logs.${DEFAULT_PROJECT_TLD}` as const;
+export const LEGACY_LOKI_HOST = `loki.${DEFAULT_PROJECT_TLD}` as const;
+export const LEGACY_SCHEMAS_HOST = `schemas.${DEFAULT_PROJECT_TLD}` as const;
 
 /**
  * OAuth providers (notably Google) require `localhost` or a host that ends with a real public suffix.
  *
- * We keep `.hack` as the primary local dev domain, and optionally expose an alias domain for OAuth flows.
+ * New projects use `.hack.local`; legacy `.hack` remains supported alongside optional OAuth aliases.
  * Default: `*.hack.gy` → 127.0.0.1 (via dnsmasq + OS resolver).
  */
 export const DEFAULT_OAUTH_ALIAS_TLD = "gy" as const;

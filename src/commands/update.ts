@@ -7,6 +7,7 @@ import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir } from "../lib/fs.ts";
+import { canPrompt } from "../lib/interactivity.ts";
 import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
@@ -68,6 +69,23 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  // Candidate launchers run hack-cli; PATH fallback can select the stable install.
+  // `hack-next` and `hack-v5` mark their children on both backends, because an
+  // explicit Compose selection no longer carries the native backend marker.
+  if (
+    process.env.HACK_RUNTIME_BACKEND === "native" ||
+    (process.env.HACK_CANDIDATE_ENTRYPOINT ?? "") !== ""
+  ) {
+    return writeResult({
+      json: args.options.json === true,
+      result: {
+        ok: false,
+        error:
+          "Refusing to self-update the opt-in native candidate. Install a separately reviewed candidate bundle to update it.",
+      },
+    });
+  }
+
   const target = resolveUpdateTarget();
   if (!target) {
     return writeResult({
@@ -168,7 +186,9 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
 
   const wantsInstall = await confirmInstall({
     yes: args.options.yes === true,
-    isTty: process.stdout.isTTY,
+    // canPrompt() covers stdin and stdout TTYs plus the explicit opt-outs; a
+    // piped stdin alone would otherwise spin in the clack prompt (HACK-1385).
+    isTty: canPrompt(),
     prompt: `${announce}. Install now?`,
   });
   if (!wantsInstall.ok) {

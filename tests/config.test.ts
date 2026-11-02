@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   readGlobalConfig,
   updateGlobalConfig,
+  updateProjectConfig,
   updateProjectConfigBatch,
 } from "../src/lib/config.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -64,6 +65,60 @@ describe("global config utilities", () => {
     expect(parsed.controlPlane.gateway.enabled).toBe(true);
     expect(parsed.controlPlane.daemon.launchd.runAtLoad).toBe(true);
   });
+
+  test.each([
+    ["malformed JSON", '{"privateFixtureValue":"do-not-echo",', "invalid JSON"],
+    ["empty file", "", "invalid JSON"],
+    ["whitespace", " \n\t", "invalid JSON"],
+    ["array", "[1, 2]\n", "expected a JSON object"],
+    ["null", "null\n", "expected a JSON object"],
+    ["string", '"do-not-echo"\n', "expected a JSON object"],
+    ["number", "42\n", "expected a JSON object"],
+    ["boolean", "true\n", "expected a JSON object"],
+  ])("all config writers preserve %s", async (_label, contents, reason) => {
+    await Bun.write(configPath, contents);
+    const expectedError = `Cannot update config at ${configPath}: ${reason}. Repair the file before retrying; it has not been changed.`;
+    const operations = [
+      () => updateGlobalConfig({ path: "enabled", value: true }),
+      () =>
+        updateProjectConfig({
+          projectDir: tempDir,
+          path: "enabled",
+          value: true,
+        }),
+      () =>
+        updateProjectConfigBatch({
+          projectDir: tempDir,
+          values: [
+            { path: "enabled", value: true },
+            { path: "sessions.mux", value: "tmux" },
+          ],
+        }),
+    ];
+    for (const update of operations) {
+      await expect(update()).rejects.toThrow(expectedError);
+      expect(await Bun.file(configPath).text()).toBe(contents);
+    }
+  });
+
+  test.skipIf(process.getuid?.() === 0)(
+    "unreadable existing config is not treated as missing",
+    async () => {
+      const contents = '{"existing":true}\n';
+      await Bun.write(configPath, contents);
+      await chmod(configPath, 0o200);
+      try {
+        await expect(
+          updateGlobalConfig({ path: "enabled", value: true })
+        ).rejects.toThrow(
+          `Cannot update config at ${configPath}: unable to read the existing file.`
+        );
+      } finally {
+        await chmod(configPath, 0o600);
+      }
+      expect(await Bun.file(configPath).text()).toBe(contents);
+    }
+  );
 
   test("readGlobalConfig returns undefined for missing config", async () => {
     const value = await readGlobalConfig({
@@ -152,6 +207,35 @@ describe("project config batch utilities", () => {
 
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("single project update creates a missing config and preserves unrelated fields", async () => {
+    const values = { nested: { enabled: true }, list: ["web", "db"] };
+    await updateProjectConfig({ projectDir, path: "custom", value: values });
+    await updateProjectConfig({ projectDir, path: "name", value: "example" });
+    expect(await Bun.file(configPath).json()).toEqual({
+      custom: values,
+      name: "example",
+    });
+  });
+
+  test("batch update preserves unrelated and sibling fields", async () => {
+    await Bun.write(
+      configPath,
+      JSON.stringify({ custom: ["untouched"], sessions: { existing: true } })
+    );
+    await updateProjectConfigBatch({
+      projectDir,
+      values: [
+        { path: "name", value: "example" },
+        { path: "sessions.mux", value: "tmux" },
+      ],
+    });
+    expect(await Bun.file(configPath).json()).toEqual({
+      custom: ["untouched"],
+      sessions: { existing: true, mux: "tmux" },
+      name: "example",
+    });
   });
 
   test("updateProjectConfigBatch persists multi-key routing overrides in one write", async () => {

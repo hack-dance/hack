@@ -2,6 +2,7 @@ import * as p from "@clack/prompts";
 import qrcode from "qrcode-terminal";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
+import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import { findProjectContext, type ProjectContext } from "../lib/project.ts";
 import { run } from "../lib/shell.ts";
 import {
@@ -254,6 +255,13 @@ async function resolveConnection(opts: {
 }
 
 async function selectConnectionMethod(): Promise<ConnectionMethod | null> {
+  // A clack prompt cannot settle on a piped stdin and spins (HACK-1385).
+  if (!canPrompt()) {
+    requireInteractive({
+      what: "hack ssh needs a connection method",
+      hint: "Pass --tailscale, or --direct with --host <host>.",
+    });
+  }
   const selected = await p.select({
     message: "Connection method",
     options: [
@@ -281,6 +289,13 @@ async function resolveDirectHost(opts: {
   const hostname = (opts.hostOverride ?? "").trim();
   if (hostname.length > 0) {
     return hostname;
+  }
+
+  if (!canPrompt()) {
+    requireInteractive({
+      what: "hack ssh --direct needs a host",
+      hint: "Pass --host <hostname or IP>.",
+    });
   }
 
   const hostInput = await p.text({
@@ -344,6 +359,11 @@ async function resolveSessionNameToConnect(opts: {
   readonly backend: MuxBackendName;
   readonly sessionName: string;
 } | null> {
+  // Without a TTY, answer "Done": the connection info is already printed, and
+  // a workspace can be named as the positional argument instead.
+  if (!canPrompt()) {
+    return null;
+  }
   const action = await p.select({
     message: "What would you like to do?",
     options: [
@@ -449,6 +469,12 @@ async function setupTailscale(): Promise<
         ? "Tailscale is stopped"
         : "Tailscale is not connected"
     );
+
+    // Never run `tailscale up` without an explicit answer.
+    if (!canPrompt()) {
+      p.log.info("Run `tailscale up`, then re-run `hack ssh`.");
+      return { ok: false };
+    }
 
     const turnOn = await p.confirm({
       message: "Turn on Tailscale?",

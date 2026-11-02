@@ -13,6 +13,11 @@ import {
   createOperationTimings,
   type OperationTimings,
 } from "./operation-timings.ts";
+import {
+  assertLegacyProjectInputFamily,
+  inspectProjectInputsAtRoot,
+  ProjectInputSelectionError,
+} from "./project-input-selection.ts";
 import { upsertProjectRegistration } from "./projects-registry.ts";
 import { exec, findExecutableInPath } from "./shell.ts";
 
@@ -324,21 +329,34 @@ export async function autoRegisterRuntimeHackProjects(opts: {
 
     const projectDir = wd;
     const repoRoot = resolve(projectDir, "..");
+    const selection = await inspectProjectInputsAtRoot({
+      projectRoot: repoRoot,
+    });
+    if (selection.kind === "native" || selection.kind === "conflict") {
+      continue;
+    }
     const composeFile = resolve(projectDir, PROJECT_COMPOSE_FILENAME);
     if (!(await pathExists(composeFile))) {
       continue;
     }
 
-    await upsertProjectRegistration({
-      project: {
-        projectRoot: repoRoot,
-        projectDirName: dirName,
-        projectDir,
-        composeFile,
-        envFile: resolve(projectDir, PROJECT_ENV_FILENAME),
-        configFile: resolve(projectDir, PROJECT_CONFIG_FILENAME),
-      },
-    });
+    try {
+      await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
+      await upsertProjectRegistration({
+        project: {
+          projectRoot: repoRoot,
+          projectDirName: dirName,
+          projectDir,
+          composeFile,
+          envFile: resolve(projectDir, PROJECT_ENV_FILENAME),
+          configFile: resolve(projectDir, PROJECT_CONFIG_FILENAME),
+        },
+      });
+    } catch (error: unknown) {
+      if (!(error instanceof ProjectInputSelectionError)) {
+        throw error;
+      }
+    }
   }
 }
 

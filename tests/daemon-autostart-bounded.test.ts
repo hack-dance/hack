@@ -30,7 +30,7 @@ afterEach(async () => {
   if (originalNoInteractive === undefined) {
     Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
   } else {
-    restoreEnv("HACK_NO_INTERACTIVE", originalNoInteractive);
+    process.env.HACK_NO_INTERACTIVE = originalNoInteractive;
   }
 });
 

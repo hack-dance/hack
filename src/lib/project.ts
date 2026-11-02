@@ -1,8 +1,9 @@
 import { basename, dirname, resolve } from "node:path";
 import {
+  DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_TLD,
   DEFAULT_PROJECT_TLD,
-  HACK_PROJECT_DIR_LEGACY,
+  type HACK_PROJECT_DIR_LEGACY,
   HACK_PROJECT_DIR_PRIMARY,
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
@@ -16,7 +17,13 @@ import {
   type OpenHostPreference,
   parseOpenHostPreference,
 } from "./open-host.ts";
-import { findUpFile } from "./path.ts";
+import {
+  assertLegacyProjectDirectory,
+  discoverProjectInputs,
+  inspectProjectInputsAtRoot,
+  requireLegacyProjectInputs,
+} from "./project-input-selection.ts";
+import { normalizeProjectName } from "./project-name.ts";
 
 export type ProjectDirName =
   | typeof HACK_PROJECT_DIR_PRIMARY
@@ -34,23 +41,28 @@ export interface ProjectContext {
 export async function findProjectContext(
   startDir: string
 ): Promise<ProjectContext | null> {
-  const primaryRoot = await findUpFile(
-    startDir,
-    `${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_COMPOSE_FILENAME}`
-  );
-  if (primaryRoot) {
-    return buildProjectContext(primaryRoot, HACK_PROJECT_DIR_PRIMARY);
+  const selected = await discoverProjectInputs({ startDir });
+  if (!selected) {
+    return null;
   }
+  requireLegacyProjectInputs(selected);
+  const directory = selected.composeDirectories[0];
+  return directory
+    ? buildProjectContext(selected.projectRoot, directory)
+    : null;
+}
 
-  const legacyRoot = await findUpFile(
-    startDir,
-    `${HACK_PROJECT_DIR_LEGACY}/${PROJECT_COMPOSE_FILENAME}`
-  );
-  if (legacyRoot) {
-    return buildProjectContext(legacyRoot, HACK_PROJECT_DIR_LEGACY);
-  }
-
-  return null;
+/** Resolve a registered exact root, never an ancestor or a native fake Compose context. */
+export async function findProjectContextAtRoot(opts: {
+  readonly projectRoot: string;
+  readonly projectDirName?: ProjectDirName;
+}): Promise<ProjectContext | null> {
+  const selected = await inspectProjectInputsAtRoot(opts);
+  requireLegacyProjectInputs(selected);
+  const directory = opts.projectDirName ?? selected.composeDirectories[0];
+  return directory && selected.composeDirectories.includes(directory)
+    ? buildProjectContext(selected.projectRoot, directory)
+    : null;
 }
 
 function buildProjectContext(
@@ -69,28 +81,28 @@ function buildProjectContext(
 }
 
 export async function findRepoRootForInit(startDir: string): Promise<string> {
-  const byPackageJson = await findUpFile(startDir, "package.json");
-  if (byPackageJson) {
-    return byPackageJson;
+  let current = resolve(startDir);
+  while (true) {
+    const selected = await inspectProjectInputsAtRoot({ projectRoot: current });
+    if (selected.kind === "native" || selected.kind === "conflict") {
+      requireLegacyProjectInputs(selected);
+    }
+    if (await pathExists(resolve(current, "package.json"))) {
+      return current;
+    }
+    if (await pathExists(resolve(current, ".git"))) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return resolve(startDir);
+    }
+    current = parent;
   }
-
-  const byGit = await findUpFile(startDir, ".git");
-  if (byGit) {
-    return byGit;
-  }
-
-  return resolve(startDir);
 }
 
 export function sanitizeProjectSlug(input: string): string {
-  const trimmed = input.trim().toLowerCase();
-  const replaced = trimmed
-    .replaceAll("_", "-")
-    .replaceAll(" ", "-")
-    .replaceAll("/", "-");
-  const cleaned = replaced.replaceAll(/[^a-z0-9-]/g, "");
-  const collapsed = cleaned.replaceAll(/-+/g, "-").replaceAll(/^-|-$/g, "");
-  return collapsed.length > 0 ? collapsed : "project";
+  return normalizeProjectName(input) ?? "project";
 }
 
 export function normalizeEnvConfigName(input: string): string | null {
@@ -106,6 +118,44 @@ export function normalizeEnvConfigName(input: string): string | null {
   return normalized.length > 0 ? normalized : null;
 }
 
+/**
+ * `--env` spellings (case-insensitive) that select the base layers and bypass
+ * the configured default overlay. An overlay file named for one of these
+ * spellings is never selected by name.
+ */
+export const ENV_BASE_SELECTION_ALIASES: ReadonlySet<string> = new Set([
+  "base",
+  "default",
+  "none",
+]);
+
+/**
+ * Canonical overlay name: the fixed point of `normalizeEnvConfigName`
+ * (lowercase letters and digits joined by single hyphens).
+ */
+export const ENV_CONFIG_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * Longest accepted overlay name. An overlay name becomes part of several file
+ * names in one directory; the longest is the env layer lock's staging name,
+ * `hack.env.<name>.local.yaml.lock.<uuid>.owner` (the name plus 68 bytes),
+ * which must fit the common 255-byte file name limit with room to spare.
+ */
+export const ENV_CONFIG_NAME_MAX_LENGTH = 128;
+
+/**
+ * Parse a requested overlay selection (CLI `--env`, daemon `env`).
+ *
+ * - `undefined` input: no selection.
+ * - `null`: base layers only (empty, or a base alias in any case).
+ * - `string`: the overlay name, exactly as given apart from surrounding
+ *   whitespace.
+ * - `undefined` for a non-empty input that is not a canonical overlay name
+ *   or is longer than {@link ENV_CONFIG_NAME_MAX_LENGTH}: refused. A requested name is never
+ *   slugged, so `X=secret` or `QA` cannot silently become `xsecret` or `qa`
+ *   and then be printed or written into an overlay file name. Callers must
+ *   refuse with fixed text that does not include the input.
+ */
 export function parseEnvConfigSelection(
   input: string | undefined
 ): string | null | undefined {
@@ -118,12 +168,14 @@ export function parseEnvConfigSelection(
     return null;
   }
 
-  const lowered = trimmed.toLowerCase();
-  if (lowered === "base" || lowered === "default" || lowered === "none") {
+  if (ENV_BASE_SELECTION_ALIASES.has(trimmed.toLowerCase())) {
     return null;
   }
 
-  return normalizeEnvConfigName(trimmed);
+  return trimmed.length <= ENV_CONFIG_NAME_MAX_LENGTH &&
+    ENV_CONFIG_NAME_PATTERN.test(trimmed)
+    ? trimmed
+    : undefined;
 }
 
 export function sanitizeBranchSlug(input: string): string {
@@ -341,6 +393,8 @@ export interface ProjectWorktreeConfig {
    * target the base instance from linked worktrees.
    */
   readonly autoBranch?: boolean;
+  /** Read eligible primary local env/aliases; false keeps this checkout isolated. */
+  readonly inheritLocal?: boolean;
 }
 
 /**
@@ -364,7 +418,7 @@ export function resolveProjectOauthTld(
 
 /**
  * Returns the OAuth alias only when Hack's generated Caddy routes can serve it.
- * Custom development hosts outside the managed `.hack` namespace retain their
+ * Custom development hosts outside the managed `.hack`/`.hack.local` namespaces retain their
  * primary host unless the project declares and routes an alias itself.
  */
 export function resolveProjectOauthAliasHost(opts: {
@@ -372,15 +426,38 @@ export function resolveProjectOauthAliasHost(opts: {
   readonly oauth: ProjectOauthConfig | undefined;
 }): string | null {
   const tld = resolveProjectOauthTld(opts.oauth);
-  if (!(tld && opts.devHost.endsWith(`.${DEFAULT_PROJECT_TLD}`))) {
+  if (!tld) {
     return null;
   }
-  return `${opts.devHost}.${tld}`;
+  if (opts.devHost.endsWith(`.${DEFAULT_NEW_PROJECT_TLD}`)) {
+    const prefix = opts.devHost.slice(0, -DEFAULT_NEW_PROJECT_TLD.length);
+    return `${prefix}${DEFAULT_PROJECT_TLD}.${tld}`;
+  }
+  return opts.devHost.endsWith(`.${DEFAULT_PROJECT_TLD}`)
+    ? `${opts.devHost}.${tld}`
+    : null;
+}
+
+/**
+ * Include retained legacy routes when branching a migrated local-domain project.
+ * These bases rewrite existing labels; they do not create or claim any routes.
+ */
+export function resolveProjectRouteBaseHosts(opts: {
+  readonly devHost: string;
+  readonly aliasHost: string | null;
+}): string[] {
+  const hosts = [opts.devHost, ...(opts.aliasHost ? [opts.aliasHost] : [])];
+  if (opts.devHost.endsWith(`.${DEFAULT_NEW_PROJECT_TLD}`)) {
+    const legacy = `${opts.devHost.slice(0, -DEFAULT_NEW_PROJECT_TLD.length)}${DEFAULT_PROJECT_TLD}`;
+    hosts.push(legacy, `${legacy}.${DEFAULT_OAUTH_ALIAS_TLD}`);
+  }
+  return [...new Set(hosts)];
 }
 
 export async function readProjectConfig(
   ctx: ProjectContext
 ): Promise<ProjectConfig> {
+  await assertLegacyProjectDirectory({ projectDir: ctx.projectDir });
   const jsonPath = resolve(ctx.projectDir, PROJECT_CONFIG_FILENAME);
   const jsonText = await readTextFile(jsonPath);
   if (jsonText !== null) {
@@ -958,7 +1035,11 @@ function parseWorktreeConfig(
     value.auto_branch ?? value.autoBranch
   );
 
+  const inheritLocal = parseOptionalBoolean(
+    value.inherit_local ?? value.inheritLocal
+  );
   const out: ProjectWorktreeConfig = {
+    ...(inheritLocal !== undefined ? { inheritLocal } : {}),
     ...(autoBranch !== undefined ? { autoBranch } : {}),
   };
   return Object.keys(out).length > 0 ? out : undefined;

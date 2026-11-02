@@ -1,7 +1,31 @@
+import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  DAEMON_LAUNCHD_LABEL,
+  DAEMON_LAUNCHD_PLIST_FILENAME,
+} from "../../src/constants.ts";
+import {
+  LAUNCHD_ALLOW_ISOLATED_ENV,
+  LAUNCHD_DISABLE_ENV,
+} from "../../src/daemon/launchd.ts";
 
 /**
  * Core end-to-end harness for the hack CLI.
@@ -62,9 +86,11 @@ export type CliInvocation = {
   /** Extra env entries layered on top of the isolated base env. */
   readonly env?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
+  /** Observe live stderr while retaining regular-file CLI capture. */
+  readonly onStderrChunk?: (chunk: string) => void;
 };
 
-export type ScenarioTier = "local" | "docker";
+export type ScenarioTier = "local" | "docker" | "host-ingress";
 
 export type ScenarioContext = {
   readonly repoRoot: string;
@@ -76,6 +102,8 @@ export type ScenarioContext = {
   readonly cli: (invocation: CliInvocation) => Promise<CliResult>;
   /** Structured progress log line (plain text, no colors). */
   readonly log: (message: string) => void;
+  /** Preserve both owned roots for incomplete cleanup; this can never become a passing scenario. */
+  readonly retainFixtures: (reason: string) => void;
   /** Abort the scenario as skipped (does not fail the suite). */
   readonly skip: (reason: string) => never;
 };
@@ -84,6 +112,10 @@ export type Scenario = {
   readonly name: string;
   readonly tier: ScenarioTier;
   readonly summary: string;
+  /** Retain disposable source and isolated-home evidence after failed ownership cleanup. */
+  readonly preserveFixtureOnFailure?: boolean;
+  /** Recovery controls that intentionally retain uncertain state require explicit selection. */
+  readonly requiresExplicitSelection?: boolean;
   readonly run: (ctx: ScenarioContext) => Promise<void>;
 };
 
@@ -208,10 +240,167 @@ export function buildCliEnv(opts: {
   }
   env.HACK_HOME = opts.hackHome;
   env.HACK_NO_INTERACTIVE = "1";
+  // `doctor --fix` runs `hack daemon start` without a TTY, and nothing stops
+  // that daemon with the scenario (HACK-1696). Unlike the launchd guard below,
+  // a scenario that stops its own daemon may opt in through `extra`.
+  env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
   env.NO_COLOR = "1";
   env.CLICOLOR = "0";
   env.TERM = "dumb";
-  return { ...env, ...(opts.extra ?? {}) };
+  return applyLaunchdGuard({ ...env, ...(opts.extra ?? {}) });
+}
+
+/**
+ * The hackd launchd service and its plist belong to the real user (HOME stays
+ * real in this harness). Every CLI invocation therefore gets two guards that
+ * a scenario's `env` cannot remove (HACK-1313):
+ *
+ * - `HACK_LAUNCHD_DISABLE=1`, which the CLI honors before any plist access or
+ *   launchctl call, with the isolated-home opt-in removed;
+ * - a `launchctl` shim first on PATH that refuses (exit 1) and records any
+ *   call naming the hackd service, so a regression in the CLI's own guard
+ *   still cannot bootstrap, kickstart or stop the real service. Other
+ *   launchctl calls pass through to `/bin/launchctl` unchanged.
+ *
+ * The plist write itself is caught after the fact by
+ * {@link fingerprintLaunchAgentPlist}, which `run.ts` compares around the run.
+ */
+function applyLaunchdGuard(
+  env: Record<string, string>
+): Record<string, string> {
+  const guard = ensureLaunchctlGuard();
+  const guarded: Record<string, string> = { ...env };
+  Reflect.deleteProperty(guarded, LAUNCHD_ALLOW_ISOLATED_ENV);
+  guarded[LAUNCHD_DISABLE_ENV] = "1";
+  guarded.PATH = guarded.PATH ? `${guard.dir}:${guarded.PATH}` : guard.dir;
+  return guarded;
+}
+
+type LaunchctlGuard = {
+  readonly dir: string;
+  readonly logPath: string;
+  readonly removeOnExit: () => void;
+};
+let launchctlGuard: LaunchctlGuard | null = null;
+
+function ensureLaunchctlGuard(): LaunchctlGuard {
+  if (launchctlGuard) {
+    return launchctlGuard;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "hack-e2e-launchctl-guard-"));
+  const logPath = join(dir, "blocked.log");
+  const shim = join(dir, "launchctl");
+  // Only the verb is recorded, never arguments.
+  writeFileSync(
+    shim,
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      `  *${DAEMON_LAUNCHD_LABEL}*)`,
+      `    printf '%s\\n' "$1" >> '${logPath}'`,
+      "    echo 'hack e2e: launchctl access to the hackd service is blocked' >&2",
+      "    exit 1",
+      "    ;;",
+      "esac",
+      'exec /bin/launchctl "$@"',
+      "",
+    ].join("\n")
+  );
+  chmodSync(shim, 0o755);
+  const removeOnExit = () => {
+    rmSync(dir, { recursive: true, force: true });
+  };
+  process.once("exit", removeOnExit);
+  launchctlGuard = { dir, logPath, removeOnExit };
+  return launchctlGuard;
+}
+
+/**
+ * Removes the launchctl guard shim and its process `exit` listener now. The
+ * e2e runner keeps one shim for its whole process; a `bun test` file that
+ * builds CLI env calls this in `afterEach`, because every test file shares
+ * one Bun process and a leftover listener would leak into later files. The
+ * next `buildCliEnv` call creates a fresh shim.
+ */
+export function releaseLaunchctlGuard(): void {
+  if (!launchctlGuard) {
+    return;
+  }
+  const { removeOnExit } = launchctlGuard;
+  launchctlGuard = null;
+  process.removeListener("exit", removeOnExit);
+  removeOnExit();
+}
+
+/**
+ * launchctl verbs the guard shim refused during this process, in call order.
+ * Any entry means a CLI invocation tried to manage the real hackd service.
+ */
+export function blockedLaunchctlCalls(): readonly string[] {
+  if (!launchctlGuard) {
+    return [];
+  }
+  try {
+    return readFileSync(launchctlGuard.logPath, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/** The real user's hackd LaunchAgent plist (HOME is not isolated here). */
+export function realHackdLaunchAgentPath(): string {
+  return resolve(
+    process.env.HOME ?? homedir(),
+    "Library",
+    "LaunchAgents",
+    DAEMON_LAUNCHD_PLIST_FILENAME
+  );
+}
+
+export type LaunchAgentFingerprint =
+  | { readonly present: false }
+  | {
+      readonly present: true;
+      readonly sha256: string;
+      readonly mtimeMs: number;
+    };
+
+/**
+ * Hash and mtime of a file, for the before/after LaunchAgents canary. The
+ * bytes are hashed and dropped: neither they nor the path's contents are
+ * ever printed.
+ */
+export async function fingerprintLaunchAgentPlist(opts: {
+  readonly path: string;
+}): Promise<LaunchAgentFingerprint> {
+  try {
+    const info = await stat(opts.path);
+    const sha256 = createHash("sha256")
+      .update(await readFile(opts.path))
+      .digest("hex");
+    return { present: true, sha256, mtimeMs: info.mtimeMs };
+  } catch {
+    return { present: false };
+  }
+}
+
+/**
+ * Null when the fingerprints match; otherwise a one-line description that
+ * names only presence, hashes and mtimes.
+ */
+export function describeLaunchAgentChange(opts: {
+  readonly before: LaunchAgentFingerprint;
+  readonly after: LaunchAgentFingerprint;
+}): string | null {
+  const render = (fingerprint: LaunchAgentFingerprint): string =>
+    fingerprint.present
+      ? `sha256=${fingerprint.sha256} mtimeMs=${fingerprint.mtimeMs}`
+      : "absent";
+  const before = render(opts.before);
+  const after = render(opts.after);
+  return before === after ? null : `${before} -> ${after}`;
 }
 
 /**
@@ -259,11 +448,11 @@ export async function runCli(opts: {
   const timeoutMs = opts.invocation.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
   const startedAt = Date.now();
 
-  outputCaptureCounter += 1;
+  const captureId = ++outputCaptureCounter;
   const captureDir = join(opts.hackHome, ".e2e-capture");
   await mkdir(captureDir, { recursive: true });
-  const stdoutPath = join(captureDir, `${outputCaptureCounter}.out`);
-  const stderrPath = join(captureDir, `${outputCaptureCounter}.err`);
+  const stdoutPath = join(captureDir, `${captureId}.out`);
+  const stderrPath = join(captureDir, `${captureId}.err`);
 
   const proc = Bun.spawn(resolveCliSpawnArgs(opts.invocation.args), {
     cwd: opts.invocation.cwd,
@@ -278,8 +467,24 @@ export async function runCli(opts: {
     timedOut = true;
     proc.kill();
   }, timeoutMs);
+  let exited = false;
+  let observationError: unknown;
+  const observation = opts.invocation.onStderrChunk
+    ? observeCapture({
+        path: stderrPath,
+        onChunk: opts.invocation.onStderrChunk,
+        isDone: () => exited,
+      }).catch((error: unknown) => {
+        observationError = error;
+      })
+    : Promise.resolve();
   const exitCode = await proc.exited;
+  exited = true;
   clearTimeout(timer);
+  await observation;
+  if (observationError !== undefined) {
+    throw observationError;
+  }
 
   const stdout = await readCapture({ path: stdoutPath });
   const stderr = await readCapture({ path: stderrPath });
@@ -293,6 +498,36 @@ export async function runCli(opts: {
     timedOut,
     durationMs: Date.now() - startedAt,
   };
+}
+
+/** Tail regular-file capture without allowing descendants to hold a pipe open. */
+async function observeCapture(opts: {
+  readonly path: string;
+  readonly onChunk: (chunk: string) => void;
+  readonly isDone: () => boolean;
+}): Promise<void> {
+  let offset = 0;
+  const decoder = new TextDecoder();
+  while (true) {
+    const done = opts.isDone();
+    const file = Bun.file(opts.path);
+    if (await file.exists()) {
+      const bytes = new Uint8Array(await file.slice(offset).arrayBuffer());
+      offset += bytes.byteLength;
+      const chunk = decoder.decode(bytes, { stream: true });
+      if (chunk) {
+        opts.onChunk(chunk);
+      }
+    }
+    if (done) {
+      const tail = decoder.decode();
+      if (tail) {
+        opts.onChunk(tail);
+      }
+      return;
+    }
+    await Bun.sleep(25);
+  }
 }
 
 async function readCapture(opts: { readonly path: string }): Promise<string> {
@@ -315,6 +550,7 @@ export async function runCommand(opts: {
   readonly cwd: string;
   readonly env?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
+  readonly onStderrChunk?: (chunk: string) => void;
 }): Promise<CliResult> {
   const proc = Bun.spawn([...opts.argv], {
     cwd: opts.cwd,
@@ -329,12 +565,45 @@ export async function runCommand(opts: {
     timedOut = true;
     proc.kill();
   }, opts.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
+  let observationError: unknown;
+  const stderrCapture = async () => {
+    const decoder = new TextDecoder();
+    let captured = "";
+    const reader = proc.stderr.getReader();
+    while (true) {
+      const { value: bytes, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      const chunk = decoder.decode(bytes, { stream: true });
+      captured += chunk;
+      try {
+        opts.onStderrChunk?.(chunk);
+      } catch (error) {
+        observationError = error;
+      }
+    }
+    reader.releaseLock();
+    const tail = decoder.decode();
+    captured += tail;
+    if (tail) {
+      try {
+        opts.onStderrChunk?.(tail);
+      } catch (error) {
+        observationError = error;
+      }
+    }
+    return captured;
+  };
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    stderrCapture(),
     proc.exited,
   ]);
   clearTimeout(timer);
+  if (observationError !== undefined) {
+    throw observationError;
+  }
   return {
     command: opts.argv.join(" "),
     exitCode,
@@ -350,7 +619,7 @@ export async function runCommand(opts: {
 export async function makeTempDir(opts: {
   readonly prefix: string;
 }): Promise<string> {
-  return await mkdtemp(join(tmpdir(), `${opts.prefix}-`));
+  return await realpath(await mkdtemp(join(tmpdir(), `${opts.prefix}-`)));
 }
 
 /**
@@ -604,6 +873,36 @@ export type RunScenariosOptions = {
   readonly keepTempDirs?: boolean;
 };
 
+/** Host ingress qualification requires explicit selection; Docker enablement is insufficient. */
+export function selectScenarios(opts: {
+  readonly scenarios: readonly Scenario[];
+  readonly only?: readonly string[];
+}): readonly Scenario[] {
+  return opts.scenarios.filter((scenario) =>
+    opts.only && opts.only.length > 0
+      ? opts.only.includes(scenario.name)
+      : scenario.tier !== "host-ingress" && !scenario.requiresExplicitSelection
+  );
+}
+
+async function cleanupScenarioRoots(opts: {
+  readonly keep: boolean;
+  readonly retained: boolean;
+  readonly tempRoot: string;
+  readonly hackHome: string;
+  readonly log: (message: string) => void;
+}): Promise<void> {
+  if (!(opts.keep || opts.retained)) {
+    await rm(opts.tempRoot, { recursive: true, force: true });
+    await rm(opts.hackHome, { recursive: true, force: true });
+  }
+  if (opts.retained) {
+    opts.log(
+      `Owned fixture cleanup incomplete; retained recovery roots: ${opts.tempRoot} and ${opts.hackHome}`
+    );
+  }
+}
+
 /**
  * Run scenarios sequentially, printing a plain-text progress log and a final
  * summary table. Returns the outcomes; the caller decides the exit code.
@@ -612,10 +911,7 @@ export async function runScenarios(
   opts: RunScenariosOptions
 ): Promise<ScenarioOutcome[]> {
   const outcomes: ScenarioOutcome[] = [];
-  const selected = opts.scenarios.filter(
-    (scenario) =>
-      !opts.only || opts.only.length === 0 || opts.only.includes(scenario.name)
-  );
+  const selected = selectScenarios(opts);
 
   for (const scenario of selected) {
     const startedAt = Date.now();
@@ -635,6 +931,7 @@ export async function runScenarios(
     const hackHome = await makeTempDir({ prefix: "hack-e2e-home" });
     const tempRoot = await makeTempDir({ prefix: "hack-e2e-fixture" });
     await seedIsolatedHackHome({ hackHome });
+    let retentionReason: string | null = null;
     const ctx: ScenarioContext = {
       repoRoot: REPO_ROOT,
       hackHome,
@@ -643,6 +940,9 @@ export async function runScenarios(
       log: (message) => {
         process.stdout.write(`  [${scenario.name}] ${message}\n`);
       },
+      retainFixtures: (reason) => {
+        retentionReason = reason;
+      },
       skip: (reason) => {
         throw new ScenarioSkip(reason);
       },
@@ -650,8 +950,18 @@ export async function runScenarios(
 
     process.stdout.write(`-- ${scenario.name} (${scenario.tier}) --\n`);
     let outcome: ScenarioOutcome;
+    let preserveFailedFixture = false;
     try {
+      expect({
+        that: scenario.tier !== "host-ingress" || opts.dockerEnabled,
+        message: "Host ingress qualification requires HACK_E2E_DOCKER=1",
+      });
       await scenario.run(ctx);
+      expect({
+        that: retentionReason === null,
+        message:
+          "Scenario cleanup is incomplete; owned fixtures are retained for recovery",
+      });
       outcome = {
         name: scenario.name,
         tier: scenario.tier,
@@ -661,7 +971,9 @@ export async function runScenarios(
       };
     } catch (error: unknown) {
       outcome =
-        error instanceof ScenarioSkip
+        error instanceof ScenarioSkip &&
+        scenario.tier !== "host-ingress" &&
+        retentionReason === null
           ? {
               name: scenario.name,
               tier: scenario.tier,
@@ -676,11 +988,16 @@ export async function runScenarios(
               durationMs: Date.now() - startedAt,
               reason: error instanceof Error ? error.message : String(error),
             };
+      preserveFailedFixture =
+        outcome.status === "fail" && scenario.preserveFixtureOnFailure === true;
     } finally {
-      if (opts.keepTempDirs !== true) {
-        await rm(tempRoot, { recursive: true, force: true });
-        await rm(hackHome, { recursive: true, force: true });
-      }
+      await cleanupScenarioRoots({
+        keep: opts.keepTempDirs === true || preserveFailedFixture,
+        retained: retentionReason !== null,
+        tempRoot,
+        hackHome,
+        log: ctx.log,
+      });
     }
     outcomes.push(outcome);
     printOutcome(outcome);

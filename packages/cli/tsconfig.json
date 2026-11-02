@@ -1,6 +1,12 @@
 {
   "extends": "../../tsconfig.json",
-  "include": ["index.ts", "../../src", "../../tests"],
+  "include": [
+    "index.ts",
+    "../../src",
+    "../../tests",
+    "../../scripts/build-config-compiler.ts",
+    "../../scripts/check-config-compiler-cli.ts"
+  ],
   "exclude": [
     "../../apps",
     "../../dist",

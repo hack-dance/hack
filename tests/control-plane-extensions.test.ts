@@ -6,7 +6,6 @@ import { ExtensionManager } from "../src/control-plane/extensions/manager.ts";
 import type { ExtensionDefinition } from "../src/control-plane/extensions/types.ts";
 import { readControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
 import type { Logger } from "../src/ui/logger.ts";
-import { restoreEnv } from "./helpers/env.ts";
 
 const silentLogger: Logger = {
   debug: () => {},
@@ -30,7 +29,7 @@ afterEach(() => {
   if (originalGlobalConfigPath === undefined) {
     Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   } else {
-    restoreEnv("HACK_GLOBAL_CONFIG_PATH", originalGlobalConfigPath);
+    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
   }
 });
 

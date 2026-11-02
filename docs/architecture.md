@@ -7,7 +7,7 @@ which redirects all global state — registry, daemon, secrets — to another ro
 - **Caddy** (docker-proxy) routes `*.hack` based on container labels.
 - **CoreDNS** resolves `*.hack` inside containers to the Caddy IP, with `extra_hosts` mappings for resolver compatibility.
 - **Alloy + Loki + Grafana** capture logs and provide history.
-- **Schemas** are served by Caddy at `https://schemas.hack`.
+- **Schemas** are served by Caddy at `https://schemas.hack.local`.
 - **hackd (optional daemon)** caches Docker state for fast `hack projects --json` / `hack ps --json`.
 
 ```mermaid
@@ -44,8 +44,8 @@ graph LR
 
   CoreDNS -->|"*.hack → Caddy IP"| Services
   Caddy -->|"https://*.hack"| Browser
-  Grafana -->|"https://logs.hack"| Browser
-  Caddy -->|"https://schemas.hack"| Browser
+  Grafana -->|"https://logs.hack.local"| Browser
+  Caddy -->|"https://schemas.hack.local"| Browser
 ```
 
 ## Global vs project scope
@@ -57,7 +57,7 @@ graph LR
   - Logging stack (Alloy → Loki → Grafana)
   - Global config: `hack.config.json` (control plane defaults + extension settings)
     - Gateway bind/port/allowWrites
-  - Schemas hosted under `https://schemas.hack`
+  - Schemas hosted under `https://schemas.hack.local`
   - Networks: `hack-dev` (ingress) and `hack-logging`
 
 - Project scope (`.hack`)
@@ -70,8 +70,10 @@ graph LR
     - `.internal/extra-hosts.json` — CLI-managed, not hand-edited (use
       `hack internal extra-hosts set/unset/list`)
     - `.branch/compose.<branch>.override.yml` (branch builds)
-  - Everything under `.hack/.internal` is a hack-managed artifact; do not hand-edit generated files
-    there.
+  - Everything under `.hack/.internal` is a hack-managed, machine-local artifact; do not hand-edit
+    or commit generated files there. Newer Hack versions rewrite them (for example
+    `compose.override.yml`), so a tracked copy leaves the working tree dirty; `hack doctor`
+    reports tracked files and `hack doctor --fix` untracks them.
 
 
 ## Internal DNS + TLS (containers)
@@ -113,7 +115,8 @@ Projects can declare shareable env overlays and safely inject secrets into compo
 At runtime, hack resolves the selected overlay and injects the effective env directly into compose and
 host-side command flows. For service-scoped values, hack still generates
 `.hack/.internal/compose.env.override.yml` so compose services get the right per-service environment
-without requiring `.hack/.env` to exist.
+without requiring `.hack/.env` to exist. That file holds only `${HACK_ENV_...}` references; the values
+reach `docker compose` through its process environment, so no decrypted value rests on disk.
 
 See `docs/env.md` for the current env model and migration notes.
 
@@ -184,6 +187,72 @@ sequenceDiagram
 NDJSON streaming (`hack logs --json`) emits `start`, `log`, `error`, and `end` events for MCP/TUI
 consumers.
 
+Snapshots (`hack logs --no-follow`) use Loki by default (`logs.snapshotBackend`). Without
+`--since`, a Loki snapshot looks back 24 hours and returns the newest `--tail` entries. If Loki
+returns no entries and Loki was not requested explicitly, `hack logs` writes a one-line notice
+to stderr and answers from `docker compose logs` instead. Nothing from Loki is written first,
+so `--json` output still has one `start`/`end` pair. When Loki was requested explicitly
+(`--loki`, `--services`, `--query`, `--since`, `--until`), the empty result stands and the
+notice suggests `hack logs --compose --no-follow` with every selector you gave that the
+compose backend accepts: `--path`, `--project`, `--branch`, `--tail`, `--profile`, `--pretty`,
+`--json` and a single service. `--query`, `--since`, `--until` and more than one service have
+no compose equivalent, so the notice names them instead of dropping them. Follow mode
+(`hack logs` without `--no-follow`) does not fall back. When Loki is the follow backend
+(`logs.followBackend: loki`, or `--loki`) and no entry arrives within 8 seconds, `hack logs`
+writes the same kind of one-line stderr notice, suggesting `hack logs --compose`, and keeps
+following.
+
+Short-lived containers: Alloy finds containers by polling Docker every 5 seconds. It includes
+exited containers, so a one-shot Compose service (a migration or seed job) is shipped after it
+stops, as long as Docker keeps the container. A container that starts, exits and is removed
+between two polls (for example `docker compose run --rm`) never reaches Loki; use
+`hack logs --compose` or the command's own output for those. Existing installs pick up this
+discovery config after `hack global install` rewrites `~/.hack/logging/alloy.alloy` and the
+Alloy container restarts (`hack global down` then `hack global up`).
+
+Alloy keeps its read positions (`positions.yml`) under `--storage.path`, which the logging
+compose maps to the named volume `alloy-data`. `hack global down` then `hack global up`
+recreates the Alloy container but keeps the volume, so Alloy resumes each container's log
+after the last line it shipped instead of reading all retained logs again. A position is a
+whole second and Docker's `since` filter includes that second, so lines from the last second
+Alloy read can be sent again. `hack global logs-reset` removes the volume together with Loki's
+data (`docker compose down -v`); the next start reads the retained logs from the beginning,
+which matches the emptied Loki. Installs made before this volume existed pick it up after
+`hack global install` rewrites `~/.hack/logging/docker-compose.yml` and the stack restarts.
+Loki rejects entries older than its sample age limit (one week by default).
+
+Kept containers have a polling cost. In Alloy v1.12.0
+(`internal/component/loki/source/docker/runner.go`), `loki.source.docker` calls container
+inspect on every discovered container every 5 seconds, running or exited, for as long as
+Docker keeps it. After that call it reopens the container's log (one more inspect call and one
+logs call) when the container is running and its log is not already open, or when
+`finished.Unix() >= target.Last()`. `finished` is the container's `State.FinishedAt` in whole
+seconds (0 if it cannot be parsed). `Last()` is the wall-clock second at which Alloy last
+processed a line from that container: `dockertarget/target.go` sets it to the current time
+after each line, it starts at 0 when the target is created, and it is not stored in the
+positions file. A reopen asks Docker for the lines since the container's position, which is a
+whole second, and Docker includes that second. So a reopen of a container that logged
+anything reads at least its last line again, and `Last()` moves past the container's finish
+time. For an exited container this means:
+
+- A container that never logged a line keeps `Last()` at 0, so it is reopened every
+  5 seconds for as long as Docker keeps it.
+- A container whose last line Alloy read in or before the second the container finished (it
+  logged and then exited while Alloy followed it), or one whose lines the positions file
+  already covers (for example after Alloy restarts), is reopened once. That reopen sends the
+  lines from its last logged second again, and then the container is not reopened. If the
+  reopen happens within the second the container finished, there is one more reopen.
+- A container whose last line Alloy read in a later second than the one the container
+  finished in, for example a one-shot service that exited before Alloy discovered it, is not
+  reopened.
+
+Docker discovery does not expose a container's state or exit time, so the config cannot skip
+old exited containers. Remove them (`hack down` or `docker compose down`) to stop the inspect
+calls. Each reopen also makes Alloy log a "finished transferring logs" info line. Alloy runs
+as a Compose service, so it would ship those lines into Loki: one per reopen, and one every
+5 seconds for each kept container that never logged a line. The Alloy config sets
+`logging { level = "warn" }`, so only Alloy's warnings and errors are written and shipped.
+
 Retention:
 - Loki retention is set in the global Loki config (`~/.hack/logging/loki.yaml`), default `168h` in the template.
 - Per-project overrides live in `hack.config.json` under `logs.retention_period` and apply when `hack down` prunes logs.
@@ -221,6 +290,31 @@ Matching a process name is insufficient: a different `HOME` or `HACK_HOME` may
 own another daemon. If socket ownership cannot be established, automatic orphan
 termination is skipped. Scripted/noninteractive commands do not autostart the
 daemon; after an explicit stop, use `hack daemon start` to restore cached queries.
+`HACK_DAEMON_AUTOSTART_DISABLE=1` turns autostart off for interactive commands
+too. Candidate runs never autostart: `hack-next` and the bundled `hack-v5`
+entrypoint set `HACK_CANDIDATE_ENTRYPOINT`, and `hack-v5` also sets the opt-out.
+Autostart would start whatever hackd the host resolves (the launchd plist or the
+first `hack` on PATH), which is the stable daemon, not the candidate. Under
+either variable, `hack global up` also skips its `daemon.autoStart` step (the
+`hack daemon start` it runs through the first `hack` on PATH), and macOS
+`hack global install` skips its offer to run `hack daemon install`; both log the
+skip. `hack doctor --fix` also skips its hackd repair (restart an incompatible
+hackd, clear stale pid/socket files, start hackd), in interactive and
+non-interactive mode alike, because each step runs the first `hack` on PATH. It
+asks nothing, notes the skip with the reason, and names the command to run
+yourself, for example `hack daemon clear && hack daemon start`.
+
+launchd and isolated state roots: on macOS the hackd launchd service is one
+per-user service (`gui/<uid>/dance.hack.hackd`, plist in
+`$HOME/Library/LaunchAgents`). It belongs to the default `$HOME/.hack` root.
+When `HACK_HOME` points anywhere else, the CLI does not read the plist, write
+it, or run `launchctl` for hackd. `hack daemon start` and autostart then start
+hackd directly under `HACK_HOME`, as on Linux. `hack daemon status` reports the
+launchd service as not installed. `hack daemon install` and
+`hack daemon uninstall` refuse with `E_PERMISSION` before they change anything.
+Set `HACK_LAUNCHD_ALLOW_ISOLATED_HOME=1` to manage the service from an isolated
+root anyway. `HACK_LAUNCHD_DISABLE=1` turns all launchd management off, opt-in
+included; the end-to-end harness sets it for every CLI call.
 
 Runtime health:
 - The daemon treats the container runtime as ephemeral; it fingerprints the engine (socket + engine id)
@@ -245,45 +339,18 @@ graph LR
   Hackd -->|"cached state"| Cache["In-memory cache"]
 ```
 
-## Control plane + extensions
+## Unsupported retained surfaces
 
-The control plane keeps the core CLI minimal while adding features as extensions. `hackd` loads
-extension manifests and exposes their APIs; the CLI dispatches extension commands via `hack x`.
-
-Builtin extensions: **Supervisor** (job execution + streaming for agents), **Gateway** (optional HTTP/WS
-access to `hackd`), **Cloudflare**, and **Tailscale** (exposure/tunnel helpers).
-
-> Gateway, remote, node, and dispatch surfaces are experimental and unsupported. They are hidden
-> from default `hack help` (use `hack help --all` to see them) and print a warning when invoked.
-> See [Beta workflows](beta.md) and [Gateway API](gateway-api.md) for details — this doc only
-> summarizes where they fit in the system.
-
-```mermaid
-graph LR
-  CLI["hack CLI"] --> Hackd["hackd"]
-  Hackd --> ExtMgr["ExtensionManager"]
-  ExtMgr --> Gateway["Gateway"]
-  ExtMgr --> Supervisor["Supervisor"]
-  ExtMgr --> Cloudflare["Cloudflare"]
-  ExtMgr --> Tailscale["Tailscale"]
-  Remote["Remote client"] -->|HTTP/WS| Gateway
-  Gateway --> Hackd
-```
-
-### Gateway API + remote workflows (unsupported experimental)
-
-Summary only — see `gateway-api.md` for full usage, security posture, and end-to-end examples:
-- `GET /v1/projects` with `project_id` for remote workflow routing
-- job execution + streaming (`/control-plane/projects/:id/jobs`)
-- PTY-backed shells (`/control-plane/projects/:id/shells`, WS stream)
-- One gateway instance is active per machine (global config); projects opt in with
-  `controlPlane.gateway.enabled`; remote clients route by `project_id` in the API paths.
+Remote, gateway, node and dispatch code remains in the repository for explicit
+maintenance. It is outside the supported local CLI contract and default onboarding.
 
 ## Branch builds
 
 `--branch <name>` generates a per-branch Compose override that:
 
-- prefixes hostnames (e.g. `api.myapp.hack` → `api.<branch>.myapp.hack`)
+- prefixes hostnames (e.g. `api.myapp.hack.local` → `api.<branch>.myapp.hack.local` for the
+  new-project `.hack.local` default; existing `.hack` names and `.hack.gy` OAuth aliases keep
+  working and are prefixed the same way)
 - prefixes the Compose project name
 
 This enables parallel worktrees without port or hostname collisions.
@@ -323,7 +390,9 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
   - `docker-compose.yml`
   - `hack.config.json`
   - `hack.branches.json` (optional)
-  - `.gitignore` (committed, self-healing on `init`/`up`; covers machine-local generated files —
+  - `.gitignore` (committed; created by `init`, and by `doctor --fix` when an existing project
+    lacks it or its managed block; runtime commands put the same
+    rules in the repository's local `info/exclude` instead of writing it; covers machine-local generated files —
     `.internal/`, `.branch/`, `.env`, `.env.state.json`, and `hack.env*.local.yaml`. The retired
     `tickets/` path stays ignored only to contain legacy machine-local caches during upgrades. If
     generated files leaked into git, `hack doctor --fix` untracks them without deleting them from
@@ -349,3 +418,22 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
 - The optional daemon keeps CLI JSON queries fast without making it a hard dependency.
 - Config lives alongside each repo in `.hack/` to keep repos isolated and portable.
 - Schemas are generated from templates and served locally for editor validation.
+
+### Global service hostname compatibility
+
+New global templates prefer `logs.hack.local`, `loki.hack.local`, and
+`schemas.hack.local`. The same services retain `logs.hack`, `loki.hack`, and
+`schemas.hack` routes, so existing schema references and explicit legacy URLs
+continue to work. Existing custom project hosts and OAuth `.hack.gy` aliases are
+unchanged.
+
+A CLI upgrade does not rewrite or restart running global services. Use
+`hack global install` to review template changes and DNS setup, preserving any
+custom routes when reviewing an existing Compose file. Installation can start
+global services; do not use it as a read-only check. Until updated, an older global installation
+may serve only the legacy URLs. `hack open logs` reads the installed logging Compose labels: it prefers the
+configured `.hack.local` route and uses `.hack` when only the legacy route exists.
+Missing, malformed, or custom-only route declarations produce an explicit error
+instead of guessing; pass an explicit URL for custom routes. Doctor retains the
+legacy DNS check, checks `.hack.local` separately, and selects the configured
+Grafana route for reachability. These reads do not prove the service is running.

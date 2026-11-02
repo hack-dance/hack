@@ -1,0 +1,6 @@
+**
+!mise.toml
+!.hack
+!.hack/toolchain
+!.hack/toolchain/Dockerfile
+!.hack/toolchain/run.sh

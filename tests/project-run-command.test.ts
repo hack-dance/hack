@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { YAML } from "bun";
 
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
@@ -12,12 +13,16 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: Array<{
   readonly composeFiles: readonly string[];
+  readonly composeProject: string | null | undefined;
+  readonly service: string;
+  readonly cmdArgs: readonly string[];
   readonly env: Record<string, string> | undefined;
   readonly noDeps: boolean | undefined;
 }> = [];
 const psJsonByComposeProject = new Map<string, string>();
 const warnCalls: string[] = [];
 const tempDirs = new Set<string>();
+const originalHackHome = process.env.HACK_HOME;
 
 const runtimeBackendMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -35,11 +40,17 @@ const runtimeBackendMock = await registerScopedModuleMock({
       ps: async () => 0,
       run: async (opts: {
         readonly composeFiles: readonly string[];
+        readonly composeProject?: string | null;
+        readonly service: string;
+        readonly cmdArgs: readonly string[];
         readonly env?: Record<string, string>;
         readonly noDeps?: boolean;
       }) => {
         runCalls.push({
           composeFiles: [...opts.composeFiles],
+          composeProject: opts.composeProject,
+          service: opts.service,
+          cmdArgs: [...opts.cmdArgs],
           env: opts.env ? { ...opts.env } : undefined,
           noDeps: opts.noDeps,
         });
@@ -67,6 +78,7 @@ const loggerMock = await registerScopedModuleMock({
 });
 
 const { runCommand } = await import("../src/commands/project.ts");
+const { runCli } = await import("../src/cli/run.ts");
 
 beforeAll(() => {
   runtimeBackendMock.activate();
@@ -81,6 +93,11 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
+  if (originalHackHome === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_HOME");
+  } else {
+    process.env.HACK_HOME = originalHackHome;
+  }
 });
 
 afterAll(() => {
@@ -93,6 +110,50 @@ function expectNoEnvScopeWarnings(): void {
     warnCalls.filter((message) => message.startsWith('Env config scope "'))
   ).toEqual([]);
 }
+
+test("run reaches the runtime without writing a contended registry", async () => {
+  const projectRoot = await createProject();
+  const registryRoot = process.env.HACK_HOME;
+  if (!registryRoot) {
+    throw new Error("Missing fixture HACK_HOME");
+  }
+  await mkdir(registryRoot, { recursive: true });
+  const lockPath = resolve(registryRoot, "projects.json.lock");
+  await writeFile(lockPath, `${process.pid}\n`, { flag: "wx" });
+  expect(await runPrintenv({ projectRoot })).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(await readFile(lockPath, "utf8")).toBe(`${process.pid}\n`);
+  expect(await Bun.file(resolve(registryRoot, "projects.json")).exists()).toBe(
+    false
+  );
+});
+
+test("hack run -- passes child flags intact and keeps the default compose project", async () => {
+  const projectRoot = await createProject();
+  // Without `--`, hack would consume --version (print and exit) and --branch
+  // (retarget the instance); the MCP run tool relies on this boundary.
+  const exitCode = await runCli([
+    "run",
+    `--path=${projectRoot}`,
+    "--",
+    "api",
+    "node",
+    "--version",
+    "--branch",
+    "other",
+  ]);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]?.service).toBe("api");
+  expect(runCalls[0]?.cmdArgs).toEqual([
+    "node",
+    "--version",
+    "--branch",
+    "other",
+  ]);
+  expect(runCalls[0]?.composeProject).toBeNull();
+});
 
 async function runPrintenv({
   projectRoot,
@@ -140,7 +201,12 @@ test("run applies modern env overlays to service-specific compose overrides", as
 
   const call = runCalls[0];
   expect(call).toBeDefined();
-  expect(call?.env).toEqual({
+  const callEnv = call?.env ?? {};
+  expect(
+    Object.fromEntries(
+      Object.entries(callEnv).filter(([key]) => !key.startsWith("HACK_ENV_"))
+    )
+  ).toEqual({
     GLOBAL_FLAG: "qa",
     SHARED_KEY: "base",
   });
@@ -166,12 +232,27 @@ test("run applies modern env overlays to service-specific compose overrides", as
     throw new Error("Missing env override compose file.");
   }
 
+  // HACK-1273: the override holds `${NAME}` references only; Compose resolves
+  // each one from the env passed to it.
   const overrideText = await readFile(overridePath, "utf8");
-  expect(overrideText).toContain("api:");
-  expect(overrideText).toContain("GLOBAL_FLAG: qa");
-  expect(overrideText).toContain("SHARED_KEY: base");
-  expect(overrideText).toContain('PORT: "4000"');
-  expect(overrideText).toContain("SERVICE_TOKEN: overlay-secret");
+  expect(overrideText).not.toContain("overlay-secret");
+  const override = YAML.parse(overrideText) as {
+    readonly services: Record<
+      string,
+      { readonly environment: Record<string, string> }
+    >;
+  };
+  const delivered = Object.fromEntries(
+    Object.entries(override.services.api?.environment ?? {}).map(
+      ([key, reference]) => [key, callEnv[reference.slice(2, -1)]]
+    )
+  );
+  expect(delivered).toEqual({
+    GLOBAL_FLAG: "qa",
+    SHARED_KEY: "base",
+    PORT: "4000",
+    SERVICE_TOKEN: "overlay-secret",
+  });
   expectNoEnvScopeWarnings();
 });
 
@@ -298,6 +379,7 @@ async function createProject(input?: {
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hack-project-run-env-"));
   tempDirs.add(root);
+  process.env.HACK_HOME = resolve(root, "global-hack");
 
   const projectRoot = resolve(root, "repo");
   const projectDir = resolve(projectRoot, ".hack");

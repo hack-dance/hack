@@ -8,6 +8,7 @@ import {
   getLaunchdServiceStatus,
   installLaunchdService,
   kickstartLaunchdService,
+  resolveLaunchdAccess,
 } from "./launchd.ts";
 import { resolveDaemonPaths } from "./paths.ts";
 import { readDaemonStatus } from "./status.ts";
@@ -24,6 +25,73 @@ const DAEMON_AUTOSTART_POLL_MS = 125;
 const DAEMON_AUTOSTART_MAX_ATTEMPTS = 2;
 
 let lastDaemonAutostartAttemptAtMs = 0;
+
+/**
+ * Opt-out: when set to `1`, CLI commands never start hackd implicitly, on any
+ * platform, through launchd or directly. That covers the autostart in
+ * {@link requestDaemonJson}, the `daemon.autoStart` step of `hack global up`,
+ * the macOS `hack global install` offer to run `hack daemon install`, and the
+ * hackd repair in `hack doctor --fix` (restart, clear and start), which it
+ * skips in interactive and non-interactive mode alike. An explicit
+ * `hack daemon start` or `hack daemon install` still works. The bundled
+ * `hack-v5` entrypoint sets it; `hack-next` sets only the candidate marker,
+ * which denies the same way.
+ */
+export const DAEMON_AUTOSTART_DISABLE_ENV = "HACK_DAEMON_AUTOSTART_DISABLE";
+
+/**
+ * Marker that `hack-next` and the bundled `hack-v5` entrypoint set on every
+ * candidate run, on both backends (see `scripts/hack-v5.sh`).
+ */
+const CANDIDATE_ENTRYPOINT_ENV = "HACK_CANDIDATE_ENTRYPOINT";
+
+export type DaemonAutostartBlockReason = "candidate" | "disabled";
+
+export type DaemonAutostartAccess =
+  | { readonly allowed: true }
+  | {
+      readonly allowed: false;
+      readonly reason: DaemonAutostartBlockReason;
+      readonly message: string;
+    };
+
+/**
+ * Decides whether this process may start hackd implicitly when a daemon
+ * request finds it unavailable.
+ *
+ * A candidate run never may (HACK-1368). Autostart starts whatever hackd the
+ * host resolves, not this process: the per-user launchd plist points at the
+ * stable binary, and the direct path runs the first `hack` on PATH. On the
+ * Compose backend a candidate also shares the caller's `~/.hack`, so an
+ * autostarted stable hackd would run beside the candidate on the same state
+ * root. Callers already fall back to direct Docker inspection when the daemon
+ * is unavailable, exactly as for a non-interactive run.
+ *
+ * {@link DAEMON_AUTOSTART_DISABLE_ENV} is checked first, then the candidate
+ * marker. Values are trimmed; only `1` disables, and any non-empty marker
+ * denies.
+ */
+export function resolveDaemonAutostartAccess(
+  opts: { readonly env?: Readonly<Record<string, string | undefined>> } = {}
+): DaemonAutostartAccess {
+  const env = opts.env ?? process.env;
+  if ((env[DAEMON_AUTOSTART_DISABLE_ENV] ?? "").trim() === "1") {
+    return {
+      allowed: false,
+      reason: "disabled",
+      message: `hackd autostart is disabled by ${DAEMON_AUTOSTART_DISABLE_ENV}=1.`,
+    };
+  }
+  if ((env[CANDIDATE_ENTRYPOINT_ENV] ?? "").trim() !== "") {
+    return {
+      allowed: false,
+      reason: "candidate",
+      message:
+        "hackd autostart is disabled for a candidate run: it would start the stable hackd. Start a daemon explicitly with `hack daemon start` if you need one.",
+    };
+  }
+  return { allowed: true };
+}
 
 export type DaemonJsonResponse = {
   readonly ok: boolean;
@@ -90,15 +158,22 @@ export async function requestDaemonJson(opts: {
  * Starts (or restarts) hackd automatically when autoStart is enabled and the daemon is unavailable.
  *
  * Uses launchd on macOS for startup/login persistence and process keepalive, with bounded retries
- * and cooldown to avoid runaway restart loops.
+ * and cooldown to avoid runaway restart loops. When launchd access is denied (an isolated
+ * HACK_HOME; see `resolveLaunchdAccess`), it starts hackd directly instead.
  *
  * Non-interactive invocations (no TTY, HACK_NO_INTERACTIVE, --no-interactive)
  * never autostart: callers fall back to direct docker inspection instead of
- * blocking a scripted/agent run on daemon spawn side effects.
+ * blocking a scripted/agent run on daemon spawn side effects. Candidate runs
+ * and {@link DAEMON_AUTOSTART_DISABLE_ENV} never autostart either; see
+ * {@link resolveDaemonAutostartAccess}. That check runs before anything else,
+ * so a denied run reads no config and touches neither launchd nor PATH.
  */
 async function ensureDaemonReady(opts: {
   readonly paths: ReturnType<typeof resolveDaemonPaths>;
 }): Promise<boolean> {
+  if (!resolveDaemonAutostartAccess().allowed) {
+    return false;
+  }
   if (!canPrompt()) {
     return false;
   }
@@ -118,7 +193,11 @@ async function ensureDaemonReady(opts: {
   }
   lastDaemonAutostartAttemptAtMs = now;
 
-  if (process.platform === "darwin") {
+  // An isolated HACK_HOME does not own the per-user launchd service, so it
+  // starts hackd directly under its own state root, as on Linux. Refusing to
+  // autostart would leave isolated runs without the daemon they configured,
+  // and the direct path touches nothing outside HACK_HOME (HACK-1313).
+  if (process.platform === "darwin" && resolveLaunchdAccess().allowed) {
     const launched = await ensureLaunchdDaemonReady({
       paths: opts.paths,
       runAtLoad: controlPlane.config.daemon.launchd.runAtLoad,

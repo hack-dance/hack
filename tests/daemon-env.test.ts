@@ -101,7 +101,7 @@ describe("handleEnvRoutes", () => {
       Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
     }
     if (originalSecretsKey !== undefined) {
-      restoreEnv("HACK_SECRETS_FILE_KEY", originalSecretsKey);
+      process.env.HACK_SECRETS_FILE_KEY = originalSecretsKey;
     } else {
       Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
     }
@@ -228,7 +228,7 @@ describe("handleEnvRoutes", () => {
       if (previousAuthBrokerUrl === undefined) {
         Reflect.deleteProperty(process.env, "HACK_AUTH_BROKER_URL");
       } else {
-        restoreEnv("HACK_AUTH_BROKER_URL", previousAuthBrokerUrl);
+        process.env.HACK_AUTH_BROKER_URL = previousAuthBrokerUrl;
       }
     }
   });

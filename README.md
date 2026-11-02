@@ -9,7 +9,7 @@ local HTTPS URL. Every project on your machine, all at once, none of them collid
 
 ```bash
 cd any-repo && hack up
-# → https://myapp.hack is live, TLS trusted, env injected
+# → https://myapp.hack.local is live, TLS trusted, env injected
 ```
 
 Local development breaks down when one machine runs many things. Two projects fight
@@ -25,9 +25,11 @@ trusted TLS. Nothing is hosted. Your machine is the platform.
 
 ## What you get
 
-**A real URL for every project.** `https://myapp.hack`, with per-service subdomains
-like `api.myapp.hack` and locally-trusted certificates. No ports to remember, no
-collisions, and OAuth-friendly alias hosts when a provider rejects `.hack`.
+**A real URL for every project.** New projects get `https://myapp.hack.local`, with
+per-service subdomains like `api.myapp.hack.local` and locally-trusted certificates.
+No ports to remember, no collisions, and OAuth-friendly `.hack.gy` alias hosts when a
+provider rejects `.hack.local` (or legacy `.hack`). Existing `.hack` names, `.hack.gy`
+aliases, and custom domains keep working in parallel.
 
 **`hack up` is the whole answer to "how do I run this repo".** Services, env,
 lifecycle hooks, and host-side helpers (tunnels, SSO, proxies) are declared in
@@ -44,9 +46,11 @@ linked git worktree, `hack up` automatically becomes a separate instance named a
 the branch — review a PR while your main checkout keeps running.
 
 **Built for agents.** `hack init --with claude|codex` hands setup to an agent.
-Machine surfaces are first-class: `--json` envelopes with stable error codes,
-`--no-interactive`, and agent instructions that sync themselves into
-AGENTS.md/CLAUDE.md, Cursor rules, and Codex skills.
+Machine surfaces are first-class: `--json` envelopes with stable error codes and
+`--no-interactive`. The optional `hack` plugin for Codex, Claude Code, and Cursor
+gives agents Hack skills through the client's plugin manager, without writing into
+your repository. Clients without shell access can add the separate `hack-mcp`
+plugin. See [agent plugin setup](docs/integrations.md#optional-native-plugins).
 
 ## More than ports
 
@@ -58,7 +62,7 @@ URL usually means another tool, another script, another README section:
 
 | The job | The usual duct tape | With hack |
 | --- | --- | --- |
-| Local domains + trusted TLS | portless, mkcert, `/etc/hosts` edits | `https://myapp.hack`, CA trusted once |
+| Local domains + trusted TLS | portless, mkcert, `/etc/hosts` edits | `https://myapp.hack.local`, CA trusted once |
 | Secrets & env | Doppler, `.env` files in Slack | encrypted values committed with the repo |
 | "How do I run this" | README + Makefile + tribal knowledge | `.hack/` config + `hack up` |
 | Tunnels, SSO, proxies | ad-hoc shell scripts in a terminal tab | declared lifecycle processes, cleaned up on `down` |
@@ -68,7 +72,7 @@ URL usually means another tool, another script, another README section:
 
 Each row is a tool you don't install or a script you don't maintain. And the
 pieces compose because they share one model of the project: the same identity that
-routes `api.myapp.hack` also decrypts its secrets, starts its tunnels, labels its
+routes `api.myapp.hack.local` also decrypts its secrets, starts its tunnels, labels its
 logs, and namespaces its branch instances. That's why none of it needs glue code.
 
 ## Your environment, anywhere
@@ -79,10 +83,12 @@ inside the box. Services, env, secrets, startup order. It's manual, it drifts, a
 it has to be redone for every project and every platform.
 
 A hack project has already done this work. The environment is committed with the
-repo and isolated by design, so it runs the same on a teammate's laptop, in CI, or
-inside an agent's sandbox. Install hack, pass `HACK_ENV_SECRET_KEY`, run `hack up`.
-That is the entire setup — make a repo portable once and every environment,
-human or machine, gets it for free.
+repo and isolated by design, so teammates and agents can reuse the same project
+definition. Each host still needs a compatible container runtime and the project's
+prerequisites. Install Hack,
+configure those prerequisites, provide the secret key through an appropriate secret
+store, and run `hack up`. See [managed environments](docs/guides/codex-managed-environments.md)
+for the supported boundaries.
 
 There's a slim container image (`hackdance/hack:slim`) built for exactly this; see
 [managed environments](./docs/guides/codex-managed-environments.md).
@@ -111,6 +117,18 @@ hack init                  # or: hack init --with claude
 hack up --detach
 hack open
 ```
+
+Using a coding agent? Install the optional `hack` plugin for its skills:
+
+```bash
+codex plugin marketplace add hack-dance/hack && codex plugin add hack@hack-dance
+# or, in Claude Code:
+claude plugin marketplace add hack-dance/hack --sparse .claude-plugin plugins/hack plugins/hack-mcp
+claude plugin install hack@hack-dance
+```
+
+In Cursor, install Hack from Customize. Add `hack-mcp` only for a client without
+shell access.
 
 When something looks wrong:
 
@@ -141,14 +159,19 @@ Every command works from the repo root, or anywhere with `--project <name>`.
 - [Env & secrets](./docs/env.md) · [Lifecycle](./docs/lifecycle.md) · [Sessions](./docs/sessions.md)
 - [Agent-first setup](./docs/guides/agent-first-setup.md)
 
-A slim macOS companion app shows project status and quick actions; the CLI stays the
-source of truth. Optional extensions and container images are covered in the docs.
-Remote/gateway/node/dispatch commands are source-available but unsupported
-experimental — hidden behind `hack help --all`.
+The CLI is the supported product. The retained macOS app and
+remote/gateway/node/dispatch commands are unsupported and are not part of setup.
+Optional agent integrations and container environments are covered in the docs.
 
 ## License
 
 See [LICENSE](./LICENSE).
 
-Optional native plugins for Codex, Claude Code, and Cursor bundle Hack skills and MCP.
-See [agent plugin setup](docs/integrations.md#optional-native-plugins). Existing standalone setup remains supported.
+## Documentation
+
+Start with [Getting started](docs/guides/getting-started.md) or browse the
+[documentation index](docs/README.md). Stable Docker Compose setup is primary;
+the [native v5 candidate](docs/guides/v5-dogfooding.md) is experimental.
+
+The local docs site is prepared with `bun run docs:prepare`. See
+[site development](site/README.md) for installation, checks and the public corpus policy.

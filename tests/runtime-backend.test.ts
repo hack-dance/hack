@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
@@ -91,7 +94,7 @@ test("composeRuntimeBackend.up builds compose args with profiles and detach", as
     cwd: "/tmp",
   });
 
-  expect(runCalls[0]).toEqual([
+  const base = [
     "docker",
     "compose",
     "-p",
@@ -102,8 +105,11 @@ test("composeRuntimeBackend.up builds compose args with profiles and detach", as
     "b.yml",
     "--profile",
     "ops",
-    "up",
-    "-d",
+  ];
+  // Image build/pull and container creation, then start and dependency wait.
+  expect(runCalls).toEqual([
+    [...base, "up", "--no-start"],
+    [...base, "up", "-d", "--no-build"],
   ]);
 });
 
@@ -120,19 +126,26 @@ test("composeRuntimeBackend.up targets services without dependencies", async () 
     cwd: "/tmp",
   });
 
-  expect(runCalls[0]).toEqual([
+  const base = [
     "docker",
     "compose",
     "-p",
     "myproj",
     "-f",
     "docker-compose.yml",
-    "up",
-    "-d",
-    "--no-deps",
-    "--force-recreate",
-    "chat-q",
-    "sim-runner",
+  ];
+  // Recreation happens once, in the image phase; the start phase only starts.
+  expect(runCalls).toEqual([
+    [
+      ...base,
+      "up",
+      "--no-start",
+      "--force-recreate",
+      "--no-deps",
+      "chat-q",
+      "sim-runner",
+    ],
+    [...base, "up", "-d", "--no-build", "--no-deps", "chat-q", "sim-runner"],
   ]);
 });
 
@@ -393,6 +406,63 @@ test("down routes stdout to stderr when requested (--json purity)", async () => 
   expect(runOpts[0]?.stdout).toBe("stderr");
 });
 
+test("detached startup uses selected budget and down keeps its fixed budget", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  const base = {
+    composeFiles: ["compose.yml"],
+    cwd: "/tmp",
+    env: { HACK_COMPOSE_STARTUP_TIMEOUT_MS: "600000" },
+  };
+  await backend.up({ ...base, detach: true });
+  // The image phase keeps its own default; only the start phase uses this.
+  expect(runOpts.map((opts) => opts.timeoutMs)).toEqual([1_800_000, 600_000]);
+  await backend.up({
+    ...base,
+    detach: true,
+    startupTimeoutMs: 120_000,
+    imageTimeoutMs: 2_400_000,
+  });
+  expect(runOpts.slice(2).map((opts) => opts.timeoutMs)).toEqual([
+    2_400_000, 120_000,
+  ]);
+  await backend.down(base);
+  expect(runOpts[4]?.timeoutMs).toBe(90_000);
+});
+
+test("invalid startup budget refuses before invoking Compose", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  await expect(
+    backend.up({
+      composeFiles: ["compose.yml"],
+      cwd: "/tmp",
+      detach: true,
+      startupTimeoutMs: 999,
+    })
+  ).rejects.toThrow("Compose startup timeout");
+  expect(runCalls).toEqual([]);
+  expect(execCalls).toEqual([]);
+});
+
+test("foreground ignores detached timeout settings and preserves child exit", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hack-foreground-budget-"));
+  try {
+    const docker = join(dir, "docker");
+    await writeFile(docker, "#!/bin/sh\nexit 7\n");
+    await chmod(docker, 0o700);
+    const backend = await loadComposeRuntimeBackend();
+    const code = await backend.up({
+      composeFiles: ["compose.yml"],
+      cwd: dir,
+      detach: false,
+      startupTimeoutMs: 0,
+      env: { PATH: dir, HACK_COMPOSE_STARTUP_TIMEOUT_MS: "invalid" },
+    });
+    expect(code).toBe(7);
+    expect(runCalls).toEqual([]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 5000);
 test("automatic bootstrap preserves output and forwards cancellation to its bounded child", async () => {
   const backend = await loadComposeRuntimeBackend();
   await backend.run({

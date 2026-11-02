@@ -1,4 +1,11 @@
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  test,
+} from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -12,14 +19,39 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
+import { evaluateComposeServiceEnvFreshness } from "../src/lib/compose-env-fingerprint.ts";
+import { readProjectRuntimeStateEntry } from "../src/lib/project-runtime-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const psRows: string[] = [];
 const errorMessages: string[] = [];
 const warnMessages: string[] = [];
+const upComposeContents: string[] = [];
+/**
+ * The global env Compose receives. The per-service `HACK_ENV_*` values that the
+ * value-free env override references (HACK-1273) are covered by
+ * tests/compose-env-at-rest-cli.test.ts.
+ */
+function withoutComposeEnvReferences(
+  env: Readonly<Record<string, string>> | undefined
+): Readonly<Record<string, string>> | undefined {
+  return env
+    ? Object.fromEntries(
+        Object.entries(env).filter(([key]) => !key.startsWith("HACK_ENV_"))
+      )
+    : env;
+}
+
 const upEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const psEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
+const upDetachSelections: Array<boolean | undefined> = [];
+const upStartupTimeouts: Array<number | undefined> = [];
+let upExitCode = 0;
+/** Detached phases the mocked backend reports before returning upExitCode. */
+let upReportedPhases: readonly ("images" | "start")[] = [];
+const upImageTimeouts: Array<number | undefined> = [];
+let downCalls = 0;
 const upServiceSelections: Array<readonly string[] | undefined> = [];
 const tempDirs = new Set<string>();
 const runtimeCalls: Array<
@@ -29,6 +61,7 @@ const runtimeCalls: Array<
 let runExitCode = 0;
 const originalHackHome = process.env.HACK_HOME;
 const originalComposeProfiles = process.env.COMPOSE_PROFILES;
+const originalStartupTimeout = process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS;
 let autoBranch: string | null = null;
 let runtimeProjects: readonly Record<string, unknown>[] = [];
 
@@ -64,15 +97,31 @@ const runtimeBackendMock = await registerScopedModuleMock({
       name: "compose",
       up: async (opts: RuntimeUpOptions) => {
         runtimeCalls.push({ kind: "up", opts });
-        upEnvs.push(opts.env);
+        upComposeContents.push(
+          (
+            await Promise.all(
+              opts.composeFiles.map((path) => readFile(path, "utf8"))
+            )
+          ).join("\n")
+        );
+        upEnvs.push(withoutComposeEnvReferences(opts.env));
         upServiceSelections.push(opts.services);
+        upStartupTimeouts.push(opts.startupTimeoutMs);
+        upImageTimeouts.push(opts.imageTimeoutMs);
+        upDetachSelections.push(opts.detach);
+        for (const phase of upReportedPhases) {
+          opts.onStartupPhase?.(phase);
+        }
+        return upExitCode;
+      },
+      down: async () => {
+        downCalls += 1;
         return 0;
       },
-      down: async () => 0,
       psJson: async (opts: {
         readonly env?: Readonly<Record<string, string>>;
       }) => {
-        psEnvs.push(opts.env);
+        psEnvs.push(withoutComposeEnvReferences(opts.env));
         return {
           exitCode: 0,
           stdout: psRows.join("\n"),
@@ -129,13 +178,33 @@ beforeAll(() => {
   loggerMock.activate();
 });
 
+const originalImageTimeout = process.env.HACK_COMPOSE_IMAGE_TIMEOUT_MS;
+
+beforeEach(() => {
+  Reflect.deleteProperty(process.env, "HACK_COMPOSE_STARTUP_TIMEOUT_MS");
+  Reflect.deleteProperty(process.env, "HACK_COMPOSE_IMAGE_TIMEOUT_MS");
+});
+
 afterEach(async () => {
   psRows.length = 0;
   errorMessages.length = 0;
   warnMessages.length = 0;
   upEnvs.length = 0;
+  upComposeContents.length = 0;
   psEnvs.length = 0;
   upServiceSelections.length = 0;
+  upStartupTimeouts.length = 0;
+  upDetachSelections.length = 0;
+  upExitCode = 0;
+  upReportedPhases = [];
+  upImageTimeouts.length = 0;
+  restoreEnv("HACK_COMPOSE_IMAGE_TIMEOUT_MS", originalImageTimeout);
+  downCalls = 0;
+  if (originalStartupTimeout === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_COMPOSE_STARTUP_TIMEOUT_MS");
+  } else {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = originalStartupTimeout;
+  }
   runtimeCalls.length = 0;
   runExitCode = 0;
   autoBranch = null;
@@ -144,15 +213,11 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
-  if (originalHackHome === undefined) {
-    Reflect.deleteProperty(process.env, "HACK_HOME");
-  } else {
-    restoreEnv("HACK_HOME", originalHackHome);
-  }
+  restoreEnv("HACK_HOME", originalHackHome);
   if (originalComposeProfiles === undefined) {
     Reflect.deleteProperty(process.env, "COMPOSE_PROFILES");
   } else {
-    restoreEnv("COMPOSE_PROFILES", originalComposeProfiles);
+    process.env.COMPOSE_PROFILES = originalComposeProfiles;
   }
 });
 
@@ -349,6 +414,103 @@ test("targeted restart preserves delivered Compose environment", async () => {
   ]);
 });
 
+test("up records value-free env digests and a targeted restart refreshes only its service", async () => {
+  const projectRoot = await createProject();
+  const projectDir = resolve(projectRoot, ".hack");
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
+    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+  );
+  const readEntry = () =>
+    readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "startup-state-test",
+    });
+
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  const atUp = (await readEntry())?.envFingerprint;
+  expect(Object.keys(atUp?.services ?? {})).toEqual([
+    "api",
+    "migrate",
+    "profiled-worker",
+  ]);
+  const freshness = (
+    record: typeof atUp,
+    service: string,
+    mode: string
+  ): string =>
+    evaluateComposeServiceEnvFreshness({
+      record,
+      service,
+      currentEnv: { SHARED_MODE: mode },
+    });
+  expect(freshness(atUp, "api", "compose")).toBe("unchanged");
+  expect(freshness(atUp, "api", "rotated")).toBe("changed");
+
+  const envPath = resolve(projectDir, "hack.env.default.yaml");
+  await writeFile(
+    envPath,
+    (await readFile(envPath, "utf8")).replace(
+      '    SHARED_MODE: "compose"',
+      '    SHARED_MODE: "rotated"'
+    )
+  );
+  expect(await runRestart({ projectRoot, services: ["api"] })).toBe(0);
+  const afterRestart = (await readEntry())?.envFingerprint;
+  expect(afterRestart?.salt).toBe(atUp?.salt);
+  expect(freshness(afterRestart, "api", "rotated")).toBe("unchanged");
+  expect(freshness(afterRestart, "migrate", "rotated")).toBe("changed");
+  expect(afterRestart?.services.migrate).toBe(atUp?.services.migrate);
+  const stored = await readFile(
+    resolve(projectDir, ".internal/runtime-state.json"),
+    "utf8"
+  );
+  for (const text of ["SHARED_MODE", "rotated", '"compose"']) {
+    expect(stored).not.toContain(text);
+  }
+});
+
+test("failed targeted restart does not record its service's env as applied", async () => {
+  const projectRoot = await createProject();
+  const projectDir = resolve(projectRoot, ".hack");
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
+    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+  );
+  const readEntry = () =>
+    readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "startup-state-test",
+    });
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  const atUp = (await readEntry())?.envFingerprint;
+  expect(atUp?.services.api).toBeDefined();
+
+  const envPath = resolve(projectDir, "hack.env.default.yaml");
+  await writeFile(
+    envPath,
+    (await readFile(envPath, "utf8")).replace(
+      '    SHARED_MODE: "compose"',
+      '    SHARED_MODE: "rotated"'
+    )
+  );
+  upExitCode = 1;
+  expect(await runRestart({ projectRoot, services: ["api"] })).not.toBe(0);
+
+  const afterFailure = (await readEntry())?.envFingerprint;
+  // The delivered env is unknown, so api's digest is dropped rather than
+  // refreshed to the rotated env; exec then reports nothing for api.
+  expect(
+    evaluateComposeServiceEnvFreshness({
+      record: afterFailure,
+      service: "api",
+      currentEnv: { SHARED_MODE: "rotated" },
+    })
+  ).toBe("unknown");
+  expect(afterFailure?.salt).toBe(atUp?.salt);
+  expect(afterFailure?.services.migrate).toBe(atUp?.services.migrate);
+});
+
 test("up --json emits E_STARTUP_INCOMPLETE for a created service", async () => {
   const projectRoot = await createProject();
   psRows.push(
@@ -413,8 +575,266 @@ test("up warns before an auto-derived branch retargets the same worktree", async
   );
 });
 
+for (const action of ["up", "restart"] as const) {
+  test(`${action} uses extra hosts created and replaced by the same before hook`, async () => {
+    const projectRoot = await createProject({
+      lifecycleCommand:
+        "mkdir -p .hack/.internal && cp hook-hosts.json .hack/.internal/extra-hosts.json",
+    });
+    psRows.push(
+      JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+    );
+    const run = action === "up" ? runDetachedUp : runRestart;
+    for (const address of ["192.0.2.10", "192.0.2.11"]) {
+      await writeFile(
+        resolve(projectRoot, "hook-hosts.json"),
+        JSON.stringify({ "search.example.test": address })
+      );
+      expect(await run({ projectRoot })).toBe(0);
+      expect(upComposeContents.at(-1)).toContain(
+        `search.example.test: ${address}`
+      );
+    }
+    expect(upComposeContents.at(-1)).not.toContain("192.0.2.10");
+    await writeFile(resolve(projectRoot, "hook-hosts.json"), "{}");
+    expect(await run({ projectRoot })).toBe(0);
+    expect(upComposeContents.at(-1)).not.toContain("search.example.test");
+  });
+
+  test(`${action} clears runtime intent when post-hook override rendering fails`, async () => {
+    const projectRoot = await createProject({
+      lifecycleCommand:
+        "mkdir -p .hack/.internal/compose.override.yml && cp hook-hosts.json .hack/.internal/extra-hosts.json",
+    });
+    await writeFile(
+      resolve(projectRoot, "hook-hosts.json"),
+      JSON.stringify({ "search.example.test": "192.0.2.10" })
+    );
+    const run = action === "up" ? runDetachedUp : runRestart;
+    await expect(run({ projectRoot })).rejects.toThrow();
+    expect(upComposeContents).toEqual([]);
+    const state = JSON.parse(
+      await readFile(
+        resolve(projectRoot, ".hack/.internal/runtime-state.json"),
+        "utf8"
+      )
+    );
+    expect(state.entries).toEqual([]);
+  });
+
+  test(`${action} does not start Compose after a failing before hook`, async () => {
+    const projectRoot = await createProject({ lifecycleCommand: "exit 23" });
+    const run = action === "up" ? runDetachedUp : runRestart;
+    expect(await run({ projectRoot })).toBe(23);
+    expect(upComposeContents).toEqual([]);
+  });
+}
+
+for (const action of ["up", "restart", "scoped restart"] as const) {
+  const run = (projectRoot: string) =>
+    action === "up"
+      ? runDetachedUp({ projectRoot })
+      : runRestart({
+          projectRoot,
+          ...(action === "scoped restart" ? { services: ["api"] } : {}),
+        });
+
+  for (const configured of [undefined, "120000"] as const) {
+    test(`${action} forwards ${configured ?? "default"} startup budget to Compose`, async () => {
+      if (configured !== undefined) {
+        process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = configured;
+      }
+      const projectRoot = await createProject();
+      psRows.push(
+        JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+      );
+
+      expect(await run(projectRoot)).toBe(0);
+      expect(upStartupTimeouts).toEqual([
+        configured === undefined ? 90_000 : 120_000,
+      ]);
+    });
+  }
+
+  test(`${action} rejects an invalid startup budget before hooks or backend effects`, async () => {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "0";
+    const projectRoot = await createProject({
+      lifecycleCommand: "touch startup-budget-hook-ran",
+    });
+    psRows.push(
+      JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+    );
+
+    await expect(run(projectRoot)).rejects.toThrow(
+      "HACK_COMPOSE_STARTUP_TIMEOUT_MS"
+    );
+    expect(
+      await Bun.file(resolve(projectRoot, "startup-budget-hook-ran")).exists()
+    ).toBe(false);
+    expect(upStartupTimeouts).toEqual([]);
+    expect(upComposeContents).toEqual([]);
+    expect(downCalls).toBe(0);
+    expect(psEnvs).toEqual([]);
+  });
+
+  test(`${action} reports the effective startup budget on timeout`, async () => {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
+    upExitCode = 124;
+    const projectRoot = await createProject();
+
+    expect(await run(projectRoot)).toBe(124);
+    // Full restart attempts its existing repair path with a fresh equal budget.
+    expect(upStartupTimeouts).toEqual(
+      action === "restart" ? [120_000, 120_000] : [120_000]
+    );
+    expect(errorMessages.join("\n")).toContain("120000 ms");
+    expect(errorMessages.join("\n")).toContain("startup budget");
+  });
+}
+
+for (const action of ["up", "restart", "scoped restart"] as const) {
+  const run = (projectRoot: string) =>
+    action === "up"
+      ? runDetachedUp({ projectRoot })
+      : runRestart({
+          projectRoot,
+          ...(action === "scoped restart" ? { services: ["api"] } : {}),
+        });
+
+  test(`${action} forwards a separate image build/pull budget to Compose`, async () => {
+    process.env.HACK_COMPOSE_IMAGE_TIMEOUT_MS = "2400000";
+    const projectRoot = await createProject();
+    psRows.push(
+      JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+    );
+
+    expect(await run(projectRoot)).toBe(0);
+    expect(upImageTimeouts).toEqual([2_400_000]);
+    expect(upStartupTimeouts).toEqual([90_000]);
+  });
+
+  test(`${action} names the image phase and its variable when image build/pull times out`, async () => {
+    process.env.HACK_COMPOSE_IMAGE_TIMEOUT_MS = "2400000";
+    upReportedPhases = ["images"];
+    upExitCode = 124;
+    const projectRoot = await createProject();
+
+    expect(await run(projectRoot)).toBe(124);
+    const errors = errorMessages.join("\n");
+    expect(errors).toContain(
+      "image build/pull budget of 2400000 ms (phase: image build/pull and container creation)"
+    );
+    expect(errors).toContain("HACK_COMPOSE_IMAGE_TIMEOUT_MS=<ms>");
+  });
+
+  test(`${action} names the start phase when dependency wait times out after a build`, async () => {
+    upReportedPhases = ["images", "start"];
+    upExitCode = 124;
+    const projectRoot = await createProject();
+
+    expect(await run(projectRoot)).toBe(124);
+    const errors = errorMessages.join("\n");
+    expect(errors).toContain(
+      "startup budget of 90000 ms (phase: start and dependency wait)"
+    );
+    expect(errors).toContain("HACK_COMPOSE_STARTUP_TIMEOUT_MS=<ms>");
+    expect(errors).not.toContain("HACK_COMPOSE_IMAGE_TIMEOUT_MS=<ms>");
+  });
+
+  test(`${action} rejects an invalid image budget before hooks or backend effects`, async () => {
+    process.env.HACK_COMPOSE_IMAGE_TIMEOUT_MS = "soon";
+    const projectRoot = await createProject({
+      lifecycleCommand: "touch image-budget-hook-ran",
+    });
+
+    await expect(run(projectRoot)).rejects.toThrow(
+      "HACK_COMPOSE_IMAGE_TIMEOUT_MS"
+    );
+    expect(
+      await Bun.file(resolve(projectRoot, "image-budget-hook-ran")).exists()
+    ).toBe(false);
+    expect(upComposeContents).toEqual([]);
+    expect(downCalls).toBe(0);
+  });
+}
+
+test("up JSON reports the timed-out Compose phase and its budget", async () => {
+  upReportedPhases = ["images"];
+  upExitCode = 124;
+  const projectRoot = await createProject();
+  const result = await runJsonUp({ projectRoot });
+  expect(result.exitCode).toBe(124);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      code: "E_STARTUP_TIMEOUT",
+      detail: {
+        exitCode: 124,
+        composePhase: "images",
+        budgetMs: 1_800_000,
+        budgetEnv: "HACK_COMPOSE_IMAGE_TIMEOUT_MS",
+      },
+    },
+  });
+});
+
+test("foreground up ignores an invalid detached startup budget", async () => {
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "invalid";
+  const projectRoot = await createProject();
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+  );
+
+  expect(await runDetachedUp({ projectRoot, detach: false })).toBe(0);
+  expect(upComposeContents).toHaveLength(1);
+  expect(upDetachSelections).toEqual([false]);
+  expect(errorMessages).toEqual([]);
+});
+
+test("restart preserves lifecycle failure when a before hook exits 124", async () => {
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
+  const projectRoot = await createProject({ lifecycleCommand: "exit 124" });
+
+  expect(await runRestart({ projectRoot })).toBe(124);
+  expect(upComposeContents).toEqual([]);
+  expect(upStartupTimeouts).toEqual([]);
+  expect(errorMessages.join("\n")).toContain("lifecycle hook failed");
+  expect(errorMessages.join("\n")).not.toContain("startup budget");
+  expect(errorMessages.join("\n")).not.toContain(
+    "process group was terminated"
+  );
+});
+
+test("restart JSON classifies hook exit 124 as E_LIFECYCLE_FAILED", async () => {
+  const projectRoot = await createProject({ lifecycleCommand: "exit 124" });
+  let stdout = "";
+  const originalWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    stdout +=
+      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stdout.write;
+  let exitCode: number;
+  try {
+    exitCode = await runRestart({ projectRoot, json: true });
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  expect(exitCode).toBe(124);
+  expect(JSON.parse(stdout)).toMatchObject({
+    ok: false,
+    error: {
+      code: "E_LIFECYCLE_FAILED",
+      detail: { exitCode: 124, phase: "up" },
+    },
+  });
+  expect(upComposeContents).toEqual([]);
+  expect(stdout).not.toContain("process group was terminated");
+});
+
 async function runDetachedUp(opts: {
   readonly projectRoot: string;
+  readonly detach?: boolean;
   readonly profiles?: readonly string[];
   readonly services?: readonly string[];
 }): Promise<number> {
@@ -427,7 +847,7 @@ async function runDetachedUp(opts: {
         project: undefined,
         env: "base",
         branch: undefined,
-        detach: true,
+        detach: opts.detach ?? true,
         profile,
         target: undefined,
         json: false,
@@ -439,7 +859,7 @@ async function runDetachedUp(opts: {
           opts.projectRoot,
           "--env",
           "base",
-          "--detach",
+          ...(opts.detach === false ? [] : ["--detach"]),
           ...(profile ? ["--profile", profile] : []),
           ...(opts.services ?? []),
         ],
@@ -453,6 +873,7 @@ async function runDetachedUp(opts: {
 
 async function runRestart(opts: {
   readonly projectRoot: string;
+  readonly json?: boolean;
   readonly profiles?: readonly string[];
   readonly services?: readonly string[];
 }): Promise<number> {
@@ -467,7 +888,7 @@ async function runRestart(opts: {
         branch: undefined,
         profile,
         target: undefined,
-        json: false,
+        json: opts.json ?? false,
       },
       positionals: { services: opts.services ?? [] },
       raw: {
@@ -476,6 +897,7 @@ async function runRestart(opts: {
           opts.projectRoot,
           "--env",
           "base",
+          ...(opts.json ? ["--json"] : []),
           ...(profile ? ["--profile", profile] : []),
           ...(opts.services ?? []),
         ],
@@ -489,6 +911,7 @@ async function runRestart(opts: {
 
 async function runJsonUp(opts: {
   readonly projectRoot: string;
+  readonly services?: readonly string[];
 }): Promise<{ readonly exitCode: number; readonly stdout: string }> {
   let stdout = "";
   const originalWrite = process.stdout.write;
@@ -512,7 +935,7 @@ async function runJsonUp(opts: {
           target: undefined,
           json: true,
         },
-        positionals: {},
+        positionals: { services: opts.services ?? [] },
         raw: {
           argv: ["--path", opts.projectRoot, "--env", "base", "--json"],
           positionals: [],
@@ -529,6 +952,7 @@ async function runJsonUp(opts: {
 async function createProject(opts?: {
   readonly composeProfiles?: string;
   readonly lifecycleMarkerFile?: string;
+  readonly lifecycleCommand?: string;
   readonly registryTokenScope?: "api" | "deps";
 }): Promise<string> {
   const projectRoot = await mkdtemp(
@@ -573,14 +997,16 @@ async function createProject(opts?: {
         name: "startup-state-test",
         dev_host: "startup-state-test.hack",
         internal: { dns: false, tls: false },
-        ...(opts?.lifecycleMarkerFile
+        ...(opts?.lifecycleMarkerFile || opts?.lifecycleCommand
           ? {
               lifecycle: {
                 up: {
                   before: [
                     {
                       name: "capture-env",
-                      command: `printf "%s|%s" "$SHARED_MODE" "$HOST_ONLY" > "${opts.lifecycleMarkerFile}"`,
+                      command:
+                        opts.lifecycleCommand ??
+                        `printf "%s|%s" "$SHARED_MODE" "$HOST_ONLY" > "${opts.lifecycleMarkerFile}"`,
                     },
                   ],
                   after: [],
@@ -624,6 +1050,69 @@ async function createProject(opts?: {
   return projectRoot;
 }
 
+test("linked startup combines inherited aliases, local static precedence and same-start hook output", async () => {
+  const savedCi = process.env.CI;
+  const savedMode = process.env.HACK_EXECUTION_MODE;
+  Reflect.deleteProperty(process.env, "CI");
+  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  try {
+    const primary = await createProject({
+      lifecycleCommand:
+        "mkdir -p .hack/.internal && printf '%s' '{\"hook.test\":\"192.0.2.30\"}' > .hack/.internal/extra-hosts.json",
+    });
+    const git = async (...args: string[]) => {
+      const child = Bun.spawn(["git", "-C", primary, ...args], {
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      const [code, error] = await Promise.all([
+        child.exited,
+        new Response(child.stderr).text(),
+      ]);
+      if (code !== 0) {
+        throw new Error(error);
+      }
+    };
+    await git("init", "--quiet");
+    await git("add", ".hack");
+    await git(
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "fixture"
+    );
+    const linked = resolve(primary, "linked");
+    await git("worktree", "add", "--quiet", "-b", "linked", linked);
+    await mkdir(resolve(primary, ".hack/.internal"), { recursive: true });
+    await writeFile(
+      resolve(primary, ".hack/.internal/extra-hosts.json"),
+      JSON.stringify({
+        "search.test": "192.0.2.10",
+        "primary.test": "192.0.2.11",
+      })
+    );
+    const configPath = resolve(linked, ".hack", PROJECT_CONFIG_FILENAME);
+    const config = await Bun.file(configPath).json();
+    config.internal.extra_hosts = { "search.test": "192.0.2.20" };
+    await writeFile(configPath, JSON.stringify(config));
+    psRows.push(
+      JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+    );
+    expect(await runDetachedUp({ projectRoot: linked })).toBe(0);
+    expect(upComposeContents.at(-1)).toContain("search.test: 192.0.2.20");
+    expect(upComposeContents.at(-1)).toContain("primary.test: 192.0.2.11");
+    expect(upComposeContents.at(-1)).toContain("hook.test: 192.0.2.30");
+    expect(upComposeContents.at(-1)).not.toContain("192.0.2.10");
+  } finally {
+    restoreEnv("CI", savedCi);
+    restoreEnv("HACK_EXECUTION_MODE", savedMode);
+  }
+});
+
 async function createCachedProject(): Promise<string> {
   const projectRoot = await createProject({ registryTokenScope: "deps" });
   const composeFile = resolve(projectRoot, ".hack", PROJECT_COMPOSE_FILENAME);
@@ -632,6 +1121,7 @@ async function createCachedProject(): Promise<string> {
     volumes: Record<string, unknown>;
   };
   compose.services.api!.volumes = ["dependencies:/app/node_modules"];
+  compose.services.deps!.platform = "linux/arm64";
   compose.services.deps!.volumes = ["dependencies:/app/node_modules"];
   compose.services.deps!.labels = {
     "hack.dependencies.cache-volume": "dependencies",
@@ -718,3 +1208,61 @@ test("run deps resolves the same shared cache as up", async () => {
   );
   expect(dependencyOverrides(installer.opts.composeFiles)).toHaveLength(1);
 });
+
+for (const operation of [runDetachedUp, runRestart]) {
+  test(`${operation.name} applies configured budget to cache bootstrap before consumer launch`, async () => {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
+    const projectRoot = await createCachedProject();
+    expect(await operation({ projectRoot, services: ["api"] })).toBe(0);
+    const bootstrap = runtimeCalls[0];
+    expect(bootstrap?.kind).toBe("run");
+    if (bootstrap?.kind !== "run") {
+      throw new Error("Missing bootstrap");
+    }
+    expect(bootstrap.opts.timeoutMs).toBe(120_000);
+    expect(upStartupTimeouts).toEqual([120_000]);
+  });
+  test(`${operation.name} reports bootstrap timeout without replacing consumers`, async () => {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
+    runExitCode = 124;
+    const projectRoot = await createCachedProject();
+    expect(await operation({ projectRoot, services: ["api"] })).toBe(124);
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run"]);
+    expect(errorMessages.join("\n")).toContain(
+      "Dependency cache initialization exceeded its startup budget of 120000 ms"
+    );
+  });
+}
+
+for (const action of ["up", "restart"] as const) {
+  test(`${action} JSON classifies cache initializer deadline as startup timeout`, async () => {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
+    runExitCode = 124;
+    const projectRoot = await createCachedProject();
+    let output = "";
+    let code: number;
+    if (action === "up") {
+      const result = await runJsonUp({ projectRoot, services: ["api"] });
+      output = result.stdout;
+      code = result.exitCode;
+    } else {
+      const write = process.stdout.write;
+      process.stdout.write = ((chunk: string | Uint8Array) => {
+        output +=
+          typeof chunk === "string"
+            ? chunk
+            : Buffer.from(chunk).toString("utf8");
+        return true;
+      }) as typeof process.stdout.write;
+      try {
+        code = await runRestart({ projectRoot, services: ["api"], json: true });
+      } finally {
+        process.stdout.write = write;
+      }
+    }
+    expect(code).toBe(124);
+    expect(JSON.parse(output).error.code).toBe("E_STARTUP_TIMEOUT");
+    expect(JSON.parse(output).error.message).toContain("120000 ms");
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run"]);
+  });
+}

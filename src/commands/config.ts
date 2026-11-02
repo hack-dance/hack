@@ -7,22 +7,29 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optPath, optProject } from "../cli/options.ts";
+import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import {
   GLOBAL_ONLY_EXTENSION_IDS,
-  HACK_PROJECT_DIR_PRIMARY,
   PROJECT_CONFIG_FILENAME,
   PROJECT_CONFIG_LEGACY_FILENAME,
 } from "../constants.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import {
+  DEFAULT_DOMAIN_CONFIG_KEY,
+  parseDefaultDomain,
+} from "../lib/default-domain.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import type { ProjectContext } from "../lib/project.ts";
-import { findProjectContext, sanitizeProjectSlug } from "../lib/project.ts";
-import {
-  resolveRegisteredProjectByName,
-  upsertProjectRegistration,
-} from "../lib/projects-registry.ts";
+import { findProjectContext } from "../lib/project.ts";
+import { assertLegacyProjectDirectory } from "../lib/project-input-selection.ts";
+import { upsertProjectRegistration } from "../lib/projects-registry.ts";
 import { logger } from "../ui/logger.ts";
+import { configAdoptCommand } from "./config-adopt.ts";
+import { configImportCommand } from "./config-import.ts";
+import { configPlanCommand } from "./config-plan.ts";
+import { configValidateCommand } from "./config-validate.ts";
 
 type ConfigReadResult =
   | {
@@ -34,7 +41,7 @@ type ConfigReadResult =
 
 const configSpec = defineCommand({
   name: "config",
-  summary: "Read/write hack.config.json values",
+  summary: "Read/write legacy config or validate native project configuration",
   group: "Project",
   options: [],
   positionals: [],
@@ -144,7 +151,11 @@ const handleConfigSet: CommandHandlerFor<typeof configSetSpec> = async ({
   }
 
   const valueRaw = (args.positionals.value ?? "").trim();
-  const value = parseValue({ raw: valueRaw });
+  const value = parseConfigSetValue({
+    target: project,
+    path: parsedKey,
+    raw: valueRaw,
+  });
 
   const globalOnlyKey = resolveGlobalOnlyKey({ path: parsedKey });
   if (globalOnlyKey && project.scope === "project") {
@@ -176,6 +187,10 @@ const handleConfigSet: CommandHandlerFor<typeof configSetSpec> = async ({
   const nextText = `${JSON.stringify(read.value, null, 2)}\n`;
   if (project.scope === "global") {
     await ensureDir(dirname(read.path));
+  } else {
+    await assertLegacyProjectDirectory({
+      projectDir: project.project.projectDir,
+    });
   }
   const result = await writeTextFileIfChanged(read.path, nextText);
 
@@ -194,12 +209,39 @@ export const configCommand = defineCommand({
   subcommands: [
     withHandler(configGetSpec, handleConfigGet),
     withHandler(configSetSpec, handleConfigSet),
+    configValidateCommand,
+    configPlanCommand,
+    configImportCommand,
+    configAdoptCommand,
   ],
 } as const);
 
 type ConfigTarget =
   | { readonly scope: "global"; readonly path: string }
   | { readonly scope: "project"; readonly project: ProjectContext };
+
+function parseConfigSetValue(opts: {
+  readonly target: ConfigTarget;
+  readonly path: readonly string[];
+  readonly raw: string;
+}): unknown {
+  const value = parseValue({ raw: opts.raw });
+  if (opts.path.join(".") !== DEFAULT_DOMAIN_CONFIG_KEY) {
+    return value;
+  }
+  if (opts.target.scope === "project") {
+    throw new CliUsageError(
+      "default_domain is global-only. Use --global for new projects, or --dev-host during this project's init."
+    );
+  }
+  try {
+    return parseDefaultDomain(value);
+  } catch (error) {
+    throw new CliUsageError(
+      error instanceof Error ? error.message : "Invalid default_domain"
+    );
+  }
+}
 
 async function resolveProjectForArgs(opts: {
   readonly ctx: CliContext;
@@ -209,27 +251,20 @@ async function resolveProjectForArgs(opts: {
   readonly touchRegistration: boolean;
 }): Promise<ConfigTarget> {
   if (opts.globalOpt) {
-    if (opts.pathOpt || opts.projectOpt) {
+    if (opts.pathOpt || opts.projectOpt !== undefined) {
       throw new CliUsageError("Use --global without --path or --project.");
     }
     return { scope: "global", path: resolveGlobalConfigPath() };
   }
 
-  if (opts.pathOpt && opts.projectOpt) {
+  if (opts.pathOpt && opts.projectOpt !== undefined) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (opts.projectOpt) {
-    const name = sanitizeProjectSlug(opts.projectOpt);
-    if (name.length === 0) {
-      throw new CliUsageError("Invalid --project value.");
-    }
-    const fromRegistry = await resolveRegisteredProjectByName({ name });
-    if (!fromRegistry) {
-      throw new CliUsageError(
-        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
-      );
-    }
+  if (opts.projectOpt !== undefined) {
+    const fromRegistry = await resolveRegisteredProjectOption({
+      projectOpt: opts.projectOpt,
+    });
     if (opts.touchRegistration) {
       await touchProjectRegistration(fromRegistry);
     }
@@ -251,9 +286,7 @@ async function requireProjectContext(
 ): Promise<ProjectContext> {
   const ctx = await findProjectContext(startDir);
   if (!ctx) {
-    throw new Error(
-      `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`
-    );
+    throw new MissingProjectContextError();
   }
   return ctx;
 }
@@ -294,6 +327,9 @@ async function readConfigObject(opts: {
     opts.target.project.projectDir,
     PROJECT_CONFIG_FILENAME
   );
+  await assertLegacyProjectDirectory({
+    projectDir: opts.target.project.projectDir,
+  });
   const jsonText = await readTextFile(jsonPath);
   if (jsonText !== null) {
     const parsed = parseJsonObject({ text: jsonText, path: jsonPath });
@@ -346,6 +382,9 @@ async function readConfigJsonForSet(opts: {
     opts.target.project.projectDir,
     PROJECT_CONFIG_FILENAME
   );
+  await assertLegacyProjectDirectory({
+    projectDir: opts.target.project.projectDir,
+  });
   const jsonText = await readTextFile(jsonPath);
   if (jsonText === null) {
     const tomlPath = resolve(

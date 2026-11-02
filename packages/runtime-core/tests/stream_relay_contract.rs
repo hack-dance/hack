@@ -1,0 +1,1627 @@
+#![cfg(feature = "native-stream-relay")]
+use std::{
+    fs,
+    io::{self, BufRead, BufReader, Read, Write},
+    net::{Shutdown, TcpListener},
+    os::{
+        fd::AsRawFd,
+        unix::{
+            fs::PermissionsExt,
+            net::{UnixListener, UnixStream},
+            process::CommandExt,
+        },
+    },
+    path::PathBuf,
+    process::{Child, Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
+    thread,
+    time::{Duration, Instant},
+};
+static NEXT: AtomicU64 = AtomicU64::new(0);
+const BINARY: &str = concat!(env!("OUT_DIR"), "/stream-relay-host");
+
+/// Creates a new scratch root `/tmp/<prefix>-<pid>-<n>`. A name left behind by
+/// an earlier run whose PID is now reused is skipped, so a stale directory
+/// never fails a fresh test.
+fn fresh_root(prefix: &str) -> PathBuf {
+    loop {
+        let root = PathBuf::from(format!(
+            "/tmp/{prefix}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&root) {
+            Ok(()) => return root,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create {}: {error}", root.display()),
+        }
+    }
+}
+
+struct Relay {
+    child: Child,
+    root: PathBuf,
+    socket: PathBuf,
+    /// The TCP port a `--publish` publisher reported or was given; None otherwise.
+    port: Option<u16>,
+}
+impl Relay {
+    fn start(port: u16, idle: u32) -> Self {
+        Self::start_with_inherited_fd(port, idle, None)
+    }
+    fn start_with_inherited_fd(port: u16, idle: u32, inherited: Option<i32>) -> Self {
+        Self::start_options(port, idle, inherited, None, None)
+    }
+    fn start_options(
+        port: u16,
+        idle: u32,
+        inherited: Option<i32>,
+        reservation: Option<&str>,
+        existing: Option<PathBuf>,
+    ) -> Self {
+        let reuse = existing.is_some();
+        let root = existing.unwrap_or_else(|| fresh_root("hkr"));
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = root.join("app.sock");
+        let mut command = Command::new(BINARY);
+        if let Some(fd) = inherited {
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::dup2(fd, 100) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        command
+            .arg(&socket)
+            .arg("127.0.0.1")
+            .arg(port.to_string())
+            .arg(idle.to_string());
+        if let Some(reservation) = reservation {
+            command.args(["--reservation", reservation]);
+        }
+        // A caller-supplied root stays the caller's; only a fresh root is removed on failure.
+        let mut startup = PublisherStartup {
+            child: None,
+            root: if reuse { PathBuf::new() } else { root.clone() },
+        };
+        startup.child = Some(
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let child = await_bare_ready(startup, &socket);
+        Self {
+            child,
+            root,
+            socket,
+            port: None,
+        }
+    }
+    /// Connects a client the relay must keep. Setting a timeout fails if the relay already
+    /// closed the stream (see `connect_refused`), which is a real failure here.
+    fn connect(&self) -> UnixStream {
+        let stream = UnixStream::connect(&self.socket).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream
+    }
+    /// Connects a client the relay must refuse, and proves the refusal.
+    ///
+    /// The relay refuses by closing the accepted stream, which can happen before this
+    /// client's next syscall. Once the peer has closed, XNU's `sosetopt` rejects
+    /// `SO_RCVTIMEO`/`SO_SNDTIMEO` with EINVAL (both directions are shut), so this never
+    /// sets socket timeouts; it bounds the wait with `poll` instead.
+    fn connect_refused(&self) {
+        let stream = UnixStream::connect(&self.socket).unwrap();
+        assert_refused_within(&stream, REFUSAL_DEADLINE);
+    }
+    /// Releases `reserved`, the listener that kept the relay's target port from other
+    /// processes, then proves the relay refuses a client because that target refuses.
+    ///
+    /// No loopback target both refuses at once and stays reserved on macOS and Linux
+    /// (HACK-1464): XNU silently drops a SYN to a bound socket that never listens, so the
+    /// dial times out; a connected socket does not stop a `SO_REUSEADDR` listener from
+    /// binding its port; the relay rejects port 0; and a multicast or broadcast address
+    /// fails `connect` synchronously, skipping the asynchronous refusal path a closed
+    /// loopback port exercises. So the port is released only here, leaving a race window
+    /// from this `close` to the relay's dial. On macOS 26.5 under 18 CPU hogs and parallel
+    /// suites, release to refusal took a median under 1 ms and at most 22 ms, against a
+    /// median of 31-51 ms and at most 255 ms when the port was released before the relay
+    /// started. A listener that takes the port in that window is dialed instead, and the
+    /// probe below turns that into `E_RELAY_TARGET_PORT_TAKEN` rather than a refusal
+    /// timeout or a silent pass. A listener that both appears and disappears inside the
+    /// window stays undetected.
+    fn connect_refused_by_released_target(&self, reserved: TcpListener) {
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let stream = UnixStream::connect(&self.socket).unwrap();
+        let refusal = refusal_within(&stream, REFUSAL_DEADLINE);
+        assert_target_still_refuses(port);
+        if let Err(message) = refusal {
+            panic!("{message}");
+        }
+    }
+    fn stop(&mut self) {
+        if self.child.try_wait().unwrap().is_none() {
+            unsafe {
+                libc::kill(self.child.id() as i32, libc::SIGTERM);
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if Instant::now() > deadline {
+                self.child.kill().unwrap();
+                self.child.wait().unwrap();
+                panic!("relay ignored termination");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.stop();
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Requires a relay's bare "ready\n" line and a private socket, then hands the child over.
+/// No `Relay` exists until this returns, so `startup` owns the child meanwhile: if any check
+/// fails or panics, its `Drop` kills and reaps the child (and removes a fresh root) instead
+/// of orphaning `stream-relay-host`.
+fn await_bare_ready(mut startup: PublisherStartup, socket: &std::path::Path) -> Child {
+    let output = startup
+        .child
+        .as_mut()
+        .expect("startup owns child")
+        .stdout
+        .take()
+        .unwrap();
+    let mut descriptor = libc::pollfd {
+        fd: output.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 3000) }, 1);
+    let mut line = String::new();
+    BufReader::new(output).read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    assert_eq!(
+        fs::metadata(socket).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    startup.root = PathBuf::new();
+    startup.child.take().expect("startup owns child")
+}
+
+#[test]
+fn fresh_root_skips_a_stale_directory_with_the_next_name() {
+    let stale = PathBuf::from(format!(
+        "/tmp/hks-{}-{}",
+        std::process::id(),
+        NEXT.load(Ordering::Relaxed)
+    ));
+    fs::create_dir(&stale).unwrap();
+    let root = fresh_root("hks");
+    assert_ne!(root, stale);
+    assert!(root.is_dir());
+    fs::remove_dir(&root).unwrap();
+    fs::remove_dir(&stale).unwrap();
+}
+
+#[test]
+fn failed_relay_readiness_kills_and_reaps_the_child() {
+    let root = fresh_root("hkr");
+    // A live child with the wrong readiness line fails the check without exiting on its own.
+    let child = Command::new("/bin/sh")
+        .args(["-c", "echo unready; exec sleep 30"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id() as libc::pid_t;
+    let startup = PublisherStartup {
+        child: Some(child),
+        root: root.clone(),
+    };
+    let socket = root.join("app.sock");
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        await_bare_ready(startup, &socket)
+    }));
+    let mut status = 0;
+    // SAFETY: a non-blocking wait on this test's own child pid.
+    let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    let error = io::Error::last_os_error();
+    if waited == 0 {
+        // SAFETY: the child is still ours and unreaped; stop it before failing.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, &mut status, 0);
+        }
+        let _ = fs::remove_dir_all(&root);
+        panic!("E_RELAY_STARTUP_ORPHAN: failed readiness left the relay child running");
+    }
+    assert!(failed.is_err(), "wrong readiness line must fail startup");
+    // ECHILD: the guard already killed and reaped it, so no zombie or orphan remains.
+    assert_eq!(waited, -1);
+    assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    assert!(!root.exists(), "failed startup must remove its fresh root");
+}
+#[test]
+fn large_stream_half_close_drains_all_buffered_bytes() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = Relay::start(target.local_addr().unwrap().port(), 30000);
+    let expected = (0..8 * 1024 * 1024)
+        .map(|i| (i % 251) as u8)
+        .collect::<Vec<_>>();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = target.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut data = Vec::new();
+        Read::by_ref(&mut stream)
+            .take(9 * 1024 * 1024)
+            .read_to_end(&mut data)
+            .unwrap();
+        assert_eq!(data.len(), 8 * 1024 * 1024);
+        stream.write_all(&data).unwrap();
+    });
+    let mut client = relay.connect();
+    client.write_all(&expected).unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut actual = Vec::new();
+    client.read_to_end(&mut actual).unwrap();
+    assert_eq!(actual, expected);
+    server.join().unwrap();
+}
+#[test]
+fn thirty_two_concurrent_streams_keep_payloads_separate() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = Relay::start(target.local_addr().unwrap().port(), 30000);
+    let server = thread::spawn(move || {
+        let workers = (0..32)
+            .map(|_| {
+                let (mut stream, _) = target.accept().unwrap();
+                thread::spawn(move || {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .unwrap();
+                    let mut bytes = vec![0; 262144];
+                    stream.read_exact(&mut bytes).unwrap();
+                    stream.write_all(&bytes).unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
+    let workers = (0..32)
+        .map(|i| {
+            let mut client = relay.connect();
+            thread::spawn(move || {
+                let expected = vec![i as u8; 262144];
+                client.write_all(&expected).unwrap();
+                client.shutdown(Shutdown::Write).unwrap();
+                let mut actual = Vec::new();
+                client.read_to_end(&mut actual).unwrap();
+                assert_eq!(actual, expected);
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    server.join().unwrap();
+}
+#[test]
+fn idle_streams_expire_and_cleanup_preserves_replaced_path() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut relay = Relay::start(target.local_addr().unwrap().port(), 100);
+    let mut client = relay.connect();
+    let (_upstream, _) = target.accept().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let result = read_before_deadline(deadline, Instant::now, |remaining| {
+        client.set_read_timeout(Some(remaining))?;
+        client.read(&mut [0])
+    });
+    assert_eq!(result.unwrap(), 0);
+    assert!(relay.child.try_wait().unwrap().is_none());
+    fs::rename(&relay.socket, relay.root.join("original.sock")).unwrap();
+    fs::write(&relay.socket, b"replacement").unwrap();
+    relay.stop();
+    assert_eq!(fs::read(&relay.socket).unwrap(), b"replacement");
+}
+
+// Signals may interrupt this read; retries must not extend its original timeout.
+fn read_before_deadline(
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut read: impl FnMut(Duration) -> io::Result<usize>,
+) -> io::Result<usize> {
+    loop {
+        let remaining = deadline
+            .checked_duration_since(now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "read deadline elapsed"))?;
+        match read(remaining) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
+
+#[test]
+fn interrupted_read_retries_with_only_the_remaining_deadline() {
+    let start = Instant::now();
+    let mut times = [0, 25, 75].into_iter();
+    let mut timeouts = Vec::new();
+    let result = read_before_deadline(
+        start + Duration::from_millis(100),
+        || start + Duration::from_millis(times.next().unwrap()),
+        |remaining| {
+            timeouts.push(remaining);
+            if timeouts.len() < 3 {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                Ok(0)
+            }
+        },
+    );
+    assert_eq!(result.unwrap(), 0);
+    assert_eq!(timeouts, [100, 75, 25].map(Duration::from_millis).to_vec());
+    assert!(times.next().is_none());
+}
+
+#[test]
+fn interrupted_reads_cannot_restart_an_expired_deadline() {
+    let start = Instant::now();
+    let mut times = [0, 40, 100].into_iter();
+    let mut reads = 0;
+    let error = read_before_deadline(
+        start + Duration::from_millis(100),
+        || start + Duration::from_millis(times.next().unwrap()),
+        |_| {
+            reads += 1;
+            Err(io::Error::from(io::ErrorKind::Interrupted))
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(reads, 2);
+    assert!(times.next().is_none());
+}
+
+#[test]
+fn read_deadline_preserves_success_and_non_interrupted_errors() {
+    let start = Instant::now();
+    assert_eq!(
+        read_before_deadline(start + Duration::from_secs(1), || start, |_| Ok(1)).unwrap(),
+        1
+    );
+    for kind in [
+        io::ErrorKind::WouldBlock,
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::TimedOut,
+    ] {
+        let mut reads = 0;
+        let error = read_before_deadline(
+            start + Duration::from_secs(1),
+            || start,
+            |_| {
+                reads += 1;
+                assert_eq!(reads, 1, "only Interrupted may retry");
+                Err(io::Error::new(kind, "original read error"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), kind);
+        assert_eq!(error.to_string(), "original read error");
+        assert_eq!(reads, 1);
+    }
+}
+#[test]
+fn occupied_socket_is_not_unlinked_and_unavailable_target_fails_connection() {
+    // Keeps the target port from other processes until the refused dial; see
+    // `connect_refused_by_released_target`.
+    let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reserved.local_addr().unwrap().port();
+    // An idle limit beyond `REFUSAL_DEADLINE`, so idle expiry cannot pass for the refusal.
+    let mut relay = Relay::start(port, 30000);
+    let status = Command::new(BINARY)
+        .arg(&relay.socket)
+        .arg("127.0.0.1")
+        .arg(port.to_string())
+        .arg("1000")
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(73));
+    relay.connect_refused_by_released_target(reserved);
+    assert!(relay.child.try_wait().unwrap().is_none());
+}
+
+#[test]
+#[should_panic(expected = "E_RELAY_TARGET_PORT_TAKEN")]
+fn released_target_taken_by_another_listener_fails_distinctly() {
+    let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = Relay::start(reserved.local_addr().unwrap().port(), 1000);
+    // Simulates the residual race: another listener holds the port when the relay dials
+    // and closes each connection at once, which the refusal check alone would accept.
+    let foreign = reserved.try_clone().unwrap();
+    thread::spawn(move || {
+        for _ in 0..2 {
+            drop(foreign.accept());
+        }
+    });
+    relay.connect_refused_by_released_target(reserved);
+}
+
+#[test]
+fn connection_limit_refuses_excess_without_disrupting_existing_streams() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut relay = Relay::start(target.local_addr().unwrap().port(), 30000);
+    let mut clients = Vec::new();
+    let mut upstreams = Vec::new();
+    for _ in 0..32 {
+        let mut client = relay.connect();
+        let (mut upstream, _) = target.accept().unwrap();
+        upstream.write_all(b"ready").unwrap();
+        let mut ready = [0; 5];
+        client.read_exact(&mut ready).unwrap();
+        assert_eq!(&ready, b"ready");
+        clients.push(client);
+        upstreams.push(upstream);
+    }
+    relay.connect_refused();
+    assert!(relay.child.try_wait().unwrap().is_none());
+    for (client, upstream) in clients.iter_mut().zip(&mut upstreams) {
+        upstream.write_all(b"alive").unwrap();
+        let mut alive = [0; 5];
+        client.read_exact(&mut alive).unwrap();
+        assert_eq!(&alive, b"alive");
+    }
+}
+
+fn refused(result: std::io::Result<usize>) -> Result<(), String> {
+    match result {
+        Ok(0) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            Ok(())
+        }
+        other => Err(format!("expected prompt refusal, received {other:?}")),
+    }
+}
+
+/// Bounds how long a refused client waits for the relay to close it.
+const REFUSAL_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Proves `stream` is refused within `limit` without setting socket timeouts: waits for
+/// readability with `poll`, then requires EOF or a reset. A live peer times out and fails;
+/// a peer that sends data fails the refusal check.
+fn assert_refused_within(stream: &UnixStream, limit: Duration) {
+    if let Err(message) = refusal_within(stream, limit) {
+        panic!("{message}");
+    }
+}
+
+/// The check behind `assert_refused_within`, returning its failure instead of panicking.
+fn refusal_within(stream: &UnixStream, limit: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + limit;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized descriptor lives throughout this bounded poll.
+        let polled = unsafe {
+            libc::poll(
+                &mut descriptor,
+                1,
+                remaining.as_millis().min(i32::MAX as u128) as i32,
+            )
+        };
+        if polled < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if polled != 1 {
+            return Err(format!(
+                "expected prompt refusal, stream stayed open for {limit:?}"
+            ));
+        }
+        break;
+    }
+    // Readable: EOF, a reset, or data is pending, so this read cannot block.
+    let mut reader = stream;
+    refused(reader.read(&mut [0]))
+}
+
+/// Fails with a distinct code unless loopback `port` still refuses connections. A port
+/// that accepts, or swallows the probe, was taken by another socket after the test
+/// released it, so a relay that dialed it never met a refusing target.
+fn assert_target_still_refuses(port: u16) {
+    let target = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    match std::net::TcpStream::connect_timeout(&target, Duration::from_secs(2)) {
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {}
+        Ok(_) => panic!(
+            "E_RELAY_TARGET_PORT_TAKEN: another listener took the released target port before the relay dialed it"
+        ),
+        Err(error) => panic!(
+            "E_RELAY_TARGET_PORT_UNVERIFIED: the released target port did not refuse a probe ({:?})",
+            error.kind()
+        ),
+    }
+}
+
+#[test]
+fn refusal_check_accepts_a_peer_that_closed_before_the_check() {
+    // The relay can close a refused stream before the client's first syscall after connect.
+    let (client, relay_side) = UnixStream::pair().unwrap();
+    drop(relay_side);
+    assert_refused_within(&client, REFUSAL_DEADLINE);
+}
+
+#[test]
+#[should_panic(expected = "expected prompt refusal")]
+fn refusal_check_rejects_a_live_peer() {
+    let (client, _relay_side) = UnixStream::pair().unwrap();
+    assert_refused_within(&client, Duration::from_millis(50));
+}
+
+#[test]
+#[should_panic(expected = "expected prompt refusal")]
+fn refusal_check_rejects_a_peer_that_sends_data() {
+    let (client, mut relay_side) = UnixStream::pair().unwrap();
+    relay_side.write_all(b"x").unwrap();
+    assert_refused_within(&client, REFUSAL_DEADLINE);
+}
+
+#[test]
+fn inherited_descriptors_do_not_keep_parent_channels_alive() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (mut reader, writer) = UnixStream::pair().unwrap();
+    reader
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut relay = Relay::start_with_inherited_fd(
+        target.local_addr().unwrap().port(),
+        1000,
+        Some(writer.as_raw_fd()),
+    );
+    drop(writer);
+    assert_eq!(reader.read(&mut [0]).unwrap(), 0);
+    assert!(relay.child.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn namespace_requests_reject_invalid_identity_before_publishing() {
+    let root = fresh_root("hkr-netns");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = root.join("app.sock");
+    for (address, option, pid, start, code) in [
+        ("127.0.0.1", "--wrong", "2", "1", 64),
+        ("172.17.0.2", "--netns", "2", "1", 64),
+        ("127.0.0.1", "--netns", "0", "1", 64),
+        ("127.0.0.1", "--netns", "2", "0", 64),
+        ("127.0.0.1", "--netns", "2", "999999999999999999999999", 64),
+        ("127.0.0.1", "--netns", "1", "1", 78),
+    ] {
+        let status = Command::new(BINARY)
+            .arg(&path)
+            .args([address, "3000", "1000", option, pid, start])
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(code));
+        assert!(!path.exists());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stop_refuses_malformed_or_protected_process_identity() {
+    for (args, expected) in [
+        (vec!["--stop"], 64),
+        (vec!["--stop", "0", "1"], 64),
+        (vec!["--stop", "2", "0"], 64),
+        (vec!["--stop", "2", "1", "extra"], 64),
+        (vec!["--stop", "1", "1"], 78),
+    ] {
+        assert_eq!(
+            Command::new(BINARY).args(args).status().unwrap().code(),
+            Some(expected)
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn pidfd_stop_preserves_wrong_identity_and_closes_owned_listener() {
+    let mut relay = Relay::start(1, 1000);
+    let pid = relay.child.id().to_string();
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let start: u64 = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let wrong = (start + 1).to_string();
+    assert_eq!(
+        Command::new(BINARY)
+            .args(["--stop", &pid, &wrong])
+            .status()
+            .unwrap()
+            .code(),
+        Some(78)
+    );
+    assert!(relay.child.try_wait().unwrap().is_none());
+    assert!(relay.socket.exists());
+    let start = start.to_string();
+    assert!(
+        Command::new(BINARY)
+            .args(["--stop", &pid, &start])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(relay.child.wait().unwrap().success());
+    assert!(!relay.socket.exists());
+    assert_eq!(
+        Command::new(BINARY)
+            .args(["--stop", &pid, &start])
+            .status()
+            .unwrap()
+            .code(),
+        Some(78)
+    );
+}
+
+#[test]
+fn reservation_handshake_precedes_backend_connection_and_preserves_payload() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let token = "0123456789abcdef0123456789abcdef";
+    let relay = Relay::start_options(
+        target.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(token),
+        None,
+    );
+    let mut client = relay.connect();
+    client.write_all(b"HKR1").unwrap();
+    let mut observed = libc::pollfd {
+        fd: target.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut observed, 1, 100) }, 0);
+    let worker = thread::spawn(move || {
+        let (mut stream, _) = target.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut data = Vec::new();
+        stream.read_to_end(&mut data).unwrap();
+        assert_eq!(data, b"application-payload");
+        stream.write_all(b"application-reply").unwrap();
+    });
+    client.write_all(&token.as_bytes()[..11]).unwrap();
+    client.write_all(&token.as_bytes()[11..]).unwrap();
+    client.write_all(b"application-payload").unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    assert_eq!(response, b"\x01application-reply");
+    worker.join().unwrap();
+}
+
+#[test]
+fn reused_socket_rejects_old_reservation_and_expiring_partial_handshakes() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let old = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let new = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let port = target.local_addr().unwrap().port();
+    let mut previous = Relay::start_options(port, 10000, None, Some(old), None);
+    let socket = previous.socket.clone();
+    previous.stop();
+    let relay = Relay::start_options(port, 10000, None, Some(new), Some(previous.root.clone()));
+    assert_eq!(relay.socket, socket);
+    for header in [
+        format!("HKR1{old}"),
+        "GET / HTTP/1.1\r\n".into(),
+        "HKR1".into(),
+    ] {
+        let mut client = relay.connect();
+        let started = Instant::now();
+        client.write_all(header.as_bytes()).unwrap();
+        let mut byte = [0];
+        match client.read(&mut byte) {
+            Ok(0) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => (),
+            other => panic!("invalid handshake remained usable: {other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(6));
+        let mut observed = libc::pollfd {
+            fd: target.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut observed, 1, 0) }, 0);
+    }
+    let mut client = relay.connect();
+    client.write_all(format!("HKR1{new}").as_bytes()).unwrap();
+    let mut ack = [0];
+    client.read_exact(&mut ack).unwrap();
+    assert_eq!(ack, [1]);
+    let (_backend, _) = target.accept().unwrap();
+}
+
+#[test]
+fn malformed_reservations_refuse_before_socket_creation() {
+    let root = fresh_root("hkr-reservation");
+    let socket = root.join("app.sock");
+    for token in [
+        "",
+        "short",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "gggggggggggggggggggggggggggggggg",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        let status = Command::new(BINARY)
+            .arg(&socket)
+            .args(["127.0.0.1", "3000", "1000", "--reservation", token])
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(64));
+        assert!(!socket.exists());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn controlled_publisher(
+    socket: &std::path::Path,
+    token: &str,
+    port: u16,
+    control_token: Option<&str>,
+) -> Relay {
+    frontend_publisher(socket, token, port, control_token, false)
+}
+fn frontend_publisher(
+    socket: &std::path::Path,
+    token: &str,
+    port: u16,
+    control_token: Option<&str>,
+    unix: bool,
+) -> Relay {
+    try_frontend_publisher(socket, token, port, control_token, unix)
+        .unwrap_or_else(|failure| panic!("publisher startup refused: {failure:?}"))
+}
+
+#[derive(Debug)]
+struct PublisherStartupFailure {
+    stage: &'static str,
+    status: Option<std::process::ExitStatus>,
+    pid: u32,
+    root: PathBuf,
+}
+struct PublisherStartup {
+    child: Option<Child>,
+    root: PathBuf,
+}
+impl Drop for PublisherStartup {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            if !matches!(child.try_wait(), Ok(Some(_))) {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        if !self.root.as_os_str().is_empty() {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
+impl PublisherStartup {
+    fn failure(&mut self, stage: &'static str) -> PublisherStartupFailure {
+        let child = self.child.as_mut().expect("startup owns child");
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Err(_) => break None,
+                Ok(None) if Instant::now() >= deadline => break None,
+                Ok(None) => thread::sleep(Duration::from_millis(2)),
+            }
+        };
+        PublisherStartupFailure {
+            stage,
+            status,
+            pid: child.id(),
+            root: self.root.clone(),
+        }
+    }
+}
+fn try_frontend_publisher(
+    socket: &std::path::Path,
+    token: &str,
+    port: u16,
+    control_token: Option<&str>,
+    unix: bool,
+) -> Result<Relay, PublisherStartupFailure> {
+    let root = fresh_root("hkp");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = Command::new(BINARY);
+    command
+        .arg(if unix { "--publish-unix" } else { "--publish" })
+        .arg(if unix {
+            root.join("frontend.sock").into_os_string()
+        } else {
+            port.to_string().into()
+        })
+        .arg(socket)
+        .args([token, "10000"]);
+    if let Some(control_token) = control_token {
+        command
+            .arg("--control")
+            .arg(root.join("control.sock"))
+            .arg(control_token);
+    }
+    let mut startup = PublisherStartup { child: None, root };
+    startup.child = Some(command.stdout(Stdio::piped()).spawn().unwrap());
+    let mut output = startup.child.as_mut().unwrap().stdout.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    // Port 0 asks a TCP publisher to bind an ephemeral port and report it as
+    // "ready <port>\n"; every other form keeps the bare "ready\n" line.
+    let ephemeral = port == 0 && !unix;
+    let mut line = Vec::with_capacity(READINESS_LIMIT);
+    // Read one byte per readiness notification: no unbounded read_line after POLLIN.
+    while line.last() != Some(&b'\n') {
+        if line.len() == READINESS_LIMIT {
+            return Err(startup.failure("readiness marker"));
+        }
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(startup.failure("readiness timeout"));
+            }
+            let mut ready = libc::pollfd {
+                fd: output.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one initialized descriptor lives throughout this bounded poll.
+            let polled =
+                unsafe { libc::poll(&mut ready, 1, remaining.as_millis().min(3000) as i32) };
+            if polled < 0
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            }
+            if polled <= 0 {
+                return Err(startup.failure("readiness poll"));
+            }
+            if Instant::now() >= deadline {
+                return Err(startup.failure("readiness timeout"));
+            }
+            let mut byte = [0];
+            match output.read(&mut byte) {
+                Ok(1) => {
+                    line.push(byte[0]);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Ok(0) => return Err(startup.failure("readiness EOF")),
+                _ => return Err(startup.failure("readiness marker")),
+            }
+        }
+    }
+    let published = match (ephemeral, line.as_slice()) {
+        (false, b"ready\n") => (!unix).then_some(port),
+        (true, reported) => match parse_reported_port(reported) {
+            Some(reported) => Some(reported),
+            None => return Err(startup.failure("readiness marker")),
+        },
+        _ => return Err(startup.failure("readiness marker")),
+    };
+    let root = std::mem::take(&mut startup.root);
+    Ok(Relay {
+        child: startup.child.take().unwrap(),
+        socket: root.join(if unix { "frontend.sock" } else { "unused" }),
+        root,
+        port: published,
+    })
+}
+
+/// "ready 65535\n" is the longest valid readiness line.
+const READINESS_LIMIT: usize = 12;
+
+/// Parses "ready <port>\n" with a canonical, nonzero decimal port.
+fn parse_reported_port(line: &[u8]) -> Option<u16> {
+    let digits = line.strip_prefix(b"ready ")?.strip_suffix(b"\n")?;
+    if digits.is_empty() || digits[0] == b'0' || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse::<u16>().ok()
+}
+
+/// Starts a TCP publisher on a kernel-chosen port that stays bound from the
+/// publisher's bind() onward, so parallel tests cannot take it first.
+fn ephemeral_publisher(
+    socket: &std::path::Path,
+    token: &str,
+    control_token: Option<&str>,
+) -> (Relay, u16) {
+    let publication = controlled_publisher(socket, token, 0, control_token);
+    let port = publication.port.expect("TCP publication reports its port");
+    (publication, port)
+}
+
+#[test]
+fn publisher_startup_reports_port_conflict_and_reaps_child() {
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let upstream = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(token),
+        None,
+    );
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let failure = match try_frontend_publisher(
+        &upstream.socket,
+        token,
+        occupied.local_addr().unwrap().port(),
+        None,
+        false,
+    ) {
+        Err(failure) => failure,
+        Ok(_) => panic!("occupied port unexpectedly admitted"),
+    };
+    assert_eq!(failure.stage, "readiness EOF");
+    assert_eq!(failure.status.and_then(|status| status.code()), Some(73));
+    assert!(!failure.root.exists());
+    let mut status = 0;
+    // SAFETY: status is writable; this checks only the exact owned startup child.
+    assert_eq!(
+        unsafe { libc::waitpid(failure.pid as i32, &mut status, libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+    assert!(upstream.socket.exists());
+}
+
+/// Runs a command that must refuse promptly and returns its exit code and stdout.
+/// A child that is still running after the deadline was admitted instead of
+/// refused; it is killed and reaped so the test fails rather than hangs.
+fn bounded_refusal(command: &mut Command) -> (Option<i32>, Vec<u8>) {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("command was admitted instead of refused: {command:?}");
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
+    (status.code(), stdout)
+}
+
+#[test]
+fn ephemeral_publication_reports_its_bound_port_and_explicit_ports_keep_bare_ready() {
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let token = "dddddddddddddddddddddddddddddddd";
+    let guard = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(token),
+        None,
+    );
+    // Only the exact `--publish 0` form selects an ephemeral port.
+    for (mode, endpoint) in [("--publish", "00"), ("--publish-unix", "0")] {
+        let (code, stdout) = bounded_refusal(
+            Command::new(BINARY)
+                .args([mode, endpoint])
+                .arg(&guard.socket)
+                .args([token, "10000"]),
+        );
+        assert_eq!(code, Some(64), "{mode} {endpoint}");
+        assert!(stdout.is_empty());
+    }
+    let (code, stdout) = bounded_refusal(
+        Command::new(BINARY)
+            .arg(guard.root.join("relay-port-zero.sock"))
+            .args(["127.0.0.1", "0", "1000"]),
+    );
+    assert_eq!(code, Some(64));
+    assert!(stdout.is_empty());
+    assert!(!guard.root.join("relay-port-zero.sock").exists());
+
+    let (mut first, first_port) = ephemeral_publisher(&guard.socket, token, None);
+    let (mut second, second_port) = ephemeral_publisher(&guard.socket, token, None);
+    assert_ne!(first_port, second_port);
+    for port in [first_port, second_port] {
+        // The reported port is the publisher's live listener, not a released probe.
+        assert_eq!(
+            TcpListener::bind(("127.0.0.1", port)).unwrap_err().kind(),
+            io::ErrorKind::AddrInUse
+        );
+        std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    }
+    first.stop();
+    second.stop();
+
+    // Explicit ports keep the bare "ready\n" line for existing callers. Picking a
+    // concrete port needs a released probe, so retry only on the publisher's
+    // confirmed bind refusal (no readiness line, exit 73) and never otherwise.
+    let mut attempts = 0;
+    let explicit = loop {
+        attempts += 1;
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        match try_frontend_publisher(&guard.socket, token, port, None, false) {
+            Ok(publication) => break publication,
+            Err(failure)
+                if attempts < 3
+                    && failure.stage == "readiness EOF"
+                    && failure.status.and_then(|status| status.code()) == Some(73) => {}
+            Err(failure) => panic!("explicit-port publisher refused: {failure:?}"),
+        }
+    };
+    let port = explicit.port.expect("explicit TCP port recorded");
+    std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    assert!(guard.socket.exists());
+}
+
+#[test]
+fn loopback_publication_streams_without_exposing_handshake_and_releases_port() {
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let token = "cccccccccccccccccccccccccccccccc";
+    let guard = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(token),
+        None,
+    );
+    let (mut publication, port) = ephemeral_publisher(&guard.socket, token, None);
+    let payload = vec![0x5a; 2 * 1024 * 1024];
+    let expected = payload.clone();
+    let worker = thread::spawn(move || {
+        let (mut stream, _) = backend.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).unwrap();
+        assert_eq!(received, expected);
+        stream.write_all(&received).unwrap();
+    });
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    client.write_all(&payload).unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut received = Vec::new();
+    client.read_to_end(&mut received).unwrap();
+    assert_eq!(received, payload);
+    worker.join().unwrap();
+    publication.stop();
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+    assert!(guard.socket.exists());
+}
+
+#[test]
+fn publisher_refuses_port_conflicts_and_stale_reused_upstream() {
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let old = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let new = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let mut guard = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(old),
+        None,
+    );
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy_port = occupied.local_addr().unwrap().port();
+    assert_eq!(
+        Command::new(BINARY)
+            .arg("--publish")
+            .arg(busy_port.to_string())
+            .arg(&guard.socket)
+            .args([old, "10000"])
+            .status()
+            .unwrap()
+            .code(),
+        Some(73)
+    );
+    assert!(std::net::TcpStream::connect(("127.0.0.1", busy_port)).is_ok());
+    let (_publication, port) = ephemeral_publisher(&guard.socket, old, None);
+    guard.stop();
+    let _replacement = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(new),
+        Some(guard.root.clone()),
+    );
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    client.write_all(b"must-not-reach-new-target").unwrap();
+    let mut byte = [0];
+    match client.read(&mut byte) {
+        Ok(0) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => (),
+        v => panic!("stale publisher accepted: {v:?}"),
+    }
+    let mut ready = libc::pollfd {
+        fd: backend.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut ready, 1, 100) }, 0);
+}
+
+#[test]
+fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
+    use std::os::unix::{fs::MetadataExt, net::UnixListener};
+    let root = fresh_root("hkp-ack");
+    let path = root.join("socket");
+    let upstream = UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let owned = fs::symlink_metadata(&path).unwrap();
+    // The ack contract is transport-independent; avoid releasing a TCP port before spawn.
+    let mut publication = frontend_publisher(&path, token, 0, None, true);
+    let worker = thread::spawn(move || {
+        let (mut socket, _) = upstream.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut header = [0; 36];
+        socket.read_exact(&mut header).unwrap();
+        assert_eq!(&header, format!("HKR1{token}").as_bytes());
+        socket.write_all(&[2]).unwrap();
+        let mut extra = Vec::new();
+        socket.read_to_end(&mut extra).unwrap();
+        assert!(extra.is_empty());
+    });
+    let mut client = publication.connect();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    client.write_all(b"private-application-bytes").unwrap();
+    let mut byte = [0];
+    match client.read(&mut byte) {
+        Ok(0) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => (),
+        v => panic!("bad ack accepted: {v:?}"),
+    }
+    worker.join().unwrap();
+    publication.stop();
+    let retained = fs::symlink_metadata(&path).unwrap();
+    assert_eq!((retained.dev(), retained.ino()), (owned.dev(), owned.ino()));
+    assert_eq!(retained.mode(), owned.mode());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn publisher_refuses_nonprivate_or_aliased_upstream_before_listening() {
+    use std::os::unix::{fs::symlink, net::UnixListener};
+    let root = fresh_root("hkp-private");
+    let path = root.join("socket");
+    let _listener = UnixListener::bind(&path).unwrap();
+    // Hold the requested port for the whole test: a publisher that reached bind()
+    // would exit 73 on it, so exit 78 proves the refusal precedes listening without
+    // probing a released port that a parallel test could have taken.
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    occupied.set_nonblocking(true).unwrap();
+    let port = occupied.local_addr().unwrap().port();
+    let attempt = |upstream: &std::path::Path| {
+        let result = Command::new(BINARY)
+            .arg("--publish")
+            .arg(port.to_string())
+            .arg(upstream)
+            .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(78));
+        assert!(result.stdout.is_empty());
+        assert_eq!(
+            occupied.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    };
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+    attempt(&path);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let alias = root.join("alias");
+    symlink(&path, &alias).unwrap();
+    attempt(&alias);
+    let file = root.join("file");
+    fs::write(&file, b"foreign").unwrap();
+    attempt(&file);
+    assert!(path.exists());
+    assert_eq!(fs::read(&file).unwrap(), b"foreign");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn private_control_stops_only_matching_publisher_and_preserves_replaced_path() {
+    use std::os::unix::net::{UnixDatagram, UnixListener};
+    let root = fresh_root("hkc");
+    let upstream = root.join("upstream");
+    let _server = UnixListener::bind(&upstream).unwrap();
+    fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
+    let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    for replace in [false, true] {
+        let (mut publication, port) = ephemeral_publisher(&upstream, token, Some(token));
+        let path = publication.root.join("control.sock");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let sender = UnixDatagram::unbound().unwrap();
+        sender.connect(&path).unwrap();
+        for invalid in [
+            b"HKSTOP1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".as_slice(),
+            b"HKSTOP1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX",
+            b"HKSTOP1",
+            b"",
+        ] {
+            sender.send(invalid).unwrap();
+        }
+        thread::sleep(Duration::from_millis(50));
+        assert!(publication.child.try_wait().unwrap().is_none());
+        let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        tcp.write_all(b"HKSTOP1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert!(publication.child.try_wait().unwrap().is_none());
+        if replace {
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, b"foreign").unwrap();
+        }
+        sender
+            .send(b"HKSTOP1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(status) = publication.child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < deadline, "private stop did not exit");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut byte = [0];
+        match tcp.read(&mut byte) {
+            Ok(0) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            other => panic!("publisher left stream open: {other:?}"),
+        }
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        assert!(upstream.exists());
+        if replace {
+            assert_eq!(fs::read(&path).unwrap(), b"foreign");
+        } else {
+            assert!(!path.exists());
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn control_startup_refuses_occupied_and_nonprivate_paths_without_retaining_publisher_resources() {
+    use std::os::unix::{fs::MetadataExt, net::UnixListener};
+    let root = fresh_root("hkcf");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let upstream = root.join("upstream");
+    let _server = UnixListener::bind(&upstream).unwrap();
+    fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
+    let control = root.join("control");
+    fs::write(&control, b"foreign").unwrap();
+    let control_identity = fs::symlink_metadata(&control).unwrap();
+    let frontend = root.join("frontend");
+    for unix in [false, true] {
+        for (mode, expected_exit) in [(0o700, 70), (0o755, 78)] {
+            fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+            let mut command = Command::new(BINARY);
+            command
+                .arg(if unix { "--publish-unix" } else { "--publish" })
+                // TCP port 0 binds an ephemeral port inside the publisher, so the TCP
+                // leg always reaches the control path instead of racing a parallel
+                // test for a released port and exiting 73 at bind.
+                .arg(if unix {
+                    frontend.as_os_str().to_owned()
+                } else {
+                    "0".into()
+                })
+                .arg(&upstream)
+                .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000", "--control"])
+                .arg(&control)
+                .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let child = command.spawn().unwrap();
+            let pid = child.id();
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(expected_exit),
+                "unix={unix} mode={mode:o}"
+            );
+            assert!(output.stdout.is_empty());
+            let mut status = 0;
+            // The publisher is one C process with no fork/thread/exec path. Exact
+            // reaping and absence prove its descriptors released the TCP port;
+            // connecting to a reusable port cannot identify the former owner.
+            // SAFETY: pid identifies the awaited child and status is writable.
+            assert_eq!(
+                unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) },
+                -1
+            );
+            assert_eq!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::ECHILD)
+            );
+            // SAFETY: signal zero observes the exact child PID without signaling.
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+            for path in [
+                &frontend,
+                &root.join("frontend.identity"),
+                &root.join("control.identity"),
+            ] {
+                assert_eq!(
+                    fs::symlink_metadata(path).unwrap_err().kind(),
+                    io::ErrorKind::NotFound
+                );
+            }
+            let retained = fs::symlink_metadata(&control).unwrap();
+            assert!(retained.is_file());
+            assert_eq!(retained.dev(), control_identity.dev());
+            assert_eq!(retained.ino(), control_identity.ino());
+            assert_eq!(fs::read(&control).unwrap(), b"foreign");
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unix_publication_streams_and_preserves_occupied_or_replaced_frontend() {
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let token = "abababababababababababababababab";
+    let guard = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(token),
+        None,
+    );
+    let mut publication = frontend_publisher(&guard.socket, token, 0, None, true);
+    assert_eq!(
+        fs::metadata(&publication.socket)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let conflict = Command::new(BINARY)
+        .arg("--publish-unix")
+        .arg(&publication.socket)
+        .arg(&guard.socket)
+        .args([token, "10000"])
+        .output()
+        .unwrap();
+    assert_eq!(conflict.status.code(), Some(73));
+    let server = thread::spawn(move || {
+        let (mut socket, _) = backend.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        socket.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, vec![0x5a; 2 * 1024 * 1024]);
+        socket.write_all(&bytes).unwrap();
+    });
+    let mut client = publication.connect();
+    client.write_all(&vec![0x5a; 2 * 1024 * 1024]).unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut echoed = Vec::new();
+    client.read_to_end(&mut echoed).unwrap();
+    assert_eq!(echoed, vec![0x5a; 2 * 1024 * 1024]);
+    server.join().unwrap();
+    fs::remove_file(&publication.socket).unwrap();
+    fs::write(&publication.socket, b"foreign").unwrap();
+    publication.stop();
+    assert_eq!(fs::read(&publication.socket).unwrap(), b"foreign");
+    assert!(guard.socket.exists());
+    let mut fresh = frontend_publisher(&guard.socket, token, 0, None, true);
+    fresh.stop();
+    assert!(!fresh.socket.exists());
+    assert!(guard.socket.exists());
+    fs::set_permissions(&fresh.root, fs::Permissions::from_mode(0o755)).unwrap();
+    let exposed = Command::new(BINARY)
+        .arg("--publish-unix")
+        .arg(&fresh.socket)
+        .arg(&guard.socket)
+        .args([token, "10000"])
+        .output()
+        .unwrap();
+    assert_eq!(exposed.status.code(), Some(78));
+    assert!(!fresh.socket.exists());
+    fs::set_permissions(&fresh.root, fs::Permissions::from_mode(0o700)).unwrap();
+    let alias = publication.root.join("alias");
+    std::os::unix::fs::symlink(&fresh.root, &alias).unwrap();
+    let aliased = Command::new(BINARY)
+        .arg("--publish-unix")
+        .arg(alias.join("frontend.sock"))
+        .arg(&guard.socket)
+        .args([token, "10000"])
+        .output()
+        .unwrap();
+    assert_eq!(aliased.status.code(), Some(78));
+    assert!(!fresh.socket.exists());
+}
+
+#[test]
+fn unix_publication_survives_a_delayed_private_upstream_ack() {
+    let root = fresh_root("hkr");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let upstream = root.join("delayed.sock");
+    let listener = UnixListener::bind(&upstream).unwrap();
+    fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
+    let token = "abababababababababababababababab";
+    let mut publisher = frontend_publisher(&upstream, token, 0, None, true);
+    let server = thread::spawn(move || {
+        let (mut connection, _) = listener.accept().unwrap();
+        connection
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reservation = [0; 36];
+        connection.read_exact(&mut reservation).unwrap();
+        assert_eq!(&reservation[..4], b"HKR1");
+        assert_eq!(&reservation[4..], token.as_bytes());
+        thread::sleep(Duration::from_millis(1500));
+        connection.write_all(&[1]).unwrap();
+        let mut request = [0; 4];
+        connection.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"ping");
+        connection.write_all(b"pong").unwrap();
+    });
+    let mut client = publisher.connect();
+    client.write_all(b"ping").unwrap();
+    let mut response = [0; 4];
+    client.read_exact(&mut response).unwrap();
+    assert_eq!(&response, b"pong");
+    server.join().unwrap();
+    publisher.stop();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unix_frontend_receipt_survives_crash_and_refuses_foreign_receipt() {
+    use std::os::unix::fs::MetadataExt;
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let token = "abababababababababababababababab";
+    let guard = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(token),
+        None,
+    );
+    let frontend = guard.root.join("frontend.sock");
+    let receipt = guard.root.join("frontend.sock.identity");
+    let start = || {
+        Command::new(BINARY)
+            .arg("--publish-unix")
+            .arg(&frontend)
+            .arg(&guard.socket)
+            .args([token, "10000"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    fs::write(&receipt, b"foreign").unwrap();
+    let failed = start().wait_with_output().unwrap();
+    assert_eq!(failed.status.code(), Some(70));
+    assert!(failed.stdout.is_empty());
+    assert!(!frontend.exists());
+    assert_eq!(fs::read(&receipt).unwrap(), b"foreign");
+    fs::remove_file(&receipt).unwrap();
+    let mut child = start();
+    let output = child.stdout.take().unwrap();
+    let mut descriptor = libc::pollfd {
+        fd: output.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 3000) }, 1);
+    let mut line = String::new();
+    BufReader::new(output).read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    let owned = fs::symlink_metadata(&frontend).unwrap();
+    let expected = format!(
+        "HKPF1 {} {} {} {token}\n",
+        child.id(),
+        owned.dev(),
+        owned.ino()
+    );
+    assert_eq!(fs::read_to_string(&receipt).unwrap(), expected);
+    assert_eq!(fs::metadata(&receipt).unwrap().mode() & 0o777, 0o600);
+    child.kill().unwrap();
+    assert!(!child.wait().unwrap().success());
+    assert_eq!(fs::read_to_string(&receipt).unwrap(), expected);
+    assert_eq!(fs::symlink_metadata(&frontend).unwrap().ino(), owned.ino());
+    // The harness owns these exact paths; managed retirement is a separate gate.
+    fs::remove_file(&frontend).unwrap();
+    fs::remove_file(&receipt).unwrap();
+    let mut normal = frontend_publisher(&guard.socket, token, 0, None, true);
+    let normal_receipt = normal.root.join("frontend.sock.identity");
+    assert!(normal_receipt.exists());
+    normal.stop();
+    assert!(!normal_receipt.exists());
+    assert!(!normal.socket.exists());
+}

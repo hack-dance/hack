@@ -10,6 +10,7 @@ import {
   removeProjectsById,
 } from "../src/lib/projects-registry.ts";
 import type { RuntimeProject } from "../src/lib/runtime-projects.ts";
+import { requireFixtureRoot } from "./helpers/fixture-root.ts";
 
 let tempDir: string | null = null;
 let originalHackHome: string | undefined;
@@ -89,7 +90,11 @@ test("findDeadProjectRegistrations flags only entries with a missing repo root",
   const dead = buildRegistration({
     id: "dead00000001",
     name: "dead",
-    repoRoot: join(tempDir ?? "", "gone", "hack-project-stale"),
+    repoRoot: join(
+      requireFixtureRoot(tempDir, "projects-prune fixture"),
+      "gone",
+      "hack-project-stale"
+    ),
   });
 
   const found = await findDeadProjectRegistrations({
@@ -116,7 +121,11 @@ test("prune removes dead entries from the registry and keeps live ones", async (
   const dead = buildRegistration({
     id: "dead00000001",
     name: "dead",
-    repoRoot: join(tempDir ?? "", "gone", "hack-project-stale"),
+    repoRoot: join(
+      requireFixtureRoot(tempDir, "projects-prune fixture"),
+      "gone",
+      "hack-project-stale"
+    ),
   });
   await writeRegistry([live, dead]);
 
@@ -178,7 +187,10 @@ test("prune dry-run leaves a missing registration intact", async () => {
   const dead = buildRegistration({
     id: "preview000001",
     name: "preview",
-    repoRoot: join(tempDir ?? "", "gone"),
+    repoRoot: join(
+      requireFixtureRoot(tempDir, "projects-prune fixture"),
+      "gone"
+    ),
   });
   await writeRegistry([dead]);
   const { runCli } = await import("../src/cli/run.ts");
@@ -195,4 +207,42 @@ test("prune dry-run leaves a missing registration intact", async () => {
   expect(
     (await readProjectsRegistry()).projects.map((project) => project.id)
   ).toEqual([dead.id]);
+});
+
+test("project-scoped prune accepts one legacy alias and refuses competing registry or runtime identities", () => {
+  const legacy = buildRegistration({
+    id: "legacy",
+    name: "my_app",
+    repoRoot: "/missing/legacy",
+  });
+  const other = buildRegistration({
+    id: "other",
+    name: "my-app",
+    repoRoot: "/missing/other",
+  });
+  expect(
+    __testOnlyProjectsCommand.filterPruneRegistryProjects({
+      projects: [legacy],
+      filter: "my-app",
+    })
+  ).toEqual([legacy]);
+  expect(() =>
+    __testOnlyProjectsCommand.filterPruneRegistryProjects({
+      projects: [legacy, other],
+      filter: "my-app",
+    })
+  ).toThrow("Ambiguous project name");
+  const runtime = [runtimeProject("my_app"), runtimeProject("my_app--feature")];
+  expect(
+    __testOnlyProjectsCommand.filterPruneRuntimeProjects({
+      runtime,
+      filter: "my-app",
+    })
+  ).toEqual(runtime);
+  expect(() =>
+    __testOnlyProjectsCommand.filterPruneRuntimeProjects({
+      runtime: [...runtime, runtimeProject("my-app--other")],
+      filter: "my-app",
+    })
+  ).toThrow("Ambiguous project name");
 });

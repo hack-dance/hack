@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 
-import { DAEMON_LAUNCHD_LABEL } from "../constants.ts";
+import { DAEMON_LAUNCHD_LABEL, GLOBAL_HACK_DIR_NAME } from "../constants.ts";
 import type { DaemonLaunchdConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import {
@@ -17,6 +17,112 @@ import type { DaemonPaths } from "./paths.ts";
 const PID_PATTERN = /pid\s*=\s*(\d+)/i;
 const STATE_PATTERN = /state\s*=\s*(\w+)/i;
 const LAST_EXIT_CODE_PATTERN = /last exit code\s*=\s*(-?\d+)/i;
+
+/**
+ * Hard deny: when set to `1`, no launchd operation runs, whatever HACK_HOME
+ * is. Test harnesses set it, so a regression in the HACK_HOME check below
+ * still cannot reach the per-user launchd service.
+ */
+export const LAUNCHD_DISABLE_ENV = "HACK_LAUNCHD_DISABLE";
+
+/**
+ * Opt-in: when set to `1`, launchd management is allowed even though
+ * HACK_HOME is not `$HOME/.hack`. {@link LAUNCHD_DISABLE_ENV} still wins.
+ */
+export const LAUNCHD_ALLOW_ISOLATED_ENV = "HACK_LAUNCHD_ALLOW_ISOLATED_HOME";
+
+export type LaunchdAccessBlockReason = "disabled" | "isolated-hack-home";
+
+export type LaunchdAccess =
+  | { readonly allowed: true }
+  | {
+      readonly allowed: false;
+      readonly reason: LaunchdAccessBlockReason;
+      readonly message: string;
+    };
+
+/**
+ * Decides whether this process may touch the hackd launchd service.
+ *
+ * The service is a per-user singleton: one label
+ * (`gui/<uid>/dance.hack.hackd`) and one plist under
+ * `$HOME/Library/LaunchAgents`, both outside HACK_HOME. A process with an
+ * isolated HACK_HOME (tests, sandboxes, a second state root) does not own
+ * that service. Installing, repairing, bootstrapping, kickstarting, stopping
+ * or inspecting it from there acts on the real user's daemon and can point
+ * its logs into the isolated directory (HACK-1313).
+ *
+ * Invariant: launchd is allowed only when HACK_HOME is unset or blank,
+ * resolves to `$HOME/.hack`, or {@link LAUNCHD_ALLOW_ISOLATED_ENV} opts in;
+ * and never when {@link LAUNCHD_DISABLE_ENV} is set. Paths are compared after
+ * `resolve`, not `realpath`: a symlinked alias of `~/.hack` counts as
+ * isolated. That fails safe, because callers then start hackd directly.
+ */
+export function resolveLaunchdAccess(
+  opts: { readonly env?: Readonly<Record<string, string | undefined>> } = {}
+): LaunchdAccess {
+  const env = opts.env ?? process.env;
+  if ((env[LAUNCHD_DISABLE_ENV] ?? "").trim() === "1") {
+    return {
+      allowed: false,
+      reason: "disabled",
+      message: `launchd management is disabled by ${LAUNCHD_DISABLE_ENV}=1.`,
+    };
+  }
+  const override = (env.HACK_HOME ?? "").trim();
+  if (override.length === 0) {
+    return { allowed: true };
+  }
+  const home = (env.HOME ?? homedir()).trim();
+  if (resolve(override) === resolve(home, GLOBAL_HACK_DIR_NAME)) {
+    return { allowed: true };
+  }
+  if ((env[LAUNCHD_ALLOW_ISOLATED_ENV] ?? "").trim() === "1") {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason: "isolated-hack-home",
+    message: `launchd management is disabled for an isolated HACK_HOME: the hackd launchd service belongs to $HOME/.hack. Set ${LAUNCHD_ALLOW_ISOLATED_ENV}=1 to manage it anyway.`,
+  };
+}
+
+const NOT_INSTALLED_STATUS: LaunchdServiceStatus = {
+  installed: false,
+  loaded: false,
+  running: false,
+  pid: null,
+  exitStatus: null,
+};
+
+type LaunchctlRun = {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+};
+
+/**
+ * The only place this module runs `launchctl`. It re-checks
+ * {@link resolveLaunchdAccess}, so a caller that skips the check still
+ * cannot reach the per-user service from an isolated HACK_HOME.
+ */
+async function runLaunchctl(args: readonly string[]): Promise<LaunchctlRun> {
+  const access = resolveLaunchdAccess();
+  if (!access.allowed) {
+    return { exitCode: 1, stdout: "", stderr: access.message };
+  }
+  const proc = Bun.spawn(["launchctl", ...args], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  return { exitCode, stdout, stderr };
+}
 
 export interface LaunchdPlistOptions {
   readonly hackBinPath: string;
@@ -91,10 +197,15 @@ export interface LaunchdInstallResult {
   readonly ok: boolean;
   readonly error?: string;
   readonly alreadyInstalled?: boolean;
+  /** Set when {@link resolveLaunchdAccess} refused; nothing was read or written. */
+  readonly blocked?: LaunchdAccessBlockReason;
 }
 
 /**
  * Installs the launchd plist and bootstraps the service.
+ *
+ * Refuses, without touching the plist or launchctl, when
+ * {@link resolveLaunchdAccess} denies access.
  */
 export async function installLaunchdService({
   paths,
@@ -103,6 +214,10 @@ export async function installLaunchdService({
   readonly paths: DaemonPaths;
   readonly config: DaemonLaunchdConfig;
 }): Promise<LaunchdInstallResult> {
+  const access = resolveLaunchdAccess();
+  if (!access.allowed) {
+    return { ok: false, error: access.message, blocked: access.reason };
+  }
   if (process.platform !== "darwin") {
     return { ok: false, error: "launchd is only available on macOS" };
   }
@@ -250,10 +365,17 @@ export type LaunchdProgramRepairResult =
  * compiled-binary virtual path (/$bunfs) or a binary that no longer exists
  * (e.g. an upgraded homebrew Cellar path). Broken plists leave launchd
  * flapping with exit status 78 and the daemon unable to stay up.
+ *
+ * Reports "not-installed" without reading the plist when
+ * {@link resolveLaunchdAccess} denies access: this process does not own the
+ * service, so it has nothing to repair.
  */
 export async function repairLaunchdProgramIfInvalid(opts: {
   readonly paths: DaemonPaths;
 }): Promise<LaunchdProgramRepairResult> {
+  if (!resolveLaunchdAccess().allowed) {
+    return "not-installed";
+  }
   const plistText = await readTextFile(opts.paths.launchdPlistPath);
   if (plistText === null) {
     return "not-installed";
@@ -292,6 +414,8 @@ export interface LaunchdUninstallResult {
   readonly ok: boolean;
   readonly error?: string;
   readonly notInstalled?: boolean;
+  /** Set when {@link resolveLaunchdAccess} refused; nothing was read or removed. */
+  readonly blocked?: LaunchdAccessBlockReason;
 }
 
 /**
@@ -302,6 +426,10 @@ export async function uninstallLaunchdService({
 }: {
   readonly paths: DaemonPaths;
 }): Promise<LaunchdUninstallResult> {
+  const access = resolveLaunchdAccess();
+  if (!access.allowed) {
+    return { ok: false, error: access.message, blocked: access.reason };
+  }
   if (process.platform !== "darwin") {
     return { ok: false, error: "launchd is only available on macOS" };
   }
@@ -340,20 +468,15 @@ async function loadLaunchdService({
 }: {
   readonly plistPath: string;
 }): Promise<LaunchctlResult> {
-  const uid = process.getuid?.() ?? 501;
-  const domain = `gui/${uid}`;
-
-  const proc = Bun.spawn(["launchctl", "bootstrap", domain, plistPath], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  const exitCode = await proc.exited;
+  const { exitCode, stderr } = await runLaunchctl([
+    "bootstrap",
+    launchdDomain(),
+    plistPath,
+  ]);
   if (exitCode === 0) {
     return { ok: true };
   }
 
-  const stderr = await new Response(proc.stderr).text();
   if (
     stderr.includes("already loaded") ||
     stderr.includes("service already loaded")
@@ -364,22 +487,23 @@ async function loadLaunchdService({
   return { ok: false, error: stderr.trim() || `exit code ${exitCode}` };
 }
 
+function launchdDomain(): string {
+  return `gui/${process.getuid?.() ?? 501}`;
+}
+
+function launchdServiceTarget(): string {
+  return `${launchdDomain()}/${DAEMON_LAUNCHD_LABEL}`;
+}
+
 async function unloadLaunchdService(): Promise<LaunchctlResult> {
-  const uid = process.getuid?.() ?? 501;
-  const domain = `gui/${uid}`;
-  const serviceTarget = `${domain}/${DAEMON_LAUNCHD_LABEL}`;
-
-  const proc = Bun.spawn(["launchctl", "bootout", serviceTarget], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  const exitCode = await proc.exited;
+  const { exitCode, stderr } = await runLaunchctl([
+    "bootout",
+    launchdServiceTarget(),
+  ]);
   if (exitCode === 0) {
     return { ok: true };
   }
 
-  const stderr = await new Response(proc.stderr).text();
   if (
     stderr.includes("Could not find specified service") ||
     stderr.includes("No such process") ||
@@ -401,43 +525,32 @@ export interface LaunchdServiceStatus {
 
 /**
  * Gets the current status of the launchd service.
+ *
+ * Reports "not installed" without reading the plist or running launchctl
+ * when {@link resolveLaunchdAccess} denies access. Callers then take their
+ * non-launchd path, for example starting hackd directly under HACK_HOME.
  */
 export async function getLaunchdServiceStatus({
   paths,
 }: {
   readonly paths: DaemonPaths;
 }): Promise<LaunchdServiceStatus> {
+  if (!resolveLaunchdAccess().allowed) {
+    return NOT_INSTALLED_STATUS;
+  }
   if (process.platform !== "darwin") {
-    return {
-      installed: false,
-      loaded: false,
-      running: false,
-      pid: null,
-      exitStatus: null,
-    };
+    return NOT_INSTALLED_STATUS;
   }
 
   const plistExists = await pathExists(paths.launchdPlistPath);
   if (!plistExists) {
-    return {
-      installed: false,
-      loaded: false,
-      running: false,
-      pid: null,
-      exitStatus: null,
-    };
+    return NOT_INSTALLED_STATUS;
   }
 
-  const uid = process.getuid?.() ?? 501;
-  const domain = `gui/${uid}`;
-  const serviceTarget = `${domain}/${DAEMON_LAUNCHD_LABEL}`;
-
-  const proc = Bun.spawn(["launchctl", "print", serviceTarget], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  const exitCode = await proc.exited;
+  const { exitCode, stdout } = await runLaunchctl([
+    "print",
+    launchdServiceTarget(),
+  ]);
   if (exitCode !== 0) {
     return {
       installed: true,
@@ -447,8 +560,6 @@ export async function getLaunchdServiceStatus({
       exitStatus: null,
     };
   }
-
-  const stdout = await new Response(proc.stdout).text();
 
   const pidMatch = stdout.match(PID_PATTERN);
   const pid = pidMatch?.[1] ? Number.parseInt(pidMatch[1], 10) : null;
@@ -475,21 +586,15 @@ export async function getLaunchdServiceStatus({
  * Kicks the launchd service to start it.
  */
 export async function kickstartLaunchdService(): Promise<LaunchctlResult> {
-  const uid = process.getuid?.() ?? 501;
-  const domain = `gui/${uid}`;
-  const serviceTarget = `${domain}/${DAEMON_LAUNCHD_LABEL}`;
-
-  const proc = Bun.spawn(["launchctl", "kickstart", "-k", serviceTarget], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  const exitCode = await proc.exited;
+  const { exitCode, stderr } = await runLaunchctl([
+    "kickstart",
+    "-k",
+    launchdServiceTarget(),
+  ]);
   if (exitCode === 0) {
     return { ok: true };
   }
 
-  const stderr = await new Response(proc.stderr).text();
   return { ok: false, error: stderr.trim() || `exit code ${exitCode}` };
 }
 
@@ -497,21 +602,15 @@ export async function kickstartLaunchdService(): Promise<LaunchctlResult> {
  * Stops the launchd service by sending SIGTERM.
  */
 export async function stopLaunchdService(): Promise<LaunchctlResult> {
-  const uid = process.getuid?.() ?? 501;
-  const domain = `gui/${uid}`;
-  const serviceTarget = `${domain}/${DAEMON_LAUNCHD_LABEL}`;
-
-  const proc = Bun.spawn(["launchctl", "kill", "SIGTERM", serviceTarget], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  const exitCode = await proc.exited;
+  const { exitCode, stderr } = await runLaunchctl([
+    "kill",
+    "SIGTERM",
+    launchdServiceTarget(),
+  ]);
   if (exitCode === 0) {
     return { ok: true };
   }
 
-  const stderr = await new Response(proc.stderr).text();
   if (stderr.includes("No such process") || stderr.includes("not running")) {
     return { ok: true, notLoaded: true };
   }

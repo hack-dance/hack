@@ -11,6 +11,13 @@
       "description": "Operate and onboard Hack-managed local development environments.",
       "category": "development",
       "tags": ["local-development", "docker", "developer-tools", "agents"]
+    },
+    {
+      "name": "hack-mcp",
+      "source": "./plugins/hack-mcp",
+      "description": "Opt-in Hack MCP server (`hack mcp serve`) for agent clients without shell access.",
+      "category": "development",
+      "tags": ["local-development", "developer-tools", "agents", "mcp"]
     }
   ]
 }

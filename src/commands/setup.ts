@@ -1,37 +1,16 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-
 import { isCancel, select, text } from "@clack/prompts";
+import { RETIRED_AGENT_AUTOMATION_MESSAGE } from "../agents/explicit-integrations.ts";
 
 /** Regex to remove leading newlines from text. */
 const LEADING_NEWLINES_PATTERN = /^\n+/;
 
 import {
-  checkClaudeHooks,
-  installClaudeHooks,
-  removeClaudeHooks,
-} from "../agents/claude.ts";
-import {
   checkCodexSkill,
   installCodexSkill,
   removeCodexSkill,
 } from "../agents/codex-skill.ts";
-import {
-  checkCursorRules,
-  installCursorRules,
-  removeCursorRules,
-} from "../agents/cursor.ts";
-import {
-  checkLegacyProjectAgentArtifacts,
-  checkLegacyUserAgentArtifacts,
-  removeLegacyProjectAgentArtifacts,
-  removeLegacyUserAgentArtifacts,
-} from "../agents/legacy-artifacts.ts";
-import {
-  checkSharedHackSkill,
-  installSharedHackSkill,
-  removeSharedHackSkill,
-} from "../agents/shared-skill.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -39,25 +18,19 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import { optPath } from "../cli/options.ts";
+import { optJson, optPath } from "../cli/options.ts";
 import { pathExists, readTextFile, writeTextFile } from "../lib/fs.ts";
 import { canPrompt } from "../lib/interactivity.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
-import type { AgentDocTarget } from "../mcp/agent-docs.ts";
-import {
-  checkAgentDocs,
-  removeAgentDocs,
-  upsertAgentDocs,
-} from "../mcp/agent-docs.ts";
 import type { McpInstallScope, McpTarget } from "../mcp/install.ts";
 import {
   checkMcpConfig,
   installMcpConfig,
   removeMcpConfig,
 } from "../mcp/install.ts";
-import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
+import { handleSetupMigrate, setupMigrateSpec } from "./setup-migrate.ts";
 
 const optCheck = defineOption({
   name: "check",
@@ -115,6 +88,13 @@ const optCodex = defineOption({
   description: "Target Codex integration",
 } as const);
 
+const optInstallMissing = defineOption({
+  name: "installMissing",
+  type: "boolean",
+  long: "--install-missing",
+  description: "Retired compatibility flag; sync always refuses",
+} as const);
+
 const optAgentsMd = defineOption({
   name: "agentsMd",
   type: "boolean",
@@ -145,8 +125,10 @@ const setupSyncOptions = [
   optPath,
   optGlobal,
   optAllScopes,
+  optInstallMissing,
   optCheck,
   optRemove,
+  optJson,
 ] as const;
 const setupMcpOptions = [
   optPath,
@@ -160,18 +142,8 @@ const setupMcpOptions = [
 ] as const;
 
 type SetupTmuxArgs = CommandArgs<typeof setupTmuxOptions, readonly []>;
-type SetupCursorArgs = CommandArgs<typeof setupCursorOptions, readonly []>;
-type SetupClaudeArgs = CommandArgs<typeof setupClaudeOptions, readonly []>;
 type SetupCodexArgs = CommandArgs<typeof setupCodexOptions, readonly []>;
-type SetupAgentsArgs = CommandArgs<typeof setupAgentsOptions, readonly []>;
-type SetupSyncArgs = CommandArgs<typeof setupSyncOptions, readonly []>;
 type SetupMcpArgs = CommandArgs<typeof setupMcpOptions, readonly []>;
-
-type SetupMultiLogResult = {
-  readonly status: string;
-  readonly path?: string;
-  readonly message?: string;
-};
 
 const tmuxSpec = defineCommand({
   name: "tmux",
@@ -184,7 +156,7 @@ const tmuxSpec = defineCommand({
 
 const cursorSpec = defineCommand({
   name: "cursor",
-  summary: "Install Cursor rules for hack CLI usage",
+  summary: "Retired: automatic Cursor rules are unavailable",
   group: "Agents",
   options: setupCursorOptions,
   positionals: [],
@@ -193,7 +165,7 @@ const cursorSpec = defineCommand({
 
 const claudeSpec = defineCommand({
   name: "claude",
-  summary: "Install Claude Code hooks for hack CLI usage",
+  summary: "Retired: automatic Claude hooks are unavailable",
   group: "Agents",
   options: setupClaudeOptions,
   positionals: [],
@@ -211,7 +183,7 @@ const codexSpec = defineCommand({
 
 const agentsSpec = defineCommand({
   name: "agents",
-  summary: "Install AGENTS.md / CLAUDE.md snippets for hack CLI usage",
+  summary: "Retired: instruction injection is unavailable",
   group: "Agents",
   options: setupAgentsOptions,
   positionals: [],
@@ -220,7 +192,7 @@ const agentsSpec = defineCommand({
 
 const syncSpec = defineCommand({
   name: "sync",
-  summary: "Refresh project/global agent guidance",
+  summary: "Retired: automatic integration sync is unavailable",
   group: "Agents",
   options: setupSyncOptions,
   positionals: [],
@@ -238,7 +210,7 @@ const mcpSpec = defineCommand({
 
 export const setupCommand = defineCommand({
   name: "setup",
-  summary: "Install integrations for coding agents",
+  summary: "Explicit opt-in skills and MCP; legacy automation is retired",
   group: "Agents",
   options: [],
   positionals: [],
@@ -250,6 +222,7 @@ export const setupCommand = defineCommand({
     withHandler(codexSpec, handleSetupCodex),
     withHandler(agentsSpec, handleSetupAgents),
     withHandler(syncSpec, handleSetupSync),
+    withHandler(setupMigrateSpec, handleSetupMigrate),
     withHandler(mcpSpec, handleSetupMcp),
   ],
 } as const);
@@ -510,64 +483,12 @@ async function resolveTmuxConfigToEdit(opts: {
     : customPath;
 }
 
-async function handleSetupCursor({
-  ctx,
-  args,
-}: {
-  readonly ctx: CliContext;
-  readonly args: SetupCursorArgs;
-}): Promise<number> {
-  const action = resolveAction(args.options);
-  const scope = resolveScope({ global: args.options.global === true });
-  const projectRoot =
-    scope === "project"
-      ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
-      : undefined;
-
-  let result: Awaited<ReturnType<typeof checkCursorRules>>;
-  if (action === "check") {
-    result = await checkCursorRules({ scope, projectRoot });
-  } else if (action === "remove") {
-    result = await removeCursorRules({ scope, projectRoot });
-  } else {
-    result = await installCursorRules({ scope, projectRoot });
-  }
-
-  return logSingleResult({
-    action,
-    okMessage: "Cursor integration",
-    result,
-  });
+function handleSetupCursor(): Promise<number> {
+  throw new CliUsageError(RETIRED_AGENT_AUTOMATION_MESSAGE);
 }
 
-async function handleSetupClaude({
-  ctx,
-  args,
-}: {
-  readonly ctx: CliContext;
-  readonly args: SetupClaudeArgs;
-}): Promise<number> {
-  const action = resolveAction(args.options);
-  const scope = resolveScope({ global: args.options.global === true });
-  const projectRoot =
-    scope === "project"
-      ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
-      : undefined;
-
-  let result: Awaited<ReturnType<typeof checkClaudeHooks>>;
-  if (action === "check") {
-    result = await checkClaudeHooks({ scope, projectRoot });
-  } else if (action === "remove") {
-    result = await removeClaudeHooks({ scope, projectRoot });
-  } else {
-    result = await installClaudeHooks({ scope, projectRoot });
-  }
-
-  return logSingleResult({
-    action,
-    okMessage: "Claude integration",
-    result,
-  });
+function handleSetupClaude(): Promise<number> {
+  throw new CliUsageError(RETIRED_AGENT_AUTOMATION_MESSAGE);
 }
 
 async function handleSetupCodex({
@@ -600,313 +521,12 @@ async function handleSetupCodex({
   });
 }
 
-async function handleSetupAgents({
-  ctx,
-  args,
-}: {
-  readonly ctx: CliContext;
-  readonly args: SetupAgentsArgs;
-}): Promise<number> {
-  const action = resolveAction(args.options);
-  const projectRoot = await resolveSetupRoot({
-    ctx,
-    pathOpt: args.options.path,
-  });
-  const targets = resolveDocTargets({
-    all: args.options.all === true,
-    agentsMd: args.options.agentsMd === true,
-    claudeMd: args.options.claudeMd === true,
-  });
-
-  const resolvedTargets =
-    targets.length > 0 ? targets : (["agents", "claude"] as const);
-
-  if (action === "check") {
-    const results = await checkAgentDocs({
-      projectRoot,
-      targets: resolvedTargets,
-    });
-    return logMultiResults({
-      action,
-      okMessage: "Agent docs",
-      results,
-    });
-  }
-
-  if (action === "remove") {
-    const results = await removeAgentDocs({
-      projectRoot,
-      targets: resolvedTargets,
-    });
-    return logMultiResults({
-      action,
-      okMessage: "Agent docs",
-      results,
-    });
-  }
-
-  const results = await upsertAgentDocs({
-    projectRoot,
-    targets: resolvedTargets,
-  });
-  return logMultiResults({
-    action,
-    okMessage: "Agent docs",
-    results,
-  });
+function handleSetupAgents(): Promise<number> {
+  throw new CliUsageError(RETIRED_AGENT_AUTOMATION_MESSAGE);
 }
 
-type SetupSyncAction = "install" | "check" | "remove";
-
-type SetupSyncGroup = {
-  readonly label: string;
-  readonly results: readonly SetupMultiLogResult[];
-};
-
-type SetupSyncScopeResult = {
-  readonly exitCode: number;
-  readonly item: DisplayStatusItem;
-};
-
-export function buildSetupSyncScopeResult(input: {
-  readonly action: SetupSyncAction;
-  readonly scope: "Project" | "Global";
-  readonly groups: readonly SetupSyncGroup[];
-}): SetupSyncScopeResult {
-  const entries = input.groups.flatMap((group) =>
-    group.results.map((result) => ({ ...result, label: group.label }))
-  );
-  const failures = entries.filter((entry) => {
-    if (entry.status === "error") {
-      return true;
-    }
-    return (
-      input.action === "check" &&
-      ["missing", "stale", "deprecated"].includes(entry.status)
-    );
-  });
-  const errorCount = failures.filter(
-    (entry) => entry.status === "error"
-  ).length;
-  let status: DisplayStatusItem["status"] = "ok";
-  if (errorCount > 0) {
-    status = "error";
-  } else if (failures.length > 0) {
-    status = "warn";
-  }
-  const meta = (() => {
-    if (input.action === "check") {
-      return failures.length === 0
-        ? `${entries.length} current`
-        : `${entries.length - failures.length}/${entries.length} current`;
-    }
-    if (input.action === "remove") {
-      const removed = entries.filter(
-        (entry) => entry.status === "removed"
-      ).length;
-      return `${removed} removed`;
-    }
-    const changed = entries.filter((entry) =>
-      ["created", "updated", "removed"].includes(entry.status)
-    ).length;
-    return changed === 0 ? "already current" : `${changed} updated`;
-  })();
-  const detail = failures
-    .map((entry) => {
-      if (entry.message) {
-        return `${entry.label}: ${entry.message}`;
-      }
-      const location = entry.path ? ` at ${entry.path}` : "";
-      return `${entry.label}: ${entry.status}${location}`;
-    })
-    .join("\n");
-
-  return {
-    exitCode: failures.length > 0 ? 1 : 0,
-    item: {
-      label: input.scope,
-      status,
-      meta,
-      detail: detail.length > 0 ? detail : undefined,
-    },
-  };
-}
-
-async function handleSetupSync({
-  ctx,
-  args,
-}: {
-  readonly ctx: CliContext;
-  readonly args: SetupSyncArgs;
-}): Promise<number> {
-  const action = resolveAction(args.options);
-  const scopes = resolveSyncScopes({
-    global: args.options.global === true,
-    allScopes: args.options.allScopes === true,
-  });
-  const includesProject = scopes.includes("project");
-  const includesUser = scopes.includes("user");
-  const projectRoot = includesProject
-    ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
-    : undefined;
-  const scopeResults: SetupSyncScopeResult[] = [];
-
-  if (includesProject && projectRoot) {
-    scopeResults.push(
-      await runProjectScopeSync({
-        action,
-        projectRoot,
-      })
-    );
-  }
-
-  if (includesUser) {
-    scopeResults.push(await runUserScopeSync({ action }));
-  }
-
-  const titles: Readonly<Record<SetupSyncAction, string>> = {
-    check: "Agent integrations",
-    install: "Agent integrations updated",
-    remove: "Agent integrations removed",
-  };
-  await display.statusList({
-    title: titles[action],
-    items: scopeResults.map((result) => result.item),
-  });
-  return Math.max(0, ...scopeResults.map((result) => result.exitCode));
-}
-
-/** Run one explicit sync action across all project-scope integrations. */
-async function runProjectScopeSync(opts: {
-  readonly action: SetupSyncAction;
-  readonly projectRoot: string;
-}): Promise<SetupSyncScopeResult> {
-  const { action, projectRoot } = opts;
-  let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
-  let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
-  let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
-  let legacyResults: SetupMultiLogResult[];
-  let mcpResults: SetupMultiLogResult[];
-  let docsResults: SetupMultiLogResult[];
-
-  if (action === "check") {
-    cursorResult = await checkCursorRules({ scope: "project", projectRoot });
-    claudeResult = await checkClaudeHooks({ scope: "project", projectRoot });
-    codexResult = await checkCodexSkill({ scope: "project", projectRoot });
-    legacyResults = await checkLegacyProjectAgentArtifacts({ projectRoot });
-    mcpResults = await checkMcpConfig({
-      scope: "project",
-      targets: ["cursor", "claude", "codex"],
-      projectRoot,
-    });
-    docsResults = await checkAgentDocs({
-      projectRoot,
-      targets: ["agents", "claude"],
-    });
-  } else if (action === "remove") {
-    cursorResult = await removeCursorRules({ scope: "project", projectRoot });
-    claudeResult = await removeClaudeHooks({ scope: "project", projectRoot });
-    codexResult = await removeCodexSkill({ scope: "project", projectRoot });
-    legacyResults = await removeLegacyProjectAgentArtifacts({ projectRoot });
-    mcpResults = await removeMcpConfig({
-      scope: "project",
-      targets: ["cursor", "claude", "codex"],
-      projectRoot,
-    });
-    docsResults = await removeAgentDocs({
-      projectRoot,
-      targets: ["agents", "claude"],
-    });
-  } else {
-    cursorResult = await installCursorRules({ scope: "project", projectRoot });
-    claudeResult = await installClaudeHooks({ scope: "project", projectRoot });
-    codexResult = await installCodexSkill({ scope: "project", projectRoot });
-    legacyResults = await removeLegacyProjectAgentArtifacts({ projectRoot });
-    mcpResults = await installMcpConfig({
-      scope: "project",
-      targets: ["cursor", "claude", "codex"],
-      projectRoot,
-    });
-    docsResults = await upsertAgentDocs({
-      projectRoot,
-      targets: ["agents", "claude"],
-    });
-  }
-
-  return buildSetupSyncScopeResult({
-    action,
-    scope: "Project",
-    groups: [
-      { label: "Cursor", results: [cursorResult] },
-      { label: "Claude", results: [claudeResult] },
-      { label: "Codex", results: [codexResult] },
-      { label: "Retired agent artifacts", results: legacyResults },
-      { label: "MCP config", results: mcpResults },
-      { label: "Agent docs", results: docsResults },
-    ],
-  });
-}
-
-/**
- * Run one sync action across all global (user) scope integrations and log
- * results. Shared `~/.ai/skills` guidance is managed alongside client-specific
- * integrations. Known retired Hack-owned skills are cleaned up safely.
- */
-async function runUserScopeSync(opts: {
-  readonly action: SetupSyncAction;
-}): Promise<SetupSyncScopeResult> {
-  const { action } = opts;
-  let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
-  let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
-  let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
-  let sharedSkillResult: SetupMultiLogResult & { readonly path: string };
-  let legacyResults: SetupMultiLogResult[];
-  let mcpResults: SetupMultiLogResult[];
-
-  if (action === "check") {
-    cursorResult = await checkCursorRules({ scope: "user" });
-    claudeResult = await checkClaudeHooks({ scope: "user" });
-    codexResult = await checkCodexSkill({ scope: "user" });
-    sharedSkillResult = await checkSharedHackSkill();
-    legacyResults = await checkLegacyUserAgentArtifacts();
-    mcpResults = await checkMcpConfig({
-      scope: "user",
-      targets: ["cursor", "claude", "codex"],
-    });
-  } else if (action === "remove") {
-    cursorResult = await removeCursorRules({ scope: "user" });
-    claudeResult = await removeClaudeHooks({ scope: "user" });
-    codexResult = await removeCodexSkill({ scope: "user" });
-    sharedSkillResult = await removeSharedHackSkill();
-    legacyResults = await removeLegacyUserAgentArtifacts();
-    mcpResults = await removeMcpConfig({
-      scope: "user",
-      targets: ["cursor", "claude", "codex"],
-    });
-  } else {
-    cursorResult = await installCursorRules({ scope: "user" });
-    claudeResult = await installClaudeHooks({ scope: "user" });
-    codexResult = await installCodexSkill({ scope: "user" });
-    sharedSkillResult = await installSharedHackSkill();
-    legacyResults = await removeLegacyUserAgentArtifacts();
-    mcpResults = await installMcpConfig({
-      scope: "user",
-      targets: ["cursor", "claude", "codex"],
-    });
-  }
-
-  return buildSetupSyncScopeResult({
-    action,
-    scope: "Global",
-    groups: [
-      { label: "Cursor", results: [cursorResult] },
-      { label: "Claude", results: [claudeResult] },
-      { label: "Codex", results: [codexResult] },
-      { label: "Shared Hack skill", results: [sharedSkillResult] },
-      { label: "Retired agent artifacts", results: legacyResults },
-      { label: "MCP config", results: mcpResults },
-    ],
-  });
+function handleSetupSync(): Promise<number> {
+  throw new CliUsageError(RETIRED_AGENT_AUTOMATION_MESSAGE);
 }
 
 async function handleSetupMcp({
@@ -996,19 +616,6 @@ function resolveScope(opts: { readonly global: boolean }): "project" | "user" {
   return opts.global ? "user" : "project";
 }
 
-function resolveSyncScopes(opts: {
-  readonly global: boolean;
-  readonly allScopes: boolean;
-}): readonly ("project" | "user")[] {
-  if (opts.allScopes) {
-    return ["project", "user"];
-  }
-  if (opts.global) {
-    return ["user"];
-  }
-  return ["project"];
-}
-
 function resolveMcpScope(opts: { readonly global: boolean }): McpInstallScope {
   return opts.global ? "user" : "project";
 }
@@ -1036,22 +643,9 @@ function resolveMcpTargets(opts: {
   if (targets.length > 0) {
     return targets;
   }
-  return ["cursor", "claude", "codex"];
-}
-
-function resolveDocTargets(opts: {
-  readonly all: boolean;
-  readonly agentsMd: boolean;
-  readonly claudeMd: boolean;
-}): AgentDocTarget[] {
-  const targets: AgentDocTarget[] = [];
-  if (opts.all || opts.agentsMd) {
-    targets.push("agents");
-  }
-  if (opts.all || opts.claudeMd) {
-    targets.push("claude");
-  }
-  return targets;
+  throw new CliUsageError(
+    "Select an MCP client with --cursor, --claude or --codex, or explicitly pass --all."
+  );
 }
 
 function logSingleResult(opts: {
@@ -1078,11 +672,22 @@ function logSingleResult(opts: {
     });
   }
 
+  if (opts.result.status === "preserved") {
+    // Preserving edited or foreign content is the safe outcome, not a failure.
+    logger.warn({
+      message: `Preserved ${opts.okMessage} at ${opts.result.path}: ${opts.result.message ?? "not owned by Hack"}`,
+    });
+    return 0;
+  }
+
   if (opts.action === "remove") {
     if (opts.result.status === "removed") {
       logger.success({
         message: `Removed ${opts.okMessage} at ${opts.result.path}`,
       });
+      if (opts.result.message) {
+        logger.info({ message: opts.result.message });
+      }
       return 0;
     }
     logger.info({

@@ -1,7 +1,13 @@
-import { confirm, isCancel, password, text } from "@clack/prompts";
+import { isCancel, password, text } from "@clack/prompts";
+
+import { secrets } from "bun";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
-import { keychain } from "../lib/keychain.ts";
+import {
+  canPrompt,
+  confirmSafe,
+  requireInteractive,
+} from "../lib/interactivity.ts";
 import { logger } from "../ui/logger.ts";
 
 const DEFAULT_SECRETS_SERVICE = "hack-cli" as const;
@@ -15,11 +21,24 @@ const optService = defineOption({
   defaultValue: DEFAULT_SECRETS_SERVICE,
 } as const);
 
+const optYes = defineOption({
+  name: "yes",
+  type: "boolean",
+  long: "--yes",
+  description:
+    "Confirm the deletion without prompting (required without a TTY or with HACK_NO_INTERACTIVE)",
+} as const);
+
 const secretsOptions = [optService] as const;
+const deleteOptions = [optService, optYes] as const;
 const secretsPositionals = [{ name: "name", required: false }] as const;
 
 type SecretsArgs = CommandArgs<
   typeof secretsOptions,
+  typeof secretsPositionals
+>;
+type SecretsDeleteArgs = CommandArgs<
+  typeof deleteOptions,
   typeof secretsPositionals
 >;
 
@@ -45,7 +64,11 @@ const deleteSpec = defineCommand({
   name: "delete",
   summary: "Delete a stored secret",
   group: "Secrets",
-  options: secretsOptions,
+  description: [
+    "Asks for confirmation before deleting. Without a TTY (or with HACK_NO_INTERACTIVE / --no-interactive)",
+    "the deletion is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.",
+  ].join("\n"),
+  options: deleteOptions,
   positionals: secretsPositionals,
   subcommands: [],
 } as const);
@@ -64,7 +87,7 @@ export const secretsCommand = defineCommand({
   ],
 } as const);
 
-function resolveService(args: SecretsArgs): string {
+function resolveService(args: SecretsArgs | SecretsDeleteArgs): string {
   return args.options.service ?? DEFAULT_SECRETS_SERVICE;
 }
 
@@ -72,6 +95,13 @@ async function resolveName(positionals: readonly string[]): Promise<string> {
   const fromPos = (positionals[0] ?? "").trim();
   if (fromPos.length > 0) {
     return fromPos;
+  }
+
+  if (!canPrompt()) {
+    requireInteractive({
+      what: "a secret name is required",
+      hint: "Pass the name as an argument (e.g. `hack secrets get <name>`).",
+    });
   }
 
   const name = await text({
@@ -101,6 +131,13 @@ async function handleSecretsSet({
     [args.positionals.name].filter((v) => typeof v === "string")
   );
 
+  if (!canPrompt()) {
+    requireInteractive({
+      what: `a value for secret "${name}" is required`,
+      hint: "Run `hack secrets set <name>` in a terminal; the value is read from a hidden prompt and never from an argument.",
+    });
+  }
+
   const value = await password({
     message: `Value for "${name}" (${service}):`,
     validate: (v) => (!v || v.length === 0 ? "Required" : undefined),
@@ -109,7 +146,7 @@ async function handleSecretsSet({
     return 1;
   }
 
-  await keychain.set({ service, name, value });
+  await secrets.set({ service, name, value });
   logger.success({
     message: `Stored secret "${name}" under service "${service}"`,
   });
@@ -127,7 +164,7 @@ async function handleSecretsGet({
     [args.positionals.name].filter((v) => typeof v === "string")
   );
 
-  const value = await keychain.get({ service, name });
+  const value = await secrets.get({ service, name });
   if (value === null) {
     logger.warn({ message: `No secret found for "${name}" (${service})` });
     return 1;
@@ -138,29 +175,38 @@ async function handleSecretsGet({
   return 0;
 }
 
+/**
+ * `hack secrets delete <name>`.
+ *
+ * `--yes` is the explicit confirmation that makes the deletion scriptable; it
+ * skips the prompt in every mode. Without it, a TTY run asks (default no) and
+ * a run that cannot prompt refuses closed with `E_INTERACTIVE_REQUIRED`
+ * before the keychain is touched.
+ */
 async function handleSecretsDelete({
   args,
 }: {
   readonly ctx: CliContext;
-  readonly args: SecretsArgs;
+  readonly args: SecretsDeleteArgs;
 }): Promise<number> {
   const service = resolveService(args);
   const name = await resolveName(
     [args.positionals.name].filter((v) => typeof v === "string")
   );
 
-  const ok = await confirm({
-    message: `Delete secret "${name}" (${service})?`,
-    initialValue: false,
-  });
-  if (isCancel(ok)) {
-    return 1;
-  }
+  const ok =
+    args.options.yes === true ||
+    (await confirmSafe({
+      message: `Delete secret "${name}" (${service})?`,
+      initialValue: false,
+      nonInteractive: "fail",
+      hint: "Pass --yes to confirm the deletion (`hack secrets delete <name> --yes`), or run it in a terminal.",
+    }));
   if (!ok) {
     return 0;
   }
 
-  const deleted = await keychain.delete({ service, name });
+  const deleted = await secrets.delete({ service, name });
   if (!deleted) {
     logger.warn({
       message: `No secret found to delete for "${name}" (${service})`,

@@ -4,8 +4,9 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { chmod, stat, writeFile } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { secrets } from "bun";
 import type {
   CloudSecretProvider,
   SecretsBackend,
@@ -14,7 +15,14 @@ import type {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
-import { isKeychainDisabled, keychain } from "./keychain.ts";
+import {
+  decodeCanonicalBase64,
+  publishPrivateFileExclusive,
+  type ReplaceablePrivateFileOptions,
+  readReplaceablePrivateFile,
+  replacePrivateFileAtomic,
+} from "./private-file.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 
 const ENCRYPTED_FILE_KEY_ENV = "HACK_SECRETS_FILE_KEY";
 const DISABLE_ENCRYPTED_FILE_KEYCHAIN_FALLBACK_ENV =
@@ -27,7 +35,14 @@ const ENCRYPTED_STORE_VERSION = 1 as const;
 const PLAINTEXT_STORE_VERSION = 1 as const;
 const ENCRYPTED_ALGORITHM = "aes-256-gcm";
 const ENCRYPTED_IV_BYTES = 12;
+const ENCRYPTED_TAG_BYTES = 16;
+/** Decoded ciphertext bound for the whole encrypted store. */
+const ENCRYPTED_CIPHERTEXT_LIMIT = 16 * 1024 * 1024;
+const ENCRYPTED_STORE_WRITE_REFUSAL =
+  "Refused encrypted secret store write: the store path is a symlink or not a regular file. Replace it with a regular file and retry; values omitted.";
 let cachedEncryptedFileKey: string | null = null;
+/** Per-path tail of the in-process mutation queue; see withEncryptedStoreMutation. */
+const encryptedStoreMutationTails = new Map<string, Promise<void>>();
 let encryptedFileKeyFailureCooldownUntilMs = 0;
 
 type EncryptedStorePayload = {
@@ -36,6 +51,13 @@ type EncryptedStorePayload = {
   readonly iv: string;
   readonly tag: string;
   readonly ciphertext: string;
+};
+
+/** Envelope fields decoded and size-checked; the bytes are not yet authenticated. */
+type ParsedEncryptedEnvelope = {
+  readonly iv: Buffer;
+  readonly tag: Buffer;
+  readonly ciphertext: Buffer;
 };
 
 type PlaintextStore = {
@@ -64,10 +86,13 @@ export type SecretStore = {
  * Resolve the active secret backend for a project context.
  *
  * Backends are controlled via `controlPlane.secrets.backend`.
+ * Set allowKeyProvisioning=false for reads that must not generate or copy key
+ * material. Existing native key access and its authorization are preserved.
  */
 export async function resolveSecretStore(input: {
   readonly projectName: string;
   readonly projectDir?: string;
+  readonly allowKeyProvisioning?: boolean;
 }): Promise<SecretStore> {
   const controlPlane = await readControlPlaneConfig({
     ...(input.projectDir ? { projectDir: input.projectDir } : {}),
@@ -78,6 +103,7 @@ export async function resolveSecretStore(input: {
       projectName: input.projectName,
       projectDir: input.projectDir,
       secretsConfig,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     });
   }
   if (secretsConfig.backend === "cloud") {
@@ -85,6 +111,7 @@ export async function resolveSecretStore(input: {
       projectName: input.projectName,
       projectDir: input.projectDir,
       secretsConfig,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     });
   }
   return createKeychainSecretStore({ projectName: input.projectName });
@@ -130,19 +157,19 @@ function createKeychainSecretStore(input: {
       mode: "native",
     },
     get: async ({ key }) =>
-      await keychain.get({
+      await secrets.get({
         service,
         name: key,
       }),
     set: async ({ key, value }) => {
-      await keychain.set({
+      await secrets.set({
         service,
         name: key,
         value,
       });
     },
     delete: async ({ key }) =>
-      await keychain.delete({
+      await secrets.delete({
         service,
         name: key,
       }),
@@ -192,6 +219,7 @@ function describeSecretStoreDescriptor(input: {
 async function createEncryptedFileSecretStore(input: {
   readonly projectName: string;
   readonly projectDir?: string;
+  readonly allowKeyProvisioning?: boolean;
   readonly secretsConfig: SecretsConfig;
 }): Promise<SecretStore> {
   const filePath = resolveConfiguredPath({
@@ -208,6 +236,7 @@ async function createEncryptedFileSecretStore(input: {
     await resolveEncryptedFileKeyMaterial({
       keyPath,
       storePath: filePath,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     })
   ).key;
   return createEncryptedScopedStore({
@@ -222,6 +251,7 @@ async function createEncryptedFileSecretStore(input: {
 async function createCloudSecretStore(input: {
   readonly projectName: string;
   readonly projectDir?: string;
+  readonly allowKeyProvisioning?: boolean;
   readonly secretsConfig: SecretsConfig;
 }): Promise<SecretStore> {
   const provider = input.secretsConfig.cloud.provider;
@@ -235,6 +265,7 @@ async function createCloudSecretStore(input: {
     provider,
     projectName: input.projectName,
     secretsConfig: input.secretsConfig,
+    allowKeyProvisioning: input.allowKeyProvisioning,
   });
   return {
     descriptor: {
@@ -253,6 +284,7 @@ async function createCloudProviderAdapter(input: {
   readonly provider: CloudSecretProvider;
   readonly projectName: string;
   readonly projectDir?: string;
+  readonly allowKeyProvisioning?: boolean;
   readonly secretsConfig: SecretsConfig;
 }): Promise<
   Pick<SecretStore, "get" | "set" | "delete"> & { readonly location: string }
@@ -263,6 +295,7 @@ async function createCloudProviderAdapter(input: {
       projectName: input.projectName,
       projectDir: input.projectDir,
       secretsConfig: input.secretsConfig,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     });
   }
   if (input.provider === "gcp") {
@@ -271,6 +304,7 @@ async function createCloudProviderAdapter(input: {
       projectName: input.projectName,
       projectDir: input.projectDir,
       secretsConfig: input.secretsConfig,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     });
   }
   if (input.provider === "azure") {
@@ -279,6 +313,7 @@ async function createCloudProviderAdapter(input: {
       projectName: input.projectName,
       projectDir: input.projectDir,
       secretsConfig: input.secretsConfig,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     });
   }
   return await createCloudShimAdapter({
@@ -286,6 +321,7 @@ async function createCloudProviderAdapter(input: {
     projectName: input.projectName,
     projectDir: input.projectDir,
     secretsConfig: input.secretsConfig,
+    allowKeyProvisioning: input.allowKeyProvisioning,
   });
 }
 
@@ -293,6 +329,7 @@ async function createCloudShimAdapter(input: {
   readonly provider: CloudSecretProvider;
   readonly projectName: string;
   readonly projectDir?: string;
+  readonly allowKeyProvisioning?: boolean;
   readonly secretsConfig: SecretsConfig;
 }): Promise<
   Pick<SecretStore, "get" | "set" | "delete"> & { readonly location: string }
@@ -313,6 +350,7 @@ async function createCloudShimAdapter(input: {
     await resolveEncryptedFileKeyMaterial({
       keyPath,
       storePath: filePath,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     })
   ).key;
   const scope = [
@@ -361,43 +399,89 @@ function createEncryptedScopedStore(input: {
       });
       return entries[scopedKey] ?? null;
     },
-    set: async ({ key, value }) => {
-      const entries = await readEncryptedEntries({
+    set: async ({ key, value }) =>
+      await withEncryptedStoreMutation({
         filePath: input.filePath,
-        encryptionKey: input.encryptionKey,
-      });
-      const scopedKey = buildScopedSecretKey({
-        scope: input.scope,
-        key,
-      });
-      entries[scopedKey] = value;
-      await writeEncryptedEntries({
+        run: async () => {
+          const entries = await readEncryptedEntries({
+            filePath: input.filePath,
+            encryptionKey: input.encryptionKey,
+          });
+          const scopedKey = buildScopedSecretKey({
+            scope: input.scope,
+            key,
+          });
+          entries[scopedKey] = value;
+          await writeEncryptedEntries({
+            filePath: input.filePath,
+            encryptionKey: input.encryptionKey,
+            entries,
+          });
+        },
+      }),
+    delete: async ({ key }) =>
+      await withEncryptedStoreMutation({
         filePath: input.filePath,
-        encryptionKey: input.encryptionKey,
-        entries,
-      });
-    },
-    delete: async ({ key }) => {
-      const entries = await readEncryptedEntries({
-        filePath: input.filePath,
-        encryptionKey: input.encryptionKey,
-      });
-      const scopedKey = buildScopedSecretKey({
-        scope: input.scope,
-        key,
-      });
-      if (!(scopedKey in entries)) {
-        return false;
-      }
-      delete entries[scopedKey];
-      await writeEncryptedEntries({
-        filePath: input.filePath,
-        encryptionKey: input.encryptionKey,
-        entries,
-      });
-      return true;
-    },
+        run: async () => {
+          const entries = await readEncryptedEntries({
+            filePath: input.filePath,
+            encryptionKey: input.encryptionKey,
+          });
+          const scopedKey = buildScopedSecretKey({
+            scope: input.scope,
+            key,
+          });
+          if (!(scopedKey in entries)) {
+            return false;
+          }
+          delete entries[scopedKey];
+          await writeEncryptedEntries({
+            filePath: input.filePath,
+            encryptionKey: input.encryptionKey,
+            entries,
+          });
+          return true;
+        },
+      }),
   };
+}
+
+/**
+ * Serializes read-modify-write of one encrypted store file.
+ *
+ * Writers in this process queue per configured path, so they never poll each
+ * other; across processes the cooperative `<store>.lock` (the same exclusive
+ * hard-link owner protocol as the projects registry, with dead-owner recovery)
+ * admits one writer at a time. Every set/delete re-reads the store inside the
+ * lock, so a concurrent writer's update is never lost. Reads take no lock:
+ * writes replace the file atomically, so a reader sees a whole envelope.
+ */
+async function withEncryptedStoreMutation<T>(input: {
+  readonly filePath: string;
+  readonly run: () => Promise<T>;
+}): Promise<T> {
+  const previous =
+    encryptedStoreMutationTails.get(input.filePath) ?? Promise.resolve();
+  let release = (): void => undefined;
+  const turn = new Promise<void>((resolveTurn) => {
+    release = resolveTurn;
+  });
+  const tail = previous.then(() => turn);
+  encryptedStoreMutationTails.set(input.filePath, tail);
+  await previous;
+  try {
+    await ensureDir(dirname(input.filePath));
+    return await withProjectsRegistryLock({
+      lockPath: `${input.filePath}.lock`,
+      label: "encrypted secret store",
+      run: input.run,
+    });
+  } finally {
+    release();
+    if (encryptedStoreMutationTails.get(input.filePath) === tail) {
+      encryptedStoreMutationTails.delete(input.filePath);
+    }
+  }
 }
 
 function buildScopedSecretKey(input: {
@@ -476,15 +560,17 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   readonly keyPath?: string;
   readonly storePath?: string;
   readonly persistResolvedKey?: boolean;
+  readonly allowKeyProvisioning?: boolean;
 }): Promise<{
   readonly key: string;
   readonly source: "env" | "file" | "keychain" | "generated";
 }> {
+  const allowKeyProvisioning = input?.allowKeyProvisioning !== false;
   const envValue = (process.env[ENCRYPTED_FILE_KEY_ENV] ?? "").trim();
   if (envValue.length > 0) {
     cachedEncryptedFileKey = envValue;
     encryptedFileKeyFailureCooldownUntilMs = 0;
-    if (input?.persistResolvedKey && input.keyPath) {
+    if (allowKeyProvisioning && input?.persistResolvedKey && input.keyPath) {
       await writeEncryptedFileKey({
         keyPath: input.keyPath,
         key: envValue,
@@ -511,8 +597,20 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     }
   }
 
-  if (!isKeychainDisabled() && cachedEncryptedFileKey) {
-    if (input?.persistResolvedKey && input.keyPath) {
+  if (
+    isTruthyEnvFlag(process.env[DISABLE_ENCRYPTED_FILE_KEYCHAIN_FALLBACK_ENV])
+  ) {
+    throw new Error(
+      buildEncryptedBackendKeyRecoveryMessage({
+        keyPath: configuredKeyPath,
+        storePath: input?.storePath,
+        reason: "keychain_disabled",
+      })
+    );
+  }
+
+  if (cachedEncryptedFileKey) {
+    if (allowKeyProvisioning && input?.persistResolvedKey && input.keyPath) {
       await writeEncryptedFileKey({
         keyPath: input.keyPath,
         key: cachedEncryptedFileKey,
@@ -525,32 +623,39 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   }
 
   const shouldBootstrapFileKey =
+    allowKeyProvisioning &&
     Boolean(configuredKeyPath) &&
     (await canBootstrapEncryptedFileKey({
       storePath: input?.storePath,
     }));
   if (configuredKeyPath && shouldBootstrapFileKey) {
     const generated = randomBytes(32).toString("base64url");
-    await writeEncryptedFileKey({
+    const key = await createOrAdoptEncryptedFileKey({
       keyPath: configuredKeyPath,
       key: generated,
     });
-    cachedEncryptedFileKey = generated;
+    cachedEncryptedFileKey = key;
     encryptedFileKeyFailureCooldownUntilMs = 0;
     return {
-      key: generated,
-      source: "generated",
+      key,
+      source: key === generated ? "generated" : "file",
     };
   }
-
-  if (isKeychainDisabled()) {
-    throw new Error(
-      buildEncryptedBackendKeyRecoveryMessage({
-        keyPath: configuredKeyPath,
-        storePath: input?.storePath,
-        reason: "keychain_disabled",
-      })
-    );
+  if (configuredKeyPath) {
+    // A first user publishes its key file before it writes the store, so a
+    // store found non-empty after the first key read implies a key file that
+    // may have appeared since. Prefer it to the keychain.
+    const publishedKey = await readEncryptedFileKey({
+      keyPath: configuredKeyPath,
+    });
+    if (publishedKey) {
+      cachedEncryptedFileKey = publishedKey;
+      encryptedFileKeyFailureCooldownUntilMs = 0;
+      return {
+        key: publishedKey,
+        source: "file",
+      };
+    }
   }
 
   const nowMs = Date.now();
@@ -567,7 +672,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   let existing: string | undefined;
   try {
     existing = (
-      await keychain.get({
+      await secrets.get({
         service: ENCRYPTED_FILE_KEY_SERVICE,
         name: ENCRYPTED_FILE_KEY_NAME,
       })
@@ -584,7 +689,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     );
   }
   if (existing) {
-    if (configuredKeyPath) {
+    if (allowKeyProvisioning && configuredKeyPath) {
       await writeEncryptedFileKey({
         keyPath: configuredKeyPath,
         key: existing,
@@ -598,7 +703,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     };
   }
 
-  if (configuredKeyPath) {
+  if (configuredKeyPath || !allowKeyProvisioning) {
     throw new Error(
       buildEncryptedBackendKeyRecoveryMessage({
         keyPath: configuredKeyPath,
@@ -610,7 +715,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
 
   const generated = randomBytes(32).toString("base64url");
   try {
-    await keychain.set({
+    await secrets.set({
       service: ENCRYPTED_FILE_KEY_SERVICE,
       name: ENCRYPTED_FILE_KEY_NAME,
       value: generated,
@@ -656,16 +761,58 @@ async function readEncryptedFileKey(input: {
   return key.length > 0 ? key : null;
 }
 
+function encryptedFileKeyOptions(input: {
+  readonly keyPath: string;
+}): ReplaceablePrivateFileOptions {
+  return {
+    path: input.keyPath,
+    directories: [dirname(input.keyPath)],
+    refusal: () =>
+      new Error(
+        "Refused encrypted secret key write: the key path or its directory is aliased or not a regular file; values omitted."
+      ),
+  };
+}
+
+/** Explicit provisioning: replaces the key file atomically (0600). */
 async function writeEncryptedFileKey(input: {
   readonly keyPath: string;
   readonly key: string;
 }): Promise<void> {
   await ensureDir(dirname(input.keyPath));
-  await writeFile(input.keyPath, `${input.key}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
+  await replacePrivateFileAtomic({
+    ...encryptedFileKeyOptions(input),
+    text: `${input.key}\n`,
   });
-  await chmod(input.keyPath, 0o600).catch(() => undefined);
+}
+
+/**
+ * First-use bootstrap of a generated key; returns the key now stored.
+ *
+ * Concurrent first users must converge on one key: a key that is replaced
+ * after another process has encrypted the store with it leaves that store
+ * undecryptable. The generated key is therefore published only when no key
+ * file exists (complete contents, never a partial file); otherwise the key
+ * already published is adopted. An existing empty key file is replaced as
+ * before, since a published key is never empty.
+ */
+async function createOrAdoptEncryptedFileKey(input: {
+  readonly keyPath: string;
+  readonly key: string;
+}): Promise<string> {
+  await ensureDir(dirname(input.keyPath));
+  const options = encryptedFileKeyOptions(input);
+  if (
+    await publishPrivateFileExclusive({ ...options, text: `${input.key}\n` })
+  ) {
+    return input.key;
+  }
+  const existing = (await readReplaceablePrivateFile(options))?.text.trim();
+  if (existing) {
+    return existing;
+  }
+  await replacePrivateFileAtomic({ ...options, text: `${input.key}\n` });
+  return input.key;
 }
 
 async function readEncryptedEntries(input: {
@@ -691,10 +838,17 @@ async function readEncryptedEntries(input: {
       `Invalid encrypted secret store payload at ${input.filePath}.`
     );
   }
-  const plaintext = decryptStore({
-    envelope,
-    encryptionKey: input.encryptionKey,
-  });
+  let plaintext: string;
+  try {
+    plaintext = decryptStore({
+      envelope,
+      encryptionKey: input.encryptionKey,
+    });
+  } catch {
+    throw new Error(
+      `Cannot decrypt encrypted secret store at ${input.filePath}: the key does not match or the payload was modified.`
+    );
+  }
   return parsePlaintextStore(plaintext).entries;
 }
 
@@ -712,10 +866,24 @@ async function writeEncryptedEntries(input: {
     encryptionKey: input.encryptionKey,
   });
   await ensureDir(dirname(input.filePath));
-  await Bun.write(input.filePath, `${JSON.stringify(envelope, null, 2)}\n`);
+  // Atomic same-directory replace with mode 0600. The configured store
+  // location's ancestors are the user's choice and are not inspected.
+  await replacePrivateFileAtomic({
+    path: input.filePath,
+    directories: [],
+    text: `${JSON.stringify(envelope, null, 2)}\n`,
+    refusal: () => new Error(ENCRYPTED_STORE_WRITE_REFUSAL),
+  });
 }
 
-function parseEncryptedEnvelope(value: unknown): EncryptedStorePayload | null {
+/**
+ * Accepts only the v1 envelope with canonical padded base64 fields, a 12-byte
+ * IV, a 16-byte tag and a bounded ciphertext. Anything else returns null so the
+ * caller reports a fixed, value-free error.
+ */
+function parseEncryptedEnvelope(
+  value: unknown
+): ParsedEncryptedEnvelope | null {
   if (!(value && typeof value === "object")) {
     return null;
   }
@@ -729,13 +897,26 @@ function parseEncryptedEnvelope(value: unknown): EncryptedStorePayload | null {
   ) {
     return null;
   }
-  return {
-    version: ENCRYPTED_STORE_VERSION,
-    algorithm: ENCRYPTED_ALGORITHM,
-    iv: maybe.iv,
-    tag: maybe.tag,
-    ciphertext: maybe.ciphertext,
-  };
+  const iv = decodeCanonicalBase64({
+    text: maybe.iv,
+    maxBytes: ENCRYPTED_IV_BYTES,
+  });
+  const tag = decodeCanonicalBase64({
+    text: maybe.tag,
+    maxBytes: ENCRYPTED_TAG_BYTES,
+  });
+  const ciphertext = decodeCanonicalBase64({
+    text: maybe.ciphertext,
+    maxBytes: ENCRYPTED_CIPHERTEXT_LIMIT,
+  });
+  if (
+    iv?.length !== ENCRYPTED_IV_BYTES ||
+    tag?.length !== ENCRYPTED_TAG_BYTES ||
+    ciphertext === null
+  ) {
+    return null;
+  }
+  return { iv, tag, ciphertext };
 }
 
 function parsePlaintextStore(value: string): PlaintextStore {
@@ -776,7 +957,9 @@ function encryptStore(input: {
 }): EncryptedStorePayload {
   const iv = randomBytes(ENCRYPTED_IV_BYTES);
   const key = deriveEncryptionKey({ source: input.encryptionKey });
-  const cipher = createCipheriv(ENCRYPTED_ALGORITHM, key, iv);
+  const cipher = createCipheriv(ENCRYPTED_ALGORITHM, key, iv, {
+    authTagLength: ENCRYPTED_TAG_BYTES,
+  });
   const ciphertext = Buffer.concat([
     cipher.update(input.plaintext, "utf8"),
     cipher.final(),
@@ -792,17 +975,19 @@ function encryptStore(input: {
 }
 
 function decryptStore(input: {
-  readonly envelope: EncryptedStorePayload;
+  readonly envelope: ParsedEncryptedEnvelope;
   readonly encryptionKey: string;
 }): string {
   const key = deriveEncryptionKey({ source: input.encryptionKey });
-  const iv = Buffer.from(input.envelope.iv, "base64");
-  const tag = Buffer.from(input.envelope.tag, "base64");
-  const ciphertext = Buffer.from(input.envelope.ciphertext, "base64");
-  const decipher = createDecipheriv(ENCRYPTED_ALGORITHM, key, iv);
-  decipher.setAuthTag(tag);
+  const decipher = createDecipheriv(
+    ENCRYPTED_ALGORITHM,
+    key,
+    input.envelope.iv,
+    { authTagLength: ENCRYPTED_TAG_BYTES }
+  );
+  decipher.setAuthTag(input.envelope.tag);
   const plaintext = Buffer.concat([
-    decipher.update(ciphertext),
+    decipher.update(input.envelope.ciphertext),
     decipher.final(),
   ]);
   return plaintext.toString("utf8");
@@ -839,4 +1024,14 @@ function buildEncryptedBackendKeyRecoveryMessage(input: {
   }
 
   return `Missing encrypted backend key${location}. ${recovery} Hack will not fall back to plaintext .hack/.env or ambient process env.`;
+}
+
+function isTruthyEnvFlag(value: string | undefined): boolean {
+  const normalized = (value ?? "").trim().toLowerCase();
+  return (
+    normalized === "1" ||
+    normalized === "true" ||
+    normalized === "yes" ||
+    normalized === "on"
+  );
 }

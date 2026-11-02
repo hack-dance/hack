@@ -2,7 +2,6 @@ import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { confirm, isCancel, password, select, text } from "@clack/prompts";
 import { YAML } from "bun";
-
 import type { CliContext, CommandHandlerFor } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -10,10 +9,29 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
+import {
+  assertLegacyEnvScope,
+  parseApplyServiceOption,
+  parseEnvGetArguments,
+  parseEnvScopeOption,
+  parseExecutionScopeOptions,
+  parseMaterializeScopeOption,
+} from "../cli/env-arguments.ts";
+import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
+import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import {
+  parseEnvHydrateInputFormat,
+  readEnvHydrateInput,
+} from "../lib/env-hydrate-input.ts";
+import {
+  assertEnvValueStdinUsage,
+  readEnvValueFromStdin,
+} from "../lib/env-value-stdin.ts";
 import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -28,6 +46,7 @@ import {
   resolveEnvFilePath,
   resolveEnvSecretKey,
   resolveHackEnv,
+  resolveHackEnvValue,
   selectHackEnvValues,
   upsertDotEnvValue,
   validateHackEnvMutationSource,
@@ -46,29 +65,36 @@ import {
   requireInteractive,
 } from "../lib/interactivity.ts";
 import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
-  parseEnvConfigSelection,
   readProjectConfig,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import {
+  assertProjectEnvLayerPaths,
   assertValidProjectEnvScopeName,
+  describeUnmigratedLegacyDotenv,
   discoverComposeServiceNames,
+  ENV_KEY_INVALID_MESSAGE,
+  findUnmigratedLegacyDotenv,
+  hasUnmigratedLegacyDotenv,
+  hydrateProjectEnvLocalLayer,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
   projectEnvConfigExists,
+  projectEnvConfigExistsForMutation,
   readMaterializedProjectEnv,
   resolveProjectEnvConfig,
+  resolveProjectEnvValue,
   selectProjectEnvValues,
   selectProjectEnvValuesForExecutionTarget,
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../lib/project-env-config.ts";
-import { resolveRegisteredProjectByName } from "../lib/projects-registry.ts";
 import {
   formatSecretStoreDescriptor,
   provisionEncryptedFileKey,
@@ -91,6 +117,14 @@ const optSecret = defineOption({
   type: "boolean",
   long: "--secret",
   description: "Store value as an encrypted secure entry",
+} as const);
+
+const optValueStdin = defineOption({
+  name: "valueStdin",
+  type: "boolean",
+  long: "--value-stdin",
+  description:
+    "Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history",
 } as const);
 
 const optLocal = defineOption({
@@ -194,6 +228,19 @@ const listSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const getSpec = defineCommand({
+  name: "get",
+  summary: "Print one resolved env value without an added newline",
+  description:
+    "Read one global or service value without starting a runtime. Empty values succeed; missing values fail. Omit --env to use the configured default, or use --env default for base layers. Plaintext is written only to stdout; errors go to stderr.",
+  group: "Project",
+  options: [optPath, optProject, optEnv, optService],
+  positionals: [{ name: "key", required: true }],
+  subcommands: [],
+  sensitiveOutputError:
+    "Unable to read env value. Check the key, arguments, project env configuration, and key/backend access. Use hack env get --help for usage.",
+} as const);
+
 const explainSpec = defineCommand({
   name: "explain",
   summary: "Explain a resolved env value without revealing it",
@@ -215,8 +262,18 @@ const applySpec = defineCommand({
 const addSpec = defineCommand({
   name: "add",
   summary: "Add or update an env value",
+  description:
+    "Non-secret values may be passed as arguments. For secrets, pipe the value with --value-stdin (for example `<secret-source> | hack env add API_TOKEN --secret --value-stdin`) or omit the value in a terminal to use the hidden prompt, so the value never appears in argv, shell history, or process listings.",
   group: "Project",
-  options: [optPath, optProject, optEnv, optSecret, optLocal, optService],
+  options: [
+    optPath,
+    optProject,
+    optEnv,
+    optSecret,
+    optValueStdin,
+    optLocal,
+    optService,
+  ],
   positionals: [
     { name: "key", required: false },
     { name: "value", required: false },
@@ -227,12 +284,60 @@ const addSpec = defineCommand({
 const setSpec = defineCommand({
   name: "set",
   summary: "Alias for env add",
+  description:
+    "Same value rules as `hack env add`: pipe secrets with --value-stdin or use the hidden prompt instead of passing them as arguments.",
   group: "Project",
-  options: [optPath, optProject, optEnv, optSecret, optLocal, optService],
+  options: [
+    optPath,
+    optProject,
+    optEnv,
+    optSecret,
+    optValueStdin,
+    optLocal,
+    optService,
+  ],
   positionals: [
     { name: "key", required: false },
     { name: "value", required: false },
   ],
+  subcommands: [],
+} as const);
+
+const optHydrateFile = defineOption({
+  name: "file",
+  type: "string",
+  long: "--file",
+  valueHint: "<path>",
+  description:
+    "Read entries from this file (or a pipe such as <(producer)) instead of stdin",
+} as const);
+
+const optHydrateFormat = defineOption({
+  name: "format",
+  type: "string",
+  long: "--format",
+  valueHint: "<env|json>",
+  description:
+    "Input format: KEY=value lines (env, default) or one JSON object of string values (json)",
+} as const);
+
+const hydrateSpec = defineCommand({
+  name: "hydrate",
+  summary: "Import many values into the machine-local env layer at once",
+  description:
+    "Reads KEY=value entries from piped stdin or --file (never from arguments) and writes them, in one atomic commit, to the worktree-local env file (`hack.env.local.yaml`, or `hack.env.<overlay>.local.yaml` with --env). Tracked env files are never written. Repeating an import with the same values changes nothing; other local entries are kept. Values are never printed.",
+  group: "Project",
+  options: [
+    optPath,
+    optProject,
+    optEnv,
+    optJson,
+    optSecret,
+    optService,
+    optHydrateFile,
+    optHydrateFormat,
+  ],
+  positionals: [],
   subcommands: [],
 } as const);
 
@@ -261,7 +366,9 @@ const execSpec = defineCommand({
     optHostTimeout,
     optHostLifetime,
   ],
-  positionals: [{ name: "command", required: false, multiple: true }],
+  positionals: [
+    { name: "command", required: false, multiple: true, passthrough: true },
+  ],
   subcommands: [],
 } as const);
 
@@ -292,7 +399,9 @@ const hostExecSpec = defineCommand({
     optHostTimeout,
     optHostLifetime,
   ],
-  positionals: [{ name: "command", required: false, multiple: true }],
+  positionals: [
+    { name: "command", required: false, multiple: true, passthrough: true },
+  ],
   subcommands: [],
 } as const);
 
@@ -578,22 +687,14 @@ async function resolveProjectForEnv(opts: {
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
 }): Promise<ProjectContext> {
-  if (opts.pathOpt && opts.projectOpt) {
+  if (opts.pathOpt && opts.projectOpt !== undefined) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (opts.projectOpt) {
-    const name = sanitizeProjectSlug(opts.projectOpt);
-    if (!name) {
-      throw new CliUsageError("Invalid --project value.");
-    }
-    const project = await resolveRegisteredProjectByName({ name });
-    if (!project) {
-      throw new CliUsageError(
-        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
-      );
-    }
-    return project;
+  if (opts.projectOpt !== undefined) {
+    return await resolveRegisteredProjectOption({
+      projectOpt: opts.projectOpt,
+    });
   }
 
   const startDir = opts.pathOpt
@@ -601,7 +702,7 @@ async function resolveProjectForEnv(opts: {
     : opts.ctx.cwd;
   const project = await findProjectContext(startDir);
   if (!project) {
-    throw new CliUsageError("No .hack/ found. Run: hack init");
+    throw new MissingProjectContextError();
   }
   return project;
 }
@@ -611,16 +712,6 @@ async function resolveProjectName(project: ProjectContext): Promise<string> {
   const derived = defaultProjectSlugFromPath(project.projectRoot);
   const raw = (cfg.name ?? derived).trim();
   return sanitizeProjectSlug(raw.length > 0 ? raw : derived);
-}
-
-function resolveRequestedEnvName(input: {
-  readonly envOption: string | undefined;
-}): string | null | undefined {
-  const envName = parseEnvConfigSelection(input.envOption);
-  if (input.envOption !== undefined && envName === undefined) {
-    throw new CliUsageError("Invalid --env value.");
-  }
-  return envName;
 }
 
 async function resolveConfiguredSecretStore(input: {
@@ -731,8 +822,9 @@ function resolveHostEnvTarget(input: {
   ) {
     return target as (typeof HOST_ENV_TARGET_VALUES)[number];
   }
+  // Fixed text: the rejected argument may be a pasted value.
   throw new CliUsageError(
-    `Invalid --target "${target}". Expected one of: ${HOST_ENV_TARGET_VALUES.join(", ")}`
+    `Invalid --target value. Expected one of: ${HOST_ENV_TARGET_VALUES.join(", ")}.`
   );
 }
 
@@ -896,7 +988,7 @@ async function promptForEnvAddInput(input: {
   if (!canPrompt()) {
     requireInteractive({
       what: "hack env add needs a key and value",
-      hint: "Pass them as arguments: `hack env add <scope>/<KEY> <value>` (or `hack env add KEY VALUE --service <scope>`, with --secret for secrets).",
+      hint: "Pass the key as an argument and pipe the value on stdin: `<value-source> | hack env add <scope>/<KEY> --value-stdin` (add --secret for secrets). Non-secret values may also be passed as `hack env add <scope>/<KEY> <value>`; never pass secret values as arguments.",
     });
   }
 
@@ -975,6 +1067,53 @@ async function promptForEnvAddInput(input: {
   };
 }
 
+const handleEnvGet: CommandHandlerFor<typeof getSpec> = async ({
+  ctx,
+  args,
+}) => {
+  const { key, scope } = parseEnvGetArguments({
+    key: args.positionals.key,
+    serviceName: args.options.service,
+  });
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const envName = resolveRequestedEnvName({ envOption: args.options.env });
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: project.composeFile,
+  });
+  const modern = await resolveProjectEnvValue({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    envName,
+    serviceNames,
+    scope,
+    key,
+  });
+  const value =
+    modern === null
+      ? await resolveHackEnvValue({
+          projectDir: project.projectDir,
+          projectName: await resolveProjectName(project),
+          envName,
+          scope,
+          key,
+        })
+      : modern.value;
+  if (value === null) {
+    process.stderr.write(
+      "Env value is not set in the selected scope and overlay.\n"
+    );
+    return 1;
+  }
+  // This command is an explicit single-value disclosure. Do not log, decorate,
+  // trim, materialize, or add a newline; empty values are successful zero bytes.
+  process.stdout.write(value);
+  return 0;
+};
+
 const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
   ctx,
   args,
@@ -996,17 +1135,9 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     envName,
   });
   if (modern) {
-    const selectedScope = (() => {
-      try {
-        return assertValidProjectEnvScopeName({
-          scopeName: args.options.service,
-        });
-      } catch (error: unknown) {
-        throw new CliUsageError(
-          error instanceof Error ? error.message : "Invalid env scope."
-        );
-      }
-    })();
+    const selectedScope = parseEnvScopeOption({
+      scopeName: args.options.service,
+    });
     const envValues = selectProjectEnvValues({
       resolved: modern,
       scopeName: selectedScope,
@@ -1171,25 +1302,12 @@ async function resolveModernEnvExplain(opts: {
   readonly scope: string;
   readonly target: "host" | "compose";
 }): Promise<EnvExplainPayload> {
-  const hostValue = opts.modern.merged.values.host?.[opts.key];
-  const scopedValue =
-    opts.scope === "global"
-      ? undefined
-      : opts.modern.merged.values[opts.scope]?.[opts.key];
-  const globalValue = opts.modern.merged.values.global?.[opts.key];
-  const usesHost = opts.target === "host" && hostValue !== undefined;
-  let effectiveScope: string | null = null;
-  let storedValue: unknown;
-  if (usesHost) {
-    effectiveScope = "host";
-    storedValue = hostValue;
-  } else if (scopedValue !== undefined) {
-    effectiveScope = opts.scope;
-    storedValue = scopedValue;
-  } else if (globalValue !== undefined) {
-    effectiveScope = "global";
-    storedValue = globalValue;
-  }
+  const metadata = (
+    opts.target === "host"
+      ? opts.modern.hostEffectiveMetadata
+      : opts.modern.effectiveMetadata
+  )[opts.scope]?.[opts.key];
+  const effectiveScope = metadata?.scope ?? null;
   const sourceFile =
     effectiveScope === null
       ? null
@@ -1200,15 +1318,15 @@ async function resolveModernEnvExplain(opts: {
         });
   return {
     key: opts.key,
-    available: storedValue !== undefined,
-    secret: storedValue !== undefined && isModernSecretStoredValue(storedValue),
+    available: metadata !== undefined,
+    secret: metadata?.secret ?? false,
     format: "project_env_config_v1",
     environment: opts.modern.selection.effectiveEnv,
     requested_scope: opts.scope,
     effective_scope: effectiveScope,
     target: opts.target,
     delivered_to: resolveEnvExplainDelivery({
-      available: storedValue !== undefined,
+      available: metadata !== undefined,
       target: opts.target,
     }),
     source:
@@ -1223,18 +1341,19 @@ const handleEnvExplain: CommandHandlerFor<typeof explainSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
-  const project = await resolveProjectForEnv({
-    ctx,
-    pathOpt: args.options.path,
-    projectOpt: args.options.project,
-  });
-  const projectName = await resolveProjectName(project);
+  // Refuse malformed arguments with fixed text before any project file is read.
   const envName = resolveRequestedEnvName({ envOption: args.options.env });
   const parsed = parseProjectEnvTarget({
     keyOrPath: args.positionals.key,
     scopeOverride: args.options.service,
   });
   const target = resolveHostEnvTarget({ targetOption: args.options.target });
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const projectName = await resolveProjectName(project);
   const modern = await loadModernProjectEnv({ project, envName });
   if (modern) {
     renderEnvExplain(
@@ -1292,10 +1411,10 @@ const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
-  const service = args.options.service?.trim() ?? "";
-  if (service.length === 0 || service === "global") {
-    throw new CliUsageError("--service <compose-service> is required.");
-  }
+  const service = parseApplyServiceOption({
+    serviceName: args.options.service,
+  });
+  const envName = resolveRequestedEnvName({ envOption: args.options.env });
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
@@ -1310,8 +1429,9 @@ const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
     "--path",
     project.projectRoot,
   ];
-  if (args.options.env) {
-    command.push("--env", args.options.env);
+  // Forward only the validated selection, never the raw argument.
+  if (envName !== undefined) {
+    command.push("--env", envName ?? "base");
   }
   if (args.options.json) {
     command.push("--json");
@@ -1350,19 +1470,9 @@ function isModernSecretAtScope(input: {
   readonly scope: string;
   readonly key: string;
 }): boolean {
-  const scopedValue =
-    input.scope === "global"
-      ? undefined
-      : input.modern.merged.values[input.scope]?.[input.key];
-  if (scopedValue !== undefined) {
-    return isModernSecretStoredValue(scopedValue);
-  }
-  const globalValue = input.modern.merged.values.global?.[input.key];
-  return globalValue !== undefined && isModernSecretStoredValue(globalValue);
-}
-
-function isModernSecretStoredValue(value: unknown): boolean {
-  return isRecord(value) && typeof value.secure === "string";
+  return (
+    input.modern.effectiveMetadata[input.scope]?.[input.key]?.secret ?? false
+  );
 }
 
 function buildModernEnvJsonPayload(input: {
@@ -1440,9 +1550,7 @@ function buildModernEnvJsonPayload(input: {
         scope: input.selectedScope,
         key,
       });
-      const secret = resolvedValue
-        ? isModernSecretStoredValue(resolvedValue.value)
-        : false;
+      const secret = resolvedValue?.secret ?? false;
       const services =
         resolvedValue?.scope && resolvedValue.scope !== "global"
           ? [resolvedValue.scope]
@@ -1487,20 +1595,8 @@ function resolveModernStoredValue(input: {
   >;
   readonly scope: string;
   readonly key: string;
-}): { readonly scope: string; readonly value: unknown } | null {
-  if (input.scope !== "global") {
-    const scopedValue = input.modern.merged.values[input.scope]?.[input.key];
-    if (scopedValue !== undefined) {
-      return { scope: input.scope, value: scopedValue };
-    }
-  }
-
-  const globalValue = input.modern.merged.values.global?.[input.key];
-  if (globalValue !== undefined) {
-    return { scope: "global", value: globalValue };
-  }
-
-  return null;
+}): { readonly scope: string; readonly secret: boolean } | null {
+  return input.modern.effectiveMetadata[input.scope]?.[input.key] ?? null;
 }
 
 function serializeEnvStorageForJson(input: {
@@ -1681,24 +1777,48 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  const keyArg = args.positionals.key?.trim();
+  const valueArg = args.positionals.value;
+  const valueStdin = args.options.valueStdin === true;
+  // --value-stdin: refuse bad combinations and read the bounded value before
+  // any project file is migrated or written, so a refusal stores nothing.
+  if (valueStdin) {
+    assertEnvValueStdinUsage({
+      hasKey: Boolean(keyArg),
+      hasPositionalValue:
+        valueArg !== undefined || keyArg?.includes("=") === true,
+    });
+  }
+  // Validate a key argument with fixed, value-free refusals before stdin is
+  // read or any project file is migrated or written.
+  const interactive = !(valueStdin || keyArg || valueArg);
+  const argTarget = interactive
+    ? null
+    : parseProjectEnvTarget({
+        keyOrPath: keyArg ?? "",
+        scopeOverride: args.options.service,
+      });
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
-  const projectName = await resolveProjectName(project);
-  const envName = resolveRequestedEnvName({
-    envOption: args.options.env,
+
+  await assertProjectEnvLayerPaths({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
   });
+  const stdinValue = valueStdin ? await readEnvValueFromStdin() : null;
+  const projectName = await resolveProjectName(project);
   await maybeMigrateLegacyProjectEnv({
     project,
     projectName,
     reason: "mutation",
   });
 
-  const keyArg = args.positionals.key?.trim();
-  const valueArg = args.positionals.value;
-  const interactive = !(keyArg || valueArg);
   const prompted = interactive
     ? await promptForEnvAddInput({
         project,
@@ -1708,17 +1828,18 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
 
   const parsedTarget = prompted
     ? { scope: prompted.scope, key: prompted.key }
-    : parseProjectEnvTarget({
-        keyOrPath: keyArg ?? "",
-        scopeOverride: args.options.service,
-      });
-  const value = prompted
-    ? prompted.value
-    : await resolveEnvValue({
-        key: parsedTarget.key,
-        value: valueArg ?? null,
-        secret: args.options.secret === true,
-      });
+    : argTarget;
+  if (!parsedTarget) {
+    throw new CliUsageError("Env key is required.");
+  }
+  const value =
+    prompted?.value ??
+    stdinValue ??
+    (await resolveEnvValue({
+      key: parsedTarget.key,
+      value: valueArg ?? null,
+      secret: args.options.secret === true,
+    }));
   const secret = prompted ? prompted.secret : args.options.secret === true;
 
   const result = await setProjectEnvValue({
@@ -1751,17 +1872,42 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  const rawKey = (args.positionals.key ?? "").trim();
+  const rawValue = args.positionals.value;
+  const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(
+    rawValue === undefined ? rawKey : `${rawKey}=${rawValue}`
+  );
+  const valueFromStdin = args.options.valueStdin === true;
+  if (valueFromStdin) {
+    assertEnvValueStdinUsage({
+      hasKey: keyFromSpec.length > 0,
+      hasPositionalValue: valueFromSpec !== null,
+    });
+  }
+  // Refuse an invalid scope in either env format before the project is read,
+  // with the same closed one-line refusal as `env add`.
+  const scope = assertValidProjectEnvScopeName({
+    scopeName: args.options.service,
+  });
+
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+  });
+
+  await assertProjectEnvLayerPaths({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
   });
   const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
 
-  const modernExists = await projectEnvConfigExists({
+  // A layer entry that is not a usable file is refused here instead of
+  // silently selecting the legacy .hack/.env.
+  const modernExists = await projectEnvConfigExistsForMutation({
     projectDir: project.projectDir,
   });
   if (modernExists) {
@@ -1777,15 +1923,13 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     });
   }
 
+  // The legacy .hack/.env has no per-service values: refuse a scope rather
+  // than write the global value, before stdin is read.
+  assertLegacyEnvScope({ scope });
   const storeSecret = args.options.secret === true;
   const runtimeConfig = await readHackEnvRuntimeConfig({
     projectDir: project.projectDir,
   });
-  const rawKey = (args.positionals.key ?? "").trim();
-  const rawValue = args.positionals.value;
-  const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(
-    rawValue === undefined ? rawKey : `${rawKey}=${rawValue}`
-  );
   const key = await resolveEnvKey({ key: keyFromSpec });
   const mutationSource = storeSecret ? "keychain" : "plain_env";
   const sourceValidation = await validateHackEnvMutationSource({
@@ -1797,11 +1941,13 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     logger.error({ message: sourceValidation.message });
     return 1;
   }
-  const value = await resolveEnvValue({
-    key,
-    value: valueFromSpec,
-    secret: storeSecret,
-  });
+  const value = valueFromStdin
+    ? await readEnvValueFromStdin()
+    : await resolveEnvValue({
+        key,
+        value: valueFromSpec,
+        secret: storeSecret,
+      });
 
   if (storeSecret) {
     const store = await resolveConfiguredSecretStore({ project, projectName });
@@ -1848,10 +1994,94 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   return 0;
 };
 
+const handleEnvHydrate: CommandHandlerFor<typeof hydrateSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  // Refuse bad options, select the project, and read and parse the whole
+  // input before anything is migrated or written, so a refusal stores nothing.
+  const format = parseEnvHydrateInputFormat(args.options.format);
+  const scope = parseEnvScopeOption({ scopeName: args.options.service });
+  const envName = resolveRequestedEnvName({ envOption: args.options.env });
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+
+  await assertProjectEnvLayerPaths({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+  });
+  const entries = await readEnvHydrateInput({
+    format,
+    filePath:
+      args.options.file === undefined
+        ? null
+        : resolve(ctx.cwd, args.options.file),
+  });
+
+  const projectName = await resolveProjectName(project);
+  await maybeMigrateLegacyProjectEnv({
+    project,
+    projectName,
+    reason: "mutation",
+  });
+
+  const result = await hydrateProjectEnvLocalLayer({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    envName: envName ?? null,
+    scope,
+    entries,
+    secret: args.options.secret === true,
+  });
+
+  if (args.options.json === true) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          file: result.filePath,
+          local: true,
+          scope: result.scope,
+          secret: args.options.secret === true,
+          changed: result.changed,
+          created_key: result.createdKey,
+          added: result.added,
+          updated: result.updated,
+          unchanged: result.unchanged,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+
+  logger.success({
+    message: [
+      result.changed
+        ? `Hydrated ${result.filePath}`
+        : `No changes needed in ${result.filePath}`,
+      "worktree-local override",
+      `scope=${result.scope}`,
+      `${result.added.length} added, ${result.updated.length} updated, ${result.unchanged.length} unchanged`,
+      result.createdKey ? "generated project env key" : null,
+    ]
+      .filter((value): value is string => typeof value === "string")
+      .join(" • "),
+  });
+  return 0;
+};
+
 const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  // Validate before migration or file access so a refused scope changes nothing.
+  const serviceName = parseMaterializeScopeOption({
+    serviceName: args.options.service,
+  });
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
@@ -1869,11 +2099,24 @@ const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
   const serviceNames = await discoverComposeServiceNames({
     composeFile: project.composeFile,
   });
+  // Materialize replaces only `.hack/.env`, so overlay values stay where they are.
+  const unmigrated = await findUnmigratedLegacyDotenv({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    serviceNames,
+    baseOnly: true,
+  });
+  if (hasUnmigratedLegacyDotenv(unmigrated)) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: `Refusing to materialize: this checkout ${describeUnmigratedLegacyDotenv(unmigrated)} in its legacy .hack/.env files, and the env layers don't deliver those values, so they could be lost. Run \`hack doctor --migrate-env-config\` first, or remove what you don't need.`,
+    });
+  }
   const result = await materializeProjectEnv({
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
     envName,
-    serviceName: args.options.service?.trim() || null,
+    serviceName,
     serviceNames,
   });
   logger.success({
@@ -1893,18 +2136,6 @@ function resolveShellCommandCommand(input: {
   return ["/bin/sh", "-lc", input.command];
 }
 
-function resolveExecutionScopeName(input: {
-  readonly scopeName?: string;
-  readonly serviceName?: string;
-}): string | null {
-  const scopeName = input.scopeName?.trim();
-  const serviceName = input.serviceName?.trim();
-  if (scopeName && serviceName) {
-    throw new CliUsageError("Use either --scope or --service, not both.");
-  }
-  return scopeName || serviceName || null;
-}
-
 async function runHostCommandWithInjectedEnv(input: {
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;
@@ -1918,6 +2149,10 @@ async function runHostCommandWithInjectedEnv(input: {
   readonly timeout?: number;
   readonly lifetime?: string;
 }): Promise<number> {
+  const executionScope = parseExecutionScopeOptions({
+    scopeName: input.scopeName,
+    serviceName: input.serviceName,
+  });
   if (
     input.timeout !== undefined &&
     (!Number.isFinite(input.timeout) ||
@@ -1944,18 +2179,18 @@ async function runHostCommandWithInjectedEnv(input: {
       "--timeout requires non-TTY stdin; pipe input or redirect from /dev/null for a finite job."
     );
   }
-  const project = await resolveProjectForEnv({
-    ctx: input.ctx,
-    pathOpt: input.pathOpt,
-    projectOpt: input.projectOpt,
-  });
-  const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({
     envOption: input.envOpt,
   });
   const target = resolveHostEnvTarget({
     targetOption: input.targetOpt,
   });
+  const project = await resolveProjectForEnv({
+    ctx: input.ctx,
+    pathOpt: input.pathOpt,
+    projectOpt: input.projectOpt,
+  });
+  const projectName = await resolveProjectName(project);
   const shellCommand = input.shellCommandOpt?.trim();
   const positionalCommand = input.command;
   if (shellCommand && positionalCommand.length > 0) {
@@ -1969,10 +2204,7 @@ async function runHostCommandWithInjectedEnv(input: {
     project,
     projectName,
     envName,
-    serviceName: resolveExecutionScopeName({
-      scopeName: input.scopeName,
-      serviceName: input.serviceName,
-    }),
+    serviceName: executionScope,
     target,
   });
   const declaredLifetime =
@@ -2003,26 +2235,27 @@ async function openHostShellWithInjectedEnv(input: {
   readonly serviceName?: string;
   readonly targetOpt: string | undefined;
 }): Promise<number> {
-  const project = await resolveProjectForEnv({
-    ctx: input.ctx,
-    pathOpt: input.pathOpt,
-    projectOpt: input.projectOpt,
+  const executionScope = parseExecutionScopeOptions({
+    scopeName: input.scopeName,
+    serviceName: input.serviceName,
   });
-  const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({
     envOption: input.envOpt,
   });
   const target = resolveHostEnvTarget({
     targetOption: input.targetOpt,
   });
+  const project = await resolveProjectForEnv({
+    ctx: input.ctx,
+    pathOpt: input.pathOpt,
+    projectOpt: input.projectOpt,
+  });
+  const projectName = await resolveProjectName(project);
   const envState = await resolveEnvInjection({
     project,
     projectName,
     envName,
-    serviceName: resolveExecutionScopeName({
-      scopeName: input.scopeName,
-      serviceName: input.serviceName,
-    }),
+    serviceName: executionScope,
     target,
   });
 
@@ -2106,19 +2339,32 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
+
+  await assertProjectEnvLayerPaths({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+  });
   const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
 
-  const modernExists = await projectEnvConfigExists({
+  const modernExists = await projectEnvConfigExistsForMutation({
     projectDir: project.projectDir,
   });
   if (!modernExists) {
-    const store = await resolveConfiguredSecretStore({ project, projectName });
+    // The legacy .hack/.env has no per-service values: refuse a scope rather
+    // than remove the global value. Validate the scope and key before
+    // resolving a secret store, so a refused argument never reaches a backend.
+    assertLegacyEnvScope({
+      scope: assertValidProjectEnvScopeName({
+        scopeName: args.options.service,
+      }),
+    });
     const key = await resolveEnvKey({
       key: (args.positionals.key ?? "").trim(),
     });
+    const store = await resolveConfiguredSecretStore({ project, projectName });
 
     const okLegacy = await confirmSafe({
       message: `Unset "${key}" from ${resolveEnvFilePath({ projectDir: project.projectDir, envName })} and ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}${envName ? ` (env ${envName})` : ""}?`,
@@ -2360,7 +2606,7 @@ async function resolveEnvKey(opts: { readonly key: string }): Promise<string> {
   const fromPos = opts.key.trim();
   if (fromPos.length > 0) {
     if (!ENV_KEY_PATTERN.test(fromPos)) {
-      throw new CliUsageError(`Invalid env key: ${fromPos}`);
+      throw new CliUsageError(ENV_KEY_INVALID_MESSAGE);
     }
     return fromPos;
   }
@@ -2404,7 +2650,7 @@ async function resolveEnvValue(opts: {
   if (!canPrompt()) {
     requireInteractive({
       what: `a value for "${opts.key}" is required`,
-      hint: "Pass the value as an argument (e.g. `hack env set KEY value` or `hack env add KEY value --secret`).",
+      hint: "Pipe the value on stdin with --value-stdin (e.g. `<secret-source> | hack env add KEY --secret --value-stdin`), or run in a terminal to use the hidden prompt. Never pass secret values as arguments.",
     });
   }
 
@@ -2440,10 +2686,12 @@ export const envCommand = defineCommand({
   positionals: [],
   subcommands: [
     withHandler(listSpec, handleEnvList),
+    withHandler(getSpec, handleEnvGet),
     withHandler(explainSpec, handleEnvExplain),
     withHandler(applySpec, handleEnvApply),
     withHandler(addSpec, handleEnvAdd),
     withHandler(setSpec, handleEnvSet),
+    withHandler(hydrateSpec, handleEnvHydrate),
     withHandler(materializeSpec, handleEnvMaterialize),
     withHandler(execSpec, handleEnvExec),
     withHandler(shellSpec, handleEnvShell),

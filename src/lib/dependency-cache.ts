@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { YAML } from "bun";
+import { CliUsageError } from "../cli/command.ts";
+import { validateDependencyCacheLayout } from "./dependency-cache-layout.ts";
+import { createDependencyCacheProtocol } from "./dependency-cache-protocol.ts";
 import {
   ensureDir,
   pathExists,
@@ -38,9 +41,14 @@ type DependencyCacheDeclaration = {
   readonly volume: string;
   readonly lockfiles: readonly string[];
   readonly runtimeFiles: readonly string[];
+  readonly runtime: Readonly<Record<string, unknown>>;
 };
 
 export type DependencyCacheResolution = {
+  readonly progressServices?: readonly string[];
+  readonly sharingDisabledReason?:
+    | "runtime_identity_unresolved"
+    | "runtime_platform_unresolved";
   readonly overridePath: string | null;
   readonly fingerprint: string | null;
   readonly volumes: readonly {
@@ -50,6 +58,22 @@ export type DependencyCacheResolution = {
   }[];
   readonly inputs: readonly string[];
 };
+
+/** Only explicitly instrumented initializer services can provide phase observations. */
+export function resolveDependencyCacheProgress(opts: {
+  readonly cache: DependencyCacheResolution;
+  readonly project: string | null | undefined;
+  readonly baseProject: string;
+}):
+  | { readonly project: string; readonly services: readonly string[] }
+  | undefined {
+  return opts.cache.progressServices?.length
+    ? {
+        project: opts.project ?? opts.baseProject,
+        services: opts.cache.progressServices,
+      }
+    : undefined;
+}
 
 /** Select only installers for cache volumes mounted by the requested consumers. */
 export async function resolveDependencyCacheBootstrapServices(opts: {
@@ -65,7 +89,10 @@ export async function resolveDependencyCacheBootstrapServices(opts: {
   if (!(isRecord(parsed) && isRecord(parsed.services))) {
     return [];
   }
-  const installers = new Set(await discoverDependencyBootstrapServices(opts));
+  const installers = new Set([
+    ...(await discoverDependencyBootstrapServices(opts)),
+    ...(opts.cache.progressServices ?? []),
+  ]);
   const services = parsed.services;
   const requiredVolumes = opts.cache.volumes.filter((volume) =>
     opts.targetServices.some((target) => {
@@ -145,11 +172,20 @@ function parseDeclarations(
     }
     const labels = normalizeLabels(rawService.labels);
     const volume = labels[CACHE_VOLUME_LABEL];
+    if (
+      labels["hack.dependencies.cache-protocol"] !== undefined &&
+      !(typeof volume === "string" && volume.trim())
+    ) {
+      throw new CliUsageError(
+        "Dependency cache protocol requires hack.dependencies.cache-volume"
+      );
+    }
     if (typeof volume !== "string" || volume.trim().length === 0) {
       continue;
     }
     declarations.push({
       service,
+      runtime: rawService,
       volume: volume.trim(),
       lockfiles: parseCsv(labels[LOCKFILES_LABEL]),
       runtimeFiles: parseCsv(labels[RUNTIME_FILES_LABEL]),
@@ -189,8 +225,12 @@ async function resolveExistingInputs(opts: {
 async function fingerprintFiles(opts: {
   readonly projectRoot: string;
   readonly files: readonly string[];
+  readonly runtimeIdentity: string;
 }): Promise<string> {
   const hash = createHash("sha256");
+  hash.update("hack-dependency-cache-v2\0");
+  hash.update(opts.runtimeIdentity);
+  hash.update("\0");
   for (const file of opts.files) {
     hash.update(file.slice(opts.projectRoot.length));
     hash.update("\0");
@@ -198,6 +238,114 @@ async function fingerprintFiles(opts: {
     hash.update("\0");
   }
   return hash.digest("hex").slice(0, 16);
+}
+
+/** Canonical declared build configuration, not a digest of the built image/context. */
+function canonicalRuntimeValue(value: unknown): string | null {
+  if (typeof value === "string") {
+    // Compose may resolve interpolation from .env or CLI inputs unavailable here.
+    return value.includes("$") ? null : JSON.stringify(value);
+  }
+  if (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "number"
+  ) {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    const entries = value.map(canonicalRuntimeValue);
+    return entries.includes(null) ? null : `[${entries.join(",")}]`;
+  }
+  if (!isRecord(value)) {
+    return null;
+  }
+  const entries: string[] = [];
+  for (const key of Object.keys(value).sort()) {
+    const entry = canonicalRuntimeValue(value[key]);
+    if (entry === null || key.includes("$")) {
+      return null;
+    }
+    entries.push(`${JSON.stringify(key)}:${entry}`);
+  }
+  return `{${entries.join(",")}}`;
+}
+
+function protocolRuntimeIdentity(
+  runtime: Readonly<Record<string, unknown>>
+): Record<string, unknown> {
+  const labels = normalizeLabels(runtime.labels);
+  const protocol = labels["hack.dependencies.cache-protocol"];
+  if (protocol === undefined) {
+    return {};
+  }
+  return {
+    protocol,
+    generation: labels["hack.dependencies.cache-generation"] ?? "0",
+    verify: labels["hack.dependencies.cache-verify"] ?? null,
+    command: runtime.command ?? null,
+    entrypoint: runtime.entrypoint ?? null,
+    environment: runtime.environment ?? null,
+    workingDir: runtime.working_dir ?? null,
+  };
+}
+
+const PLATFORM_PATTERN = /^[a-z0-9]+\/[a-z0-9_]+(?:\/[a-z0-9_.-]+)?$/;
+
+function hasUnresolvedBuildArgs(build: unknown): boolean {
+  if (!isRecord(build)) {
+    return false;
+  }
+  const args = build.args;
+  return (
+    (Array.isArray(args) &&
+      args.some((arg) => typeof arg !== "string" || !arg.includes("="))) ||
+    (isRecord(args) && Object.values(args).some((arg) => arg === null))
+  );
+}
+
+function declaredRuntimeIdentity(
+  declarations: readonly DependencyCacheDeclaration[]
+):
+  | { readonly identity: string }
+  | {
+      readonly reason: NonNullable<
+        DependencyCacheResolution["sharingDisabledReason"]
+      >;
+    } {
+  const identities: string[] = [];
+  for (const declaration of [...declarations].sort((a, b) =>
+    a.service.localeCompare(b.service)
+  )) {
+    const runtime = declaration.runtime;
+    const platform = runtime.platform ?? process.env.DOCKER_DEFAULT_PLATFORM;
+    if (platform === undefined || platform === "") {
+      // Host architecture cannot identify a remote Docker daemon's default.
+      return { reason: "runtime_platform_unresolved" };
+    }
+    if (typeof platform !== "string" || !PLATFORM_PATTERN.test(platform)) {
+      return { reason: "runtime_identity_unresolved" };
+    }
+    if (!(typeof runtime.image === "string" || runtime.build !== undefined)) {
+      return { reason: "runtime_identity_unresolved" };
+    }
+    if (hasUnresolvedBuildArgs(runtime.build)) {
+      return { reason: "runtime_identity_unresolved" };
+    }
+    const identity = canonicalRuntimeValue({
+      ...protocolRuntimeIdentity(runtime),
+      service: declaration.service,
+      volume: declaration.volume,
+      image: runtime.image ?? null,
+      platform,
+      build: runtime.build ?? null,
+    });
+    if (identity === null) {
+      return { reason: "runtime_identity_unresolved" };
+    }
+    identities.push(identity);
+  }
+  return { identity: `[${identities.join(",")}]` };
 }
 
 function sanitizeVolumeSegment(value: string): string {
@@ -227,16 +375,64 @@ export async function resolveDependencyCacheOverride(opts: {
   if (declarations.length === 0) {
     return { overridePath: null, fingerprint: null, volumes: [], inputs: [] };
   }
+  const protocolDeclarations = declarations.filter(
+    (declaration) =>
+      normalizeLabels(declaration.runtime.labels)[
+        "hack.dependencies.cache-protocol"
+      ] !== undefined
+  );
+  for (const declaration of protocolDeclarations) {
+    if (
+      declarations.filter((entry) => entry.volume === declaration.volume)
+        .length !== 1
+    ) {
+      throw new CliUsageError(
+        "Dependency cache protocol supports one initializer per volume"
+      );
+    }
+    validateDependencyCacheLayout({
+      compose: parsed,
+      producer: declaration.service,
+      volume: declaration.volume,
+    });
+    createDependencyCacheProtocol({
+      service: declaration.runtime,
+      volume: declaration.volume,
+      fingerprint: "0000000000000000",
+      scriptPath: "/hack-dependency-cache-install.sh",
+    });
+  }
+  const runtime = declaredRuntimeIdentity(declarations);
+  if ("reason" in runtime) {
+    if (protocolDeclarations.length > 0) {
+      throw new CliUsageError(
+        "Dependency cache protocol requires resolved installer identity and explicit platform"
+      );
+    }
+    return {
+      overridePath: null,
+      fingerprint: null,
+      volumes: [],
+      inputs: [],
+      sharingDisabledReason: runtime.reason,
+    };
+  }
   const inputs = await resolveExistingInputs({
     projectRoot: opts.projectRoot,
     declarations,
   });
   if (inputs.length === 0) {
+    if (protocolDeclarations.length > 0) {
+      throw new CliUsageError(
+        "Dependency cache protocol requires existing fingerprint inputs"
+      );
+    }
     return { overridePath: null, fingerprint: null, volumes: [], inputs: [] };
   }
   const fingerprint = await fingerprintFiles({
     projectRoot: opts.projectRoot,
     files: inputs,
+    runtimeIdentity: runtime.identity,
   });
   const grouped = new Map<string, Set<string>>();
   for (const declaration of declarations) {
@@ -254,7 +450,39 @@ export async function resolveDependencyCacheOverride(opts: {
     ].join("-"),
     services: [...services].sort((left, right) => left.localeCompare(right)),
   }));
+  const internalDir = resolve(opts.projectDir, ".internal");
+  await ensureDir(internalDir);
+  const services: Record<string, unknown> = {};
+  for (const declaration of protocolDeclarations) {
+    const containerScript = "/hack-dependency-cache-install.sh";
+    const protocol = createDependencyCacheProtocol({
+      service: declaration.runtime,
+      volume: declaration.volume,
+      fingerprint,
+      scriptPath: containerScript,
+    });
+    if (!protocol) {
+      continue;
+    }
+    const scriptPath = resolve(
+      internalDir,
+      `dependency-cache-${fingerprint}-${createHash("sha256").update(declaration.service).digest("hex").slice(0, 12)}.sh`
+    );
+    await writeTextFileIfChanged(scriptPath, protocol.script);
+    services[declaration.service] = {
+      entrypoint: protocol.entrypoint,
+      volumes: [
+        {
+          type: "bind",
+          source: scriptPath,
+          target: containerScript,
+          read_only: true,
+        },
+      ],
+    };
+  }
   const override = {
+    ...(protocolDeclarations.length > 0 ? { services } : {}),
     volumes: Object.fromEntries(
       volumes.map((volume) => [
         volume.logicalName,
@@ -262,12 +490,18 @@ export async function resolveDependencyCacheOverride(opts: {
       ])
     ),
   };
-  const internalDir = resolve(opts.projectDir, ".internal");
-  await ensureDir(internalDir);
   const overridePath = resolve(
     internalDir,
     "compose.dependencies.override.yml"
   );
   await writeTextFileIfChanged(overridePath, YAML.stringify(override));
-  return { overridePath, fingerprint, volumes, inputs };
+  return {
+    overridePath,
+    fingerprint,
+    volumes,
+    inputs,
+    ...(protocolDeclarations.length > 0
+      ? { progressServices: protocolDeclarations.map((entry) => entry.service) }
+      : {}),
+  };
 }

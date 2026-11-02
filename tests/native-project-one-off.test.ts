@@ -1,0 +1,383 @@
+import { afterEach, expect, test } from "bun:test";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  NATIVE_RUN_SELECTION_REFUSAL,
+  nativeProjectOneOff,
+} from "../src/backends/native-project-one-off.ts";
+import {
+  removeNativeProjectRun,
+  saveNativeProjectRun,
+} from "../src/backends/native-project-run.ts";
+import {
+  expectClosedRefusal,
+  expectCodedRefusal,
+} from "./helpers/closed-refusal.ts";
+
+const roots: string[] = [];
+afterEach(async () => {
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
+  );
+});
+const run = {
+  run: "a".repeat(32),
+  owner: "b".repeat(32),
+  namespace: "c".repeat(64),
+  planId: "d".repeat(64),
+};
+const selection = {
+  ...run,
+  plan: run.planId,
+  service: "db-ops",
+  generation: "e".repeat(64),
+  boot: "boot",
+};
+const completion = {
+  job: "f".repeat(32),
+  cleanup_confirmed: true,
+  exit_code: 7,
+  stdout_base64: "AP8=",
+  stderr_base64: "ZXJy",
+  truncated: false,
+};
+function refreshed() {
+  return {
+    ok: true,
+    ...run,
+    plan: run.planId,
+    generation: selection.generation,
+    changed_slots: [],
+  };
+}
+async function fixture(saved = true, recorded: Record<string, unknown> = {}) {
+  const projectRoot = await realpath(
+    await mkdtemp(join(tmpdir(), "native-one-off-"))
+  );
+  roots.push(projectRoot);
+  const projectDir = join(projectRoot, ".hack"),
+    nativeHome = join(projectRoot, "candidate");
+  await mkdir(projectDir);
+  await mkdir(nativeHome);
+  const scope = { projectRoot, projectDir, nativeHome, branch: null };
+  if (saved) {
+    await saveNativeProjectRun({ ...scope, run: { ...run, ...recorded } });
+  }
+  return {
+    scope,
+    runtime: { binary: "/not-invoked", home: nativeHome },
+    service: "db-ops",
+    composeFile: join(projectDir, "docker-compose.yml"),
+    environment: async () => ({ TOKEN: "synthetic-private-value" }),
+  };
+}
+
+test("one-off preserves default command or literal argv and fresh private delivery", async () => {
+  const opts = await fixture();
+  for (const argv of [[], ["/bin/echo", "a b", "$(literal)"]]) {
+    const calls: string[] = [];
+    let payload: Uint8Array | undefined;
+    const result = await nativeProjectOneOff({
+      ...opts,
+      argv,
+      workdir: "/app",
+      invoke: async (request) => {
+        calls.push(String(request.args[1]));
+        if (request.args[1] === "refresh-dependencies") {
+          expect(request.privateInput).toBeUndefined();
+          return { ...refreshed(), changed_slots: [0, 3] };
+        }
+        if (request.args[1] === "run-selection") {
+          return selection;
+        }
+        expect(request.args[1]).toBe("run-service");
+        expect(request.args.slice(request.args.indexOf("--") + 1)).toEqual(
+          argv
+        );
+        expect(request.args).toContain("/app");
+        expect(request.args.join(" ")).not.toContain("synthetic-private-value");
+        payload = request.privateInput;
+        expect(JSON.parse(new TextDecoder().decode(payload)).services).toEqual({
+          "db-ops": { TOKEN: "synthetic-private-value" },
+        });
+        return completion;
+      },
+    });
+    expect(calls).toEqual([
+      "refresh-dependencies",
+      "run-selection",
+      "run-service",
+    ]);
+    expect(payload?.every((byte) => byte === 0)).toBe(true);
+    expect(result).toEqual({
+      exitCode: 7,
+      stdout: Buffer.from([0, 255]),
+      stderr: Buffer.from("err"),
+      truncated: false,
+    });
+  }
+});
+test("stale selection and missing project never request a job", async () => {
+  const opts = await fixture();
+  let mutations = 0;
+  await expectClosedRefusal(
+    nativeProjectOneOff({
+      ...opts,
+      argv: [],
+      invoke: async (request) => {
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
+        if (request.args[1] !== "run-selection") {
+          mutations++;
+        }
+        return { ...selection, plan: "0".repeat(64) };
+      },
+    }),
+    "unconfirmed"
+  );
+  expect(mutations).toBe(0);
+  await expectClosedRefusal(
+    nativeProjectOneOff({
+      ...(await fixture(false)),
+      argv: [],
+      invoke: async () => {
+        throw new Error("must not invoke");
+      },
+    }),
+    "started project"
+  );
+});
+
+test("invalid one-off arguments refuse with a closed message before any request", async () => {
+  const opts = await fixture();
+  for (const request of [
+    { argv: [""] },
+    { argv: ["echo", "\0"] },
+    { argv: ["true"], workdir: "relative" },
+  ]) {
+    await expectClosedRefusal(
+      nativeProjectOneOff({
+        ...opts,
+        ...request,
+        invoke: async () => {
+          throw new Error("must not invoke");
+        },
+      }),
+      "Native run requires a service, bounded arguments and an optional absolute workdir."
+    );
+  }
+});
+
+test("one-off explicitly delivers an empty environment and wipes it after completion", async () => {
+  const opts = await fixture();
+  let payload: Uint8Array | undefined;
+  const calls: string[] = [];
+  const result = await nativeProjectOneOff({
+    ...opts,
+    argv: ["/bin/cat", "/data/marker"],
+    environment: async () => ({}),
+    invoke: async (request) => {
+      calls.push(String(request.args[1]));
+      if (request.args[1] === "refresh-dependencies") {
+        return refreshed();
+      }
+      if (request.args[1] === "run-selection") {
+        return selection;
+      }
+      expect(request.args[1]).toBe("run-service");
+      expect(request.args).toContain("--environment-stdin");
+      payload = request.privateInput;
+      expect(JSON.parse(new TextDecoder().decode(payload))).toEqual({
+        version: 1,
+        plan: run.planId,
+        run: run.run,
+        lifetime_seconds: 300,
+        services: {},
+      });
+      return { ...completion, exit_code: 0 };
+    },
+  });
+  expect(calls).toEqual([
+    "refresh-dependencies",
+    "run-selection",
+    "run-service",
+  ]);
+  expect(result.exitCode).toBe(0);
+  expect(payload?.every((byte) => byte === 0)).toBe(true);
+});
+test("unconfirmed cleanup or transport failure never replays and wipes delivery", async () => {
+  for (const failure of ["cleanup", "transport", "base64", "mapping"]) {
+    const opts = await fixture();
+    let mutations = 0;
+    let payload: Uint8Array | undefined;
+    await expect(
+      nativeProjectOneOff({
+        ...opts,
+        argv: ["/bin/true"],
+        invoke: async (request) => {
+          if (request.args[1] === "refresh-dependencies") {
+            return refreshed();
+          }
+          if (request.args[1] === "run-selection") {
+            return selection;
+          }
+          mutations++;
+          payload = request.privateInput;
+          if (failure === "transport") {
+            throw new Error("uncertain");
+          }
+          if (failure === "mapping") {
+            await removeNativeProjectRun({ ...opts.scope, expected: run });
+            await saveNativeProjectRun({
+              ...opts.scope,
+              run: { ...run, run: "1".repeat(32) },
+            });
+          }
+          return {
+            ...completion,
+            cleanup_confirmed: failure !== "cleanup",
+            stdout_base64:
+              failure === "base64" ? "invalid!" : completion.stdout_base64,
+          };
+        },
+      })
+    ).rejects.toThrow();
+    expect(mutations).toBe(1);
+    expect(payload?.every((byte) => byte === 0)).toBe(true);
+  }
+});
+
+test("environment preparation cannot authorize a job after the project mapping changes", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  await expectClosedRefusal(
+    nativeProjectOneOff({
+      ...opts,
+      argv: [],
+      environment: async () => {
+        await removeNativeProjectRun({ ...opts.scope, expected: run });
+        await saveNativeProjectRun({
+          ...opts.scope,
+          run: { ...run, run: "1".repeat(32) },
+        });
+        return { TOKEN: "fresh-synthetic-value" };
+      },
+      invoke: async (request) => {
+        calls.push(String(request.args[1]));
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
+        return selection;
+      },
+    }),
+    "unconfirmed"
+  );
+  expect(calls).toEqual(["refresh-dependencies", "run-selection"]);
+});
+
+test("failed dependency refresh refuses before one-off selection or private preparation without replay", async () => {
+  const opts = await fixture();
+  for (const lostReply of [false, true]) {
+    const calls: string[] = [];
+    let prepared = 0;
+    await expect(
+      nativeProjectOneOff({
+        ...opts,
+        argv: [],
+        environment: async () => {
+          prepared++;
+          return { TOKEN: "synthetic-private-value" };
+        },
+        invoke: async (request) => {
+          calls.push(String(request.args[1]));
+          expect(request.privateInput).toBeUndefined();
+          if (lostReply) {
+            throw new Error("private-synthetic-diagnostic");
+          }
+          return { ...refreshed(), changed_slots: [0, 0] };
+        },
+      })
+    ).rejects.toThrow("dependency refresh identity or outcome is unconfirmed");
+    expect(calls).toEqual(["refresh-dependencies"]);
+    expect(prepared).toBe(0);
+  }
+});
+
+const startedSelection = {
+  profiles: ["toolchain", "tools"],
+  effectiveEnvName: "staging",
+  aws: null,
+};
+
+test("a run selection equal to the running one proceeds to the job", async () => {
+  for (const requested of [
+    {},
+    { profiles: ["tools", "toolchain", "tools"] },
+    { envName: "staging", profiles: ["toolchain", "tools"] },
+  ]) {
+    const opts = await fixture(true, startedSelection);
+    const calls: string[] = [];
+    const result = await nativeProjectOneOff({
+      ...opts,
+      argv: ["bun", "--version"],
+      selection: requested,
+      environment: async () => ({}),
+      invoke: async (request) => {
+        calls.push(String(request.args[1]));
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
+        if (request.args[1] === "run-selection") {
+          return selection;
+        }
+        return { ...completion, exit_code: 0 };
+      },
+    });
+    expect(calls).toEqual([
+      "refresh-dependencies",
+      "run-selection",
+      "run-service",
+    ]);
+    expect(result.exitCode).toBe(0);
+  }
+});
+
+test("a run selection that differs from the running one refuses before any request", async () => {
+  const cases: {
+    readonly recorded: Record<string, unknown>;
+    readonly selection: { envName?: string | null; profiles?: string[] };
+  }[] = [
+    { recorded: startedSelection, selection: { profiles: ["web"] } },
+    { recorded: startedSelection, selection: { profiles: ["toolchain"] } },
+    {
+      recorded: startedSelection,
+      selection: { profiles: ["toolchain", "tools", "web"] },
+    },
+    { recorded: startedSelection, selection: { profiles: [] } },
+    { recorded: startedSelection, selection: { envName: null } },
+    { recorded: startedSelection, selection: { envName: "preview" } },
+    // A legacy mapping without recorded selectors cannot confirm a match.
+    { recorded: {}, selection: { profiles: [] } },
+    { recorded: {}, selection: { envName: null } },
+  ];
+  for (const { recorded, selection: requested } of cases) {
+    const opts = await fixture(true, recorded);
+    await expectCodedRefusal(
+      nativeProjectOneOff({
+        ...opts,
+        argv: ["bun", "--version"],
+        selection: requested,
+        environment: async () => {
+          throw new Error("must not prepare");
+        },
+        invoke: async () => {
+          throw new Error("must not invoke");
+        },
+      }),
+      "E_USAGE",
+      NATIVE_RUN_SELECTION_REFUSAL
+    );
+  }
+});

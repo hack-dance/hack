@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -8,6 +8,9 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
+import { withComposeServiceEnvFingerprints } from "../src/lib/compose-env-fingerprint.ts";
+import { findProjectContextAtRoot } from "../src/lib/project.ts";
+import { upsertProjectRuntimeStateEntry } from "../src/lib/project-runtime-state.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const execCalls: Array<{
@@ -17,7 +20,10 @@ const execCalls: Array<{
   readonly cmdArgs: readonly string[];
 }> = [];
 const psJsonByComposeProject = new Map<string, string>();
+const psEnvs: Array<Record<string, string> | undefined> = [];
 const tempDirs = new Set<string>();
+const originalHackHome = process.env.HACK_HOME;
+const originalLogger = process.env.HACK_LOGGER;
 
 const runtimeBackendMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -27,11 +33,17 @@ const runtimeBackendMock = await registerScopedModuleMock({
       name: "compose",
       up: async () => 0,
       down: async () => 0,
-      psJson: async (opts: { readonly composeFiles: readonly string[] }) => ({
-        exitCode: 0,
-        stdout: psJsonByComposeProject.get(opts.composeFiles[0] ?? "") ?? "",
-        stderr: "",
-      }),
+      psJson: async (opts: {
+        readonly composeFiles: readonly string[];
+        readonly env?: Record<string, string>;
+      }) => {
+        psEnvs.push(opts.env ? { ...opts.env } : undefined);
+        return {
+          exitCode: 0,
+          stdout: psJsonByComposeProject.get(opts.composeFiles[0] ?? "") ?? "",
+          stderr: "",
+        };
+      },
       ps: async () => 0,
       run: async () => 0,
       exec: async (opts: {
@@ -52,30 +64,55 @@ const runtimeBackendMock = await registerScopedModuleMock({
   },
 });
 
-const { execCommand } = await import("../src/commands/project.ts");
+const { execCommand, resolveModernComposeEnvOverrides } = await import(
+  "../src/commands/project.ts"
+);
 
 beforeAll(() => {
+  // Pin the logger backend: without it the logger picks gum or clack from the
+  // host, and clack writes diagnostics to stdout, which the stdout assertions
+  // below would see. Do not rely on another test file leaking this setting.
+  process.env.HACK_LOGGER = "console";
   runtimeBackendMock.activate();
 });
 
 afterEach(async () => {
   execCalls.length = 0;
+  psEnvs.length = 0;
   psJsonByComposeProject.clear();
   for (const tempDir of tempDirs) {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
+  if (originalHackHome === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_HOME");
+  } else {
+    process.env.HACK_HOME = originalHackHome;
+  }
 });
 
 afterAll(() => {
   runtimeBackendMock.deactivate();
+  if (originalLogger === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_LOGGER");
+  } else {
+    process.env.HACK_LOGGER = originalLogger;
+  }
 });
 
-test("exec runs inside an already-running service container", async () => {
+test("exec reaches the running service while registry registration is locked", async () => {
   const projectRoot = await createProject({
     runningServices: ["api"],
     runtimeEnvName: "qa",
   });
+
+  const registryRoot = process.env.HACK_HOME;
+  if (!registryRoot) {
+    throw new Error("Missing fixture HACK_HOME");
+  }
+  await mkdir(registryRoot, { recursive: true });
+  const lockPath = resolve(registryRoot, "projects.json.lock");
+  await writeFile(lockPath, `${process.pid}\n`, { flag: "wx" });
 
   const input = {
     ctx: {
@@ -116,10 +153,36 @@ test("exec runs inside an already-running service container", async () => {
 
   expect(exitCode).toBe(0);
   expect(execCalls).toHaveLength(1);
-  expect(execCalls[0]?.env).toEqual({
+  expect(await readFile(lockPath, "utf8")).toBe(`${process.pid}\n`);
+  expect(await Bun.file(resolve(registryRoot, "projects.json")).exists()).toBe(
+    false
+  );
+  const execEnv = Object.entries(execCalls[0]?.env ?? {});
+  expect(
+    Object.fromEntries(execEnv.filter(([key]) => !key.startsWith("HACK_ENV_")))
+  ).toEqual({
     GLOBAL_FLAG: "qa",
     SHARED_KEY: "base",
   });
+  // HACK-1273: the api override references these through the Compose
+  // process env instead of holding the values on disk.
+  expect(
+    execEnv
+      .filter(([key]) => key.startsWith("HACK_ENV_"))
+      .map(
+        ([key, value]) =>
+          `${key.replace(/^HACK_ENV_[0-9A-F]{12}_/, "")}=${value}`
+      )
+      .sort()
+  ).toEqual([
+    "GLOBAL_FLAG=qa",
+    "PORT=3000",
+    "SERVICE_TOKEN=overlay-secret",
+    "SHARED_KEY=base",
+  ]);
+  // The readiness `compose ps` reads the same override, so it gets the same
+  // env; without it Compose warns once per unset reference.
+  expect(psEnvs).toEqual([execCalls[0]?.env]);
   expect(execCalls[0]?.workdir).toBe("/app");
   expect(execCalls[0]?.cmdArgs).toEqual(["bun", "test"]);
   expect(execCalls[0]?.composeFiles.length).toBeGreaterThanOrEqual(2);
@@ -238,6 +301,122 @@ test("exec rejects services that are not running", async () => {
   expect(execCalls).toHaveLength(0);
 });
 
+test("exec warns value-free on stderr only after the service env changed since start", async () => {
+  const projectRoot = await createProject({
+    runningServices: ["api"],
+    runtimeEnvName: "qa",
+  });
+  const project = await findProjectContextAtRoot({
+    projectRoot,
+    projectDirName: ".hack",
+  });
+  if (!project) {
+    throw new Error("Expected exec fixture project context");
+  }
+  const atUp = await resolveModernComposeEnvOverrides({
+    project,
+    targetServices: ["api"],
+    allServiceNames: ["api", "worker"],
+    envName: "qa",
+  });
+  if (!atUp) {
+    throw new Error("Expected modern env config");
+  }
+  await upsertProjectRuntimeStateEntry({
+    projectDir: project.projectDir,
+    entry: {
+      composeProject: "project-exec-test",
+      envName: "qa",
+      updatedAt: "2026-04-01T00:00:00.000Z",
+      envFingerprint: withComposeServiceEnvFingerprints({
+        existing: undefined,
+        services: ["api"],
+        envByService: atUp.preflightEnvByService,
+      }),
+    },
+  });
+
+  const unchanged = await captureOutput(() =>
+    execCommand.handler(execInput({ projectRoot, env: "qa" }))
+  );
+  expect(unchanged.result).toBe(0);
+  expect(unchanged.stderr).not.toContain("changed since it started");
+  expect(unchanged.stdout).toBe("");
+
+  const qaPath = resolve(project.projectDir, "hack.env.qa.yaml");
+  const qaText = await readFile(qaPath, "utf8");
+  await writeFile(
+    qaPath,
+    qaText.replace("overlay-secret", "rotated-overlay-secret")
+  );
+  const stale = await captureOutput(() =>
+    execCommand.handler(execInput({ projectRoot, env: "qa" }))
+  );
+  expect(stale.result).toBe(0);
+  expect(stale.stdout).toBe("");
+  // Other stderr diagnostics (logger backend dependent) may precede it.
+  expect(
+    stale.stderr.split("\n").filter((line) => line.startsWith("WARNING: "))
+  ).toEqual([
+    'WARNING: Env for service "api" changed since it started; this exec uses the env it started with. Run `hack restart api` to apply the current env.',
+  ]);
+  for (const text of ["SERVICE_TOKEN", "overlay-secret", "rotated"]) {
+    expect(stale.stderr).not.toContain(text);
+  }
+  expect(execCalls).toHaveLength(2);
+});
+
+function execInput(opts: {
+  readonly projectRoot: string;
+  readonly env: string | undefined;
+}): Parameters<typeof execCommand.handler>[0] {
+  const envArgs = opts.env ? ["--env", opts.env] : [];
+  return {
+    ctx: { cwd: opts.projectRoot, cli: CLI_SPEC },
+    args: {
+      options: {
+        path: opts.projectRoot,
+        project: undefined,
+        env: opts.env,
+        branch: undefined,
+        workdir: undefined,
+        profile: undefined,
+      },
+      positionals: { service: "api", cmd: ["true"] },
+      raw: {
+        argv: ["--path", opts.projectRoot, ...envArgs, "api", "true"],
+        positionals: ["api", "true"],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+}
+
+async function captureOutput<T>(run: () => Promise<T>): Promise<{
+  readonly result: T;
+  readonly stdout: string;
+  readonly stderr: string;
+}> {
+  let stdout = "";
+  let stderr = "";
+  const originalOut = process.stdout.write;
+  const originalErr = process.stderr.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    stdout += chunk.toString();
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += chunk.toString();
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const result = await run();
+    return { result, stdout, stderr };
+  } finally {
+    process.stdout.write = originalOut;
+    process.stderr.write = originalErr;
+  }
+}
+
 async function createProject(input?: {
   readonly composeName?: string;
   readonly runningServices?: readonly string[];
@@ -246,6 +425,7 @@ async function createProject(input?: {
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hack-project-exec-"));
   tempDirs.add(root);
+  process.env.HACK_HOME = resolve(root, "global-hack");
 
   const projectRoot = resolve(root, "repo");
   const projectDir = resolve(projectRoot, ".hack");

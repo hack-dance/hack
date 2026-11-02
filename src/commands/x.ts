@@ -26,7 +26,9 @@ const xSpec = defineCommand({
   ].join("\n"),
   group: "Extensions",
   options: [],
-  positionals: [{ name: "args", required: false, multiple: true }],
+  positionals: [
+    { name: "args", required: false, multiple: true, passthrough: true },
+  ],
   subcommands: [],
 } as const);
 

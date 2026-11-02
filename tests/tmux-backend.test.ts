@@ -7,6 +7,7 @@ const execCalls: Array<{
   readonly command: readonly string[];
   readonly options: ExecOptions;
 }> = [];
+let presenceResult = { exitCode: 0, stdout: "", stderr: "" };
 
 const shellMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -14,6 +15,9 @@ const shellMock = await registerScopedModuleMock({
   overrides: {
     exec: async (command: readonly string[], options: ExecOptions = {}) => {
       execCalls.push({ command: [...command], options });
+      if (command.includes("has-session")) {
+        return presenceResult;
+      }
       if (command.includes("list-sessions")) {
         return {
           exitCode: 0,
@@ -43,6 +47,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   execCalls.length = 0;
+  presenceResult = { exitCode: 0, stdout: "", stderr: "" };
 });
 
 afterAll(() => {
@@ -85,4 +90,35 @@ test("tmux creates lifecycle ownership atomically and reads the env fallback", a
     "demo",
     "HACK_LIFECYCLE_OWNER_TOKEN",
   ]);
+});
+
+test("tmux presence uses an exact session target and distinguishes unknown failures", async () => {
+  const backend = await loadTmuxBackend();
+  const presence = () => backend.readSessionPresence?.({ name: "demo" });
+  expect(await presence()).toBe("present");
+  expect(execCalls[0]?.command).toEqual(["tmux", "has-session", "-t", "=demo"]);
+
+  for (const stderr of [
+    "can't find session: demo",
+    "no server running on /tmp/owned-tmux/default",
+    "error connecting to /tmp/owned-tmux/default (No such file or directory)",
+  ]) {
+    presenceResult = { exitCode: 1, stdout: "", stderr };
+    expect(await presence()).toBe("absent");
+  }
+  for (const stderr of [
+    "",
+    "can't find session: foreign",
+    "error connecting to /tmp/owned-tmux/default (Permission denied)",
+    "no server running on /tmp/owned-tmux/default\nPermission denied",
+  ]) {
+    presenceResult = { exitCode: 1, stdout: "", stderr };
+    expect(await presence()).toBe("unknown");
+  }
+  presenceResult = {
+    exitCode: 2,
+    stdout: "",
+    stderr: "can't find session: demo",
+  };
+  expect(await presence()).toBe("unknown");
 });

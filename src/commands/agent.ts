@@ -1,14 +1,9 @@
 import { resolve } from "node:path";
 
 import { isCancel, select } from "@clack/prompts";
-
-import {
-  buildInitAssistantReport,
-  renderInitAssistantPrompt,
-} from "../agents/init-assistant.ts";
+import { RETIRED_AGENT_PRIMER_MESSAGE } from "../agents/explicit-integrations.ts";
 import { renderAgentInitPatterns } from "../agents/init-patterns.ts";
-import { renderOnboardingPrompt } from "../agents/onboarding-prompt.ts";
-import { renderAgentPrimer } from "../agents/primer.ts";
+import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -16,18 +11,10 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import {
-  inspectAgentIntegrationFreshness,
-  renderAgentIntegrationFreshnessNotice,
-} from "../cli/integration-sync.ts";
 import { optPath } from "../cli/options.ts";
+import { canPrompt } from "../lib/interactivity.ts";
 import { openUrl } from "../lib/os.ts";
-import {
-  findProjectContext,
-  findRepoRootForInit,
-  readProjectConfig,
-  readProjectDevHost,
-} from "../lib/project.ts";
+import { findProjectContext, findRepoRootForInit } from "../lib/project.ts";
 import { findExecutableInPath, run } from "../lib/shell.ts";
 import { logger } from "../ui/logger.ts";
 
@@ -36,7 +23,8 @@ const primeOptions = [
     name: "check",
     type: "boolean",
     long: "--check",
-    description: "Include a read-only project and global integration inventory",
+    description:
+      "Deprecated compatibility flag; prints only the legacy-hook retirement notice",
   } as const),
 ] as const;
 type PrimeArgs = CommandArgs<typeof primeOptions, readonly []>;
@@ -61,7 +49,7 @@ type InitArgs = CommandArgs<typeof initOptions, readonly []>;
 
 const primeSpec = defineCommand({
   name: "prime",
-  summary: "Print agent primer text",
+  summary: "Print retirement notice for legacy agent hooks",
   group: "Agents",
   options: primeOptions,
   positionals: [],
@@ -109,25 +97,15 @@ export const agentCommand = defineCommand({
   ],
 } as const);
 
-async function handleAgentPrime({
-  ctx,
-  args,
+function handleAgentPrime({
+  ctx: _ctx,
+  args: _args,
 }: {
   readonly ctx: CliContext;
   readonly args: PrimeArgs;
 }): Promise<number> {
-  if (!args.options.check) {
-    process.stdout.write(`${renderAgentPrimer()}\n`);
-    return 0;
-  }
-  const project = await findProjectContext(ctx.cwd);
-  const report = await inspectAgentIntegrationFreshness({
-    projectRoot: project?.projectRoot ?? null,
-  });
-  process.stdout.write(
-    `${renderAgentIntegrationFreshnessNotice({ report })}\n\n${renderAgentPrimer()}`
-  );
-  return 0;
+  process.stdout.write(`${RETIRED_AGENT_PRIMER_MESSAGE}\n`);
+  return Promise.resolve(0);
 }
 
 function handleAgentPatterns({
@@ -149,8 +127,10 @@ async function handleAgentInit({
 }): Promise<number> {
   const startDir = resolveStartDir(ctx, args.options.path);
   const repoRoot = await findRepoRootForInit(startDir);
-  const report = await buildInitAssistantReport({ repoRoot });
-  const prompt = renderInitAssistantPrompt({ report });
+  const prompt = await buildOnboardingPrompt({
+    startDir,
+    entryPoint: { kind: "agent-init" },
+  });
 
   const selection = await resolveInitClient({
     clientRaw: args.options.client,
@@ -179,10 +159,10 @@ async function handleAgentInit({
 /**
  * `hack agent onboard` — print the canonical onboarding prompt.
  *
- * Uses `existing-project` mode (with project name/dev_host from config) when
- * a `.hack/` project is found; falls back to `new-project` mode otherwise.
- * The same content backs `hack init --with`, the `/hack-init` skill, and the
- * `hack-init` MCP prompt.
+ * The shared builder inventories the repo and picks `existing-project` mode
+ * (with project name/dev_host from config) when a `.hack/` project is found,
+ * `new-project` mode otherwise. `hack init --with`, `hack agent init`, and the
+ * `hack-init` MCP prompt render the same core content.
  */
 async function handleAgentOnboard({
   ctx,
@@ -192,21 +172,10 @@ async function handleAgentOnboard({
   readonly args: OnboardArgs;
 }): Promise<number> {
   const startDir = resolveStartDir(ctx, args.options.path);
-  const projectContext = await findProjectContext(startDir);
-
-  if (!projectContext) {
-    process.stdout.write(renderOnboardingPrompt({ mode: "new-project" }));
-    return 0;
-  }
-
-  const config = await readProjectConfig(projectContext);
-  const devHost = await readProjectDevHost(projectContext);
-
   process.stdout.write(
-    renderOnboardingPrompt({
-      mode: "existing-project",
-      projectName: config.name,
-      devHost: devHost ?? undefined,
+    await buildOnboardingPrompt({
+      startDir,
+      entryPoint: { kind: "agent-onboard" },
     })
   );
   return 0;
@@ -233,7 +202,9 @@ async function resolveInitClient(opts: {
     );
   }
 
-  if (!(process.stdin.isTTY && process.stdout.isTTY)) {
+  // No TTY, HACK_NO_INTERACTIVE, or --no-interactive: print the prompt
+  // instead of opening a picker that cannot settle on a piped stdin.
+  if (!canPrompt()) {
     return null;
   }
 

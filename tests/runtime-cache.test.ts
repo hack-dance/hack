@@ -217,6 +217,14 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
       projectDir: "/tmp/bad/.hack",
       createdAt,
     },
+    {
+      id: "native",
+      name: "native",
+      repoRoot: "/tmp/native",
+      projectDirName: HACK_PROJECT_DIR_PRIMARY,
+      projectDir: "/tmp/native/.hack",
+      createdAt,
+    },
   ];
 
   const makeView = (name: string): ProjectView => ({
@@ -240,12 +248,23 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
     status: "unknown",
   });
 
+  const metaCalls: string[] = [];
+  const blocked: ProjectView = {
+    ...makeView("native"),
+    status: "unavailable",
+    runtimeStatus: "unavailable",
+    inputDiagnostic: {
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message: "Native project is not supported yet.",
+    },
+  };
   const cache = createRuntimeCache({
     deps: {
       readProjectsRegistry: async () => ({ version: 1, projects }),
-      buildProjectViews: async () => [makeView("ok"), makeView("bad")],
+      buildProjectViews: async () => [makeView("ok"), makeView("bad"), blocked],
       serializeProjectView: (view) => ({ name: view.name, kind: view.kind }),
       resolveProjectMeta: async (opts) => {
+        metaCalls.push(opts.projectName);
         if (opts.projectName === "bad") {
           throw new Error("boom");
         }
@@ -287,7 +306,7 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
     includeMeta: true,
   });
 
-  expect(payload.projects.length).toBe(2);
+  expect(payload.projects.length).toBe(3);
   expect(payload.projects[0]).toMatchObject({
     name: "ok",
     meta: {
@@ -317,6 +336,8 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
     name: "bad",
     meta: null,
   });
+  expect(payload.projects[2]).toMatchObject({ name: "native", meta: null });
+  expect(metaCalls).toEqual(["ok", "bad"]);
 });
 
 test("runtime cache retains last runtime on failure", async () => {

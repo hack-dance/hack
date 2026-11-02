@@ -19,6 +19,25 @@ use std::{
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const BINARY: &str = concat!(env!("OUT_DIR"), "/stream-relay-host");
+
+/// Creates a new scratch root `/tmp/<prefix>-<pid>-<n>`. A name left behind by
+/// an earlier run whose PID is now reused is skipped, so a stale directory
+/// never fails a fresh test.
+fn fresh_root(prefix: &str) -> PathBuf {
+    loop {
+        let root = PathBuf::from(format!(
+            "/tmp/{prefix}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&root) {
+            Ok(()) => return root,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create {}: {error}", root.display()),
+        }
+    }
+}
+
 struct Relay {
     child: Child,
     root: PathBuf,
@@ -41,16 +60,7 @@ impl Relay {
         existing: Option<PathBuf>,
     ) -> Self {
         let reuse = existing.is_some();
-        let root = existing.unwrap_or_else(|| {
-            PathBuf::from(format!(
-                "/tmp/hkr-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ))
-        });
-        if !reuse {
-            fs::create_dir(&root).unwrap();
-        }
+        let root = existing.unwrap_or_else(|| fresh_root("hkr"));
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let socket = root.join("app.sock");
         let mut command = Command::new(BINARY);
@@ -72,25 +82,19 @@ impl Relay {
         if let Some(reservation) = reservation {
             command.args(["--reservation", reservation]);
         }
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let output = child.stdout.take().unwrap();
-        let mut descriptor = libc::pollfd {
-            fd: output.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
+        // A caller-supplied root stays the caller's; only a fresh root is removed on failure.
+        let mut startup = PublisherStartup {
+            child: None,
+            root: if reuse { PathBuf::new() } else { root.clone() },
         };
-        assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 3000) }, 1);
-        let mut line = String::new();
-        BufReader::new(output).read_line(&mut line).unwrap();
-        assert_eq!(line, "ready\n");
-        assert_eq!(
-            fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
-            0o700
+        startup.child = Some(
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
         );
+        let child = await_bare_ready(startup, &socket);
         Self {
             child,
             root,
@@ -98,6 +102,8 @@ impl Relay {
             port: None,
         }
     }
+    /// Connects a client the relay must keep. Setting a timeout fails if the relay already
+    /// closed the stream (see `connect_refused`), which is a real failure here.
     fn connect(&self) -> UnixStream {
         let stream = UnixStream::connect(&self.socket).unwrap();
         stream
@@ -107,6 +113,16 @@ impl Relay {
             .set_write_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         stream
+    }
+    /// Connects a client the relay must refuse, and proves the refusal.
+    ///
+    /// The relay refuses by closing the accepted stream, which can happen before this
+    /// client's next syscall. Once the peer has closed, XNU's `sosetopt` rejects
+    /// `SO_RCVTIMEO`/`SO_SNDTIMEO` with EINVAL (both directions are shut), so this never
+    /// sets socket timeouts; it bounds the wait with `poll` instead.
+    fn connect_refused(&self) {
+        let stream = UnixStream::connect(&self.socket).unwrap();
+        assert_refused_within(&stream, REFUSAL_DEADLINE);
     }
     fn stop(&mut self) {
         if self.child.try_wait().unwrap().is_none() {
@@ -134,6 +150,89 @@ impl Drop for Relay {
         self.stop();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+/// Requires a relay's bare "ready\n" line and a private socket, then hands the child over.
+/// No `Relay` exists until this returns, so `startup` owns the child meanwhile: if any check
+/// fails or panics, its `Drop` kills and reaps the child (and removes a fresh root) instead
+/// of orphaning `stream-relay-host`.
+fn await_bare_ready(mut startup: PublisherStartup, socket: &std::path::Path) -> Child {
+    let output = startup
+        .child
+        .as_mut()
+        .expect("startup owns child")
+        .stdout
+        .take()
+        .unwrap();
+    let mut descriptor = libc::pollfd {
+        fd: output.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 3000) }, 1);
+    let mut line = String::new();
+    BufReader::new(output).read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    assert_eq!(
+        fs::metadata(socket).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    startup.root = PathBuf::new();
+    startup.child.take().expect("startup owns child")
+}
+
+#[test]
+fn fresh_root_skips_a_stale_directory_with_the_next_name() {
+    let stale = PathBuf::from(format!(
+        "/tmp/hks-{}-{}",
+        std::process::id(),
+        NEXT.load(Ordering::Relaxed)
+    ));
+    fs::create_dir(&stale).unwrap();
+    let root = fresh_root("hks");
+    assert_ne!(root, stale);
+    assert!(root.is_dir());
+    fs::remove_dir(&root).unwrap();
+    fs::remove_dir(&stale).unwrap();
+}
+
+#[test]
+fn failed_relay_readiness_kills_and_reaps_the_child() {
+    let root = fresh_root("hkr");
+    // A live child with the wrong readiness line fails the check without exiting on its own.
+    let child = Command::new("/bin/sh")
+        .args(["-c", "echo unready; exec sleep 30"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id() as libc::pid_t;
+    let startup = PublisherStartup {
+        child: Some(child),
+        root: root.clone(),
+    };
+    let socket = root.join("app.sock");
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        await_bare_ready(startup, &socket)
+    }));
+    let mut status = 0;
+    // SAFETY: a non-blocking wait on this test's own child pid.
+    let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    let error = io::Error::last_os_error();
+    if waited == 0 {
+        // SAFETY: the child is still ours and unreaped; stop it before failing.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, &mut status, 0);
+        }
+        let _ = fs::remove_dir_all(&root);
+        panic!("E_RELAY_STARTUP_ORPHAN: failed readiness left the relay child running");
+    }
+    assert!(failed.is_err(), "wrong readiness line must fail startup");
+    // ECHILD: the guard already killed and reaped it, so no zombie or orphan remains.
+    assert_eq!(waited, -1);
+    assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    assert!(!root.exists(), "failed startup must remove its fresh root");
 }
 #[test]
 fn large_stream_half_close_drains_all_buffered_bytes() {
@@ -326,8 +425,7 @@ fn occupied_socket_is_not_unlinked_and_unavailable_target_fails_connection() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(73));
-    let mut client = relay.connect();
-    assert_refused(client.read(&mut [0]));
+    relay.connect_refused();
     assert!(relay.child.try_wait().unwrap().is_none());
 }
 
@@ -347,8 +445,7 @@ fn connection_limit_refuses_excess_without_disrupting_existing_streams() {
         clients.push(client);
         upstreams.push(upstream);
     }
-    let mut excess = relay.connect();
-    assert_refused(excess.read(&mut [0]));
+    relay.connect_refused();
     assert!(relay.child.try_wait().unwrap().is_none());
     for (client, upstream) in clients.iter_mut().zip(&mut upstreams) {
         upstream.write_all(b"alive").unwrap();
@@ -372,6 +469,66 @@ fn assert_refused(result: std::io::Result<usize>) {
     }
 }
 
+/// Bounds how long a refused client waits for the relay to close it.
+const REFUSAL_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Proves `stream` is refused within `limit` without setting socket timeouts: waits for
+/// readability with `poll`, then requires EOF or a reset. A live peer times out and fails;
+/// a peer that sends data fails the refusal check.
+fn assert_refused_within(stream: &UnixStream, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized descriptor lives throughout this bounded poll.
+        let polled = unsafe {
+            libc::poll(
+                &mut descriptor,
+                1,
+                remaining.as_millis().min(i32::MAX as u128) as i32,
+            )
+        };
+        if polled < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        assert_eq!(
+            polled, 1,
+            "expected prompt refusal, stream stayed open for {limit:?}"
+        );
+        break;
+    }
+    // Readable: EOF, a reset, or data is pending, so this read cannot block.
+    let mut reader = stream;
+    assert_refused(reader.read(&mut [0]));
+}
+
+#[test]
+fn refusal_check_accepts_a_peer_that_closed_before_the_check() {
+    // The relay can close a refused stream before the client's first syscall after connect.
+    let (client, relay_side) = UnixStream::pair().unwrap();
+    drop(relay_side);
+    assert_refused_within(&client, REFUSAL_DEADLINE);
+}
+
+#[test]
+#[should_panic(expected = "expected prompt refusal")]
+fn refusal_check_rejects_a_live_peer() {
+    let (client, _relay_side) = UnixStream::pair().unwrap();
+    assert_refused_within(&client, Duration::from_millis(50));
+}
+
+#[test]
+#[should_panic(expected = "expected prompt refusal")]
+fn refusal_check_rejects_a_peer_that_sends_data() {
+    let (client, mut relay_side) = UnixStream::pair().unwrap();
+    relay_side.write_all(b"x").unwrap();
+    assert_refused_within(&client, REFUSAL_DEADLINE);
+}
+
 #[test]
 fn inherited_descriptors_do_not_keep_parent_channels_alive() {
     let target = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -391,8 +548,7 @@ fn inherited_descriptors_do_not_keep_parent_channels_alive() {
 
 #[test]
 fn namespace_requests_reject_invalid_identity_before_publishing() {
-    let root = PathBuf::from(format!("/tmp/hkr-netns-{}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkr-netns");
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let path = root.join("app.sock");
     for (address, option, pid, start, code) in [
@@ -558,8 +714,7 @@ fn reused_socket_rejects_old_reservation_and_expiring_partial_handshakes() {
 
 #[test]
 fn malformed_reservations_refuse_before_socket_creation() {
-    let root = PathBuf::from(format!("/tmp/hkr-reservation-{}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkr-reservation");
     let socket = root.join("app.sock");
     for token in [
         "",
@@ -649,12 +804,7 @@ fn try_frontend_publisher(
     control_token: Option<&str>,
     unix: bool,
 ) -> Result<Relay, PublisherStartupFailure> {
-    let root = PathBuf::from(format!(
-        "/tmp/hkp-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkp");
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let mut command = Command::new(BINARY);
     command
@@ -998,8 +1148,7 @@ fn publisher_refuses_port_conflicts_and_stale_reused_upstream() {
 #[test]
 fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
     use std::os::unix::{fs::MetadataExt, net::UnixListener};
-    let root = PathBuf::from(format!("/tmp/hkp-ack-{}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkp-ack");
     let path = root.join("socket");
     let upstream = UnixListener::bind(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1042,8 +1191,7 @@ fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
 #[test]
 fn publisher_refuses_nonprivate_or_aliased_upstream_before_listening() {
     use std::os::unix::{fs::symlink, net::UnixListener};
-    let root = PathBuf::from(format!("/tmp/hkp-private-{}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkp-private");
     let path = root.join("socket");
     let _listener = UnixListener::bind(&path).unwrap();
     // Hold the requested port for the whole test: a publisher that reached bind()
@@ -1085,12 +1233,7 @@ fn publisher_refuses_nonprivate_or_aliased_upstream_before_listening() {
 #[test]
 fn private_control_stops_only_matching_publisher_and_preserves_replaced_path() {
     use std::os::unix::net::{UnixDatagram, UnixListener};
-    let root = PathBuf::from(format!(
-        "/tmp/hkc-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkc");
     let upstream = root.join("upstream");
     let _server = UnixListener::bind(&upstream).unwrap();
     fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1156,12 +1299,7 @@ fn private_control_stops_only_matching_publisher_and_preserves_replaced_path() {
 #[test]
 fn control_startup_refuses_occupied_and_nonprivate_paths_without_retaining_publisher_resources() {
     use std::os::unix::{fs::MetadataExt, net::UnixListener};
-    let root = PathBuf::from(format!(
-        "/tmp/hkcf-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkcf");
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let upstream = root.join("upstream");
     let _server = UnixListener::bind(&upstream).unwrap();
@@ -1316,12 +1454,7 @@ fn unix_publication_streams_and_preserves_occupied_or_replaced_frontend() {
 
 #[test]
 fn unix_publication_survives_a_delayed_private_upstream_ack() {
-    let root = PathBuf::from(format!(
-        "/tmp/hkr-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = fresh_root("hkr");
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let upstream = root.join("delayed.sock");
     let listener = UnixListener::bind(&upstream).unwrap();

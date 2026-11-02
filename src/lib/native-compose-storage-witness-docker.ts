@@ -927,8 +927,16 @@ export async function reconcileNativeComposeStorageDockerCarrierRecovery(
  * instead. Fixed and finite; exhaustion refuses as `probe-budget`.
  */
 const UNRECORDED_GROUP_BUDGET_MS = 3000;
-/** Every deadline here is monotonic (`performance.now`), like the handshake and
- * settlement budgets: a wall-clock step cannot shorten or extend the wait. */
+/**
+ * Waits until the exited command's process group is proven absent: only `ESRCH`
+ * proves it. `EPERM` means the group still has a member this process cannot
+ * signal. macOS can answer it just after the last member exited (seen once in
+ * 400 exits on a loaded host), so it is not absence: the wait continues to the
+ * same deadline (HACK-1463). Refusing it at once refused healthy commands as
+ * `unclassified` on a loaded host. Every deadline here is monotonic
+ * (`performance.now`), like the handshake and settlement budgets: a wall-clock
+ * step cannot shorten or extend the wait.
+ */
 async function groupAbsent(
   pid: number,
   monotonicDeadline?: number
@@ -945,7 +953,9 @@ async function groupAbsent(
       if (isRecord(error) && error.code === "ESRCH") {
         return;
       }
-      return refuse();
+      if (!(isRecord(error) && error.code === "EPERM")) {
+        return refuse();
+      }
     }
     if (performance.now() >= deadline) {
       return refuseCommand("probe-budget");
@@ -2191,8 +2201,16 @@ export async function createNativeComposeDockerStorageXattrCarrier(
             const check = async () => {
               await checkCompletion();
               tool();
+              // The live owner veto guards this invocation's saved command
+              // record. Every command settled before this finalizer was set, so
+              // no deadline can invalidate the owner now: a vetoed owner reports
+              // `private-state` at the carrier's own cleanup stage. Untagged, it
+              // would read `storage-budget` once caught past the deadline.
               if (!nativeComposeStorageCommandOwnerConfirmed(owner)) {
-                return refuse();
+                return refuseObserved(
+                  "storage-helper-cleanup",
+                  "private-state"
+                );
               }
               // Deferred retirement is the carrier's own cleanup: a binding
               // changed since the invocation began reports `private-state`.

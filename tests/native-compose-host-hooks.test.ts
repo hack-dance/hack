@@ -194,18 +194,20 @@ test("selected host baselines, remapped refs, explicit empty and unset stay isol
 
 test("timeout reaps a resistant descendant group and blocks later hooks", async () => {
   const root = await fixture();
-  const program =
-    'const child = Bun.spawn([process.execPath,"-e",\'process.on("SIGTERM",()=>{});await Bun.sleep(60000)\'],{stdout:"inherit",stderr:"inherit"});await Bun.write("pid",String(child.pid));await Bun.sleep(60000)';
+  // Arm TERM resistance before publishing the exact descendant PID. Keep all
+  // startup inside the original 100 ms budget, without cold Bun startup.
+  const program = `/bin/sh -c 'trap "" TERM; printf "%s" "$$" > pid; exec /bin/sleep 60' & wait`;
   const result = await execute(
     root,
     [
-      hook("timeout", { exec: [process.execPath, "-e", program] }),
+      hook("timeout", { exec: ["/bin/sh", "-c", program] }),
       hook("later", { shell: "touch later" }),
     ],
     100
   );
   expect(result).toEqual({ outcome: "complete", value: 124 });
   const pid = Number(await readFile(join(root, "pid"), "utf8"));
+  expect(Number.isSafeInteger(pid) && pid > 1).toBe(true);
   expect(() => process.kill(pid, 0)).toThrow();
   expect(await Bun.file(join(root, "later")).exists()).toBe(false);
 });

@@ -78,7 +78,6 @@ export const FOCUSED_SKILLS: readonly FocusedSkillSpec[] = [
       { id: "branch-instances" },
       { id: "branch-aliases" },
       { id: "worktrees", optional: true },
-      { id: "freshness" },
     ],
   },
   {
@@ -100,7 +99,6 @@ export const FOCUSED_SKILLS: readonly FocusedSkillSpec[] = [
       { id: "env-composition" },
       { id: "env-commands" },
       { id: "env-safety" },
-      { id: "freshness" },
     ],
   },
   {
@@ -116,11 +114,7 @@ export const FOCUSED_SKILLS: readonly FocusedSkillSpec[] = [
         "investigate routing or global infrastructure failures",
       ],
     },
-    sections: [
-      { id: "diagnose" },
-      { id: "operating-rules" },
-      { id: "freshness" },
-    ],
+    sections: [{ id: "diagnose" }, { id: "operating-rules" }],
   },
 ];
 

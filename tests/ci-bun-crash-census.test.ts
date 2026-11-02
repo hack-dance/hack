@@ -729,6 +729,23 @@ describe("workflow reads (HACK-1441)", () => {
     expect(workflowJobBunVersion(WORKFLOW, "late")).toBeNull();
   });
 
+  test("a trailing comment on the jobs: line still opens the jobs (HACK-1462)", () => {
+    const commented = [
+      "name: CI",
+      "jobs: # all jobs",
+      "  test:",
+      "    ",
+      "    steps:",
+      "      - with:",
+      '          bun-version: "1.4.2"',
+    ].join("\n");
+    expect(workflowJobBunVersion(commented, "test")).toBe("1.4.2");
+    // `#` without leading whitespace is part of the key, not a comment.
+    expect(
+      workflowJobBunVersion(commented.replace("jobs: #", "jobs:#"), "test")
+    ).toBeNull();
+  });
+
   const SHA_SHARED = "d".repeat(40);
   const SHA_OTHER = "e".repeat(40);
 

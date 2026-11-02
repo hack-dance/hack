@@ -1,5 +1,5 @@
 use super::journal::OUTPUT_LIMIT;
-use super::{Result, Store, error, try_lock};
+use super::{PausePoint, Result, Store, error, pause_point, try_lock};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -29,6 +29,8 @@ pub fn supervise(root: &Path, executable: &Path, checkout: &Path, id: &str) -> R
     if receipt.state != "running" {
         return Err(error("Claim was quarantined or cancelled."));
     }
+    // Window: claim committed, nothing spawned. Recovery must quarantine, not replay.
+    pause_point(root, id, PausePoint::ClaimSpawn)?;
     if receipt.cancel_requested {
         store.update(id, |r| {
             r.state = "cancelled".into();
@@ -262,6 +264,8 @@ fn run_child(
     })?;
     *reaped = true;
     let status = child.wait().map_err(error)?;
+    // Window: child reaped, exit status only in memory. Recovery must quarantine.
+    pause_point(&store.root, id, PausePoint::ExitPersist)?;
     // No signal is sent after wait: a reused PID/PGID cannot authorize an effect.
     let absent = group_absent(child.id() as i32);
     let outcome = store.update(id, |r| {

@@ -9,6 +9,7 @@ import {
 } from "./helpers/cli-spawn-env-scan.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import {
+  PRIVATE_CLI_DAEMON_AUTOSTART_ENV,
   PRIVATE_CLI_INHERITED_ENV,
   privateCliEnv,
 } from "./helpers/private-cli-env.ts";
@@ -426,11 +427,21 @@ test("privateCliEnv keeps only the allow-list, test values and a private HOME", 
     expect(env.PATH).toBe("/fixture/bin");
     expect(env.DOCKER_CONFIG).toBe(join(root, "docker-client"));
     expect(Object.keys(env).sort()).toEqual(
-      ["DOCKER_CONFIG", "HACK_HOME", "HOME", "PATH"].sort()
+      [
+        "DOCKER_CONFIG",
+        "HACK_HOME",
+        "HOME",
+        "PATH",
+        PRIVATE_CLI_DAEMON_AUTOSTART_ENV,
+      ].sort()
     );
     const inherited = privateCliEnv({ root, isolateDockerClient: false });
     for (const key of Object.keys(inherited)) {
-      expect([...PRIVATE_CLI_INHERITED_ENV, "HOME"]).toContain(key);
+      expect([
+        ...PRIVATE_CLI_INHERITED_ENV,
+        "HOME",
+        PRIVATE_CLI_DAEMON_AUTOSTART_ENV,
+      ]).toContain(key);
     }
     // A HOME the test created first is still made private to the owner.
     const existing = join(root, "existing-home");

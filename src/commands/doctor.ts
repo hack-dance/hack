@@ -389,7 +389,6 @@ const DOCTOR_SUMMARY_GROUPS = [
       "native root trust",
       "native ca repair",
       "native https route",
-      "agent integrations",
     ]),
   },
   {
@@ -842,22 +841,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     checkProject({ startDir, adopted })
   );
   results.push(projectCtx);
-  const agentIntegrationCheck = await runCheck(
-    s,
-    "agent integrations",
-    () => checkAgentIntegrations({ startDir, adopted }),
-    { timeoutMs: 5000 }
-  );
-  results.push(
-    agentIntegrationCheck.status === "error"
-      ? {
-          ...agentIntegrationCheck,
-          status: "warn",
-          message:
-            "Freshness audit unavailable (verify: hack setup sync --all-scopes --check)",
-        }
-      : agentIntegrationCheck
-  );
   results.push(
     await runCheck(s, "sessions mux", () =>
       checkSessionsMuxConfig({ startDir, adopted })
@@ -1690,47 +1673,6 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     status: "warn",
     message: "hackd not running (run: hack daemon start)",
   };
-}
-
-async function checkAgentIntegrations(opts: {
-  readonly startDir: string;
-  readonly adopted?: DoctorAdoptedProject | null;
-}): Promise<CheckResult> {
-  try {
-    return await checkAgentIntegrationsUnsafe(opts);
-  } catch {
-    return {
-      name: "agent integrations",
-      status: "warn",
-      message:
-        "Freshness audit unavailable (verify: hack setup sync --all-scopes --check)",
-    };
-  }
-}
-
-async function checkAgentIntegrationsUnsafe(opts: {
-  readonly startDir: string;
-  readonly adopted?: DoctorAdoptedProject | null;
-}): Promise<CheckResult> {
-  const project = opts.adopted ?? (await findProjectContext(opts.startDir));
-  const report = await inspectDoctorAgentIntegrations({
-    projectRoot: project?.projectRoot ?? null,
-  });
-  return report.status === "current"
-    ? {
-        name: "agent integrations",
-        status: "ok",
-        message: project
-          ? "Project and global guidance current"
-          : "Global guidance current",
-      }
-    : {
-        name: "agent integrations",
-        status: "warn",
-        message: project
-          ? "Agent integration review needed (inspect: hack setup sync --all-scopes --check; repair only affected, authorized targets; missing optional integrations need not be installed)"
-          : "Global agent integration review needed (inspect: hack setup sync --global --check; repair only affected, authorized targets; missing optional integrations need not be installed)",
-      };
 }
 
 async function checkGatewayConfig(): Promise<CheckResult> {
@@ -3604,12 +3546,18 @@ async function runDoctorFix(opts: {
 
   await maybeInstallMutagenForDoctorFix();
   await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
-  await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
+  // Let env migration refuse before creating an unrelated missing gitignore.
+  if (!opts.migrateEnvConfig) {
+    await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
+  }
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
   await maybeRepairHackd();
 
   const dockerOk = await dockerInfoOk();
   if (!dockerOk) {
+    if (opts.migrateEnvConfig) {
+      await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
+    }
     note(
       "Docker is not reachable; daemon repairs were still applied, but Docker-backed fixes were skipped.",
       "doctor"
@@ -3645,6 +3593,7 @@ async function runDoctorFix(opts: {
   await maybeMigrateDnsmasq();
   if (opts.migrateEnvConfig) {
     await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
+    await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   }
 
   renderSkippedDoctorFixSteps();
@@ -3785,6 +3734,13 @@ async function maybeMigrateProjectEnvConfig(opts: {
     );
   }
   note(migrationNotes.join("\n"), "doctor");
+
+  for (const retained of migrated.retainedEnvFiles) {
+    note(
+      `Kept ${retained.path}: keys not preserved in env layers: ${retained.keys.join(", ")} (values omitted).`,
+      "env cleanup"
+    );
+  }
 
   let blockedCleanupCandidates = [...migrated.blockedCleanupCandidates];
   if (migrated.composeEnvFileReferences.length > 0) {
@@ -3932,7 +3888,7 @@ export async function buildDoctorRemediationPlanLines(opts: {
   readonly migrateEnvConfig: boolean;
 }): Promise<string[]> {
   const steps = [
-    "Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.",
+    "Review and repair global Docker networks, CoreDNS, CA, host TLS env, and daemon drift where needed.",
   ];
 
   const adopted = await findDoctorAdoptedProject({ startDir: opts.startDir });

@@ -11,6 +11,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { extractArchive } from "../scripts/installer/bundle.ts";
+import { digest } from "../scripts/installer/integrity.ts";
 import { packageNativeStorageTool } from "../scripts/package-native-storage-tool.ts";
 import {
   CONFIG_COMPILER_PAYLOAD,
@@ -19,7 +21,7 @@ import {
   PRERELEASE_PAYLOAD,
   PRERELEASE_PLATFORM,
   PRERELEASE_SUPPORT_ANCHOR,
-  packagePrerelease,
+  packagePrerelease as packagePrereleaseActual,
   prereleaseMetadata,
   prereleaseNotes,
   renderChecksums,
@@ -38,6 +40,26 @@ import {
 import { packageMcpBundle } from "../src/mcp/bundle.ts";
 import { nativeCandidateMcpPayload } from "../src/mcp/candidate-payload.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+
+// Packaging fixtures qualify inventories and binding; standalone execution has its own isolated test.
+const packagePrerelease = async (
+  options: Parameters<typeof packagePrereleaseActual>[0]
+) => {
+  await packagePrereleaseActual({
+    ...options,
+    buildManager: async (output) => {
+      await writeFile(output, "standalone-manager-fixture", { mode: 0o500 });
+    },
+  });
+  const archive = join(options.output, options.plan.archive);
+  extractArchive({
+    archive,
+    checksum: digest(archive),
+    destination: `${options.output}-installer-fixture`,
+    version: options.plan.version,
+    signatures: () => {},
+  });
+};
 
 const sha = "a".repeat(40);
 const input = {
@@ -156,6 +178,9 @@ describe("prerelease decision boundary", () => {
       plan.archive,
       "prerelease.json",
       "SHA256SUMS",
+      "hack-next-manager-darwin-arm64",
+      "hack-next-install.sh",
+      "INSTALLER-SHA256SUMS",
     ]);
     expect(
       createPrereleasePlan({
@@ -850,6 +875,25 @@ test("packages complete metadata-bound archive and refuses replacement, tamperin
     const output = join(root, "assets");
     await packagePrerelease({ plan, bundle, output });
     await verifyReleaseAssets({ plan, output });
+    for (const name of [
+      "hack-next-manager-darwin-arm64",
+      "hack-next-install.sh",
+      "INSTALLER-SHA256SUMS",
+    ]) {
+      const path = join(output, name);
+      const original = await Bun.file(path).bytes();
+      if (name === "hack-next-manager-darwin-arm64") {
+        await chmod(path, 0o700);
+      }
+      await Bun.write(path, "tampered installer asset");
+      await expect(verifyReleaseAssets({ plan, output })).rejects.toThrow(
+        "Standalone installer"
+      );
+      await Bun.write(path, original);
+      if (name === "hack-next-manager-darwin-arm64") {
+        await chmod(path, 0o500);
+      }
+    }
     const members = await archiveMembers(join(output, plan.archive));
     expect(members.map((member) => member.name).sort()).toEqual(
       [...PRERELEASE_PAYLOAD, "SHA256SUMS"].sort()

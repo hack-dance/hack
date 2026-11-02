@@ -9,9 +9,10 @@ import * as fs from "node:fs/promises";
  * would. No real disk is filled.
  *
  * - `HACK_TEST_ERRNO_STEP` picks the step (default `open`): `open`, `access`,
- *   `lstat` or `rename` of a matching path (the rename's source), `write` or
- *   `sync` on a handle opened at a matching path, or `bun-write` (`Bun.write`)
- *   to a matching path.
+ *   `lstat` or `rename` of a matching path (the rename's source), `link` from
+ *   a matching source (for example ENOTSUP, as on a filesystem without hard
+ *   links such as ExFAT), `write` or `sync` on a handle opened at a matching
+ *   path, or `bun-write` (`Bun.write`) to a matching path.
  * - `HACK_TEST_ERRNO_PATH` is a regular expression a path must match (default
  *   `\.tmp$`, an atomic-write staging sibling).
  *
@@ -28,6 +29,7 @@ const STEPS = [
   "access",
   "lstat",
   "rename",
+  "link",
   "write",
   "sync",
   "bun-write",
@@ -53,6 +55,7 @@ const realOpen = fs.open;
 const realAccess = fs.access;
 const realLstat = fs.lstat;
 const realRename = fs.rename;
+const realLink = fs.link;
 
 type Handle = Awaited<ReturnType<typeof fs.open>>;
 
@@ -97,6 +100,12 @@ mock.module("node:fs/promises", () => ({
       throw injected("rename", args[0]);
     }
     return await realRename(...args);
+  },
+  link: async (...args: Parameters<typeof fs.link>) => {
+    if (step === "link" && matches(args[0])) {
+      throw injected("link", String(args[0]));
+    }
+    return await realLink(...args);
   },
 }));
 

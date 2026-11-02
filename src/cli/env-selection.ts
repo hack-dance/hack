@@ -1,4 +1,7 @@
-import { parseEnvConfigSelection } from "../lib/project.ts";
+import {
+  ENV_CONFIG_NAME_MAX_LENGTH,
+  parseEnvConfigSelection,
+} from "../lib/project.ts";
 import { CliUsageError } from "./command.ts";
 
 /**
@@ -6,8 +9,7 @@ import { CliUsageError } from "./command.ts";
  * and never the argument, which may be a mistyped `KEY=value` or a pasted
  * value.
  */
-export const INVALID_ENV_SELECTION_MESSAGE =
-  "Invalid --env value. Overlay names must match ^[a-z0-9]+(-[a-z0-9]+)*$; use base, default or none for base layers only.";
+export const INVALID_ENV_SELECTION_MESSAGE = `Invalid --env value. Overlay names must match ^[a-z0-9]+(-[a-z0-9]+)*$ and be at most ${ENV_CONFIG_NAME_MAX_LENGTH} characters; use base, default or none for base layers only.`;
 
 /**
  * Resolve a CLI `--env` value through the one shared selection grammar.
@@ -16,7 +18,8 @@ export const INVALID_ENV_SELECTION_MESSAGE =
  * - `null`: base layers only. `base`, `default` and `none` (any case) and an
  *   empty value bypass the configured default overlay.
  * - `string`: the overlay name, which must already be canonical
- *   (`ENV_CONFIG_NAME_PATTERN`); surrounding whitespace is ignored.
+ *   (`ENV_CONFIG_NAME_PATTERN`) and at most `ENV_CONFIG_NAME_MAX_LENGTH`
+ *   characters; surrounding whitespace is ignored.
  *
  * Anything else, including any value containing `=`, is refused with a fixed,
  * value-free usage error. A requested name is never slugged: slugging

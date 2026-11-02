@@ -18,6 +18,7 @@ import { NativeComposeOwnershipError } from "../src/lib/native-compose-ownership
 import {
   assertNativeComposeStorageBindingUnchanged,
   assertNativeComposeStorageCarrierStable,
+  assertNativeComposeStorageCarrierStateUnchanged,
   assertNativeComposeStorageDockerImage,
   nativeComposeStorageCarrierBudgetReason,
 } from "../src/lib/native-compose-storage-witness-docker.ts";
@@ -1264,7 +1265,56 @@ test("a re-inspected carrier whose creation time or policy changed keeps a polic
   }
 });
 
-test("a saved binding that changed across a carrier step keeps a private-state reason after its deadline", () => {
+test("a stopped carrier whose state changed on re-inspection keeps a policy stability reason after its deadline", () => {
+  const deadline = 5_000_000;
+  const live = new AbortController();
+  const selected = input();
+  const inspect = (state: Record<string, unknown>) => {
+    const fake = carrier(selected);
+    fake.value.state = state;
+    return checkNativeComposeStorageDockerCarrier({
+      value: fake.value,
+      input: selected,
+      program: fake.program,
+      imageIds: [selected.artifact.imageId],
+    });
+  };
+  const exited = { Status: "exited", Running: false, Pid: 0, ExitCode: 0 };
+  const stopped = inspect(exited);
+  expect(() =>
+    assertNativeComposeStorageCarrierStateUnchanged(
+      inspect({ ...exited }),
+      stopped
+    )
+  ).not.toThrow();
+  const caught = refusalOf(() =>
+    assertNativeComposeStorageCarrierStateUnchanged(
+      inspect({ ...exited, FinishedAt: "2026-10-08T12:00:01Z" }),
+      stopped
+    )
+  );
+  expect((caught as Error).message).toBe(
+    "Native storage xattr proof refused; values omitted."
+  );
+  expect(nativeComposeEffectRefusal(caught)).toEqual({
+    stage: "storage-helper-policy",
+    reason: "helper-policy-stability",
+  });
+  expect(
+    nativeComposeStorageCarrierBudgetReason({
+      error: caught,
+      signal: live.signal,
+      deadline,
+      now: () => deadline + 30_000,
+    })
+  ).toBe("helper-policy-stability");
+});
+
+// Two stages: the helper reports the stage its caller passes, never a fixed one.
+test.each([
+  "storage-helper-start",
+  "storage-provision",
+] as const)("a saved binding that changed across a carrier step keeps a private-state reason at %s after its deadline", (stage) => {
   const deadline = 5_000_000;
   const live = new AbortController();
   const before = {
@@ -1273,14 +1323,14 @@ test("a saved binding that changed across a carrier step keeps a private-state r
   } as unknown as NativeComposeMaterialBinding;
   expect(() =>
     assertNativeComposeStorageBindingUnchanged({
-      stage: "storage-helper-start",
+      stage,
       before,
       after: structuredClone(before),
     })
   ).not.toThrow();
   const caught = refusalOf(() =>
     assertNativeComposeStorageBindingUnchanged({
-      stage: "storage-helper-start",
+      stage,
       before,
       after: {
         ...before,
@@ -1292,7 +1342,7 @@ test("a saved binding that changed across a carrier step keeps a private-state r
     "Native storage xattr proof refused; values omitted."
   );
   expect(nativeComposeEffectRefusal(caught)).toEqual({
-    stage: "storage-helper-start",
+    stage,
     reason: "private-state",
   });
   expect(

@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 
-import { type CliSpec, resolveCommand } from "../cli/command.ts";
+import {
+  type AnyCommandSpec,
+  builtinOptions,
+  type CliSpec,
+  resolveCommand,
+} from "../cli/command.ts";
 import { HACK_ERROR_CODES } from "../lib/cli-result.ts";
 
 /**
@@ -18,6 +23,15 @@ import { HACK_ERROR_CODES } from "../lib/cli-result.ts";
  * background queue or automatic retry here. Every refusal and redaction is a
  * closed value: nothing in this module echoes payload text, destinations or
  * redacted values back in a diagnostic.
+ *
+ * This code is a reference model, not a runtime guard. Only the skill renderer
+ * and the tests import it; what protects a user in practice is an agent
+ * following the skill's prose. A passing gate also does not prove a draft is
+ * clean. The patterns find shapes, so a hostname under a public suffix, a
+ * single-label machine name, a bare username, a relative project path, or a
+ * project, service, branch, repository or organization name written in prose
+ * can still pass. Command shapes are normalized against the CLI spec, and the
+ * human review of the exact payload covers the rest.
  */
 
 /** One entry of a closed vocabulary rendered into the skill and template. */
@@ -155,9 +169,14 @@ export type RedactionKind =
   | "email"
   | "hostname"
   | "ip-address"
-  | "digest";
+  | "digest"
+  | "command-argument";
 
-/** Every redaction kind, in the order the sanitizer applies them. */
+/**
+ * Every redaction kind, in the order the sanitizer applies them. The last one,
+ * `command-argument`, needs the CLI spec, so {@link redactFeedbackCommandShapes}
+ * applies it before {@link sanitizeFeedbackText}.
+ */
 export const REDACTION_KINDS: readonly FeedbackVocabularyEntry<RedactionKind>[] =
   [
     {
@@ -206,6 +225,11 @@ export const REDACTION_KINDS: readonly FeedbackVocabularyEntry<RedactionKind>[] 
     {
       id: "digest",
       summary: "Long hexadecimal digests; hashing is not anonymization.",
+    },
+    {
+      id: "command-argument",
+      summary:
+        "Positional arguments, flag values and unknown flags of a `hack` command; only the command path and its known flag names stay.",
     },
   ];
 
@@ -274,6 +298,7 @@ export const FEEDBACK_PRIVACY_CHECKLIST: readonly string[] = [
   "No secrets, tokens, passwords, keys or URL credentials; name the key only.",
   "No ciphertext, encrypted env files or hashes of private values; hashing is not anonymization.",
   "No usernames, hostnames, home or project paths, private or routed URLs, IP addresses or emails.",
+  "No project, service, branch, repository or organization names, in prose or in commands; use placeholders. Only Hack's own repository may be named.",
   "No raw logs or full config files; summarize, and quote at most one short sanitized error line.",
   "No hidden attachments; every attachment is listed and sanitized.",
 ];
@@ -1125,6 +1150,264 @@ export function findFeedbackPrivacyIssues(text: string): RedactionKind[] {
 }
 
 // ---------------------------------------------------------------------------
+// Command shapes
+// ---------------------------------------------------------------------------
+
+const COMMAND_ARGUMENT = redactionPlaceholder("command-argument");
+const HACK_WORD = "hack";
+const UNKNOWN_COMMAND = "unknown";
+/**
+ * Placeholders that may stay in a command shape: this module's own redactions
+ * and a closed list of generic names. `<my-private-app>` is not a placeholder.
+ */
+const SAFE_COMMAND_PLACEHOLDER =
+  /^<(?:redacted:[a-z-]+|arg|args|branch|command|dir|file|host|id|key|name|path|port|project|script|service|url|value)>$/i;
+/** Sentence punctuation that may follow a command word in prose. */
+const COMMAND_WORD_PUNCTUATION = /[.,;:!?)\]]+$/;
+const COMMAND_SEPARATOR = /(?:[ \t]|\\\r?\n)+/;
+const FLAG_START = /^--?[A-Za-z]/;
+/**
+ * A `hack` invocation in free text. It runs to the end of the line, a backtick
+ * or an HTML comment end, because prose gives no reliable sign of where an
+ * unquoted command stops and redacting too much is the safe failure. `Hack` in
+ * prose, `.hack` and `hack-feedback` never match.
+ */
+const COMMAND_MENTION =
+  /(?<![\w.-])hack((?:(?:[ \t]|\\\r?\n)+(?!--!?>)[^\s`]+)+)/g;
+const SEARCH_TERM_SEPARATOR = /\s+/;
+const COMMAND_LINE = /^\s*(?:[-*+]\s+)?\**Command:\**\s*(.*?)\s*$/gim;
+const SEARCH_TERMS_LINE = /^\s*(?:[-*+]\s+)?\**Terms:\**\s*(.*?)\s*$/gim;
+const WHOLE_CODE_SPAN = /^`([^`]*)`$/;
+
+type RedactedCommandText = {
+  readonly text: string;
+  /** How many tokens were replaced; zero when the text was already clean. */
+  readonly redacted: number;
+};
+
+function findSubcommand(
+  subcommands: readonly AnyCommandSpec[],
+  token: string
+): AnyCommandSpec | undefined {
+  const word = token.replace(COMMAND_WORD_PUNCTUATION, "");
+  return subcommands.find((command) => command.name === word);
+}
+
+/**
+ * Walk the CLI spec over a command's tokens. Flags do not end the walk, as in
+ * `hack --json up`, but the first other token that is not a subcommand does.
+ */
+function walkCommandTokens(
+  cli: CliSpec,
+  tokens: readonly string[]
+): {
+  readonly path: ReadonlySet<number>;
+  readonly flags: ReadonlySet<string>;
+} {
+  const path = new Set<number>();
+  const options = [...builtinOptions(), ...cli.globalOptions];
+  let subcommands = cli.commands;
+  for (const [index, token] of tokens.entries()) {
+    if (token === "--") {
+      break;
+    }
+    if (token.startsWith("-")) {
+      continue;
+    }
+    const next = findSubcommand(subcommands, token);
+    if (!next) {
+      break;
+    }
+    path.add(index);
+    options.push(...next.options);
+    subcommands = next.subcommands;
+  }
+  const flags = new Set<string>();
+  for (const option of options) {
+    flags.add(option.long);
+    if (option.short) {
+      flags.add(option.short);
+    }
+  }
+  return { path, flags };
+}
+
+/**
+ * The arguments after `hack`, keeping only what the CLI spec names: the command
+ * path and that path's flag names. Every positional argument, flag value,
+ * unknown flag and token after `--` becomes a placeholder, unless it already is
+ * a {@link SAFE_COMMAND_PLACEHOLDER}. No text from the input survives except
+ * words the spec defines, so a private name has nowhere to stay.
+ */
+function normalizeCommandTokens(
+  cli: CliSpec,
+  tokens: readonly string[]
+): { readonly tokens: readonly string[]; readonly redacted: number } {
+  const { path, flags } = walkCommandTokens(cli, tokens);
+  let redacted = 0;
+  let afterSeparator = false;
+  const placeholder = (token: string): string => {
+    if (SAFE_COMMAND_PLACEHOLDER.test(token)) {
+      return token;
+    }
+    redacted += 1;
+    return COMMAND_ARGUMENT;
+  };
+  const normalized = tokens.map((token, index) => {
+    if (path.has(index)) {
+      return token;
+    }
+    if (afterSeparator) {
+      return placeholder(token);
+    }
+    if (token === "--") {
+      afterSeparator = true;
+      return token;
+    }
+    if (!token.startsWith("-")) {
+      return placeholder(token);
+    }
+    const equals = token.indexOf("=");
+    const name = equals === -1 ? token : token.slice(0, equals);
+    if (!flags.has(name)) {
+      return placeholder(token);
+    }
+    return equals === -1
+      ? token
+      : `${name}=${placeholder(token.slice(equals + 1))}`;
+  });
+  return { tokens: normalized, redacted };
+}
+
+/**
+ * The command shape a draft may carry: `unknown`, or `hack` followed by
+ * spec-named words and placeholders. A command that is not a plain `hack`
+ * invocation has no spec to walk, so it becomes `unknown` rather than being
+ * copied into the report.
+ */
+function normalizeFeedbackCommandShape(opts: {
+  readonly cli: CliSpec;
+  readonly command: string;
+}): RedactedCommandText {
+  const command = opts.command.trim();
+  if (command === UNKNOWN_COMMAND) {
+    return { text: UNKNOWN_COMMAND, redacted: 0 };
+  }
+  const [first, ...rest] = command.split(COMMAND_SEPARATOR);
+  if (first !== HACK_WORD) {
+    return { text: UNKNOWN_COMMAND, redacted: 1 };
+  }
+  const { tokens, redacted } = normalizeCommandTokens(opts.cli, rest);
+  return { text: [HACK_WORD, ...tokens].join(" "), redacted };
+}
+
+/**
+ * Normalize every `hack` invocation in free text, as
+ * {@link normalizeFeedbackCommandShape} does. The word after `hack` must be a
+ * flag or a top-level command, so "a hack around it" stays. Text that needs no
+ * change comes back exactly as it was, which keeps this idempotent.
+ */
+export function redactFeedbackCommandShapes(opts: {
+  readonly cli: CliSpec;
+  readonly text: string;
+}): RedactedCommandText {
+  let redacted = 0;
+  const text = opts.text.replace(
+    COMMAND_MENTION,
+    (mention: string, args: string) => {
+      const tokens = args.trim().split(COMMAND_SEPARATOR);
+      const first = tokens[0] ?? "";
+      if (
+        !(FLAG_START.test(first) || findSubcommand(opts.cli.commands, first))
+      ) {
+        return mention;
+      }
+      const normalized = normalizeCommandTokens(opts.cli, tokens);
+      if (normalized.redacted === 0) {
+        return mention;
+      }
+      redacted += normalized.redacted;
+      return [HACK_WORD, ...normalized.tokens].join(" ");
+    }
+  );
+  return { text, redacted };
+}
+
+function collectCommandNames(
+  commands: readonly AnyCommandSpec[],
+  names: Set<string>
+): void {
+  for (const command of commands) {
+    names.add(command.name);
+    collectCommandNames(command.subcommands, names);
+  }
+}
+
+/**
+ * Duplicate-search terms a draft may carry: registered error codes, command
+ * names and category ids, the vocabulary {@link buildDuplicateSearchTerms}
+ * draws from. A caller can supply its own terms, so a term from anywhere else
+ * becomes a placeholder.
+ */
+function redactSearchTerms(opts: {
+  readonly cli: CliSpec;
+  readonly terms: string;
+}): RedactedCommandText {
+  const known = new Set<string>([
+    ...KNOWN_ERROR_CODES,
+    ...FRICTION_CATEGORIES.map((entry) => entry.id),
+  ]);
+  collectCommandNames(opts.cli.commands, known);
+  let redacted = 0;
+  const text = opts.terms
+    .trim()
+    .split(SEARCH_TERM_SEPARATOR)
+    .map((term) => {
+      if (term === "" || known.has(term)) {
+        return term;
+      }
+      redacted += 1;
+      return COMMAND_ARGUMENT;
+    })
+    .join(" ");
+  return { text, redacted };
+}
+
+/** A hand-edited draft line's value, without the code span drafts render. */
+function lineValues(body: string, pattern: RegExp): readonly string[] {
+  return [...body.matchAll(pattern)].map((match) => {
+    const value = match[1] ?? "";
+    return WHOLE_CODE_SPAN.exec(value)?.[1] ?? value;
+  });
+}
+
+/**
+ * Whether final text still carries a command or search term that rendering
+ * would have changed. The gate needs this because a body can be edited after
+ * rendering, and a `Command:` line that is not a `hack` shape has no spec to
+ * walk: anything but its normalized form is refused.
+ */
+function hasUnsafeCommandText(opts: {
+  readonly cli: CliSpec;
+  readonly body: string;
+  readonly otherTexts: readonly string[];
+}): boolean {
+  const { cli, body } = opts;
+  return (
+    [body, ...opts.otherTexts].some(
+      (text) => redactFeedbackCommandShapes({ cli, text }).redacted > 0
+    ) ||
+    lineValues(body, COMMAND_LINE).some(
+      (command) =>
+        normalizeFeedbackCommandShape({ cli, command }).text !== command
+    ) ||
+    lineValues(body, SEARCH_TERMS_LINE).some(
+      (terms) => redactSearchTerms({ cli, terms }).redacted > 0
+    )
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Draft
 // ---------------------------------------------------------------------------
 
@@ -1293,28 +1576,57 @@ function mergeCounts(
 
 /**
  * Render a draft into the exact payload the user reviews. Every free-text
- * field and attachment is sanitized; the value-free redaction counts are
- * returned for the review step and never enter the public body.
+ * field and attachment is sanitized, and every `hack` command and search term
+ * is reduced to what the CLI spec and closed vocabularies name. The value-free
+ * redaction counts are returned for the review step and never enter the public
+ * body. `cli` is injected so this module does not import the whole command tree.
  */
-export function renderFeedbackDraft(
-  input: FeedbackDraftInput
-): RenderedFeedbackDraft {
+export function renderFeedbackDraft(opts: {
+  readonly cli: CliSpec;
+  readonly draft: FeedbackDraftInput;
+}): RenderedFeedbackDraft {
+  const { cli, draft } = opts;
   const counts: Partial<Record<RedactionKind, number>> = {};
-  const title = sanitizeFeedbackText(input.title);
-  mergeCounts(counts, title.redactions);
+  const countCommandArguments = (redacted: number): void => {
+    mergeCounts(counts, { "command-argument": redacted });
+  };
+  // Commands first: the path rule would turn `/opt/bin/hack run <arg>` into a
+  // placeholder that no longer reads as a `hack` command, stranding its arguments.
+  const scrub = (text: string): string => {
+    const shaped = redactFeedbackCommandShapes({ cli, text });
+    countCommandArguments(shaped.redacted);
+    const sanitized = sanitizeFeedbackText(shaped.text);
+    mergeCounts(counts, sanitized.redactions);
+    return sanitized.text;
+  };
+  const title = scrub(draft.title);
   // Names are sanitized before the body lists them, so the listing and the
   // attachment carry the same sanitized name.
-  const attachments = (input.attachments ?? []).map((attachment) => {
-    const name = sanitizeFeedbackText(attachment.name);
-    mergeCounts(counts, name.redactions);
-    const content = sanitizeFeedbackText(attachment.content);
-    mergeCounts(counts, content.redactions);
-    return { name: name.text, content: content.text };
+  const attachments = (draft.attachments ?? []).map((attachment) => ({
+    name: scrub(attachment.name),
+    content: scrub(attachment.content),
+  }));
+  const command = normalizeFeedbackCommandShape({
+    cli,
+    command: draft.environment.command,
   });
-  const body = sanitizeFeedbackText(renderDraftBody({ ...input, attachments }));
-  mergeCounts(counts, body.redactions);
+  countCommandArguments(command.redacted);
+  let duplicateSearch = draft.duplicateSearch;
+  if (duplicateSearch.status === "searched") {
+    const terms = redactSearchTerms({ cli, terms: duplicateSearch.terms });
+    countCommandArguments(terms.redacted);
+    duplicateSearch = { ...duplicateSearch, terms: terms.text };
+  }
+  const body = scrub(
+    renderDraftBody({
+      ...draft,
+      environment: { ...draft.environment, command: command.text },
+      duplicateSearch,
+      attachments,
+    })
+  );
   return {
-    payload: { title: title.text.trim(), body: body.text, attachments },
+    payload: { title: title.trim(), body, attachments },
     redactions: counts,
   };
 }
@@ -1409,6 +1721,7 @@ export type FeedbackApproval = {
 
 export type FeedbackGateRefusal =
   | "already-sent"
+  | "retry-unchecked"
   | "destination-invalid"
   | "destination-unconfirmed"
   | "known-duplicate"
@@ -1428,6 +1741,11 @@ export const FEEDBACK_GATE_REFUSALS: readonly FeedbackVocabularyEntry<FeedbackGa
       summary: "This draft was already posted; do not post it again.",
     },
     {
+      id: "retry-unchecked",
+      summary:
+        "An earlier send reported a failure; first check that it did not create the issue anyway.",
+    },
+    {
       id: "destination-invalid",
       summary:
         "The destination is not an `owner/name` repository, or its issue number is not a positive integer.",
@@ -1444,7 +1762,8 @@ export const FEEDBACK_GATE_REFUSALS: readonly FeedbackVocabularyEntry<FeedbackGa
     },
     {
       id: "privacy-findings",
-      summary: "The final text or an attachment still has private material.",
+      summary:
+        "The final text or an attachment still has private material, or a command or search term that is not reduced to its command path, known flags and placeholders.",
     },
     {
       id: "attachment-unlisted",
@@ -1494,6 +1813,11 @@ export type FeedbackSendRequest = {
   readonly approval?: FeedbackApproval;
   /** A `same` duplicate from the search, if any. */
   readonly knownDuplicate?: number;
+  /**
+   * Required to retry after a failed send: a failure report does not prove
+   * that no issue was created. Set it only after looking and finding none.
+   */
+  readonly failedSendCheck?: "no-issue-created";
 };
 
 export type FeedbackGateResult =
@@ -1543,17 +1867,22 @@ function sameDestination(
 }
 
 function payloadIssue(
+  cli: CliSpec,
   payload: FeedbackPayload
 ): FeedbackGateRefusal | undefined {
-  const texts = [
+  const otherTexts = [
     payload.title,
-    payload.body,
     ...payload.attachments.flatMap((attachment) => [
       attachment.name,
       attachment.content,
     ]),
   ];
-  if (texts.some((text) => findFeedbackPrivacyIssues(text).length > 0)) {
+  if (
+    [payload.body, ...otherTexts].some(
+      (text) => findFeedbackPrivacyIssues(text).length > 0
+    ) ||
+    hasUnsafeCommandText({ cli, body: payload.body, otherTexts })
+  ) {
     return "privacy-findings";
   }
   const listed = visibleAttachmentListing(payload.body);
@@ -1986,15 +2315,22 @@ function approvalIssue(
  * {@link FEEDBACK_GATE_REFUSALS}; the first refusal wins.
  */
 export function evaluateFeedbackGate(opts: {
+  readonly cli: CliSpec;
   readonly state: FeedbackSendState;
   readonly request: FeedbackSendRequest;
 }): FeedbackGateResult {
   if (opts.state.status === "sent") {
     return { allowed: false, reason: "already-sent" };
   }
+  if (
+    opts.state.status === "send-failed" &&
+    opts.request.failedSendCheck !== "no-issue-created"
+  ) {
+    return { allowed: false, reason: "retry-unchecked" };
+  }
   const reason =
     destinationIssue(opts.request) ??
-    payloadIssue(opts.request.payload) ??
+    payloadIssue(opts.cli, opts.request.payload) ??
     approvalIssue(opts.state, opts.request);
   return reason ? { allowed: false, reason } : { allowed: true };
 }
@@ -2019,6 +2355,7 @@ export type FeedbackSendOutcome =
  * caller's draft is never discarded here.
  */
 export async function attemptFeedbackSend(opts: {
+  readonly cli: CliSpec;
   readonly state: FeedbackSendState;
   readonly request: FeedbackSendRequest;
   readonly send: FeedbackSender;
@@ -2027,6 +2364,7 @@ export async function attemptFeedbackSend(opts: {
   readonly outcome: FeedbackSendOutcome;
 }> {
   const gate = evaluateFeedbackGate({
+    cli: opts.cli,
     state: opts.state,
     request: opts.request,
   });

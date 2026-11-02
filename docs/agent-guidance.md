@@ -127,10 +127,21 @@ into `.github/ISSUE_TEMPLATE/hack-feedback.md`) and the synthetic examples rende
 from `src/agents/feedback-review.ts`. That module also holds the reference
 sanitizer and the posting gate the skill describes: a confirmed destination, a
 single-use approval of the exact payload, recheck after edits, and no automatic
-retry. Hack ships no sender. `tests/feedback-review.test.ts` drives the gate with a
-mock sender over synthetic secret, path, URL, config, log-instruction, duplicate,
-partial-reproduction, denial, edit and failed-send cases. Live issue creation is not
-part of any test and needs the user's own authorization.
+retry. A retry after a failed send also needs a recorded check that the failure
+created no issue. Hack ships no sender. `tests/feedback-review.test.ts` drives the
+gate with a mock sender over synthetic secret, path, URL, config, log-instruction,
+command-shape, duplicate, partial-reproduction, denial, edit and failed-send cases.
+Live issue creation is not part of any test and needs the user's own authorization.
+
+Rendering and the gate walk `CLI_SPEC` over every `hack` command: the command path
+and that path's flag names stay, and positional arguments, flag values and unknown
+flags become placeholders. Only the skill renderer and tests import this code, so
+what protects a user in practice is an agent following the skill's prose. A passing
+gate does not prove a draft is clean: a hostname under a public suffix, a
+single-label machine name, a bare username, a relative project path or a project,
+service, branch, repository or organization name in prose can still pass, so the
+user's review of the exact payload still matters. An unquoted command in prose is
+redacted to the end of its line, so drafts should keep commands in code spans.
 
 Skill candidates and where their patterns live now:
 

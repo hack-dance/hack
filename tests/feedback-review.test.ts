@@ -9,6 +9,7 @@ import {
   EVIDENCE_CLASSES,
   evaluateFeedbackGate,
   FEEDBACK_GATE_REFUSALS,
+  FEEDBACK_PRIVACY_CHECKLIST,
   FEEDBACK_TEMPLATE_SECTIONS,
   type FeedbackApproval,
   type FeedbackDestination,
@@ -27,6 +28,7 @@ import {
   REPRODUCTION_STATUSES,
   type RedactionKind,
   recommendFeedbackAction,
+  redactFeedbackCommandShapes,
   renderFeedbackDraft,
   sanitizeFeedbackText,
 } from "../src/agents/feedback-review.ts";
@@ -43,6 +45,10 @@ import { CLI_SPEC } from "../src/cli/spec.ts";
 import { findGuidanceCommandIssues } from "./helpers/cli-guidance-commands.ts";
 
 const repoRoot = join(import.meta.dir, "..");
+
+function render(draft: FeedbackDraftInput) {
+  return renderFeedbackDraft({ cli: CLI_SPEC, draft });
+}
 
 /*
  * Synthetic sensitive values. Token-shaped values are assembled at runtime so
@@ -718,7 +724,7 @@ function leakyDraft(
   overrides: Partial<FeedbackDraftInput> = {}
 ): FeedbackDraftInput {
   return {
-    title: "hack up times out for /Users/example/acme-app",
+    title: "`hack up` times out for /Users/example/acme-app",
     category: "lifecycle",
     observed: `\`hack up --branch acme-feature --json\` exited 1 with E_STARTUP_TIMEOUT; DB_PASSWORD=${FAKE.password} was set.`,
     expected: "The branch instance starts beside the primary instance.",
@@ -749,7 +755,7 @@ function leakyDraft(
 }
 
 test("drafts render every template heading, honest status and sanitized text", () => {
-  const { payload, redactions } = renderFeedbackDraft(leakyDraft());
+  const { payload, redactions } = render(leakyDraft());
   const headings = [...payload.body.matchAll(/^## (.+)$/gm)].map(
     (match) => match[1]
   );
@@ -763,18 +769,24 @@ test("drafts render every template heading, honest status and sanitized text", (
   expect(payload.body).toContain("- [reported] The user said the fix shipped");
   expect(payload.body).toContain("Not searched.");
   expect(payload.body).toContain("## Attachments\n\nNone.");
-  for (const leaked of [FAKE.password, "/Users/example", "acme-app.hack"]) {
+  for (const leaked of [
+    FAKE.password,
+    "/Users/example",
+    "acme-app.hack",
+    "acme-feature",
+  ]) {
     expect(`${payload.title}\n${payload.body}`).not.toContain(leaked);
   }
   expect(redactions.secret).toBeGreaterThan(0);
   expect(redactions.path).toBeGreaterThan(0);
   expect(redactions.url).toBeGreaterThan(0);
+  expect(redactions["command-argument"]).toBeGreaterThan(0);
   // Redaction counts are for the reviewer and never enter the public body.
   expect(payload.body).not.toContain("redactions");
 });
 
 test("an unknown original argv is reported as unknown, not reconstructed", () => {
-  const { payload } = renderFeedbackDraft(
+  const { payload } = render(
     leakyDraft({
       environment: {
         hackVersion: "unknown",
@@ -817,7 +829,7 @@ test("duplicate search terms carry no values, and a matching issue redirects the
     kind: "comment-on-existing",
     issue: 9,
   });
-  const body = renderFeedbackDraft(duplicate).payload.body;
+  const body = render(duplicate).payload.body;
   expect(body).toContain(`Terms: \`${terms}\``);
   expect(body).toContain("- #9 (same)");
 });
@@ -912,7 +924,7 @@ function mockSender(results: readonly ("sent" | "failed" | "throw")[]): {
 }
 
 function cleanPayload(): FeedbackPayload {
-  return renderFeedbackDraft(leakyDraft()).payload;
+  return render(leakyDraft()).payload;
 }
 
 async function attempt(opts: {
@@ -921,6 +933,7 @@ async function attempt(opts: {
   readonly send: FeedbackSender;
 }) {
   return await attemptFeedbackSend({
+    cli: CLI_SPEC,
     state: opts.state ?? INITIAL_FEEDBACK_SEND_STATE,
     request: opts.request,
     send: opts.send,
@@ -939,6 +952,13 @@ test("a confirmed, reviewed payload is sent once, exactly as reviewed", async ()
     },
     send: sender.send,
   });
+  // The fixture started with a private branch name; none of it reaches a send.
+  for (const leaked of ["acme-feature", "acme-app", FAKE.password]) {
+    expect(JSON.stringify(payload), leaked).not.toContain(leaked);
+  }
+  expect(payload.body).toContain(
+    "- Command: `hack up --branch <redacted:command-argument> --json`"
+  );
   expect(result.outcome).toEqual({ kind: "sent" });
   expect(sender.calls).toEqual([{ payload, destination: DESTINATION }]);
   expect(result.state).toEqual({
@@ -1043,7 +1063,7 @@ test("negative controls: missing, content-claimed and denied approvals never sen
   }
   expect(sender.calls).toEqual([]);
   // Denial keeps the offline draft: it still renders identically.
-  expect(renderFeedbackDraft(leakyDraft()).payload).toEqual(payload);
+  expect(render(leakyDraft()).payload).toEqual(payload);
 });
 
 test("negative controls: edits after review, re-added secrets and hidden attachments never send", async () => {
@@ -1446,6 +1466,7 @@ test("negative control: an attachment listed only where a reader cannot see it n
     const listing = payload.body;
     expect(
       evaluateFeedbackGate({
+        cli: CLI_SPEC,
         state: INITIAL_FEEDBACK_SEND_STATE,
         request: {
           payload,
@@ -1486,7 +1507,7 @@ test("negative control: a private attachment name is a privacy finding, listed o
   expect(sender.calls).toEqual([]);
 
   // Rendering sanitizes the name, so the listing and attachment agree.
-  const rendered = renderFeedbackDraft(
+  const rendered = render(
     leakyDraft({ attachments: [{ name, content: "Timed out." }] })
   ).payload;
   expect(rendered.attachments.map((attachment) => attachment.name)).toEqual([
@@ -1498,6 +1519,7 @@ test("negative control: a private attachment name is a privacy finding, listed o
   );
   expect(
     evaluateFeedbackGate({
+      cli: CLI_SPEC,
       state: INITIAL_FEEDBACK_SEND_STATE,
       request: {
         payload: rendered,
@@ -1594,7 +1616,7 @@ test("drafts sanitize every attachment at render time and list it in the body", 
     "2026-09-17T10:00:01Z ERROR web crashed",
     "routed web.acme-app.hack 502",
   ].join("\n");
-  const { payload, redactions } = renderFeedbackDraft(
+  const { payload, redactions } = render(
     leakyDraft({ attachments: [{ name: "summary.txt", content: leaky }] })
   );
   const content = payload.attachments[0]?.content ?? "";
@@ -1614,6 +1636,7 @@ test("drafts sanitize every attachment at render time and list it in the body", 
   // The rendered payload passes the gate once the user approves it.
   expect(
     evaluateFeedbackGate({
+      cli: CLI_SPEC,
       state: INITIAL_FEEDBACK_SEND_STATE,
       request: {
         payload,
@@ -1702,6 +1725,7 @@ test("failed sends keep the draft, consume the approval and never retry on their
     destination: DESTINATION,
     confirmation: userConfirmation(),
     approval: approvalFor({ payload, id }),
+    failedSendCheck: "no-issue-created",
   });
 
   const first = await attempt({
@@ -1747,7 +1771,7 @@ test("failed sends keep the draft, consume the approval and never retry on their
   expect(sender.calls).toHaveLength(3);
   expect(sender.calls.every((call) => call.payload === payload)).toBe(true);
   // The draft survives every failure unchanged.
-  expect(renderFeedbackDraft(leakyDraft()).payload).toEqual(payload);
+  expect(render(leakyDraft()).payload).toEqual(payload);
 });
 
 test("a sender that throws synchronously is a failed attempt that consumes its approval", async () => {
@@ -1771,12 +1795,288 @@ test("a sender that throws synchronously is a failed attempt that consumes its a
     usedApprovals: ["approval-1"],
     attempts: 1,
   });
-  const retried = await attempt({ state: failed.state, request, send });
+  const retried = await attempt({
+    state: failed.state,
+    request: { ...request, failedSendCheck: "no-issue-created" },
+    send,
+  });
   expect(retried.outcome).toEqual({
     kind: "refused",
     reason: "approval-already-used",
   });
   expect(calls).toBe(1);
+});
+
+const ARG = "<redacted:command-argument>";
+
+test("a command shape keeps only the spec's command path and known flags", () => {
+  const shape = (command: string) =>
+    render(
+      leakyDraft({ environment: { ...leakyDraft().environment, command } })
+    )
+      .payload.body.split("\n")
+      .find((line) => line.startsWith("- Command: "));
+  const cases: readonly [string, string][] = [
+    ["hack up --branch acme-feature --json", `hack up --branch ${ARG} --json`],
+    ["hack up --branch=acme-feature", `hack up --branch=${ARG}`],
+    ["hack logs acme-web --follow", `hack logs ${ARG} --follow`],
+    ["hack run acmeprod migrate", `hack run ${ARG} ${ARG}`],
+    ["hack global logs acme-proxy", `hack global logs ${ARG}`],
+    ["hack env set ACME_KEY acme-value", `hack env set ${ARG} ${ARG}`],
+    ["hack run acme-web -- psql acme_db", `hack run ${ARG} -- ${ARG} ${ARG}`],
+    // A flag only another command declares, or none does, can hold a name.
+    ["hack up --acme-feature", `hack up ${ARG}`],
+    ["hack version --branch acme-feature", `hack version ${ARG} ${ARG}`],
+    // A bracketed name is not a placeholder; the closed list is.
+    ["hack up --branch <acme-feature>", `hack up --branch ${ARG}`],
+    ["hack up --branch <name> --json", "hack up --branch <name> --json"],
+    ["hack env explain <KEY>", "hack env explain <KEY>"],
+    // Nothing can break out of the line or the code span.
+    ["hack up `acme-feature`", `hack up ${ARG}`],
+    ["hack up acme\n## Injected", `hack up ${ARG} ${ARG}`],
+    // Without a `hack` invocation there is no spec to walk.
+    ["docker compose -p acme-app up", "unknown"],
+    ["./dist/hack up acme-feature", "unknown"],
+    ["bun run acme-script", "unknown"],
+    ["", "unknown"],
+    ["unknown", "unknown"],
+  ];
+  for (const [command, expected] of cases) {
+    expect(shape(command), command).toBe(`- Command: \`${expected}\``);
+  }
+});
+
+test("hack commands in free text lose their arguments in every draft field", () => {
+  const { payload, redactions } = render(
+    leakyDraft({
+      title: "`hack logs acme-title --follow` shows nothing",
+      observed:
+        "Ran `hack up acme-code-span` and then hack logs acme-prose --follow, and `/opt/bin/hack run acme-path` too.",
+      expected: "`hack up --branch acme-expected` should work.",
+      reproduction: {
+        status: "reproduced",
+        steps: [
+          "Run `hack up --branch=acme-step`.",
+          "$ hack global logs acme-shell",
+          "hack up --branch \\\n  acme-continued --json",
+        ],
+        note: "`hack run acme-note` also fails.",
+      },
+      evidence: [
+        { class: "observed", text: "`hack ps acme-evidence` is bad." },
+      ],
+      impact: "`hack down acme-impact` did not help.",
+      workaround: "`hack restart acme-workaround`",
+      attachments: [
+        { name: "summary.txt", content: "`hack logs acme-attachment` failed." },
+      ],
+    })
+  );
+  const everything = JSON.stringify(payload);
+  expect(everything).not.toContain("acme");
+  expect(payload.title).toBe(`\`hack logs ${ARG} --follow\` shows nothing`);
+  expect(payload.body).toContain(`\`hack up ${ARG}\``);
+  // Unquoted prose has no end marker, so everything up to the code span goes.
+  expect(payload.body).toContain(`then hack logs ${ARG} ${ARG} ${ARG} \``);
+  expect(payload.body).toContain(`<redacted:path> run ${ARG}`);
+  expect(payload.body).toContain(`hack up --branch ${ARG} --json`);
+  expect(payload.attachments[0]?.content).toBe(`\`hack logs ${ARG}\` failed.`);
+  expect(redactions["command-argument"]).toBeGreaterThanOrEqual(12);
+  // What rendering produces passes the gate and is stable.
+  expect(
+    evaluateFeedbackGate({
+      cli: CLI_SPEC,
+      state: INITIAL_FEEDBACK_SEND_STATE,
+      request: {
+        payload,
+        destination: DESTINATION,
+        confirmation: userConfirmation(),
+        approval: approvalFor({ payload }),
+      },
+    })
+  ).toEqual({ allowed: true });
+  expect(
+    redactFeedbackCommandShapes({ cli: CLI_SPEC, text: payload.body })
+  ).toEqual({ text: payload.body, redacted: 0 });
+  expect(sanitizeFeedbackText(payload.body).text).toBe(payload.body);
+});
+
+test("text that only mentions the word hack is left alone", () => {
+  for (const text of [
+    "Hack up the chain, then Hack status changed.",
+    "A hack around it worked, and the hack feels fragile.",
+    "The hack-feedback skill and hack-cli skill loaded.",
+    "routed through ~/.hack and app.hack today",
+    "`hack up --branch <name> --json` and `hack version`.",
+    "hack status.",
+    "Ran `hack up`, then `hack ps`; see hack down.",
+  ]) {
+    expect(redactFeedbackCommandShapes({ cli: CLI_SPEC, text })).toEqual({
+      text,
+      redacted: 0,
+    });
+  }
+  // An HTML comment still closes, so nothing after it becomes hidden.
+  expect(
+    redactFeedbackCommandShapes({
+      cli: CLI_SPEC,
+      text: "<!-- run hack up acme-feature --> visible",
+    }).text
+  ).toBe(`<!-- run hack up ${ARG} --> visible`);
+});
+
+test("duplicate search terms outside the closed vocabularies are replaced", () => {
+  const body = render(
+    leakyDraft({
+      duplicateSearch: {
+        status: "searched",
+        terms: "E_STARTUP_TIMEOUT global logs acme-proxy E_ACME_DB lifecycle",
+        duplicates: [],
+      },
+    })
+  ).payload.body;
+  expect(body).toContain(
+    `Terms: \`E_STARTUP_TIMEOUT global logs ${ARG} ${ARG} lifecycle\``
+  );
+  expect(body).not.toContain("acme");
+});
+
+test("negative controls: private command text added after rendering never sends", async () => {
+  const base = cleanPayload();
+  const body = (text: string): FeedbackPayload => ({
+    ...base,
+    body: `${base.body}\n${text}\n`,
+  });
+  const command = (value: string): FeedbackPayload => ({
+    ...base,
+    body: base.body.replace(/^- Command: .*$/m, `- Command: ${value}`),
+  });
+  const sender = mockSender(["sent"]);
+  const cases: readonly [string, FeedbackPayload][] = [
+    ["body code span", body("Ran `hack up --branch acme-feature --json`.")],
+    ["body prose", body("Then hack logs acme-web failed.")],
+    ["flag value", body("`hack up --branch=acme-feature`")],
+    ["unknown flag", body("`hack up --acme-feature`")],
+    ["bracketed name", body("`hack up --branch <acme-feature>`")],
+    ["after a separator", body("`hack run <service> -- acme-tool`")],
+    ["title", { ...base, title: "`hack up acme-feature` fails" }],
+    ["command line", command("`hack up acme-feature`")],
+    ["command without a span", command("hack up acme-feature")],
+    ["other tool", command("`docker compose -p acme-app up`")],
+    ["wrapped hack", command("`./dist/hack up`")],
+    ["no span, other tool", command("acme-app")],
+    ["empty command", command("")],
+    ["search terms", body("Terms: `up acme-web lifecycle`")],
+    [
+      "attachment content",
+      {
+        ...base,
+        body: base.body.replace(
+          "## Attachments\n\nNone.",
+          "## Attachments\n\n- `summary.txt`"
+        ),
+        attachments: [
+          { name: "summary.txt", content: "`hack logs acme-web` failed." },
+        ],
+      },
+    ],
+  ];
+  for (const [name, payload] of cases) {
+    const result = await attempt({
+      request: {
+        payload,
+        destination: DESTINATION,
+        confirmation: userConfirmation(),
+        approval: approvalFor({ payload }),
+      },
+      send: sender.send,
+    });
+    expect(result.outcome, name).toEqual({
+      kind: "refused",
+      reason: "privacy-findings",
+    });
+  }
+  expect(sender.calls).toEqual([]);
+
+  // Controls: the rendered forms of these same lines are sendable.
+  for (const payload of [
+    command("`unknown`"),
+    command("`hack up --branch <name> --json`"),
+    body("Terms: `E_STARTUP_TIMEOUT up lifecycle`"),
+  ]) {
+    expect(
+      evaluateFeedbackGate({
+        cli: CLI_SPEC,
+        state: INITIAL_FEEDBACK_SEND_STATE,
+        request: {
+          payload,
+          destination: DESTINATION,
+          confirmation: userConfirmation(),
+          approval: approvalFor({ payload }),
+        },
+      })
+    ).toEqual({ allowed: true });
+  }
+});
+
+test("the privacy checklist names project, service, branch, repository and organization names", () => {
+  const item = FEEDBACK_PRIVACY_CHECKLIST.find((line) =>
+    line.includes("project, service, branch, repository or organization names")
+  );
+  expect(item).toBeDefined();
+  const rendered = [
+    renderPluginSkill("hack-feedback"),
+    renderFeedbackIssueTemplateReference(),
+    renderFeedbackIssueTemplateFile(),
+  ];
+  for (const text of rendered) {
+    expect(text).toContain(item ?? "missing");
+  }
+});
+
+test("a retry after a failed send needs a recorded check that no issue was created", async () => {
+  const payload = cleanPayload();
+  const sender = mockSender(["failed", "sent"]);
+  const request = (id: string): FeedbackSendRequest => ({
+    payload,
+    destination: DESTINATION,
+    confirmation: userConfirmation(),
+    approval: approvalFor({ payload, id }),
+  });
+  const failed = await attempt({
+    request: request("approval-1"),
+    send: sender.send,
+  });
+  expect(failed.outcome).toEqual({ kind: "send-failed" });
+
+  // A fresh approval is not enough: the failed send may have created the issue.
+  const unchecked = await attempt({
+    state: failed.state,
+    request: request("approval-2"),
+    send: sender.send,
+  });
+  expect(unchecked.outcome).toEqual({
+    kind: "refused",
+    reason: "retry-unchecked",
+  });
+  expect(unchecked.state).toBe(failed.state);
+  expect(sender.calls).toHaveLength(1);
+
+  const checked = await attempt({
+    state: failed.state,
+    request: { ...request("approval-2"), failedSendCheck: "no-issue-created" },
+    send: sender.send,
+  });
+  expect(checked.outcome).toEqual({ kind: "sent" });
+  expect(sender.calls).toHaveLength(2);
+
+  // The check still needs a fresh approval, and a sent draft stays sent.
+  const again = await attempt({
+    state: checked.state,
+    request: { ...request("approval-3"), failedSendCheck: "no-issue-created" },
+    send: sender.send,
+  });
+  expect(again.outcome).toEqual({ kind: "refused", reason: "already-sent" });
 });
 
 test("gate refusals are closed values that never echo payload or destination text", () => {
@@ -1785,6 +2085,7 @@ test("gate refusals are closed values that never echo payload or destination tex
     body: `${cleanPayload().body}\nDB_PASSWORD=${FAKE.password}\n`,
   };
   const result = evaluateFeedbackGate({
+    cli: CLI_SPEC,
     state: INITIAL_FEEDBACK_SEND_STATE,
     request: {
       payload,
@@ -1819,9 +2120,10 @@ test("the skill names every status, evidence class and gate refusal from the con
     "Show the exact final payload",
     "Any later edit, by you or the user, needs a fresh review",
     "If the user declines, keep the draft offline",
-    "Check whether the issue was created anyway before any retry; a retry needs a new yes.",
+    "Check whether the issue was created anyway before any retry, and do not retry if it was; a retry needs a new yes.",
     "hashing is not anonymization",
     "Hack has no built-in issue sender or background poster",
+    "a draft is not clean just because no check complained",
   ]) {
     expect(skill, phrase).toContain(phrase);
   }
@@ -1863,7 +2165,7 @@ test("the template reference lists every vocabulary and the repository template 
 });
 
 test("the synthetic examples are clean, follow the template and cover the registered negatives", () => {
-  const rendered = renderFeedbackDraft(FEEDBACK_EXAMPLE_DRAFT);
+  const rendered = render(FEEDBACK_EXAMPLE_DRAFT);
   expect(rendered.redactions).toEqual({});
   expect(FEEDBACK_EXAMPLE_DRAFT.duplicateSearch).toEqual({
     status: "searched",

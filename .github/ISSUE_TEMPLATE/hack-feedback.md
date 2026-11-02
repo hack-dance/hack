@@ -10,6 +10,7 @@ about: Report a Hack bug or friction point with a privacy-reviewed draft.
 <!-- - No secrets, tokens, passwords, keys or URL credentials; name the key only. -->
 <!-- - No ciphertext, encrypted env files or hashes of private values; hashing is not anonymization. -->
 <!-- - No usernames, hostnames, home or project paths, private or routed URLs, IP addresses or emails. -->
+<!-- - No project, service, branch, repository or organization names, in prose or in commands; use placeholders. Only Hack's own repository may be named. -->
 <!-- - No raw logs or full config files; summarize, and quote at most one short sanitized error line. -->
 <!-- - No hidden attachments; every attachment is listed and sanitized. -->
 

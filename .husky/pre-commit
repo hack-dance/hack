@@ -7,6 +7,17 @@ if [ -z "$STAGED_FILES" ]; then
   exit 0
 fi
 
+# Call the pinned Biome binary directly with the flags `ultracite fix` used. Paths travel
+# NUL-delimited through xargs straight into argv, so names with brackets, spaces or quotes
+# (for example Next.js `site/app/docs/[[...slug]]/page.tsx`) reach Biome unchanged. Ultracite 7
+# shell-quoted each path and then ran Biome through a shell, which left literal quotes in the
+# path (HACK-1665). Nested configs such as `site/biome.jsonc` still apply per file.
+BIOME="$(git rev-parse --show-toplevel)/node_modules/.bin/biome"
+if [ ! -x "$BIOME" ]; then
+  echo "pre-commit: Biome is not installed at $BIOME. Run: bun install --frozen-lockfile" >&2
+  exit 1
+fi
+
 # Stash unstaged tracked changes so we format the staged snapshot of each file.
 # Note: if unstaged changes touch the same lines formatting changes, stash pop may conflict. In that
 # case we abort the commit and leave the stash for manual resolution.
@@ -17,7 +28,8 @@ if ! git diff --quiet; then
 fi
 
 # Format only staged files (avoid rewriting unrelated files).
-git diff --cached --name-only --diff-filter=ACMR -z | xargs -0 bun x ultracite fix
+git diff --cached --name-only --diff-filter=ACMR -z |
+  xargs -0 "$BIOME" check --write --no-errors-on-unmatched --
 
 # Restage in case the formatter changed them.
 git diff --cached --name-only --diff-filter=ACMR -z | xargs -0 git add --

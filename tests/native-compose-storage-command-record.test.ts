@@ -1067,6 +1067,13 @@ test.each(["stdout", "stderr"] as const)(
     })(),
   30_000
 );
+/**
+ * Case budget for the group-absence probe refusals. `EPERM` is retried until
+ * the transport's 15 s settlement budget (`SETTLEMENT_BUDGET_MS` in
+ * native-compose-storage-witness-docker.ts) runs out before it refuses
+ * (HACK-1463), so the case needs that wait plus room for a loaded host.
+ */
+const GROUP_PROBE_REFUSAL_CASE_BUDGET_MS = 60_000;
 test.each(["EPERM", "EIO"] as const)(
   "%s is never group absence or settlement",
   (code) =>
@@ -1098,7 +1105,7 @@ test.each(["EPERM", "EIO"] as const)(
         }
       }
     })(),
-  30_000
+  GROUP_PROBE_REFUSAL_CASE_BUDGET_MS
 );
 test.each([false, true])(
   "a delayed PID receipt write is bounded and permanently withholds continuation (backward wall clock: %s)",

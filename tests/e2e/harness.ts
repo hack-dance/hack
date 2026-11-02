@@ -240,6 +240,10 @@ export function buildCliEnv(opts: {
   }
   env.HACK_HOME = opts.hackHome;
   env.HACK_NO_INTERACTIVE = "1";
+  // `doctor --fix` runs `hack daemon start` without a TTY, and nothing stops
+  // that daemon with the scenario (HACK-1696). Unlike the launchd guard below,
+  // a scenario that stops its own daemon may opt in through `extra`.
+  env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
   env.NO_COLOR = "1";
   env.CLICOLOR = "0";
   env.TERM = "dumb";

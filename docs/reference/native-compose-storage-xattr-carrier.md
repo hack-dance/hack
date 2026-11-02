@@ -392,8 +392,11 @@ original completion state. It does not acquire a PID from the durable record.
 The carrier uses held regular capture files, not pipes. Version 2 therefore names
 its capture evidence `held-files-quiescent`, never EOF. The original exit callback,
 strict ESRCH group absence, held file/path identity, both synchronized bounded
-captures and their hashes precede settlement publication. EPERM/EIO and unknown
-exit or capture disposition refuse. Settlement publication shares one finite
+captures and their hashes precede settlement publication. Only ESRCH proves group
+absence: a group probe answering EPERM (which macOS can return just after the
+group's last member exits) is not absence, so observation continues to the same
+budget and refuses there if ESRCH never follows. EIO and unknown exit or capture
+disposition refuse. Settlement publication shares one finite
 15-second post-command budget with group observation and its identity reads;
 timeout/cancellation remain refused results and cannot grant a subsequent daemon
 command. These budgets must outlast an ordinary multi-second host stall: a stalled
@@ -437,7 +440,8 @@ Budgets are layered and all finite:
   it reports `storage-budget`. A recorded command's 15-second settlement budget
   follows its exit.
 - An unrecorded command (an identity read or a legacy root/seed command) waits
-  at most three seconds for its process group to become absent after exit. Like
+  at most three seconds for its process group to become absent after exit,
+  including while the group probe answers EPERM (HACK-1463). Like
   the handshake and settlement budgets, this deadline is monotonic
   (`performance.now`), so a wall-clock step cannot shorten or extend it.
   Exhaustion refuses as `probe-budget`.
@@ -451,7 +455,8 @@ record replaces it with a fixed refusal. Such reasons include a helper policy
 refusal, `helper-policy-stability` for a re-inspected carrier whose creation
 time, policy or stopped state changed, and `private-state` for a saved material
 binding that changed during a carrier step or before a verification's deferred
-evidence retirement. Cancellation
+evidence retirement, or for an original command owner vetoed before that
+retirement. Cancellation
 keeps `probe-cancel`. The reason changes no check, retention or recovery rule.
 
 Only the original in-memory writer can advance its exact sequence. Publication

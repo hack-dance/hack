@@ -4,6 +4,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  readlink,
   realpath,
   rm,
   symlink,
@@ -11,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
   resolveProjectEnvConfig,
   setProjectEnvValue,
@@ -205,6 +207,56 @@ test("inherited local symlinks are refused", async () => {
     join(f.primary, "hack.env.local.yaml")
   );
   await expect(f.resolve()).rejects.toThrow();
+});
+
+test("an inherited local overlay loop gives a closed, value-free refusal", async () => {
+  const f = await fixture();
+  await writeFile(
+    join(f.linked, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.20\n"
+  );
+  const name = "hack.env.qa.local.yaml";
+  const layer = join(f.primary, name);
+  await symlink(name, layer);
+  const before = await readdir(f.primary);
+  const message =
+    "Refused env layer: its path must resolve inside the project and be inspectable (values omitted).";
+
+  await expect(f.resolve()).rejects.toBeInstanceOf(ClosedCliError);
+  await expect(f.resolve()).rejects.toThrow(message);
+
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "index.ts",
+      "env",
+      "list",
+      "--path",
+      f.linkedRoot,
+      "--env",
+      "qa",
+    ],
+    {
+      cwd: process.cwd(),
+      env: privateCliEnv({
+        root: f.root,
+        env: { HACK_LOGGER: "console", NO_COLOR: "1" },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 10_000,
+    }
+  );
+  const [code, out, err] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  expect(code).toBe(1);
+  expect(`${out}${err}`.trim()).toBe(`ERROR: ${message}`);
+  expect(await readlink(layer)).toBe(name);
+  expect(await readdir(f.primary)).toEqual(before);
 });
 
 test("local unset masks inherited-only values idempotently and a later set restores", async () => {

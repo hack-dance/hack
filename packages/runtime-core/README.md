@@ -1514,7 +1514,12 @@ clean `down` keeps it clean. Pools stopped before this marker existed qualify af
 next clean `down`. Clean also requires a creation receipt, rootfs pin, both disk
 identities and declared sizes, the recorded executable and user, a dead recorded
 provider and no pending owner update; these receipt checks are read-only, take no
-provider lock and run around every sample, including `runtime probe`.
+provider lock and run around every sample, including `runtime probe`. The disk-handle
+scan (`lsof` over both disks) that proves the provider's release is bounded at 30 s on
+the stop paths (`down`, `recover`) and in release checks, well above the slowest scan
+measured on a loaded host. A scan that still does not finish ends the stop as
+`provider_timeout_uncertain`, without the marker. `scripts/measure-lsof-scan.ts`
+re-measures a host.
 
 The reserve is used only when a start needs it. Once the startup lease is held, a
 start whose every qualifying sample, including the lease recheck, also fits the 58 GiB

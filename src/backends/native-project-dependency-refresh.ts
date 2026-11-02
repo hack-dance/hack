@@ -1,4 +1,4 @@
-import { ClosedCliError } from "../lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   loadNativeProjectRun,
@@ -6,6 +6,7 @@ import {
 } from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
+  isNativeRuntimeNotRunning,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -38,7 +39,21 @@ const REFRESH_DIAGNOSTIC_CODES = new Set([
   "recovery_required",
 ]);
 
+/**
+ * The runtime refused the refresh before acting because it is stopped. That
+ * outcome is confirmed, not uncertain: nothing was refreshed and no command
+ * was requested, so report the cause and the next action directly.
+ */
+const RUNTIME_NOT_RUNNING_MESSAGE =
+  "Native runtime is not running; no dependency refresh or command was requested. Start the native runtime and retry.";
+
 function refused(cause?: unknown): Error {
+  if (isNativeRuntimeNotRunning(cause)) {
+    return new HackCliError({
+      code: "E_DOCKER_UNAVAILABLE",
+      message: RUNTIME_NOT_RUNNING_MESSAGE,
+    });
+  }
   let diagnostic = "";
   if (
     cause instanceof NativeRuntimeRequestError &&

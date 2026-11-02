@@ -7016,6 +7016,27 @@ async function publishMigratedLegacyLayers(opts: {
   return wroteFiles;
 }
 
+/** What each selected legacy file's env receives now, so cleanup can compare, not assume. */
+async function deliveredValuesPerLegacyFile(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly overlayNames: readonly string[];
+}): Promise<ReadonlyMap<string, ReadonlyMap<string, string | null>>> {
+  const delivered = new Map<string, ReadonlyMap<string, string | null>>();
+  for (const envName of [null, ...opts.overlayNames]) {
+    const fileName =
+      envName === null
+        ? PROJECT_ENV_FILENAME
+        : `${PROJECT_ENV_FILENAME}.${envName}`;
+    delivered.set(
+      resolve(opts.projectDir, fileName),
+      new Map(Object.entries(await deliveredLayerValues({ ...opts, envName })))
+    );
+  }
+  return delivered;
+}
+
 /**
  * Migrates a legacy project that has no `.hack/hack.env.json` contract, so
  * its values live only in `.hack/.env` and `.hack/.env.<overlay>`.
@@ -7256,9 +7277,12 @@ async function migrateUndeclaredLegacyDotenv(opts: {
     overlayNames,
     // Generated output wasn't read, so its values aren't in any layer this run wrote.
     materialize: opts.materialize || generatedBase,
-    // No retention check here: every entry in a selected file is in a layer by now,
-    // or the migration refused, and files it didn't select are never candidates.
-    deliveredValues: new Map(),
+    deliveredValues: await deliveredValuesPerLegacyFile({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      serviceNames: opts.serviceNames,
+      overlayNames,
+    }),
     configCleanupCandidates: [],
     composeEnvFileReferences,
   });

@@ -4280,3 +4280,57 @@ test("a layer with an invalid scope name refuses as unreadable, before the scope
   expect((result as Error).message).not.toContain(SCOPED_LEGACY_VALUE);
   expect(await readdir(repo.projectDir)).toEqual(entries);
 });
+
+test("a legacy file holding a value its env still doesn't receive after migrating is kept, naming the key", async () => {
+  // A local layer with `environment: local` is that env's overlay, outside a git
+  // checkout, so the base doesn't read a value merged into it.
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    LAYER_EMPTY.replace("environment: default", "environment: local")
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env"),
+    `KEPT_SETTING=${KEPT_VALUE}\n`
+  );
+
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+
+  const envPath = resolve(repo.projectDir, ".env");
+  expect(migrated.cleanupCandidates).not.toContain(envPath);
+  expect(migrated.retainedEnvFiles).toEqual([
+    { path: envPath, keys: ["KEPT_SETTING"] },
+  ]);
+  expect(JSON.stringify(migrated)).not.toContain(KEPT_VALUE);
+});
+
+test("a migrated legacy file whose values its env now receives is still offered for cleanup", async () => {
+  const repo = await writeTeammateCheckout();
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    image: alpine:3.20\n"
+  );
+
+  const migrated = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  }).catch((caught: unknown) => caught);
+
+  expect(migrated).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+    LISTED_COMPOSE
+  );
+  const repaired = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  });
+  expect(repaired.retainedEnvFiles).toEqual([]);
+  expect(repaired.blockedCleanupCandidates).toContain(
+    resolve(repo.projectDir, ".env")
+  );
+});

@@ -1,10 +1,9 @@
 import { resolve } from "node:path";
 
 import { isCancel, select } from "@clack/prompts";
-
+import { RETIRED_AGENT_PRIMER_MESSAGE } from "../agents/explicit-integrations.ts";
 import { renderAgentInitPatterns } from "../agents/init-patterns.ts";
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
-import { renderAgentPrimer } from "../agents/primer.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -12,10 +11,6 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import {
-  inspectAgentIntegrationFreshness,
-  renderAgentIntegrationFreshnessNotice,
-} from "../cli/integration-sync.ts";
 import { optPath } from "../cli/options.ts";
 import { canPrompt } from "../lib/interactivity.ts";
 import { openUrl } from "../lib/os.ts";
@@ -28,7 +23,8 @@ const primeOptions = [
     name: "check",
     type: "boolean",
     long: "--check",
-    description: "Include a read-only project and global integration inventory",
+    description:
+      "Deprecated compatibility flag; prints only the legacy-hook retirement notice",
   } as const),
 ] as const;
 type PrimeArgs = CommandArgs<typeof primeOptions, readonly []>;
@@ -53,7 +49,7 @@ type InitArgs = CommandArgs<typeof initOptions, readonly []>;
 
 const primeSpec = defineCommand({
   name: "prime",
-  summary: "Print agent primer text",
+  summary: "Print retirement notice for legacy agent hooks",
   group: "Agents",
   options: primeOptions,
   positionals: [],
@@ -101,25 +97,15 @@ export const agentCommand = defineCommand({
   ],
 } as const);
 
-async function handleAgentPrime({
-  ctx,
-  args,
+function handleAgentPrime({
+  ctx: _ctx,
+  args: _args,
 }: {
   readonly ctx: CliContext;
   readonly args: PrimeArgs;
 }): Promise<number> {
-  if (!args.options.check) {
-    process.stdout.write(`${renderAgentPrimer()}\n`);
-    return 0;
-  }
-  const project = await findProjectContext(ctx.cwd);
-  const report = await inspectAgentIntegrationFreshness({
-    projectRoot: project?.projectRoot ?? null,
-  });
-  process.stdout.write(
-    `${renderAgentIntegrationFreshnessNotice({ report })}\n\n${renderAgentPrimer()}`
-  );
-  return 0;
+  process.stdout.write(`${RETIRED_AGENT_PRIMER_MESSAGE}\n`);
+  return Promise.resolve(0);
 }
 
 function handleAgentPatterns({

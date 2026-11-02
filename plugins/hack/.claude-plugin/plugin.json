@@ -10,6 +10,5 @@
   "repository": "https://github.com/hack-dance/hack",
   "license": "MIT",
   "keywords": ["local-development", "docker", "developer-tools", "agents"],
-  "skills": "./skills/",
-  "hooks": "./hooks/claude-hooks.json"
+  "skills": "./skills/"
 }

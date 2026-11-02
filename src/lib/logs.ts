@@ -361,7 +361,7 @@ function trimmedWords(values: readonly string[] | undefined): string[] {
 
 const SHELL_SAFE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
 
-function quoteShellWord(value: string): string {
+export function quoteShellWord(value: string): string {
   if (SHELL_SAFE_WORD.test(value)) {
     return value;
   }

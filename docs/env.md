@@ -596,8 +596,8 @@ per-checkout values you don't want to commit.
 In a project with `.hack/hack.env.json` and no env layers yet, `hack env set --local` refuses and
 writes nothing for a plaintext value, because that project's migration copies `.hack/.env` values to
 tracked layers. Use `hack env add` with the same flags, which migrates first and then writes the
-machine-local layer. That migration still copies values already in `.hack/.env`, and a `plain_env`
-value exported in your shell, to tracked layers.
+machine-local layer. That migration still copies values already in `.hack/.env` to tracked layers,
+and refuses a `plain_env` value that comes only from your shell.
 With `--secret`, the value goes to the secret backend, and a key the contract declares as `keychain`
 reaches a tracked layer as ciphertext when the project migrates. Without `hack.env.json`, `--local`
 still writes `.hack/.env`.
@@ -1195,6 +1195,42 @@ files, when:
   or a dangling symlink (`E_PERMISSION`), so its values would be lost. A symlinked overlay
   that resolves to a readable file inside `.hack` is migrated like a regular one; cleanup
   removes only the link, never its target.
+
+With `hack.env.json`, the migration refuses (`E_CONFIG_INVALID`) when a `plain_env` value comes only
+from your shell, because it would otherwise be written to a tracked layer. This applies to commands
+that migrate implicitly, such as `hack env exec`. Simply skipping the value isn't enough, because
+env layers don't read the contract, so services would stop receiving it. The error names the key and
+never the value, and gives the commands for the scope the contract declares:
+
+1. Run one command without the variable, so the migration runs: `env -u KEY hack env exec -- true`.
+   Add a `-u` for each key it names.
+2. Set it for the declared scope: `hack env set KEY --service <name> --local --value-stdin`, or
+   without `--service` for a key the contract doesn't scope. `--local` alone delivers it to every
+   service, so keep `--service` for a scoped key.
+3. If an overlay file also sets the key, give that overlay its own value:
+   `hack env set KEY --env <overlay> --local --value-stdin`, with `--service` as above. A local base
+   outranks tracked overlays, so without this the overlay would take the base value.
+   The error prints a command only for a name the CLI accepts. It names an overlay file `--env`
+   can't select, such as `.env.My_Staging` or `.env.default`, or a service `--service` can't. Fix
+   those before step 1, because env layers don't read the contract once the project migrates.
+4. Keep it exported if Compose interpolation, or a host command run without that service's scope,
+   reads a key you set with `--service`, because a service value doesn't reach them. A value set
+   without `--service` does reach them, and overrides your shell.
+
+The refusal comes before Hack provisions any secret-store key. If plaintext values are mirrored to a
+secret backend whose key isn't available, Hack can't tell whether a key your shell sets is also in
+the backend, so it refuses that key the same way. Make the backend's key available and retry. If the
+backend has nothing stored yet and `HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK` isn't set, you can run
+these steps instead, and the migration creates its key; set the key only if the backend doesn't hold
+it. Any other backend failure, such as a corrupt store, stops the migration with that error.
+
+With `hack.env.json`, the migration also refuses (`E_CONFIG_INVALID`), writing no env layer, an
+overlay named `default`, `local` or `<name>.local`, in any case, that sets a value of its own, because
+it would replace the base layer or write a machine-local file, and a contract service that isn't a
+valid env scope when a value would be written for it, because no read could parse that layer. A
+secret backend's key may already have been created by then. The migration also refuses, writing nothing
+itself, a `hack.env.json` it can't open or read as a contract, and it doesn't quote the file. Earlier
+`hack doctor` steps, such as creating `.hack/.gitignore`, can still have run.
 
 With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
 symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a

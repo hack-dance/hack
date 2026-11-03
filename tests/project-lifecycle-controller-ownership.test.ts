@@ -610,9 +610,10 @@ test("a startup whose second process fails and whose session stop is unconfirmed
     project: { projectRoot: root, projectDir } as Parameters<
       typeof startLifecycleProcesses
     >[0]["project"],
-    cfg: { lifecycle: { processes: [PROCESS, second] } } as Parameters<
-      typeof startLifecycleProcesses
-    >[0]["cfg"],
+    // Only lifecycle.processes is read on this path.
+    cfg: {
+      lifecycle: { processes: [PROCESS, second] },
+    } as unknown as Parameters<typeof startLifecycleProcesses>[0]["cfg"],
     projectName: "demo",
     branch: "branch-a",
     env: { PATH: `${bin}:${process.env.PATH ?? ""}` },

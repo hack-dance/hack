@@ -614,13 +614,17 @@ async function runRetainedHelperPhases(opts: {
   ctx.log("a failing up.after hook keeps the helper of the started containers");
   await opts.writeConfig({ mode: "identity", failUpAfter: true });
   const failedAfter = await opts.cli({ verb: "up", branch });
-  const started = await opts.ownedHelper();
+  const claimAfter = await opts.readClaim();
   expect({
-    that: failedAfter.exitCode !== 0 && (await keptFor(started)),
+    that:
+      failedAfter.exitCode !== 0 &&
+      claimAfter?.ownership === "owned" &&
+      (await keptFor({ pid: claimAfter.pid, birth: claimAfter.birth })),
     message:
       "a failing up.after hook released the helper under running containers",
     result: failedAfter,
   });
+  const started = await opts.ownedHelper();
   await opts.writeConfig({ mode: "identity" });
   await downStops(started, "a failed up.after hook");
 }

@@ -1238,11 +1238,13 @@ const contracts: readonly ModelContract[] = [
     // Shared helper instance lifecycle-session ownership (HACK-1142): the
     // controller's session decision, the locked creation transaction
     // (revalidate, publish, create, record) and its failure outcomes, process
-    // start outside the lock, the locked conditional finalize, and creator
-    // cleanup by session epoch; see tests/models/tla/README.md.
+    // start outside the lock, the locked conditional finalize, bounded mux
+    // calls that settle under the lock (with controls for abandoned calls
+    // and timeouts read as absence), and creator cleanup by session epoch;
+    // see tests/models/tla/README.md.
     name: "shared-helper-instance",
     module: "Instance",
-    states: 6035,
+    states: 6039,
     invariant: "SessionSafe",
     action: "Succeed",
     fields: [
@@ -1274,7 +1276,36 @@ const contracts: readonly ModelContract[] = [
           'session = "alive"',
           'token = "b"',
           'entry = "a"',
-          'pc = [a |-> "ready", b |-> "starting"]',
+          'pc = [a |-> "ready", b |-> "failed"]',
+        ],
+      },
+      {
+        name: "abandoned-create",
+        negative: true,
+        invariant: "Reclaimable",
+        action: "LateCreate",
+        fields: ['session = "alive"', 'token = "a"', 'entry = "none"'],
+      },
+      {
+        name: "abandoned-replace",
+        negative: true,
+        invariant: "SessionSafe",
+        action: "LateKill",
+        fields: [
+          'session = "absent"',
+          'pc = [a |-> "succeeded", b |-> "done"]',
+        ],
+      },
+      {
+        name: "timeout-as-absence",
+        negative: true,
+        invariant: "Reclaimable",
+        action: "Publish",
+        fields: [
+          'session = "alive"',
+          'token = "a"',
+          'entry = "b"',
+          'pc = [a |-> "failed", b |-> "createsess"]',
         ],
       },
     ],

@@ -1,4 +1,4 @@
-import { test as boundedTest, expect } from "bun:test";
+import { test as boundedTest, expect, spyOn } from "bun:test";
 import {
   chmod,
   link,
@@ -11,8 +11,12 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { HackCliError } from "../src/lib/cli-result.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
-import { openLegacyComposeAdoptedGenerationStore } from "../src/lib/native-compose-adoption-generation.ts";
+import {
+  LegacyComposeAdoptedGenerationError,
+  openLegacyComposeAdoptedGenerationStore,
+} from "../src/lib/native-compose-adoption-generation.ts";
 import { inspectLegacyComposeAdoptionSelection } from "../src/lib/native-compose-adoption-marker.ts";
 import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption-preview.ts";
 import {
@@ -42,6 +46,7 @@ const {
   artifactPath,
   refusal,
   linkedCheckout,
+  mutationCommands,
   readReceipt,
   writeReceipt,
   originalSnapshots,
@@ -1107,7 +1112,7 @@ async function publicDispatchAfterClockJump(opts: {
     process.env.HACK_CONFIG_COMPILER_BINARY = binary;
     await store.publish({ generation, binary });
     process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = String(opts.startupTimeoutMs);
-    const commands = join(root, "commands");
+    const commands = join(context.root, "commands");
     const before = Bun.file(commands).size;
     clock = spyOn(Date, "now").mockImplementation(() => {
       if (offset === 0 && Bun.file(commands).size > before) {
@@ -1116,7 +1121,7 @@ async function publicDispatchAfterClockJump(opts: {
       return realNow() + offset;
     });
     const result = await tryLegacyComposeAdoptedCommand({
-      cwd: projectRoot,
+      cwd: context.projectRoot,
       operation: "up",
       detach: true,
     }).catch((error: unknown) => error);

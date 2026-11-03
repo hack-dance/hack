@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { readProcessIdentities } from "../../../src/lib/process-tree.ts";
+import { withProjectsRegistryLock } from "../../../src/lib/projects-registry-lock.ts";
 import {
   isSharedHostProcessRunning,
   parseSharedHostClaim,
@@ -81,9 +82,23 @@ export const sharedHostHelpersScenario: Scenario = {
       readonly withInvalidEntry?: boolean;
       /** Write the helper entry with `enabled: false`. */
       readonly disabled?: boolean;
+      /** Add an up.before hook that waits for this gate file. */
+      readonly beforeGate?: string;
     }): Promise<void> => {
       const lifecycle = {
         ...((baseConfig.lifecycle ?? {}) as Record<string, unknown>),
+        ...(opts.beforeGate
+          ? {
+              up: {
+                before: [
+                  {
+                    name: "e2e-before-gate",
+                    command: `: > "${opts.beforeGate}.reached"; while [ ! -e "${opts.beforeGate}" ]; do sleep 0.05; done`,
+                  },
+                ],
+              },
+            }
+          : {}),
         ...(opts.withProcess
           ? {
               processes: [
@@ -667,6 +682,7 @@ type ConfigOptions = {
   readonly withProcess?: boolean;
   readonly withInvalidEntry?: boolean;
   readonly disabled?: boolean;
+  readonly beforeGate?: string;
 };
 
 /**
@@ -780,11 +796,13 @@ async function runSecondReviewPhases(opts: {
 
   await runOverlappingUpPhase(opts);
   await runDisabledAfterDownPhase(opts);
+  await runDownDuringBeforeHookPhase(opts);
   await opts.writeConfig({ mode: "identity" });
 }
 
 type OverlapOptions = {
   readonly ctx: Parameters<Scenario["run"]>[0];
+  readonly port: number;
   readonly cwd: string;
   readonly hackDir: string;
   readonly fixtureName: string;
@@ -845,7 +863,12 @@ async function startGatedUp(opts: {
   return proc;
 }
 
-type EarlierOutcome = "succeeds" | "compose-fails" | "sigterm";
+type EarlierOutcome =
+  | "succeeds"
+  | "compose-fails"
+  | "sigterm"
+  /** SIGTERM while another start holds the instance lock past the cleanup timeout. */
+  | "sigterm-lock-held";
 
 /**
  * A newer up of the same instance adopts the lifecycle session and helpers
@@ -868,6 +891,7 @@ async function runOverlappingUpPhase(opts: OverlapOptions): Promise<void> {
     "succeeds",
     "compose-fails",
     "sigterm",
+    "sigterm-lock-held",
   ] as const satisfies readonly EarlierOutcome[]) {
     await runOverlap({ ...opts, tmux, outcome });
   }
@@ -930,7 +954,20 @@ async function runOverlap(
     codes: [0],
     message: "the newer up should adopt the session and helpers",
   });
-  if (outcome === "sigterm") {
+  // For sigterm-lock-held, hold the shared helper instance lock (as a third
+  // start ensuring a slow helper would) until the earlier up has exited.
+  const lock =
+    outcome === "sigterm-lock-held"
+      ? await holdInstanceLock(
+          join(
+            ctx.hackHome,
+            "shared-helpers",
+            ".instances",
+            `${composeProject}.lock`
+          )
+        )
+      : null;
+  if (outcome === "sigterm" || outcome === "sigterm-lock-held") {
     earlier.kill("SIGTERM");
   }
   await writeFile(gate, "open\n");
@@ -938,6 +975,7 @@ async function runOverlap(
     earlier.exited,
     new Response(earlier.stdout).text(),
   ]);
+  await lock?.release();
   const expectedExit =
     outcome === "succeeds" ? earlierExit === 0 : earlierExit !== 0;
   expect({
@@ -957,6 +995,104 @@ async function runOverlap(
     that: !((await sessionAlive()) || (await isRunning(helper))),
     message: "down must stop the session and the helper",
   });
+}
+
+/** Hold a Hack lock file until `release` is called. */
+async function holdInstanceLock(
+  lockPath: string
+): Promise<{ readonly release: () => Promise<void> }> {
+  let releaseLock = (): void => undefined;
+  const held = new Promise<void>((resolveHeld) => {
+    releaseLock = resolveHeld;
+  });
+  let acquired = (): void => undefined;
+  const isHeld = new Promise<void>((resolveAcquired) => {
+    acquired = resolveAcquired;
+  });
+  const holder = withProjectsRegistryLock({
+    lockPath,
+    run: async () => {
+      acquired();
+      await held;
+    },
+  });
+  await isHeld;
+  return {
+    release: async () => {
+      releaseLock();
+      await holder;
+    },
+  };
+}
+
+/**
+ * A down while an up waits in an up.before hook: the shutdown generation is
+ * captured before the hooks, so that up must refuse to start helpers or
+ * services once the hook finishes.
+ */
+async function runDownDuringBeforeHookPhase(
+  opts: OverlapOptions
+): Promise<void> {
+  const { ctx, branch } = opts;
+  ctx.log("a down while an up waits in up.before supersedes that up");
+  const gate = join(ctx.tempRoot, "before-hook-gate");
+  const dockerLog = join(ctx.tempRoot, "before-hook-docker.log");
+  await opts.writeConfig({ mode: "identity", beforeGate: gate });
+  const args = ["up", "--detach", "--json", "--branch", branch];
+  const earlier = Bun.spawn(
+    process.env.HACK_E2E_CLI_BIN?.trim()
+      ? resolveCliSpawnArgs(args)
+      : [process.execPath, CLI_ENTRYPOINT, ...args],
+    {
+      cwd: opts.cwd,
+      env: buildCliEnv({
+        hackHome: ctx.hackHome,
+        extra: {
+          PATH: opts.path,
+          E2E_ISSUER_UPSTREAM: UPSTREAM,
+          E2E_DOCKER_LOG: dockerLog,
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    }
+  );
+  let reached = false;
+  await waitUntil(async () => {
+    reached = await Bun.file(`${gate}.reached`).exists();
+    return reached;
+  });
+  if (!reached) {
+    earlier.kill("SIGKILL");
+    await earlier.exited;
+    throw new Error("the up never reached its up.before gate");
+  }
+  expectExit({
+    result: await opts.cli({ verb: "down", branch }),
+    codes: [0],
+    message: "down while the up waits in up.before",
+  });
+  await writeFile(gate, "open\n");
+  const [earlierExit, earlierStdout] = await Promise.all([
+    earlier.exited,
+    new Response(earlier.stdout).text(),
+  ]);
+  const envelope = parseEnvelope(earlierStdout);
+  const upCalls = (await Bun.file(dockerLog).exists())
+    ? (await Bun.file(dockerLog).text())
+        .split("\n")
+        .filter((line) => line.includes(" up "))
+    : [];
+  expect({
+    that:
+      earlierExit !== 0 &&
+      envelope?.error?.code === "E_LIFECYCLE_FAILED" &&
+      upCalls.length === 0 &&
+      !(await portBusy(opts.port)),
+    message: `an up superseded during up.before must start no helper or service (exit ${earlierExit}, compose up calls ${upCalls.length}, stdout ${earlierStdout.trim().slice(0, 300)})`,
+  });
+  await opts.writeConfig({ mode: "identity" });
 }
 
 /**

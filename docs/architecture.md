@@ -8,7 +8,7 @@ which redirects all global state — registry, daemon, secrets — to another ro
 - **CoreDNS** resolves `*.hack` inside containers to the Caddy IP, with `extra_hosts` mappings for resolver compatibility.
 - **Alloy + Loki + Grafana** capture logs and provide history.
 - **Schemas** are served by Caddy at `https://schemas.hack.local`.
-- **hackd (optional daemon)** caches Docker state for fast `hack projects --json` / `hack ps --json`.
+- **hackd (optional daemon)** caches Docker state for fast `hack projects --json`.
 
 ```mermaid
 graph LR
@@ -274,8 +274,10 @@ Note: the daemon does not proxy logs yet; `hack logs` still talks directly to Do
 containers. It serves a small local API over a Unix socket at `~/.hack/daemon/hackd.sock` and powers:
 
 - `hack projects --json`
-- `hack ps --json`
 - streaming consumers (TUI/MCP)
+
+`hack ps` and `hack ps --json` query Compose directly so failed startup exits
+are visible immediately, with state and exit codes.
 
 The event watcher ignores container actions such as health-check `exec_*` events that cannot change
 the cached runtime view. Relevant event bursts are debounced and rate-bounded. Event refreshes reuse

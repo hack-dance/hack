@@ -36,11 +36,23 @@ export type NativeFixtureCase = {
   ) => Readonly<Record<string, string | undefined>>;
   /** Record a failure seen in a callback that must not throw; the case then fails. */
   readonly fail: (error: unknown) => void;
+  /**
+   * End test-owned processes when this case fails or does not settle. A
+   * passing case never runs it, so a leak the product caused still fails
+   * settlement. A body that outlives its budget triggers it again when it ends,
+   * because that body can start more processes after the case has failed.
+   */
+  readonly onFailure: (cleanup: () => void | Promise<void>) => void;
 };
 
 export type NativeFixtureCases = {
   /** The guarded case running the caller. Throws outside a guarded case. */
   readonly current: () => NativeFixtureCase;
+  /** Run one guarded case body directly and reject with its outcome. */
+  readonly run: (
+    body: () => void | Promise<void>,
+    timeoutMs?: number
+  ) => Promise<void>;
   /**
    * Register a guarded case. `timeoutMs` bounds the body; the Bun timeout adds
    * the settlement budget and a margin, so cleanup always finishes inside it.
@@ -133,6 +145,18 @@ export function createNativeFixtureCases(opts: {
     const roots: string[] = [];
     const saved = new Map<string, string | undefined>();
     const observed: unknown[] = [];
+    const failureCleanups: (() => void | Promise<void>)[] = [];
+    const runFailureCleanups = async () => {
+      for (const cleanup of failureCleanups) {
+        try {
+          await cleanup();
+        } catch (error) {
+          console.error(
+            `${opts.label} failure cleanup refused: ${message(error)}`
+          );
+        }
+      }
+    };
     const settlement = createNativeAuthoredSettlement();
     const context: NativeFixtureCase = {
       root: (path) => {
@@ -150,21 +174,30 @@ export function createNativeFixtureCases(opts: {
       fail: (error) => {
         observed.push(error);
       },
+      onFailure: (cleanup) => {
+        failureCleanups.push(cleanup);
+      },
     };
     let failure: { readonly error: unknown } | undefined;
+    let bodyRunning = true;
+    const running = (async () => {
+      await storage.run(context, body);
+    })().finally(() => {
+      bodyRunning = false;
+    });
     try {
-      await withinBudget(
-        opts.label,
-        (async () => {
-          await storage.run(context, body);
-        })(),
-        timeoutMs
-      );
+      await withinBudget(opts.label, running, timeoutMs);
       if (observed.length > 0) {
         throw observed[0];
       }
     } catch (error) {
       failure = { error };
+    }
+    if (failure !== undefined) {
+      await runFailureCleanups();
+      if (bodyRunning) {
+        running.catch(() => undefined).then(runFailureCleanups);
+      }
     }
     // Settle this case's own targets even after a failure, so the next case
     // normally starts without them; a timeout here fails only this case.
@@ -173,6 +206,9 @@ export function createNativeFixtureCases(opts: {
       await settlement.settle({ budgetMs: opts.settlementBudgetMs });
     } catch (error) {
       unsettled = { error };
+      if (failure === undefined) {
+        await runFailureCleanups();
+      }
     }
     for (const [key, value] of saved) {
       restoreEnv(key, value);
@@ -186,6 +222,7 @@ export function createNativeFixtureCases(opts: {
   };
   return {
     current,
+    run: (body, timeoutMs = opts.defaultTimeoutMs) => runCase(body, timeoutMs),
     test: (name, body, timeoutMs = opts.defaultTimeoutMs) => {
       bunTest(
         name,

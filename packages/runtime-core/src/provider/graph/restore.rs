@@ -157,27 +157,37 @@ pub(super) fn observed_volumes(
     engine: &Engine<'_>,
     receipt: &Receipt,
 ) -> Result<BTreeMap<String, (String, String, String)>, CandidateError> {
+    observed_volumes_with(receipt, |resource| {
+        volume_identity::observe(engine, receipt, resource)
+    })
+}
+
+pub(super) fn observed_volumes_with(
+    receipt: &Receipt,
+    mut observe: impl FnMut(&Resource) -> Result<Value, CandidateError>,
+) -> Result<BTreeMap<String, (String, String, String)>, CandidateError> {
     let mut volumes = BTreeMap::new();
     for (key, resource) in &receipt.resources {
         if resource.kind != Kind::Volume {
             continue;
         }
-        let inspected = inspect_resource(engine, receipt, resource)?
-            .ok_or_else(|| error("graph_data_missing", "Retained volume is missing."))?;
-        let created = inspected["CreatedAt"]
+        let projection = observe(resource)?;
+        let directory = projection["directory"]
             .as_str()
-            .filter(|s| !s.is_empty() && s.len() <= 128)
             .ok_or_else(|| error("graph_receipt", "Volume identity unavailable."))?;
-        let directory = volume_subpaths::directory_identity(engine, resource, &inspected)?;
-        if inspect_resource(engine, receipt, resource)?.as_ref() != Some(&inspected) {
-            return Err(error(
-                "graph_receipt",
-                "Retained volume changed during selection.",
-            ));
-        }
+        use sha2::{Digest, Sha256};
+        // Keep the persisted tuple shape; its middle field is now a stable
+        // inspection digest. Legacy timestamp selections deliberately mismatch.
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&projection["inspected"])
+                    .map_err(|_| error("graph_receipt", "Volume identity unavailable."))?
+            )
+        );
         volumes.insert(
             key.clone(),
-            (resource.name.clone(), created.to_owned(), directory),
+            (resource.name.clone(), fingerprint, directory.to_owned()),
         );
     }
     Ok(volumes)

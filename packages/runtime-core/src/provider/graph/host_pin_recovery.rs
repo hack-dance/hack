@@ -263,38 +263,10 @@ pub(super) fn verify_volume_projections(
     receipt: &Receipt,
     selected: &BTreeMap<String, Value>,
 ) -> Result<(), CandidateError> {
-    let keys = receipt
-        .resources
-        .iter()
-        .filter(|(_, value)| value.kind == Kind::Volume)
-        .map(|(key, _)| key.clone())
-        .collect::<Vec<_>>();
-    if keys.len() != selected.len() || keys.iter().any(|key| !selected.contains_key(key)) {
-        return Err(refused());
-    }
-    for key in keys {
-        let resource = &receipt.resources[&key];
-        let actual = super::inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
-        let expected = selected.get(&key).ok_or_else(refused)?;
-        if expected["expected_name"] != resource.name
-            || expected["observed_name"] != actual["Name"]
-            || expected["observed_created_at"] != actual["CreatedAt"]
-            || expected["observed_mountpoint"] != actual["Mountpoint"]
-            || expected["observed_driver"] != actual["Driver"]
-            || expected["observed_labels_sha256"]
-                != digest(&serde_json::to_vec(&actual["Labels"]).map_err(|_| refused())?)
-        {
-            return Err(refused());
-        }
-        let labels = expected["labels"].as_object().ok_or_else(refused)?;
-        if labels
-            .iter()
-            .any(|(name, value)| actual["Labels"].get(name) != Some(value))
-        {
-            return Err(refused());
-        }
-    }
-    Ok(())
+    super::volume_identity::verify_with(receipt, selected, |resource| {
+        super::volume_identity::observe(engine, receipt, resource)
+    })
+    .map_err(|_| refused())
 }
 
 /// Caller already holds the Engine lease and exact foreground owner lock.
@@ -563,21 +535,9 @@ fn select_content(
         .iter()
         .filter(|(_, value)| value.kind == Kind::Volume)
     {
-        let actual = super::inspect_resource(engine, &receipt, resource)?.ok_or_else(refused)?;
-        let labels = super::expected_labels(&receipt, resource)
-            .as_object()
-            .ok_or_else(refused)?
-            .keys()
-            .map(|label| (label.clone(), actual["Labels"][label].clone()))
-            .collect::<BTreeMap<_, _>>();
         retained_volumes.insert(
             key.clone(),
-            json!({"expected_name":resource.name,"observed_name":actual["Name"],
-                "observed_created_at":actual["CreatedAt"],
-                "observed_mountpoint":actual["Mountpoint"],
-                "observed_driver":actual["Driver"],
-                "observed_labels_sha256":digest(&serde_json::to_vec(&actual["Labels"]).map_err(|_| refused())?),
-                "labels":labels}),
+            super::volume_identity::observe(engine, &receipt, resource)?,
         );
     }
     Ok(Witness {

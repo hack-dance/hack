@@ -14,6 +14,8 @@ import {
   type Scenario,
 } from "../harness.ts";
 
+import { type DockerResource, ownedContainers } from "./pattern-fixture.ts";
+
 const OWNER = "hack.e2e.cache-protocol-owner";
 const BRANCH = "protocol-linked";
 const COMMAND_MS = 30_000;
@@ -39,20 +41,7 @@ const INSTALL_SCRIPT = [
 const NO_READY =
   "test -f /deps/.hack-dependency-cache-v1/attempt && test ! -e /deps/.hack-dependency-cache-v1/ready && test ! -e /deps/.hack-dependency-cache-v1/ready.pending && test $(wc -l < /deps/initializations) -eq 1";
 
-type Resource = {
-  readonly Id?: string;
-  readonly Name?: string;
-  readonly Labels?: Record<string, string>;
-  readonly Config?: { readonly Labels: Record<string, string> };
-  readonly State?: { readonly Running: boolean; readonly ExitCode: number };
-  readonly Mounts?: readonly {
-    readonly Type: string;
-    readonly Name?: string;
-    readonly Source?: string;
-    readonly Destination: string;
-    readonly RW: boolean;
-  }[];
-};
+type Resource = DockerResource;
 
 /** Real Compose protocol coverage with synthetic artifacts, no package downloads. */
 export const dependencyCacheProtocolScenario: Scenario = {
@@ -215,28 +204,15 @@ export const dependencyCacheProtocolScenario: Scenario = {
       });
       return labels;
     };
-    const listContainers = async (project?: string, service?: string) => {
-      const listed = await checkedDocker([
-        "ps",
-        "-aq",
-        "--filter",
-        `label=${OWNER}=${fixture.name}`,
-        ...(project
-          ? ["--filter", `label=com.docker.compose.project=${project}`]
-          : []),
-        ...(service
-          ? ["--filter", `label=com.docker.compose.service=${service}`]
-          : []),
-      ]);
-      const ids = listed.stdout.trim().split(/\s+/).filter(Boolean);
-      if (!ids.length) {
-        return [];
-      }
-      const inspected = await checkedDocker(["inspect", ...ids]);
-      const resources = JSON.parse(inspected.stdout) as Resource[];
-      resources.forEach(owned);
-      return resources;
-    };
+    const listContainers = (project?: string, service?: string) =>
+      ownedContainers({
+        ctx,
+        owner: OWNER,
+        name: fixture.name,
+        projects,
+        project,
+        service,
+      });
     const installer = async (project: string) => {
       const resources = await listContainers(project, "installer");
       expect({

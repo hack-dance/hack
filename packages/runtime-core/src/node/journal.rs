@@ -7,12 +7,25 @@ use std::path::{Path, PathBuf};
 pub const OUTPUT_LIMIT: usize = 16 * 1024;
 const CAPACITY: i64 = 2048;
 /// How long one connection waits for another's write transaction before failing closed
-/// with `node_error` ("database is locked"). Every writer (node service, supervisors,
+/// with `journal_busy` and a value-free retry hint. Every writer (node service, supervisors,
 /// scheduler) holds the write lock only for one in-memory receipt change and its commit,
 /// so a cancel racing a completion waits for that commit; only a commit stalled beyond
 /// this bound refuses, and the refused mutation was never recorded, so a retry with the
 /// same operation ID is safe.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Keep contention refusals independent of SQLite's diagnostic text and values.
+fn sqlite_error(failure: rusqlite::Error) -> crate::CandidateError {
+    match failure.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            crate::CandidateError::new(
+                "journal_busy",
+                "Node journal is busy; retry with the same operation ID.",
+            )
+        }
+        _ => error(failure),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -181,26 +194,28 @@ impl Store {
         } else {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
         };
-        let mut connection =
-            Connection::open_with_flags(root.join("journal.sqlite"), flags).map_err(error)?;
-        connection.busy_timeout(BUSY_TIMEOUT).map_err(error)?;
+        let mut connection = Connection::open_with_flags(root.join("journal.sqlite"), flags)
+            .map_err(sqlite_error)?;
+        connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(sqlite_error)?;
         if !read_only {
             connection
                 .execute_batch(
                     "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
                 )
-                .map_err(error)?;
+                .map_err(sqlite_error)?;
         }
         let existing_version: i32 = connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .map_err(error)?;
+            .map_err(sqlite_error)?;
         if existing_version != 1 && !(create && existing_version == 0) {
             return Err(error("Unsupported journal schema."));
         }
         if create && existing_version == 0 {
             let tables: i64 = connection
                 .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
-                .map_err(error)?;
+                .map_err(sqlite_error)?;
             if tables != 0 {
                 return Err(error("Unrecognized unversioned database."));
             }
@@ -222,11 +237,11 @@ impl Store {
             let identity = format!("{:x}", hasher.finalize());
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(error)?;
+                .map_err(sqlite_error)?;
             tx.execute_batch("CREATE TABLE meta (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL, identity TEXT NOT NULL, state_root TEXT NOT NULL);
                 CREATE TABLE operations (id TEXT PRIMARY KEY, digest TEXT NOT NULL, response TEXT NOT NULL);
                 CREATE TABLE jobs (id TEXT PRIMARY KEY, receipt TEXT NOT NULL);
-                PRAGMA user_version=1;").map_err(error)?;
+                PRAGMA user_version=1;").map_err(sqlite_error)?;
             tx.execute(
                 "INSERT INTO meta VALUES (1,0,?,?)",
                 params![
@@ -235,21 +250,21 @@ impl Store {
                         .ok_or_else(|| error("Node path must be UTF-8."))?
                 ],
             )
-            .map_err(error)?;
-            tx.commit().map_err(error)?;
+            .map_err(sqlite_error)?;
+            tx.commit().map_err(sqlite_error)?;
         }
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .map_err(error)?;
+            .map_err(sqlite_error)?;
         if version != 1 {
             return Err(error("Unsupported journal schema."));
         }
         let target: String = connection
             .query_row("SELECT identity FROM meta WHERE id=1", [], |r| r.get(0))
-            .map_err(error)?;
+            .map_err(sqlite_error)?;
         let bound_root: String = connection
             .query_row("SELECT state_root FROM meta WHERE id=1", [], |r| r.get(0))
-            .map_err(error)?;
+            .map_err(sqlite_error)?;
         if Path::new(&bound_root) != root {
             return Err(error("Journal belongs to a different node directory."));
         }
@@ -350,7 +365,7 @@ impl Store {
                 let generation: i64 = self
                     .connection
                     .query_row("SELECT generation FROM meta WHERE id=1", [], |r| r.get(0))
-                    .map_err(error)?;
+                    .map_err(sqlite_error)?;
                 let mut capabilities = vec!["fixture_jobs_v1", "cooperative_process_groups"];
                 if candidate.is_some() {
                     capabilities
@@ -379,7 +394,7 @@ impl Store {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(error)?;
+            .map_err(sqlite_error)?;
         let previous: Option<(String, String)> = tx
             .query_row(
                 "SELECT digest,response FROM operations WHERE id=?",
@@ -387,7 +402,7 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
-            .map_err(error)?;
+            .map_err(sqlite_error)?;
         if let Some((old_digest, response)) = previous {
             if digest != old_digest {
                 return Err(crate::CandidateError::new(
@@ -399,7 +414,7 @@ impl Store {
         }
         let generation: i64 = tx
             .query_row("SELECT generation FROM meta WHERE id=1", [], |r| r.get(0))
-            .map_err(error)?;
+            .map_err(sqlite_error)?;
         if m.expected_generation != generation {
             return Err(crate::CandidateError::new(
                 "stale_generation",
@@ -408,7 +423,7 @@ impl Store {
         }
         let count: i64 = tx
             .query_row("SELECT count(*) FROM operations", [], |r| r.get(0))
-            .map_err(error)?;
+            .map_err(sqlite_error)?;
         if count >= CAPACITY {
             return Err(error(
                 "Journal capacity reached; retry identities are retained.",
@@ -444,7 +459,7 @@ impl Store {
                 }
                 let jobs: i64 = tx
                     .query_row("SELECT count(*) FROM jobs", [], |r| r.get(0))
-                    .map_err(error)?;
+                    .map_err(sqlite_error)?;
                 if jobs >= 128 {
                     return Err(crate::CandidateError::new(
                         "journal_capacity",
@@ -482,7 +497,7 @@ impl Store {
                     "INSERT INTO jobs VALUES (?,?)",
                     params![id, serde_json::to_string(&receipt).map_err(error)?],
                 )
-                .map_err(error)?;
+                .map_err(sqlite_error)?;
                 id
             }
             Request::ReconcileSource { job_id, .. } => {
@@ -525,10 +540,10 @@ impl Store {
             "INSERT INTO operations VALUES (?,?,?)",
             params![m.operation_id, digest, response.to_string()],
         )
-        .map_err(error)?;
+        .map_err(sqlite_error)?;
         tx.execute("UPDATE meta SET generation=generation+1 WHERE id=1", [])
-            .map_err(error)?;
-        tx.commit().map_err(error)?;
+            .map_err(sqlite_error)?;
+        tx.commit().map_err(sqlite_error)?;
         drop(source_guard);
         drop(reconciliation_lock);
         Ok(response)
@@ -541,11 +556,11 @@ impl Store {
         let mut statement = self
             .connection
             .prepare("SELECT receipt FROM jobs ORDER BY rowid")
-            .map_err(error)?;
+            .map_err(sqlite_error)?;
         let rows = statement
             .query_map([], |r| r.get::<_, String>(0))
-            .map_err(error)?;
-        rows.map(|r| serde_json::from_str(&r.map_err(error)?).map_err(error))
+            .map_err(sqlite_error)?;
+        rows.map(|r| serde_json::from_str(&r.map_err(sqlite_error)?).map_err(error))
             .collect()
     }
     /// All competing terminal updates and cancellation requests serialize here.
@@ -557,13 +572,13 @@ impl Store {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(error)?;
+            .map_err(sqlite_error)?;
         let mut receipt = read_receipt(&tx, id)?;
         if !receipt.terminal() {
             change(&mut receipt)?;
             write_receipt(&tx, &receipt)?;
         }
-        tx.commit().map_err(error)?;
+        tx.commit().map_err(sqlite_error)?;
         Ok(receipt)
     }
     pub(crate) fn lock_path(&self, id: &str) -> Result<PathBuf> {
@@ -587,7 +602,7 @@ fn reconciliation_source(receipt: &Receipt) -> Result<&crate::provider::SourceJo
 fn read_receipt(connection: &Connection, id: &str) -> Result<Receipt> {
     let raw: String = connection
         .query_row("SELECT receipt FROM jobs WHERE id=?", [id], |r| r.get(0))
-        .map_err(error)?;
+        .map_err(sqlite_error)?;
     serde_json::from_str(&raw).map_err(error)
 }
 fn write_receipt(connection: &Connection, receipt: &Receipt) -> Result<()> {
@@ -599,7 +614,7 @@ fn write_receipt(connection: &Connection, receipt: &Receipt) -> Result<()> {
                 receipt.job_id
             ],
         )
-        .map_err(error)?;
+        .map_err(sqlite_error)?;
     Ok(())
 }
 fn validate_id(id: &str) -> Result<()> {
@@ -956,6 +971,74 @@ mod tests {
         assert_eq!(published.starts, 1);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn busy_timeout_refuses_without_recording_and_same_operation_retries_once() {
+        assert_busy_timeout_refusal("BEGIN IMMEDIATE");
+    }
+
+    #[test]
+    fn busy_commit_rolls_back_writes_and_same_operation_retries_once() {
+        // A held reader permits BEGIN IMMEDIATE and writes, but prevents COMMIT.
+        assert_busy_timeout_refusal("BEGIN; SELECT generation FROM meta");
+    }
+
+    fn assert_busy_timeout_refusal(lock_sql: &str) {
+        let uid = unsafe { libc::geteuid() };
+        let root = test_root("busy-timeout");
+        let mut node = Store::open(&root, true).unwrap();
+        let blocker = Store::open(&root, false).unwrap();
+        let request = submit(&node, "busy-submit", 0);
+        blocker.connection.execute_batch(lock_sql).unwrap();
+
+        // Keep the real competing lock held until the production timeout refuses.
+        let started = std::time::Instant::now();
+        let failure = node.handle(&request, uid).unwrap_err();
+        assert!(started.elapsed() >= BUSY_TIMEOUT);
+        assert_eq!(
+            serde_json::to_value(&failure).unwrap(),
+            serde_json::json!({
+                "code": "journal_busy",
+                "message": "Node journal is busy; retry with the same operation ID."
+            })
+        );
+        assert_eq!(operations(&node), 0);
+        assert_eq!(generation(&mut node), 0);
+        assert!(node.list().unwrap().is_empty());
+
+        blocker.connection.execute_batch("ROLLBACK").unwrap();
+        let accepted = node.handle(&request, uid).unwrap();
+        assert_eq!(node.handle(&request, uid).unwrap(), accepted);
+        assert_eq!(operations(&node), 1);
+        assert_eq!(generation(&mut node), 1);
+        assert_eq!(node.list().unwrap().len(), 1);
+        drop((node, blocker));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sqlite_contention_codes_use_closed_diagnostics() {
+        for code in [
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_BUSY_SNAPSHOT,
+            rusqlite::ffi::SQLITE_LOCKED,
+            rusqlite::ffi::SQLITE_LOCKED_SHAREDCACHE,
+        ] {
+            let failure = sqlite_error(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                Some("untrusted SQLite diagnostic".into()),
+            ));
+            assert_eq!(failure.code, "journal_busy");
+            assert_eq!(
+                failure.message,
+                "Node journal is busy; retry with the same operation ID."
+            );
+        }
+        assert_eq!(
+            sqlite_error(rusqlite::Error::InvalidQuery).code,
+            "node_error"
+        );
     }
 
     #[test]

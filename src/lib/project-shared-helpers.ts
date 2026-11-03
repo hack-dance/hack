@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { resolveGlobalHackDir } from "./config-paths.ts";
@@ -337,6 +337,21 @@ export class SharedHelperStartError extends Error {
   }
 }
 
+/** Raised when a concurrent `hack down` superseded this start. */
+export class SharedHelperSupersededError extends Error {
+  /** Whether services were already launched when the down was observed. */
+  readonly servicesStarted: boolean;
+  constructor(opts: { readonly servicesStarted?: boolean } = {}) {
+    super(
+      opts.servicesStarted === true
+        ? "A concurrent hack down released this instance's shared helpers while its services started; run hack down to stop them, then hack up again."
+        : "A concurrent hack down released this instance's shared helpers; startup stopped before launching services that need them. Run hack up again."
+    );
+    this.name = "SharedHelperSupersededError";
+    this.servicesStarted = opts.servicesStarted === true;
+  }
+}
+
 /**
  * Ensure every configured helper for one instance, in config order.
  *
@@ -344,13 +359,17 @@ export class SharedHelperStartError extends Error {
  * order, the holders this call added, then throws. The returned `rollback`
  * does the same after a later phase of the operation fails.
  *
- * Overlapping operations for the same instance (two `hack up` runs of one
- * branch) are ordered by an instance lock held across every ensure, which
- * also records this operation as the instance's latest start. A rollback
- * releases only while that record still names this operation; once a later
- * start of the same instance has run, the rollback leaves the holder in place
- * (it stays recorded until `hack down`), so it can never stop a helper under
- * a newer successful start.
+ * Instance coordination (all under one per-instance lock):
+ * - Each start records its operation id as the instance's current operation.
+ *   A rollback releases only while that is still current, so it never revokes
+ *   a newer start of the same instance.
+ * - `hack down` replaces the record with a stopping marker before it stops
+ *   anything ({@link markSharedHelperInstanceStopping}) and releases under the
+ *   same lock. `assertCurrent` fails once that happened, so the caller can
+ *   refuse to launch services whose helpers a concurrent down released.
+ * - Before each helper is ensured its identity (name and port) is added to
+ *   the instance's acquired record, so `hack down` still releases it after the
+ *   entry is removed or renamed in config.
  */
 export async function startProjectSharedHelpers(opts: {
   readonly helpers: readonly ProjectSharedHelperConfig[] | undefined;
@@ -364,12 +383,20 @@ export async function startProjectSharedHelpers(opts: {
 }): Promise<{
   readonly started: readonly SharedHelperStartRecord[];
   readonly rollback: () => Promise<readonly SharedHelperRelease[]>;
+  /** Throws {@link SharedHelperSupersededError} once a down superseded this start. */
+  readonly assertCurrent: (opts?: {
+    readonly servicesStarted?: boolean;
+  }) => Promise<void>;
 }> {
   const helpers = opts.helpers ?? [];
   const started: SharedHelperStartRecord[] = [];
   const added: SharedHostHelperSpec[] = [];
   if (helpers.length === 0) {
-    return { started, rollback: () => Promise.resolve([]) };
+    return {
+      started,
+      rollback: () => Promise.resolve([]),
+      assertCurrent: () => Promise.resolve(),
+    };
   }
   const holder = resolveSharedHelperHolder(opts.composeProject);
   const instance = instancePaths({ hackDir: opts.hackDir, holder });
@@ -386,7 +413,7 @@ export async function startProjectSharedHelpers(opts: {
         ? Promise.resolve([])
         : withInstanceLock({
             instance,
-            timeoutMs: 10_000,
+            timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
             run: async () => {
               if ((await readOperation(instance)) !== operation) {
                 return [];
@@ -397,17 +424,32 @@ export async function startProjectSharedHelpers(opts: {
           });
     return rolledBack;
   };
+  const assertCurrent = async (
+    check: { readonly servicesStarted?: boolean } = {}
+  ): Promise<void> => {
+    const current = await withInstanceLock({
+      instance,
+      timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
+      run: async () => (await readOperation(instance)) === operation,
+    });
+    if (!current) {
+      throw new SharedHelperSupersededError(check);
+    }
+  };
   await mkdir(instance.dir, { recursive: true, mode: 0o700 });
   await withInstanceLock({
     instance,
     timeoutMs: lockTimeoutMs,
     ...(opts.signal ? { signal: opts.signal } : {}),
     run: async () => {
-      await writeFile(instance.operationPath, `${operation}\n`, {
-        mode: 0o600,
-      });
+      await writeOperation(instance, operation);
       try {
         for (const helper of helpers) {
+          if (helper.enabled) {
+            await recordAcquired(instance, [
+              { name: helper.name, port: helper.port },
+            ]);
+          }
           const result = await ensureOne({ ...opts, helper, holder });
           if (result.state === "ready" && result.holderAdded) {
             added.push(result.spec);
@@ -431,7 +473,7 @@ export async function startProjectSharedHelpers(opts: {
       }
     },
   });
-  return { started, rollback };
+  return { started, rollback, assertCurrent };
 }
 
 async function ensureOne(opts: {
@@ -475,10 +517,16 @@ async function ensureOne(opts: {
     : { state: "other", result };
 }
 
+const INSTANCE_LOCK_TIMEOUT_MS = 10_000;
+const MAX_ACQUIRED = 256;
+
+type HelperIdentity = { readonly name: string; readonly port: number };
+
 type InstancePaths = {
   readonly dir: string;
   readonly lockPath: string;
   readonly operationPath: string;
+  readonly acquiredPath: string;
 };
 
 function instancePaths(opts: {
@@ -494,6 +542,7 @@ function instancePaths(opts: {
     dir,
     lockPath: join(dir, `${opts.holder}.lock`),
     operationPath: join(dir, `${opts.holder}.operation`),
+    acquiredPath: join(dir, `${opts.holder}.acquired.json`),
   };
 }
 
@@ -520,10 +569,153 @@ async function readOperation(instance: InstancePaths): Promise<string | null> {
   }
 }
 
+async function writeOperation(
+  instance: InstancePaths,
+  operation: string
+): Promise<void> {
+  await writeFileAtomic(instance.operationPath, `${operation}\n`);
+}
+
+async function writeFileAtomic(path: string, text: string): Promise<void> {
+  const staging = `${path}.${randomUUID()}.tmp`;
+  await writeFile(staging, text, { mode: 0o600 });
+  await rename(staging, path);
+}
+
 /**
- * Release this instance's holder from every configured helper, enabled or
- * not (a helper disabled after it was started must still be released).
- * Every helper is attempted; failures are returned, not thrown.
+ * Helper identities this instance may hold. A missing file is empty; an
+ * unreadable or malformed one throws, so `hack down` fails closed instead of
+ * silently forgetting a holder.
+ */
+async function readAcquired(
+  instance: InstancePaths
+): Promise<readonly HelperIdentity[]> {
+  let text: string;
+  try {
+    text = await readFile(instance.acquiredPath, "utf8");
+  } catch (error: unknown) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+  const value: unknown = JSON.parse(text);
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_ACQUIRED ||
+    !value.every(
+      (entry: unknown) =>
+        isRecord(entry) &&
+        Object.keys(entry).length === 2 &&
+        typeof entry.name === "string" &&
+        NAME.test(entry.name) &&
+        typeof entry.port === "number" &&
+        Number.isInteger(entry.port) &&
+        entry.port >= 1 &&
+        entry.port <= 65_535
+    )
+  ) {
+    throw new Error("Invalid shared helper instance record");
+  }
+  return value as HelperIdentity[];
+}
+
+async function writeAcquired(
+  instance: InstancePaths,
+  identities: readonly HelperIdentity[]
+): Promise<void> {
+  if (identities.length === 0) {
+    await rm(instance.acquiredPath, { force: true });
+    return;
+  }
+  await writeFileAtomic(
+    instance.acquiredPath,
+    `${JSON.stringify(identities)}\n`
+  );
+}
+
+function sameIdentity(left: HelperIdentity, right: HelperIdentity): boolean {
+  return left.name === right.name && left.port === right.port;
+}
+
+function mergeIdentities(
+  ...lists: readonly (readonly HelperIdentity[])[]
+): HelperIdentity[] {
+  const out: HelperIdentity[] = [];
+  for (const entry of lists.flat()) {
+    if (!out.some((existing) => sameIdentity(existing, entry))) {
+      out.push({ name: entry.name, port: entry.port });
+    }
+  }
+  return out;
+}
+
+async function recordAcquired(
+  instance: InstancePaths,
+  identities: readonly HelperIdentity[]
+): Promise<void> {
+  const current = await readAcquired(instance);
+  const merged = mergeIdentities(current, identities);
+  if (merged.length !== current.length) {
+    await writeAcquired(instance, merged);
+  }
+}
+
+function holderIfValid(composeProject: string): string | null {
+  return NAME.test(composeProject) ? composeProject : null;
+}
+
+async function instanceHasState(instance: InstancePaths): Promise<boolean> {
+  try {
+    await stat(instance.acquiredPath);
+    return true;
+  } catch {
+    return (await readOperation(instance)) !== null;
+  }
+}
+
+/**
+ * Mark the instance as stopping before `hack down` stops anything, so a start
+ * still in flight fails its {@link startProjectSharedHelpers} `assertCurrent`
+ * check instead of launching services whose helpers this down releases.
+ * Returns false when the mark could not be written (the down continues; its
+ * release still runs under the instance lock).
+ */
+export async function markSharedHelperInstanceStopping(opts: {
+  readonly helpers: readonly ProjectSharedHelperConfig[] | undefined;
+  readonly composeProject: string;
+  readonly hackDir?: string;
+}): Promise<boolean> {
+  const holder = holderIfValid(opts.composeProject);
+  if (holder === null) {
+    return true;
+  }
+  const instance = instancePaths({ hackDir: opts.hackDir, holder });
+  if (
+    (opts.helpers ?? []).length === 0 &&
+    !(await instanceHasState(instance))
+  ) {
+    return true;
+  }
+  try {
+    await mkdir(instance.dir, { recursive: true, mode: 0o700 });
+    await withInstanceLock({
+      instance,
+      timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
+      run: () => writeOperation(instance, `stopping:${randomUUID()}`),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Release this instance's holder from every helper it may hold: the ones
+ * recorded as acquired (so a removed or renamed config entry is still
+ * released) plus every configured one, enabled or not. Every helper is
+ * attempted; failures are returned, not thrown, and a failed helper stays in
+ * the acquired record so the next down retries it.
  */
 export async function releaseProjectSharedHelpers(opts: {
   readonly helpers: readonly ProjectSharedHelperConfig[] | undefined;
@@ -531,19 +723,34 @@ export async function releaseProjectSharedHelpers(opts: {
   readonly hackDir?: string;
 }): Promise<readonly SharedHelperRelease[]> {
   const helpers = opts.helpers ?? [];
-  if (helpers.length === 0) {
+  const holder = holderIfValid(opts.composeProject);
+  if (holder === null) {
+    if (helpers.length > 0) {
+      // Throws the same explicit refusal start uses.
+      resolveSharedHelperHolder(opts.composeProject);
+    }
     return [];
   }
-  const holder = resolveSharedHelperHolder(opts.composeProject);
-  const specs = [...helpers].reverse().map((helper) => ({
-    name: helper.name,
-    stateDir: resolveSharedHelperStateDir({
-      ...(opts.hackDir ? { hackDir: opts.hackDir } : {}),
-      name: helper.name,
-      port: helper.port,
-    }),
-  }));
   const instance = instancePaths({ hackDir: opts.hackDir, holder });
+  if (helpers.length === 0 && !(await instanceHasState(instance))) {
+    return [];
+  }
+  const failedAll = (
+    identities: readonly HelperIdentity[],
+    reason: "lock-unavailable" | "state-unavailable"
+  ): SharedHelperRelease[] =>
+    identities.map((identity) => ({
+      name: identity.name,
+      result: {
+        state: "failed",
+        reason,
+        message: sharedHostFailureMessage(reason),
+      },
+    }));
+  const configured = helpers.map((helper) => ({
+    name: helper.name,
+    port: helper.port,
+  }));
   // The instance lock serializes this release with a start of the same
   // instance, so up and down can never split the instance's helper set (up
   // holding one helper while down stops another). Clearing the operation
@@ -554,21 +761,41 @@ export async function releaseProjectSharedHelpers(opts: {
       instance,
       timeoutMs:
         helpers.reduce((sum, helper) => sum + helper.readyTimeoutMs, 0) +
-        10_000,
+        INSTANCE_LOCK_TIMEOUT_MS,
       run: async () => {
+        let recorded: readonly HelperIdentity[];
+        try {
+          recorded = await readAcquired(instance);
+        } catch {
+          return failedAll(configured, "state-unavailable");
+        }
         await rm(instance.operationPath, { force: true });
-        return await releaseSpecs({ specs, holder });
+        const targets = mergeIdentities(configured, recorded).reverse();
+        const releases = await releaseSpecs({
+          specs: targets.map((identity) => ({
+            name: identity.name,
+            stateDir: resolveSharedHelperStateDir({
+              ...(opts.hackDir ? { hackDir: opts.hackDir } : {}),
+              name: identity.name,
+              port: identity.port,
+            }),
+          })),
+          holder,
+        });
+        await writeAcquired(
+          instance,
+          targets.filter((_, index) => {
+            const release = releases[index];
+            return (
+              release !== undefined && isSharedHelperReleaseProblem(release)
+            );
+          })
+        );
+        return releases;
       },
     });
   } catch {
-    return specs.map((spec) => ({
-      name: spec.name,
-      result: {
-        state: "failed",
-        reason: "lock-unavailable",
-        message: sharedHostFailureMessage("lock-unavailable"),
-      },
-    }));
+    return failedAll(configured, "lock-unavailable");
   }
 }
 

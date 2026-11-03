@@ -291,8 +291,10 @@ import {
   describeSharedHelperRelease,
   describeSharedHelperStart,
   isSharedHelperReleaseProblem,
+  markSharedHelperInstanceStopping,
   releaseProjectSharedHelpers,
   type SharedHelperRelease,
+  SharedHelperSupersededError,
   startProjectSharedHelpers,
   withTerminationAbort,
 } from "../lib/project-shared-helpers.ts";
@@ -1846,6 +1848,14 @@ type LifecycleUpResult = {
   readonly sessionName: string | null;
   readonly cleanup: LifecycleOperationCleanup | null;
   readonly signalCleanup: { readonly dispose: () => void } | null;
+  /**
+   * Throws {@link SharedHelperSupersededError} once a concurrent `hack down`
+   * released this instance's shared helpers. Call it right before launching
+   * services and again after they start. Absent without shared helpers.
+   */
+  readonly assertSharedHelpersCurrent?: (opts?: {
+    readonly servicesStarted?: boolean;
+  }) => Promise<void>;
 };
 
 function hasPersistentLifecycleCommands(
@@ -1913,6 +1923,12 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
         : null,
       cleanup: lifecycleStart.cleanup,
       signalCleanup: lifecycleStart.signalCleanup,
+      ...(lifecycleStart.assertSharedHelpersCurrent
+        ? {
+            assertSharedHelpersCurrent:
+              lifecycleStart.assertSharedHelpersCurrent,
+          }
+        : {}),
     };
   }
 
@@ -1969,12 +1985,49 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     sessionName: starter.hasStarted() ? starter.sessionName : null,
     cleanup: started.cleanup,
     signalCleanup: started.signalCleanup,
+    ...(started.assertSharedHelpersCurrent
+      ? { assertSharedHelpersCurrent: started.assertSharedHelpersCurrent }
+      : {}),
   };
+}
+
+/**
+ * Run Compose up guarded by this instance's shared helper check: right
+ * before containers start (via the backend's `beforeStart`) and again after a
+ * successful start. A concurrent `hack down` that released the helpers is
+ * reported as `superseded` instead of a successful start.
+ */
+async function composeUpGuardedBySharedHelpers(opts: {
+  readonly assertCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
+  readonly up: (beforeStart?: () => Promise<void>) => Promise<number>;
+}): Promise<
+  | { readonly code: number }
+  | { readonly superseded: SharedHelperSupersededError }
+> {
+  const assertCurrent = opts.assertCurrent;
+  if (!assertCurrent) {
+    return { code: await opts.up() };
+  }
+  try {
+    const code = await opts.up(() => assertCurrent());
+    if (code === 0) {
+      await assertCurrent({ servicesStarted: true });
+    }
+    return { code };
+  } catch (error: unknown) {
+    if (error instanceof SharedHelperSupersededError) {
+      return { superseded: error };
+    }
+    throw error;
+  }
 }
 
 type LifecycleProcessStart = {
   readonly cleanup: LifecycleOperationCleanup | null;
   readonly signalCleanup: { readonly dispose: () => void } | null;
+  readonly assertSharedHelpersCurrent?: (opts?: {
+    readonly servicesStarted?: boolean;
+  }) => Promise<void>;
 };
 
 /**
@@ -2025,7 +2078,10 @@ async function startWithSharedHelpers(opts: {
       onSignalled = async () => {
         await combined.cleanup?.();
       };
-      return combined;
+      return {
+        ...combined,
+        assertSharedHelpersCurrent: sharedHelpers.assertCurrent,
+      };
     },
     { onSignalled: () => onSignalled() }
   );
@@ -2034,6 +2090,9 @@ async function startWithSharedHelpers(opts: {
 type LifecycleSharedHelpers = {
   readonly configured: boolean;
   readonly rollback: () => Promise<void>;
+  readonly assertCurrent: (opts?: {
+    readonly servicesStarted?: boolean;
+  }) => Promise<void>;
 };
 
 /**
@@ -2064,6 +2123,7 @@ async function startLifecycleSharedHelpers(opts: {
     rollback: async () => {
       reportSharedHelperReleases(await started.rollback());
     },
+    assertCurrent: started.assertCurrent,
   };
 }
 
@@ -2219,24 +2279,80 @@ async function releaseLifecycleSharedHelpers(opts: {
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly composeProject: string;
 }): Promise<void> {
-  const problems = reportSharedHelperReleases(
-    await releaseProjectSharedHelpers({
-      helpers: opts.cfg.lifecycle?.sharedHelpers,
-      composeProject: opts.composeProject,
-    })
-  );
-  if (problems.length > 0) {
-    throw new Error(
-      `Shared helper release incomplete: ${problems.map((release) => release.name).join(", ")}.`
+  const failed = await releaseLifecycleSharedHelpersReporting(opts);
+  if (failed.length > 0) {
+    throw new Error(sharedHelperReleaseFailureMessage(failed));
+  }
+}
+
+/**
+ * Release this instance's shared helper holders and report each outcome.
+ * Returns the names of helpers whose release failed or whose stop was not
+ * confirmed; their claims are kept for the next down. Never throws.
+ */
+async function releaseLifecycleSharedHelpersReporting(opts: {
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly composeProject: string;
+}): Promise<readonly string[]> {
+  try {
+    return reportSharedHelperReleases(
+      await releaseProjectSharedHelpers({
+        helpers: opts.cfg.lifecycle?.sharedHelpers,
+        composeProject: opts.composeProject,
+      })
+    ).map((release) => release.name);
+  } catch (error: unknown) {
+    logger.warn({
+      message:
+        error instanceof Error ? error.message : "Shared helper release failed",
+    });
+    return (opts.cfg.lifecycle?.sharedHelpers ?? []).map(
+      (helper) => helper.name
     );
   }
 }
 
+function sharedHelperReleaseFailureMessage(names: readonly string[]): string {
+  return `Shared helper release incomplete: ${names.join(", ")}. The claim was kept; inspect it and run hack down again.`;
+}
+
+/**
+ * Mark the instance as stopping before `hack down` stops anything, so a
+ * concurrent `hack up` of the same instance refuses to launch services.
+ */
+async function markLifecycleSharedHelpersStopping(opts: {
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly composeProject: string;
+}): Promise<void> {
+  const marked = await markSharedHelperInstanceStopping({
+    helpers: opts.cfg.lifecycle?.sharedHelpers,
+    composeProject: opts.composeProject,
+  });
+  if (!marked) {
+    logger.warn({
+      message:
+        "Could not mark shared helpers as stopping; a concurrent hack up of this instance is not refused.",
+    });
+  }
+}
+
+/**
+ * Stop lifecycle processes best-effort (failures are warnings) and release
+ * shared helpers. Returns the helpers whose release failed: unlike process
+ * cleanup, an unreleased helper keeps running, so callers on the main down
+ * path must fail the command. Never throws (safe for signal cleanup).
+ */
 async function stopLifecycleProcessesBestEffort(
   opts: Parameters<typeof stopLifecycleProcesses>[0]
-): Promise<void> {
+): Promise<readonly string[]> {
   try {
-    await stopLifecycleProcesses(opts);
+    await stopLifecycleProcessController({
+      ...opts,
+      definitionHash: resolveProjectLifecycleDefinitionHash({
+        beforeCommands: opts.cfg.lifecycle?.up?.before,
+        processes: opts.cfg.lifecycle?.processes,
+      }),
+    });
   } catch (error: unknown) {
     const message =
       error instanceof Error
@@ -2244,6 +2360,7 @@ async function stopLifecycleProcessesBestEffort(
         : "Failed to stop lifecycle processes";
     logger.warn({ message });
   }
+  return await releaseLifecycleSharedHelpersReporting(opts);
 }
 
 export async function mergeLifecycleCommandEnv(
@@ -5286,9 +5403,17 @@ async function handleNativeUp({
           message: "Native up lifecycle preparation failed; values omitted.",
         });
       }
+      // The native backend launches services after this returns: refuse when a
+      // concurrent down already released this instance's shared helpers.
+      await assertNativeSharedHelpersCurrent({ lifecycle, cleanup });
       return {
         cleanup,
         ready: async () => {
+          await assertNativeSharedHelpersCurrent({
+            lifecycle,
+            cleanup,
+            servicesStarted: true,
+          });
           const code = await runLifecycleCommands({
             title: "Lifecycle (native up after)",
             commands: cfg.lifecycle?.up?.after,
@@ -5682,8 +5807,9 @@ async function runUpCommand({
 
   let lifecycleCleanup: LifecycleOperationCleanup | null = null;
   let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
+  let assertHelpersCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
   try {
-    const lifecycleUp = serviceScoped
+    const lifecycleUp: LifecycleUpResult = serviceScoped
       ? { code: 0, cleanup: null, signalCleanup: null, sessionName: null }
       : await runLifecycleUpBeforeAndProcesses({
           title: "Lifecycle (up before)",
@@ -5714,6 +5840,7 @@ async function runUpCommand({
     }
     lifecycleCleanup = lifecycleUp.cleanup;
     lifecycleSignalCleanup = lifecycleUp.signalCleanup;
+    assertHelpersCurrent = lifecycleUp.assertSharedHelpersCurrent;
   } catch (error: unknown) {
     const message =
       error instanceof Error
@@ -5804,25 +5931,51 @@ async function runUpCommand({
       return bootstrapCode;
     }
     const upPhase = trackComposeStartupPhase();
-    const upCode = await composeRuntimeBackend.up({
-      dependencyProgress: resolveDependencyCacheProgress({
-        cache: dependencyCache,
-        project: composeProjectName,
-        baseProject: baseProjectName,
-      }),
-      startupTimeoutMs,
-      imageTimeoutMs: budgets.imageTimeoutMs,
-      onStartupPhase: upPhase.onStartupPhase,
-      composeFiles: composeFilesWithEnv,
-      composeProject: composeProjectName,
-      profiles,
-      detach,
-      cwd: dirname(project.composeFile),
-      env: envOverrides.env,
-      routeStdoutToStderr: json,
-      services: serviceScoped ? targetServices : undefined,
-      noDeps: serviceScoped,
+    const guarded = await composeUpGuardedBySharedHelpers({
+      assertCurrent: assertHelpersCurrent,
+      up: (beforeStart) =>
+        composeRuntimeBackend.up({
+          ...(beforeStart ? { beforeStart } : {}),
+          dependencyProgress: resolveDependencyCacheProgress({
+            cache: dependencyCache,
+            project: composeProjectName,
+            baseProject: baseProjectName,
+          }),
+          startupTimeoutMs,
+          imageTimeoutMs: budgets.imageTimeoutMs,
+          onStartupPhase: upPhase.onStartupPhase,
+          composeFiles: composeFilesWithEnv,
+          composeProject: composeProjectName,
+          profiles,
+          detach,
+          cwd: dirname(project.composeFile),
+          env: envOverrides.env,
+          routeStdoutToStderr: json,
+          services: serviceScoped ? targetServices : undefined,
+          noDeps: serviceScoped,
+        }),
     });
+    if ("superseded" in guarded) {
+      const error = guarded.superseded;
+      await lifecycleCleanup?.();
+      await removeProjectRuntimeStateEntry({
+        projectDir: project.projectDir,
+        composeProject: lifecycleComposeProject,
+      });
+      if (json) {
+        return emitLifecycleResult({
+          result: errorResult({
+            code: "E_LIFECYCLE_FAILED",
+            message: error.message,
+            detail: { sharedHelpers: "superseded" },
+          }),
+          exitCode: 1,
+        });
+      }
+      logger.error({ message: error.message });
+      return 1;
+    }
+    const upCode = guarded.code;
     if (upCode !== 0) {
       await lifecycleCleanup?.();
       await removeProjectRuntimeStateEntry({
@@ -6120,6 +6273,7 @@ async function handleDown({
         );
       }
     };
+    await markLifecycleSharedHelpersStopping({ cfg, composeProject });
     const result = await nativeProjectDown({
       runtime: native,
       scope,
@@ -6327,7 +6481,7 @@ async function runDownCommand({
     ? await readComposeServiceStates({ project, composeProjectName, profiles })
     : [];
 
-  const lifecycleDownCleanup = async (): Promise<void> => {
+  const lifecycleDownCleanup = async (): Promise<readonly string[]> =>
     await stopLifecycleProcessesBestEffort({
       project,
       cfg,
@@ -6335,11 +6489,13 @@ async function runDownCommand({
       branch,
       composeProject: lifecycleComposeProject,
     });
-  };
   const signalCleanup = installLifecycleSignalCleanup({
-    cleanup: lifecycleDownCleanup,
+    cleanup: async () => {
+      await lifecycleDownCleanup();
+    },
   });
   let code: number;
+  let helperReleaseFailures: readonly string[] = [];
   try {
     const beforeCode = await runLifecycleCommands({
       title: "Lifecycle (down before)",
@@ -6362,6 +6518,10 @@ async function runDownCommand({
       return beforeCode;
     }
 
+    await markLifecycleSharedHelpersStopping({
+      cfg,
+      composeProject: lifecycleComposeProject,
+    });
     code = await composeRuntimeBackend.down({
       composeFiles: [project.composeFile],
       composeProject: composeProjectName,
@@ -6369,7 +6529,7 @@ async function runDownCommand({
       cwd: dirname(project.composeFile),
       routeStdoutToStderr: json,
     });
-    await lifecycleDownCleanup();
+    helperReleaseFailures = await lifecycleDownCleanup();
   } finally {
     signalCleanup.dispose();
   }
@@ -6386,6 +6546,21 @@ async function runDownCommand({
       });
     }
     return code;
+  }
+  if (helperReleaseFailures.length > 0) {
+    const message = sharedHelperReleaseFailureMessage(helperReleaseFailures);
+    if (json) {
+      return emitLifecycleResult({
+        result: errorResult({
+          code: "E_LIFECYCLE_FAILED",
+          message,
+          detail: { sharedHelpers: [...helperReleaseFailures] },
+        }),
+        exitCode: 1,
+      });
+    }
+    logger.error({ message });
+    return 1;
   }
   const cacheRemoval = await removeDisposableCacheVolumes({
     candidates: cachePruneCandidates,
@@ -6471,8 +6646,12 @@ async function runRestartDownPhase(opts: {
   readonly routeStdoutToStderr?: boolean;
   readonly envForCompose: Readonly<Record<string, string>>;
   readonly preserveComposeRuntime?: boolean;
-}): Promise<number> {
-  const lifecycleDownCleanup = async (): Promise<void> => {
+}): Promise<{
+  readonly code: number;
+  /** Helpers whose release failed; the restart must stop. */
+  readonly sharedHelperFailures?: readonly string[];
+}> {
+  const lifecycleDownCleanup = async (): Promise<readonly string[]> =>
     await stopLifecycleProcessesBestEffort({
       project: opts.project,
       cfg: opts.cfg,
@@ -6480,11 +6659,13 @@ async function runRestartDownPhase(opts: {
       branch: opts.branch,
       composeProject: opts.lifecycleComposeProject,
     });
-  };
   const signalCleanup = installLifecycleSignalCleanup({
-    cleanup: lifecycleDownCleanup,
+    cleanup: async () => {
+      await lifecycleDownCleanup();
+    },
   });
   let downCode: number;
+  let helperReleaseFailures: readonly string[] = [];
   try {
     const downBefore = await runLifecycleCommands({
       title: "Lifecycle (restart down before)",
@@ -6495,9 +6676,13 @@ async function runRestartDownPhase(opts: {
       composeProject: opts.lifecycleComposeProject,
     });
     if (downBefore !== 0) {
-      return downBefore;
+      return { code: downBefore };
     }
 
+    await markLifecycleSharedHelpersStopping({
+      cfg: opts.cfg,
+      composeProject: opts.lifecycleComposeProject,
+    });
     downCode = opts.preserveComposeRuntime
       ? 0
       : await composeRuntimeBackend.down({
@@ -6507,12 +6692,20 @@ async function runRestartDownPhase(opts: {
           cwd: dirname(opts.project.composeFile),
           routeStdoutToStderr: opts.routeStdoutToStderr === true,
         });
-    await lifecycleDownCleanup();
+    helperReleaseFailures = await lifecycleDownCleanup();
   } finally {
     signalCleanup.dispose();
   }
   if (downCode !== 0) {
-    return downCode;
+    return { code: downCode };
+  }
+  if (helperReleaseFailures.length > 0) {
+    // An unreleased helper keeps running with its claim kept: restarting on
+    // top of it would hide that, so the restart stops here.
+    logger.error({
+      message: sharedHelperReleaseFailureMessage(helperReleaseFailures),
+    });
+    return { code: 1, sharedHelperFailures: helperReleaseFailures };
   }
 
   if (!opts.preserveComposeRuntime) {
@@ -6530,7 +6723,37 @@ async function runRestartDownPhase(opts: {
     projectDir: opts.project.projectDir,
     composeProject: opts.lifecycleComposeProject,
   });
-  return downAfter;
+  return { code: downAfter };
+}
+
+/** Native-path shared helper check: cleans up, then fails with a lifecycle error. */
+async function assertNativeSharedHelpersCurrent(opts: {
+  readonly lifecycle: LifecycleUpResult;
+  readonly cleanup: () => Promise<void>;
+  readonly servicesStarted?: boolean;
+}): Promise<void> {
+  try {
+    await opts.lifecycle.assertSharedHelpersCurrent?.({
+      servicesStarted: opts.servicesStarted === true,
+    });
+  } catch (error: unknown) {
+    if (!(error instanceof SharedHelperSupersededError)) {
+      throw error;
+    }
+    await opts.cleanup();
+    throw new HackCliError({
+      code: "E_LIFECYCLE_FAILED",
+      message: error.message,
+    });
+  }
+}
+
+function reportLifecycleSession(sessionName: string | null): void {
+  if (sessionName) {
+    logger.info({
+      message: `Lifecycle processes running in session: ${sessionName}`,
+    });
+  }
 }
 
 async function runRestartUpPhase(opts: {
@@ -6586,6 +6809,7 @@ async function runRestartUpPhase(opts: {
 
   let lifecycleCleanup: LifecycleOperationCleanup | null = null;
   let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
+  let assertHelpersCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
   try {
     const lifecycleUp = await runLifecycleUpBeforeAndProcesses({
       title: "Lifecycle (restart up before)",
@@ -6600,13 +6824,10 @@ async function runRestartUpPhase(opts: {
     if (lifecycleUp.code !== 0) {
       return { code: lifecycleUp.code, phase: "lifecycle" };
     }
-    if (lifecycleUp.sessionName) {
-      logger.info({
-        message: `Lifecycle processes running in session: ${lifecycleUp.sessionName}`,
-      });
-    }
+    reportLifecycleSession(lifecycleUp.sessionName);
     lifecycleCleanup = lifecycleUp.cleanup;
     lifecycleSignalCleanup = lifecycleUp.signalCleanup;
+    assertHelpersCurrent = lifecycleUp.assertSharedHelpersCurrent;
   } catch (error: unknown) {
     const message =
       error instanceof Error
@@ -6669,24 +6890,40 @@ async function runRestartUpPhase(opts: {
       detach: opts.detach === true,
     });
     const upPhase = trackComposeStartupPhase();
-    const upCode = await composeRuntimeBackend.up({
-      dependencyProgress: resolveDependencyCacheProgress({
-        cache: dependencyCache,
-        project: opts.composeProjectName,
-        baseProject: opts.baseProjectName,
-      }),
-      startupTimeoutMs: opts.budgets.startupTimeoutMs,
-      imageTimeoutMs: opts.budgets.imageTimeoutMs,
-      onStartupPhase: upPhase.onStartupPhase,
-      composeFiles: composeFilesWithEnv,
-      composeProject: opts.composeProjectName,
-      profiles: opts.profiles,
-      detach: opts.detach === true,
-      cwd: dirname(opts.project.composeFile),
-      env: envOverrides.env,
-      routeStdoutToStderr: opts.routeStdoutToStderr === true,
-      forceRecreate: true,
+    const guarded = await composeUpGuardedBySharedHelpers({
+      assertCurrent: assertHelpersCurrent,
+      up: (beforeStart) =>
+        composeRuntimeBackend.up({
+          ...(beforeStart ? { beforeStart } : {}),
+          dependencyProgress: resolveDependencyCacheProgress({
+            cache: dependencyCache,
+            project: opts.composeProjectName,
+            baseProject: opts.baseProjectName,
+          }),
+          startupTimeoutMs: opts.budgets.startupTimeoutMs,
+          imageTimeoutMs: opts.budgets.imageTimeoutMs,
+          onStartupPhase: upPhase.onStartupPhase,
+          composeFiles: composeFilesWithEnv,
+          composeProject: opts.composeProjectName,
+          profiles: opts.profiles,
+          detach: opts.detach === true,
+          cwd: dirname(opts.project.composeFile),
+          env: envOverrides.env,
+          routeStdoutToStderr: opts.routeStdoutToStderr === true,
+          forceRecreate: true,
+        }),
     });
+    if ("superseded" in guarded) {
+      const error = guarded.superseded;
+      await lifecycleCleanup?.();
+      await removeProjectRuntimeStateEntry({
+        projectDir: opts.project.projectDir,
+        composeProject: opts.lifecycleComposeProject,
+      });
+      logger.error({ message: error.message });
+      return { code: 1, phase: "lifecycle" };
+    }
+    const upCode = guarded.code;
     if (upCode !== 0) {
       reportComposeStartupBudget({
         budgets: opts.budgets,
@@ -7221,7 +7458,7 @@ async function runRestartCommand({
     envByService: preflightEnv.preflightEnvByService,
   });
 
-  const downCode = await runRestartDownPhase({
+  const downPhase = await runRestartDownPhase({
     project,
     cfg,
     projectName,
@@ -7233,6 +7470,25 @@ async function runRestartCommand({
     routeStdoutToStderr: json,
     preserveComposeRuntime: true,
   });
+  const downCode = downPhase.code;
+  if (downPhase.sharedHelperFailures) {
+    if (json) {
+      return emitLifecycleResult({
+        result: errorResult({
+          code: "E_LIFECYCLE_FAILED",
+          message: sharedHelperReleaseFailureMessage(
+            downPhase.sharedHelperFailures
+          ),
+          detail: {
+            sharedHelpers: [...downPhase.sharedHelperFailures],
+            phase: "down",
+          },
+        }),
+        exitCode: 1,
+      });
+    }
+    return 1;
+  }
   if (downCode !== 0) {
     if (json) {
       return emitLifecycleResult({

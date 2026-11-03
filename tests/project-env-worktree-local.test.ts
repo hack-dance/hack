@@ -570,14 +570,14 @@ test("opt-outs skip all Git work and verification uses three Git calls", async (
 const runningAsRoot = process.getuid?.() === 0;
 
 test.skipIf(runningAsRoot)(
-  "inaccessible primary project directories fail closed with the path only",
+  "inaccessible primary project directories fail closed without values",
   async () => {
     const { primary, options } = await fixture();
     const dir = resolve(primary, ".hack");
     await chmod(dir, 0o000);
     try {
       await expect(resolveProjectEnvConfig(options)).rejects.toThrow(
-        `Cannot read primary local env file: ${dir}`
+        "Refused env layer: its path must resolve inside the project and be inspectable (values omitted)."
       );
     } finally {
       await chmod(dir, 0o755);

@@ -92,6 +92,9 @@ export function privateCliEnv(
     }
   }
   env[PRIVATE_CLI_DAEMON_AUTOSTART_ENV] = "1";
+  // Bun's automatic transpiler cache would otherwise write into the private
+  // HOME before CLI admission, hiding the source of no-write fixture failures.
+  env.BUN_RUNTIME_TRANSPILER_CACHE_PATH = "0";
   if (opts.isolateDockerClient !== false) {
     Object.assign(env, isolatedDockerClientEnv(root));
   }

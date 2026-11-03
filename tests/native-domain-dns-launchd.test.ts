@@ -297,3 +297,25 @@ test("restart rechecks launchd admission after preflight", async () => {
   expect(f.readCalls).toEqual(before);
   expect(f.privilegedCalls).toEqual([]);
 });
+
+test("restart rechecks launchd admission immediately before kickstart", async () => {
+  const f = fixture();
+  const runCommand = f.options.runCommand;
+  if (!runCommand) {
+    throw new Error("Fixture requires the read command recorder");
+  }
+  let processInspections = 0;
+  const restart = await prepareNativeDnsLaunchdRestart({
+    ...f.options,
+    runCommand: async (command) => {
+      const result = await runCommand(command);
+      if (command[0] === "/bin/ps" && ++processInspections === 2) {
+        process.env.HACK_LAUNCHD_DISABLE = "1";
+      }
+      return result;
+    },
+  });
+  await expect(restart()).rejects.toThrow("launchd management is disabled");
+  expect(processInspections).toBe(2);
+  expect(f.privilegedCalls).toEqual([]);
+});

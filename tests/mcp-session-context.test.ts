@@ -12,8 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { readHackHomeOverride } from "../src/lib/home-dir.ts";
 import { createMcpServer } from "../src/mcp/server.ts";
 import { captureMcpSessionContext } from "../src/mcp/session-context.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const clients: Client[] = [];
 const roots: string[] = [];
@@ -154,20 +156,129 @@ test("MCP path authorization uses only that session's registry", async () => {
   ).toBe(true);
 });
 
-test("session paths resolve relative overrides against the captured checkout", () => {
+test("session paths use absolute overrides", () => {
   const context = captureMcpSessionContext({
     cwd: "/tmp/captured-session",
     env: {
-      HACK_HOME: ".state",
+      HACK_HOME: "/tmp/hack-state",
+      HACK_GLOBAL_CONFIG_PATH: "/tmp/hack-registry/config.json",
+    },
+  });
+  expect(context.hackHome).toBe("/tmp/hack-state");
+  expect(context.registryPath).toBe("/tmp/hack-registry/projects.json");
+  expect(Object.isFrozen(context.env)).toBe(true);
+  expect(Object.isFrozen(context)).toBe(true);
+});
+
+test.each([
+  ".state",
+  "state/nested",
+])("a session refuses a relative HACK_HOME %s like the CLI", (value) => {
+  const capture = () =>
+    captureMcpSessionContext({
+      cwd: "/tmp/captured-session",
+      env: { HOME: "/tmp/hack-home", HACK_HOME: value },
+    });
+  expect(capture).toThrow(
+    `HACK_HOME must be an absolute path (got a relative path: ${JSON.stringify(value)}).`
+  );
+});
+
+test("a relative HACK_GLOBAL_CONFIG_PATH resolves against the session cwd, like its children", () => {
+  const context = captureMcpSessionContext({
+    cwd: "/tmp/captured-session",
+    env: {
+      HOME: "/tmp/hack-home",
       HACK_GLOBAL_CONFIG_PATH: ".registry/config.json",
     },
   });
-  expect(context.hackHome).toBe("/tmp/captured-session/.state");
   expect(context.registryPath).toBe(
     "/tmp/captured-session/.registry/projects.json"
   );
-  expect(Object.isFrozen(context.env)).toBe(true);
-  expect(Object.isFrozen(context)).toBe(true);
+  expect(context.hackHome).toBe("/tmp/hack-home/.hack");
+});
+
+test("a session with a relative HACK_GLOBAL_CONFIG_PATH starts and reads that registry", async () => {
+  const { project, registryDir, state } = await fixture("relative-config");
+  const relativeRegistry = join(project, ".registry");
+  await mkdir(relativeRegistry);
+  await writeFile(
+    join(relativeRegistry, "projects.json"),
+    await readFile(join(registryDir, "projects.json"))
+  );
+  // Without the registry above, the absolute fixture's project would be unknown.
+  await rm(join(registryDir, "projects.json"));
+  const server = createMcpServer({
+    cwd: project,
+    env: {
+      ...process.env,
+      HOME: project,
+      HACK_HOME: state,
+      HACK_GLOBAL_CONFIG_PATH: ".registry/config.json",
+      HACK_MCP_COMMAND: "./command",
+      SYNTHETIC_SESSION_MARKER: "relative-config",
+    },
+  });
+  const client = new Client({ name: "relative-config-fixture", version: "1" });
+  clients.push(client);
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const result = await client.callTool({
+    name: "hack.project.status",
+    arguments: { projectName: "shared-name" },
+  });
+  expect(result.isError).toBeUndefined();
+  expect(result.structuredContent).toMatchObject({ ok: true });
+});
+
+test("a session refuses HACK_HOME with the CLI's exact error", () => {
+  const saved = process.env.HACK_HOME;
+  process.env.HACK_HOME = "relative-state";
+  try {
+    let cliMessage = "";
+    try {
+      readHackHomeOverride();
+    } catch (error: unknown) {
+      cliMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(cliMessage).toContain("HACK_HOME must be an absolute path");
+    expect(() =>
+      captureMcpSessionContext({
+        cwd: "/tmp/captured-session",
+        env: { HACK_HOME: "relative-state" },
+      })
+    ).toThrow(cliMessage);
+  } finally {
+    restoreEnv("HACK_HOME", saved);
+  }
+});
+
+test("a blank override counts as unset, as in the CLI", () => {
+  const context = captureMcpSessionContext({
+    cwd: "/tmp/captured-session",
+    env: {
+      HOME: "/tmp/hack-home",
+      HACK_HOME: "  ",
+      HACK_GLOBAL_CONFIG_PATH: "",
+    },
+  });
+  expect(context.hackHome).toBe("/tmp/hack-home/.hack");
+  expect(context.registryPath).toBe("/tmp/hack-home/.hack/projects.json");
+});
+
+test.each([
+  ["empty", ""],
+  ["whitespace", "  "],
+  ["relative", "relative-home"],
+])("session state stays out of the checkout with %s HOME", (_label, home) => {
+  const context = captureMcpSessionContext({
+    cwd: "/tmp/captured-session",
+    env: { HOME: home },
+  });
+  expect(context.hackHome.startsWith("/tmp/captured-session")).toBe(false);
+  expect(context.hackHome.endsWith("/.hack")).toBe(true);
 });
 
 test("32 MCP sessions can share a process without mixing command context", async () => {

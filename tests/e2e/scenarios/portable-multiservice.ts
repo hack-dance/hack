@@ -68,7 +68,7 @@ export const portableMultiserviceScenario: Scenario = {
       ctx.log(`${tag}: ${id}`);
       return id;
     };
-    const bunImage = await image("oven/bun:1.4.2-slim");
+    const bunImage = await image("oven/bun:1.4.4-slim");
     const postgresImage = await image("postgres:17.6-alpine");
     const fixture = await createMonorepoFixture({
       parentDir: ctx.tempRoot,

@@ -387,6 +387,18 @@ export type NativeEnv = ReadonlyMap<string, string>;
 // Bound at load so a leaked `Bun.spawnSync` fake can never answer for Bun.
 const realSpawnSync = Bun.spawnSync.bind(Bun);
 
+let nativeEnvSourceForGuardTest: NativeEnv | undefined;
+
+/**
+ * Lets tests/global-state-guard.test.ts present a changed native environment.
+ * Under Bun 1.4.4 no operation it could find leaves a native change that
+ * `process.env` hides, and this keeps the boundary check and its report tested.
+ * It answers only the next read, so it cannot stay set for later files.
+ */
+export function setNativeEnvOnceForGuardTest(env: NativeEnv): void {
+  nativeEnvSourceForGuardTest = env;
+}
+
 /**
  * Reads Bun's native environment by running `/usr/bin/env -0` without an
  * `env` option, or returns undefined when that is not possible.
@@ -394,14 +406,20 @@ const realSpawnSync = Bun.spawnSync.bind(Bun);
  * `process.env` does not show all of it. Bun 1.4 starts this environment
  * from the startup environment and copies later assignments to the proxy
  * keys (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lower-case forms)
- * into it, but a delete never reaches it. A test that sets a proxy and then
- * deletes it leaves `process.env` looking clean while every later `fetch` in
+ * into it. Under Bun 1.4.2 a delete never reached it (Bun 1.4.4 fixed this; the
+ * check stays to catch a regression). A test that set a proxy and then
+ * deleted it left `process.env` looking clean while every later `fetch` in
  * the process, loopback included, still goes through that proxy (HACK-1327).
  * `restoreEnv` in `tests/helpers/env.ts` avoids this by assigning "" first.
  * Other keys never change here: Bun does not copy assignments to them.
  * Costs one short child process; the preload runs it once per test file.
  */
 export function captureNativeEnv(): NativeEnv | undefined {
+  if (nativeEnvSourceForGuardTest) {
+    const presented = nativeEnvSourceForGuardTest;
+    nativeEnvSourceForGuardTest = undefined;
+    return presented;
+  }
   try {
     const child = realSpawnSync(["/usr/bin/env", "-0"], {
       stdin: "ignore",

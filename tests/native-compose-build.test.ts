@@ -6,6 +6,7 @@ import {
   createNativeComposeWorkloadPhases,
   DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+  runNativeComposeWorkloadPhases,
 } from "../src/lib/compose-startup-budget.ts";
 import {
   assertNativeComposeBuildExecution,
@@ -664,13 +665,15 @@ test("every builder spawn follows a full guard after its last image read; one pr
     "read:web",
     "read:other",
     "read:other",
-    // Closing guard, then every admitted image is reread unchanged.
-    ...guard,
+    // Every admitted image is reread unchanged, then the closing guard: the
+    // caller's next effect (arming, then its spawn) follows it directly.
     "read:web",
     "read:other",
+    ...guard,
   ]);
   // Ownership invariant: between any image read and the next spawn there is
-  // a complete guard, and the last effect-relevant reads are followed by one.
+  // a complete guard, and the build ends with one after its last read.
+  expect(trace.slice(-guard.length)).toEqual(guard);
   for (const [index, step] of trace.entries()) {
     if (step.startsWith("spawn:")) {
       const before = trace.slice(0, index);
@@ -681,6 +684,49 @@ test("every builder spawn follows a full guard after its last image read; one pr
     }
   }
   expect(trace.filter((step) => step === "owned+storage")).toHaveLength(3);
+});
+
+test("ownership lost during the closing image reread refuses before arming or any spawn", async () => {
+  const { options, trace } = tracedHarness();
+  let reads = 0;
+  let owned = true;
+  const probe = options.io.probe;
+  options.io.probe = async (args) => {
+    const value = await probe(args);
+    // The closing reread is tag reads 7 and 8; ownership is lost at read 7.
+    if (args[1] === "ls" && ++reads === 7) {
+      owned = false;
+    }
+    return value;
+  };
+  options.assertOwned = async () => {
+    trace.push("owned+storage");
+    if (!owned) {
+      throw new NativeComposeBuildError();
+    }
+  };
+  const phases = createNativeComposeWorkloadPhases({
+    imageTimeoutMs: DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
+    startupTimeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+    storageTimeoutMs: 90_000,
+  });
+  let armed = false;
+  await expect(
+    runNativeComposeWorkloadPhases({
+      phases,
+      boundedBuilds: true,
+      build: (deadline) => buildNativeComposeImages({ ...options, deadline }),
+      // Stands in for startNativeComposeWorkloads, which arms first.
+      start: async () => {
+        armed = true;
+        return 0;
+      },
+      failed: (code) => code,
+    })
+  ).rejects.toBeInstanceOf(NativeComposeBuildError);
+  expect(reads).toBe(8);
+  expect(trace.at(-1)).toBe("owned+storage");
+  expect(armed).toBe(false);
 });
 
 test("an engine swapped during a build refuses at the next guard, before any later effect", async () => {

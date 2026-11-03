@@ -1451,8 +1451,9 @@ async function executePreparedNativeWorkloads(opts: {
               assertOwned: opts.assertOwned,
             })
         : null,
-    // No separate post-build guard: the build closes with its own guard, and
-    // the spawn (Compose `up` or one-off `run`) runs a full guard first.
+    // No separate post-build guard: the build ends with a full guard after its
+    // last image read, so arming follows a guard directly, and the spawn
+    // (Compose `up` or one-off `run`) still runs its own full guard first.
     start: (deadline) =>
       opts.options.operation === "run"
         ? runOneOff(opts)

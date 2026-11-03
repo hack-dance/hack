@@ -53,10 +53,12 @@ within its budget, plus the cap, plus at most one in-flight guard proof.
 
 Builds run B + 2 guards for B builds: one before the cached tags are admitted,
 one immediately before each builder spawn (after that build's last image read),
-and one before the closing image reread. Each guard checks source freshness,
+and one after the closing image reread. Each guard checks source freshness,
 ownership with its storage proof, and the same Docker engine. Image reads are
-read-only, so consecutive reads share one guard; the Compose `up` or one-off
-`run` that follows always runs its own full pre-spawn guard.
+read-only, so consecutive reads share one guard. Because the closing guard is
+the last build step, routing and file arming follow a full guard with no image
+read in between, and the Compose `up` or one-off `run` that follows still runs
+its own full pre-spawn guard.
 Compose owns dependency startup, restart, and exec
 health checks. Hack checks the exact proposed generation: each service must be
 running, healthy when it declares a health check, and each initializer job must

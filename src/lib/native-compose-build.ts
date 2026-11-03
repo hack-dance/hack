@@ -388,9 +388,10 @@ export async function buildNativeComposeImages(opts: {
   // (`fresh`: source freshness, ownership with its storage proof, and the same
   // engine) that follows the last image observation it depends on. Image reads
   // are read-only, so consecutive reads share one guard; a guard is needed only
-  // between an observation and the next effect, and once after the last build
-  // so the closing reread runs against the same verified engine and owner.
-  // One phase therefore runs B+2 guards for B builds, not one per read.
+  // between an observation and the next effect. The closing guard runs after
+  // the closing reread, so the caller's next effect (routing/file arming, then
+  // the Compose or one-off spawn) follows a full guard with no observation in
+  // between. One phase therefore runs B+2 guards for B builds, not one per read.
   await fresh();
   // Admit every selected cached tag before any builder is invoked.
   const cached = new Map<NativeComposeBuildIntent, string | null>();
@@ -420,9 +421,10 @@ export async function buildNativeComposeImages(opts: {
     requireValue(id !== null);
     admitted.push({ intent, id });
   }
-  await fresh();
   for (const { intent, id } of admitted) {
     requireValue((await image(intent, io.probe)) === id);
   }
+  // Last step: nothing observed after this guard before the caller's effects.
+  await fresh();
   return 0;
 }

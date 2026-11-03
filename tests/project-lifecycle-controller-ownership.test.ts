@@ -774,9 +774,10 @@ test("failed-creation cleanup reads the token and kills under the creation lock:
         if (kind !== "created") {
           return ownership.record(kind);
         }
-        // A's cleanup then stalls in its ownership-token read (it returns
-        // the value read when it started).
-        mux.stallTokenRead = mux.tokenReads + 1;
+        // A's cleanup then stalls in its kill's ownership-token read (read
+        // 2; read 1 is the cleanup's own foreign-token check). The stalled
+        // read returns the value read when it started.
+        mux.stallTokenRead = mux.tokenReads + 2;
         recordFailed();
         return Promise.reject(new Error("epoch record unwritable"));
       },

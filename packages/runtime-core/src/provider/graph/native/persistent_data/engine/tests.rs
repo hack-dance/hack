@@ -6,7 +6,6 @@ use std::{
     os::unix::fs::{DirBuilderExt, MetadataExt},
     path::PathBuf,
     rc::Rc,
-    time::Duration,
 };
 
 struct Fixture {
@@ -169,7 +168,7 @@ fn enroll(fixture: &Fixture, endpoint: &mut Endpoint<'_>) -> Result<Owner, Candi
             state_root: &fixture.data,
             binding: &fixture.binding(),
             intent: &"d".repeat(32),
-            deadline: Instant::now() + Duration::from_secs(5),
+            deadline: Instant::now() + crate::TEST_RUN_BUDGET,
             cancelled: &AtomicBool::new(false),
         },
         endpoint,
@@ -190,7 +189,7 @@ fn common_original_lock_excludes_second_creator_and_data_has_no_run_binding() {
             enrollment::ReadOptions {
                 state_root: &fixture.data,
                 binding: &fixture.binding(),
-                deadline: Instant::now() + Duration::from_secs(5),
+                deadline: Instant::now() + crate::TEST_RUN_BUDGET,
                 cancelled: &AtomicBool::new(false),
             },
             &mut first,

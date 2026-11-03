@@ -24,7 +24,7 @@ import {
 const OWNER = "hack.e2e.cache-package-owner";
 const BRANCH = "package-linked";
 const TIMEOUT_MS = 60_000;
-const IMAGE = "node:24.11.0-bookworm-slim";
+const IMAGE = "node:24.22.1-bookworm-slim";
 const PACKAGE_VALUE = "installed-local-package-v1";
 const INSTALL = `set -eu
 echo install >> /deps/install-count

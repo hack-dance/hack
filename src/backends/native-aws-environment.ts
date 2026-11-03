@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { resolveUserHomeDir } from "../lib/home-dir.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
 
 const MAX_OUTPUT = 64 * 1024;
@@ -340,7 +340,7 @@ export async function adaptNativeAwsEnvironment(opts: {
     const { managed, selected } = prepareServices(
       { ...compose, services: compose.services },
       opts.input,
-      opts.homeDirectory ?? homedir()
+      opts.homeDirectory ?? resolveUserHomeDir()
     );
     const exported = await (opts.exportSource ?? exportAwsProfile)({
       profile: opts.profile,

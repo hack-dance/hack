@@ -53,7 +53,7 @@ export type NativeFixtureCases = {
 };
 
 /** Slack between the case's own deadline plus settlement and Bun's timeout. */
-const BUN_TIMEOUT_MARGIN_MS = 5000;
+export const NATIVE_FIXTURE_BUN_MARGIN_MS = 5000;
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -190,7 +190,7 @@ export function createNativeFixtureCases(opts: {
       bunTest(
         name,
         () => runCase(body, timeoutMs),
-        timeoutMs + opts.settlementBudgetMs + BUN_TIMEOUT_MARGIN_MS
+        timeoutMs + opts.settlementBudgetMs + NATIVE_FIXTURE_BUN_MARGIN_MS
       );
     },
   };

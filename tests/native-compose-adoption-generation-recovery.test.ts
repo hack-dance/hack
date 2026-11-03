@@ -46,6 +46,8 @@ const {
   container,
   volume,
   stateRoot,
+  prepared,
+  mutationCommands,
   managedGenerated,
   trackedManagedCheckout,
   adoptableManagedFixture,
@@ -102,6 +104,52 @@ boundedTest(
         projectRoot: context.projectRoot,
       })
     ).toBe("active");
+  },
+  ADOPTION_CASE_TIMEOUT_MS
+);
+
+boundedTest(
+  "HACK-1359: doctor names up then adopt for an unpublished literal-bound preparation",
+  async () => {
+    const { override, binary } = await adoptableManagedFixture("literal");
+    const { store } = await prepared(binary);
+    try {
+      const report = await inspectComposeEnvAtRest({
+        projectDir: join(context.projectRoot, ".hack"),
+      });
+      expect(report).toMatchObject({
+        adoptionBound: true,
+        adoptionPending: false,
+        adoptionPrepared: true,
+      });
+      const checked = await checkComposeEnvOverrideAtRest({
+        startDir: context.projectRoot,
+      });
+      expect(checked.status).toBe("warn");
+      expect(checked.message).toContain("run 'hack up'");
+      expect(checked.message).toContain("then run 'hack config adopt --stop'");
+      expect(checked.message).not.toContain("--rollback");
+      expect(checked.message).not.toContain(CANARY);
+    } finally {
+      await store.close();
+    }
+    // Model the current writer used by `hack up`; normal adoption replaces
+    // the unpublished preparation rather than requiring an active rollback.
+    await writeFile(
+      override,
+      renderComposeEnvReferenceOverride({
+        targetServices: ["db"],
+        globalEnv: { MANAGED: CANARY, EMPTY: "" },
+        serviceEnv: { db: { MANAGED: CANARY, EMPTY: "" } },
+      })?.text ?? ""
+    );
+    context.fixture.running = true;
+    await save();
+    const adopted = await adoptCli(["--stop", "--json"], binary);
+    expect(adopted.code).toBe(0);
+    expect(JSON.parse(adopted.stdout)).toMatchObject({ status: "active" });
+    expect(adopted.output).not.toContain(CANARY);
+    expect(await mutationCommands()).toContainEqual(["container", "stop", ID]);
   },
   ADOPTION_CASE_TIMEOUT_MS
 );

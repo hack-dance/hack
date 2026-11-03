@@ -643,6 +643,7 @@ for (const linked of [".hack", ".hack/.internal"] as const) {
       override: { kind: "refused", path },
       adoptionBound: false,
       adoptionPending: false,
+      adoptionPrepared: false,
       asides: { stale: 0, fresh: 0 },
     });
     expect(composeEnvAtRestRepairs(report)).toEqual({

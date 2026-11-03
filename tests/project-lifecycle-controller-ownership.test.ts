@@ -78,9 +78,10 @@ function fakeMux(): FakeMux {
       if (fake.hangCreate) {
         // A hung tmux/zellij: the session appears only if the command
         // eventually completes, after the caller stopped waiting.
-        const hung = new Promise<MuxSessionCreateResult>(() => {
+        const hung = new Promise<MuxSessionCreateResult>((resolveCreate) => {
           pendingCreate = () => {
             sessions.set(opts.name, opts.lifecycleOwnerToken ?? "");
+            resolveCreate({ ok: true, session: session(opts.name) });
           };
         });
         // Keep the hung call reachable, like a real stuck subprocess.
@@ -390,6 +391,38 @@ test("a hung session creation releases the instance lock within its bound and st
   // so hack down can still reclaim it.
   mux.completeHungCreate();
   mux.hangToken = false;
+  expect(mux.sessions.get(SESSION)).toBe(kept[0]?.ownershipToken);
+  await stop();
+  expect(mux.sessions.has(SESSION)).toBe(false);
+  expect(await entries()).toEqual([]);
+});
+
+test("a timed-out creation keeps its ownership record until the creation settles, even while the session looks absent", async () => {
+  const { mux, controller, entries, stop, newOwnership } = await fixture();
+  // Token reads and presence stay responsive: the session simply is not
+  // there yet when the deadline passes.
+  mux.hangCreate = true;
+  const a = controller({
+    sessionOwnership: newOwnership(),
+    muxCommandTimeoutMs: 200,
+  });
+  const outcome = await Promise.race([
+    a.startMany({ processes: [PROCESS] }).then(
+      () => "started",
+      (error: unknown) => error
+    ),
+    Bun.sleep(5000).then(() => "creation did not settle"),
+  ]);
+  expect(outcome).toBeInstanceOf(MuxCommandDeadlineError);
+  expect(mux.sessions.has(SESSION)).toBe(false);
+  const kept = await entries();
+  expect(kept).toHaveLength(1);
+  // The caller's abort must not drop it either while creation is pending.
+  await a.abort();
+  expect(await entries()).toEqual(kept);
+  // The late creation completes with the kept token: still reclaimable.
+  mux.completeHungCreate();
+  await Bun.sleep(10);
   expect(mux.sessions.get(SESSION)).toBe(kept[0]?.ownershipToken);
   await stop();
   expect(mux.sessions.has(SESSION)).toBe(false);

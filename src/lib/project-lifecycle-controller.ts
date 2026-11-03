@@ -249,6 +249,10 @@ export function createLifecycleProcessController(opts: {
   let sessionCreationSettled: Promise<void> = Promise.resolve();
   let nextIndex = 0;
   const muxDeadlineMs = opts.muxCommandTimeoutMs ?? MUX_COMMAND_TIMEOUT_MS * 2;
+  // A createSession call that has not settled yet. A deadline stops waiting
+  // for it but does not cancel it, so the session may still appear: while it
+  // is outstanding, no cleanup may drop this start's ownership record.
+  let outstandingCreation: Promise<void> | null = null;
   const withinMuxDeadline = <T>(work: Promise<T>): Promise<T> =>
     withDeadline({ work, timeoutMs: muxDeadlineMs });
 
@@ -392,15 +396,25 @@ export function createLifecycleProcessController(opts: {
       });
       await opts.assertFresh?.();
       sessionCreated = "unknown";
-      const created = await withinMuxDeadline(
-        backend.createSession({
-          name: sessionName,
-          cwd: opts.project.projectRoot,
-          lifecycleOwnerToken: ownershipToken,
-        })
+      const createCall = backend.createSession({
+        name: sessionName,
+        cwd: opts.project.projectRoot,
+        lifecycleOwnerToken: ownershipToken,
+      });
+      const tracked: Promise<void> = createCall.then(
+        () => undefined,
+        () => undefined
       );
+      outstandingCreation = tracked;
+      void tracked.then(() => {
+        if (outstandingCreation === tracked) {
+          outstandingCreation = null;
+        }
+      });
+      const created = await withinMuxDeadline(createCall);
       if (!created.ok) {
-        sessionCreated = false;
+        // A failed (possibly killed) create may still have created the
+        // session: the ownership-token check decides, not this result.
         throw new Error(`Failed to create lifecycle session: ${sessionName}`);
       }
       sessionCreated = true;
@@ -472,6 +486,10 @@ export function createLifecycleProcessController(opts: {
     readonly ownershipToken: string;
     readonly sessionCreated: boolean | "unknown";
   }): Promise<void> => {
+    if (outstandingCreation !== null) {
+      // The create call is still running: absence proves nothing yet.
+      return;
+    }
     if (release.sessionCreated !== false) {
       const observed = await withinMuxDeadline(
         Promise.resolve(
@@ -686,6 +704,12 @@ export function createLifecycleProcessController(opts: {
   async function starterAbort(): Promise<void> {
     await sessionCreationSettled;
     if (!(createdOwnershipToken && backendName)) {
+      return;
+    }
+    if (outstandingCreation !== null) {
+      logger.warn({
+        message: `Lifecycle session ${sessionName} is still being created; kept its ownership record. Run hack down to stop it.`,
+      });
       return;
     }
     const backend = (await opts.mux()).backends.get(backendName);

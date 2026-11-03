@@ -8,6 +8,7 @@ import {
   releaseAfterFailedProcessStart,
   retainHelpersUnlessContainersAbsent,
   runGuardedSharedHelperStart,
+  signalCleanupKeepingStartedHelpers,
   stopSessionBeforeReleasingHelpers,
   withSharedHelperCleanup,
 } from "../src/commands/project.ts";
@@ -378,5 +379,23 @@ test("after an unsuccessful container start, helpers are kept unless Compose con
       },
     });
     expect([probe, keptHelpers]).toEqual([probe, kept]);
+  }
+});
+
+test("the signal cleanup keeps the helpers once a container start has begun", async () => {
+  for (const begun of [false, true]) {
+    const events: string[] = [];
+    const cleanup = signalCleanupKeepingStartedHelpers({
+      cleanup: () => {
+        events.push("cleanup");
+        return Promise.resolve();
+      },
+      containerStartBegun: () => begun,
+      keepSharedHelpers: () => () => {
+        events.push("keep");
+      },
+    });
+    await cleanup?.();
+    expect(events).toEqual(begun ? ["keep", "cleanup"] : ["cleanup"]);
   }
 });

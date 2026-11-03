@@ -2125,6 +2125,29 @@ export async function releaseAfterFailedProcessStart(opts: {
 export type ContainerShutdown = "stopped" | "unconfirmed" | "kept";
 
 /**
+ * The SIGINT/SIGTERM cleanup of an up or restart: once a container start has
+ * begun, keep the shared helpers before cleaning up (only the lifecycle
+ * processes stop), because the start may already have started services and
+ * may still start more. Exported for tests.
+ */
+export function signalCleanupKeepingStartedHelpers(opts: {
+  readonly cleanup: LifecycleOperationCleanup | null;
+  readonly containerStartBegun: () => boolean;
+  readonly keepSharedHelpers: () => (() => void) | undefined;
+}): LifecycleOperationCleanup | null {
+  const cleanup = opts.cleanup;
+  if (!cleanup) {
+    return null;
+  }
+  return async () => {
+    if (opts.containerStartBegun()) {
+      opts.keepSharedHelpers()?.();
+    }
+    return await cleanup();
+  };
+}
+
+/**
  * After a container start that did not succeed (Compose failed, timed out or
  * was interrupted, possibly after starting some services): keep the shared
  * helper holders unless Compose confirms that no container of the project
@@ -6254,9 +6277,19 @@ async function runUpCommand({
     return 1;
   }
 
+  // Set right before Compose may start containers. A signal from then on
+  // keeps the shared helpers: a start still in flight can start services
+  // after any snapshot, so no probe could prove them absent.
+  let containerStartBegun = false;
   const signalCleanup =
     lifecycleSignalCleanup ??
-    installLifecycleSignalCleanup({ cleanup: lifecycleCleanup });
+    installLifecycleSignalCleanup({
+      cleanup: signalCleanupKeepingStartedHelpers({
+        cleanup: lifecycleCleanup,
+        containerStartBegun: () => containerStartBegun,
+        keepSharedHelpers: () => keepSharedHelpers,
+      }),
+    });
   try {
     // Hooks may register or remove runtime aliases; render overrides only after
     // successful preparation, while lifecycle cleanup remains installed.
@@ -6333,6 +6366,7 @@ async function runUpCommand({
       return bootstrapCode;
     }
     const upPhase = trackComposeStartupPhase();
+    containerStartBegun = true;
     const guarded = await composeUpGuardedBySharedHelpers({
       assertCurrent: assertHelpersCurrent,
       up: (beforeStart) =>
@@ -7392,9 +7426,19 @@ async function runRestartUpPhase(opts: {
     return { code: 1, phase: "lifecycle" };
   }
 
+  // Set right before Compose may start containers. A signal from then on
+  // keeps the shared helpers: a start still in flight can start services
+  // after any snapshot, so no probe could prove them absent.
+  let containerStartBegun = false;
   const signalCleanup =
     lifecycleSignalCleanup ??
-    installLifecycleSignalCleanup({ cleanup: lifecycleCleanup });
+    installLifecycleSignalCleanup({
+      cleanup: signalCleanupKeepingStartedHelpers({
+        cleanup: lifecycleCleanup,
+        containerStartBegun: () => containerStartBegun,
+        keepSharedHelpers: () => keepSharedHelpers,
+      }),
+    });
   try {
     // Hooks may register or remove runtime aliases; render overrides only after
     // successful preparation, while lifecycle cleanup remains installed.
@@ -7445,6 +7489,7 @@ async function runRestartUpPhase(opts: {
       detach: opts.detach === true,
     });
     const upPhase = trackComposeStartupPhase();
+    containerStartBegun = true;
     const guarded = await composeUpGuardedBySharedHelpers({
       assertCurrent: assertHelpersCurrent,
       up: (beforeStart) =>

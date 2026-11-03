@@ -541,6 +541,8 @@ export const sharedHostHelpersScenario: Scenario = {
       });
       await runRetainedHelperPhases({
         ctx,
+        cwd: fixture.root,
+        path,
         port,
         holder: holderA,
         branch: branchA,
@@ -562,6 +564,8 @@ export const sharedHostHelpersScenario: Scenario = {
  */
 async function runRetainedHelperPhases(opts: {
   readonly ctx: Parameters<Scenario["run"]>[0];
+  readonly cwd: string;
+  readonly path: string;
   readonly port: number;
   readonly holder: string;
   readonly branch: string;
@@ -656,6 +660,27 @@ async function runRetainedHelperPhases(opts: {
     result: partial,
   });
   await downStops(await opts.ownedHelper(), "a partial start");
+
+  ctx.log("a signal during a container start keeps the helper");
+  // The up pauses inside docker compose up, with a service already reported
+  // running; SIGTERM reaches the CLI while that start is still in flight.
+  const gate = join(ctx.tempRoot, "signal-during-start-gate");
+  const signalled = await startGatedUp({
+    ctx,
+    cwd: opts.cwd,
+    path: opts.path,
+    branch,
+    gate,
+  });
+  const beforeSignal = await opts.ownedHelper();
+  signalled.kill("SIGTERM");
+  await writeFile(gate, "open\n");
+  const signalledExit = await signalled.exited;
+  expect({
+    that: signalledExit !== 0 && (await keptFor(beforeSignal)),
+    message: `a signal during a container start released the helper under started services (exit ${signalledExit})`,
+  });
+  await downStops(beforeSignal, "a signal during a container start");
 }
 
 /**

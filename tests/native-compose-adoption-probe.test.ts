@@ -20,6 +20,7 @@ import {
   NativeComposeOwnershipError,
   nativeComposeProbeFailure,
 } from "../src/lib/native-compose-ownership.ts";
+import { withCaseExecutables } from "./helpers/case-executables.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 const ID = "a".repeat(64);
@@ -54,8 +55,13 @@ async function ownedCase(run: () => Promise<void>) {
     activeCases--;
   }
 }
+// The stub is pinned when the case starts: the global-state guard puts PATH back
+// after a timed-out case even though afterEach keeps it, and a late body's next
+// probe must still find only this case's stub (HACK-1792).
 const test = (name: string, run: () => Promise<void>) =>
-  bunTest(name, () => ownedCase(run));
+  bunTest(name, () =>
+    ownedCase(() => withCaseExecutables({ docker: join(root, "docker") }, run))
+  );
 beforeEach(async () =>
   ownedCase(async () => {
     previousPath = process.env.PATH;
@@ -103,6 +109,7 @@ afterEach(async () => {
   }
   if (unconfirmed) {
     // An outer timeout cannot cancel its callback. Keep PATH, spies and roots until process exit.
+    // The global-state guard still restores PATH; the case's pinned stub keeps a late probe off the host.
     return;
   }
   restoreEnv("PATH", previousPath);

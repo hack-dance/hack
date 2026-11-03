@@ -20,6 +20,7 @@ import {
   runWithFixtureCleanup,
   waitForAdoptionFixtureSql,
 } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
+import { withCaseExecutables } from "./helpers/case-executables.ts";
 
 const instance = {
   root: "/synthetic/linked-checkout",
@@ -184,22 +185,26 @@ console.log("linux");
   process.env.PATH = root;
   const wallClock = spyOn(Date, "now").mockReturnValue(0);
   try {
-    const args = ["info", "--format", "{{.OSType}}"];
-    const original = createNativeComposeProbe({ timeoutMs: 30_000 });
-    const later = createAdoptionFixtureProbe();
-    expect((await original(args)).trim()).toBe("linux");
-    expect(await later(args)).toBe("linux");
-    wallClock.mockReturnValue(30_001);
-    await expect(original(args)).rejects.toMatchObject({
-      code: "E_NATIVE_COMPOSE_PROBE_TIMEOUT",
+    // Pinned at case start: if this body outlives its case and PATH is put
+    // back under it, its later probes still find only this stub (HACK-1792).
+    await withCaseExecutables({ docker: script }, async () => {
+      const args = ["info", "--format", "{{.OSType}}"];
+      const original = createNativeComposeProbe({ timeoutMs: 30_000 });
+      const later = createAdoptionFixtureProbe();
+      expect((await original(args)).trim()).toBe("linux");
+      expect(await later(args)).toBe("linux");
+      wallClock.mockReturnValue(30_001);
+      await expect(original(args)).rejects.toMatchObject({
+        code: "E_NATIVE_COMPOSE_PROBE_TIMEOUT",
+      });
+      expect(await later(args)).toBe("linux");
+      wallClock.mockReturnValue(60_002);
+      expect(await later(args)).toBe("linux");
+      expect(
+        (await readFile(commands, "utf8")).trim().split("\n")
+      ).toHaveLength(4);
+      expect(await Bun.file(join(root, "unexpected")).exists()).toBe(false);
     });
-    expect(await later(args)).toBe("linux");
-    wallClock.mockReturnValue(60_002);
-    expect(await later(args)).toBe("linux");
-    expect((await readFile(commands, "utf8")).trim().split("\n")).toHaveLength(
-      4
-    );
-    expect(await Bun.file(join(root, "unexpected")).exists()).toBe(false);
   } finally {
     wallClock.mockRestore();
     if (previous === undefined) {

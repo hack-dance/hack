@@ -1,5 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   type LifecycleSharedHelpers,
   releaseAfterFailedProcessStart,
@@ -12,7 +14,9 @@ import {
   LifecycleSessionRetainedError,
 } from "../src/lib/project-lifecycle-controller.ts";
 import {
+  listSharedHelpersHeld,
   type ProcessCleanupOutcome,
+  resolveSharedHelperHolder,
   withTerminationAbort,
 } from "../src/lib/project-shared-helpers.ts";
 import { setLoggerBackendOverride } from "../src/ui/logger.ts";
@@ -133,7 +137,7 @@ test("down keeps every helper holder and reports them when the session stop fail
       released.push("release");
       return Promise.resolve([]);
     },
-    helperNames: ["chrome-bridge", "mail"],
+    heldHelperNames: () => Promise.resolve(["chrome-bridge", "mail"]),
   });
   expect(released).toEqual([]);
   expect(outcome.sessionStopFailed?.error).toBeInstanceOf(Error);
@@ -152,7 +156,7 @@ test("down releases the helper holders once the session stop succeeded", async (
       events.push("release");
       return Promise.resolve(["mail"]);
     },
-    helperNames: ["chrome-bridge", "mail"],
+    heldHelperNames: () => Promise.resolve(["chrome-bridge", "mail"]),
   });
   expect(events).toEqual(["stop", "release"]);
   expect(outcome.sessionStopFailed).toBeNull();
@@ -208,5 +212,37 @@ test("a signal during a startup whose session was retained never rolls the helpe
     expect(events).toEqual([]);
   } finally {
     process.off("SIGTERM", absorb);
+  }
+});
+
+test("helpers recorded as acquired but removed from config are still reported as held", async () => {
+  const hackDir = await mkdtemp(join(tmpdir(), "hack-held-helpers-"));
+  try {
+    const composeProject = "demo--branch-a";
+    const dir = join(hackDir, "shared-helpers", ".instances");
+    await mkdir(dir, { recursive: true });
+    const acquired = join(
+      dir,
+      `${resolveSharedHelperHolder(composeProject)}.acquired.json`
+    );
+    // No helper is configured any more; the instance still holds `mail`.
+    expect(
+      await listSharedHelpersHeld({ helpers: [], composeProject, hackDir })
+    ).toEqual([]);
+    await writeFile(
+      acquired,
+      `${JSON.stringify([{ name: "mail", port: 1025 }])}\n`
+    );
+    expect(
+      await listSharedHelpersHeld({ helpers: [], composeProject, hackDir })
+    ).toEqual(["mail"]);
+    // An unreadable record still reports something kept.
+    await writeFile(acquired, "not json");
+    expect(
+      (await listSharedHelpersHeld({ helpers: [], composeProject, hackDir }))
+        .length
+    ).toBe(1);
+  } finally {
+    await rm(hackDir, { recursive: true, force: true });
   }
 });

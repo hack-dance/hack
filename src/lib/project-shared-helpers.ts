@@ -921,6 +921,40 @@ export async function markSharedHelperInstanceStopping(opts: {
  * attempted; failures are returned, not thrown, and a failed helper stays in
  * the acquired record so the next down retries it.
  */
+/**
+ * Names of the helpers this instance may still hold: the configured entries
+ * plus those in its acquired record (entries removed from config since they
+ * were acquired). Read without the lock, for reporting what a down keeps; an
+ * unreadable record yields a placeholder name so the caller still fails.
+ * Never throws.
+ */
+export async function listSharedHelpersHeld(opts: {
+  readonly helpers: readonly ProjectSharedHelperConfig[] | undefined;
+  readonly composeProject: string;
+  readonly hackDir?: string;
+}): Promise<readonly string[]> {
+  const configured = (opts.helpers ?? []).map((helper) => ({
+    name: helper.name,
+    port: helper.port,
+  }));
+  const holder = holderIfValid(opts.composeProject);
+  if (holder === null) {
+    return configured.map((identity) => identity.name);
+  }
+  const instance = instancePaths({ hackDir: opts.hackDir, holder });
+  let recorded: readonly HelperIdentity[];
+  try {
+    recorded = await readAcquired(instance);
+  } catch {
+    recorded = [{ name: UNLISTED_HELPERS, port: 0 }];
+  }
+  return [
+    ...new Set(
+      mergeIdentities(configured, recorded).map((identity) => identity.name)
+    ),
+  ];
+}
+
 export async function releaseProjectSharedHelpers(opts: {
   readonly helpers: readonly ProjectSharedHelperConfig[] | undefined;
   readonly composeProject: string;

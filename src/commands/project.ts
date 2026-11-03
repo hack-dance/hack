@@ -296,6 +296,7 @@ import {
   describeSharedHelperRelease,
   describeSharedHelperStart,
   isSharedHelperReleaseProblem,
+  listSharedHelpersHeld,
   markSharedHelperInstanceStopping,
   type ProcessCleanupOutcome,
   releaseProjectSharedHelpers,
@@ -2071,7 +2072,8 @@ export async function stopSessionBeforeReleasingHelpers(opts: {
   readonly stopSession: () => Promise<void>;
   /** Returns the helpers whose release failed; must not throw. */
   readonly releaseHelpers: () => Promise<readonly string[]>;
-  readonly helperNames: readonly string[];
+  /** Helpers the instance may still hold, configured or recorded; must not throw. */
+  readonly heldHelperNames: () => Promise<readonly string[]>;
 }): Promise<{
   readonly sessionStopFailed: { readonly error: unknown } | null;
   readonly notReleased: readonly string[];
@@ -2079,7 +2081,10 @@ export async function stopSessionBeforeReleasingHelpers(opts: {
   try {
     await opts.stopSession();
   } catch (error: unknown) {
-    return { sessionStopFailed: { error }, notReleased: opts.helperNames };
+    return {
+      sessionStopFailed: { error },
+      notReleased: await opts.heldHelperNames(),
+    };
   }
   return { sessionStopFailed: null, notReleased: await opts.releaseHelpers() };
 }
@@ -2452,7 +2457,7 @@ async function stopLifecycleProcesses(opts: {
   const outcome = await stopSessionBeforeReleasingHelpers({
     stopSession: () => stopLifecycleSession(opts),
     releaseHelpers: () => releaseLifecycleSharedHelpersReporting(opts),
-    helperNames: sharedHelperNames(opts.cfg),
+    heldHelperNames: () => heldSharedHelperNames(opts),
   });
   if (outcome.sessionStopFailed) {
     warnSharedHelpersKeptForSession(outcome.notReleased);
@@ -2475,10 +2480,14 @@ function stopLifecycleSession(
   });
 }
 
-function sharedHelperNames(
-  cfg: Awaited<ReturnType<typeof readProjectConfig>>
-): readonly string[] {
-  return (cfg.lifecycle?.sharedHelpers ?? []).map((helper) => helper.name);
+function heldSharedHelperNames(opts: {
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly composeProject: string;
+}): Promise<readonly string[]> {
+  return listSharedHelpersHeld({
+    helpers: opts.cfg.lifecycle?.sharedHelpers,
+    composeProject: opts.composeProject,
+  });
 }
 
 function warnSharedHelpersKeptForSession(kept: readonly string[]): void {
@@ -2554,7 +2563,7 @@ async function stopLifecycleProcessesBestEffort(
   const outcome = await stopSessionBeforeReleasingHelpers({
     stopSession: () => stopLifecycleSession(opts),
     releaseHelpers: () => releaseLifecycleSharedHelpersReporting(opts),
-    helperNames: sharedHelperNames(opts.cfg),
+    heldHelperNames: () => heldSharedHelperNames(opts),
   });
   if (outcome.sessionStopFailed) {
     const { error } = outcome.sessionStopFailed;

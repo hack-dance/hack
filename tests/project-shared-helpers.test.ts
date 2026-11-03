@@ -694,51 +694,52 @@ test(
   async () => {
     const root = await scratch();
     const first = helperConfig({ port: freePort() });
-    // The second helper never becomes ready, so the start holds the
-    // instance for its whole deadline after the first helper is up.
-    const second = helperConfig({
-      port: freePort(),
-      name: "second-bridge",
-      mode: "placeholder",
-      readyTimeoutMs: 2000,
+    const second = helperConfig({ port: freePort(), name: "second-bridge" });
+    // Pause the start between its two helpers (the report hook is awaited).
+    let resume = (): void => undefined;
+    const paused = new Promise<void>((resolvePause) => {
+      resume = resolvePause;
     });
-    let startSettledAt = 0;
+    let reachedPause = (): void => undefined;
+    const atPause = new Promise<void>((resolveAt) => {
+      reachedPause = resolveAt;
+    });
     const start = startProjectSharedHelpers({
       ...context(root),
       helpers: [first, second],
       composeProject: BRANCH_A,
-    })
-      .catch((error: unknown) => error)
-      .finally(() => {
-        startSettledAt = performance.now();
-      });
-    const deadline = performance.now() + 10_000;
-    while (!(await isReadyOwned(root, first)) && performance.now() < deadline) {
-      await Bun.sleep(25);
-    }
-    const owned = await ownedIdentity(root, first);
-    const releases = await releaseProjectSharedHelpers({
+      report: async (record) => {
+        if (record.name === first.name) {
+          reachedPause();
+          await paused;
+        }
+      },
+    });
+    await atPause;
+    const firstHelper = await ownedIdentity(root, first);
+    let released = false;
+    const release = releaseProjectSharedHelpers({
       helpers: [first, second],
       composeProject: BRANCH_A,
       hackDir: join(root, "hack-home"),
+    }).then((result) => {
+      released = true;
+      return result;
     });
-    const releasedAt = performance.now();
-    expect(String(await start)).toContain("(deadline)");
-    // The release ran only after the start settled (and rolled back).
-    expect(startSettledAt).toBeGreaterThan(0);
-    expect(releasedAt).toBeGreaterThanOrEqual(startSettledAt);
-    expect(releases.every((entry) => entry.result.state === "absent")).toBe(
-      true
-    );
-    expect(await isAlive(owned)).toBe(false);
+    await Bun.sleep(500);
+    // The release must not run inside the start: it waits for the instance.
+    expect(released).toBe(false);
+    expect(await isAlive(firstHelper)).toBe(true);
+    resume();
+    await start;
+    const secondHelper = await ownedIdentity(root, second);
+    expect((await release).map((entry) => entry.result.state).sort()).toEqual([
+      "stopped",
+      "stopped",
+    ]);
+    // Never split: both helpers end up stopped together.
+    expect(await isAlive(firstHelper)).toBe(false);
+    expect(await isAlive(secondHelper)).toBe(false);
   },
   TIMEOUT
 );
-
-async function isReadyOwned(
-  root: string,
-  helper: ProjectSharedHelperConfig
-): Promise<boolean> {
-  const claim = await readHelperClaim(root, helper);
-  return claim?.ownership === "owned" && claim.phase === "ready";
-}

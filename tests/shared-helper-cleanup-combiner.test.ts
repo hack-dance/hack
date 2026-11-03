@@ -18,7 +18,10 @@ afterEach(() => {
   setLoggerBackendOverride({ backend: null });
 });
 
-function combined(outcome: ProcessCleanupOutcome) {
+function combined(
+  outcome: ProcessCleanupOutcome,
+  processResult: undefined | "session-retained" = undefined
+) {
   const events: string[] = [];
   const sharedHelpers: LifecycleSharedHelpers = {
     configured: true,
@@ -40,7 +43,7 @@ function combined(outcome: ProcessCleanupOutcome) {
   const result = withSharedHelperCleanup({
     cleanup: () => {
       events.push("kill-session");
-      return Promise.resolve();
+      return Promise.resolve(processResult);
     },
     signalCleanup: null,
     sharedHelpers,
@@ -65,4 +68,10 @@ test("a decided process cleanup is followed by the helper rollback", async () =>
       "rollback",
     ]);
   }
+});
+
+test("a session kept because its stop was unconfirmed keeps the helper holders too", async () => {
+  const { events, cleanup } = combined("ran", "session-retained");
+  await cleanup?.();
+  expect(events).toEqual(["kill-session", "processes:ran"]);
 });

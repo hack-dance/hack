@@ -4,7 +4,7 @@
  */
 export function adoptNativeLifecycleCleanup(lifecycle: {
   readonly signalCleanup: { readonly dispose: () => void } | null;
-  readonly cleanup: (() => Promise<void>) | null;
+  readonly cleanup: (() => Promise<unknown>) | null;
 }): () => Promise<void> {
   lifecycle.signalCleanup?.dispose();
   return async () => {

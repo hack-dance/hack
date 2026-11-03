@@ -59,7 +59,17 @@ type StartedLifecycleProcess = {
   readonly panePid?: number;
   readonly processGroupId?: number;
 };
-export type LifecycleOperationCleanup = () => Promise<void>;
+/**
+ * Cleanup for what an operation started. Resolves
+ * {@link LIFECYCLE_SESSION_RETAINED} when a
+ * session it created could not be confirmed stopped and was kept, with its
+ * ownership record, for hack down; callers must then keep anything that
+ * session depends on (such as shared helper holders).
+ */
+export type LifecycleOperationCleanup = () => Promise<unknown>;
+
+/** The value an operation cleanup resolves to when it kept the session. */
+export const LIFECYCLE_SESSION_RETAINED = "session-retained";
 const LIFECYCLE_COMMAND_PID_WAIT_ATTEMPTS = 50;
 const LIFECYCLE_COMMAND_PID_WAIT_INTERVAL_MS = 20;
 export function resolveLifecycleSessionName(opts: {
@@ -682,18 +692,16 @@ export function createLifecycleProcessController(opts: {
     },
     hasStarted: () => startedProcesses.length > 0,
     getOperationCleanup: () =>
-      createdOwnershipToken
-        ? async () => {
-            await starterAbort();
-          }
-        : null,
+      createdOwnershipToken ? async () => await starterAbort() : null,
     getSignalCleanup: () => operationSignalCleanup,
   };
 
-  async function starterAbort(): Promise<void> {
+  async function starterAbort(): Promise<
+    undefined | typeof LIFECYCLE_SESSION_RETAINED
+  > {
     await sessionCreationSettled;
     if (!(createdOwnershipToken && backendName)) {
-      return;
+      return undefined;
     }
     const backend = (await opts.mux()).backends.get(backendName);
     const stopped = backend?.available
@@ -710,7 +718,7 @@ export function createLifecycleProcessController(opts: {
       logger.warn({
         message: `Could not confirm that lifecycle session ${sessionName} stopped; kept its ownership record. Run hack down to stop it.`,
       });
-      return;
+      return LIFECYCLE_SESSION_RETAINED;
     }
     await removeLifecycleStateEntryIfOwned({
       projectDir: opts.project.projectDir,
@@ -718,6 +726,7 @@ export function createLifecycleProcessController(opts: {
       ownershipToken: createdOwnershipToken,
     });
     createdOwnershipToken = null;
+    return undefined;
   }
 }
 

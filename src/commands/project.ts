@@ -1,6 +1,7 @@
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
+  LIFECYCLE_SESSION_RETAINED,
   type LifecycleOperationCleanup,
   resolveLifecycleCommandServiceName,
   resolveLifecycleCwd,
@@ -2216,12 +2217,19 @@ export function withSharedHelperCleanup(opts: {
     cleanup: async () => {
       const processCleanup = opts.cleanup;
       let outcome: ProcessCleanupOutcome | null = null;
+      // The session could not be confirmed stopped and was kept: its shared
+      // helpers must stay too, or they would stop underneath it.
+      let sessionRetained = false;
       try {
         // Another start of this instance may have adopted the lifecycle
         // session this start created; adoption keeps the creator's token, so
         // only clean up while the session is still this start's own.
         if (processCleanup) {
-          outcome = await runProcessCleanup(processCleanup);
+          outcome = await runProcessCleanup(async () => {
+            if ((await processCleanup()) === LIFECYCLE_SESSION_RETAINED) {
+              sessionRetained = true;
+            }
+          });
           if (outcome === "undecidable") {
             logger.warn({
               message:
@@ -2230,7 +2238,12 @@ export function withSharedHelperCleanup(opts: {
           }
         }
       } finally {
-        if (outcome !== "undecidable") {
+        if (sessionRetained) {
+          logger.warn({
+            message:
+              "Kept this instance's shared helpers with its lifecycle session, which could not be confirmed stopped. Run hack down to stop both.",
+          });
+        } else if (outcome !== "undecidable") {
           await sharedHelpers.rollback();
         }
       }

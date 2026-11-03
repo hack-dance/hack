@@ -283,8 +283,11 @@ test("when that stop is not confirmed, the entry and token stay so the session i
   const kept = await entries();
   expect(kept.map((entry) => entry.ownershipToken)).toEqual([token]);
   // The caller's cleanup path (startLifecycleProcesses aborts on failure)
-  // must not drop the record while the stop is still unconfirmed.
-  expect(starter.getOperationCleanup()).not.toBeNull();
+  // must not drop the record while the stop is still unconfirmed, and must
+  // report the retained session so dependent helpers are kept too.
+  const operationCleanup = starter.getOperationCleanup();
+  expect(operationCleanup).not.toBeNull();
+  expect(await operationCleanup?.()).toBe("session-retained");
   await starter.abort();
   expect(mux.sessions.get(SESSION)).toBe(token);
   expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([

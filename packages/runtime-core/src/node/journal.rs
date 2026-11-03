@@ -975,14 +975,24 @@ mod tests {
 
     #[test]
     fn busy_timeout_refuses_without_recording_and_same_operation_retries_once() {
+        assert_busy_timeout_refusal("BEGIN IMMEDIATE");
+    }
+
+    #[test]
+    fn busy_commit_rolls_back_writes_and_same_operation_retries_once() {
+        // A held reader permits BEGIN IMMEDIATE and writes, but prevents COMMIT.
+        assert_busy_timeout_refusal("BEGIN; SELECT generation FROM meta");
+    }
+
+    fn assert_busy_timeout_refusal(lock_sql: &str) {
         let uid = unsafe { libc::geteuid() };
         let root = test_root("busy-timeout");
         let mut node = Store::open(&root, true).unwrap();
         let blocker = Store::open(&root, false).unwrap();
         let request = submit(&node, "busy-submit", 0);
-        blocker.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        blocker.connection.execute_batch(lock_sql).unwrap();
 
-        // Keep the real write lock held until the production timeout refuses.
+        // Keep the real competing lock held until the production timeout refuses.
         let started = std::time::Instant::now();
         let failure = node.handle(&request, uid).unwrap_err();
         assert!(started.elapsed() >= BUSY_TIMEOUT);

@@ -67,7 +67,8 @@ impl Preparation {
     fn matches(&self, owner: &str, volume: &Value, paths: &[String]) -> bool {
         self.version == 1
             && self.owner == owner
-            && self.volume == *volume
+            && volume_identity::stable_fields(&self.volume)
+                == volume_identity::stable_fields(volume)
             && self.directories == paths
             && valid_identity(&self.identity)
     }
@@ -391,6 +392,44 @@ if test "$mode" = recover; then sync -f "$root"; fi
 printf 'volume-subpaths-v1\n'
 "#;
 
+/// Exercise persisted preparation matching after a real quarantine in the
+/// cross-feature fixture; inode validation remains in the guest SCRIPT.
+#[cfg(test)]
+pub(super) fn check_after_quarantine(
+    before: &Value,
+    after: &Value,
+    identity: &str,
+    execute: impl FnOnce(&str, &[&str]) -> Result<String, CandidateError>,
+) {
+    let record = Preparation {
+        version: 1,
+        owner: "owner".into(),
+        volume: before.clone(),
+        directories: vec!["dev/cache".into()],
+        identity: identity.into(),
+        completed: true,
+    };
+    let saved = serde_json::to_vec(&record).unwrap();
+    let loaded: Preparation = serde_json::from_slice(&saved).unwrap();
+    assert!(loaded.matches("owner", after, &["dev/cache".into()]));
+    assert_eq!(
+        execute(
+            SCRIPT,
+            &[
+                after["Mountpoint"].as_str().unwrap(),
+                "existing",
+                identity,
+                "dev/cache"
+            ]
+        )
+        .unwrap(),
+        "volume-subpaths-v1\n"
+    );
+    let mut replaced = after.clone();
+    replaced["Driver"] = json!("foreign");
+    assert!(!loaded.matches("owner", &replaced, &["dev/cache".into()]));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,7 +579,7 @@ while True:
         };
         assert!(record.matches("owner", &volume, &paths));
         assert!(!record.matches("other", &volume, &paths));
-        assert!(!record.matches(
+        assert!(record.matches(
             "owner",
             &json!({"Name":"volume","CreatedAt":"creation-two"}),
             &paths

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
-  createNativeComposeStartDeadline,
+  createNativeComposePhaseDeadline,
+  createNativeComposeWorkloadPhases,
   DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   DEFAULT_NATIVE_STORAGE_TIMEOUT_MS,
@@ -9,6 +10,7 @@ import {
   resolveComposeImageTimeoutMs,
   resolveComposeStartupTimeoutMs,
   resolveNativeStorageTimeoutMs,
+  runNativeComposeWorkloadPhases,
 } from "../src/lib/compose-startup-budget.ts";
 import {
   nativeComposeEffectReason,
@@ -164,7 +166,7 @@ function fakeClocks() {
 
 test("start deadline is consumed by start work but not by excluded storage proofs", async () => {
   const { advance, options } = fakeClocks();
-  const start = createNativeComposeStartDeadline({
+  const start = createNativeComposePhaseDeadline({
     timeoutMs: 15_000,
     storageTimeoutMs: 90_000,
     ...options,
@@ -189,7 +191,7 @@ test("start deadline is consumed by start work but not by excluded storage proof
 
 test("rejected and overlapping storage proofs are excluded once and the deadline never moves earlier", async () => {
   const { advance, options } = fakeClocks();
-  const start = createNativeComposeStartDeadline({
+  const start = createNativeComposePhaseDeadline({
     timeoutMs: 15_000,
     storageTimeoutMs: 90_000,
     ...options,
@@ -227,7 +229,7 @@ test("rejected and overlapping storage proofs are excluded once and the deadline
 
 test("monotonic exclusion ignores wall-clock steps during a storage proof", async () => {
   const { clock, options } = fakeClocks();
-  const start = createNativeComposeStartDeadline({
+  const start = createNativeComposePhaseDeadline({
     timeoutMs: 15_000,
     storageTimeoutMs: 90_000,
     ...options,
@@ -252,7 +254,7 @@ test("the whole-phase storage exclusion cap is the smaller of 16 x S and one hou
 test("excluded storage time past the whole-phase cap refuses as storage-budget and stops extending the deadline", async () => {
   const { advance, options } = fakeClocks();
   // S = 1 s, so the phase may exclude at most 16 s of storage proofs.
-  const start = createNativeComposeStartDeadline({
+  const start = createNativeComposePhaseDeadline({
     timeoutMs: 15_000,
     storageTimeoutMs: 1000,
     ...options,
@@ -305,7 +307,7 @@ test("excluded storage time past the whole-phase cap refuses as storage-budget a
 
 test("a storage proof that fails past the whole-phase cap keeps its own error", async () => {
   const { advance, options } = fakeClocks();
-  const start = createNativeComposeStartDeadline({
+  const start = createNativeComposePhaseDeadline({
     timeoutMs: 15_000,
     storageTimeoutMs: 1000,
     ...options,
@@ -321,4 +323,92 @@ test("a storage proof that fails past the whole-phase cap keeps its own error", 
   await expect(
     start.excludeStorage(async () => undefined)
   ).rejects.toBeInstanceOf(NativeStorageTotalBudgetError);
+});
+
+function workloadPhases(options: ReturnType<typeof fakeClocks>["options"]) {
+  return createNativeComposeWorkloadPhases({
+    imageTimeoutMs: DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
+    startupTimeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+    storageTimeoutMs: DEFAULT_NATIVE_STORAGE_TIMEOUT_MS,
+    ...options,
+  });
+}
+
+test("up/restart builds take the image deadline and the start phase begins after them", async () => {
+  const { advance, clock, options } = fakeClocks();
+  const phases = workloadPhases(options);
+  const steps: string[] = [];
+  const result = await runNativeComposeWorkloadPhases({
+    phases,
+    boundedBuilds: true,
+    build: async (deadline) => {
+      steps.push("build");
+      expect(deadline?.()).toBe(1_000_000 + DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS);
+      // A 20-minute build, far past the 90 s start budget.
+      advance(20 * 60_000);
+      // Guard proofs during the build extend only the image phase.
+      await phases.excludeStorage(async () => advance(5000));
+      expect(deadline?.()).toBe(
+        1_000_000 + DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS + 5000
+      );
+      return 0;
+    },
+    start: async (deadline) => {
+      steps.push("start");
+      expect(deadline()).toBe(clock.wall + DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS);
+      await phases.excludeStorage(async () => advance(3000));
+      expect(deadline()).toBe(clock.wall + DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS);
+      return "started";
+    },
+    failed: () => "failed",
+  });
+  expect(result).toBe("started");
+  expect(steps).toEqual(["build", "start"]);
+  expect(phases.images.deadline()).toBe(
+    1_000_000 + DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS + 5000
+  );
+});
+
+test("run builds stay unbounded, failed builds never begin the start phase, and no build starts at once", async () => {
+  const { options } = fakeClocks();
+  let runDeadline: (() => number) | undefined = () => 0;
+  expect(
+    await runNativeComposeWorkloadPhases({
+      phases: workloadPhases(options),
+      boundedBuilds: false,
+      build: async (deadline) => {
+        runDeadline = deadline;
+        return 0;
+      },
+      start: async () => "ran",
+      failed: () => "failed",
+    })
+  ).toBe("ran");
+  expect(runDeadline).toBeUndefined();
+
+  let started = false;
+  expect(
+    await runNativeComposeWorkloadPhases({
+      phases: workloadPhases(options),
+      boundedBuilds: true,
+      build: async () => 17,
+      start: async () => {
+        started = true;
+        return "started";
+      },
+      failed: (code) => `failed ${code}`,
+    })
+  ).toBe("failed 17");
+  expect(started).toBe(false);
+
+  const phases = workloadPhases(options);
+  expect(
+    await runNativeComposeWorkloadPhases({
+      phases,
+      boundedBuilds: true,
+      build: null,
+      start: async (deadline) => deadline(),
+      failed: () => 0,
+    })
+  ).toBe(1_000_000 + DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS);
 });

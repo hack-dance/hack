@@ -8,9 +8,9 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -364,13 +364,17 @@ test.each([
     if (["replacement", "symlink", "hardlink"].includes(kind)) {
       const other = join(root, "replacement.json");
       await writeFile(other, original, { mode: 0o600 });
-      await unlink(projection.composeFile);
+      const retained = join(root, "original-projection.json");
+      await rename(projection.composeFile, retained);
       if (kind === "symlink") {
         await symlink(other, projection.composeFile);
       } else if (kind === "hardlink") {
         await link(other, projection.composeFile);
       } else {
         await writeFile(projection.composeFile, original, { mode: 0o600 });
+        expect((await lstat(projection.composeFile)).ino).not.toBe(
+          (await lstat(retained)).ino
+        );
       }
     }
     await expect(

@@ -14,6 +14,12 @@
  *   fails that test, restores the pre-test environment and cwd, and names the file.
  *   Before comparing, it puts back the listeners that an unsettled
  *   `withOwnedProcessListeners` callback took off (a test that timed out in it).
+ *   The restore can run while a timed-out body is still going. That body
+ *   then sees the outer PATH, so a case whose later calls look up a stub
+ *   `docker` pins it with `withCaseExecutables` (HACK-1792). A value such a
+ *   body writes after this restore is not caught here: it becomes the next
+ *   case's baseline. Bun runs a `describe` block's `beforeAll`/`afterAll`
+ *   in that same gap, so a check there could not tell the two apart.
  * - Per file: when Bun loads the next test file, the state must match the
  *   state before the previous file loaded. This catches module-scope and
  *   `beforeAll`/`afterAll` leaks, including an `afterAll` that never ran its
@@ -33,7 +39,7 @@
 import { afterAll, afterEach, beforeEach } from "bun:test";
 import { readFileSync } from "node:fs";
 import { relative } from "node:path";
-
+import { installCaseExecutables } from "./case-executables.ts";
 import {
   captureGlobalState,
   captureNativeEnv,
@@ -51,6 +57,11 @@ import { installProcessOnceListeners } from "./process-once-listeners.ts";
 // Before any test file registers a listener, so a `once` listener that a
 // helper takes off and puts back stays a `once` listener.
 installProcessOnceListeners();
+// Before the first baseline, so the `Bun.which` wrapper that answers a case's
+// pinned executables is part of it. A body that outlives its case keeps its
+// pinned `docker` after the restore below puts the host's PATH back
+// (HACK-1792, `tests/helpers/case-executables.ts`).
+installCaseExecutables();
 
 /**
  * Environment keys a test file may change without a restore. Every entry

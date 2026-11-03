@@ -8,6 +8,7 @@ import {
   readdir,
   readFile,
   realpath,
+  rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -40,13 +41,18 @@ import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
-import { writeLifecycleMuxFixture } from "./helpers/lifecycle-mux-fixture.ts";
+import {
+  endLifecycleMuxFixtureGroups,
+  writeLifecycleMuxFixture,
+} from "./helpers/lifecycle-mux-fixture.ts";
 import { awaitPidFile } from "./helpers/native-authored-settlement.ts";
 import {
   createNativeFixtureCases,
   NATIVE_FIXTURE_BUN_MARGIN_MS,
   type NativeFixtureCase,
 } from "./helpers/native-fixture-cases.ts";
+import { optionalFixtureNode } from "./helpers/optional-fixture-node.ts";
+import { installStaticFixtureNode } from "./helpers/static-fixture-node.ts";
 import {
   CASE_TIMEOUT_CEILING_MS,
   testBudgetMs,
@@ -97,6 +103,12 @@ const DEADLINE_WALL_BOUND_MS = 1000;
  * shard's per-file limit. Passing cases release or cancel them explicitly.
  */
 const STAND_IN_CAP_MS = CASE_TIMEOUT_CEILING_MS;
+/**
+ * Longest life of a stand-in host process that nothing stopped. A failed case
+ * ends its groups through `onFailure`; this bounds the rest (a runner killed by
+ * the shard's limit). It outlasts that limit, so no case ever reaches it.
+ */
+const HOST_PROCESS_CAP_MS = 900_000;
 const cases = createNativeFixtureCases({
   label: "Startup fixture",
   defaultTimeoutMs: CASE_TIMEOUT_MS,
@@ -256,6 +268,9 @@ type FixtureOptions = {
   /** Closed native code for `planFailure` (default `native_graph_compile`). */
   readonly planFailureCode?: string;
   readonly failBeforeReceipt?: boolean;
+  readonly removedBeforeReady?: boolean;
+  readonly foreignRemovalReview?: boolean;
+  readonly releaseHostAfterTest?: boolean;
   /**
    * Like `failBeforeReceipt`, but serve fails the way authored foreground
    * control reports a runtime that stopped: `runtime_not_running` wrapped in
@@ -295,9 +310,14 @@ type FixtureOptions = {
     | "foreign-owner";
 };
 
+let compilerFixtureNode: Promise<string | null> | undefined;
+
 /** Fake compiler/engine transport; real managed inputs, admission, process and storage owners. */
 async function fixture(options: FixtureOptions = {}) {
   const owner = cases.current();
+  // Resolve before fixture PATH/env mutation. This only changes the pure
+  // compiler protocol transport; the original Bun script remains the fallback.
+  const node = await (compilerFixtureNode ??= optionalFixtureNode());
   // Optional effect-free integration uses the real compiler and native planner;
   // execution/status/cleanup remain this file's separately controlled fake driver.
   const realCompiler = process.env.HACK_TEST_NATIVE_COMPILER;
@@ -343,6 +363,9 @@ async function fixture(options: FixtureOptions = {}) {
       emptySettled: true,
       parse: muxWindowPids,
     });
+    // A start that fails after reservation retains these groups on purpose,
+    // for `hack down` recovery that a failed case never reaches.
+    owner.onFailure(() => endLifecycleMuxFixtureGroups(join(root, "mux.json")));
   }
   const hook = (name: string) => ({
     name,
@@ -380,7 +403,11 @@ async function fixture(options: FixtureOptions = {}) {
                               process.execPath,
                               "--no-env-file",
                               "-e",
-                              'const {appendFileSync}=await import("node:fs");appendFileSync("process-order","started\\n");await Bun.write("process-value",process.env.PROCESS_TOKEN??"missing");const stop=()=>{appendFileSync("process-order","stopped\\n");process.exit(0)};process.on("SIGTERM",stop);process.on("SIGINT",stop);setInterval(()=>{},1000)',
+                              'const {appendFileSync}=await import("node:fs");appendFileSync("process-order","started\\n");await Bun.write("process-value",process.env.PROCESS_TOKEN??"missing");const stop=()=>{appendFileSync("process-order","stopped\\n");process.exit(0)};process.on("SIGTERM",stop);process.on("SIGINT",stop);' +
+                                (options.releaseHostAfterTest
+                                  ? 'const {existsSync}=await import("node:fs");setInterval(()=>{if(existsSync("release-host-test")){appendFileSync("process-order","fixture-released"+String.fromCharCode(10));process.exit(0)}},20)'
+                                  : "setInterval(()=>{},1000)") +
+                                `;setTimeout(()=>process.exit(0),${HOST_PROCESS_CAP_MS})`,
                             ],
                           },
                           env_target: { kind: "host" },
@@ -455,6 +482,7 @@ console.log(JSON.stringify(result));
 `
   );
   await chmod(compiler, 0o700);
+  await installStaticFixtureNode({ binary: compiler, node });
   process.env.HACK_CONFIG_COMPILER_BINARY =
     options.compilerFailure === true ? compiler : (realCompiler ?? compiler);
   const bundle =
@@ -556,6 +584,17 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
  if(${options.failBeforeReceipt === true}){console.error(JSON.stringify({code:${JSON.stringify(options.failBeforeReceiptCode ?? "graph_network_intent")},message:${JSON.stringify(CANARY)}}));process.exit(2)}
  if(${options.stoppedDuringServe === true}){console.error(JSON.stringify({code:'native_graph_foreground',cause_code:'runtime_not_running',message:${JSON.stringify(CANARY)}}));process.exit(2)}
  const receipt={version:2,kind:'native-graph-runtime',owner:'f'.repeat(32),boot:'00000000-0000-0000-0000-000000000001',review,phase:'ready-observed',readiness:{web:'started'},resources:{'network:default':{kind:'network',key:'default',name:'hkn-'+input.run+'-network-0',id:'1'.repeat(64),image:null,phase:'created',outbound:true},'container:web':{kind:'container',key:'web',name:'hkn-'+input.run+'-container-0',id:'2'.repeat(64),image:'sha256:'+ '3'.repeat(64),phase:'started',networks:['default']}}};
+ if(${options.removedBeforeReady === true}){
+  if(${JSON.stringify(options.cleanup ?? "removed")}!=='live'){
+   receipt.phase='removed';for(const resource of Object.values(receipt.resources))resource.phase='removed';
+  }
+  if(${options.foreignRemovalReview === true}){
+   provenance.namespace='9'.repeat(64);
+   review.review_id=createHash('sha256').update('hack.native-graph-review/v1\\0').update(JSON.stringify(provenance)).digest('hex');
+  }
+  await writeFile(journal,JSON.stringify(receipt));
+  console.error(JSON.stringify({code:'graph_network_intent',message:${JSON.stringify(CANARY)}}));process.exit(2);
+ }
  if(${options.storage === true && options.liveStop === true}){
   const namespace=provenance.namespace, owner='9'.repeat(32);
   receipt.version=4;
@@ -2065,3 +2104,410 @@ for (const [httpsPort, branch, url] of [
     }
   );
 }
+
+/**
+ * Just past the compiler transport's fixed 10 s per-invocation default, which
+ * authored compiler calls used to keep whatever time their caller had left.
+ */
+const SLOW_COMPILE_MS = 10_500;
+
+/**
+ * A wrapper around the fixture compiler whose first invocation of `operation`
+ * (any operation when omitted) sleeps {@link SLOW_COMPILE_MS} before it runs.
+ * `install` selects it; the case guard restores the fixture's compiler key.
+ * `slept` is the marker the wrapper writes when it has slept.
+ */
+async function slowCompilerOnce(opts: {
+  readonly root: string;
+  readonly operation?: string;
+}): Promise<{ readonly install: () => void; readonly slept: string }> {
+  const compiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+  if (!compiler) {
+    throw new Error("missing fixture compiler");
+  }
+  const slept = join(opts.root, "slow-compile-once");
+  const wrapper = join(opts.root, "slow-compiler");
+  const selected = opts.operation
+    ? `process.argv[2]===${JSON.stringify(opts.operation)}`
+    : "true";
+  await writeFile(
+    wrapper,
+    `#!${process.execPath}
+import {existsSync,writeFileSync} from "node:fs";
+if(${selected}&&!existsSync(${JSON.stringify(slept)})){writeFileSync(${JSON.stringify(slept)},"");await Bun.sleep(${SLOW_COMPILE_MS});}
+const child=Bun.spawn([${JSON.stringify(compiler)},...process.argv.slice(2)],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});
+process.exit(await child.exited);
+`
+  );
+  await chmod(wrapper, 0o700);
+  return {
+    install: () => {
+      process.env.HACK_CONFIG_COMPILER_BINARY = wrapper;
+    },
+    slept,
+  };
+}
+
+macTest(
+  "HACK-1458: a startup compiler call may outlast the compiler's 10 s default while the startup deadline remains",
+  async () => {
+    const selected = await fixture({ noManaged: true });
+    const slow = await slowCompilerOnce({
+      root: selected.root,
+      operation: "compile",
+    });
+    slow.install();
+    expect(
+      await serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
+      })
+    ).toBe(0);
+    expect(await Bun.file(slow.slept).exists()).toBe(true);
+    expect(await artifacts(selected.scope)).toEqual([]);
+  }
+);
+
+// HACK-1458: the loaded hang of "Source5 cancellation after readiness". The
+// cancel's down.before acquisition kept the compiler's fixed 10 s default, so
+// a slow compiler failed the graceful stop, and the start then retained the
+// live owner and host processes until a hard cancellation that never came.
+macTest(
+  "HACK-1458: Source5 cancellation after readiness settles when its down acquisition compiler is slow",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, hostProcesses: true });
+    const slow = await slowCompilerOnce({ root: selected.root });
+    const signal = new AbortController();
+    const stages: string[] = [];
+    expect(
+      await serveNativeAuthoredProject({
+        ...selected,
+        run,
+        signal: signal.signal,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
+        onHookDiagnostic: (event) => {
+          stages.push(`${event.phase}:${event.boundary}`);
+        },
+        onReady: () => {
+          // The next compiler invocation is the cancel's down acquisition.
+          slow.install();
+          signal.abort();
+          return undefined;
+        },
+      })
+    ).toBe(0);
+    expect(await Bun.file(slow.slept).exists()).toBe(true);
+    expect(stages).not.toContain("down.before:stop-operation");
+    expect(stages).toContain("down.after:complete");
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "process-order")).text()
+    ).toBe("started\nstopped\n");
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
+    ).toBe("up-before\nup-after\ndown-before\ndown-after\n");
+    const files = await artifacts(selected.scope);
+    expect(
+      files.some((name) => name.endsWith(".host-process-owner.json"))
+    ).toBe(false);
+    expect(files.some((name) => name.endsWith(".hooks.json"))).toBe(false);
+  }
+);
+
+/**
+ * Wrap the fixture's native stand-in so its second `frontend-plan` request
+ * (the one after up.before has run and the host processes have started)
+ * publishes `held` and then waits until the start kills it.
+ */
+async function holdSecondFrontendPlan(opts: {
+  readonly root: string;
+  readonly binary: string;
+}): Promise<{ readonly binary: string; readonly held: string }> {
+  const plans = join(opts.root, "frontend-plans");
+  const held = join(opts.root, "second-frontend-plan-held");
+  const binary = join(opts.root, "native-hold-second-plan");
+  await writeFile(
+    binary,
+    `#!${process.execPath}
+import {appendFileSync,readFileSync,writeFileSync} from "node:fs";
+const args=process.argv.slice(2);
+if(args.includes("frontend-plan")){appendFileSync(${JSON.stringify(plans)},"plan\\n");if(readFileSync(${JSON.stringify(plans)},"utf8").trim().split("\\n").length===2){writeFileSync(${JSON.stringify(held)},String(process.pid));setInterval(()=>{},1000);await new Promise(()=>{});}}
+const child=Bun.spawn([${JSON.stringify(opts.binary)},...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});
+process.exit(await child.exited);
+`
+  );
+  await chmod(binary, 0o700);
+  return { binary, held };
+}
+
+// HACK-1458: a cancel (or the startup deadline, which aborts the same signal)
+// after the host processes started and before the startup intent exists must
+// stop them. Their teardown freshness check used the startup inputs, bound to
+// the aborted startup signal, so it always refused and left the groups running.
+macTest(
+  "HACK-1458: cancellation after host processes start and before reservation stops them",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, hostProcesses: true });
+    const hold = await holdSecondFrontendPlan({
+      root: selected.root,
+      binary: selected.runtime.binary,
+    });
+    const signal = new AbortController();
+    let settled = false;
+    const pending = serveNativeAuthoredProject({
+      ...selected,
+      runtime: { ...selected.runtime, binary: hold.binary },
+      run,
+      signal: signal.signal,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
+    })
+      .catch((error: unknown) => error)
+      .finally(() => {
+        settled = true;
+      });
+    while (!(settled || (await Bun.file(hold.held).exists()))) {
+      await Bun.sleep(20);
+    }
+    expect(await Bun.file(hold.held).exists()).toBe(true);
+    signal.abort();
+    const error = await pending;
+    expect(error).toBeInstanceOf(NativeAuthoredProjectStartError);
+    expect(error).toHaveProperty("canceled", true);
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "process-order")).text()
+    ).toBe("started\nstopped\n");
+    const files = await artifacts(selected.scope);
+    expect(files.some((name) => name.endsWith(".start.json"))).toBe(false);
+    expect(
+      files.some((name) => name.endsWith(".host-process-owner.json"))
+    ).toBe(false);
+  }
+);
+
+/**
+ * Delay the stand-in mux's first `list-panes` (issued right after it started
+ * the host process window) and publish `held` first, so a case can cancel
+ * while the host process launch is still in progress.
+ */
+async function holdFirstPaneQuery(root: string): Promise<string> {
+  const bin = join(root, "bin");
+  const held = join(root, "pane-query-held");
+  await writeFile(
+    join(bin, "tmux-stand-in"),
+    await readFile(join(bin, "tmux")),
+    { mode: 0o700 }
+  );
+  await writeFile(
+    join(bin, "tmux"),
+    `#!${process.execPath}
+import {existsSync,writeFileSync} from "node:fs";
+const args=process.argv.slice(2);
+if(args[0]==="list-panes"&&!existsSync(${JSON.stringify(held)})){writeFileSync(${JSON.stringify(held)},"");await Bun.sleep(1000);}
+const child=Bun.spawn([${JSON.stringify(join(bin, "tmux-stand-in"))},...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});
+process.exit(await child.exited);
+`
+  );
+  await chmod(join(bin, "tmux"), 0o700);
+  return held;
+}
+
+/** True once no process in `group` remains, within a 5 s bound. */
+async function groupEnded(group: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      process.kill(-group, 0);
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "ESRCH") {
+        return true;
+      }
+      throw error;
+    }
+    await Bun.sleep(50);
+  }
+  return false;
+}
+
+// HACK-1458: a start that failed after the host process launch began but
+// before its ready record left the launched group running: teardown required
+// a ready record, and recovery never converts a bare launch intent into
+// authority. The launch now ends what it started through its session token.
+macTest(
+  "HACK-1458: cancellation during the host process launch ends the launched group",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, hostProcesses: true });
+    const held = await holdFirstPaneQuery(selected.root);
+    const signal = new AbortController();
+    let settled = false;
+    const pending = serveNativeAuthoredProject({
+      ...selected,
+      run,
+      signal: signal.signal,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
+    })
+      .catch((error: unknown) => error)
+      .finally(() => {
+        settled = true;
+      });
+    while (!(settled || (await Bun.file(held).exists()))) {
+      await Bun.sleep(20);
+    }
+    expect(await Bun.file(held).exists()).toBe(true);
+    // The window exists now; record its group before the launch can end it.
+    const state = JSON.parse(
+      await readFile(join(selected.root, "mux.json"), "utf8")
+    ) as { readonly windows: Record<string, { readonly pid: number }> };
+    const groups = Object.values(state.windows).map((row) => row.pid);
+    expect(groups).toHaveLength(1);
+    signal.abort();
+    const error = await pending;
+    expect(error).toBeInstanceOf(NativeAuthoredProjectStartError);
+    expect(error).toHaveProperty("canceled", true);
+    for (const group of groups) {
+      expect(await groupEnded(group)).toBe(true);
+    }
+    // The owned session was ended through its token. Its owner record stays
+    // unless every launched group was recorded and proven absent; a launch
+    // cancelled this early may not have recorded its command group yet.
+    expect(await Bun.file(join(selected.root, "mux.json")).exists()).toBe(
+      false
+    );
+  }
+);
+
+for (const proof of [
+  "removed",
+  "live",
+  "foreign",
+  "hard-canceled",
+  "unconfirmed-group",
+] as const) {
+  macTest(
+    `pre-Ready host retirement requires settled authenticated removal: ${proof}`,
+    async () => {
+      const selected = await fixture({
+        finiteHooks: true,
+        hostProcesses: true,
+        removedBeforeReady: true,
+        releaseHostAfterTest: true,
+        cleanup: proof === "live" ? "live" : "removed",
+        foreignRemovalReview: proof === "foreign",
+      });
+      const signal = new AbortController();
+      const force = new AbortController();
+      let ready = false;
+      const originalKill = process.kill.bind(process);
+      let group: number | undefined;
+      let killSpy: ReturnType<typeof spyOn<typeof process, "kill">> | undefined;
+      try {
+        const error = await failure(
+          serveNativeAuthoredProject({
+            ...selected,
+            run,
+            signal: signal.signal,
+            forceSignal: force.signal,
+            startupTimeoutMs: STARTUP_TIMEOUT_MS,
+            onReady: () => {
+              ready = true;
+              return undefined;
+            },
+            onExitDiagnostic: () => {
+              signal.abort();
+              if (proof === "unconfirmed-group") {
+                killSpy = spyOn(process, "kill").mockImplementation(
+                  (pid, signal) => {
+                    // Refuse only the consumer's first settlement probe. A later
+                    // real ESRCH must not replace its missing onSettled event.
+                    if (pid < 0 && signal === 0 && group === undefined) {
+                      group = pid;
+                      throw Object.assign(
+                        new Error("synthetic group uncertainty"),
+                        { code: "EPERM" }
+                      );
+                    }
+                    return originalKill(pid, signal);
+                  }
+                );
+              }
+              if (proof === "hard-canceled") {
+                force.abort();
+              }
+            },
+          }),
+          proof === "removed" ? "removed" : "retained"
+        );
+        expect(error).toHaveProperty("canceled", true);
+        expect(ready).toBe(false);
+        expect(
+          await Bun.file(
+            join(selected.scope.projectRoot, "process-order")
+          ).text()
+        ).toBe(proof === "removed" ? "started\nstopped\n" : "started\n");
+        const files = await artifacts(selected.scope);
+        expect(files.some((name) => name.endsWith(".start.json"))).toBe(
+          proof !== "removed"
+        );
+        expect(
+          files.some((name) => name.endsWith(".host-process-owner.json"))
+        ).toBe(proof !== "removed");
+      } finally {
+        if (killSpy) {
+          confirmTestGroupAbsent(group, originalKill);
+          killSpy.mockRestore();
+        }
+        // Only this test's cooperating stand-in observes this marker. It does not
+        // turn an unproved production cleanup into an accepted stop.
+        await Bun.write(
+          join(selected.scope.projectRoot, "release-host-test"),
+          "release"
+        );
+      }
+    }
+  );
+}
+
+// HACK-1458 item 4: a failed case must not leave the stand-in groups running.
+// Bun runs this body outside `cases.test`, because the guarded case fails here.
+bunTest.skipIf(process.platform !== "darwin")(
+  "HACK-1458: a failed case ends the stand-in mux groups it left running",
+  async () => {
+    let group: number | undefined;
+    let root: string | undefined;
+    try {
+      await expect(
+        cases.run(async () => {
+          const selected = await fixture({ hostProcesses: true });
+          root = selected.root;
+          const mux = join(selected.root, "bin", "tmux");
+          for (const args of [
+            ["new-session", "-s", "failed-case", "-c", selected.root],
+            ["new-window", "-n", "held", "-c", selected.root, "sleep 300"],
+          ]) {
+            const child = Bun.spawn([mux, ...args], {
+              env: process.env,
+              stdout: "ignore",
+              stderr: "ignore",
+            });
+            expect(await child.exited).toBe(0);
+          }
+          const state = JSON.parse(
+            await readFile(join(selected.root, "mux.json"), "utf8")
+          ) as {
+            readonly windows: { readonly held: { readonly pid: number } };
+          };
+          group = state.windows.held.pid;
+          process.kill(-group, 0);
+          throw new Error("deliberate case failure");
+        }, CASE_TIMEOUT_MS)
+      ).rejects.toThrow("deliberate case failure");
+      if (group === undefined) {
+        throw new Error("the stand-in window was never recorded");
+      }
+      expect(await groupEnded(group)).toBe(true);
+    } finally {
+      if (root !== undefined) {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  },
+  CASE_TIMEOUT_MS + SETTLEMENT_BUDGET_MS + NATIVE_FIXTURE_BUN_MARGIN_MS
+);

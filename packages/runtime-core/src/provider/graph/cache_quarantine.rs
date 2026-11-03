@@ -57,12 +57,26 @@ fn refused() -> CandidateError {
         "The disposable cache selection is missing, unsafe, changed or in use; no cache bytes were moved.",
     )
 }
-/// An unconfirmed guest effect or changed volume. Bytes may already have moved, so the
+/// A changed volume after a guest effect. Bytes may already have moved, so the
 /// pre-effect wording would be false; the durable record stays `pending`.
 fn unsettled() -> CandidateError {
     error(
         "graph_cache_quarantine_unsettled",
+        "The volume changed during the cache quarantine; the record stays pending for explicit resume or resolution.",
+    )
+}
+/// A successful transport with an unknown reply cannot confirm the guest effect.
+fn unconfirmed_move() -> CandidateError {
+    error(
+        "graph_cache_quarantine_unsettled",
         "The cache quarantine outcome is unsettled; cache bytes may have moved. The record stays pending for explicit resume or resolution.",
+    )
+}
+/// Observation failed after a possible effect; do not assert replacement.
+fn unobserved() -> CandidateError {
+    error(
+        "graph_cache_quarantine_unobserved",
+        "The volume could not be observed after the cache quarantine; the record stays pending for explicit resume or resolution.",
     )
 }
 fn digest(bytes: &[u8]) -> String {
@@ -203,30 +217,7 @@ fn parse_observation(output: &str) -> Result<Option<(String, u64, u64, u64)>, Ca
     Ok(Some((identity.to_owned(), bytes, allocated, entries)))
 }
 
-/// The inspected fields that identify a volume incarnation: everything except
-/// `CreatedAt`, which the local driver derives from a directory mtime that the
-/// first quarantine's `mkdir hack-quarantine` changes.
-fn stable_volume_fields(inspected: &Value) -> Value {
-    let mut stable = inspected.clone();
-    if let Some(fields) = stable.as_object_mut() {
-        fields.remove("CreatedAt");
-    }
-    stable
-}
-
-/// Whether `current` is the same volume incarnation as the admitted one. A
-/// `CreatedAt` change alone is accepted; any other inspected change, or a
-/// different guest-observed `_data` identity (a replaced volume), refuses.
-fn same_incarnation(
-    admitted: &Value,
-    admitted_root: &str,
-    current: &Value,
-    current_root: &str,
-) -> bool {
-    admitted.is_object()
-        && admitted_root == current_root
-        && stable_volume_fields(admitted) == stable_volume_fields(current)
-}
+use super::volume_identity::same as same_incarnation;
 
 fn same_device(a: &str, b: &str) -> bool {
     a.split_once(':').map(|v| v.0) == b.split_once(':').map(|v| v.0)
@@ -518,15 +509,26 @@ impl Admitted {
     fn recheck(&self, port: &impl Port) -> Result<(), CandidateError> {
         let current = port
             .inspect(&self.receipt, &self.resource)
-            .ok()
-            .flatten()
+            .map_err(|failure| match failure.code {
+                // Production inspection observed a different identity before
+                // refusing it; this is evidence of change, not a lost read.
+                "graph_foreign_resource" | "graph_resource_identity" => unsettled(),
+                _ => unobserved(),
+            })?
             .ok_or_else(unsettled)?;
+        // Compare metadata before IDENTITY: a changed mountpoint is already an
+        // observed change and must not be masked by the script's path refusal.
+        if volume_identity::stable_fields(&self.inspected)
+            != volume_identity::stable_fields(&current)
+        {
+            return Err(unsettled());
+        }
         let current_root = volume_subpaths::directory_identity_with(
             |script, arguments| port.execute(script, arguments),
             &self.resource,
             &current,
         )
-        .map_err(|_| unsettled())?;
+        .map_err(|_| unobserved())?;
         if !same_incarnation(
             &self.inspected,
             &self.root_identity,
@@ -650,7 +652,7 @@ fn quarantine_with(
     let moved = match output.as_str() {
         "cache-quarantine-v1 moved\n" => true,
         "cache-quarantine-v1 resumed\n" => false,
-        _ => return Err(unsettled()),
+        _ => return Err(unconfirmed_move()),
     };
     admitted.recheck(port)?;
     // Commit point 2: completion follows the guest's synchronized rename.

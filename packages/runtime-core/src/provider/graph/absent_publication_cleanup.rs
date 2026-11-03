@@ -262,35 +262,9 @@ fn selected_volumes(
     engine: &Engine<'_>,
     receipt: &Receipt,
 ) -> Result<BTreeMap<String, Value>, CandidateError> {
-    let mut volumes = BTreeMap::new();
-    for (key, resource) in receipt
-        .resources
-        .iter()
-        .filter(|(_, resource)| resource.kind == Kind::Volume)
-    {
-        let actual = inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
-        let created = actual["CreatedAt"]
-            .as_str()
-            .filter(|value| !value.is_empty());
-        if created.is_none() {
-            return Err(refused());
-        }
-        volumes.insert(
-            key.clone(),
-            json!({
-                "expected_name": resource.name,
-                "observed_name": actual["Name"],
-                "observed_created_at": actual["CreatedAt"],
-                "observed_mountpoint": actual["Mountpoint"],
-                "observed_driver": actual["Driver"],
-                "observed_labels_sha256": digest(
-                    &serde_json::to_vec(&actual["Labels"]).map_err(|_| refused())?
-                ),
-                "labels": super::expected_labels(receipt, resource),
-            }),
-        );
-    }
-    Ok(volumes)
+    super::volume_identity::select_with(receipt, |resource| {
+        super::volume_identity::observe(engine, receipt, resource)
+    })
 }
 
 fn current_owner(

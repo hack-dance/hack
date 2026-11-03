@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, test as bunTest, expect } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
@@ -6,6 +6,7 @@ import type { Socket } from "node:net";
 import { join } from "node:path";
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
 import { fixture, invoke } from "./helpers/native-compose-command.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const storage = { data: { kind: "persistent", scope: "worktree" } } as const;
 const IDENTITY = JSON.stringify(["info", "--format", "{{json .ID}}"]);
@@ -22,6 +23,12 @@ const PROOF_FENCES = 81;
 const PROOF_OBSERVATIONS = 20;
 // The command's saved file-engine observation reads the ID twice, unchanged.
 const FILE_ENGINE_FENCES = 2;
+// This cost experiment runs thousands of real CLI subprocesses, including its
+// safety counterexamples. Host load can exhaust the production proof budget
+// before any cost assertion. Keep it explicit rather than counting a timeout
+// as a cost regression or relaxing the production storage checks. The small
+// request-log regression below always runs, including in the combined suite.
+const test = bunTest.skipIf(process.env.HACK_TEST_STORAGE_FENCE_COST !== "1");
 
 const servers: Server[] = [];
 const peers = new Set<Socket>();
@@ -138,9 +145,50 @@ async function saved(root: string) {
 }
 async function enrolled() {
   const root = await fixture("", false, { storage, noHooks: true });
-  expect((await invoke(root, undefined, 30_000, 120_000)).code).toBe(0);
+  const result = await invoke(root, undefined, 30_000, 120_000);
+  expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
   return root;
 }
+
+bunTest(
+  "fixture request logging outgrows the storage child's per-file quota",
+  async () => {
+    const root = await fixture("", false, { storage, noHooks: true });
+    const prefix = "[]\n".repeat(3000);
+    await writeFile(join(root, "requests"), prefix);
+    const child = Bun.spawn(
+      [
+        "/bin/sh",
+        "-c",
+        'ulimit -f 8; exec "$@"',
+        "fixture-quota",
+        join(root, "docker"),
+        "info",
+        "--format",
+        "{{json .ID}}",
+      ],
+      {
+        cwd: root,
+        env: privateCliEnv({ root }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 10_000,
+      }
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code, stderr).toBe(0);
+    expect(stdout.trim()).toBe(JSON.stringify("fixture-engine"));
+    expect(await Bun.file(join(root, "requests")).text()).toBe(
+      `${prefix}${IDENTITY}\n`
+    );
+  },
+  20_000
+);
 
 test("storage fence count per command: every proof kept, exact duplicates gone, one CLI admission", async () => {
   const root = await enrolled();

@@ -29,20 +29,13 @@
 //! needs a [`StartPermit`], which only the pre-boot admission ([`admit_boot`]) followed by
 //! the final leased recheck ([`BootAdmission::release`]) issues.
 use super::{
-    Owner, admission, binary, io, lock_absent_disks_within, root, sockets_absent,
+    Owner, admission, binary, disk_handles, io, lock_absent_disks_within, root, sockets_absent,
     verify_disk_allocation, verify_disks, verify_live,
 };
 use crate::provider::{Profile, config_audit, identity, state};
 use crate::{Candidate, CandidateError};
 use serde_json::Value;
 use std::fs;
-use std::time::Duration;
-
-/// How long a release check waits for `lsof` over the owned disks. `lsof` scans every
-/// process, so it is slow on a loaded host (5.4–6.5 s at about 1,850 processes and load
-/// 30–80). The wait is longer than `down`'s because only a start that needs the reserve runs
-/// it, under the startup lease; a scan that still does not finish refuses the reserve.
-const RELEASE_HANDLE_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Basis {
@@ -251,7 +244,7 @@ fn released(
 ) -> Result<(), StoppedRefusal> {
     let check = |error: CandidateError| StoppedRefusal::from_check(&error);
     lease.verify_path(&root(candidate)).map_err(check)?;
-    lock_absent_disks_within(candidate, owner, RELEASE_HANDLE_WAIT).map_err(check)?;
+    lock_absent_disks_within(candidate, owner, disk_handles::RELEASE_HANDLE_WAIT).map_err(check)?;
     sockets_absent(owner).map_err(check)?;
     config_audit::verify(candidate, owner).map_err(check)
 }

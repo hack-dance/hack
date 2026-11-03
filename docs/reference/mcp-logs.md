@@ -32,6 +32,28 @@ non-zero. Use `ok` and `data.cutoff` to read the result, not `exitCode`.
 `data.stop_reason` (tail only) keeps its earlier values: `eof`, `max_events`,
 `timeout`, `output_limit`, `cancelled` or `interrupted`.
 
+The whole result is also limited to 9.5 MiB, because SDK clients drop the
+connection above 10 MiB. See [Result size limit](mcp-tools.md#result-size-limit).
+Over that limit, `content` becomes a smaller view (below), and `stdout` in
+`structuredContent` is cut before any event. Events go next, from the end, always
+as whole events. `outputTruncated` is `true` whenever `structuredContent` was
+cut. When events were removed from a successful collection:
+
+- `data.cutoff` is `{ "bound": "bytes", "limit": 9961472 }`, replacing a `null`
+  or an earlier cutoff. A collection that completed is reported as cut, because
+  the result no longer holds all of it.
+- `data.count` is the number of events kept.
+- `data.stop_reason` still says why collection stopped, so it can be `eof` beside
+  a byte cutoff.
+
+A backend failure stays a failure: `ok` is `false`, `error` is unchanged and
+`data.cutoff` stays `null`, even if events were removed.
+
+The `content` text is JSON with the same shape as `structuredContent`, in a
+256 KiB view. It keeps fewer events, and when it removes events its own
+`data.cutoff.limit` is `262144`. A client should read `structuredContent` when it
+can.
+
 A backend failure is not a truncated success. It is reported when the stream
 contains an `error` event or an `end` event with a reason other than `eof` or
 `closed`, or when the child exits non-zero at the end of the stream. The error

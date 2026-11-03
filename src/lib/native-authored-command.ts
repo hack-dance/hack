@@ -19,12 +19,14 @@ import {
 } from "../backends/native-authored-project-restart.ts";
 import {
   type NativeAuthoredProjectRunScope,
+  nativeAuthoredProjectNothingToRecover,
   stopNativeAuthoredProject,
 } from "../backends/native-authored-project-run.ts";
 import {
   NativeAuthoredProjectStartError,
   serveNativeAuthoredProject,
 } from "../backends/native-authored-project-start.ts";
+import { NativeAuthoredProjectNotStartedError } from "../backends/native-authored-runtime-binary.ts";
 import {
   nativeAuthoredUnreservedStartSelected,
   retireNativeAuthoredUnreservedStart,
@@ -221,12 +223,28 @@ function assertForegroundOptions(options: NativeComposeCommandOptions): void {
   }
 }
 
+/**
+ * What a canceled start left behind, for outcomes that retain nothing. A
+ * canceled start that retained evidence still fails, so the operator inspects it.
+ */
+const CANCELED_STARTUP_NOTES: Readonly<
+  Partial<Record<NativeAuthoredProjectStartError["outcome"], string>>
+> = {
+  "not-started":
+    "Native project start was canceled; nothing was started and no startup intent was reserved.",
+  removed:
+    "Native project start was canceled; its native cleanup was confirmed.",
+  unreserved:
+    "Native project start was canceled; no runtime state was reserved and its startup intent was retired.",
+};
+
 function startupFailure(error: unknown): number {
   if (error instanceof NativeAuthoredProjectStartError) {
-    if (
-      error.canceled &&
-      (error.outcome === "removed" || error.outcome === "unreserved")
-    ) {
+    const canceledNote = error.canceled
+      ? CANCELED_STARTUP_NOTES[error.outcome]
+      : undefined;
+    if (canceledNote) {
+      logger.info({ message: canceledNote });
       return 130;
     }
     if (nativeCodesReportRuntimeNotRunning(error)) {
@@ -430,6 +448,8 @@ type Seams = {
   /** Pending-start selection and unreserved retirement seams (HACK-1272). */
   readonly unreservedSelected?: typeof nativeAuthoredUnreservedStartSelected;
   readonly retireUnreserved?: typeof retireNativeAuthoredUnreservedStart;
+  /** Read-only empty-selection seam for repeated recovery (HACK-1312). */
+  readonly nothingToRecover?: typeof nativeAuthoredProjectNothingToRecover;
   readonly observe?: typeof nativeAuthoredProjectPs;
   readonly logs?: typeof nativeAuthoredProjectLogs;
   readonly stop?: typeof stopNativeAuthoredProject;
@@ -487,6 +507,19 @@ async function runRecovery(input: LifecycleInput): Promise<number> {
     logger.info({
       message:
         "Retired an incomplete native startup that never reserved runtime state; nothing else was changed.",
+    });
+    return 0;
+  }
+  if (
+    await (
+      input.seams.nothingToRecover ?? nativeAuthoredProjectNothingToRecover
+    )(input.scope)
+  ) {
+    // A repeat after a completed recovery or retirement is a no-op, not a
+    // refusal: no saved generation, intent or owner evidence remains.
+    logger.info({
+      message:
+        "Nothing to recover: no native project state is retained for this selection; nothing was changed.",
     });
     return 0;
   }
@@ -678,7 +711,7 @@ const RUNNERS: Readonly<Record<Mode, (input: RunnerInput) => Promise<number>>> =
         projectRoot: input.projectRoot,
         runtime: input.runtime,
         perform: input.seams.exec ?? nativeAuthoredProjectExec,
-        contract: COMMAND_CONTRACTS.exec,
+        operation: "exec",
         beforeOutput: (signal) => warnStaleAuthoredEnv(input, signal),
       }),
     run: (input) =>
@@ -687,7 +720,7 @@ const RUNNERS: Readonly<Record<Mode, (input: RunnerInput) => Promise<number>>> =
         projectRoot: input.projectRoot,
         runtime: input.runtime,
         perform: input.seams.run ?? nativeAuthoredProjectRun,
-        contract: COMMAND_CONTRACTS.run,
+        operation: "run",
       }),
     logs: (input) =>
       runAuthoredLogs({
@@ -873,19 +906,54 @@ function assertCommandOptions(
 type CommandContract = {
   readonly truncated: string;
   readonly unconfirmed: string;
+  /** Closed refusals when no Ready generation is saved; nothing was sent. */
+  readonly notStarted: string;
+  readonly pending: string;
 };
 const COMMAND_CONTRACTS: Readonly<Record<"exec" | "run", CommandContract>> = {
   exec: {
     truncated: "Native exec output was truncated.\n",
     unconfirmed:
       "Native authored exec completion is unconfirmed; command effects may have occurred. Values omitted. No request was replayed.",
+    notStarted:
+      "Native project has not been started; nothing was executed. Start it with `hack up`, then run this command again.",
+    pending:
+      "Native project startup is pending and has not reached Ready; nothing was executed. Check `hack ps` before retrying.",
   },
   run: {
     truncated: "Native run output was truncated.\n",
     unconfirmed:
       "Native authored run completion is unconfirmed; command effects may have occurred and its one-off container may remain until down. Values omitted. No request was replayed.",
+    notStarted:
+      "Native project has not been started; nothing was run. Start it with `hack up`, then run this command again.",
+    pending:
+      "Native project startup is pending and has not reached Ready; nothing was run. Check `hack ps` before retrying.",
   },
 };
+/**
+ * The closed CLI refusal for a failed exec or one-off run. A selection with no
+ * saved Ready generation never sent a request, so it reports not started (or a
+ * pending startup) instead of an unknown command outcome (HACK-1312). Every
+ * other failure keeps the unconfirmed-completion contract.
+ */
+export function nativeAuthoredCommandFailure(input: {
+  readonly error: unknown;
+  readonly operation: "exec" | "run";
+}): HackCliError {
+  const contract = COMMAND_CONTRACTS[input.operation];
+  if (input.error instanceof NativeAuthoredProjectNotStartedError) {
+    const pending = input.error.pending;
+    return new HackCliError({
+      code: "E_LIFECYCLE_FAILED",
+      message: pending ? contract.pending : contract.notStarted,
+      detail: { status: pending ? "pending" : "not_started" },
+    });
+  }
+  return new HackCliError({
+    code: "E_LIFECYCLE_FAILED",
+    message: contract.unconfirmed,
+  });
+}
 type CommandCompletion = {
   readonly exitCode: number;
   readonly stdout: Uint8Array;
@@ -907,7 +975,7 @@ async function runAuthoredCommand(input: {
     readonly workdir?: string;
     readonly signal: AbortSignal;
   }) => Promise<CommandCompletion>;
-  readonly contract: CommandContract;
+  readonly operation: "exec" | "run";
   /**
    * Advisory step after a validated completion and before any output. It
    * receives the command's cancellation signal and must settle promptly once
@@ -950,16 +1018,16 @@ async function runAuthoredCommand(input: {
       return 130;
     }
     if (result.truncated) {
-      process.stderr.write(input.contract.truncated);
+      process.stderr.write(COMMAND_CONTRACTS[input.operation].truncated);
     }
     return controller.signal.aborted ? 130 : result.exitCode;
-  } catch {
+  } catch (error: unknown) {
     if (controller.signal.aborted) {
       return 130;
     }
-    throw new HackCliError({
-      code: "E_LIFECYCLE_FAILED",
-      message: input.contract.unconfirmed,
+    throw nativeAuthoredCommandFailure({
+      error,
+      operation: input.operation,
     });
   } finally {
     process.off("SIGINT", cancel);

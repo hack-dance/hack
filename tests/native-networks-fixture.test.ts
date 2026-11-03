@@ -524,9 +524,10 @@ test("peer probe attributes a failure to one URL and phase in closed stderr evid
 
 /**
  * Runs the peer probe with `Bun.dns.lookup` replaced by a stub that answers
- * every name with 127.0.0.1, after `delayMs` for names starting with `slow`.
- * The probe names use RFC 6761 `.invalid`, so only the stubbed answer can
- * reach the local listener: a second, real resolution fails (HACK-1428).
+ * every name with `answer` (default 127.0.0.1, family 4), after `delayMs` for
+ * names starting with `slow`. The probe names use RFC 6761 `.invalid`, so only
+ * the stubbed answer can reach the local listener: a second, real resolution
+ * fails (HACK-1428).
  */
 async function runStubbedPeerProbe(opts: {
   readonly root: string;
@@ -534,8 +535,12 @@ async function runStubbedPeerProbe(opts: {
   readonly alias: string;
   readonly timeoutMs: number;
   readonly delayMs: number;
+  readonly answer?: { readonly address: string; readonly family: 4 | 6 };
 }): Promise<{ readonly code: number; readonly stderr: string }> {
-  const stub = `Bun.dns.lookup=async(h)=>{if(h.startsWith("slow"))await Bun.sleep(${opts.delayMs});return [{address:"127.0.0.1",family:4}]};`;
+  const answer = JSON.stringify([
+    opts.answer ?? { address: "127.0.0.1", family: 4 },
+  ]);
+  const stub = `Bun.dns.lookup=async(h)=>{if(h.startsWith("slow"))await Bun.sleep(${opts.delayMs});return ${answer}};`;
   const child = Bun.spawn(
     [
       process.execPath,
@@ -593,6 +598,37 @@ test("peer probe fetches the address it just resolved", async () => {
       `127.0.0.1:${server.port}`,
       `127.0.0.1:${server.port}`,
     ]);
+  } finally {
+    server.stop(true);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// HACK-1457: an IPv6-only answer is bracketed into the URL host. Without the
+// brackets the URL rejects the bare address, keeps the unresolvable name, and the
+// fetch fails.
+test("peer probe fetches an IPv6-only answer through a bracketed host", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-network-probe-"));
+  const hosts: (string | null)[] = [];
+  const server = Bun.serve({
+    hostname: "::1",
+    port: 0,
+    fetch(request) {
+      hosts.push(request.headers.get("host"));
+      return new Response("primary:peer");
+    },
+  });
+  try {
+    const result = await runStubbedPeerProbe({
+      root,
+      origin: `http://probe-1457.invalid:${server.port}`,
+      alias: `http://probe-1457-alias.invalid:${server.port}/a`,
+      timeoutMs: 4000,
+      delayMs: 0,
+      answer: { address: "::1", family: 6 },
+    });
+    expect(result).toEqual({ code: 0, stderr: "" });
+    expect(hosts).toEqual([`[::1]:${server.port}`, `[::1]:${server.port}`]);
   } finally {
     server.stop(true);
     await rm(root, { recursive: true, force: true });

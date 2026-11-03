@@ -58,6 +58,13 @@ jobs:
         run: bun test tests/native-compose-file-sources.test.ts tests/native-compose-file-owner.test.ts
       - name: Test explicit imported jobs and readiness with the matching compiler
         run: HACK_TEST_NATIVE_COMPILER_BINARY="$PWD/dist/hack-config-compiler" bun test tests/native-config-import-jobs.test.ts tests/native-config-import-readiness.test.ts
+      # The test shards run on macOS, where this test skips. Fail if it skips here too.
+      - name: Test the native Linux primary-checkout listing refusal
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bun test tests/project-env-local-inheritance.test.ts --test-name-pattern 'on Linux, a primary checkout' 2>&1 | tee "$RUNNER_TEMP/listing-refusal.log"
+          grep -Eq '^ *1 pass$' "$RUNNER_TEMP/listing-refusal.log"
       - name: Independently validate generated schema shape corpus
         run: |
           python3 -m venv "$RUNNER_TEMP/config-schema"
@@ -187,6 +194,16 @@ jobs:
         run: |
           mise exec zig -- ./scripts/build-hack-local.sh
           ./hack-local info --json
+      - name: Check release candidate carries no kill harness
+        # The all-features test step built the debug candidate with node-kill-harness,
+        # so its marker proves this grep can see the harness when it is compiled in.
+        run: |
+          marker=node-kill-harness-
+          LC_ALL=C grep -q -a "$marker" .hack-local/target/debug/hack-runtime-candidate
+          if LC_ALL=C grep -q -a "$marker" .hack-local/target/release/hack-runtime-candidate; then
+            echo "release hack-runtime-candidate contains the test-only kill harness" >&2
+            exit 1
+          fi
 
   secret-scan:
     runs-on: blacksmith-4vcpu-ubuntu-2404

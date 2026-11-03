@@ -9,6 +9,7 @@ import {
 import { createMonorepoFixture } from "../fixture.ts";
 import {
   buildCliEnv,
+  CLI_ENTRYPOINT,
   type CliResult,
   expect,
   expectExit,
@@ -32,6 +33,7 @@ const HELPER_NAME = "issuer-bridge";
 const UPSTREAM = "https://issuer.shared.test";
 const OTHER_UPSTREAM = "https://issuer.sibling.test";
 const WAIT_MS = 15_000;
+const SIGNAL_EXIT_BOUND_MS = 5000;
 
 type Identity = { readonly pid: number; readonly birth: string };
 type HelperMode = "identity" | "placeholder";
@@ -112,6 +114,7 @@ export const sharedHostHelpersScenario: Scenario = {
       readonly verb: "up" | "down";
       readonly branch: string;
       readonly upstream?: string;
+      readonly failCompose?: boolean;
     }): Promise<CliResult> =>
       ctx.cli({
         args: [
@@ -122,7 +125,11 @@ export const sharedHostHelpersScenario: Scenario = {
           opts.branch,
         ],
         cwd: fixture.root,
-        env: { PATH: path, E2E_ISSUER_UPSTREAM: opts.upstream ?? UPSTREAM },
+        env: {
+          PATH: path,
+          E2E_ISSUER_UPSTREAM: opts.upstream ?? UPSTREAM,
+          ...(opts.failCompose ? { E2E_DOCKER_FAIL_UP: "1" } : {}),
+        },
       });
 
     const readClaim = async () => {
@@ -232,6 +239,36 @@ export const sharedHostHelpersScenario: Scenario = {
       expect({
         that: !(await isRunning(shared)) && (await readClaim()) === null,
         message: "the last down must stop the owned helper and drop its claim",
+      });
+
+      ctx.log("a failed up releases only the holder it added");
+      expectExit({
+        result: await cli({ verb: "up", branch: branchB }),
+        codes: [0],
+        message: "branch B up before A's failed up",
+      });
+      const held = await ownedHelper();
+      const failedUp = await cli({
+        verb: "up",
+        branch: branchA,
+        failCompose: true,
+      });
+      expect({
+        that:
+          failedUp.exitCode !== 0 &&
+          (await isRunning(held)) &&
+          (await readClaim())?.holders.join(",") === holderB,
+        message: "a compose failure must roll back A's new holder, not B's",
+        result: failedUp,
+      });
+      expectExit({
+        result: await cli({ verb: "down", branch: branchB }),
+        codes: [0],
+        message: "branch B down after A's failed up",
+      });
+      expect({
+        that: !(await isRunning(held)) && (await readClaim()) === null,
+        message: "the last down after a failed up left the helper running",
       });
 
       ctx.log("child restart: a crashed owned helper is replaced");
@@ -380,9 +417,12 @@ export const sharedHostHelpersScenario: Scenario = {
       expect({
         that:
           term.exitCode === 143 &&
+          // Promptly: a start that ignored the signal would only clean up at
+          // its 30 s readiness deadline.
+          term.exitMs < SIGNAL_EXIT_BOUND_MS &&
           !(await isRunning(term.helper)) &&
           (await readClaim()) === null,
-        message: `SIGTERM during retry must stop the owned child and drop its claim (exit ${term.exitCode})`,
+        message: `SIGTERM during retry must promptly stop the owned child and drop its claim (exit ${term.exitCode} after ${term.exitMs} ms)`,
       });
 
       ctx.log("lost parent: the next starter stops the abandoned helper");
@@ -462,20 +502,29 @@ async function signalDuringRetry(opts: {
   readonly readClaim: () => Promise<ReturnType<
     typeof parseSharedHostClaim
   > | null>;
-}): Promise<{ readonly exitCode: number; readonly helper: Identity }> {
-  const proc = Bun.spawn(
-    resolveCliSpawnArgs(["up", "--detach", "--json", "--branch", opts.branch]),
-    {
-      cwd: opts.cwd,
-      env: buildCliEnv({
-        hackHome: opts.hackHome,
-        extra: { PATH: opts.path, E2E_ISSUER_UPSTREAM: UPSTREAM },
-      }),
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    }
-  );
+}): Promise<{
+  readonly exitCode: number;
+  readonly helper: Identity;
+  /** Time from the signal to the CLI's exit. */
+  readonly exitMs: number;
+}> {
+  // Signal the CLI process itself: a `bun` on PATH may be a wrapper that
+  // forwards or widens the signal (for example by stopping its whole process
+  // scope), which would hide whether Hack's own handler cleaned up.
+  const args = ["up", "--detach", "--json", "--branch", opts.branch];
+  const argv = process.env.HACK_E2E_CLI_BIN?.trim()
+    ? resolveCliSpawnArgs(args)
+    : [process.execPath, CLI_ENTRYPOINT, ...args];
+  const proc = Bun.spawn(argv, {
+    cwd: opts.cwd,
+    env: buildCliEnv({
+      hackHome: opts.hackHome,
+      extra: { PATH: opts.path, E2E_ISSUER_UPSTREAM: UPSTREAM },
+    }),
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
   let helper: Identity | null = null;
   const deadline = Date.now() + WAIT_MS;
   while (helper === null && Date.now() < deadline) {
@@ -492,8 +541,10 @@ async function signalDuringRetry(opts: {
   }
   // Let readiness retries begin after the gate opened.
   await Bun.sleep(500);
+  const signalledAt = Date.now();
   proc.kill(opts.signal);
-  return { exitCode: await proc.exited, helper };
+  const exitCode = await proc.exited;
+  return { exitCode, helper, exitMs: Date.now() - signalledAt };
 }
 
 function freePort(): number {

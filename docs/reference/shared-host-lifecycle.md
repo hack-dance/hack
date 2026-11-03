@@ -8,12 +8,14 @@ reuses and releases such a helper without killing a process it does not own.
 Source: [`src/lib/shared-host-lifecycle.ts`](../../src/lib/shared-host-lifecycle.ts).
 Fixtures: [`tests/shared-host-lifecycle.test.ts`](../../tests/shared-host-lifecycle.test.ts).
 
-Status: this is a library contract with portable process fixtures. No configuration
-key or CLI command uses it yet. Consumers (WU18 shared helpers, bounded external
-claims and opt-in tunnels) adopt it in their own changes. The existing
-`lifecycle.singleton` port check in [Lifecycle & startup](../lifecycle.md) is
-unchanged. It adopts any listener on the configured ports; this contract adopts
-only a listener that proves its identity.
+Status: projects use this contract through `lifecycle.sharedHelpers` in
+`hack.config.json` (see [Lifecycle & startup](../lifecycle.md#shared-helpers)):
+`hack up` and `hack restart` ensure each helper, and `hack down` releases it.
+Project wiring: [`src/lib/project-shared-helpers.ts`](../../src/lib/project-shared-helpers.ts).
+Other consumers (bounded external claims and opt-in tunnels) adopt it in their own
+changes. The existing `lifecycle.singleton` port check is unchanged. It adopts any
+listener on the configured ports; this contract adopts only a listener that proves
+its identity.
 
 ## States
 
@@ -132,7 +134,10 @@ checkout.
    Every attempt first confirms that the claimed process is still live
    (`child-exited` otherwise). Cancellation (an `AbortSignal`) interrupts the probe
    and the backoff sleep.
-7. On readiness, mark the claim `ready` and return `ready/owned`. On any failure of
+7. On readiness, mark the claim `ready` and return `ready/owned`. Every `ready`
+   result carries `holderAdded`: whether this call recorded the holder. It is
+   decided under the lock, so a caller that rolls back a failed operation releases
+   only the holder that operation added. On any failure of
    a freshly spawned child (`deadline`, `cancelled`, `child-exited`, foreign
    answer), stop its birth-verified process tree and remove its claim. If the stop
    cannot be confirmed, keep the claim so the process stays recorded.
@@ -267,6 +272,29 @@ pass is a receipt only once that hosted job has run it.
 | invalid claim / no census | Malformed, other-port, group-readable and oversized claims, and an unavailable census, fail closed; nothing is spawned or signalled; the claim is kept. |
 | release lock | A release while the lock is held times out with `lock-unavailable`; the claim and helper are unchanged. |
 | observer error | The observer's error is rethrown; the waiting gate exits and no claim remains. |
+| holder added | A repeat ensure by the same holder reports `holderAdded: false`; a new holder reports `true`. |
+
+### Project and CLI receipts
+
+`bun test tests/project-shared-helpers.test.ts` covers config parsing, the claim
+directory and holder, the helper environment and the start/release wiring with real
+fixture processes; it is registered in the same hosted Linux job.
+`bun tests/e2e/run.ts --only=shared-host-helpers` drives the
+same helper through the CLI on two branches of one project (`hack up`/`down
+--branch`, fake Docker, isolated `HACK_HOME`):
+
+| Phase | Asserted behavior |
+| --- | --- |
+| concurrent startup | Two `hack up --branch` runs in parallel: one owned helper, both holders recorded, the endpoint serves the upstream. |
+| sibling with another upstream | `E_LIFECYCLE_FAILED` with `wrong-upstream` and no upstream value; the shared helper and its holders are unchanged. |
+| first and last down | The first down retains the helper (still served); the last down stops it and removes the claim. |
+| failed up | A Compose failure on branch A rolls back A's new holder only; branch B's holder and the helper stay. |
+| child restart | A crashed owned helper is replaced under a fresh claim on the next up. |
+| stale PID | A claim naming a live bystander PID with another birth is discarded; the bystander survives. |
+| healthy shared helper | An identity-matching helper started elsewhere is adopted; down releases it and it keeps serving. |
+| foreign port | A silent TCP owner fails `foreign-listener`, survives and leaves no claim. |
+| shutdown during retry | SIGTERM to `hack up` while a never-ready helper is retried: the CLI exits 143 within 5 s, the owned child is stopped and the claim removed. |
+| lost parent | SIGKILL to `hack up` leaves the helper recorded; the next up stops it at its deadline and a later up starts fresh. |
 
 The pull request records the source mutations used as negative controls and which
 test each one fails. Each test above that guards a single check was confirmed to
@@ -287,7 +315,9 @@ fail when that check is removed.
   release would read the claim as stale and clear it without stopping the helper.
   A drift during a stop is handled: it gives `stop-unconfirmed`, never `stopped`.
   macOS records the start time directly and is not affected.
-- Wiring into `hack.config.json`, `hack up`/`down` or the daemon, and migrating
-  existing `lifecycle.singleton` configurations.
+- The daemon. It has no lifecycle surface today; shared helpers are started and
+  released only by the CLI's `up`, `restart` and `down`.
+- Migrating existing `lifecycle.singleton` configurations. `singleton` keeps its
+  port-only adoption; moving a helper to `sharedHelpers` is an opt-in config change.
 - Native (macOS VM) and container-runtime effects. These fixtures qualify the
   process and claim protocol only.

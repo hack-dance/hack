@@ -49,7 +49,7 @@ endpoint) and fails when it does not match.
 The [shared host helper lifecycle contract](./reference/shared-host-lifecycle.md) defines the
 identity-verified alternative: adoption only after the listener names the expected helper and upstream,
 exact PID-plus-start-time claims, serialized starters, and release that never signals a foreign
-process. It is a library contract today; `singleton` does not use it yet.
+process. Projects use it through [`lifecycle.sharedHelpers`](#shared-helpers); `singleton` is unchanged.
 
 ## Config
 
@@ -181,6 +181,62 @@ Long-running processes live under `lifecycle.processes` and are objects with:
 - `singleton` (optional): listener-ownership policy with `ports` and `onConflict`
 
 Processes receive the resolved env contract (see `env.md`) as their environment.
+
+### Shared helpers
+
+`lifecycle.sharedHelpers` declares host helpers that several branches (or projects) share
+through one fixed loopback port, under the
+[shared host helper contract](./reference/shared-host-lifecycle.md). Unlike `singleton`, a
+listener is adopted only after it proves its identity, and Hack stops a helper only when it
+started it and the last branch using it is released.
+
+```json
+{
+  "lifecycle": {
+    "sharedHelpers": [
+      {
+        "name": "issuer-bridge",
+        "command": ["bun", "run", "bridge"],
+        "cwd": "tools/issuer-bridge",
+        "port": 4100,
+        "upstreamEnv": "ISSUER_UPSTREAM",
+        "env": ["ISSUER_TOKEN"]
+      }
+    ]
+  }
+}
+```
+
+- `name` (required): helper kind. The helper must answer `GET http://127.0.0.1:<port><identityPath>`
+  with JSON `{"helper": "<name>", "upstream": "<upstream>"}` (an optional `pid` must be its own).
+- `command` (required): argv array, executed directly, never through a shell string.
+- `port` (required): the loopback port. `name` and `port` must be unique in the list.
+- `upstream` or `upstreamEnv` (exactly one): the upstream this instance needs, literally or
+  from a variable in the resolved lifecycle env (then the CLI environment). Use
+  `upstreamEnv` with an env overlay when branches need different upstreams.
+- `identityPath` (default `/__hack/identity`), `cwd` (repo-root relative),
+  `enabled` (default `true`), `readyTimeoutMs` (default 30000, at most 600000).
+- `env`: variable names passed to the helper. It also gets `PATH`; nothing else from the
+  CLI environment is inherited. A listed name that is not set fails `hack up`.
+
+An invalid entry is a config error (`hack up` and `hack down` refuse to run), not a skipped one.
+
+Behavior:
+- `hack up` and `hack restart` ensure each helper after `lifecycle.up.before` hooks and before
+  `lifecycle.processes`. Each instance (`<project>` or `<project>--<branch>`) is one holder.
+  A healthy helper is reused; an identity-matching helper someone else started is adopted;
+  otherwise Hack starts it and waits until its identity endpoint answers.
+- A port held by anything else (another helper, the wrong upstream, a silent listener) fails
+  `hack up` with `E_LIFECYCLE_FAILED` and a closed reason; that process is left running.
+  Messages never include upstreams, argv or environment values.
+- If `hack up` fails later, or receives SIGINT/SIGTERM, Hack releases only the holders that
+  run added and stops a helper it had just started.
+- `hack down` releases the instance's holder. A helper still used by another branch keeps
+  running; the last release stops a helper Hack started and never signals an adopted one.
+  A release that cannot confirm the stop keeps the claim and makes `hack down` report it.
+- Claims live under `~/.hack/shared-helpers/<name>-<port>/` (or `$HACK_HOME`), shared by
+  every project and branch that uses that helper name and port.
+- Helpers are not part of the lifecycle mux session and do not appear in `hack logs`.
 
 ## Visibility
 

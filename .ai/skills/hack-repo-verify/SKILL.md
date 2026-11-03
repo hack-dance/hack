@@ -41,6 +41,16 @@ For native setup use root `mise.toml`, the Bun pin in `package.json`, and
 proceeds with a warning for a deliberate experiment; such a result is not CI evidence.
 Raw `bun test <paths>` does not run the guard.
 
+The storage fence cost experiment is opt-in:
+`HACK_TEST_STORAGE_FENCE_COST=1 bun test tests/native-compose-storage-fence-cost.test.ts`.
+Its four integration cases launch thousands of real source-CLI subprocesses;
+host load can exhaust a storage proof or command budget before reaching the
+request-count assertion. The default suite reports those cases as skipped and
+still runs the small request-log quota regression. A default pass does not
+qualify the opt-in counts or their integrated safety counterexamples. Keep
+the exact counts and production capture/proof limits when running the experiment;
+report a timeout or refusal as inconclusive, never as a cost improvement.
+
 CI's "Config compiler" job also runs compiled-bundle CLI checks
 (`scripts/check-config-compiler-cli.ts`, `scripts/check-native-*-plan-cli.ts`,
 `scripts/check-native-config-import-cli.ts`) that `bun run test` does not. For

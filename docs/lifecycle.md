@@ -249,9 +249,12 @@ Behavior:
   - `hack down` marks the instance as stopping before Compose shutdown, and its release
     removes the instance's operation record. Both advance the instance's shutdown
     generation.
-  - A down supersedes every `hack up` of the instance that started before it, even after a
-    later `hack up` succeeds: that later up's helpers need not be the earlier up's (an entry
-    may have been disabled or changed), so the earlier up never counts as current again.
+  - A down supersedes every `hack up` of the instance whose lifecycle preparation began
+    before it, even after a later `hack up` succeeds. Preparation begins just before the
+    `lifecycle.up.before` hooks run, so a down that completes while those hooks run also
+    supersedes that up: it fails with `E_LIFECYCLE_FAILED` before starting any helper. The
+    later up's helpers need not be the earlier up's (an entry may have been disabled or
+    changed), so the earlier up never counts as current again.
   - **Prevented during preparation.** A `hack up` checks the instance right before its
     containers start (after detached image preparation, before an attached `up`, and at the
     end of native preparation). If a down marked or released it by then, that up fails with
@@ -271,8 +274,9 @@ Behavior:
     handling is unchanged (for example, it still clears the instance's runtime-state entry),
     so check `hack ps --branch <name>` after such an overlap.
   - This applies to projects with `sharedHelpers`. The decision uses the shared helper
-    instance lock; if that lock is unavailable for 10 s, the earlier up falls back to cleaning
-    up its lifecycle session as before.
+    instance lock. If that lock stays busy for 10 s (for example, a third up is still waiting
+    for a slow helper), the decision cannot be made: the earlier up keeps the lifecycle session
+    and its helper holders, warns, and leaves them for `hack down` to stop.
 - Claims live under `~/.hack/shared-helpers/<name>-<port>/` (or `$HACK_HOME`), shared by
   every project and branch that uses that helper name and port.
 - Helpers are not part of the lifecycle mux session and do not appear in `hack logs`.

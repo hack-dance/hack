@@ -3,6 +3,7 @@ import { afterEach, expect, test } from "bun:test";
 import {
   type LifecycleSharedHelpers,
   releaseAfterFailedProcessStart,
+  runGuardedSharedHelperStart,
   stopSessionBeforeReleasingHelpers,
   withSharedHelperCleanup,
 } from "../src/commands/project.ts";
@@ -10,7 +11,10 @@ import {
   LIFECYCLE_SESSION_RETAINED,
   LifecycleSessionRetainedError,
 } from "../src/lib/project-lifecycle-controller.ts";
-import type { ProcessCleanupOutcome } from "../src/lib/project-shared-helpers.ts";
+import {
+  type ProcessCleanupOutcome,
+  withTerminationAbort,
+} from "../src/lib/project-shared-helpers.ts";
 import { setLoggerBackendOverride } from "../src/ui/logger.ts";
 
 /**
@@ -153,4 +157,56 @@ test("down releases the helper holders once the session stop succeeded", async (
   expect(events).toEqual(["stop", "release"]);
   expect(outcome.sessionStopFailed).toBeNull();
   expect(outcome.notReleased).toEqual(["mail"]);
+});
+
+test("a signal during a startup whose session was retained never rolls the helpers back afterwards", async () => {
+  const events: string[] = [];
+  // Absorbs the SIGTERM withTerminationAbort re-raises once it settles.
+  const absorb = (): void => undefined;
+  process.on("SIGTERM", absorb);
+  let onSignalled: () => Promise<void> = () => Promise.resolve();
+  let signalled = false;
+  try {
+    const outcome = await withTerminationAbort(
+      () =>
+        runGuardedSharedHelperStart({
+          startHelpers: () =>
+            Promise.resolve({
+              configured: true,
+              rollback: () => {
+                events.push("rollback");
+                return Promise.resolve();
+              },
+              assertCurrent: () => Promise.resolve(),
+            }),
+          startProcesses: async () => {
+            // SIGTERM arrives (and is caught) while processes start; the
+            // start then fails and its session stop cannot be confirmed.
+            process.kill(process.pid, "SIGTERM");
+            await Bun.sleep(50);
+            throw new LifecycleSessionRetainedError(new Error("second failed"));
+          },
+          abortProcesses: () => Promise.resolve(),
+          sessionOwnership: undefined,
+          setSignalCleanup: (cleanup) => {
+            onSignalled = cleanup;
+          },
+        }),
+      {
+        onSignalled: () => {
+          signalled = true;
+          return onSignalled();
+        },
+      }
+    ).then(
+      () => "started",
+      (error: unknown) => error
+    );
+    expect(outcome).toBeInstanceOf(LifecycleSessionRetainedError);
+    expect(signalled).toBe(true);
+    await Bun.sleep(20);
+    expect(events).toEqual([]);
+  } finally {
+    process.off("SIGTERM", absorb);
+  }
 });

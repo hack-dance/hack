@@ -2115,7 +2115,7 @@ async function composeUpGuardedBySharedHelpers(opts: {
   }
 }
 
-type LifecycleProcessStart = {
+export type LifecycleProcessStart = {
   readonly cleanup: LifecycleOperationCleanup | null;
   readonly signalCleanup: { readonly dispose: () => void } | null;
   readonly assertSharedHelpersCurrent?: (opts?: {
@@ -2157,36 +2157,65 @@ async function startWithSharedHelpers(opts: {
   }
   let onSignalled: () => Promise<void> = () => Promise.resolve();
   return await withTerminationAbort(
-    async (signal) => {
-      let sharedHelpers: LifecycleSharedHelpers | null = null;
-      let started: LifecycleProcessStart;
-      try {
-        sharedHelpers = await startLifecycleSharedHelpers({ ...opts, signal });
-        onSignalled = sharedHelpers.rollback;
-        started = await opts.startProcesses();
-      } catch (error: unknown) {
-        await releaseAfterFailedProcessStart({
-          error,
-          abortProcesses: opts.abortProcesses,
-          rollbackHelpers: sharedHelpers ? sharedHelpers.rollback : null,
-        });
-        throw failed(error);
-      }
-      const combined = withSharedHelperCleanup({
-        ...started,
-        sharedHelpers,
+    (signal) =>
+      runGuardedSharedHelperStart({
+        startHelpers: () => startLifecycleSharedHelpers({ ...opts, signal }),
+        startProcesses: opts.startProcesses,
+        abortProcesses: opts.abortProcesses,
         sessionOwnership: opts.sessionOwnership,
-      });
-      onSignalled = async () => {
-        await combined.cleanup?.();
-      };
-      return {
-        ...combined,
-        assertSharedHelpersCurrent: sharedHelpers.assertCurrent,
-      };
-    },
+        setSignalCleanup: (cleanup) => {
+          onSignalled = cleanup;
+        },
+      }),
     { onSignalled: () => onSignalled() }
   );
+}
+
+/**
+ * The body of {@link startWithSharedHelpers}, run inside its termination
+ * guard. `setSignalCleanup` names what a caught signal must undo once this
+ * settles: the helper rollback while processes start, then the combined
+ * cleanup. A failed process start does its own cleanup here (keeping the
+ * helpers when the session was retained), so it leaves no signal cleanup
+ * behind that could release them a second time. Exported for tests.
+ */
+export async function runGuardedSharedHelperStart(opts: {
+  readonly startHelpers: () => Promise<LifecycleSharedHelpers>;
+  readonly startProcesses: () => Promise<LifecycleProcessStart>;
+  readonly abortProcesses: () => Promise<unknown>;
+  readonly sessionOwnership: SharedHelperSessionOwnership | undefined;
+  readonly setSignalCleanup: (cleanup: () => Promise<void>) => void;
+}): Promise<LifecycleProcessStart> {
+  let sharedHelpers: LifecycleSharedHelpers | null = null;
+  let started: LifecycleProcessStart;
+  try {
+    sharedHelpers = await opts.startHelpers();
+    opts.setSignalCleanup(sharedHelpers.rollback);
+    started = await opts.startProcesses();
+  } catch (error: unknown) {
+    // This catch owns the cleanup from here on, whatever it decides.
+    opts.setSignalCleanup(() => Promise.resolve());
+    await releaseAfterFailedProcessStart({
+      error,
+      abortProcesses: opts.abortProcesses,
+      rollbackHelpers: sharedHelpers ? sharedHelpers.rollback : null,
+    });
+    throw error instanceof Error
+      ? error
+      : new Error("Failed to start lifecycle processes");
+  }
+  const combined = withSharedHelperCleanup({
+    ...started,
+    sharedHelpers,
+    sessionOwnership: opts.sessionOwnership,
+  });
+  opts.setSignalCleanup(async () => {
+    await combined.cleanup?.();
+  });
+  return {
+    ...combined,
+    assertSharedHelpersCurrent: sharedHelpers.assertCurrent,
+  };
 }
 
 export type LifecycleSharedHelpers = {

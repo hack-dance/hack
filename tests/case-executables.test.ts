@@ -23,6 +23,8 @@ const PROBE = resolve(
   "../src/lib/native-compose-ownership.ts"
 );
 const owned: string[] = [];
+/** Deadline for one nested run; each outer case allows 60 s. */
+const CHILD_DEADLINE_MS = 50_000;
 
 afterEach(async () => {
   await Promise.all(
@@ -119,11 +121,33 @@ async function runLateBody(pinned: boolean): Promise<{
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [stdout, stderr] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
+  // The child is killed at its deadline and always reaped here, before
+  // afterEach removes the directory it runs in.
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGKILL");
+  }, CHILD_DEADLINE_MS);
+  let stdout: string;
+  let stderr: string;
+  try {
+    [stdout, stderr] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+  } finally {
+    clearTimeout(deadline);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+    await child.exited;
+  }
+  if (timedOut) {
+    throw new Error(
+      `nested bun test exceeded ${CHILD_DEADLINE_MS} ms and was killed:\n${stdout}\n${stderr}`
+    );
+  }
   const output = `${stdout}\n${stderr}`;
   const text = await readFile(out, "utf8").catch(() => {
     throw new Error(`late body wrote nothing:\n${output}`);
@@ -171,4 +195,41 @@ test("pins answer only inside their case context and refuse paths that are not a
   expect(() => withCaseExecutables({ "bin/docker": "/stub" }, () => 0)).toThrow(
     "bare executable names"
   );
+});
+
+test("a nested scope keeps the outer pins and overrides only its own names", async () => {
+  const seen = await withCaseExecutables(
+    { docker: "/outer/docker", git: "/outer/git" },
+    () =>
+      withCaseExecutables(
+        { git: "/inner/git", tar: "/inner/tar" },
+        async () => {
+          await Bun.sleep(1);
+          return [
+            Bun.which("docker", { PATH: "" }),
+            Bun.which("git", { PATH: "" }),
+            Bun.which("tar", { PATH: "" }),
+          ];
+        }
+      )
+  );
+  expect(seen).toEqual(["/outer/docker", "/inner/git", "/inner/tar"]);
+});
+
+test("String and byte names match a pin, and other names are refused inside a pinned scope", () => {
+  const stub = "/pinned/docker";
+  withCaseExecutables({ docker: stub }, () => {
+    // Bun 1.4.4 resolves these forms on PATH, so each must hit the pin.
+    // biome-ignore lint/style/useConsistentBuiltinInstantiation: the String object form is the case under test.
+    expect(Bun.which(new String("docker") as unknown as string)).toBe(stub);
+    expect(Bun.which(Buffer.from("docker") as unknown as string)).toBe(stub);
+    expect(
+      Bun.which(new TextEncoder().encode("docker") as unknown as string)
+    ).toBe(stub);
+    expect(() => Bun.which(42 as unknown as string)).toThrow(
+      "needs a string, String or byte name"
+    );
+  });
+  // Outside a pinned scope the real lookup answers, refusing nothing.
+  expect(Bun.which(42 as unknown as string)).toBeNull();
 });

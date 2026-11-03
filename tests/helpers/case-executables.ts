@@ -43,6 +43,27 @@ function state(): { pins: AsyncLocalStorage<Pins>; installed: boolean } {
   return value;
 }
 
+/**
+ * The name `Bun.which` looks up, as a string. Bun 1.4.4 also accepts a
+ * `String` object and a `Buffer`, so a pin must match those forms too, or a
+ * pinned case could still reach the host binary through them. Any other
+ * argument inside a pinned scope is refused rather than passed through.
+ */
+function lookupName(command: unknown): string {
+  if (typeof command === "string") {
+    return command;
+  }
+  if (command instanceof String) {
+    return command.valueOf();
+  }
+  if (ArrayBuffer.isView(command)) {
+    return new TextDecoder().decode(command);
+  }
+  throw new TypeError(
+    "Bun.which inside a pinned case needs a string, String or byte name."
+  );
+}
+
 /** Wraps `Bun.which` once per process so it answers the current case's pins. */
 export function installCaseExecutables(): void {
   const current = state();
@@ -55,7 +76,9 @@ export function installCaseExecutables(): void {
     this: unknown,
     ...args: Parameters<typeof Bun.which>
   ) {
-    const pinned = pins.getStore()?.get(args[0]);
+    const store = pins.getStore();
+    const pinned =
+      store === undefined ? undefined : store.get(lookupName(args[0]));
     return pinned ?? Reflect.apply(original, this, args);
   } as typeof Bun.which;
   current.installed = true;
@@ -65,13 +88,14 @@ export function installCaseExecutables(): void {
  * Runs `body` with `executables` (bare name to absolute path) pinned for
  * `Bun.which`. Call it at the start of the case body, with paths resolved
  * then. The pins stay with every async continuation of `body`, including one
- * that outlives the case, and with nothing else.
+ * that outlives the case, and with nothing else. A nested call keeps the
+ * outer pins and overrides only the names it gives.
  */
 export function withCaseExecutables<T>(
   executables: Readonly<Record<string, string>>,
   body: () => T
 ): T {
-  const pins = new Map<string, string>();
+  const pins = new Map<string, string>(state().pins.getStore());
   for (const [name, path] of Object.entries(executables)) {
     if (name.length === 0 || name.includes("/") || !isAbsolute(path)) {
       throw new Error(

@@ -1,11 +1,11 @@
 import type { ExecResult, RunOptions } from "../lib/shell.ts";
-import { exec, findExecutableInPath } from "../lib/shell.ts";
+import { findExecutableInPath } from "../lib/shell.ts";
 
 import {
-  MUX_COMMAND_TIMEOUT_MS,
   type MuxBackend,
   type MuxSession,
   type MuxSessionCreateResult,
+  runMuxCommand,
 } from "./mux-backend.ts";
 
 const LIFECYCLE_OWNER_TAB_PREFIX = "hack-lifecycle-owner-";
@@ -21,11 +21,10 @@ export function createZellijBackend(): MuxBackend {
       return [];
     }
 
-    const result = await exec(
+    const result = await runMuxCommand(
       ["zellij", "list-sessions", "--no-formatting", "--short"],
       {
         stdin: "ignore",
-        timeoutMs: MUX_COMMAND_TIMEOUT_MS,
       }
     );
     if (result.exitCode !== 0) {
@@ -61,11 +60,10 @@ export function createZellijBackend(): MuxBackend {
     }
 
     // Create a detached session in the background.
-    const result = await exec(
+    const result = await runMuxCommand(
       ["zellij", "attach", "--create-background", opts.name],
       {
         stdin: "ignore",
-        timeoutMs: MUX_COMMAND_TIMEOUT_MS,
         cwd: opts.cwd,
         env: opts.env,
       }
@@ -77,7 +75,7 @@ export function createZellijBackend(): MuxBackend {
     }
 
     if (opts.lifecycleOwnerToken) {
-      const ownerResult = await exec(
+      const ownerResult = await runMuxCommand(
         [
           "zellij",
           "--session",
@@ -88,13 +86,11 @@ export function createZellijBackend(): MuxBackend {
         ],
         {
           stdin: "ignore",
-          timeoutMs: MUX_COMMAND_TIMEOUT_MS,
         }
       );
       if (ownerResult.exitCode !== 0) {
-        await exec(["zellij", "kill-session", opts.name], {
+        await runMuxCommand(["zellij", "kill-session", opts.name], {
           stdin: "ignore",
-          timeoutMs: MUX_COMMAND_TIMEOUT_MS,
         });
         return {
           ok: false,
@@ -112,18 +108,17 @@ export function createZellijBackend(): MuxBackend {
   const killSession = async (opts: {
     readonly name: string;
   }): Promise<ExecResult> => {
-    return await exec(["zellij", "kill-session", opts.name], {
+    return await runMuxCommand(["zellij", "kill-session", opts.name], {
       stdin: "ignore",
-      timeoutMs: MUX_COMMAND_TIMEOUT_MS,
     });
   };
 
   const readLifecycleOwnerToken = async (opts: {
     readonly name: string;
   }): Promise<string | null> => {
-    const result = await exec(
+    const result = await runMuxCommand(
       ["zellij", "--session", opts.name, "action", "dump-layout"],
-      { stdin: "ignore", timeoutMs: MUX_COMMAND_TIMEOUT_MS }
+      {}
     );
     if (result.exitCode !== 0) {
       return null;
@@ -135,9 +130,9 @@ export function createZellijBackend(): MuxBackend {
   const listSessionWindowNames = async (opts: {
     readonly name: string;
   }): Promise<ReadonlySet<string> | null> => {
-    const result = await exec(
+    const result = await runMuxCommand(
       ["zellij", "--session", opts.name, "action", "dump-layout"],
-      { stdin: "ignore", timeoutMs: MUX_COMMAND_TIMEOUT_MS }
+      {}
     );
     if (result.exitCode !== 0) {
       return null;
@@ -154,7 +149,7 @@ export function createZellijBackend(): MuxBackend {
     readonly command: string;
     readonly env?: Readonly<Record<string, string>>;
   }): Promise<ExecResult> => {
-    return await exec(
+    return await runMuxCommand(
       [
         "zellij",
         "--session",
@@ -167,7 +162,6 @@ export function createZellijBackend(): MuxBackend {
       ],
       {
         stdin: "ignore",
-        timeoutMs: MUX_COMMAND_TIMEOUT_MS,
         env: { ...(opts.env ?? {}) },
       }
     );
@@ -178,9 +172,9 @@ export function createZellijBackend(): MuxBackend {
     readonly keys: string;
   }): Promise<ExecResult> => {
     // Best-effort. This sends raw characters and does not attempt to encode special key chords.
-    return await exec(
+    return await runMuxCommand(
       ["zellij", "--session", opts.name, "action", "write-chars", opts.keys],
-      { stdin: "ignore", timeoutMs: MUX_COMMAND_TIMEOUT_MS }
+      {}
     );
   };
 

@@ -9,14 +9,14 @@ import {
 import {
   createLifecycleProcessController,
   LifecycleSessionDisplacedError,
-  MuxCommandDeadlineError,
   stopLifecycleProcessController,
 } from "../src/lib/project-lifecycle-controller.ts";
 import { createSharedHelperSessionOwnership } from "../src/lib/project-shared-helpers.ts";
-import type {
-  MuxBackend,
-  MuxSession,
-  MuxSessionCreateResult,
+import {
+  type MuxBackend,
+  MuxCommandTimeoutError,
+  type MuxSession,
+  type MuxSessionCreateResult,
 } from "../src/mux/mux-backend.ts";
 import { setLoggerBackendOverride } from "../src/ui/logger.ts";
 
@@ -45,70 +45,98 @@ const SESSION = "demo--lifecycle-branch-a";
 type FakeMux = MuxBackend & {
   readonly sessions: Map<string, string>;
   failKill: boolean;
-  /** createSession never settles until completeHungCreate() is called. */
-  hangCreate: boolean;
-  /** readLifecycleOwnerToken never settles (outcome unknown). */
-  hangToken: boolean;
-  completeHungCreate: () => void;
+  /**
+   * createSession times out (the backend kills the client and throws)
+   * after the session was created server-side, or without creating it.
+   */
+  timeoutCreate: "created" | "not-created" | null;
+  /** readLifecycleOwnerToken times out. */
+  timeoutToken: boolean;
+  /** listSessions times out. */
+  timeoutList: boolean;
+  /** The next N token reads stall, then return the value read at call time. */
+  stalledTokenReads: number;
+  readonly killed: string[];
+  /** Mux calls still running: a bounded call must settle before return. */
+  inFlight: number;
 };
 
-function fakeMux(): FakeMux {
+const TIMEOUT_DELAY_MS = 50;
+
+function fakeMux(backendName: "zellij" | "tmux" = "zellij"): FakeMux {
   const sessions = new Map<string, string>();
   const session = (name: string): MuxSession => ({
-    backend: "zellij",
+    backend: backendName,
     name,
     attached: false,
     path: null,
     windows: 1,
     createdAt: null,
   });
-  let pendingCreate: (() => void) | null = null;
-  const hungCalls: Promise<unknown>[] = [];
+  const track = async <T>(work: () => Promise<T>): Promise<T> => {
+    fake.inFlight += 1;
+    try {
+      return await work();
+    } finally {
+      fake.inFlight -= 1;
+    }
+  };
   const fake: FakeMux = {
-    name: "zellij",
+    name: backendName,
     available: true,
     sessions,
     failKill: false,
-    hangCreate: false,
-    hangToken: false,
-    completeHungCreate: () => pendingCreate?.(),
+    timeoutCreate: null,
+    timeoutToken: false,
+    timeoutList: false,
+    stalledTokenReads: 0,
+    killed: [],
+    inFlight: 0,
     listSessions: () =>
-      Promise.resolve([...sessions.keys()].map((name) => session(name))),
-    createSession: (opts): Promise<MuxSessionCreateResult> => {
-      if (fake.hangCreate) {
-        // A hung tmux/zellij: the session appears only if the command
-        // eventually completes, after the caller stopped waiting.
-        const hung = new Promise<MuxSessionCreateResult>((resolveCreate) => {
-          pendingCreate = () => {
+      track(async () => {
+        if (fake.timeoutList) {
+          await Bun.sleep(TIMEOUT_DELAY_MS);
+          throw new MuxCommandTimeoutError(["zellij", "list-sessions"]);
+        }
+        return [...sessions.keys()].map((name) => session(name));
+      }),
+    createSession: (opts): Promise<MuxSessionCreateResult> =>
+      track(async () => {
+        if (fake.timeoutCreate) {
+          if (fake.timeoutCreate === "created") {
             sessions.set(opts.name, opts.lifecycleOwnerToken ?? "");
-            resolveCreate({ ok: true, session: session(opts.name) });
-          };
-        });
-        // Keep the hung call reachable, like a real stuck subprocess.
-        hungCalls.push(hung);
-        return hung;
-      }
-      if (sessions.has(opts.name)) {
-        return Promise.resolve({ ok: false, error: "session exists" });
-      }
-      sessions.set(opts.name, opts.lifecycleOwnerToken ?? "");
-      return Promise.resolve({ ok: true, session: session(opts.name) });
-    },
-    killSession: (opts) => {
-      if (fake.failKill) {
-        return Promise.resolve({ exitCode: 1, stdout: "", stderr: "busy" });
-      }
-      sessions.delete(opts.name);
-      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
-    },
+          }
+          await Bun.sleep(TIMEOUT_DELAY_MS);
+          throw new MuxCommandTimeoutError(["zellij", "attach"]);
+        }
+        if (sessions.has(opts.name)) {
+          return { ok: false, error: "session exists" };
+        }
+        sessions.set(opts.name, opts.lifecycleOwnerToken ?? "");
+        return { ok: true, session: session(opts.name) };
+      }),
+    killSession: (opts) =>
+      track(() => {
+        if (fake.failKill) {
+          return Promise.resolve({ exitCode: 1, stdout: "", stderr: "busy" });
+        }
+        fake.killed.push(sessions.get(opts.name) ?? "");
+        sessions.delete(opts.name);
+        return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+      }),
     readLifecycleOwnerToken: (opts) =>
-      fake.hangToken
-        ? (() => {
-            const hung = new Promise<string | null>(() => undefined);
-            hungCalls.push(hung);
-            return hung;
-          })()
-        : Promise.resolve(sessions.get(opts.name) ?? null),
+      track(async () => {
+        if (fake.timeoutToken) {
+          await Bun.sleep(TIMEOUT_DELAY_MS);
+          throw new MuxCommandTimeoutError(["zellij", "show"]);
+        }
+        const value = sessions.get(opts.name) ?? null;
+        if (fake.stalledTokenReads > 0) {
+          fake.stalledTokenReads -= 1;
+          await Bun.sleep(300);
+        }
+        return value;
+      }),
     readSessionPresence: (opts) =>
       Promise.resolve(sessions.has(opts.name) ? "present" : "absent"),
     listSessionWindowNames: () => Promise.resolve(new Set(["helper-client"])),
@@ -119,20 +147,26 @@ function fakeMux(): FakeMux {
   return fake;
 }
 
-async function fixture() {
+async function fixture(backendName: "zellij" | "tmux" = "zellij") {
   const root = await mkdtemp(join(tmpdir(), "hack-lifecycle-ownership-"));
   roots.push(root);
   const projectDir = join(root, ".hack");
   await mkdir(projectDir, { recursive: true });
-  const mux = fakeMux();
+  const mux = fakeMux(backendName);
   // A stand-in zellij for process starts (`zellij --session ... run`).
   const bin = join(root, "bin");
   await mkdir(bin, { recursive: true });
   await writeFile(join(bin, "zellij"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  // A stand-in tmux whose set-environment hangs (a stuck tmux server).
+  await writeFile(
+    join(bin, "tmux"),
+    '#!/bin/sh\ncase "$1" in set-environment) sleep 30 ;; esac\nexit 0\n',
+    { mode: 0o755 }
+  );
   const resolvedMux = () =>
     Promise.resolve({
-      mode: "zellij" as const,
-      backends: new Map([["zellij" as const, mux as MuxBackend]]),
+      mode: backendName,
+      backends: new Map([[backendName, mux as MuxBackend]]),
     });
   const ownership = createSharedHelperSessionOwnership({
     composeProject: COMPOSE_PROJECT,
@@ -192,6 +226,7 @@ async function fixture() {
     });
   return {
     root,
+    bin,
     projectDir,
     mux,
     ownership,
@@ -358,24 +393,19 @@ test("a start displaced after creating its session, before finalizing, leaves th
   expect(await entries()).toEqual([]);
 });
 
-test("a hung session creation releases the instance lock within its bound and stays reclaimable", async () => {
+test("a timed-out session creation settles before the lock is released and its outcome stays reclaimable", async () => {
   const { mux, controller, entries, stop, newOwnership } = await fixture();
-  mux.hangCreate = true;
-  mux.hangToken = true;
-  const a = controller({
-    sessionOwnership: newOwnership(),
-    muxCommandTimeoutMs: 200,
-  });
-  // Self-bounded: without the deadline the creation would never settle.
-  const outcome = await Promise.race([
-    a.startMany({ processes: [PROCESS] }).then(
-      () => "started",
-      (error: unknown) => error
-    ),
-    Bun.sleep(5000).then(() => "creation did not settle"),
-  ]);
-  expect(outcome).toBeInstanceOf(MuxCommandDeadlineError);
-  // The lock is free again: another start can take it at once.
+  // The backend killed the timed-out client after the server created the
+  // session; the follow-up token read times out too (outcome unknown).
+  mux.timeoutCreate = "created";
+  mux.timeoutToken = true;
+  const a = controller({ sessionOwnership: newOwnership() });
+  await expect(a.startMany({ processes: [PROCESS] })).rejects.toBeInstanceOf(
+    MuxCommandTimeoutError
+  );
+  // Nothing of A's is still running: no completion can arrive after another
+  // command takes the lock.
+  expect(mux.inFlight).toBe(0);
   const free = newOwnership();
   await expect(
     Promise.race([
@@ -383,48 +413,137 @@ test("a hung session creation releases the instance lock within its bound and st
       Bun.sleep(2000).then(() => "still-held"),
     ])
   ).resolves.toBe("acquired");
-  // The outcome is unknown, so the pending entry and token are kept.
+  // Unknown outcome: the pending entry and token are kept, matching the live
+  // session, so hack down reclaims it.
   const kept = await entries();
   expect(kept).toHaveLength(1);
-  expect(a.getOperationCleanup()).not.toBeNull();
-  // The hung command completes later: the session carries the kept token,
-  // so hack down can still reclaim it.
-  mux.completeHungCreate();
-  mux.hangToken = false;
   expect(mux.sessions.get(SESSION)).toBe(kept[0]?.ownershipToken);
+  expect(a.getOperationCleanup()).not.toBeNull();
+  mux.timeoutToken = false;
   await stop();
   expect(mux.sessions.has(SESSION)).toBe(false);
   expect(await entries()).toEqual([]);
 });
 
-test("a timed-out creation keeps its ownership record until the creation settles, even while the session looks absent", async () => {
+test("after a timed-out creation that created nothing, a later down and up see no late session", async () => {
   const { mux, controller, entries, stop, newOwnership } = await fixture();
-  // Token reads and presence stay responsive: the session simply is not
-  // there yet when the deadline passes.
-  mux.hangCreate = true;
-  const a = controller({
-    sessionOwnership: newOwnership(),
-    muxCommandTimeoutMs: 200,
-  });
-  const outcome = await Promise.race([
-    a.startMany({ processes: [PROCESS] }).then(
-      () => "started",
-      (error: unknown) => error
-    ),
-    Bun.sleep(5000).then(() => "creation did not settle"),
+  mux.timeoutCreate = "not-created";
+  const a = controller({ sessionOwnership: newOwnership() });
+  await expect(a.startMany({ processes: [PROCESS] })).rejects.toBeInstanceOf(
+    MuxCommandTimeoutError
+  );
+  expect(mux.inFlight).toBe(0);
+  // Settled and proven absent: the pending entry is retired.
+  expect(await entries()).toEqual([]);
+  mux.timeoutCreate = null;
+  // A down, then another up, find a consistent instance; no late creation
+  // of A's can appear underneath them.
+  await stop();
+  const b = controller({ sessionOwnership: newOwnership() });
+  await b.startMany({ processes: [PROCESS] });
+  await b.finalize();
+  const tokenB = mux.sessions.get(SESSION);
+  expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([
+    tokenB,
   ]);
-  expect(outcome).toBeInstanceOf(MuxCommandDeadlineError);
-  expect(mux.sessions.has(SESSION)).toBe(false);
-  const kept = await entries();
-  expect(kept).toHaveLength(1);
-  // The caller's abort must not drop it either while creation is pending.
   await a.abort();
-  expect(await entries()).toEqual(kept);
-  // The late creation completes with the kept token: still reclaimable.
-  mux.completeHungCreate();
-  await Bun.sleep(10);
-  expect(mux.sessions.get(SESSION)).toBe(kept[0]?.ownershipToken);
+  expect(mux.sessions.get(SESSION)).toBe(tokenB);
+  await stop();
+  expect(mux.sessions.has(SESSION)).toBe(false);
+});
+
+test("a stalled replacement holds the lock until it settles, so an overlapping up never loses its session to it", async () => {
+  const { projectDir, mux, controller, entries, stop, newOwnership } =
+    await fixture();
+  // A stale pending session from a crashed start.
+  mux.sessions.set(SESSION, "token-x");
+  await upsertLifecycleStateEntry({
+    projectDir,
+    entry: {
+      composeProject: COMPOSE_PROJECT,
+      projectName: "demo",
+      branch: "branch-a",
+      sessionName: SESSION,
+      backend: "zellij",
+      ownershipToken: "token-x",
+      definitionHash: "sha256:test",
+      processes: [],
+      updatedAt: new Date().toISOString(),
+    },
+  });
+  // A's replacement stalls in its ownership-token read (it returns the token
+  // it read when the call started); B starts meanwhile.
+  mux.stalledTokenReads = 1;
+  const a = controller({ sessionOwnership: newOwnership() });
+  const b = controller({ sessionOwnership: newOwnership() });
+  const aRun = a.startMany({ processes: [PROCESS] }).then(() => a.finalize());
+  await Bun.sleep(50);
+  const bRun = b.startMany({ processes: [PROCESS] }).then(() => b.finalize());
+  await Promise.allSettled([aRun, bRun]);
+  expect(mux.inFlight).toBe(0);
+  // Whichever start finished last owns a live session with a matching
+  // entry; no stale continuation killed it or removed its entry.
+  const live = mux.sessions.get(SESSION);
+  expect(live).toBeDefined();
+  expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([
+    live,
+  ]);
+  expect(mux.killed.filter((token) => token !== "token-x")).not.toContain(live);
   await stop();
   expect(mux.sessions.has(SESSION)).toBe(false);
   expect(await entries()).toEqual([]);
+});
+
+test("a timed-out session listing is unknown, never absence: up and down leave a healthy owned session alone", async () => {
+  const { mux, controller, entries, stop, newOwnership } = await fixture();
+  const owner = controller({ sessionOwnership: newOwnership() });
+  await owner.startMany({ processes: [PROCESS] });
+  await owner.finalize();
+  const token = mux.sessions.get(SESSION);
+  const before = await entries();
+  mux.timeoutList = true;
+  const other = controller({ sessionOwnership: newOwnership() });
+  await expect(
+    other.startMany({ processes: [PROCESS] })
+  ).rejects.toBeInstanceOf(MuxCommandTimeoutError);
+  await expect(stop()).rejects.toBeInstanceOf(MuxCommandTimeoutError);
+  expect(mux.sessions.get(SESSION)).toBe(token);
+  expect(await entries()).toEqual(before);
+  mux.timeoutList = false;
+  await stop();
+  expect(mux.sessions.has(SESSION)).toBe(false);
+});
+
+test("SIGTERM during tmux environment setup settles within the mux bound", async () => {
+  const { bin, mux, controller, entries } = await fixture("tmux");
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${bin}:${originalPath ?? ""}`;
+  try {
+    const a = controller({
+      sessionOwnership: undefined,
+      muxCommandTimeoutMs: 300,
+    });
+    const start = a.startMany({ processes: [PROCESS] }).then(
+      () => "started",
+      (error: unknown) => error
+    );
+    // Wait until the session exists and set-environment is hanging.
+    while (!mux.sessions.has(SESSION)) {
+      await Bun.sleep(10);
+    }
+    const cleanup = a.getOperationCleanup();
+    expect(cleanup).not.toBeNull();
+    // The signal cleanup waits for session creation to settle; it must not
+    // wait on the stuck tmux command forever.
+    const settled = await Promise.race([
+      (cleanup?.() ?? Promise.resolve()).then(() => "settled"),
+      Bun.sleep(5000).then(() => "still waiting"),
+    ]);
+    expect(settled).toBe("settled");
+    expect(await start).toBeInstanceOf(MuxCommandTimeoutError);
+    expect(mux.sessions.has(SESSION)).toBe(false);
+    expect(await entries()).toEqual([]);
+  } finally {
+    process.env.PATH = originalPath;
+  }
 });

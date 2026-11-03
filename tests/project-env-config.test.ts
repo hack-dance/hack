@@ -1675,7 +1675,7 @@ test("contract migration in a linked worktree keeps plaintext in that worktree's
   expect(resolved?.serviceEnv.web?.LOCAL_FIXTURE).toBeUndefined();
 });
 
-test("contract migration refuses aliases with the compatibility local base before writes", async () => {
+test("a contract migration with a compatibility local base already uses env layers, so an aliasing overlay writes nothing", async () => {
   const repo = await createRepo();
   const legacyLocal = "version: 1\nenvironment: local\nvalues:\n  global: {}\n";
   await writeFile(resolve(repo.projectDir, "hack.env.local.yaml"), legacyLocal);
@@ -1691,15 +1691,16 @@ test("contract migration refuses aliases with the compatibility local base befor
   const overlay = "LOCAL_FIXTURE=synthetic-overlay\n";
   await writeFile(resolve(repo.projectDir, ".env"), base);
   await writeFile(resolve(repo.projectDir, ".env.default.local"), overlay);
-  await expect(
-    migrateLegacyProjectEnv({
-      projectRoot: repo.projectRoot,
-      projectDir: repo.projectDir,
-      projectName: "project-env-test",
-      serviceNames: ["api", "web"],
-      materialize: false,
-    })
-  ).rejects.toThrow("env layer destination paths collide");
+  const migrated = await migrateLegacyProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    projectName: "project-env-test",
+    serviceNames: ["api", "web"],
+    materialize: false,
+  });
+  expect(migrated.legacyDetected).toBe(false);
+  expect(migrated.wroteFiles).toEqual([]);
+  expect(migrated.cleanupCandidates).toEqual([]);
   expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toBe(base);
   expect(
     await readFile(resolve(repo.projectDir, ".env.default.local"), "utf8")

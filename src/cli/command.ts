@@ -467,6 +467,23 @@ function scanOption(opts: {
   );
 }
 
+/**
+ * True when `token` is an option that reads `nextToken` as its value while
+ * `command` is resolved so far, exactly as the parser's first pass reads it.
+ */
+export function optionReadsNextToken(opts: {
+  readonly cli: CliSpec;
+  readonly command: AnyCommandSpec | null;
+  readonly token: string;
+  readonly nextToken: string | undefined;
+}): boolean {
+  return consumesNextToken({
+    opt: scanOption(opts),
+    token: opts.token,
+    nextToken: opts.nextToken,
+  });
+}
+
 /** True when an option token takes the following token as its value. */
 function consumesNextToken(opts: {
   readonly opt: OptionSpec | undefined;
@@ -759,11 +776,11 @@ export function parsePositionalsForCommand<
     const single = posSpecs.at(-1);
     if (single?.passthrough === true && single.multiple !== true) {
       // A single-valued child command (such as `session exec`'s <command>)
-      // takes the whole command line as one quoted argument.
-      const extra = remaining.slice(idx).join(" ");
-      const whole = [out[single.name], ...remaining.slice(idx)].join(" ");
+      // takes the whole command line as one quoted argument. The hint uses a
+      // fixed example: the user's argv may carry a pasted value or secret.
+      const extra = remaining.length - idx;
       throw new CliUsageError(
-        `Unexpected arguments: ${extra}. <${single.name}> is one argument; quote the whole command, as in ${JSON.stringify(whole)}.`
+        `Unexpected arguments: ${extra} more than this command accepts. <${single.name}> is one argument; quote the whole command, as in "npm run test". The arguments are not shown because they may contain values.`
       );
     }
     // Count only: an extra argument is often a pasted `KEY=value` or secret.

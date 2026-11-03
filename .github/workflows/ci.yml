@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
@@ -58,6 +58,13 @@ jobs:
         run: bun test tests/native-compose-file-sources.test.ts tests/native-compose-file-owner.test.ts
       - name: Test explicit imported jobs and readiness with the matching compiler
         run: HACK_TEST_NATIVE_COMPILER_BINARY="$PWD/dist/hack-config-compiler" bun test tests/native-config-import-jobs.test.ts tests/native-config-import-readiness.test.ts
+      # The test shards run on macOS, where this test skips. Fail if it skips here too.
+      - name: Test the native Linux primary-checkout listing refusal
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bun test tests/project-env-local-inheritance.test.ts --test-name-pattern 'on Linux, a primary checkout' 2>&1 | tee "$RUNNER_TEMP/listing-refusal.log"
+          grep -Eq '^ *1 pass$' "$RUNNER_TEMP/listing-refusal.log"
       - name: Independently validate generated schema shape corpus
         run: |
           python3 -m venv "$RUNNER_TEMP/config-schema"
@@ -104,7 +111,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -187,6 +194,16 @@ jobs:
         run: |
           mise exec zig -- ./scripts/build-hack-local.sh
           ./hack-local info --json
+      - name: Check release candidate carries no kill harness
+        # The all-features test step built the debug candidate with node-kill-harness,
+        # so its marker proves this grep can see the harness when it is compiled in.
+        run: |
+          marker=node-kill-harness-
+          LC_ALL=C grep -q -a "$marker" .hack-local/target/debug/hack-runtime-candidate
+          if LC_ALL=C grep -q -a "$marker" .hack-local/target/release/hack-runtime-candidate; then
+            echo "release hack-runtime-candidate contains the test-only kill harness" >&2
+            exit 1
+          fi
 
   secret-scan:
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -195,7 +212,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
         with:
           fetch-depth: 0
       - name: Install Gitleaks
@@ -222,11 +239,11 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v1
       - name: Install dependencies
@@ -269,11 +286,11 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install --yes tmux
       - name: Install dependencies
@@ -284,7 +301,10 @@ jobs:
         run: |
           docker pull alpine:3.20
           docker pull alpine:3.22
-          docker pull node:24.11.0-bookworm-slim
+          docker pull node:24.22.1-bookworm-slim
+          docker pull oven/bun:1.4.4-slim
+          # The qualified native file and storage helper artifact stays on this image
+          # until its catalog pins are requalified (src/lib/native-compose-vm-file-protocol.ts).
           docker pull oven/bun:1.4.2-slim
           docker pull postgres:17.6-alpine
           docker pull lucaslorentz/caddy-docker-proxy:2.10.0-alpine
@@ -382,7 +402,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Install dependencies
         run: bun install --frozen-lockfile
       # The one-off checks and builds run once, on shard 1.
@@ -445,11 +465,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Require native regression tools
         run: |
           command -v python3

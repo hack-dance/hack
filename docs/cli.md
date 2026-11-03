@@ -21,7 +21,7 @@ terminal).
 - `hack exec <service> -- <cmd...>` — command in an already-running service container
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
-- `hack daemon` — optional local daemon for faster JSON status/ps
+- `hack daemon` — optional local daemon for faster JSON project status
 - `hack agent onboard` — agent-assisted onboarding for existing projects
 - `hack setup` — install/refresh agent integrations (Cursor rules, Claude hooks, Codex skill, MCP)
 
@@ -485,8 +485,10 @@ Linked worktrees read eligible primary-checkout local env overrides and managed
 extra-host aliases at command time. Later primary changes are visible without
 copying files. Tracked project config, generated overrides, runtime state and other
 ignored files stay checkout-local. Set `worktree.inherit_local` to `false` in the
-worktree's `hack.config.json` to disable inheritance. Slim/Codex execution mode and
-CI (`CI=1` or `CI=true`) disable this inheritance automatically.
+worktree's `hack.config.json` to disable inheritance. `HACK_WORKTREE_INHERIT_LOCAL=0`
+does the same for the Compose path; the experimental graph runner follows the config
+setting only. Slim/Codex execution mode and CI (`CI=1` or `CI=true`) disable this
+inheritance automatically.
 
 For Compose aliases, explicit local `internal.extra_hosts` takes precedence over
 inherited dynamic aliases, and local dynamic aliases take precedence over both.
@@ -500,6 +502,19 @@ Missing primary configuration is optional. Invalid inherited alias data or
 redirected inherited files fail explicitly instead of silently changing routing.
 These commands manage the Compose path; the experimental graph runner's direct
 Compose-input handling is a separate qualification boundary.
+
+### Branch registry and usage
+
+Runtime commands never write tracked files. `hack up/down/restart/run/exec` record when a
+branch instance was last used in machine-local `.hack/.internal/branch-usage.json` (ignored by the
+committed `.hack/.gitignore`, one per checkout), so `git status` stays clean in a linked worktree.
+
+`.hack/hack.branches.json` is the optional, committed branch registry. Only `hack branch add` and
+`hack branch remove` create or change it, and they record identity (`name`, `slug`, `note`,
+`created_at`) but no usage timestamp. Existing registries that already carry `last_used_at` are left
+as they are: runtime commands stop rewriting them, and `hack branch list` and `hack projects`
+show the machine-local time when this checkout has one, falling back to the committed value. You
+can delete the old `last_used_at` fields by hand at any time.
 
 ### Disposable cache volumes
 
@@ -684,7 +699,8 @@ files ever leak into git, `hack doctor --fix` untracks them (the files stay on d
 `.branch/compose.<branch>.runtime.override.yml` for branch instances. See [Architecture](architecture.md)
 for the full file map.
 
-The global config root defaults to `~/.hack`; override it with `HACK_HOME`.
+The global config root defaults to `~/.hack`; override it with `HACK_HOME` (an absolute path;
+a relative value is refused). An empty or relative `HOME` falls back to the OS home directory.
 
 ## Lifecycle
 

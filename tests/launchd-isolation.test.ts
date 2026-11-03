@@ -26,6 +26,7 @@ import {
 import {
   LAUNCHD_ALLOW_ISOLATED_ENV,
   LAUNCHD_DISABLE_ENV,
+  renderLaunchdPlist,
   resolveLaunchdAccess,
 } from "../src/daemon/launchd.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -315,6 +316,35 @@ test("positive control: the default hack home reaches the stub launchctl and rew
   expect(await plistSnapshot(fixture)).not.toEqual(before);
 });
 
+test("repairs legacy output paths even when the installed program is still current", async () => {
+  const fixture = await makeFixture();
+  const plist = renderLaunchdPlist({
+    hackBinPath: join(fixture.root, "tools", "hack"),
+    home: fixture.home,
+    runAtLoad: false,
+    guiSessionOnly: false,
+  });
+  await writeFile(
+    fixture.plistPath,
+    plist.replaceAll("/dev/null", "/tmp/hackd.stderr.log")
+  );
+  const run = await runAsDarwin({
+    argv: [DRIVER, "repair-output"],
+    cwd: fixture.root,
+    env: fixture.env({ HACK_HOME: join(fixture.home, ".hack") }),
+  });
+  expect(run.code).toBe(0);
+  expect(JSON.parse(run.stdout)).toEqual({
+    repair: "repaired",
+    secondRepair: "ok",
+  });
+  expect(await readFile(fixture.plistPath, "utf8")).toBe(plist);
+  const verbs = (await launchctlCalls(fixture)).map(
+    (line) => line.split(" ")[0]
+  );
+  expect(verbs).toEqual(["bootout", "bootstrap"]);
+});
+
 const CLI_CASES = [
   { label: "daemon install", args: ["daemon", "install"], refuses: true },
   { label: "daemon uninstall", args: ["daemon", "uninstall"], refuses: true },
@@ -564,3 +594,11 @@ for (const autostartCase of AUTOSTART_CASES) {
     ).toBe(started);
   });
 }
+
+test("a relative HOME cannot make a cwd-relative HACK_HOME look like the owner", () => {
+  expect(
+    resolveLaunchdAccess({
+      env: { HOME: "relative-home", HACK_HOME: "relative-home/.hack" },
+    }).allowed
+  ).toBe(false);
+});

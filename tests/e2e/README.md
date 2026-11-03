@@ -136,7 +136,7 @@ define those two spellings.
 
 The explicitly selected `native-config-vm-files` scenario exercises ordinary new
 containers with protected VM-native material; it does not adopt existing binds.
-It uses only cached `oven/bun:1.4.2-slim`, two linked worktrees, no published ports
+It uses only the cached helper image `oven/bun:1.4.2-slim`, two linked worktrees, no published ports
 and no image build or pull. Application-side checks independently require exact
 0400/default-root and 0600/explicit-numeric owner identity, actual owner reads,
 distinct-UID `EACCES`, privileged write-open `EROFS`, exact single-file mounts and
@@ -171,7 +171,7 @@ records compiled-CLI volume readback and cleanup against an isolated engine.
 The `dependency-cache`, `dependency-cache-protocol`, and
 `dependency-cache-package` Docker scenarios use standalone, network-disabled
 containers and exact ownership labels for cleanup. Prepare `alpine:3.20`,
-`alpine:3.22`, and `node:24.11.0-bookworm-slim` locally first; CI pulls these before
+`alpine:3.22`, and `node:24.22.1-bookworm-slim` locally first; CI pulls these before
 the scenarios. Tests resolve installed repository digests and refuse missing
 prerequisites rather than downloading during qualification. The package scenario
 packs a local npm package and installs its real lockfile offline; it does not test
@@ -189,7 +189,7 @@ platform identity, not cross-architecture package compatibility.
 
 `portable-multiservice` exercises a Bun HTTP app and PostgreSQL through the selected
 Hack CLI in slim mode. It needs Docker with Compose and locally cached
-`oven/bun:1.4.2-slim` and `postgres:17.6-alpine`; image tags are resolved to immutable
+`oven/bun:1.4.4-slim` and `postgres:17.6-alpine`; image tags are resolved to immutable
 IDs before startup, and the scenario never pulls. Missing prerequisites fail.
 It uses a private internal Compose network, no published ports or `hack-dev`, and
 explicitly disables Hack internal DNS/TLS. No credentials or global setup are needed.
@@ -273,7 +273,7 @@ checked-in `examples/patterns/` fixtures against a real engine. Each catalogue c
 names its scenario in `e2eScenario`, and `tests/pattern-examples.test.ts` fails when
 that scenario is not registered here as Docker-tier with a duration hint.
 `tests/e2e/scenarios/pattern-fixture.ts` makes the copy. It changes only the
-project name, the image (the cached `oven/bun:1.4.2-slim` repository digest with
+project name, the image (the cached `oven/bun:1.4.4-slim` repository digest with
 `pull_policy: never` instead of the pinned Alpine image), a declared platform
 (the daemon's architecture) and exact owner labels. Commands, mounts, dependency
 labels, gates and health checks stay as the fixture authored them.
@@ -372,7 +372,9 @@ The scenario requires these results:
   payload may contain U+FFFD, so a split code point fails the run. Where the
   cut falls varies from run to run, so a single pass does not prove that this
   run cut inside a code point; `tests/mcp-logs-contract.test.ts` covers that
-  case deterministically.
+  case deterministically. The scenario's SDK client keeps its default read limit,
+  so a result over that limit closes the session. `tests/mcp-tool-result-size.test.ts`
+  covers the result limit without Docker.
 - With `DOCKER_HOST` pointing at a missing socket, a snapshot and a tail both
   return the closed `backend_error`. The tail ends at end of stream, not at
   `maxMs`.
@@ -396,7 +398,9 @@ HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tes
 ## Native file qualification
 
 `native-config-files` requires the current compiled CLI, its matching compiler and
-cached `oven/bun:1.4.2-slim`. It pins the existing image, uses no builds or published
+cached `oven/bun:1.4.4-slim` (the workload image) plus `oven/bun:1.4.2-slim` (the qualified
+native file and storage helper image, which stays on Bun 1.4.2 until its catalog
+pins are requalified). It pins the existing image, uses no builds or published
 ports, and does not pull or activate DNS/trust. The primary and two linked worktrees
 deliver distinct binary configs, encrypted managed secrets and empty files through
 literal dollar-containing targets and a private runtime home outside the checkout.
@@ -473,7 +477,7 @@ fixtures or admit file/build/job/health/custom-network intersections.
 ## Native config process-policy qualification
 
 `native-config-process-policy` is registered in the optional `docker-e2e` CI job. It needs the
-current compiled CLI, matching compiler and cached `oven/bun:1.4.2-slim`; it resolves
+current compiled CLI, matching compiler and cached `oven/bun:1.4.4-slim`; it resolves
 the immutable image ID and never pulls, publishes ports, or activates DNS/trust.
 
 ```sh
@@ -530,7 +534,7 @@ exposes this check as mode `settled`.
 ## Native config routing qualification
 
 `native-config-routing` is an optional `docker-e2e` CI scenario using the current compiled
-CLI and matching config compiler. Prepare `oven/bun:1.4.2-slim` and
+CLI and matching config compiler. Prepare `oven/bun:1.4.4-slim` and
 `lucaslorentz/caddy-docker-proxy:2.10.0-alpine` locally first; the scenario resolves
 cached immutable image IDs and never pulls. It requires the existing `hack-dev`
 network and refuses any running global Caddy selector before creating its fixture.
@@ -580,7 +584,7 @@ excluded from the default local/Docker suite. Select it explicitly with
 Docker skip enforcement remains unchanged for the portable Docker tier.
 
 This scenario requires `HACK_E2E_DOMAIN_ROUTING=1`,
-a locally installed `node:24.11.0-bookworm-slim` image, existing Caddy ingress on
+a locally installed `node:24.22.1-bookworm-slim` image, existing Caddy ingress on
 `hack-dev`, and its exported public CA (default `~/.hack/caddy/pki/caddy-local-authority.crt`,
 override with `HACK_E2E_DOMAIN_CA`). It makes no global DNS or trust changes.
 Build the current host CLI first with `bun run build`.
@@ -741,7 +745,23 @@ control, an explicit `setup agents --agents-md`, must change exactly
   removed in a `finally` (skip with `HACK_E2E_KEEP=1`).
 - Docker scenarios run `hack down` (primary + branch instances) AND a raw
   `docker compose -p <project> down --volumes --remove-orphans` sweep in
-  their own `finally`, keyed by the random fixture name.
+  their own `finally`, keyed by the random fixture name (`<name>` and
+  `<name>--<branch>`, the CLI's branch-instance project name).
+- Every fixture name the run generates is recorded as owned
+  (`docker-ownership.ts`), with a per-process journal under
+  `$TMPDIR/hack-e2e-ownership/` (override: `HACK_E2E_OWNERSHIP_DIR`). Only
+  Compose resources whose `com.docker.compose.project` label is an owned
+  name, or `<owned name>--<branch>`, are ever removed; nothing is pruned, and
+  fixtures from other concurrent runs are left alone.
+- Network leak check: after each docker scenario the harness lists the
+  scenario's owned networks. Any network left after the scenario's own
+  cleanup FAILS the scenario; the harness then removes the scenario's owned
+  containers, networks and volumes and verifies the networks are gone. The
+  run prints `fixture networks: before=N after=M left by this run=K` and
+  exits 1 if `K > 0`.
+- Interrupts: SIGINT/SIGTERM/SIGHUP sweep the run's owned resources before
+  exiting. A run killed with SIGKILL leaves its journal behind; the next
+  docker run reclaims the journal's resources once that process is gone.
 - The canary restores the real registry snapshot best-effort if a leak is
   ever detected (and aborts the run).
 
@@ -761,7 +781,7 @@ control, an explicit `setup agents --agents-md`, must change exactly
 ## Native build acceptance
 
 `native-config-build` is an optional `docker-e2e` CI scenario using the cached
-`oven/bun:1.4.2-slim` base and the current compiled CLI/compiler. Its native-only
+`oven/bun:1.4.4-slim` base and the current compiled CLI/compiler. Its native-only
 project builds a selected multistage target through a checkout-anchored context
 with literal dollar characters and a context-relative nested Dockerfile. A second
 job qualifies the default Dockerfile. Actual profile/argv, completed-job readiness,

@@ -1,6 +1,9 @@
 use super::tests::{accept, fixture, guest, reactor, session, transport_pair};
 use super::*;
 use crate::provider::relay_auth::Credential;
+use crate::provider::test_executable::{
+    ISOLATED_HANG_GUARD, LOADED_EVENT_HANG_GUARD, MAX_CONNECT_BUDGET, run_isolated,
+};
 use std::{net::TcpListener, thread};
 
 fn authenticate(client: &mut UnixStream, credential: &Credential) -> Traffic {
@@ -35,7 +38,7 @@ fn fragmented_handshake_streams_and_shares_flow_capacity() {
     let mut reactor = reactor(2);
     let (server, mut client) = transport_pair();
     reactor
-        .admit(server, &endpoint, &authority, Duration::from_secs(2))
+        .admit(server, &endpoint, &authority, MAX_CONNECT_BUDGET)
         .unwrap();
     assert_eq!(reactor.connections(), 1);
     thread::scope(|scope| {
@@ -54,7 +57,7 @@ fn fragmented_handshake_streams_and_shares_flow_capacity() {
             let traffic = authenticate(&mut client, &credential);
             guest(&mut client, traffic, 128 * 1024, 11);
         });
-        let deadline = Instant::now() + Duration::from_secs(4);
+        let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
         while reactor.connections() > 0 {
             assert!(Instant::now() < deadline);
             reactor.tick(Duration::from_millis(10)).unwrap();
@@ -71,16 +74,30 @@ fn partial_hello_has_fixed_deadline_and_never_connects() {
     let (listener, endpoint, authority, credential) = fixture();
     let mut reactor = reactor(1);
     let (server, mut client) = transport_pair();
+    // Long enough to outlast a loaded host's delays below, and shorter than the reactor's
+    // own connect timeout so the bracket can tell the two apart.
+    let budget = Duration::from_secs(4);
+    assert!(budget < reactor.limits.connect_timeout);
+    let admitted = Instant::now();
     reactor
-        .admit(server, &endpoint, &authority, Duration::from_millis(40))
+        .admit(server, &endpoint, &authority, budget)
         .unwrap();
+    let returned = Instant::now();
     let (_, hello) = credential.begin().unwrap();
     client.write_all(&hello[..1]).unwrap();
     ticks(&mut reactor, 2);
     let deadline = reactor.handshakes[0].deadline;
+    // The deadline comes from the admitted budget alone.
+    assert!(
+        admitted + budget <= deadline && deadline <= returned + budget,
+        "E_TEST_HANDSHAKE_DEADLINE_NOT_FROM_BUDGET"
+    );
     client.write_all(&hello[1..2]).unwrap();
     ticks(&mut reactor, 2);
     assert_eq!(reactor.handshakes[0].deadline, deadline);
+    // Expire that fixed deadline instead of racing a short budget against a loaded
+    // host's scheduling delay during the partial steps above (HACK-1457).
+    reactor.handshakes[0].deadline = Instant::now();
     reactor.tick(Duration::from_secs(1)).unwrap();
     assert_eq!(reactor.connections(), 0);
     assert_eq!(reactor.stats().timed_out, 1);
@@ -94,7 +111,7 @@ fn bad_proof_and_truncated_hello_close_without_upstream() {
         let mut reactor = reactor(1);
         let (server, mut client) = transport_pair();
         reactor
-            .admit(server, &endpoint, &authority, Duration::from_secs(1))
+            .admit(server, &endpoint, &authority, MAX_CONNECT_BUDGET)
             .unwrap();
         let (_, hello) = credential.begin().unwrap();
         if bad_proof {
@@ -120,7 +137,7 @@ fn pending_and_active_share_capacity_and_cancellation_releases_it() {
     let mut reactor = reactor(2);
     let (server, _client) = transport_pair();
     let id = reactor
-        .admit(server, &endpoint, &authority, Duration::from_secs(1))
+        .admit(server, &endpoint, &authority, MAX_CONNECT_BUDGET)
         .unwrap();
     let (_, authorized) = session(&authority, &credential);
     let (server, _client2) = transport_pair();
@@ -149,7 +166,7 @@ fn shared_revocation_wakes_all_pending_handshake_stages() {
     for phase in 0..4 {
         let (server, mut client) = transport_pair();
         reactor
-            .admit(server, &endpoint, &authority, Duration::from_secs(2))
+            .admit(server, &endpoint, &authority, MAX_CONNECT_BUDGET)
             .unwrap();
         if phase > 0 {
             let (start, hello) = credential.begin().unwrap();
@@ -243,52 +260,10 @@ fn listener_accepts_one_and_preserves_owned_path() {
 fn authenticated_admission_rechecks_replaced_endpoint() {
     // The close/rebind fixture must not be inherited by unrelated parallel forks.
     // Keep its sockets in an isolated child and require the complete assertion path.
-    use std::process::{Child, Command, Stdio};
-    struct OwnedChild(Child);
-    impl Drop for OwnedChild {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let mut child = OwnedChild(
-        Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--ignored",
-                "--exact",
-                "provider::relay_loop::admission_tests::replaced_endpoint_child",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            assert!(status.success());
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "endpoint replacement child exceeded its watchdog"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
-    let mut output = String::new();
-    child
-        .0
-        .stdout
-        .take()
-        .unwrap()
-        .take(4097)
-        .read_to_string(&mut output)
-        .unwrap();
-    assert!(output.len() <= 4096);
-    assert!(
-        output.contains("test result: ok. 1 passed"),
-        "isolated assertion did not run"
+    // The watchdog bounds launching the whole test binary on a loaded host (HACK-1457).
+    run_isolated(
+        "provider::relay_loop::admission_tests::replaced_endpoint_child",
+        ISOLATED_HANG_GUARD,
     );
 }
 #[test]
@@ -302,13 +277,13 @@ fn replaced_endpoint_child() {
     let mut reactor = reactor(1);
     let (server, mut client) = transport_pair();
     reactor
-        .admit(server, &endpoint, &authority, Duration::from_secs(2))
+        .admit(server, &endpoint, &authority, MAX_CONNECT_BUDGET)
         .unwrap();
     thread::scope(|scope| {
         let client = scope.spawn(|| {
             let _ = authenticate(&mut client, &credential);
         });
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
         while reactor.connections() > 0 {
             assert!(Instant::now() < deadline);
             reactor.tick(Duration::from_millis(10)).unwrap();
@@ -350,26 +325,39 @@ fn buffered_hello_keeps_original_deadline_and_wrong_proof_never_connects() {
     let mut reactor = reactor(2);
     let (_, hello) = credential.begin().unwrap();
     let (server, mut client) = transport_pair();
-    let deadline = Instant::now() + Duration::from_millis(20);
+    // The longest budget `admit_hello` accepts, so that a loaded host's scheduling delay
+    // before it runs cannot expire the deadline first (HACK-1457).
+    let deadline = Instant::now() + MAX_CONNECT_BUDGET;
     reactor
         .admit_hello(server, &endpoint, &authority, deadline, &hello)
         .unwrap();
+    // The exact instant the owner chose, not a new budget counted from this admission.
     assert_eq!(reactor.handshakes[0].deadline, deadline);
-    while reactor.connections() > 0 {
-        reactor.tick(Duration::from_millis(30)).unwrap();
-    }
+    // Handshake progress does not renew it either. From here on the test sets the deadline
+    // itself, so the time a loaded host takes to run these steps cannot change the result.
+    let unexpired = Instant::now() + LOADED_EVENT_HANG_GUARD;
+    reactor.handshakes[0].deadline = unexpired;
+    reactor.tick(Duration::ZERO).unwrap();
+    client.read_exact(&mut [0; 64]).unwrap();
+    assert_eq!(reactor.handshakes[0].deadline, unexpired);
+    // Expiry closes the connection without connecting upstream.
+    reactor.handshakes[0].deadline = Instant::now();
+    reactor.tick(Duration::ZERO).unwrap();
+    assert_eq!(reactor.connections(), 0);
+    assert_eq!(reactor.stats().timed_out, 1);
+    assert_eq!(client.read(&mut [0]).unwrap(), 0);
     no_backend(&listener);
-    let _ = client.read(&mut [0; 64]);
     let (server, mut client) = transport_pair();
     reactor
         .admit_hello(
             server,
             &endpoint,
             &authority,
-            Instant::now() + Duration::from_secs(1),
+            Instant::now() + MAX_CONNECT_BUDGET,
             &hello,
         )
         .unwrap();
+    reactor.handshakes[0].deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
     reactor.tick(Duration::ZERO).unwrap();
     let mut challenge = [0; 64];
     client.read_exact(&mut challenge).unwrap();

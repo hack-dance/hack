@@ -115,7 +115,6 @@ import {
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
-import { requestDaemonJson } from "../daemon/client.ts";
 import { renderCompose, TODO_IMAGE_SENTINEL } from "../init/compose.ts";
 import type { ServiceCandidate } from "../init/discovery.ts";
 import { discoverRepo } from "../init/discovery.ts";
@@ -146,7 +145,8 @@ import {
   applyBranchToHosts,
   rewriteCaddyLabelForBranch,
 } from "../lib/branch-hosts.ts";
-import { resolveEffectiveBranch, touchBranchUsage } from "../lib/branches.ts";
+import { recordBranchUsage } from "../lib/branch-usage.ts";
+import { resolveEffectiveBranch } from "../lib/branches.ts";
 import {
   type CliResult,
   emitCliResult,
@@ -260,9 +260,12 @@ import {
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import {
+  describeUnmigratedLegacyDotenv,
   discoverComposeServiceNames,
   ensureHackDirGitignore,
+  findUnmigratedLegacyDotenv,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
+  hasUnmigratedLegacyDotenv,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
@@ -1321,6 +1324,16 @@ export async function resolveModernComposeEnvOverrides(opts: {
   });
   if (!modern) {
     return null;
+  }
+  const unmigrated = await findUnmigratedLegacyDotenv({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    serviceNames: opts.allServiceNames,
+  });
+  if (hasUnmigratedLegacyDotenv(unmigrated)) {
+    logger.warn({
+      message: `This checkout ${describeUnmigratedLegacyDotenv(unmigrated)} in its legacy .hack/.env files, and the env layers don't deliver those values, so services that rely on them may not get them. Run \`hack doctor --migrate-env-config\`, which moves them to this checkout's local layers or says what to change first.`,
+    });
   }
   const lifecycleEnv = selectProjectEnvValuesForExecutionTarget({
     resolved: modern,
@@ -2796,17 +2809,17 @@ function resolveBranchAliasHost(opts: {
   });
 }
 
-async function touchBranchUsageIfNeeded(opts: {
+async function recordBranchUsageIfNeeded(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly branch: string | null;
 }): Promise<void> {
   if (!opts.branch) {
     return;
   }
-  const res = await touchBranchUsage({
+  // Usage is machine-local state; never write the tracked hack.branches.json.
+  const res = await recordBranchUsage({
     projectDir: opts.project.projectDir,
     branch: opts.branch,
-    createIfMissing: true,
   });
   if (res.error) {
     logger.warn({
@@ -5378,7 +5391,7 @@ async function runUpCommand({
     });
   }
 
-  await touchBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({ project, branch });
   const remoteUpCode = await runRemoteLifecycleCommand({
     project,
     action: "up",
@@ -6052,7 +6065,7 @@ async function runDownCommand({
     requestedTarget: args.options.target,
   });
   if (remoteDownCode !== null) {
-    await touchBranchUsageIfNeeded({ project, branch });
+    await recordBranchUsageIfNeeded({ project, branch });
     if (json) {
       return emitRemoteLifecycleJson({
         action: "down",
@@ -6097,7 +6110,7 @@ async function runDownCommand({
       },
     });
   }
-  await touchBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({ project, branch });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
   const cachePruneCandidates =
     pruneCaches && runtime
@@ -6917,7 +6930,7 @@ async function runRestartCommand({
   });
   const profiles = parseCsvList(args.options.profile);
 
-  await touchBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({ project, branch });
   const remoteRestartCode = await runRemoteLifecycleCommand({
     project,
     action: "restart",
@@ -7444,26 +7457,14 @@ async function handlePs({
 
   const cwd = dirname(project.composeFile);
 
-  if (json) {
-    const daemon = await requestDaemonJson({
-      path: "/v1/ps",
-      query: {
-        compose_project: composeProjectName ?? baseProjectName,
-        project: baseProjectName,
-        branch,
-      },
-    });
-    if (daemon?.ok && daemon.json) {
-      process.stdout.write(`${JSON.stringify(daemon.json, null, 2)}\n`);
-      return 0;
-    }
-  }
-
+  // Read Compose directly: the daemon cache omits state and exit codes and can
+  // lag behind a failed startup. Both formats must observe the same containers.
   const res = await composeRuntimeBackend.psJson({
     composeFiles: [project.composeFile],
     composeProject: composeProjectName,
     profiles,
     cwd,
+    all: true,
   });
 
   if (res.exitCode !== 0) {
@@ -7476,6 +7477,7 @@ async function handlePs({
       composeProject: composeProjectName,
       profiles,
       cwd,
+      all: true,
     });
   }
 
@@ -7493,12 +7495,16 @@ async function handlePs({
   const rows = entries.map((e) => [
     getString(e, "Service") ?? "",
     getString(e, "Name") ?? "",
+    getString(e, "State") ?? "",
+    (getString(e, "State") ?? "").toLowerCase() === "exited"
+      ? String(parseComposeExitCode(e.ExitCode) ?? "")
+      : "",
     getString(e, "Status") ?? "",
     getString(e, "Ports") ?? "",
   ]);
 
   await display.table({
-    columns: ["SERVICE", "NAME", "STATUS", "PORTS"],
+    columns: ["SERVICE", "NAME", "STATE", "EXIT CODE", "STATUS", "PORTS"],
     rows,
   });
 
@@ -7610,7 +7616,7 @@ async function handleRun({
     envOption: args.options.env,
   });
 
-  await touchBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({ project, branch });
   const service = (args.positionals.service ?? "").trim();
   if (service.length === 0) {
     throw new CliUsageError("Missing required argument: service");
@@ -7789,7 +7795,7 @@ async function handleExec({
     envOption: args.options.env,
   });
 
-  await touchBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({ project, branch });
   const service = (args.positionals.service ?? "").trim();
   if (service.length === 0) {
     throw new CliUsageError("Missing required argument: service");

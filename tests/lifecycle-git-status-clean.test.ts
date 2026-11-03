@@ -182,10 +182,8 @@ test("up, restart, run, exec and down leave git status unchanged", async () => {
 }, 120_000);
 
 test("up and down in a linked worktree leave both checkouts clean", async () => {
-  // Target the base instance from the worktree. With the default
-  // `worktree.auto_branch`, `up` also records the derived branch in the
-  // authored `.hack/hack.branches.json`; that is a separate behavior from the
-  // ignore rules this test covers.
+  // Target the base instance from the worktree, because this test covers the
+  // ignore rules rather than branch instances.
   const configPath = join(repoRoot, ".hack", "hack.config.json");
   const config = JSON.parse(await readFile(configPath, "utf8"));
   await writeFile(

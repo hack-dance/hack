@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import {
@@ -10,6 +9,7 @@ import {
   GLOBAL_HACK_DIR_NAME,
 } from "../constants.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
 
 export interface DaemonPaths {
   readonly root: string;
@@ -26,19 +26,46 @@ export function resolveDaemonPaths({
 }: {
   readonly home?: string;
 }): DaemonPaths {
-  const baseHome = (home ?? process.env.HOME ?? homedir()).trim();
-  const hackDir = home
-    ? resolve(baseHome, GLOBAL_HACK_DIR_NAME)
+  const explicitHome = resolveExplicitHome({ home });
+  const hackDir = explicitHome
+    ? resolve(explicitHome, GLOBAL_HACK_DIR_NAME)
     : resolveGlobalHackDir();
   const root = resolve(hackDir, GLOBAL_DAEMON_DIR_NAME);
-  const launchAgentsDir = resolve(baseHome, "Library", "LaunchAgents");
   return {
     root,
     socketPath: resolve(root, GLOBAL_DAEMON_SOCKET_FILENAME),
     pidPath: resolve(root, GLOBAL_DAEMON_PID_FILENAME),
     logPath: resolve(root, GLOBAL_DAEMON_LOG_FILENAME),
-    launchdPlistPath: resolve(launchAgentsDir, DAEMON_LAUNCHD_PLIST_FILENAME),
+    // Resolved on access: daemon state only needs the hack dir (which an
+    // absolute HACK_HOME supplies), so an unusable HOME must fail launchd
+    // operations alone, not every daemon client.
+    get launchdPlistPath() {
+      const baseHome = explicitHome ?? resolveUserHomeDir();
+      return resolve(
+        baseHome,
+        "Library",
+        "LaunchAgents",
+        DAEMON_LAUNCHD_PLIST_FILENAME
+      );
+    },
     launchdStdoutPath: resolve(root, "hackd.stdout.log"),
     launchdStderrPath: resolve(root, "hackd.stderr.log"),
   };
+}
+
+function resolveExplicitHome({
+  home,
+}: {
+  readonly home: string | undefined;
+}): string | null {
+  if (home === undefined || home.trim().length === 0) {
+    return null;
+  }
+  const normalized = normalizeHomeDir(home);
+  if (!normalized) {
+    throw new Error(
+      `Daemon home must be an absolute path (got ${JSON.stringify(home)}).`
+    );
+  }
+  return normalized;
 }

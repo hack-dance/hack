@@ -6,7 +6,7 @@ import {
 } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { secrets } from "bun";
+import { CliUsageError } from "../cli/command.ts";
 import type {
   CloudSecretProvider,
   SecretsBackend,
@@ -15,6 +15,9 @@ import type {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
+import { resolveUserHomeDir } from "./home-dir.ts";
+import { isKeychainDisabled, keychain } from "./keychain.ts";
+import { NativeKeychainTimeoutError } from "./native-keychain.ts";
 import {
   decodeCanonicalBase64,
   publishPrivateFileExclusive,
@@ -81,6 +84,14 @@ export type SecretStore = {
   }) => Promise<void>;
   readonly delete: (input: { readonly key: string }) => Promise<boolean>;
 };
+
+/** An encrypted backend's key isn't available, and this read didn't create one. */
+export class SecretStoreKeyUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SecretStoreKeyUnavailableError";
+  }
+}
 
 /**
  * Resolve the active secret backend for a project context.
@@ -157,19 +168,19 @@ function createKeychainSecretStore(input: {
       mode: "native",
     },
     get: async ({ key }) =>
-      await secrets.get({
+      await keychain.get({
         service,
         name: key,
       }),
     set: async ({ key, value }) => {
-      await secrets.set({
+      await keychain.set({
         service,
         name: key,
         value,
       });
     },
     delete: async ({ key }) =>
-      await secrets.delete({
+      await keychain.delete({
         service,
         name: key,
       }),
@@ -502,9 +513,8 @@ function resolveConfiguredPath(input: {
   readonly projectDir?: string;
 }): string {
   const raw = input.path.trim();
-  const home = (process.env.HOME ?? "").trim();
   if (raw === "~") {
-    return home;
+    return resolveUserHomeDir();
   }
   if (raw === "~/.hack" || raw.startsWith("~/.hack/")) {
     // "~/.hack" is the canonical global hack dir; route it through the seam so
@@ -515,7 +525,7 @@ function resolveConfiguredPath(input: {
       : resolveGlobalHackDir();
   }
   if (raw.startsWith("~/")) {
-    return resolve(home, raw.slice(2));
+    return resolve(resolveUserHomeDir(), raw.slice(2));
   }
   if (raw.startsWith("/")) {
     return raw;
@@ -523,7 +533,7 @@ function resolveConfiguredPath(input: {
   if (input.projectDir) {
     return resolve(input.projectDir, "..", raw);
   }
-  return resolve(home, raw);
+  return resolve(resolveUserHomeDir(), raw);
 }
 
 export async function provisionEncryptedFileKey(input: {
@@ -597,19 +607,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     }
   }
 
-  if (
-    isTruthyEnvFlag(process.env[DISABLE_ENCRYPTED_FILE_KEYCHAIN_FALLBACK_ENV])
-  ) {
-    throw new Error(
-      buildEncryptedBackendKeyRecoveryMessage({
-        keyPath: configuredKeyPath,
-        storePath: input?.storePath,
-        reason: "keychain_disabled",
-      })
-    );
-  }
-
-  if (cachedEncryptedFileKey) {
+  if (!isKeychainDisabled() && cachedEncryptedFileKey) {
     if (allowKeyProvisioning && input?.persistResolvedKey && input.keyPath) {
       await writeEncryptedFileKey({
         keyPath: input.keyPath,
@@ -658,9 +656,19 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     }
   }
 
+  if (isKeychainDisabled()) {
+    throw new SecretStoreKeyUnavailableError(
+      buildEncryptedBackendKeyRecoveryMessage({
+        keyPath: configuredKeyPath,
+        storePath: input?.storePath,
+        reason: "keychain_disabled",
+      })
+    );
+  }
+
   const nowMs = Date.now();
   if (nowMs < encryptedFileKeyFailureCooldownUntilMs) {
-    throw new Error(
+    throw new SecretStoreKeyUnavailableError(
       buildEncryptedBackendKeyRecoveryMessage({
         keyPath: configuredKeyPath,
         storePath: input?.storePath,
@@ -672,21 +680,17 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   let existing: string | undefined;
   try {
     existing = (
-      await secrets.get({
+      await keychain.get({
         service: ENCRYPTED_FILE_KEY_SERVICE,
         name: ENCRYPTED_FILE_KEY_NAME,
       })
     )?.trim();
-  } catch {
-    encryptedFileKeyFailureCooldownUntilMs =
-      Date.now() + ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS;
-    throw new Error(
-      buildEncryptedBackendKeyRecoveryMessage({
-        keyPath: configuredKeyPath,
-        storePath: input?.storePath,
-        reason: "keychain_access_failed",
-      })
-    );
+  } catch (error: unknown) {
+    throw keychainKeyAccessError({
+      error,
+      keyPath: configuredKeyPath,
+      storePath: input?.storePath,
+    });
   }
   if (existing) {
     if (allowKeyProvisioning && configuredKeyPath) {
@@ -704,7 +708,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   }
 
   if (configuredKeyPath || !allowKeyProvisioning) {
-    throw new Error(
+    throw new SecretStoreKeyUnavailableError(
       buildEncryptedBackendKeyRecoveryMessage({
         keyPath: configuredKeyPath,
         storePath: input?.storePath,
@@ -715,21 +719,17 @@ async function resolveEncryptedFileKeyMaterial(input?: {
 
   const generated = randomBytes(32).toString("base64url");
   try {
-    await secrets.set({
+    await keychain.set({
       service: ENCRYPTED_FILE_KEY_SERVICE,
       name: ENCRYPTED_FILE_KEY_NAME,
       value: generated,
     });
-  } catch {
-    encryptedFileKeyFailureCooldownUntilMs =
-      Date.now() + ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS;
-    throw new Error(
-      buildEncryptedBackendKeyRecoveryMessage({
-        keyPath: configuredKeyPath,
-        storePath: input?.storePath,
-        reason: "keychain_access_failed",
-      })
-    );
+  } catch (error: unknown) {
+    throw keychainKeyAccessError({
+      error,
+      keyPath: configuredKeyPath,
+      storePath: input?.storePath,
+    });
   }
   cachedEncryptedFileKey = generated;
   encryptedFileKeyFailureCooldownUntilMs = 0;
@@ -737,6 +737,35 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     key: generated,
     source: "generated",
   };
+}
+
+/**
+ * Map a failed keychain call for the encrypted_file key. An invalid
+ * `HACK_KEYCHAIN_TIMEOUT_MS` keeps its own usage refusal (no keychain call was
+ * made, so no cooldown). A timeout keeps its closed message, which reports an
+ * unknown outcome for a write, and starts the cooldown like any other failure.
+ * Other failures become the fixed recovery message.
+ */
+function keychainKeyAccessError(input: {
+  readonly error: unknown;
+  readonly keyPath: string | undefined;
+  readonly storePath: string | undefined;
+}): Error {
+  if (input.error instanceof CliUsageError) {
+    return input.error;
+  }
+  encryptedFileKeyFailureCooldownUntilMs =
+    Date.now() + ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS;
+  if (input.error instanceof NativeKeychainTimeoutError) {
+    return input.error;
+  }
+  return new SecretStoreKeyUnavailableError(
+    buildEncryptedBackendKeyRecoveryMessage({
+      keyPath: input.keyPath,
+      storePath: input.storePath,
+      reason: "keychain_access_failed",
+    })
+  );
 }
 
 async function canBootstrapEncryptedFileKey(input: {
@@ -1024,14 +1053,4 @@ function buildEncryptedBackendKeyRecoveryMessage(input: {
   }
 
   return `Missing encrypted backend key${location}. ${recovery} Hack will not fall back to plaintext .hack/.env or ambient process env.`;
-}
-
-function isTruthyEnvFlag(value: string | undefined): boolean {
-  const normalized = (value ?? "").trim().toLowerCase();
-  return (
-    normalized === "1" ||
-    normalized === "true" ||
-    normalized === "yes" ||
-    normalized === "on"
-  );
 }

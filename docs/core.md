@@ -29,7 +29,13 @@ hack logs --pretty
 ```
 
 `hack up` starts the declared services and project lifecycle. Use `hack ps` to
-inspect them and `hack logs` to read their output. When finished:
+inspect them and `hack logs` to read their output. On the Compose backend,
+`hack ps` includes stopped containers in the selected project or branch, with
+state and exit-code columns. An exited one-shot with code `0` completed
+successfully; a nonzero code indicates failure. `hack ps --json` reads Compose
+directly and retains each item's `State` and `ExitCode`, including immediately
+after a failed startup. Removed containers are not retained as run history.
+When finished:
 
 ```sh
 hack down
@@ -50,6 +56,8 @@ start with the project instead of relying on an extra terminal tab.
 In a linked git worktree, `hack up` defaults to a branch instance named after the
 git branch. The secret key is inherited from the primary checkout through the
 shared git directory. A detached worktree needs an explicit `--branch <name>`.
+The worktree also reads the primary checkout's local env overlays live, below its
+own local overrides; see [Environment and secrets](env.md#merge-rules).
 See [Worktrees and watchers](guides/development-runtime-safety.md) for shared files,
 watchers and dependency caches, and [Sessions](sessions.md) for persistent project
 workspaces.

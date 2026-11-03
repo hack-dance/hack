@@ -1823,7 +1823,34 @@ test("HTTPS route paths come only from reviewed native probes and conflicts refu
       { services: { web: { routing: { hostnames: ["web.example.com"] } } } },
       new Set(["web"])
     )
-  ).toThrow();
+  ).toThrow(NATIVE_CONFIGURATION_REFUSAL);
+});
+
+test("malformed reviewed runtime plans refuse as unconfirmed, not as configuration", () => {
+  const routed = {
+    routing: { hostnames: ["web.example.com"] },
+    healthcheck: { native_http: { path: "/health" } },
+  };
+  for (const plan of [
+    null,
+    {},
+    { services: [] },
+    { services: {} },
+    { services: { web: { ...routed, routing: {} } } },
+    { services: { web: { ...routed, routing: { hostnames: [7] } } } },
+  ]) {
+    let refusal: unknown;
+    try {
+      reviewedNativeHttpsRoutes(plan, new Set(["web"]));
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(ClosedCliError);
+    expect(refusal).not.toBeInstanceOf(HackCliError);
+    expect(String(refusal)).toContain(
+      "Native foreground up could not confirm the reviewed runtime plan"
+    );
+  }
 });
 
 test("HTTPS startup refuses a non-2xx reviewed health response", async () => {

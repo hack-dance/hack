@@ -54,14 +54,17 @@ type FakeMux = MuxBackend & {
   timeoutToken: boolean;
   /** listSessions times out. */
   timeoutList: boolean;
-  /** The next N token reads stall, then return the value read at call time. */
-  stalledTokenReads: number;
+  /** This token read (1-based) stalls, then returns the value read at call time. */
+  stallTokenRead: number;
+  tokenReads: number;
   readonly killed: string[];
   /** Mux calls still running: a bounded call must settle before return. */
   inFlight: number;
 };
 
 const TIMEOUT_DELAY_MS = 50;
+/** Long enough that an overlapping start could finish meanwhile. */
+const STALLED_READ_MS = 1500;
 
 function fakeMux(backendName: "zellij" | "tmux" = "zellij"): FakeMux {
   const sessions = new Map<string, string>();
@@ -89,7 +92,8 @@ function fakeMux(backendName: "zellij" | "tmux" = "zellij"): FakeMux {
     timeoutCreate: null,
     timeoutToken: false,
     timeoutList: false,
-    stalledTokenReads: 0,
+    stallTokenRead: 0,
+    tokenReads: 0,
     killed: [],
     inFlight: 0,
     listSessions: () =>
@@ -131,9 +135,9 @@ function fakeMux(backendName: "zellij" | "tmux" = "zellij"): FakeMux {
           throw new MuxCommandTimeoutError(["zellij", "show"]);
         }
         const value = sessions.get(opts.name) ?? null;
-        if (fake.stalledTokenReads > 0) {
-          fake.stalledTokenReads -= 1;
-          await Bun.sleep(300);
+        fake.tokenReads += 1;
+        if (fake.tokenReads === fake.stallTokenRead) {
+          await Bun.sleep(STALLED_READ_MS);
         }
         return value;
       }),
@@ -471,9 +475,10 @@ test("a stalled replacement holds the lock until it settles, so an overlapping u
       updatedAt: new Date().toISOString(),
     },
   });
-  // A's replacement stalls in its ownership-token read (it returns the token
-  // it read when the call started); B starts meanwhile.
-  mux.stalledTokenReads = 1;
+  // A's replacement stalls in its kill's ownership-token read (read 2; read
+  // 1 is A's inspection): the read returns the token from when it started.
+  // B starts meanwhile.
+  mux.stallTokenRead = 2;
   const a = controller({ sessionOwnership: newOwnership() });
   const b = controller({ sessionOwnership: newOwnership() });
   const aRun = a.startMany({ processes: [PROCESS] }).then(() => a.finalize());

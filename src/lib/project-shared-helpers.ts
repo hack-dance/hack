@@ -364,12 +364,18 @@ export class SharedHelperSupersededError extends Error {
  *   instance's current operation (a start that fails never does).
  *   A rollback releases only while that is still current, so it never revokes
  *   a newer start of the same instance.
- * - `hack down` replaces the record with a stopping marker before it stops
- *   anything ({@link markSharedHelperInstanceStopping}) and releases under the
- *   same lock. `assertCurrent` fails once that happened, so the caller can
- *   refuse to launch services whose helpers a concurrent down released.
- *   A newer start of the same instance does not fail it: that start holds
- *   the helpers, and tearing down the earlier start would break it.
+ * - Shutdown is tracked separately, as the instance's shutdown generation.
+ *   Only `hack down` advances it: its stopping mark
+ *   ({@link markSharedHelperInstanceStopping}) and its release. A start
+ *   captures the generation, and `assertCurrent` fails once it changed, so
+ *   the caller can refuse to launch services whose helpers a down released.
+ *   A later start never restores it, even a successful one: its helpers need
+ *   not satisfy this start's (an entry may be disabled or changed since). A
+ *   newer start without a down in between does not fail it.
+ * - `runUnlessNewerStart` runs this start's lifecycle-process cleanup under
+ *   the instance lock, and skips it once a newer start has become current:
+ *   that start may have adopted the lifecycle session, and the session keeps
+ *   this start's ownership token, so the token alone cannot protect it.
  * - Before each helper is ensured its identity (name and port) is added to
  *   the instance's acquired record, so `hack down` still releases it after the
  *   entry is removed or renamed in config.
@@ -390,6 +396,13 @@ export async function startProjectSharedHelpers(opts: {
   readonly assertCurrent: (opts?: {
     readonly servicesStarted?: boolean;
   }) => Promise<void>;
+  /**
+   * Run `cleanup` (this start's lifecycle-process cleanup) unless a newer start
+   * of the instance has become current. Returns whether it ran.
+   */
+  readonly runUnlessNewerStart: (
+    cleanup: () => Promise<void>
+  ) => Promise<boolean>;
 }> {
   const helpers = opts.helpers ?? [];
   const started: SharedHelperStartRecord[] = [];
@@ -399,11 +412,17 @@ export async function startProjectSharedHelpers(opts: {
       started,
       rollback: () => Promise.resolve([]),
       assertCurrent: () => Promise.resolve(),
+      runUnlessNewerStart: async (cleanup) => {
+        await cleanup();
+        return true;
+      },
     };
   }
   const holder = resolveSharedHelperHolder(opts.composeProject);
   const instance = instancePaths({ hackDir: opts.hackDir, holder });
   const operation = randomUUID();
+  // Captured under the lock before the first ensure; see assertCurrent.
+  let generation: string | null = null;
   // Each ensure is bounded by its own deadline; the lock wait covers them all.
   const lockTimeoutMs =
     helpers.reduce((sum, helper) => sum + helper.readyTimeoutMs, 0) + 10_000;
@@ -433,10 +452,45 @@ export async function startProjectSharedHelpers(opts: {
     const current = await withInstanceLock({
       instance,
       timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
-      run: async () => !isShutdown(await readOperation(instance)),
+      run: async () => (await readGeneration(instance)) === generation,
     });
     if (!current) {
       throw new SharedHelperSupersededError(check);
+    }
+  };
+  const runUnlessNewerStart = async (
+    cleanup: () => Promise<void>
+  ): Promise<boolean> => {
+    let decided = false;
+    try {
+      // Held through the cleanup: a newer start cannot become current, and
+      // so cannot adopt the session, while this cleanup kills it.
+      return await withInstanceLock({
+        instance,
+        timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
+        run: async () => {
+          decided = true;
+          const current = await readOperation(instance);
+          if (
+            current !== null &&
+            current !== operation &&
+            !current.startsWith(STOPPING_PREFIX)
+          ) {
+            return false;
+          }
+          await cleanup();
+          return true;
+        },
+      });
+    } catch (error: unknown) {
+      if (decided) {
+        // The cleanup itself failed: report it as before.
+        throw error;
+      }
+      // The lock was unavailable. Keep the default of cleaning up what this
+      // start created rather than leaving its processes running.
+      await cleanup();
+      return true;
     }
   };
   await mkdir(instance.dir, { recursive: true, mode: 0o700 });
@@ -445,6 +499,7 @@ export async function startProjectSharedHelpers(opts: {
     timeoutMs: lockTimeoutMs,
     ...(opts.signal ? { signal: opts.signal } : {}),
     run: async () => {
+      generation = await readGeneration(instance);
       try {
         for (const helper of helpers) {
           if (helper.enabled) {
@@ -483,7 +538,7 @@ export async function startProjectSharedHelpers(opts: {
       }
     },
   });
-  return { started, rollback, assertCurrent };
+  return { started, rollback, assertCurrent, runUnlessNewerStart };
 }
 
 async function ensureOne(opts: {
@@ -543,6 +598,7 @@ type InstancePaths = {
   readonly dir: string;
   readonly lockPath: string;
   readonly operationPath: string;
+  readonly generationPath: string;
   readonly acquiredPath: string;
 };
 
@@ -559,6 +615,7 @@ function instancePaths(opts: {
     dir,
     lockPath: join(dir, `${opts.holder}.lock`),
     operationPath: join(dir, `${opts.holder}.operation`),
+    generationPath: join(dir, `${opts.holder}.shutdown-generation`),
     acquiredPath: join(dir, `${opts.holder}.acquired.json`),
   };
 }
@@ -586,15 +643,18 @@ async function readOperation(instance: InstancePaths): Promise<string | null> {
   }
 }
 
-/**
- * Whether the instance's operation record shows a shutdown: `hack down` wrote
- * its stopping mark, or a release removed the record. A newer start of the
- * same instance writes its own id, which is not a shutdown: its helpers are
- * held, so services of an earlier start may still launch (and its cleanup
- * must not tear down what the newer start adopted).
- */
-function isShutdown(operation: string | null): boolean {
-  return operation === null || operation.startsWith(STOPPING_PREFIX);
+/** The instance's shutdown generation; null until the first `hack down`. */
+async function readGeneration(instance: InstancePaths): Promise<string | null> {
+  try {
+    return (await readFile(instance.generationPath, "utf8")).trim();
+  } catch {
+    return null;
+  }
+}
+
+/** Advance the shutdown generation; only `hack down` calls this. */
+async function advanceGeneration(instance: InstancePaths): Promise<void> {
+  await writeFileAtomic(instance.generationPath, `${randomUUID()}\n`);
 }
 
 async function writeOperation(
@@ -737,7 +797,10 @@ export async function markSharedHelperInstanceStopping(opts: {
     await withInstanceLock({
       instance,
       timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
-      run: () => writeOperation(instance, `${STOPPING_PREFIX}${randomUUID()}`),
+      run: async () => {
+        await advanceGeneration(instance);
+        await writeOperation(instance, `${STOPPING_PREFIX}${randomUUID()}`);
+      },
     });
     return true;
   } catch {
@@ -807,6 +870,7 @@ export async function releaseProjectSharedHelpers(opts: {
         } catch {
           return failedAll(configured, "state-unavailable");
         }
+        await advanceGeneration(instance);
         await rm(instance.operationPath, { force: true });
         const targets = mergeIdentities(configured, recorded).reverse();
         const releases = await releaseSpecs({

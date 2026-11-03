@@ -2101,6 +2101,9 @@ type LifecycleSharedHelpers = {
   readonly assertCurrent: (opts?: {
     readonly servicesStarted?: boolean;
   }) => Promise<void>;
+  readonly runUnlessNewerStart: (
+    cleanup: () => Promise<void>
+  ) => Promise<boolean>;
 };
 
 /**
@@ -2132,6 +2135,7 @@ async function startLifecycleSharedHelpers(opts: {
       reportSharedHelperReleases(await started.rollback());
     },
     assertCurrent: started.assertCurrent,
+    runUnlessNewerStart: started.runUnlessNewerStart,
   };
 }
 
@@ -2156,8 +2160,14 @@ function withSharedHelperCleanup(opts: {
   opts.signalCleanup?.dispose();
   return {
     cleanup: async () => {
+      const processCleanup = opts.cleanup;
       try {
-        await opts.cleanup?.();
+        // A newer start of this instance may have adopted the lifecycle
+        // session, which keeps this start's ownership token: only clean up
+        // processes while no newer start is current.
+        if (processCleanup) {
+          await sharedHelpers.runUnlessNewerStart(processCleanup);
+        }
       } finally {
         await sharedHelpers.rollback();
       }
@@ -5929,6 +5939,10 @@ async function runUpCommand({
       env: envOverrides.env,
     });
     if (bootstrapCode !== 0) {
+      // Release whatever this operation started, like every later failure.
+      // (Today the cache bootstrap only runs for a service-scoped up, which
+      // starts no lifecycle work, so this cleanup is null there.)
+      await lifecycleCleanup?.();
       const failure = dependencyCacheBootstrapFailure({
         code: bootstrapCode,
         timeoutMs: detach ? startupTimeoutMs : undefined,

@@ -25,7 +25,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute } from "node:path";
 
-type Pins = ReadonlyMap<string, string>;
+/** A `null` pin answers "not found" without consulting PATH. */
+type Pins = ReadonlyMap<string, string | null>;
 
 const STATE = Symbol.for("hack.tests.caseExecutables");
 
@@ -77,29 +78,38 @@ export function installCaseExecutables(): void {
     ...args: Parameters<typeof Bun.which>
   ) {
     const store = pins.getStore();
-    const pinned =
-      store === undefined ? undefined : store.get(lookupName(args[0]));
-    return pinned ?? Reflect.apply(original, this, args);
+    if (store !== undefined) {
+      const name = lookupName(args[0]);
+      if (store.has(name)) {
+        return store.get(name) ?? null;
+      }
+    }
+    return Reflect.apply(original, this, args);
   } as typeof Bun.which;
   current.installed = true;
 }
 
 /**
  * Runs `body` with `executables` (bare name to absolute path) pinned for
- * `Bun.which`. Call it at the start of the case body, with paths resolved
+ * `Bun.which`. A `null` path pins the name as missing, so a case can exercise
+ * a failed lookup without a late body finding the host's binary on PATH. Call it at the start of the case body, with paths resolved
  * then. The pins stay with every async continuation of `body`, including one
  * that outlives the case, and with nothing else. A nested call keeps the
  * outer pins and overrides only the names it gives.
  */
 export function withCaseExecutables<T>(
-  executables: Readonly<Record<string, string>>,
+  executables: Readonly<Record<string, string | null>>,
   body: () => T
 ): T {
-  const pins = new Map<string, string>(state().pins.getStore());
+  const pins = new Map<string, string | null>(state().pins.getStore());
   for (const [name, path] of Object.entries(executables)) {
-    if (name.length === 0 || name.includes("/") || !isAbsolute(path)) {
+    if (
+      name.length === 0 ||
+      name.includes("/") ||
+      !(path === null || isAbsolute(path))
+    ) {
       throw new Error(
-        "withCaseExecutables needs bare executable names and absolute paths."
+        "withCaseExecutables needs bare executable names and absolute paths or null."
       );
     }
     pins.set(name, path);

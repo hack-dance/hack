@@ -188,6 +188,11 @@ test("pins answer only inside their case context and refuse paths that are not a
     }
   );
   expect(inside).toBe("/pinned/stub");
+  // A null pin answers "not found" even where PATH has the name.
+  expect(
+    withCaseExecutables({ sh: null }, () => Bun.which("sh", { PATH: "/bin" }))
+  ).toBeNull();
+  expect(Bun.which("sh", { PATH: "/bin" })).not.toBeNull();
   expect(Bun.which("hack-case-executables-pin")).toBeNull();
   expect(() => withCaseExecutables({ docker: "stub/docker" }, () => 0)).toThrow(
     "absolute paths"

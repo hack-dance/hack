@@ -58,9 +58,13 @@ async function ownedCase(run: () => Promise<void>) {
 // The stub is pinned when the case starts: the global-state guard puts PATH back
 // after a timed-out case even though afterEach keeps it, and a late body's next
 // probe must still find only this case's stub (HACK-1792).
-const test = (name: string, run: () => Promise<void>) =>
+const test = (
+  name: string,
+  run: () => Promise<void>,
+  docker: () => string | null = () => join(root, "docker")
+) =>
   bunTest(name, () =>
-    ownedCase(() => withCaseExecutables({ docker: join(root, "docker") }, run))
+    ownedCase(() => withCaseExecutables({ docker: docker() }, run))
   );
 beforeEach(async () =>
   ownedCase(async () => {
@@ -342,14 +346,26 @@ test("operation admission and spawn failure remain distinct from child failure",
   expect(await Bun.file(join(root, "started")).exists()).toBe(false);
 });
 
-test("missing executable refuses before any child", async () => {
-  await rm(join(root, "docker"));
-  publicRefusal(
-    await rejection(() => inspectLegacyComposeJobStates({ binding })),
-    "probe-operation"
-  );
-  expect(await Bun.file(join(root, "started")).exists()).toBe(false);
-});
+// Pinned as missing rather than to the stub, so the lookup itself fails (as it
+// does with no docker on PATH) and a late body still cannot find the host's.
+test(
+  "missing executable refuses before any child",
+  async () => {
+    await rm(join(root, "docker"));
+    const spawn = spyOn(Bun, "spawn");
+    try {
+      publicRefusal(
+        await rejection(() => inspectLegacyComposeJobStates({ binding })),
+        "probe-operation"
+      );
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      spawn.mockRestore();
+    }
+    expect(await Bun.file(join(root, "started")).exists()).toBe(false);
+  },
+  () => null
+);
 
 test("real timed out capture retains timeout classification and settles its exact child", async () => {
   await observedChild(async (child) => {

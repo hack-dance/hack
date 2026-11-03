@@ -680,6 +680,10 @@ files ever leak into git, `hack doctor --fix` untracks them (the files stay on d
 for the full file map.
 
 The global config root defaults to `~/.hack`; override it with `HACK_HOME`.
+A non-default `HACK_HOME` disables hackd launchd management, host-trust launchd
+environment registration, and native DNS launchd inspection/restarts. Set
+`HACK_LAUNCHD_ALLOW_ISOLATED_HOME=1` to opt in to these host-wide effects.
+`HACK_LAUNCHD_DISABLE=1` always disables launchd access, including with that opt-in.
 
 ## Lifecycle
 

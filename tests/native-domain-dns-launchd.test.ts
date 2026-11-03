@@ -1,8 +1,37 @@
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   type NativeDnsLaunchdRestartOptions,
   prepareNativeDnsLaunchdRestart,
 } from "../src/lib/native-domain-dns-launchd.ts";
+import { restoreEnv } from "./helpers/env.ts";
+
+const accessKeys = [
+  "HACK_HOME",
+  "HACK_LAUNCHD_DISABLE",
+  "HACK_LAUNCHD_ALLOW_ISOLATED_HOME",
+] as const;
+let savedEnv: Record<string, string | undefined> = {};
+let scratch: string | undefined;
+beforeEach(() => {
+  savedEnv = Object.fromEntries(
+    accessKeys.map((key) => [key, process.env[key]])
+  );
+  for (const key of accessKeys) {
+    restoreEnv(key, undefined);
+  }
+});
+afterEach(async () => {
+  for (const key of accessKeys) {
+    restoreEnv(key, savedEnv[key]);
+  }
+  if (scratch) {
+    await rm(scratch, { recursive: true, force: true });
+    scratch = undefined;
+  }
+});
 
 const BIN = "/opt/homebrew/opt/dnsmasq/sbin/dnsmasq";
 const MAIN = "/opt/homebrew/etc/dnsmasq.conf";
@@ -181,4 +210,85 @@ test("failed kickstart reports the error and permits rollback retry of the same 
   await expect(restart()).rejects.toThrow("kickstart failed");
   await restart();
   expect(f.privilegedCalls).toHaveLength(2);
+});
+
+for (const accessCase of [
+  "isolated",
+  "disabled",
+  "default",
+  "opt-in",
+] as const) {
+  test(`recording launchctl stub: native DNS ${accessCase}`, async () => {
+    scratch = await mkdtemp(join(tmpdir(), "hack-dns-launchd-"));
+    const stub = join(scratch, "launchctl");
+    const log = join(scratch, "calls");
+    await writeFile(
+      stub,
+      '#!/bin/sh\nprintf "%s\\n" "$*" >> "$HACK_TEST_CALL_LOG"\n'
+    );
+    await chmod(stub, 0o755);
+    const f = fixture();
+    const wrap =
+      (runner: NonNullable<NativeDnsLaunchdRestartOptions["runCommand"]>) =>
+      async (command: readonly string[]) => {
+        const offset = command[0] === "sudo" ? 3 : 1;
+        if (command[offset - 1] === "/bin/launchctl") {
+          const child = Bun.spawn([stub, ...command.slice(offset)], {
+            env: { HACK_TEST_CALL_LOG: log },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          expect(await child.exited).toBe(0);
+        }
+        return await runner(command);
+      };
+    const { runCommand, runPrivileged } = f.options;
+    if (!(runCommand && runPrivileged)) {
+      throw new Error("Fixture requires both command recorders");
+    }
+    const options = {
+      ...f.options,
+      runCommand: wrap(runCommand),
+      runPrivileged: wrap(runPrivileged),
+    };
+    if (accessCase !== "default") {
+      process.env.HACK_HOME = scratch;
+    }
+    if (accessCase === "opt-in" || accessCase === "disabled") {
+      process.env.HACK_LAUNCHD_ALLOW_ISOLATED_HOME = "1";
+    }
+    if (accessCase === "disabled") {
+      process.env.HACK_LAUNCHD_DISABLE = "1";
+    }
+    const allowed = accessCase === "default" || accessCase === "opt-in";
+    if (allowed) {
+      const restart = await prepareNativeDnsLaunchdRestart(options);
+      await restart();
+    } else {
+      await expect(prepareNativeDnsLaunchdRestart(options)).rejects.toThrow(
+        "launchd management is disabled"
+      );
+    }
+    const calls = (await readFile(log, "utf8").catch(() => ""))
+      .split("\n")
+      .filter(Boolean);
+    if (allowed) {
+      expect(calls.filter((call) => call.startsWith("print "))).toHaveLength(6);
+      expect(calls.filter((call) => call.startsWith("kickstart "))).toEqual([
+        `kickstart -k system/${LABELS[0]}`,
+      ]);
+    } else {
+      expect(calls).toEqual([]);
+      expect(f.privilegedCalls).toEqual([]);
+    }
+  });
+}
+
+test("restart rechecks launchd admission after preflight", async () => {
+  const f = fixture();
+  const restart = await prepareNativeDnsLaunchdRestart(f.options);
+  process.env.HACK_LAUNCHD_DISABLE = "1";
+  await expect(restart()).rejects.toThrow("launchd management is disabled");
+  expect(f.privilegedCalls).toEqual([]);
 });

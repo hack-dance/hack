@@ -561,6 +561,12 @@ graphs inside a running pool. macOS APFS only: elsewhere `prefer` keeps the stoc
 Protocol version 1 describes this development client. It is not a promised release API. This is
 a bounded experimental application graph executor, not a qualified native Linux container adapter. The checkout-owned `node serve`
 service and independent supervisors implement the WU04 contract (local `_docs/docs/plans/v5/wu04-contract.md`).
+
+Journal connections wait up to two seconds for SQLite contention. SQLITE_BUSY or
+SQLITE_LOCKED refuses with the closed code `journal_busy` and the fixed hint
+"Node journal is busy; retry with the same operation ID." A refused write records
+no mutation; retry the unchanged request with the same operation ID.
+
 Its [versioned schema](node-protocol-v1.schema.json) precedes any TypeScript consumer. The
 Compose subset (local `_docs/docs/plans/v5/compose-subset.md`) defines the importer and refusal boundaries. The
 work-unit ledger (local `_docs/docs/plans/v5/work-units.md`) separates implementation from live qualification.

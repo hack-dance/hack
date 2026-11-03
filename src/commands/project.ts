@@ -2109,7 +2109,7 @@ async function startWithSharedHelpers(opts: {
   );
 }
 
-type LifecycleSharedHelpers = {
+export type LifecycleSharedHelpers = {
   readonly configured: boolean;
   readonly rollback: () => Promise<void>;
   readonly assertCurrent: (opts?: {
@@ -2162,8 +2162,13 @@ async function startLifecycleSharedHelpers(opts: {
  * controller's own signal handler only knows its cleanup, so it is replaced:
  * returning no signal cleanup makes the caller install one for the combined
  * cleanup.
+ *
+ * When process cleanup is undecidable (the instance lock was busy), the
+ * helper rollback is skipped too: keeping the session while releasing its
+ * helpers would leave a running session whose helpers were stopped. Both are
+ * kept for `hack down`.
  */
-function withSharedHelperCleanup(opts: {
+export function withSharedHelperCleanup(opts: {
   readonly cleanup: LifecycleOperationCleanup | null;
   readonly signalCleanup: { readonly dispose: () => void } | null;
   readonly sharedHelpers: LifecycleSharedHelpers | null;
@@ -2179,22 +2184,24 @@ function withSharedHelperCleanup(opts: {
   return {
     cleanup: async () => {
       const processCleanup = opts.cleanup;
+      let outcome: ProcessCleanupOutcome | null = null;
       try {
         // A newer start of this instance may have adopted the lifecycle
         // session, which keeps this start's ownership token: only clean up
         // processes while no newer start is current.
         if (processCleanup) {
-          const outcome =
-            await sharedHelpers.runUnlessNewerStart(processCleanup);
+          outcome = await sharedHelpers.runUnlessNewerStart(processCleanup);
           if (outcome === "undecidable") {
             logger.warn({
               message:
-                "Kept this instance's lifecycle session: the shared helper instance lock was busy, so whether a newer hack up adopted it could not be checked. Run hack down to stop it if nothing uses it.",
+                "Kept this instance's lifecycle session and its shared helpers: the shared helper instance lock was busy, so whether a newer hack up adopted them could not be checked. Run hack down to stop them if nothing uses them.",
             });
           }
         }
       } finally {
-        await sharedHelpers.rollback();
+        if (outcome !== "undecidable") {
+          await sharedHelpers.rollback();
+        }
       }
     },
     signalCleanup: null,
@@ -2357,23 +2364,6 @@ async function releaseLifecycleSharedHelpersReporting(opts: {
 
 function sharedHelperReleaseFailureMessage(names: readonly string[]): string {
   return `Shared helper release incomplete: ${names.join(", ")}. The claim was kept; inspect it and run hack down again.`;
-}
-
-/**
- * Wrap a down `before` step so the shared helper stopping mark is written only
- * after it succeeds. A refused down (its `lifecycle.down.before` hook failed)
- * must not supersede a concurrent up, whose cleanup could then stop helpers
- * the still-running instance uses. The Compose down path marks at the same
- * point.
- */
-export function markSharedHelpersStoppingAfter<Run>(opts: {
-  readonly before: (run: Run) => Promise<void>;
-  readonly mark: () => Promise<void>;
-}): (run: Run) => Promise<void> {
-  return async (run) => {
-    await opts.before(run);
-    await opts.mark();
-  };
 }
 
 /**
@@ -6354,20 +6344,21 @@ async function handleDown({
           composeProject,
         });
       },
-      before: markSharedHelpersStoppingAfter({
-        before: async (run) => {
-          if (!hasHooks) {
-            return;
-          }
-          lifecycleEnv = await nativeDownEnvironment({
-            scope,
-            run,
-            serviceNames: await readComposeServiceNames(project.composeFile),
-          });
-          await hook("before");
-        },
-        mark: () => markLifecycleSharedHelpersStopping({ cfg, composeProject }),
-      }),
+      before: async (run) => {
+        if (!hasHooks) {
+          return;
+        }
+        lifecycleEnv = await nativeDownEnvironment({
+          scope,
+          run,
+          serviceNames: await readComposeServiceNames(project.composeFile),
+        });
+        await hook("before");
+      },
+      // Only a committed down (its before hook succeeded and the ownership
+      // and finalization rechecks passed) may supersede a concurrent up.
+      beforeCleanup: () =>
+        markLifecycleSharedHelpersStopping({ cfg, composeProject }),
       after: async () => {
         if (hasHooks) {
           await hook("after");

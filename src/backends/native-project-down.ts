@@ -87,6 +87,13 @@ export async function nativeProjectDown(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly before?: (run: NativeProjectRun) => Promise<void>;
+  /**
+   * Runs once the down is committed: after `before` and the ownership and
+   * finalization rechecks that follow it, immediately before graph cleanup is
+   * requested. Effects that must only happen for a down that actually stops
+   * the graph (such as marking shared helpers as stopping) belong here.
+   */
+  readonly beforeCleanup?: (run: NativeProjectRun) => Promise<void>;
   readonly retireHostProcesses?: (run: NativeProjectRun) => Promise<void>;
   readonly after?: (run: NativeProjectRun) => Promise<void>;
   readonly invoke?: typeof invokeNativeRuntime;
@@ -176,6 +183,7 @@ export async function nativeProjectDown(opts: {
   ) {
     throw finalizationRefused();
   }
+  await opts.beforeCleanup?.(run);
   await invoke({
     runtime: opts.runtime,
     cwd: opts.scope.projectRoot,

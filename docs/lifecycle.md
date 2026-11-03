@@ -246,7 +246,10 @@ Behavior:
   `hack restart` with `E_LIFECYCLE_FAILED` (non-zero exit, the helper names in `detail`).
   Fix the claim and run `hack down` again.
 - A `hack down` that overlaps a `hack up` of the same instance (same branch):
-  - `hack down` marks the instance as stopping before Compose shutdown, and its release
+  - `hack down` marks the instance as stopping once the down is committed: after its
+    `lifecycle.down.before` hooks succeed (and, on the native path, after the ownership and
+    finalization rechecks that follow them), right before Compose or graph shutdown. A down
+    refused before that point supersedes nothing. Its release
     removes the instance's operation record. Both advance the instance's shutdown
     generation.
   - A down supersedes every `hack up` of the instance whose lifecycle preparation began

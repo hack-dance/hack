@@ -313,7 +313,8 @@ Behavior:
     session creation leaves an empty session that the next `hack up` refuses;
     stop it with tmux. Closing this gap is tracked in HACK-1849.
   - A failed up releases only the helper holders it added, and only while it is the latest
-    up of the instance to have its helpers ready.
+    up of the instance to have its helpers ready and no `hack down` has started since
+    (including one that was interrupted); otherwise the next `hack down` releases them.
   - The failed up's other failure handling is unchanged (for example, it still clears the
     instance's runtime-state entry), so check `hack ps --branch <name>` after such an
     overlap.

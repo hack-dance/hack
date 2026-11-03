@@ -158,7 +158,7 @@ export class LegacyComposeAdoptionBindingError extends Error {
         E_LEGACY_COMPOSE_BINDING_TIMEOUT:
           "Legacy Compose binding inspection timed out; values omitted.",
         E_LEGACY_COMPOSE_BINDING_PROBE:
-          "Legacy Compose binding inspection failed or exceeded its time or I/O budget; values omitted.",
+          "Legacy Compose binding inspection failed or exceeded its I/O budget; values omitted.",
         E_LEGACY_COMPOSE_BINDING_CANCELLED:
           "Legacy Compose binding inspection was cancelled; values omitted.",
       }[code]

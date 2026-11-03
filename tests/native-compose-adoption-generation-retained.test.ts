@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
 import { runLegacyComposeRetainedOperation } from "../src/lib/native-compose-adoption-execution.ts";
 import { openLegacyComposeAdoptedGenerationStore } from "../src/lib/native-compose-adoption-generation.ts";
+import * as adoptionRuntime from "../src/lib/native-compose-adoption-runtime.ts";
 import { captureAdoptionDependencyFirstPrepare } from "./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { createAdoptionGenerationFixture } from "./helpers/native-compose-adoption-generation-fixture.ts";
@@ -740,57 +741,80 @@ boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
   ADOPTION_CASE_TIMEOUT_MS
 );
 
-boundedTest(
-  "HACK-1810: an early deadline timer abort reaches cancelled as a deadline, not caller cancellation",
-  async () => {
-    await dependencyFixture();
-    const { store, generation } = await prepared();
-    const originalTimeout = globalThis.setTimeout;
-    let fireDeadline: (() => void) | undefined;
-    let timer: { mockRestore: () => void } | undefined;
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      timer = spyOn(globalThis, "setTimeout").mockImplementation(
-        Object.assign(
-          (handler: TimerHandler, delay?: number, ...args: unknown[]) => {
-            if (
-              typeof handler === "function" &&
-              handler.name === "adoptionDeadlineAbort"
-            ) {
-              fireDeadline = () => handler(...args);
-            }
-            return originalTimeout(handler, delay, ...args);
-          },
-          { __promisify__: originalTimeout.__promisify__ }
-        ) as typeof setTimeout
-      );
-      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
-      await refusal(
-        store.withMutation({
-          generation,
-          binary,
-          operation: "stop",
-          services: [],
-          deadline,
-          run: async (input) => {
-            expect(Date.now()).toBeLessThan(deadline);
-            expect(fireDeadline).toBeDefined();
-            fireDeadline?.();
-            // The timer can win the rounded-down final millisecond before the
-            // wall clock. This checks cancelled(), before its date guard.
-            input.assertActive();
-            return 0;
-          },
-        }),
-        "E_LEGACY_ADOPTION_DEADLINE"
-      );
-      expect((await readReceipt()).pendingOperation.operation).toBe("stop");
-      expect(await mutationCommands()).toEqual([]);
-    } finally {
-      timer?.mockRestore();
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(1)
-);
+for (const abortAt of ["generation", "binding"] as const) {
+  boundedTest(
+    `HACK-1810: an early deadline timer abort reaches ${abortAt} as a deadline, not caller cancellation`,
+    async () => {
+      await dependencyFixture();
+      const { store, generation } = await prepared();
+      const originalTimeout = globalThis.setTimeout;
+      let fireDeadline: (() => void) | undefined;
+      let timer: { mockRestore: () => void } | undefined;
+      let stateSpy: { mockRestore: () => void } | undefined;
+      let bindingAborted = false;
+      try {
+        const binary = await compiler();
+        await store.publish({ generation, binary });
+        timer = spyOn(globalThis, "setTimeout").mockImplementation(
+          Object.assign(
+            (handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+              if (
+                typeof handler === "function" &&
+                handler.name === "adoptionDeadlineAbort"
+              ) {
+                fireDeadline = () => handler(...args);
+              }
+              return originalTimeout(handler, delay, ...args);
+            },
+            { __promisify__: originalTimeout.__promisify__ }
+          ) as typeof setTimeout
+        );
+        const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
+        await refusal(
+          store.withMutation({
+            generation,
+            binary,
+            operation: "stop",
+            services: [],
+            deadline,
+            run: async (input) => {
+              expect(Date.now()).toBeLessThan(deadline);
+              expect(fireDeadline).toBeDefined();
+              if (abortAt === "generation") {
+                fireDeadline?.();
+                // The timer can win the final rounded millisecond before the
+                // wall clock. Exercise cancelled() before its date guard.
+                input.assertActive();
+              } else {
+                const inspect =
+                  adoptionRuntime.inspectLegacyComposeContainerStates;
+                stateSpy = spyOn(
+                  adoptionRuntime,
+                  "inspectLegacyComposeContainerStates"
+                ).mockImplementation(async (opts) => {
+                  expect(Date.now()).toBeLessThan(deadline);
+                  expect(opts.signal?.aborted).toBe(false);
+                  fireDeadline?.();
+                  bindingAborted = true;
+                  // Let the real lower layer classify its aborted probe. The
+                  // generation's cancelled() does not see this signal here.
+                  return await inspect(opts);
+                });
+              }
+              return 0;
+            },
+          }),
+          "E_LEGACY_ADOPTION_DEADLINE"
+        );
+        expect(bindingAborted).toBe(abortAt === "binding");
+        expect((await readReceipt()).pendingOperation.operation).toBe("stop");
+        expect(await mutationCommands()).toEqual([]);
+      } finally {
+        stateSpy?.mockRestore();
+        timer?.mockRestore();
+        await store.close();
+      }
+    },
+    retainedOperationCaseTimeout(1)
+  );
+}

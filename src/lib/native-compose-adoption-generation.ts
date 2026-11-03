@@ -2690,7 +2690,7 @@ function boundedMutationContext(ctx: Context, deadline: number) {
       controller.abort();
     }
   }, initialRemaining);
-  const bounded: Context = {
+  const bounded = {
     ...ctx,
     signal: controller.signal,
     get timeoutMs() {
@@ -2705,7 +2705,7 @@ function boundedMutationContext(ctx: Context, deadline: number) {
       await ctx.check();
       remaining();
     },
-  };
+  } satisfies Context;
   return {
     ctx: bounded,
     dispose: () => {
@@ -2864,10 +2864,10 @@ async function mutateRetainedContainers(
     );
   } catch (error: unknown) {
     cancelled(original.signal);
-    // An observed drift keeps its own code. Any other failure once the caller
-    // deadline has passed, including the bounded context's own abort, is expiry.
+    // An observed drift keeps its own code. The owned timer can fire in the
+    // rounded-down final millisecond; preserve expiry across every lower layer.
     if (
-      Date.now() >= deadline &&
+      (deadlineAborts.has(bounded.ctx.signal) || Date.now() >= deadline) &&
       !(
         error instanceof LegacyComposeAdoptedGenerationError &&
         error.code === "E_LEGACY_ADOPTION_CHANGED"

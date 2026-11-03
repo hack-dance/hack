@@ -63,6 +63,7 @@ function fakeMux(): FakeMux {
     createdAt: null,
   });
   let pendingCreate: (() => void) | null = null;
+  const hungCalls: Promise<unknown>[] = [];
   const fake: FakeMux = {
     name: "zellij",
     available: true,
@@ -77,11 +78,14 @@ function fakeMux(): FakeMux {
       if (fake.hangCreate) {
         // A hung tmux/zellij: the session appears only if the command
         // eventually completes, after the caller stopped waiting.
-        return new Promise(() => {
+        const hung = new Promise<MuxSessionCreateResult>(() => {
           pendingCreate = () => {
             sessions.set(opts.name, opts.lifecycleOwnerToken ?? "");
           };
         });
+        // Keep the hung call reachable, like a real stuck subprocess.
+        hungCalls.push(hung);
+        return hung;
       }
       if (sessions.has(opts.name)) {
         return Promise.resolve({ ok: false, error: "session exists" });
@@ -98,7 +102,11 @@ function fakeMux(): FakeMux {
     },
     readLifecycleOwnerToken: (opts) =>
       fake.hangToken
-        ? new Promise(() => undefined)
+        ? (() => {
+            const hung = new Promise<string | null>(() => undefined);
+            hungCalls.push(hung);
+            return hung;
+          })()
         : Promise.resolve(sessions.get(opts.name) ?? null),
     readSessionPresence: (opts) =>
       Promise.resolve(sessions.has(opts.name) ? "present" : "absent"),
@@ -357,11 +365,15 @@ test("a hung session creation releases the instance lock within its bound and st
     sessionOwnership: newOwnership(),
     muxCommandTimeoutMs: 200,
   });
-  const started = performance.now();
-  await expect(a.startMany({ processes: [PROCESS] })).rejects.toBeInstanceOf(
-    MuxCommandDeadlineError
-  );
-  expect(performance.now() - started).toBeLessThan(5000);
+  // Self-bounded: without the deadline the creation would never settle.
+  const outcome = await Promise.race([
+    a.startMany({ processes: [PROCESS] }).then(
+      () => "started",
+      (error: unknown) => error
+    ),
+    Bun.sleep(5000).then(() => "creation did not settle"),
+  ]);
+  expect(outcome).toBeInstanceOf(MuxCommandDeadlineError);
   // The lock is free again: another start can take it at once.
   const free = newOwnership();
   await expect(

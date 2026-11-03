@@ -348,8 +348,9 @@ its own budget, separate from the start budget:
 
 `HACK_COMPOSE_STARTUP_TIMEOUT_MS` neither shortens nor lengthens a storage proof:
 carriers follow only `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Native
-`up` and `restart` builds use the image budget (`HACK_COMPOSE_IMAGE_TIMEOUT_MS`), and
-the start budget begins only after builds end, as with the Compose backend. Storage
+`up` and `restart` image builds use the image budget (`HACK_COMPOSE_IMAGE_TIMEOUT_MS`),
+and the start budget begins only after builds end. Native pulls of `image:` services
+still happen during container start and count against the start budget. Storage
 proofs that run while a native `up` or `restart` builds and starts workloads do not
 consume either budget: their elapsed time extends the current phase's deadline, and
 each proof stays bounded by its own carrier budget. Each Docker command inside a carrier

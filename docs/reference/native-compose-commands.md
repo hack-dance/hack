@@ -34,12 +34,13 @@ fallback.
 ## Execution and completion
 
 The first command slice supports whole-project detached `up`, `restart`, `run`,
-`down`, `ps`, plain `logs`, and `exec`. Startup runs in two phases with the
-same budgets as the Compose backend. Image builds use the image budget
-(`HACK_COMPOSE_IMAGE_TIMEOUT_MS`, default 30 minutes); container start,
-readiness and route verification then use the start budget
-(`HACK_COMPOSE_STARTUP_TIMEOUT_MS`, default 90 seconds), which begins only after
-builds end, so a long build never consumes it. A one-off `run` build keeps its
+`down`, `ps`, plain `logs`, and `exec`. Startup runs in two phases. Native image
+builds use the image budget (`HACK_COMPOSE_IMAGE_TIMEOUT_MS`, default 30
+minutes); container start, readiness and route verification then use the start
+budget (`HACK_COMPOSE_STARTUP_TIMEOUT_MS`, default 90 seconds), which begins
+only after builds end, so a long build never consumes it. Unlike the Compose
+backend, pulls of `image:` services happen during Compose `up` in the start
+phase and count against the start budget. A one-off `run` build keeps its
 unbounded command budget. Storage preparation, enrollment and every storage
 proof use the separate per-carrier storage budget
 (`HACK_NATIVE_STORAGE_TIMEOUT_MS`, default 90 seconds); proofs in the build and

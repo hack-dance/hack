@@ -11,10 +11,12 @@ import {
 } from "./cli-result.ts";
 import {
   createNativeComposeWorkloadPhases,
+  DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
   type NativeComposeWorkloadPhases,
   resolveComposeImageTimeoutMs,
   resolveComposeStartupTimeoutMs,
   resolveNativeStorageTimeoutMs,
+  runNativeComposeWorkloadPhases,
 } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
 import { tryNativeAuthoredCommand } from "./native-authored-command.ts";
@@ -1431,38 +1433,30 @@ async function executePreparedNativeWorkloads(opts: {
   /** Image phase, then start phase; each excludes its own guard proof time. */
   readonly phases: NativeComposeWorkloadPhases;
 }) {
-  if (opts.builds.length > 0) {
-    // Builds run under the image budget (HACK_COMPOSE_IMAGE_TIMEOUT_MS), like
-    // the Compose backend's `up --no-start`. One-off `run` builds keep their
-    // unbounded command budget.
-    const code = await buildNativeComposeImages({
-      intents: opts.builds,
-      projectRoot: opts.projectRoot,
-      deadline:
-        opts.options.operation === "run"
-          ? undefined
-          : opts.phases.images.deadline,
-      signal: opts.signal,
-      env: opts.base.env,
-      json: opts.options.json === true,
-      assertFresh: opts.assertFresh,
-      assertOwned: opts.assertOwned,
-    });
-    if (code !== 0) {
-      return { value: code, outcome: "uncertain" as const };
-    }
+  return await runNativeComposeWorkloadPhases({
+    phases: opts.phases,
+    boundedBuilds: opts.options.operation !== "run",
+    build:
+      opts.builds.length > 0
+        ? (deadline) =>
+            buildNativeComposeImages({
+              intents: opts.builds,
+              projectRoot: opts.projectRoot,
+              deadline,
+              signal: opts.signal,
+              env: opts.base.env,
+              json: opts.options.json === true,
+              assertFresh: opts.assertFresh,
+              assertOwned: opts.assertOwned,
+            })
+        : null,
     // No separate post-build guard: the build closes with its own guard, and
-    // the spawn below (Compose `up` or one-off `run`) runs a full guard first.
-  }
-  // The start budget begins only after builds end, so build time never
-  // consumes it.
-  const start = opts.phases.start();
-  if (opts.options.operation === "run") {
-    return await runOneOff(opts);
-  }
-  return await startNativeComposeWorkloads({
-    ...opts,
-    deadline: start.deadline,
+    // the spawn (Compose `up` or one-off `run`) runs a full guard first.
+    start: (deadline) =>
+      opts.options.operation === "run"
+        ? runOneOff(opts)
+        : startNativeComposeWorkloads({ ...opts, deadline }),
+    failed: (code) => ({ value: code, outcome: "uncertain" as const }),
   });
 }
 
@@ -1622,10 +1616,14 @@ async function executePreparedGeneration(opts: {
   if (operation !== "up" && operation !== "restart" && operation !== "run") {
     return invalid();
   }
-  // Resolve every workload budget before any effect, so an invalid value
-  // refuses before enrollment, builds or container start.
+  // Resolve the workload budgets before the journaled effect, so an invalid
+  // value refuses before storage enrollment, builds or container start. A
+  // one-off run never bounds its builds, so it does not read the image budget.
   const budgets = {
-    imageTimeoutMs: resolveComposeImageTimeoutMs(),
+    imageTimeoutMs:
+      operation === "run"
+        ? DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS
+        : resolveComposeImageTimeoutMs(),
     startupTimeoutMs: resolveComposeStartupTimeoutMs(),
     storageTimeoutMs: resolveNativeStorageTimeoutMs(),
   };

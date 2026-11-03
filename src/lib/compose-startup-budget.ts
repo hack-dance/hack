@@ -110,7 +110,8 @@ export function resolveNativeStorageTimeoutMs(
  * `HACK_NATIVE_STORAGE_TIMEOUT_MS` (S), with one carrier per enrolled volume
  * (V). The image phase runs B+2 guard proofs for B builds (one admission
  * guard, one before each builder spawn, one closing guard) and the start phase
- * runs one pre-spawn guard. Without a cap the excluded total is finite, at most
+ * runs one pre-spawn guard (two for a one-off `run`, which also guards after
+ * removing its container). Without a cap the excluded total is finite, at most
  * (B+2) x V x S, but it grows with the build and volume counts: 4 builds and 3
  * volumes allow 18 carriers, about 27 minutes at the 90 s default and 3 hours
  * at the 600 s maximum. The excluded total of a phase may therefore not exceed
@@ -151,7 +152,9 @@ export class NativeStorageTotalBudgetError extends Error {
 /**
  * Deadline of one native `up`/`restart` workload phase:
  * - image phase: native image builds, bounded by
- *   `HACK_COMPOSE_IMAGE_TIMEOUT_MS` like the Compose backend's `up --no-start`;
+ *   `HACK_COMPOSE_IMAGE_TIMEOUT_MS`. Unlike the Compose backend's
+ *   `up --no-start`, it does not cover pulls of `image:` services or container
+ *   creation; Compose `up` performs those in the start phase;
  * - start phase: container start, readiness and route verification, bounded by
  *   `HACK_COMPOSE_STARTUP_TIMEOUT_MS`. It begins only after the image phase
  *   ends, so a long build never consumes it.
@@ -263,6 +266,34 @@ export function createNativeComposeWorkloadPhases(opts: {
     },
     excludeStorage: (work) => (start ?? images).excludeStorage(work),
   };
+}
+
+/**
+ * Run the native workload phases in order: optional builds under the image
+ * phase deadline (none for an unbounded one-off `run`), then begin the start
+ * phase and run the start step under its deadline. A failed build ends the
+ * sequence before the start phase begins.
+ */
+export async function runNativeComposeWorkloadPhases<T>(opts: {
+  readonly phases: NativeComposeWorkloadPhases;
+  /** False for a one-off `run`, whose builds keep their unbounded budget. */
+  readonly boundedBuilds: boolean;
+  readonly build:
+    | ((deadline: (() => number) | undefined) => Promise<number>)
+    | null;
+  readonly start: (deadline: () => number) => Promise<T>;
+  readonly failed: (code: number) => T;
+}): Promise<T> {
+  if (opts.build) {
+    const code = await opts.build(
+      opts.boundedBuilds ? opts.phases.images.deadline : undefined
+    );
+    if (code !== 0) {
+      return opts.failed(code);
+    }
+  }
+  // The start budget begins only after builds end.
+  return await opts.start(opts.phases.start().deadline);
 }
 
 function resolveBudget(opts: {

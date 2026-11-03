@@ -295,6 +295,9 @@ same helper through the CLI on two branches of one project (`hack up`/`down
 | foreign port | A silent TCP owner fails `foreign-listener`, survives and leaves no claim. |
 | shutdown during retry | SIGTERM to `hack up` while a never-ready helper is retried: the CLI exits 143 within 5 s, the owned child is stopped and the claim removed. |
 | lost parent | SIGKILL to `hack up` leaves the helper recorded; the next up stops it at its deadline and a later up starts fresh. |
+| down during a paused up | `hack up` is paused at Compose image preparation after its helpers are ready; `hack down` completes and stops the helper; the resumed up fails `E_LIFECYCLE_FAILED` and never runs `compose up -d`. |
+| entry removed after start | After `hack up`, the `sharedHelpers` entry is removed from config; `hack down` still releases the recorded helper and stops it. |
+| unreleased helper | With an unreadable claim, `hack down` exits non-zero with `E_LIFECYCLE_FAILED` naming the helper; the claim and helper are kept; after the claim is restored, down stops it. |
 
 The pull request records the source mutations used as negative controls and which
 test each one fails. Each test above that guards a single check was confirmed to

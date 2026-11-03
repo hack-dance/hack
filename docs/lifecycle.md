@@ -237,7 +237,15 @@ Behavior:
 - A disabled helper (`enabled: false`) needs none of its `env` or `upstreamEnv` values.
 - `hack down` releases the instance's holder. A helper still used by another branch keeps
   running; the last release stops a helper Hack started and never signals an adopted one.
-  A release that cannot confirm the stop keeps the claim and makes `hack down` report it.
+  Down releases every helper the instance acquired, recorded at start, so removing or
+  renaming an entry (or switching to a revision without it) does not strand its holder.
+- A release that fails or cannot confirm the stop keeps the claim and fails `hack down` and
+  `hack restart` with `E_LIFECYCLE_FAILED` (non-zero exit, the helper names in `detail`).
+  Fix the claim and run `hack down` again.
+- `hack down` marks the instance as stopping before Compose shutdown. A `hack up` of the
+  same instance that is still preparing checks this right before its containers start and
+  again after they start; once a down released its helpers, that up fails with
+  `E_LIFECYCLE_FAILED` instead of starting services without them.
 - Claims live under `~/.hack/shared-helpers/<name>-<port>/` (or `$HACK_HOME`), shared by
   every project and branch that uses that helper name and port.
 - Helpers are not part of the lifecycle mux session and do not appear in `hack logs`.

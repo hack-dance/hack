@@ -574,14 +574,34 @@ test.skipIf(runningAsRoot)(
   async () => {
     const { primary, options } = await fixture();
     const dir = resolve(primary, ".hack");
+    const canary = "synthetic-unreadable-primary-value";
+    await writeLayer(primary, "local", { PERMISSION_CANARY: canary });
+    const localPath = resolve(dir, "hack.env.local.yaml");
+    const before = await readFile(localPath, "utf8");
     await chmod(dir, 0o000);
     try {
-      await expect(resolveProjectEnvConfig(options)).rejects.toThrow(
-        "Refused env layer: its path must resolve inside the project and be inspectable (values omitted)."
-      );
+      let failure: unknown;
+      try {
+        await resolveProjectEnvConfig(options);
+      } catch (error: unknown) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      if (!(failure instanceof Error)) {
+        throw new Error("Expected inaccessible inherited env to be refused");
+      }
+      // Platforms may encounter the permission denial during containment
+      // inspection or while reading the primary directory. Both must refuse.
+      expect([
+        "Refused env layer: its path must resolve inside the project and be inspectable (values omitted).",
+        `Cannot read primary local env file: ${dir}`,
+      ]).toContain(failure.message);
+      expect(failure.message).not.toContain(canary);
+      expect(failure.message).not.toContain("PERMISSION_CANARY");
     } finally {
       await chmod(dir, 0o755);
     }
+    expect(await readFile(localPath, "utf8")).toBe(before);
   }
 );
 

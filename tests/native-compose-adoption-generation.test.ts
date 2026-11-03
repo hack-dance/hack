@@ -43,6 +43,7 @@ import {
   renderComposeEnvReferenceOverride,
   renderManagedComposeEnvOverride,
 } from "../src/lib/compose-managed-env.ts";
+import { DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS } from "../src/lib/compose-startup-budget.ts";
 import { acquireLegacyComposeAdoptionPreparationBinding } from "../src/lib/native-compose-adoption-binding.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
 import {
@@ -75,14 +76,57 @@ import { restoreEnv } from "./helpers/env.ts";
 import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
-// Each owner workflow performs multiple bounded child probes; allow their cumulative work on shared CI hosts.
+/**
+ * The test budget of a case that prepares, publishes, reads or rolls back a
+ * saved adoption, or runs a CLI adoption command, without waiting on a retained
+ * operation's deadline. Every engine and compiler query is a cold Bun process.
+ * With every limit lifted, the slowest such case took 27 s under synthetic CPU
+ * load (load average about 90 on 20 cores); the former 20 s and 30 s limits
+ * timed out there (HACK-1319). This is about four times that.
+ */
+const ADOPTION_CASE_TIMEOUT_MS = 120_000;
+/**
+ * The aggregate deadline a test gives each retained operation it runs: the
+ * deadline the public adopted command gives one
+ * (`DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS`). It replaces a 20 s literal that a
+ * loaded host could exhaust before a healthy operation finished (HACK-1319).
+ * Tests of deadline expiry name {@link EXPIRING_OPERATION_DEADLINE_MS} instead.
+ */
+const RETAINED_OPERATION_DEADLINE_MS = DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
+/**
+ * The test budget of a case that runs `operations` retained operations (direct
+ * or through the public adopted command), each bounded by
+ * {@link RETAINED_OPERATION_DEADLINE_MS}, after its own adoption work. A slow
+ * host therefore ends in the operation's own closed refusal before Bun's
+ * timeout. A Bun timeout is worse than a failure here: the timed-out owner may
+ * still be running, so every later case in this file refuses to start.
+ */
+function retainedOperationCaseTimeout(operations: number): number {
+  return ADOPTION_CASE_TIMEOUT_MS + operations * RETAINED_OPERATION_DEADLINE_MS;
+}
+/**
+ * The aggregate deadline of a case that proves expiry. Work before its callback
+ * must fit inside it, so it covers the pre-callback freshness probes under
+ * load, and a held probe must still be ended by it rather than by the fake
+ * child's 60 s sleep (HACK-1319; formerly 5 s).
+ */
+const EXPIRING_OPERATION_DEADLINE_MS = 15_000;
+/** How late after its deadline an expired operation may refuse under load. */
+const DEADLINE_REFUSAL_SLACK_MS = 5000;
+/**
+ * How soon after its abort a cancelled retained effect must refuse. It stays
+ * far below the effect child's 60 s sleep and the operation's deadline, so only
+ * the cancellation can end the effect in time.
+ */
+const CANCELLED_EFFECT_REFUSAL_BOUND_MS = 10_000;
+// Unnamed cases are saved-adoption cases (see ADOPTION_CASE_TIMEOUT_MS).
 const test = (name: string, run: () => Promise<void>) =>
-  boundedTest(name, run, 20_000);
+  boundedTest(name, run, ADOPTION_CASE_TIMEOUT_MS);
 const CANARY = "synthetic-private-adoption-canary";
 /**
- * Budget for a rollback-recovery test that runs several saved adoption reads
- * or CLI adoption commands; adoption tests are load-sensitive on shared hosts
- * (HACK-1367).
+ * Budget for a rollback-recovery test that runs several saved adoption reads,
+ * rollbacks or CLI adoption commands; adoption tests are load-sensitive on
+ * shared hosts (HACK-1367). The slowest took 49 s under the load above.
  */
 const ROLLBACK_RECOVERY_BUDGET_MS = 240_000;
 const ID = "a".repeat(64);
@@ -241,8 +285,10 @@ beforeEach(async () => {
   await writeFile(
     join(root, "docker"),
     `#!${process.execPath}
-import {appendFileSync, readFileSync, writeFileSync} from "node:fs";
+import {appendFileSync, readFileSync, renameSync, writeFileSync} from "node:fs";
 const root = ${JSON.stringify(root)};
+// Publish a hanging child's PID by rename: a child killed mid-write must never leave an empty file (HACK-1319).
+const publishPid = (name) => {writeFileSync(root + "/" + name + ".tmp", String(process.pid));renameSync(root + "/" + name + ".tmp", root + "/" + name);};
 const args = process.argv.slice(2);
 appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
 const fixture = JSON.parse(readFileSync(root + "/fixture.json", "utf8"));
@@ -258,7 +304,7 @@ if(fixture.dependencyReadScope && !(kind === 'container' && ['start','stop','res
 }
 if (kind === 'container' && ['start','restart','stop'].includes(action)) {
  if (!args.slice(2).length || args.slice(2).some(id => !fixture.container.some(container => container.id === id))) { writeFileSync(root + '/mutation','unverified effect');process.exit(99); }
- if(fixture.hangMutation) {writeFileSync(root + '/effect-started', String(process.pid));await Bun.sleep(60_000);}
+ if(fixture.hangMutation) {publishPid('effect-started');await Bun.sleep(60_000);}
  if (fixture.ordered) {for(const id of args.slice(2)) fixture.states[id] = action !== 'stop';}
  else fixture.running = action !== 'stop';
  if(fixture.jobs) for(const id of args.slice(2)) if(fixture.jobs[id]) {
@@ -279,8 +325,8 @@ if (kind === "compose") {
 if (!(kind === "info" && action === "--format") && (!['container','volume','network'].includes(kind) || !['ls','inspect'].includes(action) || !args.includes('--format'))) {writeFileSync(root + "/mutation", "unauthorized command");process.exit(99);}
 if (fixture.mode === "fail") {console.error(${JSON.stringify(CANARY)});process.exit(29);}
 if (fixture.mode === "malformed") {console.log(${JSON.stringify(CANARY)});process.exit(0);}
-if (fixture.mode === "hang") {writeFileSync(root + "/started", String(process.pid));await Bun.sleep(60_000);}
-if (fixture.mode === "hang-state" && kind === "container" && action === "inspect" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) {writeFileSync(root + "/started", String(process.pid));await Bun.sleep(60_000);}
+if (fixture.mode === "hang") {publishPid("started");await Bun.sleep(60_000);}
+if (fixture.mode === "hang-state" && kind === "container" && action === "inspect" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) {publishPid("started");await Bun.sleep(60_000);}
 if (fixture.mode === "overflow") {await Bun.write(Bun.stdout, "x".repeat(9 * 1024 * 1024));process.exit(0);}
 if (fixture.mode === "stderr-overflow") {await Bun.write(Bun.stderr, "x".repeat(17 * 1024));process.exit(0);}
 if (kind === "info") {console.log(JSON.stringify({id: fixture.engine, os: "linux"}));}
@@ -638,44 +684,48 @@ function publicStatic7Stages() {
   };
 }
 
-test("retained Compose fixture admits its explicit backend and preserves opposite-backend refusal before probes", async () => {
-  await publicStatic7Case(async () => {
-    expect(process.env.HACK_RUNTIME_BACKEND).toBe("compose");
-    const binary = await compiler();
-    const { store, generation } = await prepared(binary);
-    const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-    try {
-      process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-      await store.publish({ generation, binary });
-      const commands = await readFile(join(root, "commands"), "utf8");
-      process.env.HACK_RUNTIME_BACKEND = "native";
+boundedTest(
+  "retained Compose fixture admits its explicit backend and preserves opposite-backend refusal before probes",
+  async () => {
+    await publicStatic7Case(async () => {
+      expect(process.env.HACK_RUNTIME_BACKEND).toBe("compose");
+      const binary = await compiler();
+      const { store, generation } = await prepared(binary);
+      const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
       try {
-        await expect(
-          tryLegacyComposeAdoptedCommand({
+        process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+        await store.publish({ generation, binary });
+        const commands = await readFile(join(root, "commands"), "utf8");
+        process.env.HACK_RUNTIME_BACKEND = "native";
+        try {
+          await expect(
+            tryLegacyComposeAdoptedCommand({
+              cwd: projectRoot,
+              operation: "up",
+              detach: true,
+            })
+          ).rejects.toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
+          expect(await readFile(join(root, "commands"), "utf8")).toBe(commands);
+          expect((await readReceipt()).pendingOperation).toBeNull();
+        } finally {
+          process.env.HACK_RUNTIME_BACKEND = "compose";
+        }
+        expect(
+          await tryLegacyComposeAdoptedCommand({
             cwd: projectRoot,
             operation: "up",
             detach: true,
           })
-        ).rejects.toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
-        expect(await readFile(join(root, "commands"), "utf8")).toBe(commands);
-        expect((await readReceipt()).pendingOperation).toBeNull();
+        ).toBe(0);
+        expect(await mutationCommands()).toEqual([["container", "start", ID]]);
       } finally {
-        process.env.HACK_RUNTIME_BACKEND = "compose";
+        restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+        await store.close();
       }
-      expect(
-        await tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
-          operation: "up",
-          detach: true,
-        })
-      ).toBe(0);
-      expect(await mutationCommands()).toEqual([["container", "start", ID]]);
-    } finally {
-      restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-      await store.close();
-    }
-  });
-});
+    });
+  },
+  retainedOperationCaseTimeout(1)
+);
 
 boundedTest.each(["no", ""] as const)(
   "public retained up dispatches the maintained static7 family with disabled policy %j",
@@ -731,7 +781,7 @@ boundedTest.each(["no", ""] as const)(
     });
   },
   // Cover prepare/publish and separate bounded up/down operations without changing their deadlines.
-  60_000
+  retainedOperationCaseTimeout(2)
 );
 
 boundedTest.each([
@@ -792,7 +842,7 @@ boundedTest.each([
       }
     });
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest(
@@ -846,7 +896,7 @@ boundedTest(
       }
     });
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest.each(["start", "restart", "stop"] as const)(
@@ -865,7 +915,7 @@ boundedTest.each(["start", "restart", "stop"] as const)(
         fixture.states = { [ID]: true, [app]: true, [job]: false };
         await save();
       }
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -924,7 +974,7 @@ boundedTest.each(["start", "restart", "stop"] as const)(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest(
@@ -941,7 +991,7 @@ boundedTest(
           binary,
           operation: "start",
           services: [],
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
           run: async () => {
             fixture.states = { [ID]: true, [app]: true, [job]: false };
             await save();
@@ -951,7 +1001,7 @@ boundedTest(
       ).rejects.toThrow("values omitted");
       expect((await readReceipt()).pendingOperation.operation).toBe("start");
       expect(await mutationCommands()).toEqual([]);
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -979,7 +1029,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(2)
 );
 
 boundedTest(
@@ -995,7 +1045,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
       await expect(
         store.withMutation({
           generation,
@@ -1022,7 +1072,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest(
@@ -1034,7 +1084,7 @@ boundedTest(
       const binary = await compiler();
       await store.publish({ generation, binary });
       let previous: LegacyComposeRetainedOutcome | undefined;
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -1061,7 +1111,7 @@ boundedTest(
           binary,
           operation: "start",
           services: [],
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
           run: async () => {
             if (!previous) {
               throw new Error("missing completion");
@@ -1076,7 +1126,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(2)
 );
 
 boundedTest(
@@ -1087,7 +1137,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
       await expect(
         store.withMutation({
           generation,
@@ -1117,7 +1167,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest(
@@ -1132,7 +1182,7 @@ boundedTest(
         join(projectRoot, ".hack/hack.project.json"),
         "utf8"
       );
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
       await refusal(
         store.withMutation({
           generation,
@@ -1166,7 +1216,7 @@ boundedTest(
       fixture.jobFinalRace = false;
       await save();
       await writeFile(join(projectRoot, ".hack/hack.project.json"), original);
-      const recoveryDeadline = Date.now() + 20_000;
+      const recoveryDeadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
       expect(
         await store.withMutation({
           generation,
@@ -1188,7 +1238,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(2)
 );
 
 boundedTest(
@@ -1199,7 +1249,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
       await expect(
         store.withMutation({
           generation,
@@ -1235,7 +1285,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest(
@@ -1262,7 +1312,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  ADOPTION_CASE_TIMEOUT_MS
 );
 
 boundedTest(
@@ -1275,7 +1325,7 @@ boundedTest(
     const controller = new AbortController();
     try {
       const binary = await compiler(),
-        deadline = Date.now() + 20_000;
+        deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
       expect(
         await store.withPreparationStop({
           generation,
@@ -1305,7 +1355,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest(
@@ -1316,7 +1366,7 @@ boundedTest(
     try {
       const binary = await compiler();
       await store.publish({ generation, binary });
-      const deadline = Date.now() + 5000;
+      const deadline = Date.now() + EXPIRING_OPERATION_DEADLINE_MS;
       await refusal(
         store.withMutation({
           generation,
@@ -1337,7 +1387,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest(
@@ -1378,7 +1428,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  ADOPTION_CASE_TIMEOUT_MS
 );
 
 for (const linked of [false, true]) {
@@ -1462,7 +1512,7 @@ for (const linked of [false, true]) {
         stage("closed");
       }
     },
-    30_000
+    ADOPTION_CASE_TIMEOUT_MS
   );
 }
 
@@ -1475,7 +1525,7 @@ for (const stage of ["per-effect freshness", "final observation"] as const) {
       try {
         const binary = await compiler();
         await store.publish({ generation, binary });
-        const deadline = Date.now() + 5000;
+        const deadline = Date.now() + EXPIRING_OPERATION_DEADLINE_MS;
         let reachedCallback = false;
         await refusal(
           store.withMutation({
@@ -1498,7 +1548,7 @@ for (const stage of ["per-effect freshness", "final observation"] as const) {
           "E_LEGACY_ADOPTION_DEADLINE"
         );
         expect(reachedCallback).toBe(true);
-        expect(Date.now()).toBeLessThan(deadline + 1500);
+        expect(Date.now()).toBeLessThan(deadline + DEADLINE_REFUSAL_SLACK_MS);
         const pid = Number(
           (await readFile(join(root, "started"), "utf8")).trim()
         );
@@ -1517,7 +1567,7 @@ for (const stage of ["per-effect freshness", "final observation"] as const) {
         await store.close();
       }
     },
-    30_000
+    retainedOperationCaseTimeout(1)
   );
 }
 
@@ -1542,7 +1592,7 @@ boundedTest(
     expect(await mutationCommands()).toEqual([]);
     expect(fixture.volume[0]?.createdAt).toBe(CREATED);
   },
-  30_000
+  ADOPTION_CASE_TIMEOUT_MS
 );
 
 boundedTest(
@@ -1575,7 +1625,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  ADOPTION_CASE_TIMEOUT_MS
 );
 
 boundedTest(
@@ -1636,7 +1686,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(2)
 );
 
 boundedTest(
@@ -1650,7 +1700,7 @@ boundedTest(
       let calls = 0;
       await refusal(
         store.withMutation({
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
           generation,
           binary,
           operation: "start",
@@ -1666,7 +1716,7 @@ boundedTest(
       expect((await readReceipt()).pendingOperation).toBeNull();
       let retained: (() => Promise<void>) | undefined;
       await store.withMutation({
-        deadline: Date.now() + 20_000,
+        deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
         generation,
         binary,
         operation: "stop",
@@ -1689,7 +1739,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(2)
 );
 
 boundedTest(
@@ -1739,7 +1789,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(2)
 );
 
 boundedTest(
@@ -1752,7 +1802,7 @@ boundedTest(
       await store.publish({ generation, binary });
       await refusal(
         store.withMutation({
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
           generation,
           binary,
           operation: "start",
@@ -1775,7 +1825,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest(
@@ -1794,7 +1844,7 @@ boundedTest(
       let effects = 0;
       await refusal(
         store.withMutation({
-          deadline: Date.now() + 20_000,
+          deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
           generation,
           binary,
           operation: "start",
@@ -1815,7 +1865,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest(
@@ -1833,7 +1883,7 @@ boundedTest(
       await store.publish({ generation, binary });
       fixture.hangMutation = true;
       await save();
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
       let effectStartedAt = 0;
       await refusal(
         store.withMutation({
@@ -1849,10 +1899,22 @@ boundedTest(
               deadline,
               signal: controller.signal,
             });
-            const readyUntil = Date.now() + 4000;
+            // Handshake, not a timed wait: the effect child publishes its PID,
+            // or the operation settles without one (HACK-1319).
+            let settled = false;
+            operation.then(
+              () => {
+                settled = true;
+              },
+              () => {
+                settled = true;
+              }
+            );
             while (
-              !(await Bun.file(join(root, "effect-started")).exists()) &&
-              Date.now() < readyUntil
+              !(
+                (await Bun.file(join(root, "effect-started")).exists()) ||
+                settled
+              )
             ) {
               await Bun.sleep(10);
             }
@@ -1866,7 +1928,9 @@ boundedTest(
         }),
         "E_LEGACY_ADOPTION_CANCELLED"
       );
-      expect(Date.now() - effectStartedAt).toBeLessThan(4000);
+      expect(Date.now() - effectStartedAt).toBeLessThan(
+        CANCELLED_EFFECT_REFUSAL_BOUND_MS
+      );
       const pid = Number(await Bun.file(join(root, "effect-started")).text());
       let alive = true;
       try {
@@ -1882,7 +1946,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
@@ -1926,7 +1990,7 @@ boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
       await store.close();
     }
   },
-  30_000
+  ADOPTION_CASE_TIMEOUT_MS
 );
 
 /** Current writers keep references at rest; "literal" models a file an earlier
@@ -2414,7 +2478,7 @@ boundedTest(
       "active"
     );
   },
-  90_000
+  ADOPTION_CASE_TIMEOUT_MS
 );
 
 boundedTest(
@@ -2578,7 +2642,7 @@ boundedTest(
       })
     ).toMatchObject({ removed: true, adoptionBound: false });
   },
-  90_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest(
@@ -2636,7 +2700,7 @@ boundedTest(
       "rolled-back"
     );
   },
-  90_000
+  ADOPTION_CASE_TIMEOUT_MS
 );
 
 boundedTest(
@@ -3214,7 +3278,7 @@ boundedTest(
       await store.close();
     }
   },
-  240_000
+  ROLLBACK_RECOVERY_BUDGET_MS
 );
 
 boundedTest(
@@ -3277,7 +3341,7 @@ boundedTest(
       await store.close();
     }
   },
-  60_000
+  ADOPTION_CASE_TIMEOUT_MS
 );
 async function artifactPath(name: string) {
   const receipt = JSON.parse(
@@ -3882,7 +3946,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(2)
 );
 
 test("v10 saved bridge and health owner rejects other contract receipts", async () => {
@@ -3970,7 +4034,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  retainedOperationCaseTimeout(1)
 );
 
 boundedTest(
@@ -4005,7 +4069,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  ADOPTION_CASE_TIMEOUT_MS
 );
 
 test("rolled-back v10 can reprepare the same owned bridge without health under v6", async () => {
@@ -4175,7 +4239,7 @@ boundedTest(
       await store.close();
     }
   },
-  30_000
+  ADOPTION_CASE_TIMEOUT_MS
 );
 
 test("v6 rollback permits a later plain owner without inheriting topology authority", async () => {
@@ -5064,89 +5128,93 @@ test("post-effect resource loss cannot acknowledge success or enable automatic r
   }
 });
 
-test("retained command dispatch uses only original IDs and keeps anchors through stop and recovery", async () => {
-  const original = await originalSnapshots(),
-    { store, generation } = await prepared();
-  const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-  try {
-    const binary = await compiler();
-    process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-    await store.publish({ generation, binary });
-    const options = {
-      cwd: projectRoot,
-      operation: "up" as const,
-      detach: true,
-    };
-    expect(await tryLegacyComposeAdoptedCommand(options)).toBe(0);
-    expect(
-      JSON.parse(await readFile(join(root, "fixture.json"), "utf8")).running
-    ).toBe(true);
-    expect(
-      await tryLegacyComposeAdoptedCommand({
+boundedTest(
+  "retained command dispatch uses only original IDs and keeps anchors through stop and recovery",
+  async () => {
+    const original = await originalSnapshots(),
+      { store, generation } = await prepared();
+    const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+    try {
+      const binary = await compiler();
+      process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+      await store.publish({ generation, binary });
+      const options = {
         cwd: projectRoot,
-        operation: "exec",
-        service: "db",
-        command: ["true"],
-      })
-    ).toBe(0);
-    await expect(
-      tryLegacyComposeAdoptedCommand({
-        cwd: projectRoot,
-        operation: "run",
-        service: "db",
-        command: ["true"],
-      })
-    ).rejects.toThrow("Recreation");
-    expect(
-      await tryLegacyComposeAdoptedCommand({
-        cwd: projectRoot,
-        operation: "down",
-      })
-    ).toBe(0);
-    fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
-    expect(fixture.container[0]?.id).toBe(ID);
-    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-    fixture.mutationFailure = true;
-    await save();
-    expect(await tryLegacyComposeAdoptedCommand(options)).toBe(7);
-    await expect(tryLegacyComposeAdoptedCommand(options)).rejects.toThrow(
-      "busy"
-    );
-    fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
-    fixture.mutationFailure = undefined;
-    await save();
-    expect(
-      await tryLegacyComposeAdoptedCommand({
-        cwd: projectRoot,
-        operation: "down",
-        recover: true,
-      })
-    ).toBe(0);
-    await store.rollback();
-    await expectOriginals(original);
-    const commands = (await readFile(join(root, "commands"), "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    expect(
-      commands
-        .filter((args) => ["start", "stop", "restart"].includes(args[1]))
-        .every((args) => args.join(" ").endsWith(ID))
-    ).toBe(true);
-    expect(
-      commands.some(
-        (args) =>
-          args.includes("rm") ||
-          args.includes("up") ||
-          args.includes("down") ||
-          args.includes("create")
-      )
-    ).toBe(false);
-  } finally {
-    restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-    await store.close();
-  }
-});
+        operation: "up" as const,
+        detach: true,
+      };
+      expect(await tryLegacyComposeAdoptedCommand(options)).toBe(0);
+      expect(
+        JSON.parse(await readFile(join(root, "fixture.json"), "utf8")).running
+      ).toBe(true);
+      expect(
+        await tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "exec",
+          service: "db",
+          command: ["true"],
+        })
+      ).toBe(0);
+      await expect(
+        tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "run",
+          service: "db",
+          command: ["true"],
+        })
+      ).rejects.toThrow("Recreation");
+      expect(
+        await tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "down",
+        })
+      ).toBe(0);
+      fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
+      expect(fixture.container[0]?.id).toBe(ID);
+      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+      fixture.mutationFailure = true;
+      await save();
+      expect(await tryLegacyComposeAdoptedCommand(options)).toBe(7);
+      await expect(tryLegacyComposeAdoptedCommand(options)).rejects.toThrow(
+        "busy"
+      );
+      fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
+      fixture.mutationFailure = undefined;
+      await save();
+      expect(
+        await tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "down",
+          recover: true,
+        })
+      ).toBe(0);
+      await store.rollback();
+      await expectOriginals(original);
+      const commands = (await readFile(join(root, "commands"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(
+        commands
+          .filter((args) => ["start", "stop", "restart"].includes(args[1]))
+          .every((args) => args.join(" ").endsWith(ID))
+      ).toBe(true);
+      expect(
+        commands.some(
+          (args) =>
+            args.includes("rm") ||
+            args.includes("up") ||
+            args.includes("down") ||
+            args.includes("create")
+        )
+      ).toBe(false);
+    } finally {
+      restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+      await store.close();
+    }
+  },
+  retainedOperationCaseTimeout(4)
+);
 
 test("receipt changes during compile cannot overwrite a newer owner decision", async () => {
   const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });

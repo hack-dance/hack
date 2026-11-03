@@ -78,3 +78,38 @@ transaction or protection against a hostile process with the same UID. Filesyste
 checks alone do not prove route or engine ownership. Tests cover publication races,
 kill/interruption retention and filesystem refusal; root command integration must
 qualify real Docker routing, saved operations and normal/recovery cleanup separately.
+
+## Settled retained lifecycle attempts
+
+After a retained lifecycle receipt commits, `compact({ references })` runs under
+that operation's instance mutation lock. The original adoption reference and the
+latest committed operation reference remain pinned. Unreferenced completed,
+aborted or explicitly recovered stopped attempts can be removed only when the
+surviving journals prove every active claim with the same token and inode.
+Reserved and uncertain attempts remain. This does not release a hostname or earn
+completion authority.
+
+Retirement first atomically moves an obsolete attempt out of `attempts` into
+`retired`, synchronizes both parents, then deletes only validated private journal
+files, including token-named temporary files left by interrupted publication.
+A later compaction resumes interrupted cleanup. Post-commit cleanup is best-effort:
+failure cannot change the settled receipt or successful command result. Pre-operation
+cleanup still refuses unsafe state before lifecycle admission. Directory handles and
+immutable-file cache entries are closed/discarded as their attempts retire.
+Successful repeated retained operations therefore keep two attempt directories
+(the adoption and latest operation), with a constant descriptor count. An
+operation may temporarily add one attempt. This bound applies when the pinned
+journals witness every live claim. If an older attempt is the sole witness for a
+claim (for example after removing a hostname from config), compaction preserves
+the entire history until that claim is safely released or witnessed again.
+Directories preceding intent publication, empty or containing only validated
+token-named temporary files (including zero-byte files), are removed under the mutation lock.
+Existing byte limits still apply;
+unsafe or unresolved histories refuse rather than being silently discarded.
+
+Container binding, runtime and routing projections batch immutable IDs within a
+fresh observation, with at most 64 IDs per command. Every selected ID must occur
+exactly once; missing, duplicate, foreign or malformed rows refuse. Each caller
+still checks every projected ownership/policy field and retains its original
+before/after inventories, engine fences and phase deadlines. No observation is
+cached across an engine effect.

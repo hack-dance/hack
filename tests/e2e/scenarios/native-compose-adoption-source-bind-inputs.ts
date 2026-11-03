@@ -3,7 +3,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isRecord } from "../../../src/lib/guards.ts";
 import type { CliResult } from "../harness.ts";
-import { adoptionDependencyReadAllowed } from "./native-compose-adoption-dependency-inputs.ts";
+import {
+  adoptionDependencyReadAllowed,
+  adoptionFixtureContainerInspectIdsAllowed,
+} from "./native-compose-adoption-dependency-inputs.ts";
 import {
   type AdoptionDependencyFirstPrepare,
   captureAdoptionDependencyFirstPrepare,
@@ -278,12 +281,8 @@ export function sourceBindFixtureReadAllowed(
   const { args } = opts;
   return (
     adoptionDependencyReadAllowed(opts) ||
-    (args.length === 5 &&
-      args[0] === "container" &&
-      args[1] === "inspect" &&
-      args[2] === "--format" &&
-      args[3] === SOURCE_BIND_FIXTURE_OWNER_FORMAT &&
-      opts.containerIds.includes(args[4] ?? ""))
+    (adoptionFixtureContainerInspectIdsAllowed(opts) &&
+      args[3] === SOURCE_BIND_FIXTURE_OWNER_FORMAT)
   );
 }
 

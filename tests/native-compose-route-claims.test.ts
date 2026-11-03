@@ -1131,3 +1131,172 @@ for (const hostname of [
     expect(await fs.readdir(join(namespace(root), "claims"))).toEqual([]);
   });
 }
+
+test.each([
+  "",
+  "unfinished",
+])("compaction removes interrupted publication temporary %j and empty attempts", async (contents) => {
+  const root = await fixture();
+  const result = await store(root);
+  const obsolete = await acquire(result);
+  await complete(result, obsolete);
+  const current = await acquire(result);
+  await complete(result, current);
+  await fs.writeFile(
+    join(
+      ownerPath(root),
+      "attempts",
+      obsolete.reference.attemptId,
+      `${"a".repeat(32)}.tmp`
+    ),
+    contents,
+    { mode: 0o600 }
+  );
+  await fs.mkdir(join(ownerPath(root), "attempts", "b".repeat(32)), {
+    mode: 0o700,
+  });
+  await fs.mkdir(join(ownerPath(root), "attempts", "d".repeat(32)), {
+    mode: 0o700,
+  });
+  await fs.writeFile(
+    join(ownerPath(root), "attempts", "d".repeat(32), `${"e".repeat(32)}.tmp`),
+    contents,
+    { mode: 0o600 }
+  );
+  await result.compact({ references: [current.reference] });
+  expect(await fs.readdir(join(ownerPath(root), "attempts"))).toEqual([
+    current.reference.attemptId,
+  ]);
+  expect(await fs.readdir(join(ownerPath(root), "retired"))).toEqual([]);
+  await result.assertHeld(current.reference);
+});
+
+test("compaction retires aborted and stopped attempts but preserves a stopped pin", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const aborted = await acquire(result);
+  await result.rollback(aborted);
+  const stopped = await acquire(result);
+  await result.markEffectsPossible(stopped);
+  await result.recoverRetainedStopped({
+    references: [stopped.reference],
+    assertStopped: async () => {},
+  });
+  await result.compact({ references: [stopped.reference] });
+  expect((await result.reopen(stopped.reference)).phase).toBe("stopped");
+  await expect(result.reopen(aborted.reference)).rejects.toThrow();
+  const current = await acquire(result);
+  await complete(result, current);
+  await result.compact({ references: [current.reference] });
+  await expect(result.reopen(stopped.reference)).rejects.toThrow();
+});
+
+test("settled lifecycle attempts have constant directory and Linux descriptor counts", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const original = await acquire(result);
+  const descriptors = async () =>
+    process.platform === "linux"
+      ? (await fs.readdir("/proc/self/fd")).length
+      : null;
+  let previous = await acquire(result);
+  await complete(result, previous);
+  await result.compact({
+    references: [original.reference, previous.reference],
+  });
+  const baseline = await descriptors();
+  for (let index = 0; index < 24; index++) {
+    const current = await acquire(result);
+    await complete(result, current);
+    await result.compact({
+      references: [original.reference, current.reference],
+    });
+    expect(await fs.readdir(join(ownerPath(root), "attempts"))).toHaveLength(2);
+    expect(await fs.readdir(join(ownerPath(root), "retired"))).toHaveLength(0);
+    if (baseline !== null) {
+      expect(await descriptors()).toBe(baseline);
+    }
+    await expect(result.reopen(previous.reference)).rejects.toThrow();
+    await result.assertHeld(original.reference);
+    await result.assertHeld(current.reference);
+    previous = current;
+  }
+}, 120_000);
+
+test("compaction preserves uncertainty, referenced attempts and sole active claim witnesses", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const settled = await acquire(result);
+  await complete(result, settled);
+  await result.compact({ references: [] });
+  expect((await result.reopen(settled.reference)).phase).toBe("complete");
+  const unknown = await acquire(result);
+  await result.markEffectsPossible(unknown);
+  await result.compact({ references: [settled.reference] });
+  expect((await result.reopen(unknown.reference)).phase).toBe("armed");
+  await result.assertHeld(unknown.reference);
+  await result.compact({ references: [] });
+  await expect(result.reopen(settled.reference)).rejects.toThrow();
+});
+
+test("interrupted retired-file cleanup resumes without a partial active journal", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const original = await acquire(result);
+  const obsolete = await acquire(result);
+  await complete(result, obsolete);
+  const current = await acquire(result);
+  await complete(result, current);
+  const references = [original.reference, current.reference];
+  const unlink = fs.unlink;
+  const failure = spyOn(fs, "unlink").mockImplementation(async (path) => {
+    if (String(path).includes("/retired/")) {
+      throw Object.assign(new Error("synthetic interrupted cleanup"), {
+        code: "EIO",
+      });
+    }
+    return await unlink(path);
+  });
+  try {
+    await expect(result.compact({ references })).rejects.toThrow();
+  } finally {
+    failure.mockRestore();
+    await result.close();
+  }
+  expect(await fs.readdir(join(ownerPath(root), "attempts"))).toHaveLength(2);
+  expect(await fs.readdir(join(ownerPath(root), "retired"))).toHaveLength(1);
+  const reopened = await store(root);
+  await reopened.compact({ references });
+  expect(await fs.readdir(join(ownerPath(root), "retired"))).toHaveLength(0);
+  await reopened.assertHeld(original.reference);
+  await reopened.assertHeld(current.reference);
+});
+
+test("retired cleanup can retry on the same open store without leaking a directory handle", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const original = await acquire(result);
+  const obsolete = await acquire(result);
+  await complete(result, obsolete);
+  const current = await acquire(result);
+  await complete(result, current);
+  const references = [original.reference, current.reference];
+  const unlink = fs.unlink;
+  const failure = spyOn(fs, "unlink").mockImplementation(async (path) => {
+    if (String(path).includes("/retired/")) {
+      throw Object.assign(new Error("synthetic interrupted cleanup"), {
+        code: "EIO",
+      });
+    }
+    return await unlink(path);
+  });
+  try {
+    await expect(result.compact({ references })).rejects.toThrow();
+  } finally {
+    failure.mockRestore();
+  }
+  await result.compact({ references });
+  await result.assertHeld(original.reference);
+  await result.assertHeld(current.reference);
+  expect(await fs.readdir(join(ownerPath(root), "retired"))).toHaveLength(0);
+});

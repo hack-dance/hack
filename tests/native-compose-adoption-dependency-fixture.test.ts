@@ -8,6 +8,10 @@ import {
   assertAdoptionDependencyHealthcheck,
   assertAdoptionDependencyStart,
 } from "./e2e/scenarios/native-compose-adoption-dependency-inputs.ts";
+import {
+  SOURCE_BIND_FIXTURE_OWNER_FORMAT,
+  sourceBindFixtureReadAllowed,
+} from "./e2e/scenarios/native-compose-adoption-source-bind-inputs.ts";
 import { nativeComposeAdoptionDependencyWorktreesScenario } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
 
 const db = "a".repeat(64),
@@ -371,4 +375,54 @@ test("new dependency selector is explicit and registered once with failure prese
   expect(
     entries.match(/nativeComposeAdoptionDependencyWorktreesScenario/g)
   ).toHaveLength(1);
+});
+
+test("read forwarding accepts bounded captured container batches and rejects widened authority", () => {
+  for (const [format, allowed] of [
+    [statesFormat, adoptionDependencyReadAllowed],
+    [configHashFormat, adoptionDependencyReadAllowed],
+    [SOURCE_BIND_FIXTURE_OWNER_FORMAT, sourceBindFixtureReadAllowed],
+  ] as const) {
+    const prefix = ["container", "inspect", "--format", format];
+    expect(allowed({ ...readScope, args: [...prefix, db, worker] })).toBe(true);
+    const captured = Array.from({ length: 65 }, (_, index) =>
+      index.toString(16).padStart(64, "0")
+    );
+    expect(
+      allowed({
+        ...readScope,
+        containerIds: captured,
+        args: [...prefix, ...captured.slice(0, 64)],
+      })
+    ).toBe(true);
+    expect(
+      allowed({
+        ...readScope,
+        containerIds: captured,
+        args: [...prefix, ...captured],
+      })
+    ).toBe(false);
+    for (const ids of [
+      [],
+      [db, db],
+      [db, "e".repeat(64)],
+      [db, "--size"],
+      Array.from({ length: 65 }, () => db),
+    ]) {
+      expect(allowed({ ...readScope, args: [...prefix, ...ids] })).toBe(false);
+    }
+    expect(
+      allowed({
+        ...readScope,
+        args: [
+          "container",
+          "inspect",
+          "--format",
+          `${format}PRIVATE`,
+          db,
+          worker,
+        ],
+      })
+    ).toBe(false);
+  }
 });

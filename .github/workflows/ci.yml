@@ -179,13 +179,33 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Install pinned Zig for guest helpers
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
-        with:
-          version: "2026.9.12"
-          install_args: zig
-          add_shims_to_path: false
-          cache: false
-          env: false
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep the mise.toml pin; avoid installer fallback to obsolete archive names
+          # when the upstream download index is unavailable or malformed.
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64)
+              platform=x86_64-linux
+              checksum=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+              ;;
+            macOS-ARM64)
+              platform=aarch64-macos
+              checksum=3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+              ;;
+            macOS-X64)
+              platform=x86_64-macos
+              checksum=375b6909fc1495d16fc2c7db9538f707456bfc3373b14ee83fdd3e22b3d43f7f
+              ;;
+            *) echo "Unsupported Zig runner platform" >&2; exit 1 ;;
+          esac
+          archive="zig-${platform}-0.15.2.tar.xz"
+          destination="${RUNNER_TEMP}/candidate-zig"
+          mkdir -p "$destination"
+          curl --fail --location --retry 3 "https://ziglang.org/download/0.15.2/${archive}" -o "$destination/$archive"
+          (cd "$destination" && echo "$checksum  $archive" | shasum -a 256 --check)
+          tar -xf "$destination/$archive" -C "$destination"
+          echo "$destination/zig-${platform}-0.15.2" >> "$GITHUB_PATH"
       - name: Check candidate formatting
         run: cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check
       - name: Lint candidate core
@@ -193,12 +213,12 @@ jobs:
       - name: Test candidate isolation contracts
         run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --jobs 2
       - name: Lint candidate optional features
-        run: mise exec zig -- cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --all-features --jobs 2 -- -D warnings
+        run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --all-features --jobs 2 -- -D warnings
       - name: Test candidate optional feature contracts
-        run: mise exec zig -- cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-features --jobs 2
+        run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-features --jobs 2
       - name: Build and inspect local candidate
         run: |
-          mise exec zig -- ./scripts/build-hack-local.sh
+          ./scripts/build-hack-local.sh
           ./hack-local info --json
       - name: Check release candidate carries no kill harness
         # The all-features test step built the debug candidate with node-kill-harness,

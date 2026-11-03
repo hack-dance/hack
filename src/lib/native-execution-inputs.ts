@@ -89,6 +89,12 @@ type NativeExecutionInputSelection = {
    */
   readonly runtimeMetadata?: NativeAuthoredRuntimeMetadataSelection;
   readonly signal?: AbortSignal;
+  /**
+   * Budget of each compiler invocation, including the later freshness and
+   * value checks of the returned inputs; read again for every invocation.
+   * Undefined keeps the compiler's own default (HACK-1458).
+   */
+  readonly compilerTimeoutMs?: () => number | undefined;
 };
 
 function projectName(plan: Readonly<Record<string, unknown>>): string {
@@ -126,6 +132,7 @@ async function acquireInputs(input: {
     explicitDomain: opts.explicitDomain,
     compilerBranch: opts.compilerBranch,
     signal,
+    compilerTimeoutMs: opts.compilerTimeoutMs,
   };
   const prepare = () =>
     prepareNativeProjectSelection({ ...selection, requireEnvPlanning: true });

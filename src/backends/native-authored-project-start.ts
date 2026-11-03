@@ -6,7 +6,11 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { deepFreeze } from "../lib/guards.ts";
 import { NativeComposeHostHookError } from "../lib/native-compose-host-contract.ts";
-import { NativeConfigCompilerError } from "../lib/native-config-compiler.ts";
+import {
+  NATIVE_CONFIG_COMPILER_MAX_TIMEOUT_MS,
+  NativeConfigCompilerError,
+  nativeConfigCompilerTimeoutWithin,
+} from "../lib/native-config-compiler.ts";
 import { acquireNativeExecutionInputs } from "../lib/native-execution-inputs.ts";
 import {
   assertNativeFiniteHookBindings,
@@ -571,6 +575,27 @@ async function prepareHostSelection(opts: {
   return { hooks, lifecycle, persistent, owner, processes };
 }
 
+/** A canceled startup input cannot authorize teardown after a pre-Ready failure. */
+async function refreshPreReadyHostInputs(opts: {
+  readonly hostProcesses: NativeAuthoredHostProcesses | undefined;
+  readonly ready: Attempt["ready"];
+  readonly processSettled: boolean;
+  readonly refresh: () => Promise<void>;
+}): Promise<void> {
+  if (!opts.hostProcesses || opts.ready !== undefined) {
+    return;
+  }
+  // No down.before phase refreshed these inputs. Do not acquire teardown
+  // authority until the original producer and its readers have settled.
+  // The caller still authenticates Removed immediately before host stop.
+  if (!opts.processSettled) {
+    throw new Error(
+      "Native foreground settlement is unconfirmed; values omitted."
+    );
+  }
+  await opts.refresh();
+}
+
 async function runPreparedLifecycle(ctx: {
   readonly options: Options;
   readonly admitted: Attempt;
@@ -581,6 +606,7 @@ async function runPreparedLifecycle(ctx: {
   readonly hookOwner: NativeAuthoredHookOwner | undefined;
   readonly hostProcesses: NativeAuthoredHostProcesses | undefined;
   readonly hostRetired: () => void;
+  readonly refreshHostInputs: () => Promise<void>;
   readonly phase: (name: NativeHookPhase) => Promise<NativeHookResult>;
   readonly graph: AbortController;
   readonly hard: AbortController;
@@ -720,6 +746,12 @@ async function runPreparedLifecycle(ctx: {
     attempt: ctx.admitted,
   };
   if (ctx.hookOwner) {
+    await refreshPreReadyHostInputs({
+      hostProcesses: ctx.hostProcesses,
+      ready: ctx.admitted.ready,
+      processSettled,
+      refresh: ctx.refreshHostInputs,
+    });
     // Keep frontend bindings recoverable until every hook has known completion.
     await confirmRemoved(retirement);
     if (ctx.hostProcesses) {
@@ -823,14 +855,17 @@ async function stopUnstartedHostProcesses(opts: {
   readonly processes: NativeAuthoredHostProcesses | undefined;
   readonly attempt: Attempt | undefined;
   readonly outcome: Outcome;
+  /** Re-acquires teardown inputs that do not depend on the startup signal. */
+  readonly refresh?: () => Promise<void>;
 }): Promise<{
   readonly processes: NativeAuthoredHostProcesses | undefined;
   readonly outcome: Outcome;
 }> {
   if (!opts.processes || opts.attempt) {
-    return opts;
+    return { processes: opts.processes, outcome: opts.outcome };
   }
   try {
+    await opts.refresh?.();
     await opts.processes.stop();
     await opts.processes.close();
     return { processes: undefined, outcome: opts.outcome };
@@ -914,6 +949,18 @@ export async function serveNativeAuthoredProject(
     }
     return time;
   };
+  // HACK-1458: compiler calls never keep the compiler's fixed 10 s default.
+  // Startup calls share the startup deadline. Calls that are not part of
+  // startup (down-hook acquisition, and checks after publication) have no
+  // startup deadline, so each takes the transport's largest budget: a slow
+  // host must not fail a graceful stop, which would retain the live owner
+  // until a hard cancellation.
+  const startupCompilerTimeoutMs = () =>
+    published
+      ? NATIVE_CONFIG_COMPILER_MAX_TIMEOUT_MS
+      : nativeConfigCompilerTimeoutWithin(deadline - performance.now());
+  const settlementCompilerTimeoutMs = () =>
+    NATIVE_CONFIG_COMPILER_MAX_TIMEOUT_MS;
   const abort = () => {
     if (!published) {
       controller.abort();
@@ -947,6 +994,7 @@ export async function serveNativeAuthoredProject(
         let nativeCauseCode: string | undefined;
         let hookOwner: NativeAuthoredHookOwner | undefined;
         let hostProcesses: NativeAuthoredHostProcesses | undefined;
+        let teardownInputs: (() => Promise<void>) | undefined;
         let storageTool: NativeAuthoredStorageTool | undefined;
         let hookStop:
           | { readonly close: (force?: boolean) => Promise<void> }
@@ -981,6 +1029,10 @@ export async function serveNativeAuthoredProject(
                 httpsPort: opts.httpsPort ?? null,
               },
               signal,
+              compilerTimeoutMs:
+                signal === controller.signal
+                  ? startupCompilerTimeoutMs
+                  : settlementCompilerTimeoutMs,
             });
           let inputs = await acquire(controller.signal);
           if (nativeAuthoredStorageToolRequired(inputs.result.plan)) {
@@ -1002,6 +1054,21 @@ export async function serveNativeAuthoredProject(
           const { hooks, persistent } = selectedHost;
           hookOwner = selectedHost.owner;
           hostProcesses = selectedHost.processes;
+          // HACK-1458: inputs acquired for startup check freshness under the
+          // startup signal and deadline, so after a cancel or an expired
+          // deadline host process teardown could never pass its own freshness
+          // check. Teardown re-acquires them under the hard signal, like the
+          // down hooks, and still refuses a changed selection.
+          teardownInputs = async () => {
+            const current = await acquire(hardSignal.signal);
+            if (
+              hookSelection(current) !== identity ||
+              current.result.semantic_hash !== inputs.result.semantic_hash
+            ) {
+              throw new Error("Native host source changed; values omitted.");
+            }
+            inputs = current;
+          };
           const phase = hookPhaseRunner({
             owner: hookOwner,
             hooks,
@@ -1144,6 +1211,7 @@ export async function serveNativeAuthoredProject(
             storageTool,
             hookOwner,
             hostProcesses,
+            refreshHostInputs: teardownInputs,
             hostRetired: () => {
               hostProcesses = undefined;
             },
@@ -1183,6 +1251,7 @@ export async function serveNativeAuthoredProject(
             processes: hostProcesses,
             attempt,
             outcome,
+            refresh: teardownInputs,
           });
           hostProcesses = host.processes;
           outcome = host.outcome;

@@ -61,6 +61,24 @@ export const NATIVE_CONFIG_INPUT_LIMIT = 1024 * 1024;
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
 const STDERR_LIMIT = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 10_000;
+/** Smallest per-invocation budget the compiler transport accepts. */
+export const NATIVE_CONFIG_COMPILER_MIN_TIMEOUT_MS = 1;
+/** Largest per-invocation budget the compiler transport accepts. */
+export const NATIVE_CONFIG_COMPILER_MAX_TIMEOUT_MS = 60_000;
+
+/**
+ * Budget of one compiler invocation for a caller with `remainingMs` left on its
+ * own deadline (HACK-1458): the remaining time, clamped to the transport's
+ * accepted range. A caller deadline longer than the ceiling still bounds each
+ * invocation by the ceiling, and a nearly spent one cannot request less than
+ * the floor; the caller's own deadline remains its authority.
+ */
+export function nativeConfigCompilerTimeoutWithin(remainingMs: number): number {
+  return Math.min(
+    NATIVE_CONFIG_COMPILER_MAX_TIMEOUT_MS,
+    Math.max(NATIVE_CONFIG_COMPILER_MIN_TIMEOUT_MS, Math.floor(remainingMs))
+  );
+}
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const OVERLAY_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const RESOLVE_REQUEST_LIMIT = 20 * 1024 * 1024;
@@ -843,7 +861,11 @@ function compilerRequest(opts: {
     throw failure("E_COMPILER_PATH", "Compiler path must be absolute.");
   }
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs < NATIVE_CONFIG_COMPILER_MIN_TIMEOUT_MS ||
+    timeoutMs > NATIVE_CONFIG_COMPILER_MAX_TIMEOUT_MS
+  ) {
     throw failure(
       "E_COMPILER_BUDGET",
       "Compiler timeout is outside the supported budget."

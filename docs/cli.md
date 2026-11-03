@@ -347,10 +347,13 @@ its own budget, separate from the start budget:
 | One native storage carrier | 90 seconds | `HACK_NATIVE_STORAGE_TIMEOUT_MS` | 1,000–600,000 |
 
 `HACK_COMPOSE_STARTUP_TIMEOUT_MS` neither shortens nor lengthens a storage proof:
-carriers follow only `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Storage
+carriers follow only `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Native
+`up` and `restart` image builds use the image budget (`HACK_COMPOSE_IMAGE_TIMEOUT_MS`),
+and the start budget begins only after builds end. Native pulls of `image:` services
+still happen during container start and count against the start budget. Storage
 proofs that run while a native `up` or `restart` builds and starts workloads do not
-consume the start budget: their elapsed time extends the start deadline, and each
-proof stays bounded by its own carrier budget. Each Docker command inside a carrier
+consume either budget: their elapsed time extends the current phase's deadline, and
+each proof stays bounded by its own carrier budget. Each Docker command inside a carrier
 is bounded by that carrier's remaining budget (reads at most 60 seconds), so a slow
 helper start on a loaded host can use the budget rather than a fixed 15-second cap.
 Helper cleanup keeps its own 10–60 second bound.
@@ -358,15 +361,17 @@ Helper cleanup keeps its own 10–60 second bound.
 The two variables bound different things:
 
 - Per proof: each storage carrier ends within `HACK_NATIVE_STORAGE_TIMEOUT_MS` (S).
-- Per start phase: the storage time excluded from one `up` or `restart` start
+- Per phase: the storage time excluded from one `up` or `restart` image or start
   deadline may total at most 16 × S or 1 hour, whichever is smaller (24 minutes at
-  the 90-second default; 1 hour from S = 225,000 up). The start deadline moves
-  later by at most that cap. A proof that would start after the cap is spent is
-  refused before it runs, and a proof that ends past the cap refuses the phase.
-- Whole phase: the workload phase therefore ends within
-  `HACK_COMPOSE_STARTUP_TIMEOUT_MS`, plus the cap, plus at most one in-flight
+  the 90-second default; 1 hour from S = 225,000 up). Each phase has its own cap,
+  and its deadline moves later by at most that cap. A proof that would start after
+  the cap is spent is refused before it runs, and a proof that ends past the cap
+  refuses the phase.
+- Whole phase: the image phase therefore ends within
+  `HACK_COMPOSE_IMAGE_TIMEOUT_MS`, and the start phase within
+  `HACK_COMPOSE_STARTUP_TIMEOUT_MS`, each plus its cap, plus at most one in-flight
   guard proof. Raising S raises both the per-proof bound and the cap; raising the
-  start budget never changes either.
+  image or start budget never changes either.
 
 When a carrier budget or the whole-phase cap runs out, the command reports the
 closed effect reason `storage-budget` in `error.detail.native_compose_effect_refusal`,

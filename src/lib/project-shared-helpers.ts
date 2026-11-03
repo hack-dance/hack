@@ -467,6 +467,12 @@ export async function startProjectSharedHelpers(opts: {
             });
           }
         }
+        // Only a start whose helpers are all ready becomes the current
+        // operation. Recording earlier would let a start that then fails
+        // replace a down's shutdown mark, so an older start would launch its
+        // services without helpers. A failed write rolls back like any
+        // other failure.
+        await writeOperation(instance, operation);
       } catch (error: unknown) {
         // Still under the instance lock, and this start never became the
         // current operation: release exactly what it added. The operation
@@ -475,11 +481,6 @@ export async function startProjectSharedHelpers(opts: {
         await rolledBack;
         throw error;
       }
-      // Only a start whose helpers are all ready becomes the current
-      // operation. Recording earlier would let a start that then fails
-      // replace a down's shutdown mark, so an older start would launch its
-      // services without helpers.
-      await writeOperation(instance, operation);
     },
   });
   return { started, rollback, assertCurrent };
@@ -683,6 +684,13 @@ async function recordAcquired(
 ): Promise<void> {
   const current = await readAcquired(instance);
   const merged = mergeIdentities(current, identities);
+  if (merged.length > MAX_ACQUIRED) {
+    // Never publish a record readAcquired would reject: that would make
+    // every later down fail without releasing anything.
+    throw new Error(
+      `This instance already records ${MAX_ACQUIRED} shared helpers; run hack down to release them before adding another.`
+    );
+  }
   if (merged.length !== current.length) {
     await writeAcquired(instance, merged);
   }

@@ -1048,3 +1048,66 @@ test(
   },
   TIMEOUT
 );
+
+test(
+  "a start whose operation record cannot be written rolls back its holders",
+  async () => {
+    const root = await scratch();
+    const helper = helperConfig({ port: freePort() });
+    const instanceDir = join(root, "hack-home", "shared-helpers", ".instances");
+    // A directory where the operation record belongs makes its write fail.
+    await mkdir(join(instanceDir, `${BRANCH_A}.operation`), {
+      recursive: true,
+    });
+    await expect(
+      startProjectSharedHelpers({
+        ...context(root),
+        helpers: [helper],
+        composeProject: BRANCH_A,
+      })
+    ).rejects.toThrow();
+    // The helper this start spawned was its only holder: it is stopped.
+    expect(await readHelperClaim(root, helper)).toBeNull();
+    expect(await served(helper.port).catch(() => "")).toBe("");
+  },
+  TIMEOUT
+);
+
+test(
+  "a start refuses to grow the acquired record past its limit; down still releases",
+  async () => {
+    const root = await scratch();
+    const hackDir = join(root, "hack-home");
+    const instanceDir = join(hackDir, "shared-helpers", ".instances");
+    await mkdir(instanceDir, { recursive: true, mode: 0o700 });
+    const record = join(instanceDir, `${BRANCH_A}.acquired.json`);
+    const full = Array.from({ length: 256 }, (_, index) => ({
+      name: `old-helper-${index}`,
+      port: 20_000 + index,
+    }));
+    const fullText = `${JSON.stringify(full)}\n`;
+    await writeFile(record, fullText, { mode: 0o600 });
+    const helper = helperConfig({ port: freePort() });
+    await expect(
+      startProjectSharedHelpers({
+        ...context(root),
+        helpers: [helper],
+        composeProject: BRANCH_A,
+      })
+    ).rejects.toThrow("already records 256 shared helpers");
+    expect(await readFile(record, "utf8")).toBe(fullText);
+    expect(await readHelperClaim(root, helper)).toBeNull();
+    // The record stays readable, so down releases every entry and clears it.
+    const released = await releaseProjectSharedHelpers({
+      helpers: undefined,
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    expect(released).toHaveLength(256);
+    expect(released.every((entry) => entry.result.state === "absent")).toBe(
+      true
+    );
+    expect(await readFile(record, "utf8").catch(() => null)).toBeNull();
+  },
+  TIMEOUT
+);

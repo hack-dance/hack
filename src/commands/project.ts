@@ -1870,7 +1870,29 @@ type LifecycleUpResult = {
   readonly assertSharedHelpersCurrent?: (opts?: {
     readonly servicesStarted?: boolean;
   }) => Promise<void>;
+  /**
+   * Call once the instance's containers run (a detached Compose up
+   * succeeded): later cleanup then stops only the lifecycle processes and
+   * keeps the shared helper holders for hack down, so a failure after start
+   * (an up.after hook, a startup check) never stops a helper underneath the
+   * running containers. Absent without shared helpers.
+   */
+  readonly keepSharedHelpers?: () => void;
 };
+
+/** The optional shared helper controls of a lifecycle start, when present. */
+function sharedHelperControls(
+  start: LifecycleProcessStart
+): Pick<LifecycleUpResult, "assertSharedHelpersCurrent" | "keepSharedHelpers"> {
+  return {
+    ...(start.assertSharedHelpersCurrent
+      ? { assertSharedHelpersCurrent: start.assertSharedHelpersCurrent }
+      : {}),
+    ...(start.keepSharedHelpers
+      ? { keepSharedHelpers: start.keepSharedHelpers }
+      : {}),
+  };
+}
 
 /**
  * Lifecycle sessions of projects with shared helpers need tmux. zellij
@@ -2005,12 +2027,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
         : null,
       cleanup: lifecycleStart.cleanup,
       signalCleanup: lifecycleStart.signalCleanup,
-      ...(lifecycleStart.assertSharedHelpersCurrent
-        ? {
-            assertSharedHelpersCurrent:
-              lifecycleStart.assertSharedHelpersCurrent,
-          }
-        : {}),
+      ...sharedHelperControls(lifecycleStart),
     };
   }
 
@@ -2070,9 +2087,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     sessionName: starter.hasStarted() ? starter.sessionName : null,
     cleanup: started.cleanup,
     signalCleanup: started.signalCleanup,
-    ...(started.assertSharedHelpersCurrent
-      ? { assertSharedHelpersCurrent: started.assertSharedHelpersCurrent }
-      : {}),
+    ...sharedHelperControls(started),
   };
 }
 
@@ -2203,6 +2218,8 @@ export type LifecycleProcessStart = {
   readonly assertSharedHelpersCurrent?: (opts?: {
     readonly servicesStarted?: boolean;
   }) => Promise<void>;
+  /** See {@link LifecycleUpResult.keepSharedHelpers}. */
+  readonly keepSharedHelpers?: () => void;
 };
 
 /**
@@ -2353,7 +2370,8 @@ async function startLifecycleSharedHelpers(opts: {
  * When process cleanup is undecidable (the instance lock was busy), the
  * helper rollback is skipped too: keeping the session while releasing its
  * helpers would leave a running session whose helpers were stopped. Both are
- * kept for `hack down`.
+ * kept for `hack down`. Likewise, once `keepSharedHelpers` was called (the
+ * containers run), the cleanup stops the processes but keeps the helpers.
  */
 export function withSharedHelperCleanup(opts: {
   readonly cleanup: LifecycleOperationCleanup | null;
@@ -2365,8 +2383,10 @@ export function withSharedHelperCleanup(opts: {
 }): {
   readonly cleanup: LifecycleOperationCleanup | null;
   readonly signalCleanup: { readonly dispose: () => void } | null;
+  readonly keepSharedHelpers?: () => void;
 } {
   const sharedHelpers = opts.sharedHelpers;
+  let containersRunning = false;
   const runProcessCleanup =
     opts.sessionOwnership?.runIfOwned ??
     (async (cleanup: () => Promise<void>): Promise<ProcessCleanupOutcome> => {
@@ -2378,6 +2398,9 @@ export function withSharedHelperCleanup(opts: {
   }
   opts.signalCleanup?.dispose();
   return {
+    keepSharedHelpers: () => {
+      containersRunning = true;
+    },
     cleanup: async () => {
       const processCleanup = opts.cleanup;
       let outcome: ProcessCleanupOutcome | null = null;
@@ -2406,6 +2429,11 @@ export function withSharedHelperCleanup(opts: {
           logger.warn({
             message:
               "Kept this instance's shared helpers with its lifecycle session, which could not be confirmed stopped. Run hack down to stop both.",
+          });
+        } else if (containersRunning) {
+          logger.warn({
+            message:
+              "Kept this instance's shared helpers: its containers are running. Run hack down to stop both.",
           });
         } else if (outcome !== "undecidable") {
           await sharedHelpers.rollback();
@@ -6119,6 +6147,7 @@ async function runUpCommand({
   let lifecycleCleanup: LifecycleOperationCleanup | null = null;
   let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
   let assertHelpersCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
+  let keepSharedHelpers: LifecycleUpResult["keepSharedHelpers"];
   try {
     const lifecycleUp: LifecycleUpResult = serviceScoped
       ? { code: 0, cleanup: null, signalCleanup: null, sessionName: null }
@@ -6152,6 +6181,7 @@ async function runUpCommand({
     lifecycleCleanup = lifecycleUp.cleanup;
     lifecycleSignalCleanup = lifecycleUp.signalCleanup;
     assertHelpersCurrent = lifecycleUp.assertSharedHelpersCurrent;
+    keepSharedHelpers = lifecycleUp.keepSharedHelpers;
   } catch (error: unknown) {
     const message =
       error instanceof Error
@@ -6315,6 +6345,11 @@ async function runUpCommand({
       }
       logger.error({ message: failure.message });
       return upCode;
+    }
+
+    if (detach) {
+      // The containers now run: a later failure keeps their helpers.
+      keepSharedHelpers?.();
     }
 
     const afterCode = serviceScoped
@@ -7250,6 +7285,7 @@ async function runRestartUpPhase(opts: {
   let lifecycleCleanup: LifecycleOperationCleanup | null = null;
   let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
   let assertHelpersCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
+  let keepSharedHelpers: LifecycleUpResult["keepSharedHelpers"];
   try {
     const lifecycleUp = await runLifecycleUpBeforeAndProcesses({
       title: "Lifecycle (restart up before)",
@@ -7268,6 +7304,7 @@ async function runRestartUpPhase(opts: {
     lifecycleCleanup = lifecycleUp.cleanup;
     lifecycleSignalCleanup = lifecycleUp.signalCleanup;
     assertHelpersCurrent = lifecycleUp.assertSharedHelpersCurrent;
+    keepSharedHelpers = lifecycleUp.keepSharedHelpers;
   } catch (error: unknown) {
     const message =
       error instanceof Error
@@ -7392,6 +7429,10 @@ async function runRestartUpPhase(opts: {
       });
     }
 
+    if (opts.detach === true) {
+      // The containers now run: a later failure keeps their helpers.
+      keepSharedHelpers?.();
+    }
     const upAfter = await runLifecycleCommands({
       title: "Lifecycle (restart up after)",
       commands: opts.cfg.lifecycle?.up?.after,

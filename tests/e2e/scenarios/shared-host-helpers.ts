@@ -84,6 +84,8 @@ export const sharedHostHelpersScenario: Scenario = {
       readonly disabled?: boolean;
       /** Add an up.before hook that waits for this gate file. */
       readonly beforeGate?: string;
+      /** Add an up.after hook that fails. */
+      readonly failUpAfter?: boolean;
     }): Promise<void> => {
       const lifecycle = {
         ...((baseConfig.lifecycle ?? {}) as Record<string, unknown>),
@@ -98,6 +100,9 @@ export const sharedHostHelpersScenario: Scenario = {
                 ],
               },
             }
+          : {}),
+        ...(opts.failUpAfter
+          ? { up: { after: [{ name: "e2e-after-fails", command: "exit 3" }] } }
           : {}),
         ...(opts.withProcess
           ? {
@@ -340,43 +345,6 @@ export const sharedHostHelpersScenario: Scenario = {
         message: "down left the replaced helper running",
       });
 
-      ctx.log("restart keeps the helper of the containers it preserves");
-      expectExit({
-        result: await cli({ verb: "up", branch: branchA }),
-        codes: [0],
-        message: "branch A up before restart",
-      });
-      const beforeRestart = await ownedHelper();
-      // Restart preserves the Compose runtime, so the containers keep
-      // running: their sole holder must not stop the helper underneath them.
-      const restarted = await cli({ verb: "restart", branch: branchA });
-      expectExit({
-        result: restarted,
-        codes: [0],
-        message: "branch A restart",
-      });
-      const afterRestart = await ownedHelper();
-      expect({
-        that:
-          afterRestart.pid === beforeRestart.pid &&
-          afterRestart.birth === beforeRestart.birth &&
-          (await isRunning(beforeRestart)) &&
-          (await served(port)) === `served:${UPSTREAM}` &&
-          (await readClaim())?.holders.join(",") === holderA,
-        message:
-          "restart stopped or replaced the helper of its preserved containers",
-        result: restarted,
-      });
-      expectExit({
-        result: await cli({ verb: "down", branch: branchA }),
-        codes: [0],
-        message: "branch A down after restart",
-      });
-      expect({
-        that: !(await isRunning(afterRestart)) && (await readClaim()) === null,
-        message: "down after a restart left the helper running",
-      });
-
       ctx.log("stale PID: a reused PID is discarded and never signalled");
       const bystander = Bun.spawn(
         [process.execPath, HELPER, "placeholder", "0", "-", "-"],
@@ -566,11 +534,96 @@ export const sharedHostHelpersScenario: Scenario = {
         readClaim,
         ownedHelper,
       });
+      await runRetainedHelperPhases({
+        ctx,
+        port,
+        holder: holderA,
+        branch: branchA,
+        writeConfig,
+        cli,
+        readClaim,
+        ownedHelper,
+      });
     } finally {
       await cleanupScenario({ foreign, readClaim });
     }
   },
 };
+
+/**
+ * Helpers stay held while their containers run: a restart that preserves
+ * the Compose runtime keeps them, and so does an up whose up.after hook
+ * fails after its detached containers started.
+ */
+async function runRetainedHelperPhases(opts: {
+  readonly ctx: Parameters<Scenario["run"]>[0];
+  readonly port: number;
+  readonly holder: string;
+  readonly branch: string;
+  readonly writeConfig: (opts: ConfigOptions) => Promise<void>;
+  readonly cli: (opts: {
+    readonly verb: "up" | "down" | "restart";
+    readonly branch: string;
+  }) => Promise<CliResult>;
+  readonly readClaim: () => Promise<ReturnType<
+    typeof parseSharedHostClaim
+  > | null>;
+  readonly ownedHelper: () => Promise<Identity>;
+}): Promise<void> {
+  const { ctx, branch } = opts;
+  const keptFor = async (helper: Identity): Promise<boolean> =>
+    (await isRunning(helper)) &&
+    (await served(opts.port)) === `served:${UPSTREAM}` &&
+    (await opts.readClaim())?.holders.join(",") === opts.holder;
+  const downStops = async (helper: Identity, phase: string): Promise<void> => {
+    expectExit({
+      result: await opts.cli({ verb: "down", branch }),
+      codes: [0],
+      message: `down after ${phase}`,
+    });
+    expect({
+      that: !(await isRunning(helper)) && (await opts.readClaim()) === null,
+      message: `down after ${phase} left the helper running`,
+    });
+  };
+
+  ctx.log("restart keeps the helper of the containers it preserves");
+  await opts.writeConfig({ mode: "identity" });
+  expectExit({
+    result: await opts.cli({ verb: "up", branch }),
+    codes: [0],
+    message: "up before restart",
+  });
+  const beforeRestart = await opts.ownedHelper();
+  // Restart preserves the Compose runtime, so the containers keep running:
+  // their sole holder must not stop the helper underneath them.
+  const restarted = await opts.cli({ verb: "restart", branch });
+  expectExit({ result: restarted, codes: [0], message: "restart" });
+  const afterRestart = await opts.ownedHelper();
+  expect({
+    that:
+      afterRestart.pid === beforeRestart.pid &&
+      afterRestart.birth === beforeRestart.birth &&
+      (await keptFor(afterRestart)),
+    message:
+      "restart stopped or replaced the helper of its preserved containers",
+    result: restarted,
+  });
+  await downStops(afterRestart, "restart");
+
+  ctx.log("a failing up.after hook keeps the helper of the started containers");
+  await opts.writeConfig({ mode: "identity", failUpAfter: true });
+  const failedAfter = await opts.cli({ verb: "up", branch });
+  const started = await opts.ownedHelper();
+  expect({
+    that: failedAfter.exitCode !== 0 && (await keptFor(started)),
+    message:
+      "a failing up.after hook released the helper under running containers",
+    result: failedAfter,
+  });
+  await opts.writeConfig({ mode: "identity" });
+  await downStops(started, "a failed up.after hook");
+}
 
 /**
  * Regressions from the independent review of #565: a down that completes
@@ -720,6 +773,7 @@ type ConfigOptions = {
   readonly withInvalidEntry?: boolean;
   readonly disabled?: boolean;
   readonly beforeGate?: string;
+  readonly failUpAfter?: boolean;
 };
 
 /**

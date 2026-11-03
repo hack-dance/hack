@@ -333,3 +333,27 @@ test("containers kept on purpose (restart preserves the runtime) keep the holder
   expect(events).toEqual(["stop"]);
   expect(outcome).toEqual({ sessionStopFailed: null, notReleased: [] });
 });
+
+test("once the containers run, the combined cleanup stops the processes but keeps the helpers", async () => {
+  const events: string[] = [];
+  const combinedCleanup = withSharedHelperCleanup({
+    cleanup: () => {
+      events.push("processes");
+      return Promise.resolve(undefined);
+    },
+    signalCleanup: null,
+    sharedHelpers: {
+      configured: true,
+      rollback: () => {
+        events.push("rollback");
+        return Promise.resolve();
+      },
+      assertCurrent: () => Promise.resolve(),
+    },
+    sessionOwnership: undefined,
+  });
+  // A detached Compose up succeeded; then an up.after hook fails.
+  combinedCleanup.keepSharedHelpers?.();
+  await combinedCleanup.cleanup?.();
+  expect(events).toEqual(["processes"]);
+});

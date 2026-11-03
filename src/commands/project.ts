@@ -287,6 +287,15 @@ import {
   upsertProjectRuntimeStateEntry,
 } from "../lib/project-runtime-state.ts";
 import {
+  describeSharedHelperRelease,
+  describeSharedHelperStart,
+  isSharedHelperReleaseProblem,
+  releaseProjectSharedHelpers,
+  type SharedHelperRelease,
+  startProjectSharedHelpers,
+  withTerminationAbort,
+} from "../lib/project-shared-helpers.ts";
+import {
   readProjectsRegistry,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
@@ -1878,15 +1887,22 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
         signalCleanup: null,
       };
     }
-    const lifecycleStart = await startLifecycleProcesses({
-      project: opts.project,
-      cfg: opts.cfg,
-      projectName: opts.projectName,
-      branch: opts.branch,
-      env: opts.env,
-      composeProject: opts.composeProject,
-      definitionHash,
-    });
+    const sharedHelpers = await startLifecycleSharedHelpers(opts);
+    let lifecycleStart: Awaited<ReturnType<typeof startLifecycleProcesses>>;
+    try {
+      lifecycleStart = await startLifecycleProcesses({
+        project: opts.project,
+        cfg: opts.cfg,
+        projectName: opts.projectName,
+        branch: opts.branch,
+        env: opts.env,
+        composeProject: opts.composeProject,
+        definitionHash,
+      });
+    } catch (error: unknown) {
+      await sharedHelpers.rollback();
+      throw error;
+    }
     const hasProcesses = (opts.cfg.lifecycle?.processes ?? []).length > 0;
     return {
       code: 0,
@@ -1896,8 +1912,11 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
             branch: opts.branch,
           })
         : null,
-      cleanup: lifecycleStart.cleanup,
-      signalCleanup: lifecycleStart.signalCleanup,
+      ...withSharedHelperCleanup({
+        cleanup: lifecycleStart.cleanup,
+        signalCleanup: lifecycleStart.signalCleanup,
+        sharedHelpers,
+      }),
     };
   }
 
@@ -1934,13 +1953,16 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     };
   }
 
+  let sharedHelpers: LifecycleSharedHelpers | null = null;
   try {
+    sharedHelpers = await startLifecycleSharedHelpers(opts);
     await starter.startMany({
       processes: opts.cfg.lifecycle?.processes ?? [],
     });
     await starter.finalize();
   } catch (error: unknown) {
     await starter.abort();
+    await sharedHelpers?.rollback();
     if (error instanceof Error) {
       throw error;
     }
@@ -1950,9 +1972,100 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   return {
     code: 0,
     sessionName: starter.hasStarted() ? starter.sessionName : null,
-    cleanup: starter.getOperationCleanup(),
-    signalCleanup: starter.getSignalCleanup(),
+    ...withSharedHelperCleanup({
+      cleanup: starter.getOperationCleanup(),
+      signalCleanup: starter.getSignalCleanup(),
+      sharedHelpers,
+    }),
   };
+}
+
+type LifecycleSharedHelpers = {
+  readonly configured: boolean;
+  readonly rollback: () => Promise<void>;
+};
+
+/**
+ * Ensure `lifecycle.sharedHelpers` for this instance. SIGINT/SIGTERM during a
+ * start cancels it (the library stops a helper it spawned), releases what this
+ * run added and then re-raises the signal. A failure throws after that rollback.
+ */
+async function startLifecycleSharedHelpers(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly env: Readonly<Record<string, string>>;
+  readonly composeProject: string;
+}): Promise<LifecycleSharedHelpers> {
+  const helpers = opts.cfg.lifecycle?.sharedHelpers ?? [];
+  if (helpers.length === 0) {
+    return { configured: false, rollback: () => Promise.resolve() };
+  }
+  const started = await withTerminationAbort(
+    async (signal) =>
+      await startProjectSharedHelpers({
+        helpers,
+        projectRoot: opts.project.projectRoot,
+        composeProject: opts.composeProject,
+        env: opts.env,
+        signal,
+        report: (record) => {
+          if (record.result.state !== "failed") {
+            logger.info({ message: describeSharedHelperStart(record) });
+          }
+        },
+      })
+  );
+  return {
+    configured: true,
+    rollback: async () => {
+      reportSharedHelperReleases(await started.rollback());
+    },
+  };
+}
+
+/**
+ * Fold the shared helper rollback into the operation cleanup. The process
+ * controller's own signal handler only knows its cleanup, so it is replaced:
+ * returning no signal cleanup makes the caller install one for the combined
+ * cleanup.
+ */
+function withSharedHelperCleanup(opts: {
+  readonly cleanup: LifecycleOperationCleanup | null;
+  readonly signalCleanup: { readonly dispose: () => void } | null;
+  readonly sharedHelpers: LifecycleSharedHelpers | null;
+}): {
+  readonly cleanup: LifecycleOperationCleanup | null;
+  readonly signalCleanup: { readonly dispose: () => void } | null;
+} {
+  const sharedHelpers = opts.sharedHelpers;
+  if (!sharedHelpers?.configured) {
+    return { cleanup: opts.cleanup, signalCleanup: opts.signalCleanup };
+  }
+  opts.signalCleanup?.dispose();
+  return {
+    cleanup: async () => {
+      try {
+        await opts.cleanup?.();
+      } finally {
+        await sharedHelpers.rollback();
+      }
+    },
+    signalCleanup: null,
+  };
+}
+
+function reportSharedHelperReleases(
+  releases: readonly SharedHelperRelease[]
+): readonly SharedHelperRelease[] {
+  for (const release of releases) {
+    const message = describeSharedHelperRelease(release);
+    if (isSharedHelperReleaseProblem(release)) {
+      logger.warn({ message });
+    } else {
+      logger.info({ message });
+    }
+  }
+  return releases.filter(isSharedHelperReleaseProblem);
 }
 
 async function startLifecycleProcesses(opts: {
@@ -2042,13 +2155,37 @@ async function stopLifecycleProcesses(opts: {
   readonly branch: string | null;
   readonly composeProject: string;
 }): Promise<void> {
-  await stopLifecycleProcessController({
-    ...opts,
-    definitionHash: resolveProjectLifecycleDefinitionHash({
-      beforeCommands: opts.cfg.lifecycle?.up?.before,
-      processes: opts.cfg.lifecycle?.processes,
-    }),
-  });
+  try {
+    await stopLifecycleProcessController({
+      ...opts,
+      definitionHash: resolveProjectLifecycleDefinitionHash({
+        beforeCommands: opts.cfg.lifecycle?.up?.before,
+        processes: opts.cfg.lifecycle?.processes,
+      }),
+    });
+  } finally {
+    // Release this instance's shared helper holders even when the process
+    // stop failed: a release never signals anything but an owned helper with
+    // no remaining holder.
+    await releaseLifecycleSharedHelpers(opts);
+  }
+}
+
+async function releaseLifecycleSharedHelpers(opts: {
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly composeProject: string;
+}): Promise<void> {
+  const problems = reportSharedHelperReleases(
+    await releaseProjectSharedHelpers({
+      helpers: opts.cfg.lifecycle?.sharedHelpers,
+      composeProject: opts.composeProject,
+    })
+  );
+  if (problems.length > 0) {
+    throw new Error(
+      `Shared helper release incomplete: ${problems.map((release) => release.name).join(", ")}.`
+    );
+  }
 }
 
 async function stopLifecycleProcessesBestEffort(

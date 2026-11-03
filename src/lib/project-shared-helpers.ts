@@ -1,0 +1,531 @@
+import { join, resolve } from "node:path";
+
+import { resolveGlobalHackDir } from "./config-paths.ts";
+import { isRecord } from "./guards.ts";
+import {
+  ensureSharedHostHelper,
+  releaseSharedHostHelper,
+  type SharedHostEnsureResult,
+  type SharedHostHelperSpec,
+  type SharedHostReleaseResult,
+} from "./shared-host-lifecycle.ts";
+
+/**
+ * Project wiring for the shared host helper contract
+ * (docs/reference/shared-host-lifecycle.md): `lifecycle.sharedHelpers` in
+ * `hack.config.json`, started by `hack up`/`restart` and released by
+ * `hack down`.
+ *
+ * Invariants:
+ * - The claim directory is derived from the helper name and port only, under
+ *   the global Hack home, so every branch and checkout of every project that
+ *   names the same helper and port coordinates through one claim and lock.
+ * - The holder is the instance's Compose project (`<project>` or
+ *   `<project>--<branch>`), so two branches hold one helper independently and
+ *   the last release stops an owned helper.
+ * - A failed or signalled `up` releases only the holders that operation
+ *   recorded (`holderAdded`), so a retry never drops a holder that an earlier
+ *   successful `up` still relies on.
+ * - Nothing here signals a process: stopping is the library's birth-verified
+ *   release. Messages name the helper and a closed reason, never upstreams,
+ *   argv or environment values.
+ */
+
+const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const DEFAULT_IDENTITY_PATH = "/__hack/identity";
+const DEFAULT_READY_TIMEOUT_MS = 30_000;
+const MAX_READY_TIMEOUT_MS = 600_000;
+const DEFAULT_PROBE_TIMEOUT_MS = 2000;
+const BACKOFF = { initialMs: 100, maxMs: 2000 } as const;
+const ALLOWED_KEYS = new Set([
+  "name",
+  "enabled",
+  "command",
+  "cwd",
+  "port",
+  "identityPath",
+  "upstream",
+  "upstreamEnv",
+  "env",
+  "readyTimeoutMs",
+]);
+
+export type ProjectSharedHelperConfig = {
+  /** Helper kind: the identity `helper` value and the claim name. */
+  readonly name: string;
+  readonly enabled: boolean;
+  /** Argv, executed directly (never through a shell string). */
+  readonly command: readonly string[];
+  readonly cwd?: string;
+  readonly port: number;
+  readonly identityPath: string;
+  /** Exactly one of `upstream` and `upstreamEnv` is set. */
+  readonly upstream?: string;
+  readonly upstreamEnv?: string;
+  /** Names passed to the helper, besides PATH. */
+  readonly env: readonly string[];
+  readonly readyTimeoutMs: number;
+};
+
+/**
+ * Strictly parse `lifecycle.sharedHelpers`. Unlike other lifecycle entries,
+ * an invalid entry is a config error, not a silently skipped one: a helper
+ * that is quietly not started fails later and further from its cause.
+ */
+export function parseProjectSharedHelpers(value: unknown): {
+  readonly helpers?: readonly ProjectSharedHelperConfig[];
+  readonly errors: readonly string[];
+} {
+  if (value === undefined) {
+    return { errors: [] };
+  }
+  if (!Array.isArray(value)) {
+    return { errors: ["lifecycle.sharedHelpers must be an array."] };
+  }
+  const errors: string[] = [];
+  const helpers: ProjectSharedHelperConfig[] = [];
+  value.forEach((entry: unknown, index: number) => {
+    const parsed = parseHelper(entry, `lifecycle.sharedHelpers[${index}]`);
+    if ("error" in parsed) {
+      errors.push(parsed.error);
+      return;
+    }
+    if (helpers.some((helper) => helper.name === parsed.helper.name)) {
+      errors.push(
+        `lifecycle.sharedHelpers[${index}].name duplicates "${parsed.helper.name}".`
+      );
+      return;
+    }
+    if (helpers.some((helper) => helper.port === parsed.helper.port)) {
+      errors.push(
+        `lifecycle.sharedHelpers[${index}].port duplicates ${parsed.helper.port}.`
+      );
+      return;
+    }
+    helpers.push(parsed.helper);
+  });
+  return {
+    ...(helpers.length > 0 && errors.length === 0 ? { helpers } : {}),
+    errors,
+  };
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: One strict field-by-field validator keeps every refusal message next to its rule.
+function parseHelper(
+  value: unknown,
+  at: string
+): { readonly helper: ProjectSharedHelperConfig } | { readonly error: string } {
+  if (!isRecord(value)) {
+    return { error: `${at} must be an object.` };
+  }
+  const unknownKey = Object.keys(value).find((key) => !ALLOWED_KEYS.has(key));
+  if (unknownKey !== undefined) {
+    return { error: `${at} has unknown key "${unknownKey}".` };
+  }
+  const name = value.name;
+  if (typeof name !== "string" || !NAME.test(name)) {
+    return {
+      error: `${at}.name must match [A-Za-z0-9][A-Za-z0-9_.-]{0,127}.`,
+    };
+  }
+  const command = value.command;
+  if (
+    !Array.isArray(command) ||
+    command.length === 0 ||
+    !command.every((part) => typeof part === "string" && part.length > 0)
+  ) {
+    return {
+      error: `${at}.command must be a non-empty array of non-empty strings (argv, not a shell string).`,
+    };
+  }
+  const port = value.port;
+  if (
+    typeof port !== "number" ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65_535
+  ) {
+    return { error: `${at}.port must be an integer from 1 to 65535.` };
+  }
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") {
+    return { error: `${at}.enabled must be a boolean.` };
+  }
+  if (
+    value.cwd !== undefined &&
+    (typeof value.cwd !== "string" || value.cwd.trim().length === 0)
+  ) {
+    return { error: `${at}.cwd must be a non-empty string.` };
+  }
+  const identityPath = value.identityPath ?? DEFAULT_IDENTITY_PATH;
+  if (typeof identityPath !== "string" || !identityPath.startsWith("/")) {
+    return { error: `${at}.identityPath must be an absolute path.` };
+  }
+  const hasUpstream = value.upstream !== undefined;
+  const hasUpstreamEnv = value.upstreamEnv !== undefined;
+  if (hasUpstream === hasUpstreamEnv) {
+    return { error: `${at} needs exactly one of upstream and upstreamEnv.` };
+  }
+  if (
+    hasUpstream &&
+    (typeof value.upstream !== "string" || value.upstream.length === 0)
+  ) {
+    return { error: `${at}.upstream must be a non-empty string.` };
+  }
+  if (
+    hasUpstreamEnv &&
+    (typeof value.upstreamEnv !== "string" || !ENV_NAME.test(value.upstreamEnv))
+  ) {
+    return { error: `${at}.upstreamEnv must be an environment variable name.` };
+  }
+  const env = value.env ?? [];
+  if (
+    !(
+      Array.isArray(env) &&
+      env.every((entry) => typeof entry === "string" && ENV_NAME.test(entry))
+    ) ||
+    new Set(env).size !== env.length
+  ) {
+    return {
+      error: `${at}.env must be an array of unique environment variable names.`,
+    };
+  }
+  const readyTimeoutMs = value.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+  if (
+    typeof readyTimeoutMs !== "number" ||
+    !Number.isInteger(readyTimeoutMs) ||
+    readyTimeoutMs < 1 ||
+    readyTimeoutMs > MAX_READY_TIMEOUT_MS
+  ) {
+    return {
+      error: `${at}.readyTimeoutMs must be an integer from 1 to ${MAX_READY_TIMEOUT_MS}.`,
+    };
+  }
+  return {
+    helper: {
+      name,
+      enabled: value.enabled !== false,
+      command: command as string[],
+      ...(typeof value.cwd === "string" ? { cwd: value.cwd.trim() } : {}),
+      port,
+      identityPath,
+      ...(hasUpstream ? { upstream: value.upstream as string } : {}),
+      ...(hasUpstreamEnv ? { upstreamEnv: value.upstreamEnv as string } : {}),
+      env: env as string[],
+      readyTimeoutMs,
+    },
+  };
+}
+
+/**
+ * The claim directory for one helper. It depends on the helper name and port
+ * only, never on the project, branch or checkout, so every client of that
+ * helper port shares one claim and lock.
+ */
+export function resolveSharedHelperStateDir(opts: {
+  readonly hackDir?: string;
+  readonly name: string;
+  readonly port: number;
+}): string {
+  return join(
+    opts.hackDir ?? resolveGlobalHackDir(),
+    "shared-helpers",
+    `${opts.name}-${opts.port}`
+  );
+}
+
+/** Holder for one project instance; refuses names the claim cannot record. */
+export function resolveSharedHelperHolder(composeProject: string): string {
+  if (!NAME.test(composeProject)) {
+    throw new Error(
+      "Shared helpers need a Compose project name of letters, digits, '.', '_' or '-'."
+    );
+  }
+  return composeProject;
+}
+
+/**
+ * Build the library spec. The helper sees PATH from the CLI plus only the
+ * names it lists; each comes from the resolved lifecycle env, then the CLI
+ * environment. A listed name that is set in neither is an error.
+ */
+export function buildSharedHelperSpec(opts: {
+  readonly helper: ProjectSharedHelperConfig;
+  readonly projectRoot: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly processEnv?: Readonly<Record<string, string | undefined>>;
+  readonly hackDir?: string;
+}): SharedHostHelperSpec {
+  const { helper } = opts;
+  const processEnv = opts.processEnv ?? process.env;
+  const lookup = (name: string): string | undefined =>
+    opts.env[name] ?? processEnv[name];
+  const childEnv: Record<string, string> = {};
+  const path = processEnv.PATH;
+  if (path !== undefined) {
+    childEnv.PATH = path;
+  }
+  for (const name of helper.env) {
+    const value = lookup(name);
+    if (value === undefined) {
+      throw new Error(
+        `Shared helper "${helper.name}" lists env ${name}, but it is not set.`
+      );
+    }
+    childEnv[name] = value;
+  }
+  const upstream =
+    helper.upstream ??
+    (helper.upstreamEnv === undefined ? undefined : lookup(helper.upstreamEnv));
+  if (upstream === undefined || upstream.length === 0) {
+    throw new Error(
+      `Shared helper "${helper.name}" reads its upstream from ${helper.upstreamEnv}, but it is not set.`
+    );
+  }
+  const cwd = helper.cwd
+    ? resolve(opts.projectRoot, helper.cwd)
+    : opts.projectRoot;
+  return {
+    name: helper.name,
+    enabled: helper.enabled,
+    stateDir: resolveSharedHelperStateDir({
+      ...(opts.hackDir ? { hackDir: opts.hackDir } : {}),
+      name: helper.name,
+      port: helper.port,
+    }),
+    port: helper.port,
+    identityPath: helper.identityPath,
+    expected: { helper: helper.name, upstream },
+    command: helper.command,
+    cwd,
+    env: childEnv,
+    deadlineMs: helper.readyTimeoutMs,
+    backoff: BACKOFF,
+    probeTimeoutMs: Math.min(DEFAULT_PROBE_TIMEOUT_MS, helper.readyTimeoutMs),
+  };
+}
+
+export type SharedHelperStartRecord = {
+  readonly name: string;
+  readonly result: SharedHostEnsureResult;
+};
+
+export type SharedHelperRelease = {
+  readonly name: string;
+  readonly result: SharedHostReleaseResult;
+};
+
+/** Raised when a shared helper is not ready; holders added by this run were released first. */
+export class SharedHelperStartError extends Error {
+  readonly helper: string;
+  readonly reason: string;
+  constructor(opts: {
+    readonly helper: string;
+    readonly reason: string;
+    readonly message: string;
+  }) {
+    super(
+      `Shared helper "${opts.helper}" failed (${opts.reason}): ${opts.message}`
+    );
+    this.name = "SharedHelperStartError";
+    this.helper = opts.helper;
+    this.reason = opts.reason;
+  }
+}
+
+/**
+ * Ensure every configured helper for one instance, in config order.
+ *
+ * On the first failure (or a thrown spec error) it releases, in reverse
+ * order, the holders this call added, then throws. The returned `rollback`
+ * does the same after a later phase of the operation fails.
+ */
+export async function startProjectSharedHelpers(opts: {
+  readonly helpers: readonly ProjectSharedHelperConfig[] | undefined;
+  readonly projectRoot: string;
+  readonly composeProject: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly signal?: AbortSignal;
+  readonly hackDir?: string;
+  readonly processEnv?: Readonly<Record<string, string | undefined>>;
+  readonly report?: (record: SharedHelperStartRecord) => void | Promise<void>;
+}): Promise<{
+  readonly started: readonly SharedHelperStartRecord[];
+  readonly rollback: () => Promise<readonly SharedHelperRelease[]>;
+}> {
+  const helpers = opts.helpers ?? [];
+  const started: SharedHelperStartRecord[] = [];
+  const added: SharedHostHelperSpec[] = [];
+  if (helpers.length === 0) {
+    return { started, rollback: () => Promise.resolve([]) };
+  }
+  const holder = resolveSharedHelperHolder(opts.composeProject);
+  let rolledBack: Promise<readonly SharedHelperRelease[]> | null = null;
+  const rollback = (): Promise<readonly SharedHelperRelease[]> => {
+    rolledBack ??= releaseSpecs({ specs: [...added].reverse(), holder });
+    return rolledBack;
+  };
+  try {
+    for (const helper of helpers) {
+      const spec = buildSharedHelperSpec({
+        helper,
+        projectRoot: opts.projectRoot,
+        env: opts.env,
+        ...(opts.processEnv ? { processEnv: opts.processEnv } : {}),
+        ...(opts.hackDir ? { hackDir: opts.hackDir } : {}),
+      });
+      const result = await ensureSharedHostHelper({
+        spec,
+        holder,
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      });
+      if (result.state === "ready" && result.holderAdded) {
+        added.push(spec);
+      }
+      const record = { name: helper.name, result };
+      started.push(record);
+      await opts.report?.(record);
+      if (result.state === "failed") {
+        throw new SharedHelperStartError({
+          helper: helper.name,
+          reason: result.reason,
+          message: result.message,
+        });
+      }
+    }
+  } catch (error: unknown) {
+    await rollback();
+    throw error;
+  }
+  return { started, rollback };
+}
+
+/**
+ * Release this instance's holder from every configured helper, enabled or
+ * not (a helper disabled after it was started must still be released).
+ * Every helper is attempted; failures are returned, not thrown.
+ */
+export async function releaseProjectSharedHelpers(opts: {
+  readonly helpers: readonly ProjectSharedHelperConfig[] | undefined;
+  readonly composeProject: string;
+  readonly hackDir?: string;
+}): Promise<readonly SharedHelperRelease[]> {
+  const helpers = opts.helpers ?? [];
+  if (helpers.length === 0) {
+    return [];
+  }
+  const holder = resolveSharedHelperHolder(opts.composeProject);
+  return await releaseSpecs({
+    specs: [...helpers].reverse().map((helper) => ({
+      name: helper.name,
+      stateDir: resolveSharedHelperStateDir({
+        ...(opts.hackDir ? { hackDir: opts.hackDir } : {}),
+        name: helper.name,
+        port: helper.port,
+      }),
+    })),
+    holder,
+  });
+}
+
+async function releaseSpecs(opts: {
+  readonly specs: readonly Pick<SharedHostHelperSpec, "name" | "stateDir">[];
+  readonly holder: string;
+}): Promise<readonly SharedHelperRelease[]> {
+  const out: SharedHelperRelease[] = [];
+  for (const spec of opts.specs) {
+    out.push({
+      name: spec.name,
+      result: await releaseSharedHostHelper({ spec, holder: opts.holder }),
+    });
+  }
+  return out;
+}
+
+/** True when a release left a helper or its claim in a state that needs an operator. */
+export function isSharedHelperReleaseProblem(
+  release: SharedHelperRelease
+): boolean {
+  return (
+    release.result.state === "failed" ||
+    release.result.state === "stop-unconfirmed"
+  );
+}
+
+/** One value-free line for a release outcome. */
+export function describeSharedHelperRelease(
+  release: SharedHelperRelease
+): string {
+  const result = release.result;
+  if (result.state === "failed") {
+    return `Shared helper "${release.name}" was not released (${result.reason}): ${result.message}`;
+  }
+  switch (result.state) {
+    case "absent":
+      return `Shared helper "${release.name}": no claim to release.`;
+    case "retained":
+      return `Shared helper "${release.name}" left running for its other holders.`;
+    case "released-adopted":
+      return `Shared helper "${release.name}" released; it was adopted, so Hack left it running.`;
+    case "stale-cleared":
+      return `Shared helper "${release.name}": stale claim cleared; nothing was signalled.`;
+    case "stopped":
+      return `Shared helper "${release.name}" stopped.`;
+    default:
+      return `Shared helper "${release.name}" did not confirm its stop; its claim was kept for inspection.`;
+  }
+}
+
+/** One value-free line for a ready or disabled start. */
+export function describeSharedHelperStart(
+  record: SharedHelperStartRecord
+): string {
+  const result = record.result;
+  if (result.state === "disabled") {
+    return `Shared helper "${record.name}" is disabled; not started.`;
+  }
+  if (result.state === "failed") {
+    return `Shared helper "${record.name}" failed (${result.reason}): ${result.message}`;
+  }
+  let how = "reused";
+  if (result.ownership === "adopted") {
+    how = "adopted (identity verified; Hack will not stop it)";
+  } else if (result.spawned) {
+    how = "started";
+  }
+  return `Shared helper "${record.name}" ${how} at ${result.endpoint}.`;
+}
+
+/**
+ * Run `run` with an AbortSignal that SIGINT/SIGTERM trips. After `run`
+ * settles (its own cleanup included), a caught signal is re-raised with the
+ * handlers removed, so the process still ends the way the sender asked.
+ */
+export async function withTerminationAbort<T>(
+  run: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
+  const controller = new AbortController();
+  let caught: NodeJS.Signals | null = null;
+  const handlers = new Map<NodeJS.Signals, () => void>();
+  for (const name of ["SIGINT", "SIGTERM"] as const) {
+    const handler = (): void => {
+      caught ??= name;
+      controller.abort();
+    };
+    handlers.set(name, handler);
+    process.on(name, handler);
+  }
+  const dispose = (): void => {
+    for (const [name, handler] of handlers) {
+      process.off(name, handler);
+    }
+  };
+  try {
+    return await run(controller.signal);
+  } finally {
+    dispose();
+    if (caught !== null) {
+      process.kill(process.pid, caught);
+    }
+  }
+}

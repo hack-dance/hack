@@ -556,7 +556,7 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
   },
 };
 
-async function writeFakeDocker(opts: {
+export async function writeFakeDocker(opts: {
   readonly fakeBin: string;
 }): Promise<void> {
   await mkdir(opts.fakeBin, { recursive: true });

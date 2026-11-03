@@ -24,6 +24,10 @@ import {
   requireLegacyProjectInputs,
 } from "./project-input-selection.ts";
 import { normalizeProjectName } from "./project-name.ts";
+import {
+  type ProjectSharedHelperConfig,
+  parseProjectSharedHelpers,
+} from "./project-shared-helpers.ts";
 
 export type ProjectDirName =
   | typeof HACK_PROJECT_DIR_PRIMARY
@@ -280,6 +284,8 @@ export interface ProjectLifecycleConfig {
   readonly up?: ProjectLifecycleHooks;
   readonly down?: ProjectLifecycleHooks;
   readonly processes?: readonly ProjectLifecycleProcess[];
+  /** Identity-verified shared host helpers; see project-shared-helpers.ts. */
+  readonly sharedHelpers?: readonly ProjectSharedHelperConfig[];
 }
 
 export type ProjectLifecycleSingletonConflictPolicy = "adopt" | "fail";
@@ -536,12 +542,19 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
   const internal = parseInternalConfig(getRecord(value, "internal"));
   const worktree = parseWorktreeConfig(getRecord(value, "worktree"));
   const sessions = parseSessionsConfig(getRecord(value, "sessions"));
-  const lifecycleBase = parseLifecycleConfig(getRecord(value, "lifecycle"));
+  const lifecycleRecord = getRecord(value, "lifecycle");
+  const lifecycleBase = parseLifecycleConfig(lifecycleRecord);
+  const sharedHelpers = parseProjectSharedHelpers(
+    lifecycleRecord?.sharedHelpers
+  );
   const startup = parseStartupEntries(value.startup);
-  const lifecycle = mergeLifecycleWithStartup({
+  const lifecycleMerged = mergeLifecycleWithStartup({
     lifecycle: lifecycleBase,
     startup,
   });
+  const lifecycle = sharedHelpers.helpers
+    ? { ...lifecycleMerged, sharedHelpers: sharedHelpers.helpers }
+    : lifecycleMerged;
   const parsedOwnership = parseProjectOwnership(value.ownership);
   const defaultEnvConfig =
     typeof defaultEnvConfigRaw === "string"
@@ -564,6 +577,7 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
       : []),
     ...(parsedOwnership.parseError ? [parsedOwnership.parseError] : []),
     ...(parsedOpen.parseError ? [parsedOpen.parseError] : []),
+    ...sharedHelpers.errors,
   ];
 
   return {

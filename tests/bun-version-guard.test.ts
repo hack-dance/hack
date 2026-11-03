@@ -167,5 +167,43 @@ test("local test, check and typecheck entry points run the Bun guard", async () 
   // Turbo's strict environment mode would otherwise drop the override for
   // package tasks, so the documented opt-in must pass through.
   const turbo = await Bun.file(join(root, "turbo.json")).json();
-  expect(turbo.globalPassThroughEnv).toContain(BUN_VERSION_OVERRIDE_ENV);
+  expect(turbo.globalEnv).toContain(BUN_VERSION_OVERRIDE_ENV);
+  expect(turbo.globalPassThroughEnv ?? []).not.toContain(
+    BUN_VERSION_OVERRIDE_ENV
+  );
+});
+
+test("Turbo separates override cache hashes from pinned runs", async () => {
+  const hash = async (override: string | undefined) => {
+    const env = { ...process.env };
+    delete env[BUN_VERSION_OVERRIDE_ENV];
+    if (override !== undefined) {
+      env[BUN_VERSION_OVERRIDE_ENV] = override;
+    }
+    const child = Bun.spawn(
+      [
+        join(root, "node_modules/.bin/turbo"),
+        "run",
+        "typecheck",
+        "--filter=@hack/cli",
+        "--dry=json",
+      ],
+      { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] }
+    );
+    const [exit, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exit, stderr).toBe(0);
+    const plan = JSON.parse(stdout);
+    expect(plan.tasks.length).toBeGreaterThan(0);
+    return plan.tasks.map((task: { taskId: string; hash: string }) => [
+      task.taskId,
+      task.hash,
+    ]);
+  };
+  const pinnedHashes = await hash(undefined);
+  expect(await hash("1")).not.toEqual(pinnedHashes);
+  expect(await hash(undefined)).toEqual(pinnedHashes);
 });

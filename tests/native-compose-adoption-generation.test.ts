@@ -47,6 +47,7 @@ const {
   artifactPath,
   refusal,
   linkedCheckout,
+  mutationCommands,
   readReceipt,
   writeReceipt,
   originalSnapshots,

@@ -14,6 +14,8 @@ enum Change {
     /// Remove and recreate the volume under the same name and labels, as
     /// `docker volume rm` followed by `docker volume create` would.
     Replace,
+    InspectFailure,
+    IdentityFailure,
 }
 
 /// Where a guest effect is interrupted relative to the MOVE script.
@@ -43,6 +45,8 @@ struct Provider {
     observe_reply: RefCell<Option<String>>,
     fault: Cell<Fault>,
     calls: RefCell<Vec<&'static str>>,
+    inspect_failure: Cell<bool>,
+    identity_failure: Cell<bool>,
 }
 impl Provider {
     fn new() -> Self {
@@ -82,8 +86,13 @@ impl Provider {
             observe_reply: RefCell::new(None),
             fault: Cell::new(Fault::None),
             calls: RefCell::new(Vec::new()),
+            inspect_failure: Cell::new(false),
+            identity_failure: Cell::new(false),
         };
         provider.receipt("stopped-data-retained", "created");
+        let (receipt, _) = provider.load(&provider.candidate, RUN).unwrap();
+        provider.inspected.borrow_mut()["Labels"] =
+            expected_labels(&receipt, &receipt.resources["volume:www_next"]);
         provider
     }
     /// Write the graph receipt. `redis` varies the receipt bytes the way a
@@ -190,9 +199,19 @@ impl Port for Provider {
         self.calls.borrow_mut().push("load");
         load_at(directory(candidate, run)?, run, "owner")
     }
-    fn inspect(&self, _: &Receipt, resource: &Resource) -> Result<Option<Value>, CandidateError> {
+    fn inspect(
+        &self,
+        receipt: &Receipt,
+        resource: &Resource,
+    ) -> Result<Option<Value>, CandidateError> {
         self.calls.borrow_mut().push("inspect");
         assert_eq!(resource.name, self.name);
+        if self.inspect_failure.get() {
+            return Err(CandidateError::new(
+                "inspect_failed",
+                "Synthetic inspect failed.",
+            ));
+        }
         let mut value = self.inspected.borrow().clone();
         if value.is_null() {
             return Ok(None);
@@ -200,6 +219,9 @@ impl Port for Provider {
         if value.get("CreatedAt").is_none() {
             value["CreatedAt"] = json!(self.created_at());
         }
+        // Use the same identity validator as the production engine adapter,
+        // including its distinct observed-foreign/changed identity errors.
+        verify_resource_identity(receipt, resource, &value)?;
         Ok(Some(value))
     }
     fn containers(&self) -> Result<Value, CandidateError> {
@@ -215,6 +237,9 @@ impl Port for Provider {
             _ => "identity",
         };
         self.calls.borrow_mut().push(call);
+        if call == "identity" && self.identity_failure.get() {
+            return Err(lost());
+        }
         if call == "observe"
             && let Some(reply) = self.observe_reply.borrow().clone()
         {
@@ -240,6 +265,8 @@ impl Port for Provider {
         match changed {
             Some((_, Change::Inspect(changed))) => *self.inspected.borrow_mut() = changed,
             Some((_, Change::Replace)) => self.replace_volume(),
+            Some((_, Change::InspectFailure)) => self.inspect_failure.set(true),
+            Some((_, Change::IdentityFailure)) => self.identity_failure.set(true),
             None => {}
         }
         if call == "move" && self.fault.get() == Fault::After {
@@ -614,5 +641,180 @@ fn a_record_stuck_by_the_created_at_recheck_resumes_or_resolves_with_retained_by
         assert_eq!(absent["phase"], "target_absent");
         assert_eq!(absent["retained_quarantine_bytes"], 1016);
         provider.untouched_application_data();
+    }
+}
+
+/// Exercise each affected feature's production read-only selection/verification
+/// through the synthetic provider, after running the real quarantine script.
+/// This does not qualify the native provider transport or host recovery gate.
+#[test]
+fn retained_volume_features_accept_quarantine_but_refuse_replacement() {
+    use crate::provider::graph::{restore, volume_identity};
+    let provider = Provider::new();
+    let (mut receipt, _) = provider.load(&provider.candidate, RUN).unwrap();
+    receipt.resources.remove("volume:redis");
+    let resource = &receipt.resources["volume:www_next"];
+    let observe = |resource: &Resource| {
+        volume_identity::observe_with(
+            resource,
+            || Port::inspect(&provider, &receipt, resource),
+            |program, args| provider.execute(program, args),
+        )
+    };
+    let before_inspect = Port::inspect(&provider, &receipt, resource)
+        .unwrap()
+        .unwrap();
+    let selected = volume_identity::select_with(&receipt, observe).unwrap();
+    let restore_selected = restore::observed_volumes_with(&receipt, observe).unwrap();
+    let saved = serde_json::to_vec(&selected).unwrap();
+    let selected: BTreeMap<String, Value> = serde_json::from_slice(&saved).unwrap();
+    let sha = selection_sha(&provider.inspect().unwrap());
+    provider.quarantine(&sha).unwrap();
+    let after_inspect = Port::inspect(&provider, &receipt, resource)
+        .unwrap()
+        .unwrap();
+    assert_ne!(before_inspect["CreatedAt"], after_inspect["CreatedAt"]);
+    let after = observe(resource).unwrap();
+    volume_identity::verify_with(&receipt, &selected, observe).unwrap();
+    assert_eq!(
+        volume_identity::select_with(&receipt, observe).unwrap(),
+        selected
+    );
+    // Restore generation, source-device rebind and quiescent-dependency recovery
+    // all persist and compare this same production selection.
+    assert_eq!(
+        restore::observed_volumes_with(&receipt, observe).unwrap(),
+        restore_selected
+    );
+    assert!(volume_identity::retained_matches(
+        selected.get("volume:www_next"),
+        Some(&after),
+        true
+    ));
+    volume_subpaths::check_after_quarantine(
+        &before_inspect,
+        &after_inspect,
+        after["directory"].as_str().unwrap(),
+        |program, args| provider.execute(program, args),
+    );
+    for change in [
+        Change::Replace,
+        Change::Inspect({
+            let mut changed = provider.inspected.borrow().clone();
+            changed["Options"] = json!({"type":"tmpfs"});
+            changed
+        }),
+    ] {
+        match change {
+            Change::Replace => provider.replace_volume(),
+            Change::Inspect(value) => *provider.inspected.borrow_mut() = value,
+            _ => unreachable!(),
+        }
+        let replacement = observe(resource).unwrap();
+        assert!(volume_identity::verify_with(&receipt, &selected, observe).is_err());
+        assert_ne!(
+            volume_identity::select_with(&receipt, observe).unwrap(),
+            selected
+        );
+        assert_ne!(
+            restore::observed_volumes_with(&receipt, observe).unwrap(),
+            restore_selected
+        );
+        assert!(!volume_identity::retained_matches(
+            selected.get("volume:www_next"),
+            Some(&replacement),
+            true
+        ));
+        if provider.replaced().exists() {
+            provider.restore_volume();
+        }
+    }
+}
+
+#[test]
+fn failed_post_effect_observations_do_not_claim_the_volume_changed() {
+    for effect in ["move", "locate"] {
+        for change in [Change::InspectFailure, Change::IdentityFailure] {
+            let provider = Provider::new();
+            let sha = selection_sha(&provider.inspect().unwrap());
+            if effect == "locate" {
+                provider.fault.set(Fault::After);
+                assert!(provider.quarantine(&sha).is_err());
+                provider.fault.set(Fault::None);
+            }
+            *provider.after.borrow_mut() = Some((effect, change));
+            let result = if effect == "move" {
+                provider.quarantine(&sha)
+            } else {
+                provider.resolve(&sha)
+            };
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "graph_cache_quarantine_unobserved");
+            assert!(error.message.contains("could not be observed"));
+            assert!(!error.message.contains("volume changed"));
+            assert_eq!(provider.records()[0].outcome, Outcome::Pending);
+            provider.inspect_failure.set(false);
+            provider.identity_failure.set(false);
+            provider.resolve(&sha).unwrap();
+            assert_eq!(provider.records()[0].outcome, Outcome::Quarantined);
+        }
+    }
+}
+
+#[test]
+fn production_inspection_identity_errors_remain_observed_changes_after_effects() {
+    for effect in ["move", "locate"] {
+        for (field, value, validation_code) in [
+            (
+                "Labels",
+                json!({"io.hack-local.owner":"foreign"}),
+                Some("graph_foreign_resource"),
+            ),
+            ("Name", json!("foreign"), Some("graph_resource_identity")),
+            ("Driver", json!("foreign"), Some("graph_resource_identity")),
+            (
+                "Mountpoint",
+                json!("/var/lib/docker/volumes/foreign/_data"),
+                None,
+            ),
+            ("Options", json!({"type":"tmpfs"}), None),
+            ("Scope", json!("foreign"), None),
+        ] {
+            let provider = Provider::new();
+            let sha = selection_sha(&provider.inspect().unwrap());
+            if effect == "locate" {
+                provider.fault.set(Fault::After);
+                assert!(provider.quarantine(&sha).is_err());
+                provider.fault.set(Fault::None);
+            }
+            let original = provider.inspected.borrow().clone();
+            let mut changed = original.clone();
+            changed[field] = value;
+            let (receipt, _) = provider.load(&provider.candidate, RUN).unwrap();
+            let validation =
+                verify_resource_identity(&receipt, &receipt.resources["volume:www_next"], &changed);
+            assert_eq!(
+                validation.err().map(|failure| failure.code),
+                validation_code
+            );
+            *provider.after.borrow_mut() = Some((effect, Change::Inspect(changed)));
+            let result = if effect == "move" {
+                provider.quarantine(&sha)
+            } else {
+                provider.resolve(&sha)
+            };
+            let failure = result.unwrap_err();
+            assert_eq!(
+                failure.code, "graph_cache_quarantine_unsettled",
+                "{effect}:{field}"
+            );
+            assert!(failure.message.contains("volume changed"));
+            // No IDENTITY call may mask already observed metadata drift.
+            assert_eq!(provider.calls.borrow().last(), Some(&"inspect"));
+            assert_eq!(provider.records()[0].outcome, Outcome::Pending);
+            *provider.inspected.borrow_mut() = original;
+            provider.resolve(&sha).unwrap();
+            assert_eq!(provider.records()[0].outcome, Outcome::Quarantined);
+        }
     }
 }

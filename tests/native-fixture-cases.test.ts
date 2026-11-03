@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -182,6 +182,54 @@ test("the stand-in mux cleanup ends recorded window groups and ignores a missing
     expect(groupPresent(windows.held.pid)).toBe(true);
     await endLifecycleMuxFixtureGroups(state);
     expect(await groupEnded(windows.held.pid)).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("the stand-in mux cleanup signals only its own groups and gets past one that exited", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lifecycle-mux-reuse-"));
+  try {
+    const mux = await writeLifecycleMuxFixture(root);
+    const state = join(root, "mux.json");
+    for (const args of [
+      ["new-session", "-s", "reuse", "-c", root],
+      ["new-window", "-n", "live", "-c", root, "sleep 300"],
+    ]) {
+      const child = Bun.spawn([mux, ...args], {
+        env: { ...process.env, HACK_TEST_MUX_STATE: state },
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      expect(await child.exited).toBe(0);
+    }
+    const saved = JSON.parse(await readFile(state, "utf8")) as {
+      windows: Record<
+        string,
+        { readonly pid: number; readonly started?: string }
+      >;
+    };
+    const live = saved.windows.live?.pid as number;
+    started.push(live);
+    const reused = detachedGroup();
+    const unproven = detachedGroup();
+    const exited = Bun.spawn(["/usr/bin/true"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await exited.exited;
+    // `gone` comes first: stopping there would leave the live window running.
+    saved.windows = {
+      gone: { pid: exited.pid, started: "Thu Jan  1 00:00:00 1970" },
+      reused: { pid: reused, started: "Thu Jan  1 00:00:00 1970" },
+      unproven: { pid: unproven },
+      ...saved.windows,
+    };
+    await writeFile(state, JSON.stringify(saved));
+    await endLifecycleMuxFixtureGroups(state);
+    expect(await groupEnded(live)).toBe(true);
+    expect(groupPresent(reused)).toBe(true);
+    expect(groupPresent(unproven)).toBe(true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

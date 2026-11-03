@@ -4357,7 +4357,7 @@ test("outside git, setting that local layer's environment to default, as the ref
   expect(resolved?.hostTargetEnv.global?.KEPT_SETTING).toBe(KEPT_VALUE);
 });
 
-test("in git, a tracked local layer still in the working tree gets the tracked-layer refusal and its remedy", async () => {
+test("in git, a tracked local layer still in the working tree gets the tracked-layer refusal", async () => {
   const repo = await createLegacyRepo();
   await git({ repo, args: ["init", "-q"] });
   const localPath = resolve(repo.projectDir, "hack.env.local.yaml");

@@ -194,6 +194,16 @@ jobs:
         run: |
           mise exec zig -- ./scripts/build-hack-local.sh
           ./hack-local info --json
+      - name: Check release candidate carries no kill harness
+        # The all-features test step built the debug candidate with node-kill-harness,
+        # so its marker proves this grep can see the harness when it is compiled in.
+        run: |
+          marker=node-kill-harness-
+          LC_ALL=C grep -q -a "$marker" .hack-local/target/debug/hack-runtime-candidate
+          if LC_ALL=C grep -q -a "$marker" .hack-local/target/release/hack-runtime-candidate; then
+            echo "release hack-runtime-candidate contains the test-only kill harness" >&2
+            exit 1
+          fi
 
   secret-scan:
     runs-on: blacksmith-4vcpu-ubuntu-2404

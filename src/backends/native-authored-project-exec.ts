@@ -11,7 +11,9 @@ import {
   withNativeAuthoredProjectStatus,
 } from "./native-authored-project-run.ts";
 import {
+  NativeAuthoredProjectNotStartedError,
   requireReadyServiceReceipt,
+  unstartedNativeAuthoredProject,
   withPinnedRuntimeBinary,
 } from "./native-authored-runtime-binary.ts";
 import {
@@ -137,6 +139,11 @@ export async function nativeAuthoredProjectExec(input: {
   }
   const result = await withStatus(scope, async (saved) => {
     active();
+    // A never-started selection is a closed refusal, not an unknown outcome.
+    const unstarted = unstartedNativeAuthoredProject(saved);
+    if (unstarted) {
+      return unstarted;
+    }
     const receipt =
       requireReadyServiceReceipt(saved, scope, service) ?? refused();
     return await withPinnedRuntimeBinary(
@@ -179,5 +186,8 @@ export async function nativeAuthoredProjectExec(input: {
     );
   });
   active();
+  if (result instanceof NativeAuthoredProjectNotStartedError) {
+    throw result;
+  }
   return result;
 }

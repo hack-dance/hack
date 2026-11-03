@@ -234,7 +234,11 @@ export const composeRuntimeBackend: RuntimeBackend = {
     });
   },
   async ps(opts) {
-    const cmd = [...buildComposeArgs(opts), "ps"];
+    const cmd = [
+      ...buildComposeArgs(opts),
+      "ps",
+      ...(opts.all ? ["--all"] : []),
+    ];
     return await run(cmd, { cwd: opts.cwd, env: opts.env });
   },
   async run(opts) {

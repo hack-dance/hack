@@ -44,6 +44,23 @@ if [ "$(bun --version)" != 1.4.4 ]; then
   echo "Pinned Bun 1.4.4 is required" >&2
   exit 69
 fi
+# Zig's musl link of hack-storage-root-witness exceeds the default macOS soft
+# descriptor limit (256) with ProcessFdQuotaExceeded. Raise only this build's
+# soft limit, never above the hard limit; a lower result warns and continues.
+fd_want=10240
+fd_soft=$(ulimit -Sn)
+if [ "$fd_soft" != unlimited ] && [ "$fd_soft" -lt "$fd_want" ]; then
+  fd_hard=$(ulimit -Hn)
+  fd_target=$fd_want
+  if [ "$fd_hard" != unlimited ] && [ "$fd_hard" -lt "$fd_want" ]; then
+    fd_target=$fd_hard
+  fi
+  ulimit -Sn "$fd_target" 2>/dev/null || :
+  fd_soft=$(ulimit -Sn)
+  if [ "$fd_soft" != unlimited ] && [ "$fd_soft" -lt "$fd_want" ]; then
+    echo "Open file soft limit is $fd_soft (wanted $fd_want); the storage tool link may fail with ProcessFdQuotaExceeded" >&2
+  fi
+fi
 stdlib=$(rustc --print target-libdir --target aarch64-unknown-linux-musl)
 set -- "$stdlib"/libstd-*.rlib
 if [ ! -f "$1" ]; then

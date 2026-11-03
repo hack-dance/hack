@@ -1,10 +1,13 @@
 [test]
 root = "./tests"
+# preload: replaces Bun.secrets with an in-memory backend and disables the native
+# keychain. It runs first, so the state guard's baseline already has the flag.
 # global-state-guard: fails a test or file that leaves PATH, HOME, cwd or other
 # process state changed, and restores it so later files run clean (HACK-1327).
 # checkout-write-guard: fails the run when a test creates or changes a file in
 # the checkout (HACK-1343).
 preload = [
+  "./tests/preload.ts",
   "./tests/helpers/global-state-guard-preload.ts",
   "./tests/helpers/checkout-write-guard-preload.ts",
 ]

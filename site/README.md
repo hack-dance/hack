@@ -24,7 +24,7 @@ The service is capped at two CPUs and 6 GB memory, with a 3 GB Node heap.
 Restart the service after source changes to rebuild the preview. This avoids
 development-server compilation and HMR overhead while reviewing the whole corpus.
 
-Use the repository's pinned Bun 1.4.2. Site dependencies and `site/bun.lock` are
+Use the repository's pinned Bun 1.4.4. Site dependencies and `site/bun.lock` are
 independent of the CLI workspace; do not change the root Bun pin for Next.js.
 Next.js also requires a supported Node.js installation (20.9 or newer).
 

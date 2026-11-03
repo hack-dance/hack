@@ -1237,11 +1237,12 @@ const contracts: readonly ModelContract[] = [
   {
     // Shared helper instance lifecycle-session ownership (HACK-1142): the
     // controller's session decision, the locked creation transaction
-    // (revalidate, publish, create, record) and its failure outcomes, and
-    // creator cleanup by session epoch; see tests/models/tla/README.md.
+    // (revalidate, publish, create, record) and its failure outcomes, process
+    // start outside the lock, the locked conditional finalize, and creator
+    // cleanup by session epoch; see tests/models/tla/README.md.
     name: "shared-helper-instance",
     module: "Instance",
-    states: 3367,
+    states: 6035,
     invariant: "SessionSafe",
     action: "Succeed",
     fields: [
@@ -1263,6 +1264,18 @@ const contracts: readonly ModelContract[] = [
         invariant: "Reclaimable",
         action: "RecordFailUnstopped",
         fields: ['session = "alive"', 'token = "a"', 'entry = "none"'],
+      },
+      {
+        name: "stale-finalize",
+        negative: true,
+        invariant: "Reclaimable",
+        action: "Finalize",
+        fields: [
+          'session = "alive"',
+          'token = "b"',
+          'entry = "a"',
+          'pc = [a |-> "ready", b |-> "starting"]',
+        ],
       },
     ],
   },

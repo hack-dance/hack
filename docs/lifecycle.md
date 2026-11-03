@@ -275,6 +275,9 @@ Behavior:
     if no other up adopted it since. Hack records each session adoption and creation under
     the shared helper instance lock, so this holds whichever up ensured its helpers first.
     An up that only adopted the session never stops it.
+  - An up whose lifecycle session another up replaced while it was still starting (its
+    entry was still pending) fails with an error saying so. It does not publish over the
+    replacement or stop it; the replacement stays owned and `hack down` can stop it.
   - A failed up releases only the helper holders it added, and only while it is the latest
     up of the instance to have its helpers ready.
   - The failed up's other failure handling is unchanged (for example, it still clears the

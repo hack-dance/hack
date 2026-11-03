@@ -963,12 +963,14 @@ lifecycle entry (`entry`, `healthy`) as explicit state.
 | `Decide` | The controller's session decision under the instance lock (`resolveSessionDisposition`): adopt an owned healthy session and record the adoption epoch, replace an owned stale (pending) one, refuse one without matching state, or decide to create. |
 | `CreateBegin` | Start of the creation transaction (`ensureSession` → `createOwnedSession` under one `withLock`): `assertSessionStillAbsent` re-inspects and refuses unless the session is still absent. `tests/project-lifecycle-controller-ownership.test.ts` interleaving regression. |
 | `Publish` / `CreateSession` | Pending entry published, then `createSession`; a failed creation removes only this start's pending entry (`removeLifecycleStateEntryIfOwned`). |
-| `Record` / `RecordFail*` | `record("created")`. On failure the created session is stopped with its token before the entry is removed (`RecordFailStopped`); an unconfirmed stop keeps the entry and token (`RecordFailUnconfirmed`). Controller regressions for both. |
+| `Record` / `RecordFail*` | `record("created")`, then the lock is released with the entry still pending. On failure the created session is stopped with its token before the entry is removed (`RecordFailStopped`); an unconfirmed (or timed-out) stop keeps the entry and token (`RecordFailUnconfirmed`). Controller regressions for both, including a hung `createSession`. |
+| `StartProcesses` | Lifecycle processes start in the session outside the lock (`startLifecycleProcess`); the pending entry is not adoptable, so another start may replace the session here. |
+| `Finalize` | `finalize()` under the lock (`publishFinalEntryIfStillOwned`): publish the final, adoptable entry only while the persisted entry and the live session still carry this start's created or adopted token; otherwise the start is displaced, gives up its authority and fails (`LifecycleSessionDisplacedError`). Controller regression: replacement after creation but before finalization, reclaimed by `stopLifecycleProcessController`. |
 | `Launch` / `Succeed` / `Fail` | `assertCurrent` before and after containers start; Compose failure, SIGINT/SIGTERM or a failed check. |
 | `Cleanup` / `CleanupUndecidable` | `SharedHelperSessionOwnership.runIfOwned`: under the lock, a creator with a recorded epoch kills only while the epoch is its own; a creator whose record failed kills by token; the kill always checks the token. An unavailable lock keeps the session. Module tests and e2e overlap variants. |
 | `DownMark` / `DownStop` | `markSharedHelperInstanceStopping` once the down is committed; the stop controller reclaims the session through the persisted entry; `releaseProjectSharedHelpers` advances the generation again. |
 
-The positive configuration checks both invariants and exhausts 3,367 distinct states
+The positive configuration checks both invariants and exhausts 6,035 distinct states
 (TLC 1.7.4, Java 17, no fairness, `CHECK_DEADLOCK FALSE`). Each control disables one
 fix through a constant and must fail with a named same-state witness:
 
@@ -977,12 +979,14 @@ fix through a constant and must fail with a named same-state witness:
 | `negative` | `CheckEpoch` (creator kills by token alone) | `SessionSafe` at `Succeed` | `a` created, `b` adopted, `a` failed and killed it, `b` succeeded: `session = "absent"`, `epoch = <<"b", "adopted">>` |
 | `no-revalidation` | `Revalidate` | `Reclaimable` at `Publish` | `a` created and finalized meanwhile; `b`'s stale create decision overwrites the entry: `token = "a"`, `entry = "b"` |
 | `epoch-failure-unstopped` | `StopOnEpochFailure` | `Reclaimable` at `RecordFailUnstopped` | the entry is removed while the created session lives: `token = "a"`, `entry = "none"` |
+| `stale-finalize` | `FinalizeRecheck` | `Reclaimable` at `Finalize` | `b` replaced `a`'s pending session (token `b`); `a`'s stale finalize publishes its own token: `token = "b"`, `entry = "a"` |
 
 Bounds and assumptions: two ups, each running once; one down. `Decide`, the three
-creation steps and `Record` are lock-held steps; `Decide` is one step because the
-source holds the lock across inspect and record. Process startup and entry
-finalization are folded into `Record` (`healthy` becomes TRUE); a failure between
-them is not modeled separately. Helper ensure/holder counts, helper rollback
+creation steps, `Record` and `Finalize` are lock-held steps; `StartProcesses` and
+the launch steps are not. `Decide` is one step because the source holds the lock
+across inspect and record. Every lock-held mux call is bounded in the source
+(`MUX_COMMAND_TIMEOUT_MS` and the controller's deadline); a timed-out call is the
+model's unconfirmed outcome, not a separate action. Helper ensure/holder counts, helper rollback
 ownership (the operation record), the acquired-helper record and claim-level stop
 confirmation are not modeled; the shared-host claim protocol has its own fixtures in
 `tests/shared-host-lifecycle.test.ts`. `DownStop` joins the down's session stop and

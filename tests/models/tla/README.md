@@ -947,33 +947,46 @@ about this unchanged specification.
 
 `shared-helper-instance/Instance.tla` models lifecycle-session ownership for one
 shared-helper instance (one branch, HACK-1142): two overlapping `hack up` runs
-(`a`, `b`) and one `hack down`. Property `SessionSafe`: an up that succeeded with no
-down since it captured the shutdown generation still has a live lifecycle session,
-so an overlapping up's cleanup never kills a session a successful up adopted.
+(`a`, `b`) and one `hack down`, with the shared helper instance lock (`lock`), the
+live session and its ownership token (`session`, `token`) and the persisted
+lifecycle entry (`entry`, `healthy`) as explicit state.
+
+- `SessionSafe`: an up that succeeded with no down since it captured the shutdown
+  generation still has a live session, so an overlapping up's cleanup never kills a
+  session a successful up adopted.
+- `Reclaimable`: a live session always has a persisted entry naming its token, so
+  the normal stop controller (`hack down`) can reclaim it.
 
 | Model operation | Source boundary and regression |
 | --- | --- |
-| `Capture` | `captureSharedHelperShutdownGeneration` at the top of `runLifecycleUpBeforeAndProcesses`, before `up.before` hooks. Module and e2e "down during up.before" regressions. |
-| `Superseded` | `startProjectSharedHelpers` refuses when the captured generation changed, before ensuring any helper. |
-| `Decide` | Helpers ready; then the lifecycle controller's session decision (inspect, adopt or replace) and session creation, each under the shared helper instance lock with `SharedHelperSessionOwnership.record`. Adoption writes a fresh session epoch; creation writes the creator's epoch. |
-| `Launch` / `Succeed` | `assertCurrent` before containers start (backend `beforeStart`) and after they start. |
-| `Fail` | Compose failure, SIGINT/SIGTERM or a failed `assertCurrent`. |
-| `Cleanup` / `CleanupUndecidable` | `SharedHelperSessionOwnership.runIfOwned`: under the instance lock the creator kills only while the epoch is still its own; an unavailable lock keeps the session. Module tests in `tests/project-shared-helpers.test.ts`; e2e overlap variants (succeeds, compose-fails, sigterm, sigterm-lock-held). |
-| `DownMark` / `DownStop` | `markSharedHelperInstanceStopping` once the down is committed; then Compose/graph shutdown and `releaseProjectSharedHelpers`, which advances the generation again. |
+| `Capture` / `Superseded` | `captureSharedHelperShutdownGeneration` before `up.before`; `startProjectSharedHelpers` refuses a changed generation before ensuring helpers. |
+| `Decide` | The controller's session decision under the instance lock (`resolveSessionDisposition`): adopt an owned healthy session and record the adoption epoch, replace an owned stale (pending) one, refuse one without matching state, or decide to create. |
+| `CreateBegin` | Start of the creation transaction (`ensureSession` → `createOwnedSession` under one `withLock`): `assertSessionStillAbsent` re-inspects and refuses unless the session is still absent. `tests/project-lifecycle-controller-ownership.test.ts` interleaving regression. |
+| `Publish` / `CreateSession` | Pending entry published, then `createSession`; a failed creation removes only this start's pending entry (`removeLifecycleStateEntryIfOwned`). |
+| `Record` / `RecordFail*` | `record("created")`. On failure the created session is stopped with its token before the entry is removed (`RecordFailStopped`); an unconfirmed stop keeps the entry and token (`RecordFailUnconfirmed`). Controller regressions for both. |
+| `Launch` / `Succeed` / `Fail` | `assertCurrent` before and after containers start; Compose failure, SIGINT/SIGTERM or a failed check. |
+| `Cleanup` / `CleanupUndecidable` | `SharedHelperSessionOwnership.runIfOwned`: under the lock, a creator with a recorded epoch kills only while the epoch is its own; a creator whose record failed kills by token; the kill always checks the token. An unavailable lock keeps the session. Module tests and e2e overlap variants. |
+| `DownMark` / `DownStop` | `markSharedHelperInstanceStopping` once the down is committed; the stop controller reclaims the session through the persisted entry; `releaseProjectSharedHelpers` advances the generation again. |
 
-The positive exploration exhausts 978 distinct states (TLC 1.7.4, Java 17, no
-fairness, `CHECK_DEADLOCK FALSE`). `InstanceBroken.tla` removes the epoch check from
-`Cleanup` (the creator kills by its token alone) and must violate `SessionSafe`; its
-named same-state witness is `Succeed` with `session = "absent"`,
-`epoch = <<"b", "adopted">>` and `b` succeeded: `a` created the session, `b` adopted
-it, `a`'s token-only cleanup killed it and `b` then succeeded on a dead session.
+The positive configuration checks both invariants and exhausts 3,367 distinct states
+(TLC 1.7.4, Java 17, no fairness, `CHECK_DEADLOCK FALSE`). Each control disables one
+fix through a constant and must fail with a named same-state witness:
 
-Bounds and assumptions: two ups, each running once; one down; lock-held sections
-are single atomic steps. Helper ensure/holder counts, helper rollback ownership
-(the operation record), the acquired-helper record and claim-level stop
-confirmation are not modeled; the shared-host claim protocol has its own fixtures
-in `tests/shared-host-lifecycle.test.ts`. `DownStop` joins the down's session stop
-and its release into one step. In the implementation an up that captured after the
+| Control | Fix disabled | Fails | Witness |
+| --- | --- | --- | --- |
+| `negative` | `CheckEpoch` (creator kills by token alone) | `SessionSafe` at `Succeed` | `a` created, `b` adopted, `a` failed and killed it, `b` succeeded: `session = "absent"`, `epoch = <<"b", "adopted">>` |
+| `no-revalidation` | `Revalidate` | `Reclaimable` at `Publish` | `a` created and finalized meanwhile; `b`'s stale create decision overwrites the entry: `token = "a"`, `entry = "b"` |
+| `epoch-failure-unstopped` | `StopOnEpochFailure` | `Reclaimable` at `RecordFailUnstopped` | the entry is removed while the created session lives: `token = "a"`, `entry = "none"` |
+
+Bounds and assumptions: two ups, each running once; one down. `Decide`, the three
+creation steps and `Record` are lock-held steps; `Decide` is one step because the
+source holds the lock across inspect and record. Process startup and entry
+finalization are folded into `Record` (`healthy` becomes TRUE); a failure between
+them is not modeled separately. Helper ensure/holder counts, helper rollback
+ownership (the operation record), the acquired-helper record and claim-level stop
+confirmation are not modeled; the shared-host claim protocol has its own fixtures in
+`tests/shared-host-lifecycle.test.ts`. `DownStop` joins the down's session stop and
+its release into one step. In the implementation an up that captured after the
 down's stopping mark can still succeed between the down's session stop and its
 release; that is the documented first-slice limitation (launch prevention across a
 concurrent down is detected after launch, not prevented). Real mux sessions,

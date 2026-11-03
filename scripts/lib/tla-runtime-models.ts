@@ -1235,19 +1235,35 @@ const contracts: readonly ModelContract[] = [
     fields: ['phase = "discarded"', "alive = TRUE"],
   },
   {
-    // Shared helper instance lifecycle-session ownership (HACK-1142):
-    // src/lib/project-shared-helpers.ts createSharedHelperSessionOwnership,
-    // captureSharedHelperShutdownGeneration and assertCurrent; see README.
+    // Shared helper instance lifecycle-session ownership (HACK-1142): the
+    // controller's session decision, the locked creation transaction
+    // (revalidate, publish, create, record) and its failure outcomes, and
+    // creator cleanup by session epoch; see tests/models/tla/README.md.
     name: "shared-helper-instance",
     module: "Instance",
-    negativeModule: "InstanceBroken",
-    states: 978,
+    states: 3367,
     invariant: "SessionSafe",
     action: "Succeed",
     fields: [
       'session = "absent"',
       'epoch = <<"b", "adopted">>',
       'pc = [a |-> "done", b |-> "succeeded"]',
+    ],
+    additionalControls: [
+      {
+        name: "no-revalidation",
+        negative: true,
+        invariant: "Reclaimable",
+        action: "Publish",
+        fields: ['session = "alive"', 'token = "a"', 'entry = "b"'],
+      },
+      {
+        name: "epoch-failure-unstopped",
+        negative: true,
+        invariant: "Reclaimable",
+        action: "RecordFailUnstopped",
+        fields: ['session = "alive"', 'token = "a"', 'entry = "none"'],
+      },
     ],
   },
   {

@@ -7,6 +7,7 @@ import {
   BUILD_CANARY,
   retainedBuildFixture,
 } from "./helpers/retained-build-adoption.ts";
+import { assertInvalidRetainedMutationDeadlines } from "./helpers/retained-mutation-deadline.ts";
 
 const test = (name: string, run: () => Promise<void>) =>
   boundedTest(name, run, 30_000);
@@ -350,6 +351,23 @@ test("version9 requires one deadline before any mutation callback and preserves 
     await store.publish({ generation: repair, binary: h.compiler });
     await store.rollback();
     await assertNoAllocation();
+  } finally {
+    await store.close();
+  }
+});
+
+test("HACK-1359: version9 rejects missing and non-finite mutation deadlines without effects", async () => {
+  const { store, generation } = await prepared();
+  try {
+    await assertInvalidRetainedMutationDeadlines({
+      store,
+      generation,
+      binary: h.compiler,
+      snapshot: async () => ({
+        commands: await h.commands(),
+        receipt: await h.receipt(),
+      }),
+    });
   } finally {
     await store.close();
   }

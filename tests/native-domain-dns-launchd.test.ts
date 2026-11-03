@@ -63,9 +63,11 @@ function fixture(
   let kickstarts = 0;
   let postPrints = 0;
   const privilegedCalls: string[][] = [];
+  const readCalls: string[][] = [];
   const runCommand: NonNullable<
     NativeDnsLaunchdRestartOptions["runCommand"]
   > = async (command) => {
+    readCalls.push([...command]);
     if (command[0] === "/bin/launchctl" && command[1] === "print") {
       const label = command[2]?.slice("system/".length) ?? "";
       if (config.printFailure) {
@@ -153,6 +155,7 @@ function fixture(
   return {
     options,
     privilegedCalls,
+    readCalls,
     setFileUid: (uid: number) => {
       fileUid = uid;
     },
@@ -288,7 +291,9 @@ for (const accessCase of [
 test("restart rechecks launchd admission after preflight", async () => {
   const f = fixture();
   const restart = await prepareNativeDnsLaunchdRestart(f.options);
+  const before = [...f.readCalls];
   process.env.HACK_LAUNCHD_DISABLE = "1";
   await expect(restart()).rejects.toThrow("launchd management is disabled");
+  expect(f.readCalls).toEqual(before);
   expect(f.privilegedCalls).toEqual([]);
 });

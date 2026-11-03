@@ -255,7 +255,8 @@ export function createLifecycleProcessController(opts: {
     readonly processes: readonly ProjectLifecycleProcess[];
   }) => Promise<void>;
   finalize: () => Promise<void>;
-  abort: () => Promise<void>;
+  /** Resolves LIFECYCLE_SESSION_RETAINED when the session was kept. */
+  abort: () => Promise<undefined | typeof LIFECYCLE_SESSION_RETAINED>;
   hasStarted: () => boolean;
   getOperationCleanup: () => LifecycleOperationCleanup | null;
   getSignalCleanup: () => { readonly dispose: () => void } | null;
@@ -687,8 +688,9 @@ export function createLifecycleProcessController(opts: {
       await ownership.withLock(publishFinalEntryIfStillOwned);
     },
     abort: async () => {
-      await starterAbort();
+      const outcome = await starterAbort();
       operationSignalCleanup?.dispose();
+      return outcome;
     },
     hasStarted: () => startedProcesses.length > 0,
     getOperationCleanup: () =>
@@ -727,6 +729,25 @@ export function createLifecycleProcessController(opts: {
     });
     createdOwnershipToken = null;
     return undefined;
+  }
+}
+
+/**
+ * A lifecycle start failed and its session could not be confirmed stopped:
+ * the session (and its ownership record) was kept. Callers must keep what
+ * the session depends on, such as shared helper holders. The message is the
+ * original failure's.
+ */
+export class LifecycleSessionRetainedError extends Error {
+  readonly original: unknown;
+  constructor(original: unknown) {
+    super(
+      original instanceof Error
+        ? original.message
+        : "Failed to start lifecycle processes"
+    );
+    this.name = "LifecycleSessionRetainedError";
+    this.original = original;
   }
 }
 

@@ -288,6 +288,8 @@ test("when that stop is not confirmed, the entry and token stay so the session i
   const operationCleanup = starter.getOperationCleanup();
   expect(operationCleanup).not.toBeNull();
   expect(await operationCleanup?.()).toBe("session-retained");
+  // abort(), used by the start's own failure path, reports it too.
+  expect(await starter.abort()).toBe("session-retained");
   await starter.abort();
   expect(mux.sessions.get(SESSION)).toBe(token);
   expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([

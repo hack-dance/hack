@@ -2,8 +2,13 @@ import { afterEach, expect, test } from "bun:test";
 
 import {
   type LifecycleSharedHelpers,
+  releaseAfterFailedProcessStart,
   withSharedHelperCleanup,
 } from "../src/commands/project.ts";
+import {
+  LIFECYCLE_SESSION_RETAINED,
+  LifecycleSessionRetainedError,
+} from "../src/lib/project-lifecycle-controller.ts";
 import type { ProcessCleanupOutcome } from "../src/lib/project-shared-helpers.ts";
 import { setLoggerBackendOverride } from "../src/ui/logger.ts";
 
@@ -74,4 +79,42 @@ test("a session kept because its stop was unconfirmed keeps the helper holders t
   const { events, cleanup } = combined("ran", "session-retained");
   await cleanup?.();
   expect(events).toEqual(["kill-session", "processes:ran"]);
+});
+
+test("a failed process start keeps the helper holders when its session was retained", async () => {
+  const cases = [
+    {
+      name: "abort reports the retained session",
+      error: new Error("second process failed"),
+      aborted: LIFECYCLE_SESSION_RETAINED,
+      rolledBack: false,
+    },
+    {
+      name: "the start already aborted and retained it",
+      error: new LifecycleSessionRetainedError(new Error("process failed")),
+      aborted: undefined,
+      rolledBack: false,
+    },
+    {
+      name: "the session was stopped",
+      error: new Error("second process failed"),
+      aborted: undefined,
+      rolledBack: true,
+    },
+  ] as const;
+  for (const entry of cases) {
+    let rolledBack = false;
+    await releaseAfterFailedProcessStart({
+      error: entry.error,
+      abortProcesses: () => Promise.resolve(entry.aborted),
+      rollbackHelpers: () => {
+        rolledBack = true;
+        return Promise.resolve();
+      },
+    });
+    expect({ name: entry.name, rolledBack }).toEqual({
+      name: entry.name,
+      rolledBack: entry.rolledBack,
+    });
+  }
 });

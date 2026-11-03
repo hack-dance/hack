@@ -3,6 +3,7 @@ import {
   installLifecycleSignalCleanup,
   LIFECYCLE_SESSION_RETAINED,
   type LifecycleOperationCleanup,
+  LifecycleSessionRetainedError,
   resolveLifecycleCommandServiceName,
   resolveLifecycleCwd,
   resolveLifecycleSessionName,
@@ -2035,6 +2036,31 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
 }
 
 /**
+ * After lifecycle processes failed to start: abort them, then release the
+ * shared helper holders this start added, unless the abort kept the session
+ * (its stop could not be confirmed). Releasing then could stop a helper
+ * underneath the retained processes, so the holders stay for hack down.
+ */
+export async function releaseAfterFailedProcessStart(opts: {
+  readonly error: unknown;
+  readonly abortProcesses: () => Promise<unknown>;
+  readonly rollbackHelpers: (() => Promise<void>) | null;
+}): Promise<void> {
+  const aborted = await opts.abortProcesses();
+  const retained =
+    aborted === LIFECYCLE_SESSION_RETAINED ||
+    opts.error instanceof LifecycleSessionRetainedError;
+  if (retained) {
+    logger.warn({
+      message:
+        "Kept this instance's shared helpers with its lifecycle session, which could not be confirmed stopped. Run hack down to stop both.",
+    });
+    return;
+  }
+  await opts.rollbackHelpers?.();
+}
+
+/**
  * Run Compose up guarded by this instance's shared helper check: right
  * before containers start (via the backend's `beforeStart`) and again after a
  * successful start. A concurrent `hack down` that released the helpers is
@@ -2089,7 +2115,7 @@ async function startWithSharedHelpers(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly composeProject: string;
   readonly startProcesses: () => Promise<LifecycleProcessStart>;
-  readonly abortProcesses: () => Promise<void>;
+  readonly abortProcesses: () => Promise<unknown>;
   readonly shutdownGeneration: SharedHelperShutdownGeneration | undefined;
   readonly sessionOwnership: SharedHelperSessionOwnership | undefined;
 }): Promise<LifecycleProcessStart> {
@@ -2115,8 +2141,11 @@ async function startWithSharedHelpers(opts: {
         onSignalled = sharedHelpers.rollback;
         started = await opts.startProcesses();
       } catch (error: unknown) {
-        await opts.abortProcesses();
-        await sharedHelpers?.rollback();
+        await releaseAfterFailedProcessStart({
+          error,
+          abortProcesses: opts.abortProcesses,
+          rollbackHelpers: sharedHelpers ? sharedHelpers.rollback : null,
+        });
         throw failed(error);
       }
       const combined = withSharedHelperCleanup({
@@ -2313,7 +2342,9 @@ async function startLifecycleProcesses(opts: {
       signalCleanup: starter.getSignalCleanup(),
     };
   } catch (error: unknown) {
-    await starter.abort();
+    if ((await starter.abort()) === LIFECYCLE_SESSION_RETAINED) {
+      throw new LifecycleSessionRetainedError(error);
+    }
     if (error instanceof Error) {
       throw error;
     }

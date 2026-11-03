@@ -574,3 +574,117 @@ test("a disabled helper starts nothing and down still releases a recorded holder
   });
   expect(down.map((entry) => entry.result.state)).toEqual(["absent"]);
 });
+
+test(
+  "an overlapping start of the same instance is never revoked by the earlier run's rollback",
+  async () => {
+    const root = await scratch();
+    const helper = helperConfig({ port: freePort() });
+    // Run 1 adds the holder; run 2 of the same instance reuses it.
+    const first = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    const owned = await ownedIdentity(root, helper);
+    const second = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    expect(second.started[0]?.result).toMatchObject({
+      state: "ready",
+      holderAdded: false,
+    });
+    // Run 1 then fails later (Compose): its rollback must not stop the
+    // helper under run 2.
+    expect(await first.rollback()).toEqual([]);
+    expect(await isAlive(owned)).toBe(true);
+    expect((await readHelperClaim(root, helper))?.holders).toEqual([BRANCH_A]);
+    expect(await served(helper.port)).toBe(`served:${UPSTREAM_A}`);
+    // Without a newer start, a rollback releases what its run added.
+    await releaseProjectSharedHelpers({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir: join(root, "hack-home"),
+    });
+    const fresh = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    const freshOwned = await ownedIdentity(root, helper);
+    expect((await fresh.rollback()).map((entry) => entry.result.state)).toEqual(
+      ["stopped"]
+    );
+    expect(await isAlive(freshOwned)).toBe(false);
+  },
+  TIMEOUT
+);
+
+test("a disabled helper needs none of its runtime env", async () => {
+  const root = await scratch();
+  const helper: ProjectSharedHelperConfig = {
+    ...helperConfig({ port: freePort() }),
+    enabled: false,
+    upstream: undefined,
+    upstreamEnv: "UNSET_ISSUER_UPSTREAM",
+    env: ["UNSET_ISSUER_TOKEN"],
+  };
+  const up = await startProjectSharedHelpers({
+    ...context(root),
+    helpers: [helper],
+    composeProject: BRANCH_A,
+  });
+  expect(up.started[0]?.result).toEqual({
+    state: "disabled",
+    ownership: "disabled",
+  });
+});
+
+test(
+  "a signal anywhere in a guarded start runs its cleanup, then is re-raised",
+  async () => {
+    const root = await scratch();
+    const script = join(root, "guard.ts");
+    const marker = join(root, "cleaned");
+    const module = resolve(
+      import.meta.dir,
+      "../src/lib/project-shared-helpers.ts"
+    );
+    await writeFile(
+      script,
+      `import { writeFileSync } from "node:fs";
+import { withTerminationAbort } from ${JSON.stringify(module)};
+await withTerminationAbort(
+  async () => {
+    // A step that does not watch the abort signal, like mux session setup.
+    console.log("running");
+    await Bun.sleep(1500);
+  },
+  { onSignalled: async () => writeFileSync(${JSON.stringify(marker)}, "yes") }
+);
+console.log("not reached");
+`
+    );
+    const proc = Bun.spawn([process.execPath, script], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const reader = proc.stdout.getReader();
+    let text = "";
+    while (!text.includes("running")) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      text += new TextDecoder().decode(value);
+    }
+    reader.releaseLock();
+    proc.kill("SIGTERM");
+    expect(await proc.exited).toBe(143);
+    expect(await readFile(marker, "utf8")).toBe("yes");
+  },
+  TIMEOUT
+);

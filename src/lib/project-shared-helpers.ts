@@ -1,7 +1,10 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { isRecord } from "./guards.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 import {
   ensureSharedHostHelper,
   releaseSharedHostHelper,
@@ -339,6 +342,14 @@ export class SharedHelperStartError extends Error {
  * On the first failure (or a thrown spec error) it releases, in reverse
  * order, the holders this call added, then throws. The returned `rollback`
  * does the same after a later phase of the operation fails.
+ *
+ * Overlapping operations for the same instance (two `hack up` runs of one
+ * branch) are ordered by an instance lock held across every ensure, which
+ * also records this operation as the instance's latest start. A rollback
+ * releases only while that record still names this operation; once a later
+ * start of the same instance has run, the rollback leaves the holder in place
+ * (it stays recorded until `hack down`), so it can never stop a helper under
+ * a newer successful start.
  */
 export async function startProjectSharedHelpers(opts: {
   readonly helpers: readonly ProjectSharedHelperConfig[] | undefined;
@@ -360,44 +371,152 @@ export async function startProjectSharedHelpers(opts: {
     return { started, rollback: () => Promise.resolve([]) };
   }
   const holder = resolveSharedHelperHolder(opts.composeProject);
+  const instance = instancePaths({ hackDir: opts.hackDir, holder });
+  const operation = randomUUID();
+  // Each ensure is bounded by its own deadline; the lock wait covers them all.
+  const lockTimeoutMs =
+    helpers.reduce((sum, helper) => sum + helper.readyTimeoutMs, 0) + 10_000;
+  const releaseAdded = (): Promise<readonly SharedHelperRelease[]> =>
+    releaseSpecs({ specs: [...added].reverse(), holder });
   let rolledBack: Promise<readonly SharedHelperRelease[]> | null = null;
   const rollback = (): Promise<readonly SharedHelperRelease[]> => {
-    rolledBack ??= releaseSpecs({ specs: [...added].reverse(), holder });
+    rolledBack ??=
+      added.length === 0
+        ? Promise.resolve([])
+        : withInstanceLock({
+            instance,
+            timeoutMs: 10_000,
+            run: async () => {
+              if ((await readOperation(instance)) !== operation) {
+                return [];
+              }
+              await rm(instance.operationPath, { force: true });
+              return await releaseAdded();
+            },
+          });
     return rolledBack;
   };
-  try {
-    for (const helper of helpers) {
-      const spec = buildSharedHelperSpec({
-        helper,
-        projectRoot: opts.projectRoot,
-        env: opts.env,
-        ...(opts.processEnv ? { processEnv: opts.processEnv } : {}),
-        ...(opts.hackDir ? { hackDir: opts.hackDir } : {}),
+  await mkdir(instance.dir, { recursive: true, mode: 0o700 });
+  await withInstanceLock({
+    instance,
+    timeoutMs: lockTimeoutMs,
+    ...(opts.signal ? { signal: opts.signal } : {}),
+    run: async () => {
+      await writeFile(instance.operationPath, `${operation}\n`, {
+        mode: 0o600,
       });
-      const result = await ensureSharedHostHelper({
-        spec,
-        holder,
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      });
-      if (result.state === "ready" && result.holderAdded) {
-        added.push(spec);
+      try {
+        for (const helper of helpers) {
+          const result = await ensureOne({ ...opts, helper, holder });
+          if (result.state === "ready" && result.holderAdded) {
+            added.push(result.spec);
+          }
+          const record = { name: helper.name, result: result.result };
+          started.push(record);
+          await opts.report?.(record);
+          if (record.result.state === "failed") {
+            throw new SharedHelperStartError({
+              helper: helper.name,
+              reason: record.result.reason,
+              message: record.result.message,
+            });
+          }
+        }
+      } catch (error: unknown) {
+        // Still under the instance lock: this operation is the latest start.
+        rolledBack = releaseAdded();
+        await rolledBack;
+        throw error;
       }
-      const record = { name: helper.name, result };
-      started.push(record);
-      await opts.report?.(record);
-      if (result.state === "failed") {
-        throw new SharedHelperStartError({
-          helper: helper.name,
-          reason: result.reason,
-          message: result.message,
-        });
-      }
-    }
-  } catch (error: unknown) {
-    await rollback();
-    throw error;
-  }
+    },
+  });
   return { started, rollback };
+}
+
+async function ensureOne(opts: {
+  readonly helper: ProjectSharedHelperConfig;
+  readonly holder: string;
+  readonly projectRoot: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly signal?: AbortSignal;
+  readonly hackDir?: string;
+  readonly processEnv?: Readonly<Record<string, string | undefined>>;
+}): Promise<
+  | {
+      readonly state: "ready";
+      readonly holderAdded: boolean;
+      readonly spec: SharedHostHelperSpec;
+      readonly result: SharedHostEnsureResult;
+    }
+  | { readonly state: "other"; readonly result: SharedHostEnsureResult }
+> {
+  // A disabled helper needs none of its runtime env: it is never started.
+  if (!opts.helper.enabled) {
+    return {
+      state: "other",
+      result: { state: "disabled", ownership: "disabled" },
+    };
+  }
+  const spec = buildSharedHelperSpec({
+    helper: opts.helper,
+    projectRoot: opts.projectRoot,
+    env: opts.env,
+    ...(opts.processEnv ? { processEnv: opts.processEnv } : {}),
+    ...(opts.hackDir ? { hackDir: opts.hackDir } : {}),
+  });
+  const result = await ensureSharedHostHelper({
+    spec,
+    holder: opts.holder,
+    ...(opts.signal ? { signal: opts.signal } : {}),
+  });
+  return result.state === "ready"
+    ? { state: "ready", holderAdded: result.holderAdded, spec, result }
+    : { state: "other", result };
+}
+
+type InstancePaths = {
+  readonly dir: string;
+  readonly lockPath: string;
+  readonly operationPath: string;
+};
+
+function instancePaths(opts: {
+  readonly hackDir?: string;
+  readonly holder: string;
+}): InstancePaths {
+  const dir = join(
+    opts.hackDir ?? resolveGlobalHackDir(),
+    "shared-helpers",
+    ".instances"
+  );
+  return {
+    dir,
+    lockPath: join(dir, `${opts.holder}.lock`),
+    operationPath: join(dir, `${opts.holder}.operation`),
+  };
+}
+
+async function withInstanceLock<T>(opts: {
+  readonly instance: InstancePaths;
+  readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
+  readonly run: () => Promise<T>;
+}): Promise<T> {
+  return await withProjectsRegistryLock({
+    lockPath: opts.instance.lockPath,
+    label: "shared helper instance",
+    timeoutMs: opts.timeoutMs,
+    ...(opts.signal ? { signal: opts.signal } : {}),
+    run: opts.run,
+  });
+}
+
+async function readOperation(instance: InstancePaths): Promise<string | null> {
+  try {
+    return (await readFile(instance.operationPath, "utf8")).trim();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -497,12 +616,15 @@ export function describeSharedHelperStart(
 }
 
 /**
- * Run `run` with an AbortSignal that SIGINT/SIGTERM trips. After `run`
- * settles (its own cleanup included), a caught signal is re-raised with the
- * handlers removed, so the process still ends the way the sender asked.
+ * Run `run` with an AbortSignal that SIGINT/SIGTERM trips. The handlers stay
+ * installed until `run` settles. If a signal was caught, `onSignalled` then
+ * runs (the caller's cleanup for whatever `run` started), the handlers are
+ * removed and the signal is re-raised, so the process still ends the way the
+ * sender asked.
  */
 export async function withTerminationAbort<T>(
-  run: (signal: AbortSignal) => Promise<T>
+  run: (signal: AbortSignal) => Promise<T>,
+  opts: { readonly onSignalled?: () => Promise<void> } = {}
 ): Promise<T> {
   const controller = new AbortController();
   let caught: NodeJS.Signals | null = null;
@@ -515,15 +637,15 @@ export async function withTerminationAbort<T>(
     handlers.set(name, handler);
     process.on(name, handler);
   }
-  const dispose = (): void => {
-    for (const [name, handler] of handlers) {
-      process.off(name, handler);
-    }
-  };
   try {
     return await run(controller.signal);
   } finally {
-    dispose();
+    if (caught !== null) {
+      await opts.onSignalled?.().catch(() => undefined);
+    }
+    for (const [name, handler] of handlers) {
+      process.off(name, handler);
+    }
     if (caught !== null) {
       process.kill(process.pid, caught);
     }

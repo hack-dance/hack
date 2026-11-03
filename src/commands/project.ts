@@ -1887,22 +1887,20 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
         signalCleanup: null,
       };
     }
-    const sharedHelpers = await startLifecycleSharedHelpers(opts);
-    let lifecycleStart: Awaited<ReturnType<typeof startLifecycleProcesses>>;
-    try {
-      lifecycleStart = await startLifecycleProcesses({
-        project: opts.project,
-        cfg: opts.cfg,
-        projectName: opts.projectName,
-        branch: opts.branch,
-        env: opts.env,
-        composeProject: opts.composeProject,
-        definitionHash,
-      });
-    } catch (error: unknown) {
-      await sharedHelpers.rollback();
-      throw error;
-    }
+    const lifecycleStart = await startWithSharedHelpers({
+      ...opts,
+      startProcesses: () =>
+        startLifecycleProcesses({
+          project: opts.project,
+          cfg: opts.cfg,
+          projectName: opts.projectName,
+          branch: opts.branch,
+          env: opts.env,
+          composeProject: opts.composeProject,
+          definitionHash,
+        }),
+      abortProcesses: () => Promise.resolve(),
+    });
     const hasProcesses = (opts.cfg.lifecycle?.processes ?? []).length > 0;
     return {
       code: 0,
@@ -1912,11 +1910,8 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
             branch: opts.branch,
           })
         : null,
-      ...withSharedHelperCleanup({
-        cleanup: lifecycleStart.cleanup,
-        signalCleanup: lifecycleStart.signalCleanup,
-        sharedHelpers,
-      }),
+      cleanup: lifecycleStart.cleanup,
+      signalCleanup: lifecycleStart.signalCleanup,
     };
   }
 
@@ -1953,31 +1948,86 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     };
   }
 
-  let sharedHelpers: LifecycleSharedHelpers | null = null;
-  try {
-    sharedHelpers = await startLifecycleSharedHelpers(opts);
-    await starter.startMany({
-      processes: opts.cfg.lifecycle?.processes ?? [],
-    });
-    await starter.finalize();
-  } catch (error: unknown) {
-    await starter.abort();
-    await sharedHelpers?.rollback();
-    if (error instanceof Error) {
-      throw error;
-    }
-    throw new Error("Failed to start lifecycle processes");
-  }
+  const started = await startWithSharedHelpers({
+    ...opts,
+    startProcesses: async () => {
+      await starter.startMany({
+        processes: opts.cfg.lifecycle?.processes ?? [],
+      });
+      await starter.finalize();
+      return {
+        cleanup: starter.getOperationCleanup(),
+        signalCleanup: starter.getSignalCleanup(),
+      };
+    },
+    abortProcesses: () => starter.abort(),
+  });
 
   return {
     code: 0,
     sessionName: starter.hasStarted() ? starter.sessionName : null,
-    ...withSharedHelperCleanup({
-      cleanup: starter.getOperationCleanup(),
-      signalCleanup: starter.getSignalCleanup(),
-      sharedHelpers,
-    }),
+    cleanup: started.cleanup,
+    signalCleanup: started.signalCleanup,
   };
+}
+
+type LifecycleProcessStart = {
+  readonly cleanup: LifecycleOperationCleanup | null;
+  readonly signalCleanup: { readonly dispose: () => void } | null;
+};
+
+/**
+ * Start shared helpers, then lifecycle processes, as one guarded step.
+ *
+ * Without shared helpers this is `startProcesses` with `abortProcesses` on
+ * failure, unchanged. With them, SIGINT/SIGTERM handlers stay installed from
+ * the first helper start until the combined cleanup is handed back: a signal
+ * cancels an in-flight helper start, and once this step settles it runs the
+ * cleanup for whatever was started (process session and helper holders) and
+ * is re-raised. No window exists in which a started helper is unguarded.
+ */
+async function startWithSharedHelpers(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly env: Readonly<Record<string, string>>;
+  readonly composeProject: string;
+  readonly startProcesses: () => Promise<LifecycleProcessStart>;
+  readonly abortProcesses: () => Promise<void>;
+}): Promise<LifecycleProcessStart> {
+  const failed = (error: unknown): Error =>
+    error instanceof Error
+      ? error
+      : new Error("Failed to start lifecycle processes");
+  if ((opts.cfg.lifecycle?.sharedHelpers ?? []).length === 0) {
+    try {
+      return await opts.startProcesses();
+    } catch (error: unknown) {
+      await opts.abortProcesses();
+      throw failed(error);
+    }
+  }
+  let onSignalled: () => Promise<void> = () => Promise.resolve();
+  return await withTerminationAbort(
+    async (signal) => {
+      let sharedHelpers: LifecycleSharedHelpers | null = null;
+      let started: LifecycleProcessStart;
+      try {
+        sharedHelpers = await startLifecycleSharedHelpers({ ...opts, signal });
+        onSignalled = sharedHelpers.rollback;
+        started = await opts.startProcesses();
+      } catch (error: unknown) {
+        await opts.abortProcesses();
+        await sharedHelpers?.rollback();
+        throw failed(error);
+      }
+      const combined = withSharedHelperCleanup({ ...started, sharedHelpers });
+      onSignalled = async () => {
+        await combined.cleanup?.();
+      };
+      return combined;
+    },
+    { onSignalled: () => onSignalled() }
+  );
 }
 
 type LifecycleSharedHelpers = {
@@ -1986,35 +2036,28 @@ type LifecycleSharedHelpers = {
 };
 
 /**
- * Ensure `lifecycle.sharedHelpers` for this instance. SIGINT/SIGTERM during a
- * start cancels it (the library stops a helper it spawned), releases what this
- * run added and then re-raises the signal. A failure throws after that rollback.
+ * Ensure `lifecycle.sharedHelpers` for this instance. A failure, including a
+ * start cancelled through `signal`, throws after releasing what this run added.
  */
 async function startLifecycleSharedHelpers(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly env: Readonly<Record<string, string>>;
   readonly composeProject: string;
+  readonly signal: AbortSignal;
 }): Promise<LifecycleSharedHelpers> {
-  const helpers = opts.cfg.lifecycle?.sharedHelpers ?? [];
-  if (helpers.length === 0) {
-    return { configured: false, rollback: () => Promise.resolve() };
-  }
-  const started = await withTerminationAbort(
-    async (signal) =>
-      await startProjectSharedHelpers({
-        helpers,
-        projectRoot: opts.project.projectRoot,
-        composeProject: opts.composeProject,
-        env: opts.env,
-        signal,
-        report: (record) => {
-          if (record.result.state !== "failed") {
-            logger.info({ message: describeSharedHelperStart(record) });
-          }
-        },
-      })
-  );
+  const started = await startProjectSharedHelpers({
+    helpers: opts.cfg.lifecycle?.sharedHelpers,
+    projectRoot: opts.project.projectRoot,
+    composeProject: opts.composeProject,
+    env: opts.env,
+    signal: opts.signal,
+    report: (record) => {
+      if (record.result.state !== "failed") {
+        logger.info({ message: describeSharedHelperStart(record) });
+      }
+    },
+  });
   return {
     configured: true,
     rollback: async () => {

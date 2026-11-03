@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertSharedHelperSessionMuxSupported,
   releaseAfterFailedProcessStart,
   startLifecycleProcesses,
 } from "../src/commands/project.ts";
@@ -52,9 +53,11 @@ afterEach(async () => {
 const COMPOSE_PROJECT = "demo--branch-a";
 const SESSION = "demo--lifecycle-branch-a";
 
-type FakeMux = MuxBackend & {
+type FakeMux = Omit<MuxBackend, "createsWithOwnerToken"> & {
   readonly sessions: Map<string, string>;
   failKill: boolean;
+  /** Mutable so a test can switch the selected backend's capability. */
+  createsWithOwnerToken: boolean;
   /**
    * createSession times out (the backend kills the client and throws)
    * after the session was created server-side, or without creating it.
@@ -99,6 +102,8 @@ function fakeMux(backendName: "zellij" | "tmux" = "zellij"): FakeMux {
   const fake: FakeMux = {
     name: backendName,
     available: true,
+    // Its sessions carry their token from creation, as tmux's do.
+    createsWithOwnerToken: true,
     sessions,
     failKill: false,
     timeoutCreate: null,
@@ -192,7 +197,7 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
   const resolvedMux = () =>
     Promise.resolve({
       mode: backendName,
-      backends: new Map([[backendName, mux as MuxBackend]]),
+      backends: new Map([[backendName, mux as unknown as MuxBackend]]),
     });
   const ownership = createSharedHelperSessionOwnership({
     composeProject: COMPOSE_PROJECT,
@@ -858,4 +863,24 @@ test("a signal cleanup already waiting on the lock never kills a session another
   ]);
   await stop();
   expect(mux.sessions.has(SESSION)).toBe(false);
+});
+
+test("the shared-helper backend requirement holds at the backend the controller actually selects, not only at preflight", async () => {
+  const { mux, controller, entries, newOwnership, resolvedMux } =
+    await fixture();
+  // Preflight sees a backend that records its token with creation.
+  await assertSharedHelperSessionMuxSupported({
+    sharedHelpersConfigured: true,
+    needsSession: true,
+    mux: resolvedMux,
+  });
+  // The mux selection changes while hooks run (for example sessions.mux is
+  // switched to zellij): the backend now selected writes its token later.
+  mux.createsWithOwnerToken = false;
+  const a = controller({ sessionOwnership: newOwnership() });
+  await expect(a.startMany({ processes: [PROCESS] })).rejects.toThrow(
+    "need tmux"
+  );
+  expect(mux.sessions.size).toBe(0);
+  expect(await entries()).toEqual([]);
 });

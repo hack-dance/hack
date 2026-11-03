@@ -319,6 +319,7 @@ export function createTmuxBackend(): MuxBackend {
   return {
     name: "tmux",
     available,
+    createsWithOwnerToken: true,
     listSessions,
     createSession,
     killSession,

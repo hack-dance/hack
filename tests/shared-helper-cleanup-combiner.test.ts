@@ -251,7 +251,11 @@ test("helpers recorded as acquired but removed from config are still reported as
 
 function resolvedMux(available: readonly ("tmux" | "zellij")[]) {
   const backend = (name: "tmux" | "zellij") =>
-    ({ name, available: available.includes(name) }) as unknown as MuxBackend;
+    ({
+      name,
+      available: available.includes(name),
+      createsWithOwnerToken: name === "tmux",
+    }) as unknown as MuxBackend;
   return () =>
     Promise.resolve({
       mode: "auto" as const,

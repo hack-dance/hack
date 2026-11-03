@@ -73,6 +73,13 @@ export async function runMuxCommand(
 export interface MuxBackend {
   readonly name: MuxBackendName;
   readonly available: boolean;
+  /**
+   * The session carries its lifecycle ownership token from the creating
+   * command itself (tmux `new-session -e`), so no interrupted create can
+   * leave a live session without one. Shared-helper lifecycle sessions
+   * require it; zellij writes its token afterwards and lacks it (HACK-1849).
+   */
+  readonly createsWithOwnerToken?: boolean;
 
   listSessions(): Promise<readonly MuxSession[]>;
   createSession(opts: {

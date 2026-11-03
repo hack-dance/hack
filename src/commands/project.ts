@@ -8,6 +8,7 @@ import {
   resolveLifecycleCwd,
   resolveLifecycleSessionName,
   resolveProjectLifecycleDefinitionHash,
+  SHARED_HELPER_MUX_UNSUPPORTED_MESSAGE,
   stopLifecycleProcessController,
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
@@ -1889,10 +1890,13 @@ export async function assertSharedHelperSessionMuxSupported(opts: {
     return;
   }
   const mux = await opts.mux();
-  if (resolveDefaultBackendName(mux) === "zellij") {
-    throw new Error(
-      "Lifecycle sessions for projects with lifecycle.sharedHelpers need tmux; zellij cannot record the session's ownership with its creation. Install tmux or set sessions.mux to tmux. Nothing was started."
-    );
+  const selected = resolveDefaultBackendName(mux);
+  const backend = selected ? mux.backends.get(selected) : undefined;
+  // No backend: the controller reports that itself. The controller also
+  // enforces this at the backend it actually selects, which may differ if
+  // the mux configuration changes while hooks run.
+  if (backend && backend.createsWithOwnerToken !== true) {
+    throw new Error(SHARED_HELPER_MUX_UNSUPPORTED_MESSAGE);
   }
 }
 

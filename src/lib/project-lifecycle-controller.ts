@@ -319,6 +319,11 @@ export function createLifecycleProcessController(opts: {
     if (!backend?.available) {
       throw new Error(`${resolvedBackend} is not available`);
     }
+    // Enforced at the backend actually selected, not only at preflight: the
+    // mux selection is resolved again here and may have changed since.
+    if (opts.sessionOwnership && backend.createsWithOwnerToken !== true) {
+      throw new Error(SHARED_HELPER_MUX_UNSUPPORTED_MESSAGE);
+    }
     const entries = await readLifecycleState({
       projectDir: opts.project.projectDir,
     });
@@ -860,6 +865,14 @@ export class LifecycleSessionRetainedError extends Error {
     this.original = original;
   }
 }
+
+/**
+ * Lifecycle sessions of projects with shared helpers need a backend whose
+ * session carries its ownership token from creation (tmux); see
+ * MuxBackend.createsWithOwnerToken.
+ */
+export const SHARED_HELPER_MUX_UNSUPPORTED_MESSAGE =
+  "Lifecycle sessions for projects with lifecycle.sharedHelpers need tmux; zellij cannot record the session's ownership with its creation. Install tmux or set sessions.mux to tmux. Nothing was started.";
 
 /** Raised by finalize when another start replaced this start's session. */
 export class LifecycleSessionDisplacedError extends Error {

@@ -1000,6 +1000,53 @@ export async function recoverNativeAuthoredProject(opts: {
   );
 }
 
+/** Read-only no-op selection after a completed recovery. Retained ownership,
+ * incomplete release, and changed or malformed history still select recovery. */
+export async function nativeAuthoredCompletedRecoveryIsEmpty(
+  scope: NativeAuthoredProjectRunScope
+): Promise<boolean> {
+  return await withNativeAuthoredProjectRecoveryStorage(
+    scope,
+    async (store) => {
+      const saved = await readIntent(store);
+      if (!saved) {
+        return false;
+      }
+      if (
+        saved.record.phase !== "complete" ||
+        !saved.record.lease_releasing ||
+        !saved.record.mutation_releasing ||
+        saved.record.next_lease !== null ||
+        saved.record.next_mutation !== null
+      ) {
+        return false;
+      }
+      await store.check();
+      const key = hash(JSON.stringify(scope.branch));
+      for (const path of [
+        store.ready,
+        store.start,
+        store.admission,
+        store.recovery,
+        `${store.recovery}.recovery`,
+        store.mutation,
+        store.mutationRecovery,
+        `${store.mutation}.recovery`,
+        store.liveStop,
+        join(store.root.path, `${key}.hooks.json`),
+        store.sourcePath(saved.record.native.run),
+      ]) {
+        if (!(await absent(path))) {
+          return false;
+        }
+      }
+      const current = await readIntent(store);
+      await store.check();
+      return JSON.stringify(current) === JSON.stringify(saved);
+    }
+  );
+}
+
 /** Startup may archive an authenticated completed frontend intent under its
  * fresh admission. Incomplete recovery never becomes automatic takeover. */
 export async function archiveCompletedNativeAuthoredRecovery(opts: {

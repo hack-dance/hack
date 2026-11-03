@@ -115,7 +115,6 @@ import {
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
-import { requestDaemonJson } from "../daemon/client.ts";
 import { renderCompose, TODO_IMAGE_SENTINEL } from "../init/compose.ts";
 import type { ServiceCandidate } from "../init/discovery.ts";
 import { discoverRepo } from "../init/discovery.ts";
@@ -7457,26 +7456,14 @@ async function handlePs({
 
   const cwd = dirname(project.composeFile);
 
-  if (json) {
-    const daemon = await requestDaemonJson({
-      path: "/v1/ps",
-      query: {
-        compose_project: composeProjectName ?? baseProjectName,
-        project: baseProjectName,
-        branch,
-      },
-    });
-    if (daemon?.ok && daemon.json) {
-      process.stdout.write(`${JSON.stringify(daemon.json, null, 2)}\n`);
-      return 0;
-    }
-  }
-
+  // Read Compose directly: the daemon cache omits state and exit codes and can
+  // lag behind a failed startup. Both formats must observe the same containers.
   const res = await composeRuntimeBackend.psJson({
     composeFiles: [project.composeFile],
     composeProject: composeProjectName,
     profiles,
     cwd,
+    all: true,
   });
 
   if (res.exitCode !== 0) {
@@ -7489,6 +7476,7 @@ async function handlePs({
       composeProject: composeProjectName,
       profiles,
       cwd,
+      all: true,
     });
   }
 
@@ -7506,12 +7494,16 @@ async function handlePs({
   const rows = entries.map((e) => [
     getString(e, "Service") ?? "",
     getString(e, "Name") ?? "",
+    getString(e, "State") ?? "",
+    (getString(e, "State") ?? "").toLowerCase() === "exited"
+      ? String(parseComposeExitCode(e.ExitCode) ?? "")
+      : "",
     getString(e, "Status") ?? "",
     getString(e, "Ports") ?? "",
   ]);
 
   await display.table({
-    columns: ["SERVICE", "NAME", "STATUS", "PORTS"],
+    columns: ["SERVICE", "NAME", "STATE", "EXIT CODE", "STATUS", "PORTS"],
     rows,
   });
 

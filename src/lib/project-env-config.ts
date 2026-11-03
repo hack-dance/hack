@@ -61,11 +61,13 @@ import {
 } from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
 import {
-  type HackEnvResolveResult,
+  findProcessOnlyContractValues,
+  type ProcessOnlyContractValue,
   readHackEnvContract,
   resolveEnvFilePath,
   resolveHackEnv,
 } from "./hack-env.ts";
+import { quoteShellWord } from "./logs.ts";
 import {
   isOwnedLegacyAdoptionManagedEnvAdmission,
   type LegacyAdoptionManagedEnvAdmission,
@@ -5139,6 +5141,15 @@ export async function migrateLegacyProjectEnv(opts: {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const contract = await readHackEnvContract({ projectDir: opts.projectDir });
+  // Read as an empty contract, it would migrate nothing and offer .env and the contract
+  // for cleanup. The parser's message isn't repeated, because it can quote the file.
+  if (contract.exists && contract.parseError !== undefined) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason:
+        "hack.env.json can't be read as an env contract, so the migration can't tell which values to keep. Correct it, or remove it if this project doesn't use a contract, then retry.",
+    });
+  }
   if (!contract.exists) {
     if (opts.migrateUndeclaredDotenv === true) {
       return await migrateUndeclaredLegacyDotenv(opts);
@@ -5188,10 +5199,34 @@ export async function migrateLegacyProjectEnv(opts: {
     overlayNames,
   });
 
+  // Before resolveHackEnv, which can provision secret-store key material.
+  assertNoShellValuesInContractMigration({
+    values: await findProcessOnlyContractValues({
+      projectDir: opts.projectDir,
+      projectName: opts.projectName,
+      overlayNames,
+    }),
+  });
   const baseResolved = await resolveHackEnv({
     projectDir: opts.projectDir,
     projectName: opts.projectName,
     envName: null,
+  });
+  const overlaysResolved: {
+    readonly name: string;
+    readonly values: Awaited<ReturnType<typeof resolveHackEnv>>["values"];
+  }[] = [];
+  for (const name of overlayNames) {
+    const overlay = await resolveHackEnv({
+      projectDir: opts.projectDir,
+      projectName: opts.projectName,
+      envName: name,
+    });
+    overlaysResolved.push({ name, values: overlay.values });
+  }
+  assertContractMigrationLayersAreWritable({
+    baseValues: baseResolved.values,
+    overlays: overlaysResolved,
   });
 
   if (overlayNames.includes("default")) {
@@ -5209,29 +5244,16 @@ export async function migrateLegacyProjectEnv(opts: {
     projectDir: opts.projectDir,
     overlayNames,
   });
-  const resolvedOverlays: { name: string; resolved: HackEnvResolveResult }[] =
-    [];
-  for (const name of overlayNames) {
-    resolvedOverlays.push({
-      name,
-      resolved: await resolveHackEnv({
-        projectDir: opts.projectDir,
-        projectName: opts.projectName,
-        envName: name,
-      }),
-    });
-  }
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
   )
     ? await ensureProjectEnvSecretKey({ projectRoot: opts.projectRoot })
     : null;
   if (
-    [baseResolved, ...resolvedOverlays.map((overlay) => overlay.resolved)].some(
-      (resolved) =>
-        resolved.values.some(
-          (value) => value.source === "plain_env" && value.value !== null
-        )
+    [baseResolved, ...overlaysResolved].some((resolved) =>
+      resolved.values.some(
+        (value) => value.source === "plain_env" && value.value !== null
+      )
     )
   ) {
     await ensureLegacyMigrationLocalLayersIgnored({
@@ -5323,16 +5345,13 @@ export async function migrateLegacyProjectEnv(opts: {
     wroteFiles.push(defaultPath);
   }
 
-  for (const {
-    name: overlayName,
-    resolved: overlayResolved,
-  } of resolvedOverlays) {
+  for (const { name: overlayName, values: overlayValues } of overlaysResolved) {
     deliveredValues.set(
       resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlayName}`),
-      new Map(overlayResolved.values.map((entry) => [entry.key, entry.value]))
+      new Map(overlayValues.map((entry) => [entry.key, entry.value]))
     );
     const hasPlainOverlayEntries = await migratePlainValues({
-      resolvedValues: overlayResolved.values,
+      resolvedValues: overlayValues,
       envName: overlayName,
       baseValues: new Map(
         baseResolved.values.map((value) => [value.key, value.value])
@@ -5341,7 +5360,7 @@ export async function migrateLegacyProjectEnv(opts: {
     const overlayConfig = buildMigratedProjectEnvConfig({
       environment: overlayName,
       values: buildMigratedValues({
-        resolvedValues: overlayResolved.values.filter(
+        resolvedValues: overlayValues.filter(
           (entry) => entry.source === "keychain"
         ),
         baseValues: new Map(
@@ -5414,20 +5433,23 @@ export async function migrateLegacyProjectEnv(opts: {
 }
 
 /**
- * Closed, value-free refusal of the explicit migration of a project without a
- * `.hack/hack.env.json` contract ({@link migrateUndeclaredLegacyDotenv}). It is
- * raised before any file is written, so the legacy `.hack/.env*` files and any
- * existing entries stay as they were. The message names paths, legacy file
- * names and counts only, never a key or a value.
+ * Closed, value-free refusal of a legacy project env migration, including the
+ * explicit path without a contract ({@link migrateUndeclaredLegacyDotenv}). It
+ * may also be raised after ignore rules or earlier layers have been written.
+ * The legacy `.hack/.env*` files are kept; a retry compares their values again.
+ * The message names paths, valid keys and scopes, or counts of malformed entries,
+ * never values.
  */
 export class LegacyDotenvMigrationRefusalError extends HackCliError {
   constructor(opts: {
     readonly code: "E_CONFIG_INVALID" | "E_PATH_CONFLICT" | "E_PERMISSION";
     readonly reason: string;
+    /** Replaces the closing sentence, for a refusal that can follow a key being created. */
+    readonly closing?: string;
   }) {
     super({
       code: opts.code,
-      message: `Refusing to migrate the legacy .hack/.env files: ${opts.reason} Nothing was written, and the legacy files are kept.`,
+      message: `Refusing to migrate the legacy .hack/.env files: ${opts.reason} ${opts.closing ?? "The legacy files are kept. Earlier migration writes may remain; check the layers and ignore rules before retrying."}`,
     });
     this.name = "LegacyDotenvMigrationRefusalError";
   }
@@ -5524,11 +5546,6 @@ async function assertUntrackedMigrationLocalLayer(opts: {
   }
 }
 
-/**
- * Legacy `.hack/.env.<name>` overlays the `.env`-only migration converts.
- * Refuses, before anything is written, names that are not overlay names or
- * that would land on the default or a machine-local layer.
- */
 /**
  * Names legacy overlay files for a refusal. File names are not values, but
  * each is JSON-quoted so a control character cannot break the one-line message.
@@ -5970,13 +5987,13 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
   if (conflicts.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `Compose environment sets ${conflicts.sort().join(", ")}, which the legacy .env files also set; after the migration the .env value would override the Compose value. Remove the key from the .hack/.env file or from that service's environment, then retry.`,
+      reason: `Compose environment sets ${conflicts.sort().join(", ")}, which the legacy .env files also set; after the migration the .env value would override the Compose value. Remove the key from the legacy .env file or overlay that sets it, or from that service's environment, then retry.`,
     });
   }
   if (envFileConflicts.length > 0) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_CONFIG_INVALID",
-      reason: `Compose env_file sets ${envFileConflicts.sort().join(", ")}, which the legacy .env files also set; after the migration the .env value would override that file's value. Remove the key from the .hack/.env file or from that env_file, then retry.`,
+      reason: `Compose env_file sets ${envFileConflicts.sort().join(", ")}, which the legacy .env files also set; after the migration the .env value would override that file's value. Remove the key from the legacy .env file or overlay that sets it, or from that env_file, then retry.`,
     });
   }
   const defaultOverlay = await readProjectDefaultEnvConfig({
@@ -6191,6 +6208,10 @@ function legacyOverlayChangedValues(opts: {
   );
 }
 
+/**
+ * Legacy `.hack/.env.<name>` overlays the `.env`-only migration converts.
+ * Refuses names that are not overlay names or would land on a default or local layer.
+ */
 async function selectLegacyDotenvOverlays(opts: {
   readonly projectDir: string;
 }): Promise<readonly string[]> {
@@ -6299,7 +6320,8 @@ async function deliveredLayerValuesForMigration(opts: {
  * `.hack/.env` with a valid state file is treated as generated output, so it is
  * skipped. A migration that runs for another reason checks its text
  * ({@link legacyBaseDotenvIsGenerated}); with nothing else to migrate, nothing does.
- * Overlays are not generated by materialize, so they are always compared.
+ * Overlays are not generated by materialize. Only valid, non-reserved overlay
+ * names are compared; state files, templates and backups are excluded too.
  */
 export async function findUnmigratedLegacyDotenv(opts: {
   readonly projectRoot: string;
@@ -6395,12 +6417,15 @@ export function describeUnmigratedLegacyDotenv(
   return parts.join("; ");
 }
 
-/** Whether `doctor --migrate-env-config` can move these values: regular layer files only. */
+/** Whether legacy values remain to migrate; refuses non-regular layers with a repair. */
 export async function canMigrateCheckoutLegacyDotenv(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly serviceNames: readonly string[];
 }): Promise<boolean> {
+  if (!hasUnmigratedLegacyDotenv(await findUnmigratedLegacyDotenv(opts))) {
+    return false;
+  }
   const entries = await readdir(opts.projectDir, { withFileTypes: true });
   const allRegular = entries
     .filter(
@@ -6409,10 +6434,225 @@ export async function canMigrateCheckoutLegacyDotenv(opts: {
         entry.name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
     )
     .every((entry) => entry.isFile());
-  return (
-    allRegular &&
-    hasUnmigratedLegacyDotenv(await findUnmigratedLegacyDotenv(opts))
+  if (!allRegular) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason:
+        "env layers include a symlink or non-regular entry, and legacy values remain undelivered. Replace symlinked env layers with regular files containing the intended layer content, repair any other non-regular entries, then retry `hack doctor --migrate-env-config`.",
+    });
+  }
+  return true;
+}
+
+/**
+ * Refuses when a contract value comes only from this process's environment. A
+ * repository's contract can name any variable, and this migration saves plain
+ * values to disk, so a shell credential would land in a plaintext file nobody asked
+ * for. Skipping it isn't enough: env layers don't read the contract, so a service that received it
+ * would silently stop.
+ *
+ * Checking the base covers every overlay. An overlay falls back to the process only
+ * when its own sources and the base's lack the key, and then the base does too.
+ *
+ * The recovery keeps each key's declared scope, because `--local` alone would
+ * deliver it to every service. An overlay file's own value moves to that overlay's
+ * machine-local layer, which outranks the local base, so the overlay command only
+ * changes it later. Names from the repository are quoted, because these commands get
+ * pasted. Only a name the CLI accepts unchanged gets a command: `--env base`, for
+ * example, selects no overlay, so following it would replace the base value. Any other
+ * name is reported.
+ *
+ * It also refuses when a mirrored backend's key isn't available, because the shell
+ * value might be the only one.
+ */
+function assertNoShellValuesInContractMigration(opts: {
+  readonly values: readonly ProcessOnlyContractValue[];
+}): void {
+  if (opts.values.length === 0) {
+    return;
+  }
+  const named = opts.values.filter((value) =>
+    PROJECT_ENV_KEY_PATTERN.test(value.key)
   );
+  const malformed = opts.values.length - named.length;
+  const parts = [
+    ...named.map((value) => JSON.stringify(value.key)).sort(),
+    ...(malformed > 0
+      ? [countLabel({ count: malformed, noun: "malformed key" })]
+      : []),
+  ];
+  const undetermined = opts.values.some((value) => value.undetermined);
+  const sentences = [
+    undetermined
+      ? `the contract declares ${parts.join(", ")} as plain_env, your shell sets it, and the secret backend's key isn't available, so the value may come only from your shell, and migrating could save it to a plaintext file on this machine without you asking. No key was created. Make the backend's key available and retry. If the backend has nothing stored yet and HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK isn't set, the steps below also work, and the migration then creates its key.`
+      : `the contract declares ${parts.join(", ")} as plain_env, and the value comes only from your shell, so migrating would save it to a plaintext file on this machine without you asking.`,
+  ];
+  if (malformed > 0) {
+    sentences.push(
+      "Correct or remove a malformed key in hack.env.json, and unset it in your shell."
+    );
+  }
+  if (named.length > 0) {
+    const unset = named
+      .map((value) => `-u ${value.key}`)
+      .sort()
+      .join(" ");
+    const setCommand = (input: {
+      readonly key: string;
+      readonly envName?: string;
+      readonly service?: string;
+    }) =>
+      [
+        `hack env set ${input.key}`,
+        ...(input.envName ? [`--env ${quoteShellWord(input.envName)}`] : []),
+        ...(input.service
+          ? [`--service ${quoteShellWord(input.service)}`]
+          : []),
+        "--local --value-stdin",
+      ].join(" ");
+    const isUsableOverlay = (name: string) =>
+      parseEnvConfigSelection(name) === name &&
+      !isReservedLegacyOverlayName(name.toLowerCase());
+    const isUsableService = (service: string) =>
+      isValidProjectEnvScopeName({ scopeName: service });
+    const scopesOf = (value: ProcessOnlyContractValue) =>
+      value.services && value.services.length > 0
+        ? value.services.filter(isUsableService).map((service) => ({ service }))
+        : [{}];
+    const baseCommands = named
+      .flatMap((value) =>
+        scopesOf(value).map((scope) => setCommand({ key: value.key, ...scope }))
+      )
+      .sort();
+    const overlayCommands = named
+      .flatMap((value) =>
+        value.overlaysWithOwnValue
+          .filter(isUsableOverlay)
+          .flatMap((envName) =>
+            scopesOf(value).map((scope) =>
+              setCommand({ key: value.key, envName, ...scope })
+            )
+          )
+      )
+      .sort();
+    const unusableOverlays = named
+      .flatMap((value) => value.overlaysWithOwnValue)
+      .filter((name) => !isUsableOverlay(name))
+      .map((name) => JSON.stringify(`.env.${name}`));
+    const unusableServices = named
+      .flatMap((value) => value.services ?? [])
+      .filter((service) => !isUsableService(service))
+      .map((service) => JSON.stringify(service));
+    // First, because the layers don't read the contract or these files once it migrates.
+    if (unusableOverlays.length > 0) {
+      sentences.push(
+        `First, \`--env\` can't select the overlay file ${[...new Set(unusableOverlays)].sort().join(", ")}, so no command is given for it. Rename it to a lowercase name such as .env.staging and update any env_file or env.defaultOverlay that names it, or remove it.`
+      );
+    }
+    if (unusableServices.length > 0) {
+      sentences.push(
+        `First, \`--service\` can't select the service ${[...new Set(unusableServices)].sort().join(", ")} in hack.env.json, so no command is given for it. Correct the name there, renaming the Compose service if it must match.`
+      );
+    }
+    sentences.push(
+      `Unset it for one command so the migration runs (\`env ${unset} hack env exec -- true\`). Services then stop receiving it from the shell${
+        baseCommands.length > 0
+          ? `, so set it again with the scope the contract declares${undetermined ? ", if the backend doesn't hold it" : ""}: ${baseCommands.join("; ")}`
+          : ""
+      }.`
+    );
+    if (overlayCommands.length > 0) {
+      sentences.push(
+        `The migration moves each overlay file's own value to that overlay's machine-local layer, so it keeps it. To change it later: ${overlayCommands.join("; ")}.`
+      );
+    }
+    sentences.push(
+      "A value set with --service doesn't reach Compose interpolation or a host command run without that service's scope, so keep it exported if they read it. A value set without --service reaches them and overrides your shell."
+    );
+  }
+  throw new LegacyDotenvMigrationRefusalError({
+    code: "E_CONFIG_INVALID",
+    reason: sentences.join(" "),
+  });
+}
+
+type ResolvedContractMigrationValue = {
+  readonly key: string;
+  readonly value: string | null;
+  readonly services: readonly string[] | null;
+};
+
+/**
+ * Resolving values can create a mirrored backend's key before these refusals, so they
+ * don't claim nothing at all was written.
+ */
+const CONTRACT_LAYER_REFUSAL_CLOSING =
+  "No env layer was written, and the legacy files are kept. A secret backend's key may have been created.";
+
+/**
+ * Refuses what this migration can't write as a working layer, before it writes
+ * anything, because it has no rollback and a retry finds layers and does nothing.
+ * An overlay named `default` would land on the base layer, and `local` on the
+ * machine-local one. A scope a layer can't hold would leave a layer no read can parse.
+ * Only an entry that would be written counts, so a `<name>.local` overlay that adds
+ * nothing to the base, or a scope with no value, still migrates. `.env.default` and
+ * `.env.local` are refused separately, whatever they hold, and a case variant of
+ * either by the destination preflight. Names only, JSON-quoted.
+ */
+function assertContractMigrationLayersAreWritable(opts: {
+  readonly baseValues: readonly ResolvedContractMigrationValue[];
+  readonly overlays: readonly {
+    readonly name: string;
+    readonly values: readonly ResolvedContractMigrationValue[];
+  }[];
+}): void {
+  const base = new Map(
+    opts.baseValues.map((value) => [value.key, value.value])
+  );
+  const addedBy = (values: readonly ResolvedContractMigrationValue[]) =>
+    values.filter(
+      (value) => value.value !== null && base.get(value.key) !== value.value
+    );
+  const reserved = opts.overlays
+    .filter(
+      (overlay) =>
+        // Lowercased: on a case-insensitive filesystem .env.Default lands on the same layer.
+        isReservedLegacyOverlayName(overlay.name.toLowerCase()) &&
+        addedBy(overlay.values).length > 0
+    )
+    .map((overlay) => JSON.stringify(`.env.${overlay.name}`))
+    .sort();
+  if (reserved.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `the overlay file ${reserved.join(", ")} uses a name reserved for Hack's own layers, so migrating it would replace the base layer or write a machine-local file. Rename it to a lowercase name such as .env.staging and update any env_file or env.defaultOverlay that names it, or remove it, then retry.`,
+      closing: CONTRACT_LAYER_REFUSAL_CLOSING,
+    });
+  }
+  const written = [
+    ...opts.baseValues.filter((value) => value.value !== null),
+    ...opts.overlays.flatMap((overlay) => addedBy(overlay.values)),
+  ];
+  const invalidScopes = [
+    ...new Set(
+      written
+        .flatMap((value) => value.services ?? [])
+        .filter(
+          (service) =>
+            service.trim().length > 0 &&
+            !isValidProjectEnvScopeName({ scopeName: service })
+        )
+    ),
+  ]
+    .map((service) => JSON.stringify(service))
+    .sort();
+  if (invalidScopes.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `hack.env.json declares the service ${invalidScopes.join(", ")}, which isn't a valid env scope, so no read could parse the layer the migration would write. Use lowercase letters, numbers, dots, dashes or underscores, renaming the Compose service if it must match, then retry.`,
+      closing: CONTRACT_LAYER_REFUSAL_CLOSING,
+    });
+  }
 }
 
 /**
@@ -7151,8 +7391,8 @@ async function planLocalLayerMerges(opts: {
 }
 
 /**
- * Publishes machine-local layers, then tracked ones. If a write fails, removes
- * what this call created, so the checkout keeps using the legacy files.
+ * Publishes machine-local layers, then tracked ones. If a write fails, attempts
+ * to remove what this call created. A cleanup failure can leave a created layer.
  */
 async function publishMigratedLegacyLayers(opts: {
   readonly projectRoot: string;
@@ -7194,8 +7434,8 @@ async function publishMigratedLegacyLayers(opts: {
       }
     }
   } catch (error: unknown) {
-    // Every target was absent before this call, so removing what it created
-    // leaves the project on the legacy files.
+    // Best-effort cleanup of targets this call created; the refusal must not
+    // promise rollback, because an unlink can fail too.
     for (const path of [...wroteFiles].reverse()) {
       await unlink(path).catch(() => undefined);
     }
@@ -7273,9 +7513,9 @@ async function deliveredValuesPerLegacyFile(opts: {
  *   `hack.env.default.yaml` (and `hack.env.<overlay>.yaml` for each migrated
  *   overlay) is written with no values, so the project switches to env layers.
  *   With no legacy file at all only the empty default layer is written.
- * - Refused before anything is written ({@link LegacyDotenvMigrationRefusalError},
+ * - Preflight refuses ({@link LegacyDotenvMigrationRefusalError},
  *   or {@link ProjectEnvLayerPathConflictError} for an unusable layer entry):
- *   any existing env layer entry, a legacy file that is a symlink out of
+ *   an unusable env layer entry or conflicting local value, a legacy file that is a symlink out of
  *   `.hack`, a legacy overlay named like the default or a
  *   machine-local layer, a Compose `env_file` on a file the migration leaves
  *   out or on an overlay a launch without `--env` would not select, a Compose
@@ -7287,9 +7527,10 @@ async function deliveredValuesPerLegacyFile(opts: {
  *   from Hack, a key that does not match `^[A-Z_][A-Z0-9_]*$`
  *   (counted per file, never shown), and a machine-local target that git
  *   tracks or, inside a git checkout, cannot report on.
- * - Layers are created only where nothing exists (compare-and-swap against an
- *   absent file); if a later write fails, the layers this call created are
- *   removed again, so the project keeps using the legacy files.
+ * - Missing layers are created with an absence check. Existing local layers
+ *   receive missing keys after a content comparison. Publication failure attempts
+ *   to remove newly created layers; earlier merges and ignore-rule updates are
+ *   not rolled back, and cleanup can fail. Legacy sources are kept for retries.
  * - Without a contract nothing names secret-backend values, so none are read
  *   or migrated, and `hack.config.json` (including any secret backend it
  *   configures, and that backend's store) is left unchanged and never offered
@@ -7592,7 +7833,7 @@ async function legacyBaseDotenvIsGenerated(opts: {
   if (generated !== read.text) {
     throw new LegacyDotenvMigrationRefusalError({
       code: "E_PATH_CONFLICT",
-      reason: `.hack/.env has a state file, but its text isn't what \`hack env materialize\` would write, so it may hold values of your own. If it's generated output, move any value of your own with \`hack env set\`, then run \`hack env materialize\`, which replaces the file. If it's your own file, delete .hack/.env.state.json so it's read as a legacy file. Don't do that for generated output, because its values would then migrate as your own.`,
+      reason: `.hack/.env has a state file, but its text isn't what \`hack env materialize\` would write, so it may hold values of your own. If it's generated output, move any value of your own with \`hack env set --local\`, then run \`hack env materialize\`, which replaces the file. If it's your own file, delete .hack/.env.state.json so it's read as a legacy file. Don't do that for generated output, because its values would then migrate as your own.`,
     });
   }
   return true;

@@ -8,6 +8,7 @@ import { legacyComposeOrderedRefusal } from "./native-compose-adoption-diagnosti
 import { runLegacyComposeRetainedOperation } from "./native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
+  legacyAdoptionProbePhaseMs,
   openLegacyComposeAdoptedGenerationStore,
 } from "./native-compose-adoption-generation.ts";
 import { inspectLegacyComposeAdoptionSelection } from "./native-compose-adoption-marker.ts";
@@ -42,6 +43,37 @@ function unsupported(): never {
     message:
       "Adopted Compose supports retained-container start, restart, stop, ps, logs and exec only. Recreation, run and changed selections are unsupported; original data is retained. Values omitted.",
   });
+}
+/**
+ * Closed public refusal of an adopted command. A caller-deadline expiry is a
+ * timeout, not a config fault (HACK-1458); the fixed store message is kept
+ * for closed diagnostics.
+ */
+function throwAdoptedCommandRefusal(error: unknown): never {
+  if (error instanceof HackCliError || error instanceof CliUsageError) {
+    throw error;
+  }
+  const ordered = legacyComposeOrderedRefusal(error);
+  throw new HackCliError({
+    code:
+      error instanceof LegacyComposeAdoptedGenerationError &&
+      error.code === "E_LEGACY_ADOPTION_DEADLINE"
+        ? "E_STARTUP_TIMEOUT"
+        : "E_CONFIG_INVALID",
+    message:
+      error instanceof LegacyComposeAdoptedGenerationError
+        ? error.message
+        : LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES.refused,
+    ...(ordered ? { detail: { legacy_adoption_refusal: ordered } } : {}),
+  });
+}
+/** Time left before the command deadline; an expired deadline refuses as one. */
+function remainingMs(deadline: number): number {
+  const remaining = Math.floor(deadline - Date.now());
+  if (remaining <= 0) {
+    throw new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_DEADLINE");
+  }
+  return remaining;
 }
 function cancelled(signal: AbortSignal) {
   if (signal.aborted) {
@@ -215,6 +247,7 @@ async function observe(opts: {
   readonly binding: LegacyComposeVerifiedBinding;
   readonly signal: AbortSignal;
   readonly timeoutMs: number;
+  readonly deadline: number;
 }) {
   const { options, binding, signal, timeoutMs } = opts;
   cancelled(signal);
@@ -223,6 +256,10 @@ async function observe(opts: {
     const states = await inspectLegacyComposeContainerStates({
       binding,
       signal,
+      timeoutMs: legacyAdoptionProbePhaseMs({
+        deadline: opts.deadline,
+        now: Date.now(),
+      }),
     });
     const report = containers.map((container) => ({
       service: container.service,
@@ -290,13 +327,17 @@ export async function tryLegacyComposeAdoptedCommand(
   process.on("SIGINT", cancel);
   process.on("SIGTERM", cancel);
   try {
+    // One caller deadline spans the whole command: store inspection, the
+    // retained operation and its final proof (HACK-1458).
     const signal = controller.signal,
       timeoutMs = resolveComposeStartupTimeoutMs(),
+      deadline = Date.now() + timeoutMs,
       store = await openLegacyComposeAdoptedGenerationStore({
         projectRoot,
         requestedBranch: options.instance,
         mode: "saved",
         signal,
+        deadline,
       });
     try {
       if (options.recover) {
@@ -311,7 +352,6 @@ export async function tryLegacyComposeAdoptedCommand(
       const requested = requestedServices(options);
       const operation = mutationOperation(options.operation);
       if (operation) {
-        const deadline = Date.now() + timeoutMs;
         return await store.withMutation({
           generation,
           operation,
@@ -354,7 +394,7 @@ export async function tryLegacyComposeAdoptedCommand(
                 stdout: "ignore",
                 stderr: "ignore",
                 forwardSignals: true,
-                timeoutMs,
+                timeoutMs: remainingMs(deadline),
               }
             );
           },
@@ -369,29 +409,14 @@ export async function tryLegacyComposeAdoptedCommand(
             binding: privateInput.binding,
             signal,
             timeoutMs,
+            deadline,
           }),
       });
     } finally {
       await store.close();
     }
   } catch (error: unknown) {
-    if (error instanceof HackCliError || error instanceof CliUsageError) {
-      throw error;
-    }
-    throw new HackCliError({
-      code: "E_CONFIG_INVALID",
-      message:
-        error instanceof LegacyComposeAdoptedGenerationError
-          ? error.message
-          : LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES.refused,
-      ...(legacyComposeOrderedRefusal(error)
-        ? {
-            detail: {
-              legacy_adoption_refusal: legacyComposeOrderedRefusal(error),
-            },
-          }
-        : {}),
-    });
+    throwAdoptedCommandRefusal(error);
   } finally {
     process.off("SIGINT", cancel);
     process.off("SIGTERM", cancel);

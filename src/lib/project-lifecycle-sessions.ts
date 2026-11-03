@@ -170,7 +170,10 @@ export async function inspectLifecycleSession(opts: {
   const sessions = await opts.backend.listSessions();
   const session =
     sessions.find((candidate) => candidate.name === opts.expectedSessionName) ??
-    null;
+    (await confirmUnlistedSession({
+      backend: opts.backend,
+      name: opts.expectedSessionName,
+    }));
   if (!session) {
     return classifyLifecycleSession({
       session: null,
@@ -290,6 +293,31 @@ function hasLegacyTmuxOwnershipProof(opts: {
     createdAt <= stateUpdatedAt &&
     enoughWindows
   );
+}
+
+/** A listing miss is not proof of absence: a session the listing could not
+ * parse would otherwise be "created" again (tmux refuses the duplicate) or
+ * skipped by down. Ask for the exact session; when it is present, return it
+ * without listing metadata so ownership is decided by the token alone.
+ */
+async function confirmUnlistedSession(opts: {
+  readonly backend: MuxBackend;
+  readonly name: string;
+}): Promise<MuxSession | null> {
+  const presence = await opts.backend.readSessionPresence?.({
+    name: opts.name,
+  });
+  if (presence !== "present") {
+    return null;
+  }
+  return {
+    backend: opts.backend.name,
+    name: opts.name,
+    attached: null,
+    path: null,
+    windows: null,
+    createdAt: null,
+  };
 }
 
 function foreignInspection(opts: {

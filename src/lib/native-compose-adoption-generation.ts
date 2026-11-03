@@ -85,7 +85,10 @@ import {
   type LegacyComposeContainerState,
 } from "./native-compose-adoption-runtime.ts";
 import { holdSavedLegacyComposeSourceBind } from "./native-compose-adoption-source-bind.ts";
-import { createNativeComposeProbe } from "./native-compose-ownership.ts";
+import {
+  createNativeComposeProbe,
+  nativeComposeProbeFailure,
+} from "./native-compose-ownership.ts";
 import {
   createNativeComposePrivateMutationLock,
   type HeldDirectory,
@@ -274,7 +277,62 @@ function cancelled(signal?: AbortSignal) {
     refuse("E_LEGACY_ADOPTION_CANCELLED");
   }
 }
-function translate(error: unknown, signal?: AbortSignal): never {
+/**
+ * Default aggregate clock of one store inspection phase (one probe owner) when
+ * the caller names neither a phase bound nor a deadline.
+ */
+export const LEGACY_ADOPTION_PROBE_PHASE_DEFAULT_MS = 15_000;
+/** Largest aggregate clock one probe owner accepts. */
+export const LEGACY_ADOPTION_PROBE_PHASE_MAX_MS = 60_000;
+
+/**
+ * Phase budget of a store opened with a caller deadline (HACK-1458): each new
+ * inspection phase gets the caller's remaining time, capped by the explicit
+ * phase bound (if any) and {@link LEGACY_ADOPTION_PROBE_PHASE_MAX_MS}. Without a
+ * deadline the explicit bound passes through unchanged (undefined keeps each
+ * owner's own default). An expired deadline refuses as
+ * `E_LEGACY_ADOPTION_DEADLINE` before another probe starts.
+ */
+export function legacyAdoptionProbePhaseMs(opts: {
+  readonly timeoutMs?: number;
+  readonly deadline?: number;
+  readonly now: number;
+}): number | undefined {
+  if (opts.deadline === undefined) {
+    return opts.timeoutMs;
+  }
+  const remaining = Math.floor(opts.deadline - opts.now);
+  if (remaining <= 0) {
+    refuse("E_LEGACY_ADOPTION_DEADLINE");
+  }
+  return Math.min(
+    opts.timeoutMs ?? LEGACY_ADOPTION_PROBE_PHASE_MAX_MS,
+    LEGACY_ADOPTION_PROBE_PHASE_MAX_MS,
+    remaining
+  );
+}
+
+/**
+ * A store with a caller deadline reports an unclassified failure as a
+ * deadline, not as invalid state, when a probe phase timed out or the deadline
+ * has passed: phase clocks are derived from that deadline (HACK-1458).
+ */
+function deadlineExpiry(error: unknown, deadline?: number): boolean {
+  return (
+    deadline !== undefined &&
+    (nativeComposeProbeFailure(error) === "timeout" || Date.now() >= deadline)
+  );
+}
+
+function acceptedDeadline(value: unknown): boolean {
+  return value === undefined || Number.isFinite(value);
+}
+
+function translate(
+  error: unknown,
+  signal?: AbortSignal,
+  deadline?: number
+): never {
   try {
     cancelled(signal);
     if (error instanceof LegacyComposeAdoptedGenerationError) {
@@ -287,7 +345,9 @@ function translate(error: unknown, signal?: AbortSignal): never {
       refuse("E_LEGACY_ADOPTION_BUSY");
     }
     const translated = new LegacyComposeAdoptedGenerationError(
-      "E_LEGACY_ADOPTION_STATE"
+      deadlineExpiry(error, deadline)
+        ? "E_LEGACY_ADOPTION_DEADLINE"
+        : "E_LEGACY_ADOPTION_STATE"
     );
     const diagnostic = legacyComposeOrderedRefusal(error);
     if (diagnostic) {
@@ -994,7 +1054,13 @@ async function assertRetainedRouteState(
     refuse();
   }
   const observedManifest = JSON.stringify(first.manifest);
-  const current: Context = { ...ctx };
+  // A context copy must not snapshot the caller's remaining proof budget.
+  const current: Context = {
+    ...ctx,
+    get timeoutMs() {
+      return ctx.timeoutMs;
+    },
+  };
   let active = true;
   const assertActive = () => {
     cancelled(current.signal);
@@ -2229,7 +2295,11 @@ async function completePublication(
       refuse();
     }
     const routingDeadline =
-      Date.now() + Math.min(ctx.timeoutMs ?? 15_000, 60_000);
+      Date.now() +
+      Math.min(
+        ctx.timeoutMs ?? LEGACY_ADOPTION_PROBE_PHASE_DEFAULT_MS,
+        LEGACY_ADOPTION_PROBE_PHASE_MAX_MS
+      );
     stage = "publication-inputs";
     const loaded = await readInputs(ctx, publication.generation);
     // Publishing pins the bound override for the adoption's life. An earlier
@@ -2261,6 +2331,9 @@ async function completePublication(
     );
     const transaction: Context = {
       ...ctx,
+      get timeoutMs() {
+        return ctx.timeoutMs;
+      },
       check: async () => {
         await ctx.check();
         await recheckDirectories([held]);
@@ -2367,7 +2440,11 @@ async function completeRollback(ctx: Context, state: Receipt) {
     refuse();
   }
   const routingDeadline =
-    Date.now() + Math.min(ctx.timeoutMs ?? 15_000, 60_000);
+    Date.now() +
+    Math.min(
+      ctx.timeoutMs ?? LEGACY_ADOPTION_PROBE_PHASE_DEFAULT_MS,
+      LEGACY_ADOPTION_PROBE_PHASE_MAX_MS
+    );
   const loaded = await readInputs(
     ctx,
     publication.generation,
@@ -2382,6 +2459,9 @@ async function completeRollback(ctx: Context, state: Receipt) {
   );
   const transaction: Context = {
     ...ctx,
+    get timeoutMs() {
+      return ctx.timeoutMs;
+    },
     check: async () => {
       await ctx.check();
       await recheckDirectories([held]);
@@ -2601,7 +2681,11 @@ function boundedMutationContext(ctx: Context, deadline: number) {
     ...ctx,
     signal: controller.signal,
     get timeoutMs() {
-      return Math.min(ctx.timeoutMs ?? 15_000, 60_000, remaining());
+      return Math.min(
+        ctx.timeoutMs ?? LEGACY_ADOPTION_PROBE_PHASE_DEFAULT_MS,
+        LEGACY_ADOPTION_PROBE_PHASE_MAX_MS,
+        remaining()
+      );
     },
     check: async () => {
       remaining();
@@ -3283,10 +3367,18 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
   readonly requestedBranch?: string;
   readonly mode?: "prepare" | "saved";
   readonly signal?: AbortSignal;
+  /** Explicit bound of each inspection phase; see {@link legacyAdoptionProbePhaseMs}. */
   readonly timeoutMs?: number;
+  /**
+   * Caller deadline (epoch ms, `Date.now()` clock). Every inspection phase is
+   * bounded by its remaining time and its expiry refuses as
+   * `E_LEGACY_ADOPTION_DEADLINE`, never as invalid state.
+   */
+  readonly deadline?: number;
 }): Promise<LegacyComposeAdoptedGenerationStore> {
   const directories: HeldDirectory[] = [];
   let signal: AbortSignal | undefined;
+  let deadline: number | undefined;
   try {
     if (
       !isRecord(input) ||
@@ -3296,6 +3388,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       (input.signal !== undefined && !(input.signal instanceof AbortSignal)) ||
       (input.mode !== undefined &&
         !["prepare", "saved"].includes(input.mode)) ||
+      !acceptedDeadline(input.deadline) ||
       (input.requestedBranch !== undefined &&
         (typeof input.requestedBranch !== "string" ||
           !input.requestedBranch.trim() ||
@@ -3306,6 +3399,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
     const root = resolve(input.projectRoot),
       mode = input.mode ?? "prepare";
     signal = input.signal;
+    deadline = input.deadline;
     const timeoutMs = input.timeoutMs,
       capturedRoute = route(),
       routingRoot = join(resolveGlobalHackDir(), "compose-routing");
@@ -3377,7 +3471,13 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       generationsRoot,
       receiptPath,
       signal,
-      timeoutMs,
+      get timeoutMs() {
+        return legacyAdoptionProbePhaseMs({
+          timeoutMs,
+          deadline,
+          now: Date.now(),
+        });
+      },
       requestedBranch: input.requestedBranch,
       check,
       sourceBind,
@@ -3488,7 +3588,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             );
           });
         } catch (error: unknown) {
-          translate(error, signal);
+          translate(error, signal, deadline);
         }
       },
       async loadPrepared(opts = {}) {
@@ -3511,7 +3611,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             loaded.manifest.adoption_generation_version
           );
         } catch (error: unknown) {
-          translate(error, signal);
+          translate(error, signal, deadline);
         }
       },
       async loadActive(opts = {}) {
@@ -3539,7 +3639,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             loaded.manifest.adoption_generation_version
           );
         } catch (error: unknown) {
-          translate(error, signal);
+          translate(error, signal, deadline);
         }
       },
       async publish(opts) {
@@ -3577,7 +3677,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             await completePublication(ctx, pending, binary);
           });
         } catch (error: unknown) {
-          translate(error, signal);
+          translate(error, signal, deadline);
         }
       },
       async rollback() {
@@ -3605,7 +3705,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             await completeRollback(ctx, pending);
           });
         } catch (error: unknown) {
-          translate(error, signal);
+          translate(error, signal, deadline);
         }
       },
       async pendingSwitchEnvOverrideChanged() {
@@ -3666,7 +3766,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             }
           });
         } catch (error: unknown) {
-          translate(error, signal);
+          translate(error, signal, deadline);
         }
       },
       async withLease(opts) {
@@ -3731,7 +3831,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             return value;
           });
         } catch (error: unknown) {
-          translate(error, signal);
+          translate(error, signal, deadline);
         }
       },
       async withMutation(opts) {
@@ -3741,7 +3841,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             async () => await mutateRetainedContainers(ctx, known, captured)
           );
         } catch (error: unknown) {
-          translate(error, signal);
+          translate(error, signal, deadline);
         }
       },
       async withPreparationStop(opts) {
@@ -3756,14 +3856,14 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
               await mutateRetainedContainers(ctx, known, captured, true)
           );
         } catch (error: unknown) {
-          translate(error, signal);
+          translate(error, signal, deadline);
         }
       },
       async recoverInterruptedLock() {
         try {
           await lock.recoverInterruptedLock();
         } catch (error: unknown) {
-          translate(error, signal);
+          translate(error, signal, deadline);
         }
       },
       async close() {
@@ -3781,6 +3881,6 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
     return Object.freeze(result);
   } catch (error: unknown) {
     await Promise.all(directories.map((directory) => directory.file.close()));
-    translate(error, signal);
+    translate(error, signal, deadline);
   }
 }

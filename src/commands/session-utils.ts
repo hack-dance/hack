@@ -180,6 +180,43 @@ export function writeSessionStreamEvent(opts: {
   process.stdout.write(`${JSON.stringify(opts.event)}\n`);
 }
 
+export type SessionListRow = {
+  readonly workspace: string;
+  readonly project: string;
+  readonly backend: string;
+  readonly status: string;
+};
+
+/**
+ * Render `hack session list` rows. Each column is as wide as its longest cell
+ * plus a gap, so a workspace ID never runs into the project column: the first
+ * whitespace-delimited token of a row is exactly the ID `session stop` takes.
+ */
+export function formatSessionListTable(
+  rows: readonly SessionListRow[]
+): string[] {
+  const header: SessionListRow = {
+    workspace: "Workspace",
+    project: "Project",
+    backend: "Backend",
+    status: "Status",
+  };
+  const all = [header, ...rows];
+  const width = (key: keyof SessionListRow, min: number): number =>
+    Math.max(min, ...all.map((row) => row[key].length + 2));
+  const workspaceWidth = width("workspace", 20);
+  const projectWidth = width("project", 20);
+  const backendWidth = width("backend", 10);
+  const render = (row: SessionListRow): string =>
+    row.workspace.padEnd(workspaceWidth) +
+    row.project.padEnd(projectWidth) +
+    row.backend.padEnd(backendWidth) +
+    row.status;
+  const lines = all.map(render);
+  const ruleWidth = Math.max(60, ...lines.map((line) => line.length));
+  return [lines[0] ?? "", "-".repeat(ruleWidth), ...lines.slice(1)];
+}
+
 export function splitLines(text: string): string[] {
   const lines = text.split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") {

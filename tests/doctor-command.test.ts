@@ -205,6 +205,21 @@ test("doctor remediation plan skips env migration when modern env files already 
   }
 });
 
+test("doctor plans migration when existing layers leave a legacy key undelivered", async () => {
+  const root = await createDoctorTestProject({ modern: true });
+  try {
+    await writeFile(join(root, ".hack", ".env"), "EXTRA=synthetic\n");
+    const lines = await buildDoctorRemediationPlanLines({
+      startDir: root,
+      migrateEnvConfig: true,
+    });
+    expect(lines.join("\n")).toContain("Prompt to migrate legacy env values");
+    expect(lines.join("\n")).not.toContain("already uses");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("doctor guidance keeps CoreDNS restartable outages out of doctor --fix", () => {
   const guidance = buildDoctorRecoveryGuidance({
     results: [

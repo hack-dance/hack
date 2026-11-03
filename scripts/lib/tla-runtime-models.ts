@@ -1252,6 +1252,34 @@ const contracts: readonly ModelContract[] = [
       'epoch = <<"b", "adopted">>',
       'pc = [a |-> "done", b |-> "succeeded"]',
     ],
+    // TLC's two workers may report either up as the adopter, and the kill
+    // may land after the adopter's Succeed (reported at Cleanup).
+    alternativeWitnesses: [
+      {
+        action: "Succeed",
+        fields: [
+          'session = "absent"',
+          'epoch = <<"a", "adopted">>',
+          'pc = [a |-> "succeeded", b |-> "done"]',
+        ],
+      },
+      {
+        action: "Cleanup",
+        fields: [
+          'session = "absent"',
+          'epoch = <<"b", "adopted">>',
+          'pc = [a |-> "done", b |-> "succeeded"]',
+        ],
+      },
+      {
+        action: "Cleanup",
+        fields: [
+          'session = "absent"',
+          'epoch = <<"a", "adopted">>',
+          'pc = [a |-> "succeeded", b |-> "done"]',
+        ],
+      },
+    ],
     additionalControls: [
       {
         name: "no-revalidation",
@@ -1259,6 +1287,12 @@ const contracts: readonly ModelContract[] = [
         invariant: "Reclaimable",
         action: "Publish",
         fields: ['session = "alive"', 'token = "a"', 'entry = "b"'],
+        alternativeWitnesses: [
+          {
+            action: "Publish",
+            fields: ['session = "alive"', 'token = "b"', 'entry = "a"'],
+          },
+        ],
       },
       {
         name: "epoch-failure-unstopped",
@@ -1266,17 +1300,25 @@ const contracts: readonly ModelContract[] = [
         invariant: "Reclaimable",
         action: "RecordFailUnstopped",
         fields: ['session = "alive"', 'token = "a"', 'entry = "none"'],
+        alternativeWitnesses: [
+          {
+            action: "RecordFailUnstopped",
+            fields: ['session = "alive"', 'token = "b"', 'entry = "none"'],
+          },
+        ],
       },
       {
         name: "stale-finalize",
         negative: true,
         invariant: "Reclaimable",
         action: "Finalize",
-        fields: [
-          'session = "alive"',
-          'token = "b"',
-          'entry = "a"',
-          'pc = [a |-> "ready", b |-> "failed"]',
+        fields: ['session = "alive"', 'token = "b"', 'entry = "a"'],
+        // TLC's two workers may report either up as the displaced one.
+        alternativeWitnesses: [
+          {
+            action: "Finalize",
+            fields: ['session = "alive"', 'token = "a"', 'entry = "b"'],
+          },
         ],
       },
       {
@@ -1285,6 +1327,12 @@ const contracts: readonly ModelContract[] = [
         invariant: "Reclaimable",
         action: "LateCreate",
         fields: ['session = "alive"', 'token = "a"', 'entry = "none"'],
+        alternativeWitnesses: [
+          {
+            action: "LateCreate",
+            fields: ['session = "alive"', 'token = "b"', 'entry = "none"'],
+          },
+        ],
       },
       {
         name: "abandoned-replace",
@@ -1295,17 +1343,43 @@ const contracts: readonly ModelContract[] = [
           'session = "absent"',
           'pc = [a |-> "succeeded", b |-> "done"]',
         ],
+        // The stale kill can land before or after the victim's Succeed;
+        // either up can be the victim.
+        alternativeWitnesses: [
+          {
+            action: "LateKill",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "done", b |-> "succeeded"]',
+            ],
+          },
+          {
+            action: "Succeed",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "succeeded", b |-> "done"]',
+            ],
+          },
+          {
+            action: "Succeed",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "done", b |-> "succeeded"]',
+            ],
+          },
+        ],
       },
       {
         name: "timeout-as-absence",
         negative: true,
         invariant: "Reclaimable",
         action: "Publish",
-        fields: [
-          'session = "alive"',
-          'token = "a"',
-          'entry = "b"',
-          'pc = [a |-> "failed", b |-> "createsess"]',
+        fields: ['session = "alive"', 'token = "a"', 'entry = "b"'],
+        alternativeWitnesses: [
+          {
+            action: "Publish",
+            fields: ['session = "alive"', 'token = "b"', 'entry = "a"'],
+          },
         ],
       },
     ],

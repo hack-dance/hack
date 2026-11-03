@@ -255,7 +255,10 @@ Behavior:
   `hack restart` with `E_LIFECYCLE_FAILED` (non-zero exit, the helper names in `detail`).
   Fix the claim and run `hack down` again.
 - Holders are released only after the instance's containers and lifecycle session
-  stopped. If `docker compose down` fails, times out or is interrupted, the holders are
+  stopped. `hack restart` keeps the containers running, so it keeps their holders and
+  reuses the helpers. Once a detached `hack up` or `hack restart` started the
+  containers, a later failure (such as a failing `up.after` hook) stops the lifecycle
+  processes but keeps the holders for `hack down`. If `docker compose down` fails, times out or is interrupted, the holders are
   kept (with a warning) and the command fails with Compose's error; run `hack down`
   again. If the session stop fails or cannot be confirmed (including when tmux cannot
   say whether the session exists), the session's processes may still use the helpers: `hack

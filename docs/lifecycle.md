@@ -229,8 +229,12 @@ Behavior:
 - A port held by anything else (another helper, the wrong upstream, a silent listener) fails
   `hack up` with `E_LIFECYCLE_FAILED` and a closed reason; that process is left running.
   Messages never include upstreams, argv or environment values.
-- If `hack up` fails later, or receives SIGINT/SIGTERM, Hack releases only the holders that
-  run added and stops a helper it had just started.
+- If `hack up` fails later, or receives SIGINT/SIGTERM at any point while helpers or
+  lifecycle processes start, Hack releases only the holders that run added and stops a
+  helper it had just started. Overlapping `hack up` runs of the same instance are ordered by
+  an instance lock; an earlier run's rollback never releases a holder after a later run of
+  that instance has started (the holder stays recorded until `hack down`).
+- A disabled helper (`enabled: false`) needs none of its `env` or `upstreamEnv` values.
 - `hack down` releases the instance's holder. A helper still used by another branch keeps
   running; the last release stops a helper Hack started and never signals an adopted one.
   A release that cannot confirm the stop keeps the claim and makes `hack down` report it.

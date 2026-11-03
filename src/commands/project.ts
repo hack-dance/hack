@@ -2360,6 +2360,23 @@ function sharedHelperReleaseFailureMessage(names: readonly string[]): string {
 }
 
 /**
+ * Wrap a down `before` step so the shared helper stopping mark is written only
+ * after it succeeds. A refused down (its `lifecycle.down.before` hook failed)
+ * must not supersede a concurrent up, whose cleanup could then stop helpers
+ * the still-running instance uses. The Compose down path marks at the same
+ * point.
+ */
+export function markSharedHelpersStoppingAfter<Run>(opts: {
+  readonly before: (run: Run) => Promise<void>;
+  readonly mark: () => Promise<void>;
+}): (run: Run) => Promise<void> {
+  return async (run) => {
+    await opts.before(run);
+    await opts.mark();
+  };
+}
+
+/**
  * Mark the instance as stopping before `hack down` stops anything, so a
  * concurrent `hack up` of the same instance refuses to launch services.
  */
@@ -6324,7 +6341,6 @@ async function handleDown({
         );
       }
     };
-    await markLifecycleSharedHelpersStopping({ cfg, composeProject });
     const result = await nativeProjectDown({
       runtime: native,
       scope,
@@ -6338,17 +6354,20 @@ async function handleDown({
           composeProject,
         });
       },
-      before: async (run) => {
-        if (!hasHooks) {
-          return;
-        }
-        lifecycleEnv = await nativeDownEnvironment({
-          scope,
-          run,
-          serviceNames: await readComposeServiceNames(project.composeFile),
-        });
-        await hook("before");
-      },
+      before: markSharedHelpersStoppingAfter({
+        before: async (run) => {
+          if (!hasHooks) {
+            return;
+          }
+          lifecycleEnv = await nativeDownEnvironment({
+            scope,
+            run,
+            serviceNames: await readComposeServiceNames(project.composeFile),
+          });
+          await hook("before");
+        },
+        mark: () => markLifecycleSharedHelpersStopping({ cfg, composeProject }),
+      }),
       after: async () => {
         if (hasHooks) {
           await hook("after");

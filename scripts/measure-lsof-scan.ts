@@ -11,12 +11,13 @@
  * output, exactly the stop path's success case.
  *
  * Usage: bun scripts/measure-lsof-scan.ts [--runs N] [--concurrency C] [--burn B]
- *                                          [--scan-timeout SECONDS]
+ *                                          [--scan-timeout SECONDS] [--lsof PATH]
  *   --runs          scans per round (default 20)
  *   --concurrency   scans started at once in the concurrent round (default 8)
  *   --burn          busy-loop processes to run during both rounds (default 0),
  *                   to add CPU contention on an otherwise idle host
  *   --scan-timeout  bound on one scan, its exit and its output (default 120)
+ *   --lsof          the lsof to time (default /usr/sbin/lsof, the runtime's)
  *
  * Prints one JSON report: host platform, process count, load averages and
  * min/median/p95/max seconds for a sequential and a concurrent round. It
@@ -129,12 +130,28 @@ async function drain(
   return Buffer.concat(chunks).toString();
 }
 
+class Aborted extends Error {
+  constructor() {
+    super("aborted");
+  }
+}
+
+/**
+ * One bounded scan. It ends at the first of: the scan completing (exit and
+ * both streams closed), its bound, or `run` aborting. On every path its timer
+ * and abort listener are removed, its child is killed and awaited and both
+ * reads are cancelled and awaited, so nothing of it outlives the call.
+ */
 async function scan(
   owned: Owned,
   lsof: string,
   disks: string[],
-  timeoutMs: number
+  timeoutMs: number,
+  run: AbortSignal
 ): Promise<Scan> {
+  if (run.aborted) {
+    throw new Aborted();
+  }
   const started = performance.now();
   const child = owned.spawn([lsof, "-n", "-P", "-t", "--", ...disks], {
     env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C" },
@@ -142,20 +159,34 @@ async function scan(
     stderr: "pipe",
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const expired = new Promise<"timeout">((resolve) => {
+  let onAbort: (() => void) | undefined;
+  const stopped = new Promise<"timeout" | "aborted">((resolve) => {
     timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    onAbort = () => resolve("aborted");
+    run.addEventListener("abort", onAbort, { once: true });
   });
   // The bound covers the exit and both streams closing, as in the runtime.
-  const stdoutRead = drain(child.stdout, expired);
-  const stderrRead = drain(child.stderr, expired);
+  const stdoutRead = drain(child.stdout, stopped);
+  const stderrRead = drain(child.stderr, stopped);
   const finished = Promise.all([stdoutRead, stderrRead, child.exited]);
-  const outcome = await Promise.race([finished, expired]);
-  clearTimeout(timer);
-  const seconds = (performance.now() - started) / 1000;
-  await owned.release(child);
-  // Expiry cancelled both reads, so this settles at once even when a
-  // descendant still holds a pipe; no read outlives the scan.
-  await Promise.allSettled([stdoutRead, stderrRead]);
+  let outcome: Awaited<typeof finished> | "timeout" | "aborted" = "aborted";
+  let seconds = 0;
+  try {
+    outcome = await Promise.race([finished, stopped]);
+    seconds = (performance.now() - started) / 1000;
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) {
+      run.removeEventListener("abort", onAbort);
+    }
+    await owned.release(child);
+    // A stopped scan cancelled both reads, so this settles at once even when
+    // a descendant still holds a pipe; no read outlives the scan.
+    await Promise.allSettled([stdoutRead, stderrRead]);
+  }
+  if (outcome === "aborted") {
+    throw new Aborted();
+  }
   if (outcome === "timeout") {
     return { seconds, exitCode: null, clean: false, timedOut: true };
   }
@@ -196,15 +227,18 @@ const defaultSpawn: Spawn = (command, options) => Bun.spawn(command, options);
  * children are stopped and the scratch directory removed on every path.
  */
 export async function measure(options: MeasureOptions, signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new Aborted();
+  }
   const owned = new Owned(options.spawn ?? defaultSpawn);
   const lsof = options.lsof ?? HOST_LSOF;
+  // Aborted by the caller's signal, or by teardown after any failure, so a
+  // sibling scan never outlives the run.
+  const run = new AbortController();
+  const forward = () => run.abort();
+  signal?.addEventListener("abort", forward, { once: true });
+  const active = new Set<Promise<Scan>>();
   const directory = mkdtempSync(join(tmpdir(), "lsof-scan-"));
-  const aborted = new Promise<never>((_, reject) => {
-    signal?.addEventListener("abort", () => reject(new Error("aborted")), {
-      once: true,
-    });
-  });
-  aborted.catch(() => undefined);
   try {
     const disks = ["storage.raw", "overlay.raw"].map((name) => {
       const path = join(directory, name);
@@ -218,8 +252,21 @@ export async function measure(options: MeasureOptions, signal?: AbortSignal) {
         stderr: "ignore",
       });
     }
-    const one = () =>
-      Promise.race([scan(owned, lsof, disks, options.scanTimeoutMs), aborted]);
+    const one = () => {
+      const pending = scan(
+        owned,
+        lsof,
+        disks,
+        options.scanTimeoutMs,
+        run.signal
+      );
+      active.add(pending);
+      pending.then(
+        () => active.delete(pending),
+        () => active.delete(pending)
+      );
+      return pending;
+    };
     const before = { processes: processCount(), load: loadavg() };
     const sequential: Scan[] = [];
     for (let i = 0; i < options.runs; i++) {
@@ -243,6 +290,9 @@ export async function measure(options: MeasureOptions, signal?: AbortSignal) {
       concurrent: { concurrency: options.concurrency, ...summary(concurrent) },
     };
   } finally {
+    run.abort();
+    signal?.removeEventListener("abort", forward);
+    await Promise.allSettled([...active]);
     await owned.stopAll();
     rmSync(directory, { recursive: true, force: true });
   }
@@ -255,6 +305,7 @@ function parseOptions(): MeasureOptions {
       concurrency: { type: "string", default: "8" },
       burn: { type: "string", default: "0" },
       "scan-timeout": { type: "string", default: "120" },
+      lsof: { type: "string", default: HOST_LSOF },
     },
   });
   const positive = (name: string, value: number) => {
@@ -273,6 +324,7 @@ function parseOptions(): MeasureOptions {
     burn,
     scanTimeoutMs:
       positive("--scan-timeout", Number(values["scan-timeout"])) * 1000,
+    lsof: values.lsof,
   };
 }
 

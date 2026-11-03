@@ -147,4 +147,69 @@ describe("measure-lsof-scan", () => {
     expect(started).toHaveLength(2);
     expect(started.filter((child) => alive(child.pid))).toEqual([]);
   });
+
+  test("an already-aborted signal starts nothing", async () => {
+    const { spawn, started } = recordingSpawn();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      measure(
+        { ...base, burn: 2, lsof: await fakeLsof("exit 1"), spawn },
+        controller.signal
+      )
+    ).rejects.toThrow("aborted");
+    expect(started).toEqual([]);
+  });
+
+  test("a failed spawn in the concurrent round stops its sibling scan", async () => {
+    // Spawns 1-2 are the sequential round (quick scans); spawn 3 is a sibling
+    // that hangs and spawn 4 fails.
+    const { spawn, started } = recordingSpawn(4);
+    const count = join(scratch, "count");
+    await writeFile(count, "0");
+    const lsof = await fakeLsof(
+      `n=$(cat '${count}'); echo $((n + 1)) > '${count}'\n` +
+        '[ "$n" -ge 2 ] && exec sleep 600\nexit 1'
+    );
+    const begun = performance.now();
+    await expect(
+      measure({
+        ...base,
+        runs: 2,
+        concurrency: 2,
+        scanTimeoutMs: 60_000,
+        lsof,
+        spawn,
+      })
+    ).rejects.toThrow("spawn refused");
+    expect(performance.now() - begun).toBeLessThan(5000);
+    expect(started).toHaveLength(3);
+    expect(started.filter((child) => alive(child.pid))).toEqual([]);
+  });
+
+  test("SIGINT during a scan whose pipe a descendant holds exits promptly", async () => {
+    // The scan exits at once; its background child holds the scan's stdout
+    // far past the time the runner may take to exit.
+    const lsof = await fakeLsof("sleep 8 &\nexit 1");
+    const runner = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "../scripts/measure-lsof-scan.ts"),
+        "--runs",
+        "1",
+        "--scan-timeout",
+        "60",
+        "--lsof",
+        lsof,
+      ],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    await Bun.sleep(700);
+    const signalled = performance.now();
+    runner.kill("SIGINT");
+    const exitCode = await runner.exited;
+    expect(performance.now() - signalled).toBeLessThan(4000);
+    expect(exitCode).toBe(130);
+    expect(await new Response(runner.stderr).text()).toContain("aborted");
+  });
 });

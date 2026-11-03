@@ -9,6 +9,12 @@ on:
       - "v*"
   pull_request:
 
+concurrency:
+  # PR updates supersede earlier runs. Pushes need unique groups: even with
+  # cancellation disabled, a shared group replaces an older pending run.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   config-compiler:
     name: Config compiler (${{ matrix.os }})

@@ -254,9 +254,11 @@ Behavior:
 - A release that fails or cannot confirm the stop keeps the claim and fails `hack down` and
   `hack restart` with `E_LIFECYCLE_FAILED` (non-zero exit, the helper names in `detail`).
   Fix the claim and run `hack down` again.
-- Holders are released only after the instance's lifecycle session stopped. If that stop
-  fails or cannot be confirmed (including when tmux cannot say whether the session
-  exists), the session's processes may still use the helpers: `hack
+- Holders are released only after the instance's containers and lifecycle session
+  stopped. If `docker compose down` fails, times out or is interrupted, the holders are
+  kept (with a warning) and the command fails with Compose's error; run `hack down`
+  again. If the session stop fails or cannot be confirmed (including when tmux cannot
+  say whether the session exists), the session's processes may still use the helpers: `hack
   down`, `hack restart` and native retirement keep every holder, warn, and fail the same
   way. Run `hack down` again once the session can be stopped. Likewise, an up whose failed
   start kept its lifecycle session (its stop could not be confirmed) keeps the holders it

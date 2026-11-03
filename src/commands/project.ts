@@ -2103,13 +2103,17 @@ export async function releaseAfterFailedProcessStart(opts: {
 
 /**
  * Stop the lifecycle session, then release this instance's shared helper
- * holders only once that stop succeeded. When it failed or its outcome is
- * unknown, the session's processes may still use the helpers: every holder
- * is kept (a later hack down releases both) and reported as not released, so
+ * holders only once both the session and the containers are confirmed
+ * stopped. When the session stop failed or its outcome is unknown, or the
+ * containers were not confirmed stopped (Compose down failed, timed out or
+ * was interrupted), something may still use the helpers: every holder is
+ * kept (a later hack down releases them) and reported as not released, so
  * down, restart and native retirement fail visibly. Never throws.
  */
 export async function stopSessionBeforeReleasingHelpers(opts: {
   readonly stopSession: () => Promise<void>;
+  /** Compose (or graph) shutdown succeeded; false keeps every holder. */
+  readonly containersStopped: boolean;
   /** Returns the helpers whose release failed; must not throw. */
   readonly releaseHelpers: () => Promise<readonly string[]>;
   /** Helpers the instance may still hold, configured or recorded; must not throw. */
@@ -2123,6 +2127,12 @@ export async function stopSessionBeforeReleasingHelpers(opts: {
   } catch (error: unknown) {
     return {
       sessionStopFailed: { error },
+      notReleased: await opts.heldHelperNames(),
+    };
+  }
+  if (!opts.containersStopped) {
+    return {
+      sessionStopFailed: null,
       notReleased: await opts.heldHelperNames(),
     };
   }
@@ -2496,6 +2506,8 @@ async function stopLifecycleProcesses(opts: {
 }): Promise<void> {
   const outcome = await stopSessionBeforeReleasingHelpers({
     stopSession: () => stopLifecycleSession(opts),
+    // Native retirement runs after the graph's own shutdown succeeded.
+    containersStopped: true,
     releaseHelpers: () => releaseLifecycleSharedHelpersReporting(opts),
     heldHelperNames: () => heldSharedHelperNames(opts),
   });
@@ -2598,13 +2610,25 @@ async function markLifecycleSharedHelpersStopping(opts: {
  * signal cleanup).
  */
 async function stopLifecycleProcessesBestEffort(
-  opts: Parameters<typeof stopLifecycleProcesses>[0]
+  opts: Parameters<typeof stopLifecycleProcesses>[0] & {
+    /** Compose shutdown succeeded; false keeps every helper holder. */
+    readonly containersStopped: boolean;
+  }
 ): Promise<readonly string[]> {
   const outcome = await stopSessionBeforeReleasingHelpers({
     stopSession: () => stopLifecycleSession(opts),
+    containersStopped: opts.containersStopped,
     releaseHelpers: () => releaseLifecycleSharedHelpersReporting(opts),
     heldHelperNames: () => heldSharedHelperNames(opts),
   });
+  if (
+    !(outcome.sessionStopFailed || opts.containersStopped) &&
+    outcome.notReleased.length > 0
+  ) {
+    logger.warn({
+      message: `Kept shared helpers ${outcome.notReleased.join(", ")}: this instance's containers were not confirmed stopped. Run hack down again once they are.`,
+    });
+  }
   if (outcome.sessionStopFailed) {
     const { error } = outcome.sessionStopFailed;
     logger.warn({
@@ -6751,17 +6775,22 @@ async function runDownCommand({
     ? await readComposeServiceStates({ project, composeProjectName, profiles })
     : [];
 
-  const lifecycleDownCleanup = async (): Promise<readonly string[]> =>
+  // Holders are released only once Compose confirmed the containers
+  // stopped; an interrupted or failed shutdown keeps them for the next down.
+  const lifecycleDownCleanup = async (
+    containersStopped: boolean
+  ): Promise<readonly string[]> =>
     await stopLifecycleProcessesBestEffort({
       project,
       cfg,
       projectName,
       branch,
       composeProject: lifecycleComposeProject,
+      containersStopped,
     });
   const signalCleanup = installLifecycleSignalCleanup({
     cleanup: async () => {
-      await lifecycleDownCleanup();
+      await lifecycleDownCleanup(false);
     },
   });
   let code: number;
@@ -6799,7 +6828,7 @@ async function runDownCommand({
       cwd: dirname(project.composeFile),
       routeStdoutToStderr: json,
     });
-    helperReleaseFailures = await lifecycleDownCleanup();
+    helperReleaseFailures = await lifecycleDownCleanup(code === 0);
   } finally {
     signalCleanup.dispose();
   }
@@ -6921,17 +6950,22 @@ async function runRestartDownPhase(opts: {
   /** Helpers whose release failed; the restart must stop. */
   readonly sharedHelperFailures?: readonly string[];
 }> {
-  const lifecycleDownCleanup = async (): Promise<readonly string[]> =>
+  // As in hack down: holders are released only once the containers are
+  // confirmed stopped.
+  const lifecycleDownCleanup = async (
+    containersStopped: boolean
+  ): Promise<readonly string[]> =>
     await stopLifecycleProcessesBestEffort({
       project: opts.project,
       cfg: opts.cfg,
       projectName: opts.projectName,
       branch: opts.branch,
       composeProject: opts.lifecycleComposeProject,
+      containersStopped,
     });
   const signalCleanup = installLifecycleSignalCleanup({
     cleanup: async () => {
-      await lifecycleDownCleanup();
+      await lifecycleDownCleanup(false);
     },
   });
   let downCode: number;
@@ -6962,7 +6996,7 @@ async function runRestartDownPhase(opts: {
           cwd: dirname(opts.project.composeFile),
           routeStdoutToStderr: opts.routeStdoutToStderr === true,
         });
-    helperReleaseFailures = await lifecycleDownCleanup();
+    helperReleaseFailures = await lifecycleDownCleanup(downCode === 0);
   } finally {
     signalCleanup.dispose();
   }
@@ -7935,12 +7969,14 @@ async function runRestartCommand({
     successfulCompletionServices,
   });
   if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
+    // Some containers may still run: keep the helper holders for hack down.
     await stopLifecycleProcessesBestEffort({
       project,
       cfg,
       projectName,
       branch,
       composeProject: lifecycleComposeProject,
+      containersStopped: false,
     });
     await removeProjectRuntimeStateEntry({
       projectDir: project.projectDir,

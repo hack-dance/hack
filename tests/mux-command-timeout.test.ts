@@ -125,6 +125,7 @@ test("a listing that omits the session plus a timed-out presence query is unknow
             backends: new Map([["tmux", backend]]),
           }),
       }),
+    containersStopped: true,
     releaseHelpers: () => Promise.resolve([]),
     heldHelperNames: () => Promise.resolve(["mail"]),
   });

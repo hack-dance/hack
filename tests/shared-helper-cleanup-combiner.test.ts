@@ -135,6 +135,7 @@ test("down keeps every helper holder and reports them when the session stop fail
   const outcome = await stopSessionBeforeReleasingHelpers({
     stopSession: () =>
       Promise.reject(new Error("Failed to stop owned lifecycle session")),
+    containersStopped: true,
     releaseHelpers: () => {
       released.push("release");
       return Promise.resolve([]);
@@ -154,6 +155,7 @@ test("down releases the helper holders once the session stop succeeded", async (
       events.push("stop");
       return Promise.resolve();
     },
+    containersStopped: true,
     releaseHelpers: () => {
       events.push("release");
       return Promise.resolve(["mail"]);
@@ -291,4 +293,25 @@ test("shared helpers with a lifecycle session refuse zellij before anything star
     needsSession: true,
     mux: resolvedMux(["zellij"]),
   });
+});
+
+test("down keeps every helper holder when the containers were not confirmed stopped", async () => {
+  const events: string[] = [];
+  const outcome = await stopSessionBeforeReleasingHelpers({
+    stopSession: () => {
+      events.push("stop");
+      return Promise.resolve();
+    },
+    // Compose down failed or timed out (exit 124), or was interrupted.
+    containersStopped: false,
+    releaseHelpers: () => {
+      events.push("release");
+      return Promise.resolve([]);
+    },
+    heldHelperNames: () => Promise.resolve(["mail"]),
+  });
+  // The lifecycle session still stops; the helpers stay with the containers.
+  expect(events).toEqual(["stop"]);
+  expect(outcome.sessionStopFailed).toBeNull();
+  expect(outcome.notReleased).toEqual(["mail"]);
 });

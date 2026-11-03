@@ -493,8 +493,20 @@ impl Admitted {
     fn recheck(&self, port: &impl Port) -> Result<(), CandidateError> {
         let current = port
             .inspect(&self.receipt, &self.resource)
-            .map_err(|_| unobserved())?
+            .map_err(|failure| match failure.code {
+                // Production inspection observed a different identity before
+                // refusing it; this is evidence of change, not a lost read.
+                "graph_foreign_resource" | "graph_resource_identity" => unsettled(),
+                _ => unobserved(),
+            })?
             .ok_or_else(unsettled)?;
+        // Compare metadata before IDENTITY: a changed mountpoint is already an
+        // observed change and must not be masked by the script's path refusal.
+        if volume_identity::stable_fields(&self.inspected)
+            != volume_identity::stable_fields(&current)
+        {
+            return Err(unsettled());
+        }
         let current_root = volume_subpaths::directory_identity_with(
             |script, arguments| port.execute(script, arguments),
             &self.resource,

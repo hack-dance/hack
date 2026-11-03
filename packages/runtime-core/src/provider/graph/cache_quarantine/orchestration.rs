@@ -90,6 +90,9 @@ impl Provider {
             identity_failure: Cell::new(false),
         };
         provider.receipt("stopped-data-retained", "created");
+        let (receipt, _) = provider.load(&provider.candidate, RUN).unwrap();
+        provider.inspected.borrow_mut()["Labels"] =
+            expected_labels(&receipt, &receipt.resources["volume:www_next"]);
         provider
     }
     /// Write the graph receipt. `redis` varies the receipt bytes the way a
@@ -196,7 +199,11 @@ impl Port for Provider {
         self.calls.borrow_mut().push("load");
         load_at(directory(candidate, run)?, run, "owner")
     }
-    fn inspect(&self, _: &Receipt, resource: &Resource) -> Result<Option<Value>, CandidateError> {
+    fn inspect(
+        &self,
+        receipt: &Receipt,
+        resource: &Resource,
+    ) -> Result<Option<Value>, CandidateError> {
         self.calls.borrow_mut().push("inspect");
         assert_eq!(resource.name, self.name);
         if self.inspect_failure.get() {
@@ -212,6 +219,9 @@ impl Port for Provider {
         if value.get("CreatedAt").is_none() {
             value["CreatedAt"] = json!(self.created_at());
         }
+        // Use the same identity validator as the production engine adapter,
+        // including its distinct observed-foreign/changed identity errors.
+        verify_resource_identity(receipt, resource, &value)?;
         Ok(Some(value))
     }
     fn containers(&self) -> Result<Value, CandidateError> {
@@ -745,6 +755,64 @@ fn failed_post_effect_observations_do_not_claim_the_volume_changed() {
             assert_eq!(provider.records()[0].outcome, Outcome::Pending);
             provider.inspect_failure.set(false);
             provider.identity_failure.set(false);
+            provider.resolve(&sha).unwrap();
+            assert_eq!(provider.records()[0].outcome, Outcome::Quarantined);
+        }
+    }
+}
+
+#[test]
+fn production_inspection_identity_errors_remain_observed_changes_after_effects() {
+    for effect in ["move", "locate"] {
+        for (field, value, validation_code) in [
+            (
+                "Labels",
+                json!({"io.hack-local.owner":"foreign"}),
+                Some("graph_foreign_resource"),
+            ),
+            ("Name", json!("foreign"), Some("graph_resource_identity")),
+            ("Driver", json!("foreign"), Some("graph_resource_identity")),
+            (
+                "Mountpoint",
+                json!("/var/lib/docker/volumes/foreign/_data"),
+                None,
+            ),
+            ("Options", json!({"type":"tmpfs"}), None),
+            ("Scope", json!("foreign"), None),
+        ] {
+            let provider = Provider::new();
+            let sha = selection_sha(&provider.inspect().unwrap());
+            if effect == "locate" {
+                provider.fault.set(Fault::After);
+                assert!(provider.quarantine(&sha).is_err());
+                provider.fault.set(Fault::None);
+            }
+            let original = provider.inspected.borrow().clone();
+            let mut changed = original.clone();
+            changed[field] = value;
+            let (receipt, _) = provider.load(&provider.candidate, RUN).unwrap();
+            let validation =
+                verify_resource_identity(&receipt, &receipt.resources["volume:www_next"], &changed);
+            assert_eq!(
+                validation.err().map(|failure| failure.code),
+                validation_code
+            );
+            *provider.after.borrow_mut() = Some((effect, Change::Inspect(changed)));
+            let result = if effect == "move" {
+                provider.quarantine(&sha)
+            } else {
+                provider.resolve(&sha)
+            };
+            let failure = result.unwrap_err();
+            assert_eq!(
+                failure.code, "graph_cache_quarantine_unsettled",
+                "{effect}:{field}"
+            );
+            assert!(failure.message.contains("volume changed"));
+            // No IDENTITY call may mask already observed metadata drift.
+            assert_eq!(provider.calls.borrow().last(), Some(&"inspect"));
+            assert_eq!(provider.records()[0].outcome, Outcome::Pending);
+            *provider.inspected.borrow_mut() = original;
             provider.resolve(&sha).unwrap();
             assert_eq!(provider.records()[0].outcome, Outcome::Quarantined);
         }

@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { LogOutputFormat } from "../backends/log-backend.ts";
+import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../backends/native-project-one-off.ts";
 import type { RuntimeBaseOptions } from "../backends/runtime-backend.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
@@ -2393,6 +2394,31 @@ function validateNativeOptions(options: NativeComposeCommandOptions): boolean {
   return prepare;
 }
 
+/**
+ * An authored project's `run` refuses an empty `--env` or `--profile` with the
+ * same closed E_USAGE line as a native-backend run, so every native run agrees.
+ * Without this, the Compose-backend authored path would read `--env ""` as the
+ * base env and `--profile ""` as no profiles. `input` carries the raw `--env`
+ * text and the parsed `--profile` list, where an all-empty list is `[]`. The
+ * native backend refuses earlier, before any dispatch; legacy Compose
+ * projects never reach this, and there an empty `--env` still means base.
+ */
+function refuseEmptyAuthoredRunSelection(
+  input: NativeComposeCommandOptions
+): void {
+  if (input.operation !== "run") {
+    return;
+  }
+  const emptyEnv =
+    typeof input.overlay === "string" && input.overlay.trim() === "";
+  if (emptyEnv || input.profiles?.length === 0) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
+    });
+  }
+}
+
 /** Dispatch native authored inputs before any legacy context or registry mutation. */
 export async function tryNativeComposeCommand(
   input: NativeComposeCommandOptions
@@ -2422,6 +2448,7 @@ async function dispatchNativeComposeCommand(
   if (!selected) {
     return null;
   }
+  refuseEmptyAuthoredRunSelection(input);
   const native = await tryNativeAuthoredCommand({ options, selected });
   if (native !== null) {
     return native;

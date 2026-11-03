@@ -7,6 +7,7 @@ import {
   NATIVE_GRAPH_ADMISSION_MESSAGE,
   nativeConsumerAdmitsImages,
 } from "../src/lib/native-authored-image-admission.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
  * HACK-1300: with the native backend selected, `config validate` refuses a
@@ -136,15 +137,18 @@ async function runValidate(opts: {
     ],
     {
       cwd: directory,
-      env: {
-        PATH: "/usr/bin:/bin",
-        HOME: home,
-        HACK_LOGGER: "console",
-        HACK_CONFIG_COMPILER_BINARY: compiler,
-        ...(opts.backend === undefined
-          ? {}
-          : { HACK_RUNTIME_BACKEND: opts.backend }),
-      },
+      env: privateCliEnv({
+        root: directory,
+        home,
+        env: {
+          PATH: "/usr/bin:/bin",
+          HACK_LOGGER: "console",
+          HACK_CONFIG_COMPILER_BINARY: compiler,
+          ...(opts.backend === undefined
+            ? {}
+            : { HACK_RUNTIME_BACKEND: opts.backend }),
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -182,19 +186,20 @@ test.each([
     expect(result.stdout + result.stderr).not.toContain("busybox");
     // No runtime, registry or project state was created: only the fixture remains.
     expect((await readdir(directory)).sort()).toEqual(
-      [...(project ? [".hack"] : []), "compiler", "home", "input.json"].sort()
+      [
+        ...(project ? [".hack"] : []),
+        "compiler",
+        "docker-client",
+        "home",
+        "input.json",
+      ].sort()
     );
     if (project) {
       expect(await readdir(join(directory, ".hack"))).toEqual([
         "hack.project.json",
       ]);
     }
-    // The temporary HOME holds at most Bun's own transpiler cache, never Hack state.
-    expect(
-      (await readdir(result.home, { recursive: true })).every((name) =>
-        name.startsWith("Library")
-      )
-    ).toBe(true);
+    expect(await readdir(result.home, { recursive: true })).toEqual([]);
   },
   CLI_TIMEOUT_MS
 );

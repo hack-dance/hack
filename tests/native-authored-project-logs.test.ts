@@ -511,48 +511,51 @@ test("cancellation after the real held-read owner closes withholds the result", 
     expect(completed).toBe(true);
   });
 });
-test("public cancellation after an overridden log read returns130 before rendering", async () => {
-  return owned(async () => {
-    const f = await fixture();
-    const out = spyOn(process.stdout, "write"),
-      err = spyOn(process.stderr, "write");
-    try {
-      const result = await tryNativeAuthoredCommand({
-        selected: { kind: "native", projectRoot: f.scope.projectRoot },
-        options: {
-          cwd: f.scope.projectRoot,
-          operation: "logs",
-          service: "web",
-          follow: false,
-          json: true,
-        },
-        env: {
-          HACK_RUNTIME_BACKEND: "native",
-          HACK_NATIVE_BINARY: f.runtime.binary,
-          HACK_NATIVE_HOME: f.runtime.home,
-        },
-        logs: async () => {
-          process.emit("SIGINT");
-          return {
-            backend: "native",
-            run: f.receipt.review.provenance.run,
+test.skipIf(process.platform !== "darwin")(
+  "public cancellation after an overridden log read returns130 before rendering",
+  async () => {
+    return owned(async () => {
+      const f = await fixture();
+      const out = spyOn(process.stdout, "write"),
+        err = spyOn(process.stderr, "write");
+      try {
+        const result = await tryNativeAuthoredCommand({
+          selected: { kind: "native", projectRoot: f.scope.projectRoot },
+          options: {
+            cwd: f.scope.projectRoot,
+            operation: "logs",
             service: "web",
-            container: "2".repeat(64),
-            stdout: "must-not-render",
-            stderr: "must-not-render",
-            truncated: false,
-          };
-        },
-      });
-      expect(result).toBe(130);
-      expect(out).not.toHaveBeenCalled();
-      expect(err).not.toHaveBeenCalled();
-    } finally {
-      out.mockRestore();
-      err.mockRestore();
-    }
-  });
-});
+            follow: false,
+            json: true,
+          },
+          env: {
+            HACK_RUNTIME_BACKEND: "native",
+            HACK_NATIVE_BINARY: f.runtime.binary,
+            HACK_NATIVE_HOME: f.runtime.home,
+          },
+          logs: async () => {
+            process.emit("SIGINT");
+            return {
+              backend: "native",
+              run: f.receipt.review.provenance.run,
+              service: "web",
+              container: "2".repeat(64),
+              stdout: "must-not-render",
+              stderr: "must-not-render",
+              truncated: false,
+            };
+          },
+        });
+        expect(result).toBe(130);
+        expect(out).not.toHaveBeenCalled();
+        expect(err).not.toHaveBeenCalled();
+      } finally {
+        out.mockRestore();
+        err.mockRestore();
+      }
+    });
+  }
+);
 
 const macTest = process.platform === "darwin" ? test : test.skip;
 macTest.each([

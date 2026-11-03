@@ -23,6 +23,7 @@ import { acquireLegacyComposeAdoptionBinding } from "../src/lib/native-compose-a
 import { openLegacyComposeAdoptedGenerationStore } from "../src/lib/native-compose-adoption-generation.ts";
 import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption-preview.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { assertInvalidRetainedMutationDeadlines } from "./helpers/retained-mutation-deadline.ts";
 import { retainedRoutingFixtureLifetime } from "./helpers/retained-routing-adoption.ts";
 
 // The two compound workflows include preparation, publication, multiple bounded
@@ -811,3 +812,20 @@ test.each([
     await store.close();
   }
 }, 30_000);
+
+test("HACK-1359: file8 rejects missing and non-finite mutation deadlines without effects", async () => {
+  const { store, generation } = await prepared();
+  try {
+    await assertInvalidRetainedMutationDeadlines({
+      store,
+      generation,
+      binary,
+      snapshot: async () => ({
+        commands: await commands(),
+        receipt: await state(),
+      }),
+    });
+  } finally {
+    await store.close();
+  }
+});

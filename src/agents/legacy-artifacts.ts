@@ -2,6 +2,7 @@ import { rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
+import { normalizeHomeDir } from "../lib/home-dir.ts";
 
 export type LegacyAgentArtifactResult = {
   readonly status: "absent" | "deprecated" | "removed" | "error";
@@ -102,11 +103,12 @@ function resolveLegacyUserSkillDefinitions({
 }):
   | { readonly ok: true; readonly items: readonly LegacySkillDefinition[] }
   | { readonly ok: false; readonly message: string } {
-  const resolvedHome = (home ?? "").trim();
+  const resolvedHome = normalizeHomeDir(home);
   if (!resolvedHome) {
     return {
       ok: false,
-      message: "HOME is not set; cannot resolve legacy skills.",
+      message:
+        "HOME is not set to an absolute path; cannot resolve legacy skills.",
     };
   }
   return {

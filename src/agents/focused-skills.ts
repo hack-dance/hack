@@ -56,7 +56,7 @@ export const HACK_CLI_PLUGIN_ROUTING: SkillRouting = {
     "update agent integrations",
   ],
   closing:
-    "Use hack-branches for branch instances, hack-env for env values and hack-diagnose for a failing project. Prefer CLI over MCP when shell access is available.",
+    "Use hack-branches for branch instances, hack-env for env values, hack-diagnose for a failing project and hack-feedback to draft a report about Hack itself. Prefer CLI over MCP when shell access is available.",
 };
 
 /** Focused plugin skills, in generation order. */

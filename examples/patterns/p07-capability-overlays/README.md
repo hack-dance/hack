@@ -77,5 +77,5 @@ names each source file without printing values, including an inherited
 primary-local runner override. It also checks that the containers' metadata
 carries each overlay's keys, that both APIs reach `upstream`, and that no Hack
 command tries to open a browser. The copy uses the runner's cached
-`oven/bun:1.4.2-slim` digest instead of the pinned Alpine image, and never
+`oven/bun:1.4.4-slim` digest instead of the pinned Alpine image, and never
 pulls.

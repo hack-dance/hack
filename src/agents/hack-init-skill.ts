@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 
 import { readOptionalTextFile } from "../lib/fs.ts";
+import { readHomeEnv } from "../lib/home-dir.ts";
 import { normalizeInstructionText } from "./instruction-source.ts";
 import {
   type IntegrationPreservedReason,
@@ -247,7 +248,8 @@ function resolveHackInitSkillPath(opts: {
   if (!root) {
     return {
       ok: false,
-      message: "HOME is not set; cannot resolve hack-init skill path.",
+      message:
+        "HOME is not set to an absolute path; cannot resolve hack-init skill path.",
     };
   }
 
@@ -258,6 +260,5 @@ function resolveHackInitSkillPath(opts: {
 }
 
 function resolveHomeDir(): string | null {
-  const home = (process.env.HOME ?? "").trim();
-  return home.length > 0 ? home : null;
+  return readHomeEnv();
 }

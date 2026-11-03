@@ -665,7 +665,7 @@ for (const docker of [
   }, 30_000);
 }
 
-test("doctor --migrate-env-config treats a symlinked overlay as env layers and never writes through it (HACK-1370)", async () => {
+test("doctor --migrate-env-config refuses a symlinked overlay with undelivered values and never writes through it (HACK-1370)", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();
   const projectDir = resolve(projectRoot, ".hack");
   const owned = ["synthetic", "owned", "77d1"].join("-");
@@ -686,8 +686,8 @@ test("doctor --migrate-env-config treats a symlinked overlay as env layers and n
     "--path",
     projectRoot,
   ]);
-  expect(code).toBe(0);
-  expect(noteCalls.join("\n")).toContain(
+  expect(code).not.toBe(0);
+  expect(noteCalls.join("\n")).not.toContain(
     "Project already uses the new env config files."
   );
   // The link and its target are untouched; nothing was migrated or cleaned.

@@ -173,6 +173,7 @@ import {
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   type LegacyComposeEnvFileReference,
+  LegacyDotenvMigrationRefusalError,
   type LegacyProjectEnvMigration,
   migrateLegacyProjectEnv,
   ProjectEnvLayerPathConflictError,
@@ -4094,14 +4095,26 @@ async function buildEnvMigrationPlanStep(opts: {
     return "Skip env migration because no project was detected from this path.";
   }
 
-  // The same format decision as the migration itself. A layer entry it refuses is
-  // reported as a plan; a path leaving the project still stops the run (HACK-1685).
+  // Match the execution gate, including checkout values not yet in the layers.
+  // A layer conflict is reported as a plan; escaping paths still stop the run.
   let modernExists: boolean;
   try {
     modernExists = await projectEnvConfigExistsForMutation({
       projectDir: opts.project.projectDir,
     });
+    if (modernExists) {
+      modernExists = !(await canMigrateCheckoutLegacyDotenv({
+        projectRoot: opts.project.projectRoot,
+        projectDir: opts.project.projectDir,
+        serviceNames: await discoverComposeServiceNames({
+          composeFile: opts.project.composeFile,
+        }),
+      }));
+    }
   } catch (error: unknown) {
+    if (error instanceof LegacyDotenvMigrationRefusalError) {
+      return error.message;
+    }
     if (error instanceof ProjectEnvLayerPathConflictError) {
       return `Refuse env migration (E_PATH_CONFLICT) because ${error.path} is not a regular env layer file.`;
     }

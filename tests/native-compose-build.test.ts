@@ -3,6 +3,12 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createNativeComposeWorkloadPhases,
+  DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
+  DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+  runNativeComposeWorkloadPhases,
+} from "../src/lib/compose-startup-budget.ts";
+import {
   assertNativeComposeBuildExecution,
   buildNativeComposeImages,
   NativeComposeBuildError,
@@ -381,7 +387,9 @@ test.each([
   const state = harness(rebuild, initial);
   expect(await buildNativeComposeImages(state.options)).toBe(0);
   expect(state.executed()).toBe(builds);
-  expect(state.checks()).toBeGreaterThan(4);
+  // Admission guard, one guard per builder spawn, closing guard; each guard
+  // is one freshness and one owned (storage proof) check.
+  expect(state.checks()).toBe(2 * (2 + builds));
 });
 
 test("foreign cached tags and ambiguous inventory refuse before any build", async () => {
@@ -445,7 +453,7 @@ test.each([
   const probe = state.options.io.probe;
   state.options.io.probe = async (args) => {
     const result = await probe(args);
-    if (args[1] === "ls" && ++reads === 3) {
+    if (args[1] === "ls" && ++reads === 2) {
       valid = false;
       if (change === "abort") {
         controller.abort();
@@ -473,7 +481,7 @@ test.each([
     await expect(
       buildNativeComposeImages({ ...state.options, deadline: () => deadline })
     ).rejects.toBeInstanceOf(NativeComposeBuildError);
-    expect(reads).toBe(3);
+    expect(reads).toBe(2);
     expect(state.executed()).toBe(0);
   } finally {
     clock.mockRestore();
@@ -519,7 +527,7 @@ test("all cached tags admit before builds and changed tag observations refuse", 
   expect(changed.executed()).toBe(0);
 });
 
-test("run builds keep the existing unbounded command budget; startup budgets remain shared", async () => {
+test("run builds keep the existing unbounded command budget; up/restart builds take the phase deadline", async () => {
   const command = harness();
   let timeout: number | undefined;
   const execute = command.options.io.execute;
@@ -588,6 +596,257 @@ test("guard storage time that extends the start deadline is re-read at every bui
       buildNativeComposeImages({ ...fixed.options, deadline: () => frozen })
     ).rejects.toBeInstanceOf(NativeComposeBuildError);
     expect(fixed.executed()).toBe(0);
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+function tracedHarness() {
+  const state = harness();
+  const first = state.value.intents[0];
+  if (!first) {
+    throw new Error("Intent missing");
+  }
+  // "cached" already has an owned image; "web" (first) must be built.
+  const other = { ...first, service: "other", tag: "other:latest" };
+  const trace: string[] = [];
+  const present = new Set<string>([other.tag]);
+  let engine = "fixture-engine:1";
+  state.options.assertFresh = async () => {
+    trace.push("fresh");
+  };
+  state.options.assertOwned = async () => {
+    trace.push("owned+storage");
+  };
+  state.options.io.engine = async () => {
+    trace.push("engine");
+    return engine;
+  };
+  state.options.io.probe = async (args) => {
+    const tag = (args.find((arg) => arg.endsWith(":latest")) ?? "").replace(
+      "reference=",
+      ""
+    );
+    const name = tag === other.tag ? "other" : "web";
+    if (args[1] === "ls") {
+      trace.push(`read:${name}`);
+      return present.has(tag) ? ID : "";
+    }
+    return JSON.stringify(cached(tag === other.tag ? other : first));
+  };
+  state.options.io.execute = async () => {
+    trace.push("spawn:web");
+    present.add(first.tag);
+    return 0;
+  };
+  return {
+    state,
+    options: { ...state.options, intents: [first, other] },
+    trace,
+    setEngine: (value: string) => {
+      engine = value;
+    },
+  };
+}
+
+test("every builder spawn follows a full guard after its last image read; one proof per build", async () => {
+  const { options, trace } = tracedHarness();
+  expect(await buildNativeComposeImages(options)).toBe(0);
+  const guard = ["fresh", "owned+storage", "engine"];
+  expect(trace).toEqual([
+    // Admission: one guard, then every selected tag is read.
+    ...guard,
+    "read:web",
+    "read:other",
+    // Builds: reread the tag, then a full guard immediately before the spawn.
+    "read:web",
+    ...guard,
+    "spawn:web",
+    "read:web",
+    "read:other",
+    "read:other",
+    // Every admitted image is reread unchanged, then the closing guard: the
+    // caller's next effect (arming, then its spawn) follows it directly.
+    "read:web",
+    "read:other",
+    ...guard,
+  ]);
+  // Ownership invariant: between any image read and the next spawn there is
+  // a complete guard, and the build ends with one after its last read.
+  expect(trace.slice(-guard.length)).toEqual(guard);
+  for (const [index, step] of trace.entries()) {
+    if (step.startsWith("spawn:")) {
+      const before = trace.slice(0, index);
+      const lastRead = before.findLastIndex((entry) =>
+        entry.startsWith("read:")
+      );
+      expect(before.slice(lastRead + 1)).toEqual(guard);
+    }
+  }
+  expect(trace.filter((step) => step === "owned+storage")).toHaveLength(3);
+});
+
+test("ownership lost during the closing image reread refuses before arming or any spawn", async () => {
+  const { options, trace } = tracedHarness();
+  let reads = 0;
+  let owned = true;
+  const probe = options.io.probe;
+  options.io.probe = async (args) => {
+    const value = await probe(args);
+    // The closing reread is tag reads 7 and 8; ownership is lost at read 7.
+    if (args[1] === "ls" && ++reads === 7) {
+      owned = false;
+    }
+    return value;
+  };
+  options.assertOwned = async () => {
+    trace.push("owned+storage");
+    if (!owned) {
+      throw new NativeComposeBuildError();
+    }
+  };
+  const phases = createNativeComposeWorkloadPhases({
+    imageTimeoutMs: DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
+    startupTimeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+    storageTimeoutMs: 90_000,
+  });
+  let armed = false;
+  await expect(
+    runNativeComposeWorkloadPhases({
+      phases,
+      boundedBuilds: true,
+      build: (deadline) => buildNativeComposeImages({ ...options, deadline }),
+      // Stands in for startNativeComposeWorkloads, which arms first.
+      start: async () => {
+        armed = true;
+        return 0;
+      },
+      failed: (code) => code,
+    })
+  ).rejects.toBeInstanceOf(NativeComposeBuildError);
+  expect(reads).toBe(8);
+  expect(trace.at(-1)).toBe("owned+storage");
+  expect(armed).toBe(false);
+});
+
+test("an engine swapped during a build refuses at the next guard, before any later effect", async () => {
+  const { options, trace, setEngine } = tracedHarness();
+  const execute = options.io.execute;
+  options.io.execute = async (args, value) => {
+    const code = await execute(args, value);
+    setEngine("foreign-engine:2");
+    return code;
+  };
+  await expect(buildNativeComposeImages(options)).rejects.toBeInstanceOf(
+    NativeComposeBuildError
+  );
+  expect(trace.filter((step) => step.startsWith("spawn:"))).toEqual([
+    "spawn:web",
+  ]);
+  expect(trace.at(-1)).toBe("engine");
+});
+
+test("a long native build runs on the image budget and leaves the start budget whole", async () => {
+  // Fake clocks: wall time drives Date.now and both phase deadlines.
+  let now = 1_000_000;
+  let monotonic = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const phases = createNativeComposeWorkloadPhases({
+      imageTimeoutMs: DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
+      startupTimeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+      storageTimeoutMs: 90_000,
+      wallNow: () => now,
+      monotonicNow: () => monotonic,
+    });
+    const state = harness();
+    let timeout: number | undefined;
+    const execute = state.options.io.execute;
+    state.options.io.execute = async (args, value) => {
+      timeout = value;
+      // A 20-minute build: far past the 90 s start budget.
+      now += 20 * 60_000;
+      monotonic += 20 * 60_000;
+      return await execute(args, value);
+    };
+    let proofs = 0;
+    state.options.assertOwned = () =>
+      phases.excludeStorage(async () => {
+        proofs++;
+        now += 5000;
+        monotonic += 5000;
+      });
+    expect(
+      await buildNativeComposeImages({
+        ...state.options,
+        deadline: phases.images.deadline,
+      })
+    ).toBe(0);
+    expect(state.executed()).toBe(1);
+    // The builder got the image budget, not the start budget: the admission
+    // and pre-spawn proofs were excluded from it.
+    expect(timeout).toBe(DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS);
+    // Admission, pre-spawn and closing guards: one storage proof each.
+    expect(proofs).toBe(3);
+    // The start phase begins only now, with its whole budget.
+    const start = phases.start();
+    expect(start.deadline() - now).toBe(DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS);
+    // Later guard proofs extend the start phase, not the finished image phase.
+    const imageDeadline = phases.images.deadline();
+    await phases.excludeStorage(async () => {
+      now += 7000;
+      monotonic += 7000;
+    });
+    expect(phases.images.deadline()).toBe(imageDeadline);
+    expect(start.deadline() - now).toBe(DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS);
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+test("a native build past the image budget is refused before the next builder spawn", async () => {
+  let now = 1_000_000;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const phases = createNativeComposeWorkloadPhases({
+      imageTimeoutMs: 60_000,
+      startupTimeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+      storageTimeoutMs: 90_000,
+      wallNow: () => now,
+      monotonicNow: () => now,
+    });
+    const state = harness();
+    const first = state.value.intents[0];
+    if (!first) {
+      throw new Error("Intent missing");
+    }
+    const other = { ...first, service: "other", tag: "other:latest" };
+    const built = new Set<string>();
+    state.options.io.probe = async (args) => {
+      const tag = (args.find((arg) => arg.endsWith(":latest")) ?? "").replace(
+        "reference=",
+        ""
+      );
+      if (args[1] === "ls") {
+        return built.has(tag) ? ID : "";
+      }
+      return JSON.stringify(cached(tag === other.tag ? other : first));
+    };
+    const timeouts: (number | undefined)[] = [];
+    state.options.io.execute = async (args, value) => {
+      timeouts.push(value);
+      now += 61_000;
+      built.add(args[args.indexOf("--tag") + 1] ?? "");
+      return 0;
+    };
+    await expect(
+      buildNativeComposeImages({
+        ...state.options,
+        intents: [first, other],
+        deadline: phases.images.deadline,
+      })
+    ).rejects.toBeInstanceOf(NativeComposeBuildError);
+    expect(timeouts).toEqual([60_000]);
   } finally {
     clock.mockRestore();
   }

@@ -327,8 +327,9 @@ export async function buildNativeComposeImages(opts: {
   readonly intents: readonly NativeComposeBuildIntent[];
   readonly projectRoot: string;
   /**
-   * Start-phase wall deadline, read at every check: storage proof time that
-   * `assertOwned` excludes from the start budget extends it while builds run.
+   * Image-phase wall deadline (`HACK_COMPOSE_IMAGE_TIMEOUT_MS`), read at every
+   * check: storage proof time that `assertOwned` excludes from the image
+   * budget extends it while builds run. Omitted for one-off `run`.
    */
   readonly deadline?: () => number;
   readonly signal: AbortSignal;
@@ -383,20 +384,26 @@ export async function buildNativeComposeImages(opts: {
     engine = observed;
     requireValue(!opts.signal.aborted && within());
   };
-  const admitted: { intent: NativeComposeBuildIntent; id: string }[] = [];
+  // Guard placement: every effect (builder spawn) runs only after a full guard
+  // (`fresh`: source freshness, ownership with its storage proof, and the same
+  // engine) that follows the last image observation it depends on. Image reads
+  // are read-only, so consecutive reads share one guard; a guard is needed only
+  // between an observation and the next effect. The closing guard runs after
+  // the closing reread, so the caller's next effect (routing/file arming, then
+  // the Compose or one-off spawn) follows a full guard with no observation in
+  // between. One phase therefore runs B+2 guards for B builds, not one per read.
+  await fresh();
   // Admit every selected cached tag before any builder is invoked.
   const cached = new Map<NativeComposeBuildIntent, string | null>();
   for (const intent of opts.intents) {
-    await fresh();
     cached.set(intent, await image(intent, io.probe));
   }
+  const admitted: { intent: NativeComposeBuildIntent; id: string }[] = [];
   for (const intent of opts.intents) {
-    await fresh();
+    // An earlier build or a foreign writer must not have changed this tag.
     const prior = await image(intent, io.probe);
     requireValue(prior === cached.get(intent));
     if (intent.rebuild || prior === null) {
-      await fresh();
-      requireValue((await image(intent, io.probe)) === prior);
       // The final image read can outlive or invalidate prior admission.
       // Recheck after it, then admit spawn synchronously with the remaining budget.
       await fresh();
@@ -409,15 +416,15 @@ export async function buildNativeComposeImages(opts: {
       if (code !== 0 || opts.signal.aborted) {
         return code || 1;
       }
-      await fresh();
     }
     const id = await image(intent, io.probe);
     requireValue(id !== null);
     admitted.push({ intent, id });
   }
-  await fresh();
   for (const { intent, id } of admitted) {
     requireValue((await image(intent, io.probe)) === id);
   }
+  // Last step: nothing observed after this guard before the caller's effects.
+  await fresh();
   return 0;
 }

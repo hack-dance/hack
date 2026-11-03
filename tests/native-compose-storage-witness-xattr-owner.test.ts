@@ -20,7 +20,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createNativeComposeStartDeadline } from "../src/lib/compose-startup-budget.ts";
+import { createNativeComposePhaseDeadline } from "../src/lib/compose-startup-budget.ts";
 import {
   assertNativeComposeEffectOwned,
   nativeComposeGuardStorageProof,
@@ -1967,7 +1967,7 @@ test(
       if (!storage) {
         throw new Error("Expected retained storage");
       }
-      const start = createNativeComposeStartDeadline({
+      const start = createNativeComposePhaseDeadline({
         timeoutMs: 10_000,
         storageTimeoutMs: 90_000,
         wallNow: () => 1_000_000,

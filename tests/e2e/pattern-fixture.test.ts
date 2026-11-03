@@ -26,6 +26,21 @@ function inspection(opts: {
 const kept = JSON.stringify([{ Id: `${KEPT}${"0".repeat(52)}` }]);
 
 describe("partitionContainerInspection", () => {
+  test("rejects an unlisted missing ID even when all listed containers survive", () => {
+    expect(
+      partitionContainerInspection({
+        ids: [KEPT],
+        result: inspection({
+          exitCode: 0,
+          stdout: kept,
+          stderr: `Error: No such object: ${GONE}\n`,
+        }),
+      })
+    ).toEqual({
+      error: `unexpected docker inspect error: Error: No such object: ${GONE}`,
+    });
+  });
+
   test("keeps every listed container when inspection succeeds", () => {
     const split = partitionContainerInspection({
       ids: [KEPT],

@@ -10,6 +10,7 @@ import type {
 const LIFECYCLE_OWNER_OPTION = "@hack_lifecycle_owner";
 const LIFECYCLE_OWNER_ENV = "HACK_LIFECYCLE_OWNER_TOKEN";
 const NO_TMUX_SERVER = /^no server running on [^\r\n]+$/;
+const NUMERIC_FIELD = /^\d+$/;
 const MISSING_TMUX_SOCKET =
   /^error connecting to [^\r\n]+ \(No such file or directory\)$/;
 
@@ -57,6 +58,48 @@ function buildEnvInjectedCommand(opts: {
   return `env ${assignments} ${opts.command}`;
 }
 
+/**
+ * Parse `list-sessions` output in the
+ * `name<TAB>attached<TAB>path<TAB>windows<TAB>created` format.
+ *
+ * tmux rejects tabs in session names, and the attached, windows and created
+ * fields are numeric, so the path is everything between the second field and
+ * the last two. That keeps a path containing tabs, spaces or other delimiter
+ * characters out of the session name (HACK-1798). A line without all five
+ * fields, or with a non-numeric tail, is not a session row: returning its
+ * whole text as a name would print an ID that no session answers to.
+ */
+export function parseTmuxSessionListing(stdout: string): MuxSession[] {
+  const sessions: MuxSession[] = [];
+  for (const line of stdout.split("\n")) {
+    const fields = line.endsWith("\r") ? line.slice(0, -1) : line;
+    const parts = fields.split("\t");
+    if (parts.length < 5) {
+      continue;
+    }
+    const name = parts[0] ?? "";
+    const attached = parts[1] ?? "";
+    const created = parts.at(-1) ?? "";
+    const windows = parts.at(-2) ?? "";
+    const path = parts.slice(2, -2).join("\t");
+    const numeric = [attached, windows, created].every((field) =>
+      NUMERIC_FIELD.test(field)
+    );
+    if (!(name && numeric)) {
+      continue;
+    }
+    sessions.push({
+      backend: "tmux",
+      name,
+      attached: attached === "1",
+      path: path || null,
+      windows: parseIntOrNull(windows),
+      createdAt: new Date(Number.parseInt(created, 10) * 1000).toISOString(),
+    });
+  }
+  return sessions;
+}
+
 export function createTmuxBackend(): MuxBackend {
   const available = Boolean(findExecutableInPath("tmux"));
 
@@ -73,7 +116,11 @@ export function createTmuxBackend(): MuxBackend {
       "#{session_created}",
     ].join("\t");
 
-    const result = await exec(["tmux", "list-sessions", "-F", format], {
+    // `-u` keeps the tab separators intact. Without a UTF-8 locale (LANG
+    // unset or C), tmux replaces control characters in client output with
+    // `_`, which turns every line into one unmatched name: lifecycle
+    // sessions then look absent to both `up` and `down` (HACK-1797).
+    const result = await exec(["tmux", "-u", "list-sessions", "-F", format], {
       stdin: "ignore",
     });
 
@@ -81,32 +128,7 @@ export function createTmuxBackend(): MuxBackend {
       return [];
     }
 
-    const sessions: MuxSession[] = [];
-    for (const line of result.stdout.trim().split("\n")) {
-      if (!line) {
-        continue;
-      }
-      const [name, attached, path, windows, created] = line.split("\t");
-      if (!name) {
-        continue;
-      }
-
-      const createdAt =
-        created && created.length > 0
-          ? new Date(Number.parseInt(created, 10) * 1000).toISOString()
-          : null;
-
-      sessions.push({
-        backend: "tmux",
-        name,
-        attached: attached === "1",
-        path: path || null,
-        windows: parseIntOrNull(windows),
-        createdAt,
-      });
-    }
-
-    return sessions;
+    return parseTmuxSessionListing(result.stdout);
   };
 
   const createSession = async (opts: {
@@ -156,7 +178,7 @@ export function createTmuxBackend(): MuxBackend {
         { stdin: "ignore" }
       );
       if (ownerResult.exitCode !== 0) {
-        await exec(["tmux", "kill-session", "-t", opts.name], {
+        await exec(["tmux", "kill-session", "-t", `=${opts.name}`], {
           stdin: "ignore",
         });
         return {
@@ -175,7 +197,10 @@ export function createTmuxBackend(): MuxBackend {
   const killSession = async (opts: {
     readonly name: string;
   }): Promise<ExecResult> => {
-    return await exec(["tmux", "kill-session", "-t", opts.name], {
+    // `=` makes tmux match the name exactly. A bare target falls back to a
+    // prefix match, so stopping `demo` after it exited could kill
+    // `demo--lifecycle`, a session the caller never verified.
+    return await exec(["tmux", "kill-session", "-t", `=${opts.name}`], {
       stdin: "ignore",
     });
   };

@@ -224,6 +224,63 @@ test("inspection accepts exact-owned cleanup between session listing and owner r
   expect(kills).toBe(1);
 });
 
+test("inspection confirms an unlisted owned session instead of recreating it (HACK-1797)", async () => {
+  // A listing that cannot be parsed (tmux without a UTF-8 locale) omits the
+  // session. Up must adopt it rather than create a duplicate, and down must
+  // still see it.
+  const presenceQueries: string[] = [];
+  const backend = inspectionBackend({
+    listSessions: async () => [],
+    readLifecycleOwnerToken: async () => ownershipToken,
+    listSessionWindowNames: async () => new Set(["shell", "proxy"]),
+    readSessionPresence: async ({ name }) => {
+      presenceQueries.push(name);
+      return "present";
+    },
+  });
+
+  const inspection = await inspectFixture(backend);
+  expect(inspection.classification).toBe("owned-healthy");
+  expect(inspection.decision).toEqual({ kind: "adopt", entry });
+  expect(inspection.session).toMatchObject({
+    backend: "tmux",
+    name: session.name,
+    path: null,
+  });
+  expect(presenceQueries[0]).toBe(session.name);
+});
+
+test("inspection treats an unlisted session as absent only on explicit absence", async () => {
+  for (const presence of ["absent", "unknown"] as const) {
+    const backend = inspectionBackend({
+      listSessions: async () => [],
+      readSessionPresence: async () => presence,
+    });
+    const inspection = await inspectFixture(backend);
+    expect(inspection.classification).toBe("absent");
+    expect(inspection.decision).toEqual({ kind: "create" });
+  }
+});
+
+test("inspection never grants legacy ownership to an unlisted session", async () => {
+  const legacyEntry: LifecycleStateEntry = {
+    ...entry,
+    ownershipToken: undefined,
+  };
+  const inspection = await inspectLifecycleSession({
+    backend: inspectionBackend({
+      listSessions: async () => [],
+      readSessionPresence: async () => "present",
+    }),
+    entry: legacyEntry,
+    expectedSessionName: session.name,
+    expectedProjectRoot: "/tmp/event-agent",
+    expectedDefinitionHash: definitionHash,
+  });
+  expect(inspection.classification).toBe("foreign");
+  expect(inspection.decision.kind).toBe("block");
+});
+
 test.each([
   "present",
   "unknown",

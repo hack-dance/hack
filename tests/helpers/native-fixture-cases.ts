@@ -46,6 +46,8 @@ export type NativeFixtureCase = {
 };
 
 export type NativeFixtureCases = {
+  /** Await overrun bodies and their second cleanup before removing retained roots. */
+  readonly drain: () => Promise<void>;
   /** The guarded case running the caller. Throws outside a guarded case. */
   readonly current: () => NativeFixtureCase;
   /** Run one guarded case body directly and reject with its outcome. */
@@ -131,6 +133,7 @@ export function createNativeFixtureCases(opts: {
   readonly settlementBudgetMs: number;
 }): NativeFixtureCases {
   const storage = new AsyncLocalStorage<NativeFixtureCase>();
+  const lateCleanups = new Set<Promise<void>>();
   const current = (): NativeFixtureCase => {
     const value = storage.getStore();
     if (value === undefined) {
@@ -194,9 +197,12 @@ export function createNativeFixtureCases(opts: {
       failure = { error };
     }
     if (failure !== undefined) {
+      const overrun = bodyRunning ? running : undefined;
       await runFailureCleanups();
-      if (bodyRunning) {
-        running.catch(() => undefined).then(runFailureCleanups);
+      if (overrun) {
+        const cleanup = overrun.catch(() => undefined).then(runFailureCleanups);
+        lateCleanups.add(cleanup);
+        cleanup.finally(() => lateCleanups.delete(cleanup));
       }
     }
     // Settle this case's own targets even after a failure, so the next case
@@ -221,6 +227,9 @@ export function createNativeFixtureCases(opts: {
     );
   };
   return {
+    drain: async () => {
+      await Promise.all([...lateCleanups]);
+    },
     current,
     run: (body, timeoutMs = opts.defaultTimeoutMs) => runCase(body, timeoutMs),
     test: (name, body, timeoutMs = opts.defaultTimeoutMs) => {

@@ -5181,6 +5181,9 @@ boundedTest(
       { store, generation } = await prepared();
     const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
     try {
+      // This reported case uses the legacy v1 mutation path: its command signal
+      // belongs only to SIGINT/SIGTERM, not the newer mutation deadline timer.
+      expect(generation.report.adoption_generation_version).toBe(1);
       const binary = await compiler();
       process.env.HACK_CONFIG_COMPILER_BINARY = binary;
       await store.publish({ generation, binary });
@@ -5509,3 +5512,82 @@ boundedTest(
   },
   PUBLIC_DEADLINE_CASE_MS
 );
+
+boundedTest(
+  "HACK-1810: an early deadline timer abort reaches cancelled as a deadline, not caller cancellation",
+  async () => {
+    await dependencyFixture();
+    const { store, generation } = await prepared();
+    const originalTimeout = globalThis.setTimeout;
+    let fireDeadline: (() => void) | undefined;
+    let timer: { mockRestore: () => void } | undefined;
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      timer = spyOn(globalThis, "setTimeout").mockImplementation(
+        Object.assign(
+          (handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+            if (
+              typeof handler === "function" &&
+              handler.name === "adoptionDeadlineAbort"
+            ) {
+              fireDeadline = () => handler(...args);
+            }
+            return originalTimeout(handler, delay, ...args);
+          },
+          { __promisify__: originalTimeout.__promisify__ }
+        ) as typeof setTimeout
+      );
+      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
+      await refusal(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "stop",
+          services: [],
+          deadline,
+          run: async (input) => {
+            expect(Date.now()).toBeLessThan(deadline);
+            expect(fireDeadline).toBeDefined();
+            fireDeadline?.();
+            // The timer can win the rounded-down final millisecond before the
+            // wall clock. This checks cancelled(), before its date guard.
+            input.assertActive();
+            return 0;
+          },
+        }),
+        "E_LEGACY_ADOPTION_DEADLINE"
+      );
+      expect((await readReceipt()).pendingOperation.operation).toBe("stop");
+      expect(await mutationCommands()).toEqual([]);
+    } finally {
+      timer?.mockRestore();
+      await store.close();
+    }
+  },
+  retainedOperationCaseTimeout(1)
+);
+
+test("HACK-1810: a v4 engine proof phase timeout keeps its timeout classification without a caller deadline", async () => {
+  await trackedManagedCheckout();
+  await managedGenerated("reference");
+  const binary = await managedEnvCompilerFixture(join(root, "phase-compiler"));
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  const realNow = Date.now;
+  let clock: { mockRestore: () => void } | undefined;
+  let offset = 0;
+  try {
+    const before = Bun.file(join(root, "commands")).size;
+    clock = spyOn(Date, "now").mockImplementation(() => {
+      if (Bun.file(join(root, "commands")).size > before) {
+        offset = 16_000;
+      }
+      return realNow() + offset;
+    });
+    await refusal(store.prepare({ binary }), "E_LEGACY_ADOPTION_DEADLINE");
+    expect(offset).toBe(16_000);
+  } finally {
+    clock?.mockRestore();
+    await store.close();
+  }
+});

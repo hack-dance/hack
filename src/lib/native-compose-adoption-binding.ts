@@ -53,6 +53,7 @@ import {
 import {
   createNativeComposeProbe,
   NativeComposeOwnershipError,
+  nativeComposeProbeFailure,
 } from "./native-compose-ownership.ts";
 import {
   acquireLegacyAdoptionSourceInputs,
@@ -136,6 +137,7 @@ type Code =
   | "E_LEGACY_COMPOSE_BINDING_UNSUPPORTED"
   | "E_LEGACY_COMPOSE_BINDING_IDENTITY"
   | "E_LEGACY_COMPOSE_BINDING_CHANGED"
+  | "E_LEGACY_COMPOSE_BINDING_TIMEOUT"
   | "E_LEGACY_COMPOSE_BINDING_PROBE"
   | "E_LEGACY_COMPOSE_BINDING_CANCELLED";
 
@@ -153,6 +155,8 @@ export class LegacyComposeAdoptionBindingError extends Error {
           "Existing legacy Compose resource identities could not be verified; values omitted.",
         E_LEGACY_COMPOSE_BINDING_CHANGED:
           "Legacy Compose binding changed after acquisition; values omitted.",
+        E_LEGACY_COMPOSE_BINDING_TIMEOUT:
+          "Legacy Compose binding inspection timed out; values omitted.",
         E_LEGACY_COMPOSE_BINDING_PROBE:
           "Legacy Compose binding inspection failed or exceeded its time or I/O budget; values omitted.",
         E_LEGACY_COMPOSE_BINDING_CANCELLED:
@@ -1262,6 +1266,9 @@ function translate(error: unknown, signal?: AbortSignal): never {
   cancelled(signal);
   if (error instanceof LegacyComposeAdoptionBindingError) {
     throw error;
+  }
+  if (nativeComposeProbeFailure(error) === "timeout") {
+    refuse("E_LEGACY_COMPOSE_BINDING_TIMEOUT");
   }
   if (error instanceof NativeComposeOwnershipError) {
     refuse(

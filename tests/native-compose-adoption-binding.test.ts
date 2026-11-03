@@ -857,7 +857,7 @@ test("moving snapshot guard exhausts the original shared deadline", async () => 
       projectRoot,
       timeoutMs: EXHAUSTED_PROBE_DEADLINE_MS,
     }),
-    "E_LEGACY_COMPOSE_BINDING_PROBE"
+    "E_LEGACY_COMPOSE_BINDING_TIMEOUT"
   );
   expect(Date.now() - started).toBeLessThan(
     EXHAUSTED_PROBE_DEADLINE_MS + EXHAUSTED_REFUSAL_SLACK_MS
@@ -945,7 +945,7 @@ test("a persistent endpoint placeholder exhausts the original shared deadline", 
       projectRoot,
       timeoutMs: EXHAUSTED_PROBE_DEADLINE_MS,
     }),
-    "E_LEGACY_COMPOSE_BINDING_PROBE"
+    "E_LEGACY_COMPOSE_BINDING_TIMEOUT"
   );
   expect(Date.now() - started).toBeLessThan(
     EXHAUSTED_PROBE_DEADLINE_MS + EXHAUSTED_REFUSAL_SLACK_MS
@@ -1547,7 +1547,7 @@ test("timeout reaps real child without authorizing any mutation", async () => {
         projectRoot,
         timeoutMs: EXPIRING_PROBE_DEADLINE_MS,
       }),
-      "E_LEGACY_COMPOSE_BINDING_PROBE"
+      "E_LEGACY_COMPOSE_BINDING_TIMEOUT"
     );
     expect(observed.children.length).toBeGreaterThan(0);
     for (const { child, exited } of observed.children) {

@@ -54,12 +54,17 @@ function throwAdoptedCommandRefusal(error: unknown): never {
     throw error;
   }
   const ordered = legacyComposeOrderedRefusal(error);
+  let code: "E_CONFIG_INVALID" | "E_STARTUP_TIMEOUT" | "E_CANCELLED" =
+    "E_CONFIG_INVALID";
+  if (error instanceof LegacyComposeAdoptedGenerationError) {
+    if (error.code === "E_LEGACY_ADOPTION_DEADLINE") {
+      code = "E_STARTUP_TIMEOUT";
+    } else if (error.code === "E_LEGACY_ADOPTION_CANCELLED") {
+      code = "E_CANCELLED";
+    }
+  }
   throw new HackCliError({
-    code:
-      error instanceof LegacyComposeAdoptedGenerationError &&
-      error.code === "E_LEGACY_ADOPTION_DEADLINE"
-        ? "E_STARTUP_TIMEOUT"
-        : "E_CONFIG_INVALID",
+    code,
     message:
       error instanceof LegacyComposeAdoptedGenerationError
         ? error.message
@@ -78,7 +83,7 @@ function remainingMs(deadline: number): number {
 function cancelled(signal: AbortSignal) {
   if (signal.aborted) {
     throw new HackCliError({
-      code: "E_CONFIG_INVALID",
+      code: "E_CANCELLED",
       message: LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES.cancelled,
     });
   }

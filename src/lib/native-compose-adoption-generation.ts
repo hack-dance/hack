@@ -9,6 +9,7 @@ import {
   inspectLegacyComposeAdoptionResources,
   inspectLegacyComposeRetainedFileResources,
   inspectLegacyComposeSourceBindResources,
+  LegacyComposeAdoptionBindingError,
   type LegacyComposeVerifiedBinding,
 } from "./native-compose-adoption-binding.ts";
 import {
@@ -254,7 +255,7 @@ function refuseRoutingProofDeadline(
   stage?: LegacyComposePublicationRefusal["stage"]
 ): never {
   const error = new LegacyComposeAdoptedGenerationError(
-    "E_LEGACY_ADOPTION_STATE"
+    "E_LEGACY_ADOPTION_DEADLINE"
   );
   if (stage) {
     retainLegacyComposePublicationRefusal(error, {
@@ -272,9 +273,14 @@ function refuseRoutingProofDeadline(
 function refuseMutationDeadline(): never {
   refuse("E_LEGACY_ADOPTION_DEADLINE");
 }
+const deadlineAborts = new WeakSet<AbortSignal>();
 function cancelled(signal?: AbortSignal) {
   if (signal?.aborted) {
-    refuse("E_LEGACY_ADOPTION_CANCELLED");
+    refuse(
+      deadlineAborts.has(signal)
+        ? "E_LEGACY_ADOPTION_DEADLINE"
+        : "E_LEGACY_ADOPTION_CANCELLED"
+    );
   }
 }
 /**
@@ -313,14 +319,16 @@ export function legacyAdoptionProbePhaseMs(opts: {
 }
 
 /**
- * A store with a caller deadline reports an unclassified failure as a
- * deadline, not as invalid state, when a probe phase timed out or the deadline
- * has passed: phase clocks are derived from that deadline (HACK-1458).
+ * A known probe timeout stays a timeout even without an aggregate deadline.
+ * With a caller deadline, an unclassified failure after expiry also reports
+ * deadline rather than invalid state (HACK-1458, HACK-1810).
  */
 function deadlineExpiry(error: unknown, deadline?: number): boolean {
   return (
-    deadline !== undefined &&
-    (nativeComposeProbeFailure(error) === "timeout" || Date.now() >= deadline)
+    nativeComposeProbeFailure(error) === "timeout" ||
+    (error instanceof LegacyComposeAdoptionBindingError &&
+      error.code === "E_LEGACY_COMPOSE_BINDING_TIMEOUT") ||
+    (deadline !== undefined && Date.now() >= deadline)
   );
 }
 
@@ -2329,20 +2337,20 @@ async function completePublication(
       join(ctx.generationsRoot, publication.generation.id, "originals"),
       true
     );
-    const transaction: Context = {
-      ...ctx,
-      get timeoutMs() {
-        return ctx.timeoutMs;
-      },
-      check: async () => {
-        await ctx.check();
-        await recheckDirectories([held]);
-        await ctx.sourceBind.current?.lease.assertDirectoriesFresh({
-          signal: ctx.signal,
-        });
-      },
-    };
     try {
+      const transaction: Context = {
+        ...ctx,
+        get timeoutMs() {
+          return ctx.timeoutMs;
+        },
+        check: async () => {
+          await ctx.check();
+          await recheckDirectories([held]);
+          await ctx.sourceBind.current?.lease.assertDirectoriesFresh({
+            signal: ctx.signal,
+          });
+        },
+      };
       stage = "publication-hold-original";
       for (const location of originalLocations(
         transaction,
@@ -2457,20 +2465,20 @@ async function completeRollback(ctx: Context, state: Receipt) {
     join(ctx.generationsRoot, publication.generation.id, "originals"),
     true
   );
-  const transaction: Context = {
-    ...ctx,
-    get timeoutMs() {
-      return ctx.timeoutMs;
-    },
-    check: async () => {
-      await ctx.check();
-      await recheckDirectories([held]);
-      await ctx.sourceBind.current?.lease.assertDirectoriesFresh({
-        signal: ctx.signal,
-      });
-    },
-  };
   try {
+    const transaction: Context = {
+      ...ctx,
+      get timeoutMs() {
+        return ctx.timeoutMs;
+      },
+      check: async () => {
+        await ctx.check();
+        await recheckDirectories([held]);
+        await ctx.sourceBind.current?.lease.assertDirectoriesFresh({
+          signal: ctx.signal,
+        });
+      },
+    };
     let current = state;
     if (
       publication.native === null &&
@@ -2676,7 +2684,12 @@ function boundedMutationContext(ctx: Context, deadline: number) {
   const controller = new AbortController();
   const abort = () => controller.abort();
   ctx.signal?.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(abort, initialRemaining);
+  const timer = setTimeout(function adoptionDeadlineAbort() {
+    if (!controller.signal.aborted) {
+      deadlineAborts.add(controller.signal);
+      controller.abort();
+    }
+  }, initialRemaining);
   const bounded: Context = {
     ...ctx,
     signal: controller.signal,

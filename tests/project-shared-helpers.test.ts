@@ -797,6 +797,47 @@ test(
 );
 
 test(
+  "a down interrupted between its generation and operation-record writes still keeps a post-start rollback from releasing",
+  async () => {
+    const root = await scratch();
+    const helper = helperConfig({ port: freePort() });
+    const hackDir = join(root, "hack-home");
+    const up = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    await up.assertCurrent();
+    const owned = await ownedIdentity(root, helper);
+    // The containers started; then a down published only its new shutdown
+    // generation and died before replacing the operation record.
+    const instanceDir = join(hackDir, "shared-helpers", ".instances");
+    const holder = resolveSharedHelperHolder(BRANCH_A);
+    await writeFile(
+      join(instanceDir, `${holder}.shutdown-generation`),
+      "interrupted-down\n"
+    );
+    const error = await up
+      .assertCurrent({ servicesStarted: true })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SharedHelperSupersededError);
+    // The superseded start's cleanup keeps the helper under its containers.
+    expect(await up.rollback()).toEqual([]);
+    expect(await isAlive(owned)).toBe(true);
+    expect((await readHelperClaim(root, helper))?.holders).toEqual([holder]);
+    // The next down releases it.
+    await releaseProjectSharedHelpers({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    expect(await isAlive(owned)).toBe(false);
+    expect(await readHelperClaim(root, helper)).toBeNull();
+  },
+  TIMEOUT
+);
+
+test(
   "down releases helpers the instance acquired even after their config entry is removed or changed",
   async () => {
     const root = await scratch();

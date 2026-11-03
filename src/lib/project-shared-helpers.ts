@@ -433,7 +433,18 @@ export async function startProjectSharedHelpers(opts: {
             instance,
             timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
             run: async () => {
-              if ((await readOperation(instance)) !== operation) {
+              // Release only while this start is still the instance's
+              // current operation and no down has advanced the shutdown
+              // generation since it began. A down publishes the generation
+              // and then its operation record as two writes, so a down
+              // interrupted between them leaves this start's record in
+              // place: the generation check keeps the holders anyway (the
+              // down, or the next one, releases them), never stopping a
+              // helper underneath containers this start already launched.
+              if (
+                (await readOperation(instance)) !== operation ||
+                (await readGeneration(instance)) !== generation
+              ) {
                 return [];
               }
               await rm(instance.operationPath, { force: true });

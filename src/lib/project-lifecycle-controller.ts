@@ -179,6 +179,15 @@ async function replaceInspectedLifecycleSession(opts: {
   });
 }
 
+/** Keep the mux diagnostic (for example tmux "duplicate session") visible. */
+function describeSessionCreateFailure(opts: {
+  readonly sessionName: string;
+  readonly stderr?: string;
+}): string {
+  const detail = opts.stderr ? ` (${opts.stderr})` : "";
+  return `Failed to create lifecycle session: ${opts.sessionName}${detail}`;
+}
+
 /** The shared Hack mux owner. Callers supply selection; this owner retains session/token checks. */
 export function createLifecycleProcessController(opts: {
   readonly mux: () => Promise<ResolvedMux>;
@@ -344,7 +353,9 @@ export function createLifecycleProcessController(opts: {
         lifecycleOwnerToken: ownershipToken,
       });
       if (!created.ok) {
-        throw new Error(`Failed to create lifecycle session: ${sessionName}`);
+        throw new Error(
+          describeSessionCreateFailure({ sessionName, stderr: created.stderr })
+        );
       }
       if (backendName === "tmux") {
         for (const [key, value] of Object.entries(opts.env)) {

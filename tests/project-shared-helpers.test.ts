@@ -10,12 +10,14 @@ import {
 import { readProjectConfig } from "../src/lib/project.ts";
 import {
   buildSharedHelperSpec,
+  markSharedHelperInstanceStopping,
   type ProjectSharedHelperConfig,
   parseProjectSharedHelpers,
   releaseProjectSharedHelpers,
   resolveSharedHelperHolder,
   resolveSharedHelperStateDir,
   SharedHelperStartError,
+  SharedHelperSupersededError,
   startProjectSharedHelpers,
 } from "../src/lib/project-shared-helpers.ts";
 import {
@@ -740,6 +742,153 @@ test(
     // Never split: both helpers end up stopped together.
     expect(await isAlive(firstHelper)).toBe(false);
     expect(await isAlive(secondHelper)).toBe(false);
+  },
+  TIMEOUT
+);
+
+test(
+  "a down that marks the instance stopping, or releases it, supersedes an in-flight start",
+  async () => {
+    const root = await scratch();
+    const helper = helperConfig({ port: freePort() });
+    const hackDir = join(root, "hack-home");
+    const up = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    await up.assertCurrent();
+    expect(
+      await markSharedHelperInstanceStopping({
+        helpers: [helper],
+        composeProject: BRANCH_A,
+        hackDir,
+      })
+    ).toBe(true);
+    const error = await up.assertCurrent().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SharedHelperSupersededError);
+    expect(String(error)).toContain("before launching services");
+    // The superseded start's rollback must not release: the down owns it.
+    expect(await up.rollback()).toEqual([]);
+
+    // A release without a prior mark (down that skipped marking) also
+    // supersedes, and the after-start check names started services.
+    const again = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    await releaseProjectSharedHelpers({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    const after = await again
+      .assertCurrent({ servicesStarted: true })
+      .catch((caught: unknown) => caught);
+    expect(after).toBeInstanceOf(SharedHelperSupersededError);
+    expect(String(after)).toContain("while its services started");
+    expect(await readHelperClaim(root, helper)).toBeNull();
+  },
+  TIMEOUT
+);
+
+test(
+  "down releases helpers the instance acquired even after their config entry is removed or changed",
+  async () => {
+    const root = await scratch();
+    const hackDir = join(root, "hack-home");
+    const original = helperConfig({ port: freePort() });
+    await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [original],
+      composeProject: BRANCH_A,
+    });
+    const owned = await ownedIdentity(root, original);
+    // The entry is removed from config: down still releases and stops it.
+    const removed = await releaseProjectSharedHelpers({
+      helpers: undefined,
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    expect(removed.map((entry) => [entry.name, entry.result.state])).toEqual([
+      ["issuer-bridge", "stopped"],
+    ]);
+    expect(await isAlive(owned)).toBe(false);
+    expect(await readHelperClaim(root, original)).toBeNull();
+
+    // The entry's port changes after start: the original port is released.
+    await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [original],
+      composeProject: BRANCH_A,
+    });
+    const ownedAgain = await ownedIdentity(root, original);
+    const moved = helperConfig({ port: freePort() });
+    const changed = await releaseProjectSharedHelpers({
+      helpers: [moved],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    expect(changed.map((entry) => entry.result.state).sort()).toEqual([
+      "absent",
+      "stopped",
+    ]);
+    expect(await isAlive(ownedAgain)).toBe(false);
+    expect(await readHelperClaim(root, original)).toBeNull();
+    // Nothing is left to release.
+    expect(
+      await releaseProjectSharedHelpers({
+        helpers: undefined,
+        composeProject: BRANCH_A,
+        hackDir,
+      })
+    ).toEqual([]);
+  },
+  TIMEOUT
+);
+
+test(
+  "a failed release keeps the claim and the acquired record, so the next down retries it",
+  async () => {
+    const root = await scratch();
+    const hackDir = join(root, "hack-home");
+    const helper = helperConfig({ port: freePort() });
+    await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    const owned = await ownedIdentity(root, helper);
+    const claimPath = join(
+      resolveSharedHelperStateDir({
+        hackDir,
+        name: helper.name,
+        port: helper.port,
+      }),
+      `${helper.name}.claim.json`
+    );
+    const claimText = await readFile(claimPath, "utf8");
+    await writeFile(claimPath, "{not json\n", { mode: 0o600 });
+    // Config entry removed too: the record alone must carry the retry.
+    const failed = await releaseProjectSharedHelpers({
+      helpers: undefined,
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    expect(failed.map((entry) => entry.result)).toMatchObject([
+      { state: "failed", reason: "claim-invalid" },
+    ]);
+    expect(await readFile(claimPath, "utf8")).toBe("{not json\n");
+    expect(await isAlive(owned)).toBe(true);
+    await writeFile(claimPath, claimText, { mode: 0o600 });
+    const retried = await releaseProjectSharedHelpers({
+      helpers: undefined,
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    expect(retried.map((entry) => entry.result.state)).toEqual(["stopped"]);
+    expect(await isAlive(owned)).toBe(false);
   },
   TIMEOUT
 );

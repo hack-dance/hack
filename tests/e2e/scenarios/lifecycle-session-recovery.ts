@@ -573,6 +573,15 @@ export async function writeFakeDocker(opts: {
       "      exit 0",
       "      ;;",
       '    *" up "*)',
+      // Optional gate: the image phase (`up --no-start`) records that it was
+      // reached, then waits until the gate file exists.
+      '      if [ -n "${E2E_DOCKER_GATE_UP:-}" ]; then',
+      '        case " $* " in *" --no-start "*)',
+      '          : > "${E2E_DOCKER_GATE_UP}.reached"',
+      '          while [ ! -e "$E2E_DOCKER_GATE_UP" ]; do sleep 0.05; done',
+      "          ;;",
+      "        esac",
+      "      fi",
       '      if [ "${E2E_DOCKER_BLOCK_UP:-}" = "1" ]; then',
       '        parent_pid="$PPID"',
       '        while kill -0 "$parent_pid" 2>/dev/null; do sleep 0.1; done',

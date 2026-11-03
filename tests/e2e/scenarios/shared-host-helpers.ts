@@ -73,8 +73,17 @@ export const sharedHostHelpersScenario: Scenario = {
     const writeConfig = async (opts: {
       readonly mode: HelperMode;
       readonly readyTimeoutMs?: number;
+      /** Write the config with no sharedHelpers entry at all. */
+      readonly withoutHelpers?: boolean;
     }): Promise<void> => {
       const lifecycle = (baseConfig.lifecycle ?? {}) as Record<string, unknown>;
+      if (opts.withoutHelpers) {
+        await writeFile(
+          configPath,
+          `${JSON.stringify({ ...baseConfig, lifecycle }, null, 2)}\n`
+        );
+        return;
+      }
       await writeFile(
         configPath,
         `${JSON.stringify(
@@ -467,11 +476,189 @@ export const sharedHostHelpersScenario: Scenario = {
         that: !((await isRunning(last)) || (await portBusy(port))),
         message: "the final down left an owned helper or listener behind",
       });
+
+      await runReviewRegressionPhases({
+        ctx,
+        cwd: fixture.root,
+        path,
+        branch: branchA,
+        claimPath,
+        writeConfig,
+        cli,
+        readClaim,
+        ownedHelper,
+      });
     } finally {
       await cleanupScenario({ foreign, readClaim });
     }
   },
 };
+
+/**
+ * Regressions from the independent review of #565: a down that completes
+ * while an up is paused after helper preparation; a helper entry removed
+ * from config after start; and a down whose helper release fails.
+ */
+async function runReviewRegressionPhases(opts: {
+  readonly ctx: Parameters<Scenario["run"]>[0];
+  readonly cwd: string;
+  readonly path: string;
+  readonly branch: string;
+  readonly claimPath: string;
+  readonly writeConfig: (opts: {
+    readonly mode: HelperMode;
+    readonly withoutHelpers?: boolean;
+  }) => Promise<void>;
+  readonly cli: (opts: {
+    readonly verb: "up" | "down";
+    readonly branch: string;
+  }) => Promise<CliResult>;
+  readonly readClaim: () => Promise<ReturnType<
+    typeof parseSharedHostClaim
+  > | null>;
+  readonly ownedHelper: () => Promise<Identity>;
+}): Promise<void> {
+  const { ctx, branch } = opts;
+  await opts.writeConfig({ mode: "identity" });
+
+  ctx.log("down during a paused up: the up refuses to start services");
+  const gate = join(ctx.tempRoot, "compose-up-gate");
+  const dockerLog = join(ctx.tempRoot, "gated-docker.log");
+  const pausedUp = Bun.spawn(
+    resolveCliSpawnArgs(["up", "--detach", "--json", "--branch", branch]),
+    {
+      cwd: opts.cwd,
+      env: buildCliEnv({
+        hackHome: ctx.hackHome,
+        extra: {
+          PATH: opts.path,
+          E2E_ISSUER_UPSTREAM: UPSTREAM,
+          E2E_DOCKER_GATE_UP: gate,
+          E2E_DOCKER_LOG: dockerLog,
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    }
+  );
+  let reached = false;
+  await waitUntil(async () => {
+    reached = await Bun.file(`${gate}.reached`).exists();
+    return reached;
+  });
+  if (!reached) {
+    pausedUp.kill("SIGKILL");
+    await pausedUp.exited;
+    throw new Error("the gated up never reached compose image preparation");
+  }
+  // Helper preparation is done: the up holds a ready helper.
+  const pausedHelper = await opts.ownedHelper();
+  expectExit({
+    result: await opts.cli({ verb: "down", branch }),
+    codes: [0],
+    message: "down while the up is paused",
+  });
+  expect({
+    that: !(await isRunning(pausedHelper)) && (await opts.readClaim()) === null,
+    message: "down must release the paused up's helper",
+  });
+  await writeFile(gate, "open\n");
+  const [pausedExit, pausedStdout] = await Promise.all([
+    pausedUp.exited,
+    new Response(pausedUp.stdout).text(),
+  ]);
+  const pausedResult = parseEnvelope(pausedStdout);
+  const startCalls = (await Bun.file(dockerLog).text())
+    .split("\n")
+    .filter((line) => line.includes(" up -d "));
+  expect({
+    that:
+      pausedExit !== 0 &&
+      pausedResult?.error?.code === "E_LIFECYCLE_FAILED" &&
+      (pausedResult.error.message ?? "").includes(
+        "before launching services"
+      ) &&
+      startCalls.length === 0 &&
+      (await opts.readClaim()) === null,
+    message: `a superseded up must fail before starting containers (exit ${pausedExit}, stdout ${pausedStdout.trim()}, start calls ${startCalls.length})`,
+  });
+
+  ctx.log("a helper entry removed after start is still released by down");
+  expectExit({
+    result: await opts.cli({ verb: "up", branch }),
+    codes: [0],
+    message: "up before removing the helper entry",
+  });
+  const removedHelper = await opts.ownedHelper();
+  await opts.writeConfig({ mode: "identity", withoutHelpers: true });
+  expectExit({
+    result: await opts.cli({ verb: "down", branch }),
+    codes: [0],
+    message: "down after removing the helper entry",
+  });
+  expect({
+    that:
+      !(await isRunning(removedHelper)) && (await opts.readClaim()) === null,
+    message: "down must release a helper whose config entry was removed",
+  });
+  await opts.writeConfig({ mode: "identity" });
+
+  ctx.log("an unreleased helper fails down and keeps its claim");
+  expectExit({
+    result: await opts.cli({ verb: "up", branch }),
+    codes: [0],
+    message: "up before corrupting the claim",
+  });
+  const keptHelper = await opts.ownedHelper();
+  const claimText = await readFile(opts.claimPath, "utf8");
+  await writeFile(opts.claimPath, "{not json\n", { mode: 0o600 });
+  const failedDown = await opts.cli({ verb: "down", branch });
+  const failedResult = parseEnvelope(failedDown.stdout);
+  expect({
+    that:
+      failedDown.exitCode !== 0 &&
+      failedResult?.ok === false &&
+      failedResult.error?.code === "E_LIFECYCLE_FAILED" &&
+      JSON.stringify(failedResult.error.detail ?? {}).includes(HELPER_NAME) &&
+      (await readFile(opts.claimPath, "utf8")) === "{not json\n" &&
+      (await isRunning(keptHelper)),
+    message: "a failed helper release must fail down and keep the claim",
+    result: failedDown,
+  });
+  await writeFile(opts.claimPath, claimText, { mode: 0o600 });
+  expectExit({
+    result: await opts.cli({ verb: "down", branch }),
+    codes: [0],
+    message: "down after restoring the claim",
+  });
+  expect({
+    that: !(await isRunning(keptHelper)) && (await opts.readClaim()) === null,
+    message: "the retried down must stop the helper",
+  });
+}
+
+type Envelope = {
+  readonly ok?: boolean;
+  readonly error?: {
+    readonly code?: string;
+    readonly message?: string;
+    readonly detail?: unknown;
+  };
+};
+
+function parseEnvelope(stdout: string): Envelope | null {
+  // The CLI prints one (pretty-printed) JSON envelope on stdout.
+  const start = stdout.indexOf("{");
+  if (start < 0) {
+    return null;
+  }
+  try {
+    return JSON.parse(stdout.slice(start)) as Envelope;
+  } catch {
+    return null;
+  }
+}
 
 /** Kill this scenario's foreign fixtures and any helper still claimed as owned. */
 async function cleanupScenario(opts: {

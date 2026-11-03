@@ -425,7 +425,7 @@ export function createLifecycleProcessController(opts: {
       // killed) before this transaction releases the lock, and a timeout is
       // an unknown outcome, so the entry and token are kept for reclaim. The
       // server may still create the session after the lock is released; that
-      // residual is documented in tests/models/tla/README.md.
+      // residual is documented in tests/models/tla/README.md (HACK-1849).
       const created = await backend.createSession({
         name: sessionName,
         cwd: opts.project.projectRoot,

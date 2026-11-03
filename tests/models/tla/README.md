@@ -1045,4 +1045,5 @@ project and branch):
 
 Closing the residual needs a mutation fence rather than a timeout: target tmux
 mutations by session ID (`#{session_id}`, never reused by a server) captured with
-the token read. That is not in this slice.
+the token read. That fence, and full zellij support for shared-helper lifecycle
+sessions, are tracked in HACK-1849 and are not in this slice.

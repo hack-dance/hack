@@ -27,7 +27,7 @@ export type MuxSessionCreateResult =
  * client), and zellij's background create daemonizes its session server.
  * Callers therefore never treat a timeout as "did not happen"; the remaining
  * late-effect residual is described in tests/models/tla/README.md ("Shared
- * helper instance"). `HACK_MUX_COMMAND_TIMEOUT_MS` overrides it (tests).
+ * helper instance") and tracked in HACK-1849. `HACK_MUX_COMMAND_TIMEOUT_MS` overrides it (tests).
  */
 export const MUX_COMMAND_TIMEOUT_MS = 15_000;
 

@@ -243,7 +243,8 @@ Behavior:
   `hack up` and `hack restart` fail with `E_LIFECYCLE_FAILED` before any hook,
   helper or process runs: zellij records the session's ownership after creating
   it, so an interrupted start could leave a session `hack down` cannot reclaim.
-  Install tmux or set `sessions.mux` to `tmux`.
+  Install tmux or set `sessions.mux` to `tmux`. zellij support is tracked in
+  HACK-1849.
 - `hack down` releases the instance's holder. A helper still used by another branch keeps
   running; the last release stops a helper Hack started and never signals an adopted one.
   Down releases every helper the instance acquired, recorded at start, so removing or
@@ -298,7 +299,7 @@ Behavior:
     or window command from an earlier up can then stop or change a newer up's
     session of the same branch; `hack down` and `hack up` recover it. A late
     session creation leaves an empty session that the next `hack up` refuses;
-    stop it with tmux.
+    stop it with tmux. Closing this gap is tracked in HACK-1849.
   - A failed up releases only the helper holders it added, and only while it is the latest
     up of the instance to have its helpers ready.
   - The failed up's other failure handling is unchanged (for example, it still clears the

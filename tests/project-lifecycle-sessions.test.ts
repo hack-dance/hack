@@ -6,6 +6,7 @@ import {
   inspectLifecycleSession,
   killInspectedLifecycleSession,
   killLifecycleSessionWithOwnership,
+  LifecycleSessionPresenceUnknownError,
   resolveLifecycleDefinitionHash,
   resolveLifecycleEnvironmentFingerprint,
 } from "../src/lib/project-lifecycle-sessions.ts";
@@ -251,15 +252,23 @@ test("inspection confirms an unlisted owned session instead of recreating it (HA
 });
 
 test("inspection treats an unlisted session as absent only on explicit absence", async () => {
-  for (const presence of ["absent", "unknown"] as const) {
-    const backend = inspectionBackend({
+  const absent = await inspectFixture(
+    inspectionBackend({
       listSessions: async () => [],
-      readSessionPresence: async () => presence,
-    });
-    const inspection = await inspectFixture(backend);
-    expect(inspection.classification).toBe("absent");
-    expect(inspection.decision).toEqual({ kind: "create" });
-  }
+      readSessionPresence: async () => "absent",
+    })
+  );
+  expect(absent.classification).toBe("absent");
+  expect(absent.decision).toEqual({ kind: "create" });
+  // An unknown exact-presence answer blocks: never absence, never "create".
+  await expect(
+    inspectFixture(
+      inspectionBackend({
+        listSessions: async () => [],
+        readSessionPresence: async () => "unknown",
+      })
+    )
+  ).rejects.toBeInstanceOf(LifecycleSessionPresenceUnknownError);
 });
 
 test("inspection never grants legacy ownership to an unlisted session", async () => {

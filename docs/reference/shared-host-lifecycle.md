@@ -328,11 +328,12 @@ fail when that check is removed.
   The code does not guarantee that: a stalled tmux server can still apply it, so a
   late kill or window command can reach a newer session of the same instance
   (recovered by `hack down` and `hack up`, not prevented). The README lists each
-  case. A session-ID mutation fence for tmux would close it and is not in this
-  slice.
+  case. A session-ID mutation fence for tmux would close it; it is tracked in
+  HACK-1849 and is not in this slice.
 - zellij lifecycle sessions for projects with shared helpers. They are refused
   before anything starts: zellij writes the ownership token after creating the
   session, so an interrupted start could leave a session without a token.
+  Support is tracked in HACK-1849.
 - The daemon. It has no lifecycle surface today; shared helpers are started and
   released only by the CLI's `up`, `restart` and `down`.
 - Migrating existing `lifecycle.singleton` configurations. `singleton` keeps its

@@ -10,6 +10,7 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import { createKeychainBackend } from "./keychain.ts";
 import { resolveSecretStore, type SecretStore } from "./secret-store.ts";
 import { exec } from "./shell.ts";
 
@@ -485,97 +486,107 @@ function resolveMacOsNodeAuthSecretStore(): SecretStore | null {
   if (!(process.platform === "darwin" && Bun.which("security"))) {
     return null;
   }
+  const backend = createKeychainBackend({
+    backend: {
+      get: async ({ name: key }) => {
+        const found = await exec(
+          [
+            "security",
+            "find-generic-password",
+            "-s",
+            NODE_KEYCHAIN_SERVICE,
+            "-a",
+            key,
+            "-w",
+          ],
+          { stdin: "ignore" }
+        );
+        if (found.exitCode === 0) {
+          const token = found.stdout.trim();
+          return token.length > 0 ? token : null;
+        }
+        const errorText = `${found.stderr}\n${found.stdout}`.toLowerCase();
+        if (
+          errorText.includes("could not be found") ||
+          errorText.includes("item could not be found")
+        ) {
+          return null;
+        }
+        throw new Error(
+          normalizeSecurityErrorMessage({
+            action: "read",
+            detail: found.stderr || found.stdout,
+          })
+        );
+      },
+      set: async ({ name: key, value }) => {
+        const saved = await exec(
+          [
+            "security",
+            "add-generic-password",
+            "-U",
+            "-s",
+            NODE_KEYCHAIN_SERVICE,
+            "-a",
+            key,
+            "-w",
+            value,
+          ],
+          { stdin: "ignore" }
+        );
+        if (saved.exitCode === 0) {
+          return;
+        }
+        throw new Error(
+          normalizeSecurityErrorMessage({
+            action: "write",
+            detail: saved.stderr || saved.stdout,
+          })
+        );
+      },
+      delete: async ({ name: key }) => {
+        const deleted = await exec(
+          [
+            "security",
+            "delete-generic-password",
+            "-s",
+            NODE_KEYCHAIN_SERVICE,
+            "-a",
+            key,
+          ],
+          { stdin: "ignore" }
+        );
+        if (deleted.exitCode === 0) {
+          return true;
+        }
+        const errorText = `${deleted.stderr}\n${deleted.stdout}`.toLowerCase();
+        if (
+          errorText.includes("could not be found") ||
+          errorText.includes("item could not be found")
+        ) {
+          return false;
+        }
+        throw new Error(
+          normalizeSecurityErrorMessage({
+            action: "delete",
+            detail: deleted.stderr || deleted.stdout,
+          })
+        );
+      },
+    },
+  });
   return {
     descriptor: {
       backend: "keychain",
       location: NODE_KEYCHAIN_SERVICE,
       mode: "native",
     },
-    get: async ({ key }) => {
-      const found = await exec(
-        [
-          "security",
-          "find-generic-password",
-          "-s",
-          NODE_KEYCHAIN_SERVICE,
-          "-a",
-          key,
-          "-w",
-        ],
-        { stdin: "ignore" }
-      );
-      if (found.exitCode === 0) {
-        const token = found.stdout.trim();
-        return token.length > 0 ? token : null;
-      }
-      const errorText = `${found.stderr}\n${found.stdout}`.toLowerCase();
-      if (
-        errorText.includes("could not be found") ||
-        errorText.includes("item could not be found")
-      ) {
-        return null;
-      }
-      throw new Error(
-        normalizeSecurityErrorMessage({
-          action: "read",
-          detail: found.stderr || found.stdout,
-        })
-      );
-    },
-    set: async ({ key, value }) => {
-      const saved = await exec(
-        [
-          "security",
-          "add-generic-password",
-          "-U",
-          "-s",
-          NODE_KEYCHAIN_SERVICE,
-          "-a",
-          key,
-          "-w",
-          value,
-        ],
-        { stdin: "ignore" }
-      );
-      if (saved.exitCode === 0) {
-        return;
-      }
-      throw new Error(
-        normalizeSecurityErrorMessage({
-          action: "write",
-          detail: saved.stderr || saved.stdout,
-        })
-      );
-    },
-    delete: async ({ key }) => {
-      const deleted = await exec(
-        [
-          "security",
-          "delete-generic-password",
-          "-s",
-          NODE_KEYCHAIN_SERVICE,
-          "-a",
-          key,
-        ],
-        { stdin: "ignore" }
-      );
-      if (deleted.exitCode === 0) {
-        return true;
-      }
-      const errorText = `${deleted.stderr}\n${deleted.stdout}`.toLowerCase();
-      if (
-        errorText.includes("could not be found") ||
-        errorText.includes("item could not be found")
-      ) {
-        return false;
-      }
-      throw new Error(
-        normalizeSecurityErrorMessage({
-          action: "delete",
-          detail: deleted.stderr || deleted.stdout,
-        })
-      );
-    },
+    get: async ({ key }) =>
+      await backend.get({ service: NODE_KEYCHAIN_SERVICE, name: key }),
+    set: async ({ key, value }) =>
+      await backend.set({ service: NODE_KEYCHAIN_SERVICE, name: key, value }),
+    delete: async ({ key }) =>
+      await backend.delete({ service: NODE_KEYCHAIN_SERVICE, name: key }),
   };
 }
 

@@ -46,7 +46,7 @@ const ID = /^[a-f0-9]{64}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const PROJECT = "com.docker.compose.project";
-const BUN_TAG = "oven/bun:1.4.2-slim";
+const BUN_TAG = "oven/bun:1.4.4-slim";
 const DB_TAG = "postgres:17.6-alpine";
 const LOOP = ["bun", "-e", "setInterval(()=>{},1000)"];
 const FORMATS = {

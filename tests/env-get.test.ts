@@ -333,6 +333,9 @@ test("legacy get reads only the requested backend key and preserves empty overla
     { key: "OTHER", source: "keychain" },
   ]);
   const calls: string[] = [];
+  // tests/preload.ts keeps this in memory; the gate only has to be open.
+  const keychainFlag = process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK;
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "0";
   const spy = spyOn(secrets, "get").mockImplementation(async (opts) => {
     expect(opts.service).toBe("hack-env-get-fixture");
     calls.push(opts.name);
@@ -352,6 +355,7 @@ test("legacy get reads only the requested backend key and preserves empty overla
     expect(calls).toEqual([]);
   } finally {
     spy.mockRestore();
+    restoreEnv("HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK", keychainFlag);
   }
 });
 

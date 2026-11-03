@@ -23,6 +23,7 @@ import { CliUsageError, defineCommand, defineOption } from "../cli/command.ts";
 import { optJson, optPath } from "../cli/options.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import { readHomeEnv } from "../lib/home-dir.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
 import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
@@ -217,7 +218,7 @@ export async function handleSetupMigrate({
     return await reportRollback({ result, json: options.json === true });
   }
 
-  const home = (process.env.HOME ?? "").trim();
+  const home = readHomeEnv() ?? "";
   const scopes: MigrationScopeRoot[] = [];
   if (!options.global || options.allScopes) {
     const startDir = resolve(ctx.cwd, options.path ?? ".");

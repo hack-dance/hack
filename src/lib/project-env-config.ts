@@ -67,6 +67,7 @@ import {
   resolveEnvFilePath,
   resolveHackEnv,
 } from "./hack-env.ts";
+import { resolveUserHomeDir } from "./home-dir.ts";
 import { quoteShellWord } from "./logs.ts";
 import {
   isOwnedLegacyAdoptionManagedEnvAdmission,
@@ -105,7 +106,9 @@ import {
   withProjectsRegistryLock,
 } from "./projects-registry-lock.ts";
 import {
+  hasPrimaryLocalInputs,
   isNativeManagedLocalTracked,
+  readPrimaryLocalFile,
   resolvePrimaryLocalProjectDir,
   resolveVerifiedPrimaryWorktreeRoot,
   resolveVerifiedProjectEnvKeyGitLocation,
@@ -936,7 +939,7 @@ export async function projectEnvConfigExists(opts: {
   }
 
   const entries = await readdir(opts.projectDir, { withFileTypes: true });
-  return entries.some((entry) => {
+  const hasLocalConfig = entries.some((entry) => {
     if (!entry.isFile()) {
       return false;
     }
@@ -947,6 +950,15 @@ export async function projectEnvConfigExists(opts: {
       return false;
     }
     return entry.name !== PROJECT_ENV_CONFIG_DEFAULT_FILENAME;
+  });
+  if (hasLocalConfig) {
+    return true;
+  }
+
+  // Inherited-only linked worktrees still route to the modern YAML commands.
+  return await hasPrimaryLocalInputs({
+    projectRoot: dirname(opts.projectDir),
+    projectDir: opts.projectDir,
   });
 }
 
@@ -1108,8 +1120,12 @@ async function readProjectEnvConfigFile(opts: {
   readonly path: string;
   readonly environment: string;
   readonly strictRead?: boolean;
+  /** Inherited layers replace the normal read with their fail-closed one. */
+  readonly readText?: (path: string) => Promise<string | null>;
 }): Promise<ProjectEnvConfigReadResult> {
-  const text = await readProjectEnvLayerText(opts);
+  const text = opts.readText
+    ? await opts.readText(opts.path)
+    : await readProjectEnvLayerText(opts);
   return parseProjectEnvConfigText({
     path: opts.path,
     environment: opts.environment,
@@ -1386,7 +1402,7 @@ async function readProjectEnvLayers(opts: {
     inheritedReads.push(
       await readProjectEnvConfigFile({
         projectRoot: dirname(primaryDir),
-        strictRead: opts.strictRead,
+        readText: readPrimaryLocalFile,
         path: primaryDefaultPath,
         environment: "default",
       })
@@ -1404,11 +1420,16 @@ async function readProjectEnvLayers(opts: {
       inheritedReads.push(
         await readProjectEnvConfigFile({
           projectRoot: dirname(primaryDir),
-          strictRead: opts.strictRead,
+          readText: readPrimaryLocalFile,
           path: primaryOverlayPath,
           environment: selection.effectiveEnv,
         })
       );
+    }
+    for (const read of inheritedReads) {
+      if (read.parseError) {
+        throw new Error(`Failed to parse primary local env file: ${read.path}`);
+      }
     }
   }
   // Primary local settings are live inputs, subordinate to checkout-local choices.
@@ -3854,12 +3875,23 @@ export async function inspectProjectEnvMaterialization(opts: {
     serviceNames: opts.serviceNames,
   });
   if (!resolved) {
+    // Every recorded input is gone (e.g. inheritance disabled or removed).
+    if (Object.keys(stateRead.state.inputs).length === 0) {
+      return {
+        envPath,
+        statePath,
+        status: "ok",
+        message: "No modern env config files found",
+        issues: [],
+      };
+    }
+    const issue = `no env inputs remain; materialized ${envPath} is obsolete`;
     return {
       envPath,
       statePath,
-      status: "ok",
-      message: "No modern env config files found",
-      issues: [],
+      status: "warn",
+      message: `${issue} (remove ${envPath} and ${statePath}, or restore inputs and run: hack env materialize)`,
+      issues: [issue],
     };
   }
 
@@ -8312,12 +8344,11 @@ function resolveConfiguredProjectPath(opts: {
   readonly configuredPath: string;
 }): string {
   const raw = opts.configuredPath.trim();
-  const home = (process.env.HOME ?? "").trim();
   if (raw === "~") {
-    return home;
+    return resolveUserHomeDir();
   }
   if (raw.startsWith("~/")) {
-    return resolve(home, raw.slice(2));
+    return resolve(resolveUserHomeDir(), raw.slice(2));
   }
   if (raw.startsWith("/")) {
     return raw;

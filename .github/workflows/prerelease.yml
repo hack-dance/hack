@@ -47,7 +47,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Validate immutable plan
         id: plan
         run: bun scripts/prerelease-plan.ts plan
@@ -74,7 +74,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: aarch64-unknown-linux-musl
@@ -122,7 +122,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - uses: actions/download-artifact@v4
         with:
           name: v5-prerelease-${{ needs.plan.outputs.version }}

@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
@@ -117,7 +117,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -218,7 +218,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
         with:
           fetch-depth: 0
       - name: Install Gitleaks
@@ -245,11 +245,11 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v1
       - name: Install dependencies
@@ -292,11 +292,11 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install --yes tmux
       - name: Install dependencies
@@ -307,7 +307,10 @@ jobs:
         run: |
           docker pull alpine:3.20
           docker pull alpine:3.22
-          docker pull node:24.11.0-bookworm-slim
+          docker pull node:24.22.1-bookworm-slim
+          docker pull oven/bun:1.4.4-slim
+          # The qualified native file and storage helper artifact stays on this image
+          # until its catalog pins are requalified (src/lib/native-compose-vm-file-protocol.ts).
           docker pull oven/bun:1.4.2-slim
           docker pull postgres:17.6-alpine
           docker pull lucaslorentz/caddy-docker-proxy:2.10.0-alpine
@@ -405,7 +408,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Install dependencies
         run: bun install --frozen-lockfile
       # The one-off checks and builds run once, on shard 1.
@@ -468,11 +471,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Require native regression tools
         run: |
           command -v python3

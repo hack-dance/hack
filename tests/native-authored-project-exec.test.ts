@@ -23,6 +23,7 @@ import {
   withNativeAuthoredProjectStatus,
 } from "../src/backends/native-authored-project-run.ts";
 import { NativeAuthoredProjectNotStartedError } from "../src/backends/native-authored-runtime-binary.ts";
+import { NATIVE_EXEC_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
 import {
   invokeNativeRuntime,
   NATIVE_EXIT_DRAIN_BOUND_MS,
@@ -659,16 +660,23 @@ test(
     ),
   NATIVE_EXIT_DRAIN_BOUND_MS + KEEPER_JOIN_MS + DEFAULT_BUDGET_MS + 5000
 );
+// An empty selection is refused as E_USAGE before authored dispatch (HACK-1360);
+// a non-empty selection reaches dispatch and is refused there.
+const unsupportedSelection = "E_NATIVE_PROJECT_UNSUPPORTED";
 macTest.each([
-  { extra: [], code: 17 },
+  { extra: [], code: 17, refusal: undefined },
+  {
+    extra: ["--profile", ""],
+    code: 1,
+    refusal: `ERROR: E_USAGE: ${NATIVE_EXEC_SELECTION_REFUSAL}`,
+  },
   ...[
-    ["--profile", ""],
     ["--profile", "dev"],
     ["--env", "base"],
-  ].map((extra) => ({ extra, code: 1 })),
+  ].map((extra) => ({ extra, code: 1, refusal: unsupportedSelection })),
 ])(
   "source CLI exec %j preserves omitted options and exact completion",
-  async ({ extra, code }) =>
+  async ({ extra, code, refusal }) =>
     owned(
       `source CLI exec ${JSON.stringify(extra)}`,
       async () => {
@@ -731,8 +739,8 @@ macTest.each([
         }).toMatchObject({
           code,
         });
-        if (extra.length) {
-          expect(result.combined).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+        if (refusal !== undefined) {
+          expect(result.combined).toContain(refusal);
           expect(await Bun.file(attempts).exists()).toBe(false);
         } else {
           expect(await Bun.file(attempts).text()).toBe("exec\n");

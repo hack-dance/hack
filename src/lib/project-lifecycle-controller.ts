@@ -353,8 +353,16 @@ export function createLifecycleProcessController(opts: {
       processes: [],
       updatedAt: new Date().toISOString(),
     };
-    createdOwnershipToken = ownershipToken;
-    try {
+    let sessionCreated = false;
+    // Revalidate, publish pending ownership, create and record as one
+    // transition. With shared helper ownership it runs under the instance
+    // lock, so an overlapping start cannot create the session (and finalize
+    // its entry) between this start's decision and its publication.
+    const createOwnedSession = async (): Promise<void> => {
+      if (opts.sessionOwnership) {
+        await assertSessionStillAbsent(backend);
+      }
+      createdOwnershipToken = ownershipToken;
       // Persist ownership before creating the mux session. If the CLI is
       // SIGKILLed after session creation, the next up can still prove that
       // the empty session belongs to this Compose instance and replace it.
@@ -363,42 +371,95 @@ export function createLifecycleProcessController(opts: {
         entry: pendingEntry,
       });
       await opts.assertFresh?.();
-      const createSession = async (): Promise<void> => {
-        const created = await backend.createSession({
-          name: sessionName,
-          cwd: opts.project.projectRoot,
-          lifecycleOwnerToken: ownershipToken,
-        });
-        if (!created.ok) {
-          throw new Error(`Failed to create lifecycle session: ${sessionName}`);
-        }
-        await opts.sessionOwnership?.record("created");
-      };
+      const created = await backend.createSession({
+        name: sessionName,
+        cwd: opts.project.projectRoot,
+        lifecycleOwnerToken: ownershipToken,
+      });
+      if (!created.ok) {
+        throw new Error(`Failed to create lifecycle session: ${sessionName}`);
+      }
+      sessionCreated = true;
+      await opts.sessionOwnership?.record("created");
+    };
+    try {
       await (opts.sessionOwnership
-        ? opts.sessionOwnership.withLock(createSession)
-        : createSession());
+        ? opts.sessionOwnership.withLock(createOwnedSession)
+        : createOwnedSession());
       if (backendName === "tmux") {
-        for (const [key, value] of Object.entries(opts.env)) {
-          await exec(
-            ["tmux", "set-environment", "-t", sessionName, key, value],
-            {
-              stdin: "ignore",
-            }
-          );
-        }
+        await applyTmuxSessionEnvironment({ sessionName, env: opts.env });
       }
     } catch (error: unknown) {
-      await removeLifecycleStateEntryIfOwned({
-        projectDir: opts.project.projectDir,
-        composeProject: opts.composeProject,
-        ownershipToken,
-      });
-      createdOwnershipToken = null;
+      if (createdOwnershipToken === ownershipToken) {
+        await releaseFailedSessionCreation({
+          backend,
+          ownershipToken,
+          sessionCreated,
+        });
+      }
       throw error;
     } finally {
       settleSessionCreation();
     }
     sessionReady = true;
+  };
+
+  /**
+   * Refuse to create when the session is no longer absent: an overlapping
+   * start created it (and may have finalized its entry) after this start
+   * decided to create. Nothing is published or changed on refusal.
+   */
+  const assertSessionStillAbsent = async (
+    backend: MuxBackend
+  ): Promise<void> => {
+    const entries = await readLifecycleState({
+      projectDir: opts.project.projectDir,
+    });
+    const entry =
+      entries.find(
+        (candidate) => candidate.composeProject === opts.composeProject
+      ) ?? null;
+    const inspection = await inspectLifecycleSession({
+      backend,
+      entry,
+      expectedSessionName: sessionName,
+      expectedProjectRoot: opts.project.projectRoot,
+      expectedDefinitionHash: opts.definitionHash,
+    });
+    if (inspection.decision.kind !== "create") {
+      throw new Error(
+        `Another hack up of this instance changed lifecycle session ${sessionName} while this one prepared it; nothing was changed. Run the command again.`
+      );
+    }
+  };
+
+  /**
+   * After a failed creation transition: a session that was created is stopped
+   * with its ownership token before its entry is removed. If that stop is not
+   * confirmed, the entry and token are kept so abort() or hack down can still
+   * reclaim the session; nothing is left running without an ownership record.
+   */
+  const releaseFailedSessionCreation = async (release: {
+    readonly backend: MuxBackend;
+    readonly ownershipToken: string;
+    readonly sessionCreated: boolean;
+  }): Promise<void> => {
+    if (release.sessionCreated) {
+      const stopped = await killLifecycleSessionWithOwnership({
+        backend: release.backend,
+        sessionName,
+        ownershipToken: release.ownershipToken,
+      }).catch(() => false);
+      if (!stopped) {
+        return;
+      }
+    }
+    await removeLifecycleStateEntryIfOwned({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+      ownershipToken: release.ownershipToken,
+    });
+    createdOwnershipToken = null;
   };
 
   const startProcess = async (
@@ -515,6 +576,20 @@ export function createLifecycleProcessController(opts: {
       composeProject: opts.composeProject,
       ownershipToken: createdOwnershipToken,
     });
+  }
+}
+
+async function applyTmuxSessionEnvironment(opts: {
+  readonly sessionName: string;
+  readonly env: Readonly<Record<string, string>>;
+}): Promise<void> {
+  for (const [key, value] of Object.entries(opts.env)) {
+    await exec(
+      ["tmux", "set-environment", "-t", opts.sessionName, key, value],
+      {
+        stdin: "ignore",
+      }
+    );
   }
 }
 

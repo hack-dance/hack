@@ -7,7 +7,7 @@ import {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
-import { readTextFile } from "./fs.ts";
+import { readOptionalTextFile, readTextFile } from "./fs.ts";
 import { ensureHackGitInfoExclude } from "./git-info-exclude.ts";
 import { getString, isRecord } from "./guards.ts";
 import {
@@ -19,6 +19,7 @@ import type { SecretStoreDescriptor } from "./secret-store.ts";
 import {
   resolveSecretStore,
   resolveSecretStoreDescriptor,
+  SecretStoreKeyUnavailableError,
 } from "./secret-store.ts";
 
 export const HACK_ENV_VERSION = 1 as const;
@@ -187,14 +188,27 @@ export type HackEnvStorageSummary = {
   readonly portableState: HackEnvPortableStateSummary;
 };
 
+const CONTRACT_UNREADABLE = "the file can't be read";
+
 export async function readHackEnvContract(opts: {
   readonly projectDir: string;
 }): Promise<HackEnvReadResult> {
   const path = resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME);
-  const text = await readTextFile(path);
-  if (text === null) {
+  const read = await readOptionalTextFile(path);
+  if (read.kind === "absent") {
     return { path, exists: false, contract: defaultHackEnvContract() };
   }
+  // A contract that can't be opened isn't a project without one: callers that took it
+  // for absent created layers that bypass .hack/.env, or ignored its scopes.
+  if (read.kind === "unreadable") {
+    return {
+      path,
+      exists: true,
+      contract: defaultHackEnvContract(),
+      parseError: CONTRACT_UNREADABLE,
+    };
+  }
+  const { text } = read;
 
   let parsed: unknown;
   try {
@@ -272,6 +286,136 @@ export async function resolveHackEnvValue(opts: {
     secretStore,
   });
   return state.value;
+}
+
+export type ProcessOnlyContractValue = {
+  readonly key: string;
+  readonly services: readonly string[] | null;
+  /** Overlays that supply the key themselves, so they don't take the process value. */
+  readonly overlaysWithOwnValue: readonly string[];
+  /**
+   * The process sets the key, and a mirrored backend that could also hold it has no
+   * key available, so whether the base takes it from the process is unknown. A
+   * caller that must not write a shell value has to treat this as if it did.
+   */
+  readonly undetermined: boolean;
+};
+
+/**
+ * Contract values the base env may take from this process's environment. It never
+ * generates or copies key material. A key the process doesn't set, or that the base
+ * file sets, can't come from the process, so only a key the process sets alone
+ * reads the backend, and only when plaintext values are mirrored there. Only a
+ * missing backend key counts as undetermined: any other failure, such as a corrupt
+ * store or an incomplete config, propagates, so nothing is written either way.
+ */
+export async function findProcessOnlyContractValues(opts: {
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly overlayNames: readonly string[];
+}): Promise<readonly ProcessOnlyContractValue[]> {
+  const { contract } = await readHackEnvContract({
+    projectDir: opts.projectDir,
+  });
+  const baseText = await readTextFile(
+    resolve(opts.projectDir, PROJECT_ENV_FILENAME)
+  );
+  const baseDotenv = baseText === null ? {} : parseDotEnv(baseText);
+  const candidates = contract.vars.filter(
+    (contractVar) =>
+      contractVar.source !== "keychain" &&
+      isPresentEnvValue(process.env[contractVar.key]) &&
+      !isPresentEnvValue(baseDotenv[contractVar.key])
+  );
+  if (candidates.length === 0) {
+    return [];
+  }
+  const { storePlaintextInBackend } = await readHackEnvRuntimeConfig({
+    projectDir: opts.projectDir,
+  });
+  const overlays: {
+    readonly name: string;
+    readonly dotenv: Readonly<Record<string, string>>;
+  }[] = [];
+  for (const name of opts.overlayNames) {
+    const text = await readTextFile(
+      resolveEnvFilePath({ projectDir: opts.projectDir, envName: name })
+    );
+    overlays.push({ name, dotenv: text === null ? {} : parseDotEnv(text) });
+  }
+
+  let secretStore: {
+    readonly get: (input: { readonly key: string }) => Promise<string | null>;
+  } = { get: async () => null };
+  if (storePlaintextInBackend) {
+    try {
+      secretStore = await resolveSecretStore({
+        projectName: opts.projectName,
+        projectDir: opts.projectDir,
+        allowKeyProvisioning: false,
+      });
+    } catch (error: unknown) {
+      if (!(error instanceof SecretStoreKeyUnavailableError)) {
+        throw error;
+      }
+      return candidates.map((contractVar) => ({
+        key: contractVar.key,
+        services: contractVar.services,
+        // A backend value can't be seen here, but an overlay's file still can.
+        overlaysWithOwnValue: overlays
+          .filter((overlay) =>
+            isPresentEnvValue(overlay.dotenv[contractVar.key])
+          )
+          .map((overlay) => overlay.name),
+        undetermined: true,
+      }));
+    }
+  }
+  const resolvedFrom = async (input: {
+    readonly contractVar: HackEnvVar;
+    readonly envName: string | null;
+    readonly overlayDotenv: Readonly<Record<string, string>>;
+  }) =>
+    (
+      await resolveHackEnvValueState({
+        contractVar: input.contractVar,
+        storePlaintextInBackend,
+        effectiveEnvName: input.envName,
+        baseDotenv,
+        overlayDotenv: input.overlayDotenv,
+        secretStore,
+      })
+    ).resolvedFrom;
+
+  const found: ProcessOnlyContractValue[] = [];
+  for (const contractVar of candidates) {
+    const fromBase = await resolvedFrom({
+      contractVar,
+      envName: null,
+      overlayDotenv: {},
+    });
+    if (fromBase !== "process") {
+      continue;
+    }
+    const overlaysWithOwnValue: string[] = [];
+    for (const overlay of overlays) {
+      const fromOverlay = await resolvedFrom({
+        contractVar,
+        envName: overlay.name,
+        overlayDotenv: overlay.dotenv,
+      });
+      if (fromOverlay !== "process") {
+        overlaysWithOwnValue.push(overlay.name);
+      }
+    }
+    found.push({
+      key: contractVar.key,
+      services: contractVar.services,
+      overlaysWithOwnValue,
+      undetermined: false,
+    });
+  }
+  return found;
 }
 
 export async function resolveHackEnv(opts: {
@@ -752,12 +896,18 @@ function buildHackEnvMutationSourceMismatchMessage(input: {
   return `Env key "${input.key}" is declared as source "plain_env" in ${input.contractPath}. Use "hack env set ${input.key}=…" or update the contract source before writing. Hack will not write this key through the secret backend until the contract source changes.`;
 }
 
+function describeContractProblem(parseError: string): string {
+  return parseError === CONTRACT_UNREADABLE
+    ? "can't be read"
+    : `is malformed (${parseError})`;
+}
+
 function buildHackEnvMalformedContractMessage(input: {
   readonly key: string;
   readonly contractPath: string;
   readonly parseError: string;
 }): string {
-  return `Env contract ${input.contractPath} is malformed (${input.parseError}). Fix or remove the contract file before writing "${input.key}". Hack will not fall back to the default contract while mutation-source validation cannot trust the declared storage rules.`;
+  return `Env contract ${input.contractPath} ${describeContractProblem(input.parseError)}. Fix or remove the contract file before writing "${input.key}". Hack will not fall back to the default contract while mutation-source validation cannot trust the declared storage rules.`;
 }
 
 function describePortableState(input: {

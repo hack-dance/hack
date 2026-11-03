@@ -10,6 +10,7 @@ import {
   resolveCliSpawnArgs,
   runCommand,
   type Scenario,
+  type ScenarioContext,
 } from "../harness.ts";
 
 const SESSION_WAIT_TIMEOUT_MS = 10_000;
@@ -474,6 +475,8 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
         });
       }
 
+      await runNonUtf8LocaleCycle({ ctx, cliEnv });
+
       const doctorFixture = await createMonorepoFixture({
         parentDir: ctx.tempRoot,
         withHackConfig: true,
@@ -555,6 +558,119 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
     }
   },
 };
+
+/**
+ * HACK-1797: without a UTF-8 locale tmux rewrote the session listing's tab
+ * separators, so `down` missed the owned session (leaving it and its tunnel
+ * running) and the next `up` failed with "Failed to create lifecycle
+ * session". Drive up -> up (live) -> down -> up -> down under LC_ALL=C.
+ */
+async function runNonUtf8LocaleCycle(opts: {
+  readonly ctx: ScenarioContext;
+  readonly cliEnv: Readonly<Record<string, string>>;
+}): Promise<void> {
+  const fixture = await createMonorepoFixture({
+    parentDir: opts.ctx.tempRoot,
+    withHackConfig: true,
+    lifecycle: {
+      persistentUpBefore: true,
+      persistentProcess: true,
+      disableInternal: true,
+    },
+  });
+  const sessionName = `${fixture.name}--lifecycle`;
+  const statePath = join(
+    fixture.hackDir,
+    ".internal",
+    "lifecycle",
+    "state.json"
+  );
+  const env = { ...opts.cliEnv, LC_ALL: "C", LANG: "C" };
+  const up = async (phase: string) => {
+    const result = await opts.ctx.cli({
+      args: ["up", "--detach", "--json"],
+      cwd: fixture.root,
+      env,
+    });
+    expectExit({
+      result,
+      codes: [0],
+      message: `non-UTF-8 locale: ${phase} should start or adopt the lifecycle session`,
+    });
+    await expectSessionPresent({ sessionName, cwd: fixture.root, phase });
+    return result;
+  };
+  const down = async (phase: string) => {
+    const groups = (await readState({ statePath })).entries.flatMap((entry) =>
+      (entry.processes ?? []).flatMap((process) =>
+        process.processGroupId ? [process.processGroupId] : []
+      )
+    );
+    expect({
+      that: groups.length === 2,
+      message: `non-UTF-8 locale: ${phase} expected two recorded lifecycle process groups, got ${groups.length}`,
+    });
+    const result = await opts.ctx.cli({
+      args: ["down", "--json"],
+      cwd: fixture.root,
+      env,
+    });
+    expectExit({
+      result,
+      codes: [0],
+      message: `non-UTF-8 locale: ${phase} should stop the lifecycle session`,
+    });
+    await expectSessionAbsent({ sessionName, cwd: fixture.root, phase });
+    expect({
+      that: (await readState({ statePath })).entries.length === 0,
+      message: `non-UTF-8 locale: ${phase} left lifecycle state behind`,
+      result,
+    });
+    const survivors = groups.filter(isProcessGroupAlive);
+    expect({
+      that: survivors.length === 0,
+      message: `non-UTF-8 locale: ${phase} left lifecycle process groups running: ${survivors.join(", ")}`,
+      result,
+    });
+  };
+
+  try {
+    const first = await up("first up");
+    const firstToken = (await readState({ statePath })).entries[0]
+      ?.ownershipToken;
+    expect({
+      that: Boolean(firstToken),
+      message: "non-UTF-8 locale: first up did not persist lifecycle ownership",
+      result: first,
+    });
+    const live = await up("up over a live session");
+    expect({
+      that:
+        (await readState({ statePath })).entries[0]?.ownershipToken ===
+        firstToken,
+      message:
+        "non-UTF-8 locale: up over a live owned session did not adopt it",
+      result: live,
+    });
+    await down("first down");
+    await up("up after down");
+    await down("second down");
+  } finally {
+    await runCommand({
+      argv: ["tmux", "kill-session", "-t", `=${sessionName}`],
+      cwd: fixture.root,
+    });
+  }
+}
+
+function isProcessGroupAlive(processGroupId: number): boolean {
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function writeFakeDocker(opts: {
   readonly fakeBin: string;
@@ -757,6 +873,9 @@ type LifecycleState = {
   readonly entries: ReadonlyArray<{
     readonly composeProject: string;
     readonly ownershipToken?: string;
+    readonly processes?: ReadonlyArray<{
+      readonly processGroupId?: number;
+    }>;
   }>;
 };
 

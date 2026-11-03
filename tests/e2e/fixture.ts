@@ -45,6 +45,8 @@ export type LifecycleFixtureOptions = {
   readonly upBeforeEnvMarkerFile?: string;
   /** Adds a long-running lifecycle host process (bun sleep loop). */
   readonly persistentProcess?: boolean;
+  /** Adds a persistent lifecycle.up.before step (a long-running tunnel-style helper). */
+  readonly persistentUpBefore?: boolean;
   /** Makes docker compose reject the fixture after lifecycle startup. */
   readonly composeFailure?: boolean;
   /** Runs fixture containers without a host bind mount. */
@@ -408,6 +410,14 @@ function buildLifecycleConfig(opts: {
       name: "e2e-env-marker",
       command: `printf "%s|%s" "$E2E_PLAIN" "$E2E_HOST_ONLY" > "${opts.lifecycle.upBeforeEnvMarkerFile}"`,
       cwd: ".",
+    });
+  }
+  if (opts.lifecycle.persistentUpBefore === true) {
+    upBefore.push({
+      name: "e2e-tunnel",
+      command: "bun -e 'setInterval(() => {}, 60000)'",
+      cwd: ".",
+      persistent: true,
     });
   }
   if (opts.lifecycle.persistentProcess === true) {

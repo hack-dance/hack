@@ -73,7 +73,11 @@ export function createTmuxBackend(): MuxBackend {
       "#{session_created}",
     ].join("\t");
 
-    const result = await exec(["tmux", "list-sessions", "-F", format], {
+    // `-u` keeps the tab separators intact. Without a UTF-8 locale (LANG
+    // unset or C), tmux replaces control characters in client output with
+    // `_`, which turns every line into one unmatched name: lifecycle
+    // sessions then look absent to both `up` and `down` (HACK-1797).
+    const result = await exec(["tmux", "-u", "list-sessions", "-F", format], {
       stdin: "ignore",
     });
 

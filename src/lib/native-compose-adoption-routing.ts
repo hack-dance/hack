@@ -280,6 +280,7 @@ async function observe(opts: {
     resources: binding.containers,
     format: CONTAINER,
     probe,
+    refuse,
   })) {
     if (
       !(

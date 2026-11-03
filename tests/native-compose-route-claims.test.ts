@@ -1132,6 +1132,54 @@ for (const hostname of [
   });
 }
 
+test("compaction removes interrupted publication temporaries and empty attempts", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const obsolete = await acquire(result);
+  await complete(result, obsolete);
+  const current = await acquire(result);
+  await complete(result, current);
+  await fs.writeFile(
+    join(
+      ownerPath(root),
+      "attempts",
+      obsolete.reference.attemptId,
+      `${"a".repeat(32)}.tmp`
+    ),
+    "unfinished",
+    { mode: 0o600 }
+  );
+  await fs.mkdir(join(ownerPath(root), "attempts", "b".repeat(32)), {
+    mode: 0o700,
+  });
+  await result.compact({ references: [current.reference] });
+  expect(await fs.readdir(join(ownerPath(root), "attempts"))).toEqual([
+    current.reference.attemptId,
+  ]);
+  expect(await fs.readdir(join(ownerPath(root), "retired"))).toEqual([]);
+  await result.assertHeld(current.reference);
+});
+
+test("compaction retires aborted and stopped attempts but preserves a stopped pin", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const aborted = await acquire(result);
+  await result.rollback(aborted);
+  const stopped = await acquire(result);
+  await result.markEffectsPossible(stopped);
+  await result.recoverRetainedStopped({
+    references: [stopped.reference],
+    assertStopped: async () => {},
+  });
+  await result.compact({ references: [stopped.reference] });
+  expect((await result.reopen(stopped.reference)).phase).toBe("stopped");
+  await expect(result.reopen(aborted.reference)).rejects.toThrow();
+  const current = await acquire(result);
+  await complete(result, current);
+  await result.compact({ references: [current.reference] });
+  await expect(result.reopen(stopped.reference)).rejects.toThrow();
+});
+
 test("settled lifecycle attempts have constant directory and Linux descriptor counts", async () => {
   const root = await fixture();
   const result = await store(root);

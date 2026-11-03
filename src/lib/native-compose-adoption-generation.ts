@@ -3325,9 +3325,14 @@ async function mutateRetainedContainersWithinBudget(
       beforeCommit ? { beforeCommit } : undefined
     );
     if (routeClaims && routeAttempt && loaded.manifest.routingClaims) {
-      await routeClaims.compact({
-        references: [loaded.manifest.routingClaims, routeAttempt.reference],
-      });
+      try {
+        await routeClaims.compact({
+          references: [loaded.manifest.routingClaims, routeAttempt.reference],
+        });
+      } catch {
+        // The receipt is settled. Cleanup retries on the next operation and
+        // cannot change the outcome of the already committed lifecycle effect.
+      }
     }
     return 0;
   } finally {

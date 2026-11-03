@@ -91,11 +91,19 @@ completion authority.
 
 Retirement first atomically moves an obsolete attempt out of `attempts` into
 `retired`, synchronizes both parents, then deletes only validated private journal
-files. A later compaction resumes interrupted cleanup. Directory handles and
+files, including token-named temporary files left by interrupted publication.
+A later compaction resumes interrupted cleanup. Post-commit cleanup is best-effort:
+failure cannot change the settled receipt or successful command result. Pre-operation
+cleanup still refuses unsafe state before lifecycle admission. Directory handles and
 immutable-file cache entries are closed/discarded as their attempts retire.
 Successful repeated retained operations therefore keep two attempt directories
 (the adoption and latest operation), with a constant descriptor count. An
-operation may temporarily add one attempt. Existing byte limits still apply;
+operation may temporarily add one attempt. This bound applies when the pinned
+journals witness every live claim. If an older attempt is the sole witness for a
+claim (for example after removing a hostname from config), compaction preserves
+the entire history until that claim is safely released or witnessed again.
+Empty directories preceding intent publication are removed under the mutation lock.
+Existing byte limits still apply;
 unsafe or unresolved histories refuse rather than being silently discarded.
 
 Container binding, runtime and routing projections batch immutable IDs within a

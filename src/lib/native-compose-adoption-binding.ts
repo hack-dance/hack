@@ -46,6 +46,7 @@ import {
   acquireLegacyComposeSourceBind,
   type LegacyComposeSourceBindProof,
 } from "./native-compose-adoption-source-bind.ts";
+import { inspectNativeComposeContainers } from "./native-compose-batch-inspect.ts";
 import {
   type NativeComposeIngressBinding,
   observeNativeComposeIngress,
@@ -287,40 +288,40 @@ async function inspect(opts: {
   } else if (opts.kind === "container" && opts.ownedNetwork) {
     format = CUSTOM_CONTAINER_NETWORK_FORMAT;
   }
-  // Keep argv bounded without dropping either inventory observation or any
-  // per-resource identity/label check. Never reuse rows across phase fences.
-  const batchSize = opts.kind === "container" ? 64 : 1;
-  for (let offset = 0; offset < opts.resources.length; offset += batchSize) {
-    const batch = opts.resources.slice(offset, offset + batchSize);
-    const output = lines(
-      await opts.probe([
-        opts.kind,
-        "inspect",
-        "--format",
-        format,
-        ...batch.map((resource) => resource.id),
-      ])
-    );
-    requireValue(output.length === batch.length);
-    const remaining = new Map(batch.map((resource) => [resource.id, resource]));
-    const observed = new Map<string, Record<string, unknown>>();
-    for (const row of output) {
-      requireValue(typeof row.id === "string");
-      const resource = remaining.get(row.id);
-      requireValue(resource !== undefined);
-      remaining.delete(row.id);
+  if (opts.kind === "container") {
+    for (const { resource, row } of await inspectNativeComposeContainers({
+      resources: opts.resources,
+      format,
+      probe: opts.probe,
+      refuse,
+    })) {
       requireValue(
-        row.name ===
-          (opts.kind === "container" ? `/${resource.name}` : resource.name) &&
+        row.name === `/${resource.name}` &&
           row.project === opts.project &&
           emptyNative(row.native)
       );
-      observed.set(resource.id, row);
+      rows.push(row);
     }
-    // Preserve the canonical inventory order even if the transport reorders rows.
-    for (const resource of batch) {
-      const row = observed.get(resource.id);
-      requireValue(row !== undefined);
+  } else {
+    for (const resource of opts.resources) {
+      const output = lines(
+        await opts.probe([
+          opts.kind,
+          "inspect",
+          "--format",
+          format,
+          resource.id,
+        ])
+      );
+      requireValue(output.length === 1);
+      const row = output[0];
+      requireValue(
+        row &&
+          row.id === resource.id &&
+          row.name === resource.name &&
+          row.project === opts.project &&
+          emptyNative(row.native)
+      );
       rows.push(row);
     }
   }

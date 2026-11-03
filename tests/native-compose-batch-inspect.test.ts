@@ -1,5 +1,19 @@
 import { expect, test } from "bun:test";
 import { inspectNativeComposeContainers } from "../src/lib/native-compose-batch-inspect.ts";
+import { NativeComposeRoutingError } from "../src/lib/native-compose-routing.ts";
+
+test("routing membership refusal preserves the routing error class", async () => {
+  await expect(
+    inspectNativeComposeContainers({
+      resources: [{ id: "a".repeat(64) }],
+      format: "projection",
+      probe: async () => "{}",
+      refuse: () => {
+        throw new NativeComposeRoutingError();
+      },
+    })
+  ).rejects.toBeInstanceOf(NativeComposeRoutingError);
+});
 
 const resources = Array.from({ length: 129 }, (_, index) => ({
   id: index.toString(16).padStart(64, "0"),

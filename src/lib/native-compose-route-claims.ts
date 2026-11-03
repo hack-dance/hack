@@ -620,7 +620,7 @@ export async function openNativeComposeRouteClaims(opts: {
     const namespace = join(root, hash(binding.engineId));
     await make(namespace);
     const claimsRoot = join(namespace, "claims");
-    const claimsDirectory = await make(claimsRoot);
+    await make(claimsRoot);
     const ownersRoot = join(namespace, "owners");
     await make(ownersRoot);
     const ownerRoot = join(ownersRoot, hash(JSON.stringify(owner)));
@@ -664,7 +664,9 @@ export async function openNativeComposeRouteClaims(opts: {
       }
       await check();
       await unlink(path);
-      await claimsDirectory.handle.sync();
+      await directories
+        .find((directory) => directory.path === dirname(path))
+        ?.handle.sync();
     };
     const publish = async (path: string, value: unknown): Promise<Read> => {
       const text = JSON.stringify(value);
@@ -1193,15 +1195,18 @@ export async function openNativeComposeRouteClaims(opts: {
         // subset of these files; none grants claim or completion authority.
         for (const file of await readdir(path)) {
           if (
-            ![
-              "intent",
-              "reserved",
-              "armed",
-              "complete",
-              "retained",
-              "stopped",
-              "aborted",
-            ].some((kind) => file === `${kind}.json`)
+            !(
+              [
+                "intent",
+                "reserved",
+                "armed",
+                "complete",
+                "retained",
+                "stopped",
+                "aborted",
+              ].some((kind) => file === `${kind}.json`) ||
+              (file.endsWith(".tmp") && TOKEN.test(file.slice(0, -4)))
+            )
           ) {
             refuse();
           }
@@ -1222,6 +1227,20 @@ export async function openNativeComposeRouteClaims(opts: {
           const references = options.references.map(snapshotReference);
           await cleanRetired();
           const records = await journals();
+          for (const name of await readdir(attemptsRoot)) {
+            if (records.some((record) => record.intent.attemptId === name)) {
+              continue;
+            }
+            const path = join(attemptsRoot, name);
+            await check();
+            // journals validated this intent-less directory as empty. rmdir
+            // refuses if anything appeared; no journal authority is discarded.
+            await rmdir(path);
+            await forgetDirectory(path);
+            await directories
+              .find((directory) => directory.path === attemptsRoot)
+              ?.handle.sync();
+          }
           const pinned = new Set(
             references.map((reference) => find(records, reference))
           );

@@ -15,13 +15,15 @@ export async function inspectNativeComposeContainers<
   readonly resources: readonly T[];
   readonly format: string;
   readonly probe: (args: readonly string[]) => Promise<string>;
+  readonly refuse?: () => never;
 }): Promise<{ readonly resource: T; readonly row: Record<string, unknown> }[]> {
+  const refuseMembership: () => never = opts.refuse ?? refuse;
   if (
     opts.resources.some((resource) => !ID.test(resource.id)) ||
     new Set(opts.resources.map((resource) => resource.id)).size !==
       opts.resources.length
   ) {
-    refuse();
+    refuseMembership();
   }
   const result: { resource: T; row: Record<string, unknown> }[] = [];
   for (let offset = 0; offset < opts.resources.length; offset += 64) {
@@ -35,7 +37,7 @@ export async function inspectNativeComposeContainers<
     ]);
     const lines = text.trim().split("\n");
     if (lines.length !== batch.length) {
-      refuse();
+      refuseMembership();
     }
     const remaining = new Set(batch.map((resource) => resource.id));
     const rows = new Map<string, Record<string, unknown>>();
@@ -46,14 +48,14 @@ export async function inspectNativeComposeContainers<
         typeof row.id !== "string" ||
         !remaining.delete(row.id)
       ) {
-        refuse();
+        refuseMembership();
       }
       rows.set(row.id, row);
     }
     for (const resource of batch) {
       const row = rows.get(resource.id);
       if (!row) {
-        refuse();
+        refuseMembership();
       }
       result.push({ resource, row });
     }

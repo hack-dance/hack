@@ -1111,3 +1111,89 @@ test(
   },
   TIMEOUT
 );
+
+test(
+  "a later successful start does not restore an earlier start after a down, even with a disabled or changed helper",
+  async () => {
+    const root = await scratch();
+    const hackDir = join(root, "hack-home");
+    const helper = helperConfig({ port: freePort() });
+    for (const later of [
+      { ...helper, enabled: false },
+      helperConfig({ port: freePort() }),
+    ]) {
+      const earlier = await startProjectSharedHelpers({
+        ...context(root),
+        helpers: [helper],
+        composeProject: BRANCH_A,
+      });
+      await markSharedHelperInstanceStopping({
+        helpers: [helper],
+        composeProject: BRANCH_A,
+        hackDir,
+      });
+      await releaseProjectSharedHelpers({
+        helpers: [helper],
+        composeProject: BRANCH_A,
+        hackDir,
+      });
+      const newer = await startProjectSharedHelpers({
+        ...context(root),
+        helpers: [later],
+        composeProject: BRANCH_A,
+      });
+      await newer.assertCurrent();
+      expect(
+        await earlier.assertCurrent().catch((caught: unknown) => caught)
+      ).toBeInstanceOf(SharedHelperSupersededError);
+      await releaseProjectSharedHelpers({
+        helpers: [later],
+        composeProject: BRANCH_A,
+        hackDir,
+      });
+    }
+  },
+  TIMEOUT
+);
+
+test(
+  "an earlier start's process cleanup is skipped once a newer start is current, and runs after a down",
+  async () => {
+    const root = await scratch();
+    const hackDir = join(root, "hack-home");
+    const helper = helperConfig({ port: freePort() });
+    const earlier = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    const cleaned: string[] = [];
+    const cleanup = (label: string) => () => {
+      cleaned.push(label);
+      return Promise.resolve();
+    };
+    // No newer start: the earlier start still owns its processes.
+    expect(await earlier.runUnlessNewerStart(cleanup("alone"))).toBe(true);
+    await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    // A newer start is current: it may have adopted the session.
+    expect(await earlier.runUnlessNewerStart(cleanup("newer"))).toBe(false);
+    // After a down, nothing newer owns the session: clean up.
+    await markSharedHelperInstanceStopping({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    expect(await earlier.runUnlessNewerStart(cleanup("down"))).toBe(true);
+    expect(cleaned).toEqual(["alone", "down"]);
+    await releaseProjectSharedHelpers({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+  },
+  TIMEOUT
+);

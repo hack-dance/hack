@@ -79,6 +79,8 @@ export const sharedHostHelpersScenario: Scenario = {
       readonly withProcess?: boolean;
       /** Add a second entry with a shell-string command (invalid). */
       readonly withInvalidEntry?: boolean;
+      /** Write the helper entry with `enabled: false`. */
+      readonly disabled?: boolean;
     }): Promise<void> => {
       const lifecycle = {
         ...((baseConfig.lifecycle ?? {}) as Record<string, unknown>),
@@ -110,6 +112,7 @@ export const sharedHostHelpersScenario: Scenario = {
         port,
         upstreamEnv: "E2E_ISSUER_UPSTREAM",
         readyTimeoutMs: opts.readyTimeoutMs ?? 10_000,
+        ...(opts.disabled ? { enabled: false } : {}),
       };
       const sharedHelpers = opts.withInvalidEntry
         ? [helper, { ...helper, name: "second-bridge", command: "bun bridge" }]
@@ -663,6 +666,7 @@ type ConfigOptions = {
   readonly withoutHelpers?: boolean;
   readonly withProcess?: boolean;
   readonly withInvalidEntry?: boolean;
+  readonly disabled?: boolean;
 };
 
 /**
@@ -775,10 +779,11 @@ async function runSecondReviewPhases(opts: {
   });
 
   await runOverlappingUpPhase(opts);
+  await runDisabledAfterDownPhase(opts);
   await opts.writeConfig({ mode: "identity" });
 }
 
-async function runOverlappingUpPhase(opts: {
+type OverlapOptions = {
   readonly ctx: Parameters<Scenario["run"]>[0];
   readonly cwd: string;
   readonly hackDir: string;
@@ -791,8 +796,65 @@ async function runOverlappingUpPhase(opts: {
     readonly branch: string;
   }) => Promise<CliResult>;
   readonly ownedHelper: () => Promise<Identity>;
-}): Promise<void> {
-  const { ctx, branch } = opts;
+};
+
+/**
+ * Start `hack up` for the branch, paused at Compose image preparation by the
+ * fake Docker gate. The CLI process itself is spawned (not a `bun` wrapper)
+ * so a signal reaches Hack's own handlers.
+ */
+async function startGatedUp(opts: {
+  readonly ctx: Parameters<Scenario["run"]>[0];
+  readonly cwd: string;
+  readonly path: string;
+  readonly branch: string;
+  readonly gate: string;
+  readonly extraEnv?: Readonly<Record<string, string>>;
+}): Promise<Bun.Subprocess<"ignore", "pipe", "ignore">> {
+  const args = ["up", "--detach", "--json", "--branch", opts.branch];
+  const proc = Bun.spawn(
+    process.env.HACK_E2E_CLI_BIN?.trim()
+      ? resolveCliSpawnArgs(args)
+      : [process.execPath, CLI_ENTRYPOINT, ...args],
+    {
+      cwd: opts.cwd,
+      env: buildCliEnv({
+        hackHome: opts.ctx.hackHome,
+        extra: {
+          PATH: opts.path,
+          E2E_ISSUER_UPSTREAM: UPSTREAM,
+          E2E_DOCKER_GATE_UP: opts.gate,
+          ...opts.extraEnv,
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    }
+  );
+  let reached = false;
+  await waitUntil(async () => {
+    reached = await Bun.file(`${opts.gate}.reached`).exists();
+    return reached;
+  });
+  if (!reached) {
+    proc.kill("SIGKILL");
+    await proc.exited;
+    throw new Error("the gated up never reached compose image preparation");
+  }
+  return proc;
+}
+
+type EarlierOutcome = "succeeds" | "compose-fails" | "sigterm";
+
+/**
+ * A newer up of the same instance adopts the lifecycle session and helpers
+ * of an earlier up that is paused at image preparation. Whatever the earlier
+ * up then does (succeeds, fails in Compose, or is terminated), it must not
+ * tear down the session or helpers the newer up now relies on.
+ */
+async function runOverlappingUpPhase(opts: OverlapOptions): Promise<void> {
+  const { ctx } = opts;
   const tmux = Bun.which("tmux");
   if (!tmux) {
     if (process.env.HACK_E2E_REQUIRE_TMUX === "1") {
@@ -801,8 +863,26 @@ async function runOverlappingUpPhase(opts: {
     ctx.log("overlapping up phase skipped: tmux is not installed");
     return;
   }
-  ctx.log("a newer up never makes an earlier up tear down its session");
   await opts.writeConfig({ mode: "identity", withProcess: true });
+  for (const outcome of [
+    "succeeds",
+    "compose-fails",
+    "sigterm",
+  ] as const satisfies readonly EarlierOutcome[]) {
+    await runOverlap({ ...opts, tmux, outcome });
+  }
+}
+
+async function runOverlap(
+  opts: OverlapOptions & {
+    readonly tmux: string;
+    readonly outcome: EarlierOutcome;
+  }
+): Promise<void> {
+  const { ctx, branch, outcome } = opts;
+  ctx.log(
+    `a newer up never makes an earlier up tear down its session (earlier up ${outcome})`
+  );
   const sessionName = `${opts.fixtureName}--lifecycle-${branch}`;
   const composeProject = `${opts.fixtureName}--${branch}`;
   const statePath = join(opts.hackDir, ".internal", "lifecycle", "state.json");
@@ -823,63 +903,50 @@ async function runOverlappingUpPhase(opts: {
     );
   };
   const sessionAlive = async (): Promise<boolean> =>
-    (await Bun.spawn([tmux, "has-session", "-t", sessionName], {
+    (await Bun.spawn([opts.tmux, "has-session", "-t", sessionName], {
       stdout: "ignore",
       stderr: "ignore",
     }).exited) === 0;
 
-  const gate = join(ctx.tempRoot, "overlap-gate");
-  const earlier = Bun.spawn(
-    resolveCliSpawnArgs(["up", "--detach", "--json", "--branch", branch]),
-    {
-      cwd: opts.cwd,
-      env: buildCliEnv({
-        hackHome: ctx.hackHome,
-        extra: {
-          PATH: opts.path,
-          E2E_ISSUER_UPSTREAM: UPSTREAM,
-          E2E_DOCKER_GATE_UP: gate,
-        },
-      }),
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-    }
-  );
-  let reached = false;
-  await waitUntil(async () => {
-    reached = await Bun.file(`${gate}.reached`).exists();
-    return reached;
+  const gate = join(ctx.tempRoot, `overlap-gate-${outcome}`);
+  const earlier = await startGatedUp({
+    ctx,
+    cwd: opts.cwd,
+    path: opts.path,
+    branch,
+    gate,
+    ...(outcome === "compose-fails"
+      ? { extraEnv: { E2E_DOCKER_FAIL_UP: "1" } }
+      : {}),
   });
-  if (!reached) {
-    earlier.kill("SIGKILL");
-    await earlier.exited;
-    throw new Error("the earlier up never reached compose image preparation");
-  }
   const helper = await opts.ownedHelper();
   const token = await readToken();
   expect({
     that: token !== null && (await sessionAlive()),
     message: "the earlier up should own a lifecycle session before pausing",
   });
-  const newer = await opts.cli({ verb: "up", branch });
   expectExit({
-    result: newer,
+    result: await opts.cli({ verb: "up", branch }),
     codes: [0],
     message: "the newer up should adopt the session and helpers",
   });
+  if (outcome === "sigterm") {
+    earlier.kill("SIGTERM");
+  }
   await writeFile(gate, "open\n");
   const [earlierExit, earlierStdout] = await Promise.all([
     earlier.exited,
     new Response(earlier.stdout).text(),
   ]);
+  const expectedExit =
+    outcome === "succeeds" ? earlierExit === 0 : earlierExit !== 0;
   expect({
     that:
-      earlierExit === 0 &&
+      expectedExit &&
       (await sessionAlive()) &&
       (await readToken()) === token &&
       (await isRunning(helper)),
-    message: `the earlier up must not tear down the adopted session or helpers (exit ${earlierExit}, stdout ${earlierStdout.trim().slice(0, 300)})`,
+    message: `the earlier up (${outcome}) must not tear down the adopted session or helpers (exit ${earlierExit}, stdout ${earlierStdout.trim().slice(0, 300)})`,
   });
   expectExit({
     result: await opts.cli({ verb: "down", branch }),
@@ -890,6 +957,64 @@ async function runOverlappingUpPhase(opts: {
     that: !((await sessionAlive()) || (await isRunning(helper))),
     message: "down must stop the session and the helper",
   });
+}
+
+/**
+ * A down while an up is paused, then a newer up that succeeds with the helper
+ * disabled: the newer start does not restore the earlier start's helper, so
+ * the earlier up must still refuse to start services.
+ */
+async function runDisabledAfterDownPhase(opts: OverlapOptions): Promise<void> {
+  const { ctx, branch } = opts;
+  ctx.log(
+    "a newer up with the helper disabled does not restore an earlier up after down"
+  );
+  await opts.writeConfig({ mode: "identity" });
+  const gate = join(ctx.tempRoot, "disabled-gate");
+  const dockerLog = join(ctx.tempRoot, "disabled-docker.log");
+  const earlier = await startGatedUp({
+    ctx,
+    cwd: opts.cwd,
+    path: opts.path,
+    branch,
+    gate,
+    extraEnv: { E2E_DOCKER_LOG: dockerLog },
+  });
+  const helper = await opts.ownedHelper();
+  expectExit({
+    result: await opts.cli({ verb: "down", branch }),
+    codes: [0],
+    message: "down while the earlier up is paused",
+  });
+  await opts.writeConfig({ mode: "identity", disabled: true });
+  expectExit({
+    result: await opts.cli({ verb: "up", branch }),
+    codes: [0],
+    message: "the newer up with the helper disabled",
+  });
+  await writeFile(gate, "open\n");
+  const [earlierExit, earlierStdout] = await Promise.all([
+    earlier.exited,
+    new Response(earlier.stdout).text(),
+  ]);
+  const envelope = parseEnvelope(earlierStdout);
+  const startCalls = (await Bun.file(dockerLog).text())
+    .split("\n")
+    .filter((line) => line.includes(" up -d "));
+  expect({
+    that:
+      earlierExit !== 0 &&
+      envelope?.error?.code === "E_LIFECYCLE_FAILED" &&
+      startCalls.length === 0 &&
+      !(await isRunning(helper)),
+    message: `the earlier up must stay superseded after a later up with the helper disabled (exit ${earlierExit}, start calls ${startCalls.length})`,
+  });
+  expectExit({
+    result: await opts.cli({ verb: "down", branch }),
+    codes: [0],
+    message: "down after the disabled-helper up",
+  });
+  await opts.writeConfig({ mode: "identity" });
 }
 
 type Envelope = {

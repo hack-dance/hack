@@ -256,7 +256,8 @@ macTest(
 );
 
 macTest.each([
-  { name: "omitted", args: [], code: "E_LIFECYCLE_FAILED" },
+  // HACK-1312: with nothing retained, omitted-profile recovery is a no-op.
+  { name: "omitted", args: [], code: null },
   {
     name: "explicit-empty",
     args: ["--profile", ""],
@@ -281,15 +282,17 @@ macTest.each([
       backend: "native",
       logger: "console",
     });
-    expect(value.code).toBe(1);
-    expect(value.stdout + value.stderr).toMatch(
-      new RegExp(`(?:^|\\n)ERROR: ${code}\\b`)
-    );
-    expect(value.stdout + value.stderr).not.toContain(
-      code === "E_LIFECYCLE_FAILED"
-        ? "E_NATIVE_PROJECT_UNSUPPORTED"
-        : "E_LIFECYCLE_FAILED"
-    );
+    if (code === null) {
+      expect(value.code).toBe(0);
+      expect(value.stdout + value.stderr).toContain("Nothing to recover");
+      expect(value.stdout + value.stderr).not.toContain("ERROR:");
+    } else {
+      expect(value.code).toBe(1);
+      expect(value.stdout + value.stderr).toMatch(
+        new RegExp(`(?:^|\\n)ERROR: ${code}\\b`)
+      );
+      expect(value.stdout + value.stderr).not.toContain("E_LIFECYCLE_FAILED");
+    }
     expect(
       await Bun.file(join(selected.root, "compiler-called")).exists()
     ).toBe(false);

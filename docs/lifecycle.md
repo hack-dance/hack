@@ -271,15 +271,19 @@ Behavior:
 - Two overlapping `hack up` runs of the same instance, with no down in between:
   - The newer up does not supersede the earlier one: an earlier, slower up still starts,
     because the newer up holds the same helpers.
-  - Once the newer up has become current (its helpers are ready), the earlier up's cleanup
-    (after it fails, or on SIGINT/SIGTERM) leaves the lifecycle session and helper holders
-    alone, since the newer up may have adopted the session. The earlier up's other failure
-    handling is unchanged (for example, it still clears the instance's runtime-state entry),
-    so check `hack ps --branch <name>` after such an overlap.
-  - This applies to projects with `sharedHelpers`. The decision uses the shared helper
-    instance lock. If that lock stays busy for 10 s (for example, a third up is still waiting
-    for a slow helper), the decision cannot be made: the earlier up keeps the lifecycle session
-    and its helper holders, warns, and leaves them for `hack down` to stop.
+  - The up that created the lifecycle session stops it on failure (or SIGINT/SIGTERM) only
+    if no other up adopted it since. Hack records each session adoption and creation under
+    the shared helper instance lock, so this holds whichever up ensured its helpers first.
+    An up that only adopted the session never stops it.
+  - A failed up releases only the helper holders it added, and only while it is the latest
+    up of the instance to have its helpers ready.
+  - The failed up's other failure handling is unchanged (for example, it still clears the
+    instance's runtime-state entry), so check `hack ps --branch <name>` after such an
+    overlap.
+  - This applies to projects with `sharedHelpers`. If the shared helper instance lock stays
+    busy for 10 s (for example, a third up is still waiting for a slow helper), ownership
+    cannot be decided: the failed up keeps the lifecycle session and its helper holders,
+    warns, and leaves them for `hack down` to stop.
 - Claims live under `~/.hack/shared-helpers/<name>-<port>/` (or `$HACK_HOME`), shared by
   every project and branch that uses that helper name and port.
 - Helpers are not part of the lifecycle mux session and do not appear in `hack logs`.

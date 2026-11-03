@@ -942,3 +942,39 @@ compatibility, resource improvements or release readiness. The model also omits 
 implementation's graph-receipt/coordinator acknowledgement gap and startup release
 gate; those require their own implementation tests rather than an expanded claim
 about this unchanged specification.
+
+## Shared helper instance
+
+`shared-helper-instance/Instance.tla` models lifecycle-session ownership for one
+shared-helper instance (one branch, HACK-1142): two overlapping `hack up` runs
+(`a`, `b`) and one `hack down`. Property `SessionSafe`: an up that succeeded with no
+down since it captured the shutdown generation still has a live lifecycle session,
+so an overlapping up's cleanup never kills a session a successful up adopted.
+
+| Model operation | Source boundary and regression |
+| --- | --- |
+| `Capture` | `captureSharedHelperShutdownGeneration` at the top of `runLifecycleUpBeforeAndProcesses`, before `up.before` hooks. Module and e2e "down during up.before" regressions. |
+| `Superseded` | `startProjectSharedHelpers` refuses when the captured generation changed, before ensuring any helper. |
+| `Decide` | Helpers ready; then the lifecycle controller's session decision (inspect, adopt or replace) and session creation, each under the shared helper instance lock with `SharedHelperSessionOwnership.record`. Adoption writes a fresh session epoch; creation writes the creator's epoch. |
+| `Launch` / `Succeed` | `assertCurrent` before containers start (backend `beforeStart`) and after they start. |
+| `Fail` | Compose failure, SIGINT/SIGTERM or a failed `assertCurrent`. |
+| `Cleanup` / `CleanupUndecidable` | `SharedHelperSessionOwnership.runIfOwned`: under the instance lock the creator kills only while the epoch is still its own; an unavailable lock keeps the session. Module tests in `tests/project-shared-helpers.test.ts`; e2e overlap variants (succeeds, compose-fails, sigterm, sigterm-lock-held). |
+| `DownMark` / `DownStop` | `markSharedHelperInstanceStopping` once the down is committed; then Compose/graph shutdown and `releaseProjectSharedHelpers`, which advances the generation again. |
+
+The positive exploration exhausts 978 distinct states (TLC 1.7.4, Java 17, no
+fairness, `CHECK_DEADLOCK FALSE`). `InstanceBroken.tla` removes the epoch check from
+`Cleanup` (the creator kills by its token alone) and must violate `SessionSafe`; its
+named same-state witness is `Succeed` with `session = "absent"`,
+`epoch = <<"b", "adopted">>` and `b` succeeded: `a` created the session, `b` adopted
+it, `a`'s token-only cleanup killed it and `b` then succeeded on a dead session.
+
+Bounds and assumptions: two ups, each running once; one down; lock-held sections
+are single atomic steps. Helper ensure/holder counts, helper rollback ownership
+(the operation record), the acquired-helper record and claim-level stop
+confirmation are not modeled; the shared-host claim protocol has its own fixtures
+in `tests/shared-host-lifecycle.test.ts`. `DownStop` joins the down's session stop
+and its release into one step. In the implementation an up that captured after the
+down's stopping mark can still succeed between the down's session stop and its
+release; that is the documented first-slice limitation (launch prevention across a
+concurrent down is detected after launch, not prevented). Real mux sessions,
+process groups, lock-file durability and Compose behavior are outside this model.

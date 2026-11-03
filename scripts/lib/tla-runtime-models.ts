@@ -1235,6 +1235,22 @@ const contracts: readonly ModelContract[] = [
     fields: ['phase = "discarded"', "alive = TRUE"],
   },
   {
+    // Shared helper instance lifecycle-session ownership (HACK-1142):
+    // src/lib/project-shared-helpers.ts createSharedHelperSessionOwnership,
+    // captureSharedHelperShutdownGeneration and assertCurrent; see README.
+    name: "shared-helper-instance",
+    module: "Instance",
+    negativeModule: "InstanceBroken",
+    states: 978,
+    invariant: "SessionSafe",
+    action: "Succeed",
+    fields: [
+      'session = "absent"',
+      'epoch = <<"b", "adopted">>',
+      'pc = [a |-> "done", b |-> "succeeded"]',
+    ],
+  },
+  {
     name: "relay-fence",
     module: "RelayFence",
     negativeModule: "RelayFenceBroken",

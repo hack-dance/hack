@@ -321,6 +321,9 @@ fail when that check is removed.
   release would read the claim as stale and clear it without stopping the helper.
   A drift during a stop is handled: it gives `stop-unconfirmed`, never `stopped`.
   macOS records the start time directly and is not affected.
+- Model coverage. `tests/models/tla/shared-helper-instance` checks lifecycle-session
+  ownership across overlapping ups and a down (see its README section); the claim
+  protocol itself is covered by the fixtures above, not by a model.
 - The daemon. It has no lifecycle surface today; shared helpers are started and
   released only by the CLI's `up`, `restart` and `down`.
 - Migrating existing `lifecycle.singleton` configurations. `singleton` keeps its

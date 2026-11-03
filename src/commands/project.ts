@@ -290,6 +290,7 @@ import {
 } from "../lib/project-runtime-state.ts";
 import {
   captureSharedHelperShutdownGeneration,
+  createSharedHelperSessionOwnership,
   describeSharedHelperRelease,
   describeSharedHelperStart,
   isSharedHelperReleaseProblem,
@@ -297,6 +298,7 @@ import {
   type ProcessCleanupOutcome,
   releaseProjectSharedHelpers,
   type SharedHelperRelease,
+  type SharedHelperSessionOwnership,
   type SharedHelperShutdownGeneration,
   SharedHelperSupersededError,
   startProjectSharedHelpers,
@@ -1887,10 +1889,25 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   }
   // Captured before any preparation hook runs: a down that completes while
   // the hooks run supersedes this operation (see startProjectSharedHelpers).
+  const sharedHelperConfigs = opts.cfg.lifecycle?.sharedHelpers ?? [];
   const shutdownGeneration =
-    (opts.cfg.lifecycle?.sharedHelpers ?? []).length > 0
+    sharedHelperConfigs.length > 0
       ? await captureSharedHelperShutdownGeneration({
           composeProject: opts.composeProject,
+        })
+      : undefined;
+  // Records lifecycle-session adoption and creation, so a creator's cleanup
+  // never kills a session another start adopted (see the ownership type).
+  const sessionOwnership =
+    sharedHelperConfigs.length > 0
+      ? createSharedHelperSessionOwnership({
+          composeProject: opts.composeProject,
+          // Another start may hold the instance lock while it ensures helpers.
+          decisionTimeoutMs:
+            sharedHelperConfigs.reduce(
+              (sum, helper) => sum + helper.readyTimeoutMs,
+              0
+            ) + 10_000,
         })
       : undefined;
   const beforeCommands = opts.cfg.lifecycle?.up?.before;
@@ -1920,6 +1937,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     const lifecycleStart = await startWithSharedHelpers({
       ...opts,
       shutdownGeneration,
+      sessionOwnership,
       startProcesses: () =>
         startLifecycleProcesses({
           project: opts.project,
@@ -1929,6 +1947,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
           env: opts.env,
           composeProject: opts.composeProject,
           definitionHash,
+          ...(sessionOwnership ? { sessionOwnership } : {}),
         }),
       abortProcesses: () => Promise.resolve(),
     });
@@ -1960,6 +1979,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     env: opts.env,
     composeProject: opts.composeProject,
     definitionHash,
+    ...(sessionOwnership ? { sessionOwnership } : {}),
   });
   const beforeCode = await runLifecycleCommands({
     title: opts.title,
@@ -1988,6 +2008,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   const started = await startWithSharedHelpers({
     ...opts,
     shutdownGeneration,
+    sessionOwnership,
     startProcesses: async () => {
       await starter.startMany({
         processes: opts.cfg.lifecycle?.processes ?? [],
@@ -2069,6 +2090,7 @@ async function startWithSharedHelpers(opts: {
   readonly startProcesses: () => Promise<LifecycleProcessStart>;
   readonly abortProcesses: () => Promise<void>;
   readonly shutdownGeneration: SharedHelperShutdownGeneration | undefined;
+  readonly sessionOwnership: SharedHelperSessionOwnership | undefined;
 }): Promise<LifecycleProcessStart> {
   const failed = (error: unknown): Error =>
     error instanceof Error
@@ -2096,7 +2118,11 @@ async function startWithSharedHelpers(opts: {
         await sharedHelpers?.rollback();
         throw failed(error);
       }
-      const combined = withSharedHelperCleanup({ ...started, sharedHelpers });
+      const combined = withSharedHelperCleanup({
+        ...started,
+        sharedHelpers,
+        sessionOwnership: opts.sessionOwnership,
+      });
       onSignalled = async () => {
         await combined.cleanup?.();
       };
@@ -2115,9 +2141,6 @@ export type LifecycleSharedHelpers = {
   readonly assertCurrent: (opts?: {
     readonly servicesStarted?: boolean;
   }) => Promise<void>;
-  readonly runUnlessNewerStart: (
-    cleanup: () => Promise<void>
-  ) => Promise<ProcessCleanupOutcome>;
 };
 
 /**
@@ -2153,7 +2176,6 @@ async function startLifecycleSharedHelpers(opts: {
       reportSharedHelperReleases(await started.rollback());
     },
     assertCurrent: started.assertCurrent,
-    runUnlessNewerStart: started.runUnlessNewerStart,
   };
 }
 
@@ -2172,11 +2194,20 @@ export function withSharedHelperCleanup(opts: {
   readonly cleanup: LifecycleOperationCleanup | null;
   readonly signalCleanup: { readonly dispose: () => void } | null;
   readonly sharedHelpers: LifecycleSharedHelpers | null;
+  readonly sessionOwnership:
+    | Pick<SharedHelperSessionOwnership, "runIfOwned">
+    | undefined;
 }): {
   readonly cleanup: LifecycleOperationCleanup | null;
   readonly signalCleanup: { readonly dispose: () => void } | null;
 } {
   const sharedHelpers = opts.sharedHelpers;
+  const runProcessCleanup =
+    opts.sessionOwnership?.runIfOwned ??
+    (async (cleanup: () => Promise<void>): Promise<ProcessCleanupOutcome> => {
+      await cleanup();
+      return "ran";
+    });
   if (!sharedHelpers?.configured) {
     return { cleanup: opts.cleanup, signalCleanup: opts.signalCleanup };
   }
@@ -2186,15 +2217,15 @@ export function withSharedHelperCleanup(opts: {
       const processCleanup = opts.cleanup;
       let outcome: ProcessCleanupOutcome | null = null;
       try {
-        // A newer start of this instance may have adopted the lifecycle
-        // session, which keeps this start's ownership token: only clean up
-        // processes while no newer start is current.
+        // Another start of this instance may have adopted the lifecycle
+        // session this start created; adoption keeps the creator's token, so
+        // only clean up while the session is still this start's own.
         if (processCleanup) {
-          outcome = await sharedHelpers.runUnlessNewerStart(processCleanup);
+          outcome = await runProcessCleanup(processCleanup);
           if (outcome === "undecidable") {
             logger.warn({
               message:
-                "Kept this instance's lifecycle session and its shared helpers: the shared helper instance lock was busy, so whether a newer hack up adopted them could not be checked. Run hack down to stop them if nothing uses them.",
+                "Kept this instance's lifecycle session and its shared helpers: the shared helper instance lock was busy, so whether another hack up adopted them could not be checked. Run hack down to stop them if nothing uses them.",
             });
           }
         }
@@ -2230,6 +2261,7 @@ async function startLifecycleProcesses(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly composeProject: string;
   readonly definitionHash: string;
+  readonly sessionOwnership?: SharedHelperSessionOwnership;
 }): Promise<{
   readonly cleanup: LifecycleOperationCleanup | null;
   readonly signalCleanup: { readonly dispose: () => void } | null;
@@ -2256,6 +2288,9 @@ async function startLifecycleProcesses(opts: {
     env: opts.env,
     composeProject: opts.composeProject,
     definitionHash: opts.definitionHash,
+    ...(opts.sessionOwnership
+      ? { sessionOwnership: opts.sessionOwnership }
+      : {}),
   });
   try {
     await starter.startMany({ processes });

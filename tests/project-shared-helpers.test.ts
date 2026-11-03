@@ -11,6 +11,7 @@ import { readProjectConfig } from "../src/lib/project.ts";
 import {
   buildSharedHelperSpec,
   captureSharedHelperShutdownGeneration,
+  createSharedHelperSessionOwnership,
   markSharedHelperInstanceStopping,
   type ProjectSharedHelperConfig,
   parseProjectSharedHelpers,
@@ -1157,69 +1158,110 @@ test(
   TIMEOUT
 );
 
-test(
-  "an earlier start's process cleanup is skipped once a newer start is current, and runs after a down",
-  async () => {
-    const root = await scratch();
-    const hackDir = join(root, "hack-home");
-    const helper = helperConfig({ port: freePort() });
-    const earlier = await startProjectSharedHelpers({
-      ...context(root),
-      helpers: [helper],
-      composeProject: BRANCH_A,
-    });
-    const cleaned: string[] = [];
-    const cleanup = (label: string) => () => {
-      cleaned.push(label);
+function sessionOwnership(root: string, decisionTimeoutMs = 10_000) {
+  return createSharedHelperSessionOwnership({
+    composeProject: BRANCH_A,
+    hackDir: join(root, "hack-home"),
+    decisionTimeoutMs,
+  });
+}
+
+test("a creator's session cleanup runs while the session is its own and is skipped once another start adopts it", async () => {
+  const root = await scratch();
+  const cleaned: string[] = [];
+  const cleanup = (label: string) => () => {
+    cleaned.push(label);
+    return Promise.resolve();
+  };
+  const creator = sessionOwnership(root);
+  await creator.withLock(() => creator.record("created"));
+  expect(await creator.runIfOwned(cleanup("alone"))).toBe("ran");
+  // Another start adopts the session: the creator's token would still kill it.
+  const adopter = sessionOwnership(root);
+  await adopter.withLock(() => adopter.record("adopted"));
+  expect(await creator.runIfOwned(cleanup("after-adoption"))).toBe("adopted");
+  expect(cleaned).toEqual(["alone"]);
+});
+
+test("session ownership follows adoption, not the order starts ensured their helpers", async () => {
+  // Codex's sequence: A ensures helpers first, B ensures second and creates
+  // the session, A then adopts it and succeeds, and B fails in Compose.
+  const root = await scratch();
+  const helper = helperConfig({ port: freePort() });
+  await startProjectSharedHelpers({
+    ...context(root),
+    helpers: [helper],
+    composeProject: BRANCH_A,
+  });
+  await startProjectSharedHelpers({
+    ...context(root),
+    helpers: [helper],
+    composeProject: BRANCH_A,
+  });
+  const b = sessionOwnership(root);
+  const a = sessionOwnership(root);
+  await b.withLock(() => b.record("created"));
+  await a.withLock(() => a.record("adopted"));
+  let killed = false;
+  expect(
+    await b.runIfOwned(() => {
+      killed = true;
       return Promise.resolve();
-    };
-    // No newer start: the earlier start still owns its processes.
-    expect(await earlier.runUnlessNewerStart(cleanup("alone"))).toBe("ran");
-    await startProjectSharedHelpers({
-      ...context(root),
-      helpers: [helper],
-      composeProject: BRANCH_A,
-    });
-    // A newer start is current: it may have adopted the session.
-    expect(await earlier.runUnlessNewerStart(cleanup("newer"))).toBe(
-      "newer-start"
-    );
-    // After a down, nothing newer owns the session: clean up.
-    await markSharedHelperInstanceStopping({
-      helpers: [helper],
-      composeProject: BRANCH_A,
-      hackDir,
-    });
-    expect(await earlier.runUnlessNewerStart(cleanup("down"))).toBe("ran");
-    expect(cleaned).toEqual(["alone", "down"]);
-    await releaseProjectSharedHelpers({
-      helpers: [helper],
-      composeProject: BRANCH_A,
-      hackDir,
-    });
-  },
-  TIMEOUT
-);
+    })
+  ).toBe("adopted");
+  expect(killed).toBe(false);
+  await releaseProjectSharedHelpers({
+    helpers: [helper],
+    composeProject: BRANCH_A,
+    hackDir: join(root, "hack-home"),
+  });
+});
+
+test("a creator's cleanup waits for an adoption decision in progress and then keeps the session", async () => {
+  const root = await scratch();
+  const creator = sessionOwnership(root);
+  await creator.withLock(() => creator.record("created"));
+  const adopter = sessionOwnership(root);
+  let finishDecision = (): void => undefined;
+  const deciding = new Promise<void>((resolveDecision) => {
+    finishDecision = resolveDecision;
+  });
+  let inDecision = (): void => undefined;
+  const decisionStarted = new Promise<void>((resolveStarted) => {
+    inDecision = resolveStarted;
+  });
+  // The adopter has inspected the live session and is deciding to adopt it.
+  const adoption = adopter.withLock(async () => {
+    inDecision();
+    await deciding;
+    await adopter.record("adopted");
+  });
+  await decisionStarted;
+  let killed = false;
+  const cleanup = creator.runIfOwned(() => {
+    killed = true;
+    return Promise.resolve();
+  });
+  await Bun.sleep(200);
+  expect(killed).toBe(false);
+  finishDecision();
+  await adoption;
+  expect(await cleanup).toBe("adopted");
+  expect(killed).toBe(false);
+});
 
 test(
-  "when the instance lock outlasts the cleanup timeout, an earlier start keeps the session a newer start may have adopted",
+  "when the instance lock outlasts the cleanup timeout, a creator keeps the session another start may have adopted",
   async () => {
     const root = await scratch();
     const hackDir = join(root, "hack-home");
-    const helper = helperConfig({ port: freePort() });
-    const earlier = await startProjectSharedHelpers({
-      ...context(root),
-      helpers: [helper],
-      composeProject: BRANCH_A,
-    });
-    // B is already successful: it is current and may have adopted the session.
-    await startProjectSharedHelpers({
-      ...context(root),
-      helpers: [helper],
-      composeProject: BRANCH_A,
-    });
-    // C holds the instance lock (as a slow helper ensure would) for longer
-    // than the cleanup's lock timeout.
+    const creator = sessionOwnership(root);
+    await creator.withLock(() => creator.record("created"));
+    // Another start adopted the session and succeeded.
+    const adopter = sessionOwnership(root);
+    await adopter.withLock(() => adopter.record("adopted"));
+    // A third start holds the instance lock (as a slow helper ensure would)
+    // for longer than the cleanup's lock timeout.
     let releaseLock = (): void => undefined;
     const held = new Promise<void>((resolveHeld) => {
       releaseLock = resolveHeld;
@@ -1242,7 +1284,7 @@ test(
     });
     await isHeld;
     let cleaned = false;
-    const outcome = await earlier.runUnlessNewerStart(() => {
+    const outcome = await creator.runIfOwned(() => {
       cleaned = true;
       return Promise.resolve();
     });
@@ -1250,11 +1292,6 @@ test(
     await lockHolder;
     expect(outcome).toBe("undecidable");
     expect(cleaned).toBe(false);
-    await releaseProjectSharedHelpers({
-      helpers: [helper],
-      composeProject: BRANCH_A,
-      hackDir,
-    });
   },
   TIMEOUT
 );

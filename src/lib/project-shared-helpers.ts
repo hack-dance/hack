@@ -376,12 +376,8 @@ export class SharedHelperSupersededError extends Error {
  *   hooks ran ({@link captureSharedHelperShutdownGeneration}), so a down
  *   during those hooks also supersedes this start: it fails before ensuring
  *   any helper.
- * - `runUnlessNewerStart` runs this start's lifecycle-process cleanup under
- *   the instance lock, and skips it once a newer start has become current:
- *   that start may have adopted the lifecycle session, and the session keeps
- *   this start's ownership token, so the token alone cannot protect it. When
- *   the lock is unavailable the answer is unknown, so it keeps the session
- *   (`hack down` stops it) rather than risk killing an adopted one.
+ * - Lifecycle-session cleanup is coordinated separately, by
+ *   {@link createSharedHelperSessionOwnership}.
  * - Before each helper is ensured its identity (name and port) is added to
  *   the instance's acquired record, so `hack down` still releases it after the
  *   entry is removed or renamed in config.
@@ -407,13 +403,6 @@ export async function startProjectSharedHelpers(opts: {
   readonly assertCurrent: (opts?: {
     readonly servicesStarted?: boolean;
   }) => Promise<void>;
-  /**
-   * Run `cleanup` (this start's lifecycle-process cleanup) unless a newer start
-   * of the instance has become current, or that cannot be decided.
-   */
-  readonly runUnlessNewerStart: (
-    cleanup: () => Promise<void>
-  ) => Promise<ProcessCleanupOutcome>;
 }> {
   const helpers = opts.helpers ?? [];
   const started: SharedHelperStartRecord[] = [];
@@ -423,10 +412,6 @@ export async function startProjectSharedHelpers(opts: {
       started,
       rollback: () => Promise.resolve([]),
       assertCurrent: () => Promise.resolve(),
-      runUnlessNewerStart: async (cleanup) => {
-        await cleanup();
-        return "ran";
-      },
     };
   }
   const holder = resolveSharedHelperHolder(opts.composeProject);
@@ -480,41 +465,6 @@ export async function startProjectSharedHelpers(opts: {
     });
     if (!current) {
       throw new SharedHelperSupersededError(check);
-    }
-  };
-  const runUnlessNewerStart = async (
-    cleanup: () => Promise<void>
-  ): Promise<ProcessCleanupOutcome> => {
-    let decided = false;
-    try {
-      // Held through the cleanup: a newer start cannot become current, and
-      // so cannot adopt the session, while this cleanup kills it.
-      return await withInstanceLock({
-        instance,
-        timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
-        run: async (): Promise<ProcessCleanupOutcome> => {
-          decided = true;
-          const current = await readOperation(instance);
-          if (
-            current !== null &&
-            current !== operation &&
-            !current.startsWith(STOPPING_PREFIX)
-          ) {
-            return "newer-start";
-          }
-          await cleanup();
-          return "ran";
-        },
-      });
-    } catch (error: unknown) {
-      if (decided) {
-        // The cleanup itself failed: report it as before.
-        throw error;
-      }
-      // The lock was unavailable, so whether a newer start adopted the
-      // session cannot be decided. Its ownership token would still let this
-      // cleanup kill an adopted session, so keep it; hack down stops it.
-      return "undecidable";
     }
   };
   await mkdir(instance.dir, { recursive: true, mode: 0o700 });
@@ -571,7 +521,7 @@ export async function startProjectSharedHelpers(opts: {
       }
     },
   });
-  return { started, rollback, assertCurrent, runUnlessNewerStart };
+  return { started, rollback, assertCurrent };
 }
 
 async function ensureOne(opts: {
@@ -632,6 +582,7 @@ type InstancePaths = {
   readonly lockPath: string;
   readonly operationPath: string;
   readonly generationPath: string;
+  readonly sessionEpochPath: string;
   readonly acquiredPath: string;
 };
 
@@ -649,6 +600,7 @@ function instancePaths(opts: {
     lockPath: join(dir, `${opts.holder}.lock`),
     operationPath: join(dir, `${opts.holder}.operation`),
     generationPath: join(dir, `${opts.holder}.shutdown-generation`),
+    sessionEpochPath: join(dir, `${opts.holder}.session-epoch`),
     acquiredPath: join(dir, `${opts.holder}.acquired.json`),
   };
 }
@@ -676,14 +628,105 @@ async function readOperation(instance: InstancePaths): Promise<string | null> {
   }
 }
 
-/** Outcome of {@link startProjectSharedHelpers}'s `runUnlessNewerStart`. */
+/** Outcome of {@link SharedHelperSessionOwnership.runIfOwned}. */
 export type ProcessCleanupOutcome =
   /** The cleanup ran. */
   | "ran"
-  /** A newer start is current and may have adopted the session: kept. */
-  | "newer-start"
-  /** The instance lock was unavailable, so adoption is unknown: kept. */
+  /** Another operation adopted (or replaced) the session since: kept. */
+  | "adopted"
+  /** The instance lock was unavailable, so ownership is unknown: kept. */
   | "undecidable";
+
+/**
+ * Lifecycle-session ownership for one operation of an instance with shared
+ * helpers.
+ *
+ * The lifecycle session keeps its creator's ownership token when another
+ * `hack up` adopts it, so the token alone cannot tell the creator whether the
+ * session is still only its own. Each session decision is recorded instead:
+ * under the instance lock, adopting writes a fresh session epoch, and
+ * creating writes one that the creator remembers. The creator's cleanup kills
+ * the session only while the epoch is still the one it wrote, checked under
+ * the same lock, so no adoption can slip between the check and the kill and
+ * no creation can overwrite an adoption's record. This is independent of the
+ * order in which operations ensured their helpers.
+ */
+export type SharedHelperSessionOwnership = {
+  /** Run a session decision or creation under the instance lock. */
+  readonly withLock: <T>(run: () => Promise<T>) => Promise<T>;
+  /** Record a decision; call inside {@link withLock}. */
+  readonly record: (kind: "adopted" | "created") => Promise<void>;
+  /** Run this operation's session cleanup only while it still owns the session. */
+  readonly runIfOwned: (
+    cleanup: () => Promise<void>
+  ) => Promise<ProcessCleanupOutcome>;
+};
+
+export function createSharedHelperSessionOwnership(opts: {
+  readonly composeProject: string;
+  readonly hackDir?: string;
+  /** Lock wait for a session decision; another start may hold it while ensuring helpers. */
+  readonly decisionTimeoutMs: number;
+}): SharedHelperSessionOwnership {
+  const holder = resolveSharedHelperHolder(opts.composeProject);
+  const instance = instancePaths({ hackDir: opts.hackDir, holder });
+  let createdEpoch: string | null = null;
+  const readEpoch = async (): Promise<string | null> => {
+    try {
+      return (await readFile(instance.sessionEpochPath, "utf8")).trim();
+    } catch {
+      return null;
+    }
+  };
+  return {
+    withLock: async (run) => {
+      await mkdir(instance.dir, { recursive: true, mode: 0o700 });
+      return await withInstanceLock({
+        instance,
+        timeoutMs: opts.decisionTimeoutMs,
+        run,
+      });
+    },
+    record: async (kind) => {
+      const epoch = randomUUID();
+      await writeFileAtomic(instance.sessionEpochPath, `${epoch}\n`);
+      if (kind === "created") {
+        createdEpoch = epoch;
+      }
+    },
+    runIfOwned: async (cleanup) => {
+      if (createdEpoch === null) {
+        // This operation never recorded a created session (creation failed
+        // before its record): nothing was published for anyone to adopt.
+        await cleanup();
+        return "ran";
+      }
+      let decided = false;
+      try {
+        return await withInstanceLock({
+          instance,
+          timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
+          run: async (): Promise<ProcessCleanupOutcome> => {
+            decided = true;
+            if ((await readEpoch()) !== createdEpoch) {
+              return "adopted";
+            }
+            await cleanup();
+            return "ran";
+          },
+        });
+      } catch (error: unknown) {
+        if (decided) {
+          throw error;
+        }
+        // The lock was unavailable: ownership cannot be decided. Keep the
+        // session (hack down stops it) rather than risk killing an adopted
+        // one with the still-valid creator token.
+        return "undecidable";
+      }
+    },
+  };
+}
 
 /** An instance's shutdown generation, captured when an operation begins. */
 export type SharedHelperShutdownGeneration = {

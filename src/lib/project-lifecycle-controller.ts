@@ -41,6 +41,7 @@ import {
   inspectListeningTcpPorts,
   resolveLifecycleSingletonDecision,
 } from "./project-lifecycle-singleton.ts";
+import type { SharedHelperSessionOwnership } from "./project-shared-helpers.ts";
 import { exec } from "./shell.ts";
 export type LifecycleControllerProject = {
   readonly projectRoot: string;
@@ -198,6 +199,16 @@ export function createLifecycleProcessController(opts: {
     readonly cleanup: LifecycleOperationCleanup;
   }) => { readonly dispose: () => void };
   readonly assertFresh?: () => Promise<void>;
+  /**
+   * Shared helper session ownership (projects with `sharedHelpers`). The
+   * session decision (inspect, adopt or replace) and session creation run
+   * under its lock and are recorded, so a creator's cleanup can tell whether
+   * another start adopted the session; see SharedHelperSessionOwnership.
+   */
+  readonly sessionOwnership?: Pick<
+    SharedHelperSessionOwnership,
+    "withLock" | "record"
+  >;
 }): {
   readonly sessionName: string;
   startFromCommand: (opts: {
@@ -231,6 +242,19 @@ export function createLifecycleProcessController(opts: {
     if (sessionDispositionResolved) {
       return;
     }
+    const ownership = opts.sessionOwnership;
+    if (!ownership) {
+      await decideSessionDisposition();
+      return;
+    }
+    await ownership.withLock(async () => {
+      if ((await decideSessionDisposition()) === "adopted") {
+        await ownership.record("adopted");
+      }
+    });
+  };
+
+  const decideSessionDisposition = async (): Promise<"adopted" | "create"> => {
     const mux = await opts.mux();
     const resolvedBackend = resolveDefaultBackendName({
       mode: mux.mode,
@@ -281,7 +305,7 @@ export function createLifecycleProcessController(opts: {
       startedProcesses.push(...inspection.decision.entry.processes);
       sessionReady = true;
       sessionDispositionResolved = true;
-      return;
+      return "adopted";
     }
     if (inspection.decision.kind === "replace") {
       await opts.assertFresh?.();
@@ -294,6 +318,7 @@ export function createLifecycleProcessController(opts: {
       });
     }
     sessionDispositionResolved = true;
+    return "create";
   };
 
   const ensureSession = async (): Promise<void> => {
@@ -338,14 +363,20 @@ export function createLifecycleProcessController(opts: {
         entry: pendingEntry,
       });
       await opts.assertFresh?.();
-      const created = await backend.createSession({
-        name: sessionName,
-        cwd: opts.project.projectRoot,
-        lifecycleOwnerToken: ownershipToken,
-      });
-      if (!created.ok) {
-        throw new Error(`Failed to create lifecycle session: ${sessionName}`);
-      }
+      const createSession = async (): Promise<void> => {
+        const created = await backend.createSession({
+          name: sessionName,
+          cwd: opts.project.projectRoot,
+          lifecycleOwnerToken: ownershipToken,
+        });
+        if (!created.ok) {
+          throw new Error(`Failed to create lifecycle session: ${sessionName}`);
+        }
+        await opts.sessionOwnership?.record("created");
+      };
+      await (opts.sessionOwnership
+        ? opts.sessionOwnership.withLock(createSession)
+        : createSession());
       if (backendName === "tmux") {
         for (const [key, value] of Object.entries(opts.env)) {
           await exec(

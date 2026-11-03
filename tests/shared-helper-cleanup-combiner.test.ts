@@ -27,7 +27,9 @@ function combined(outcome: ProcessCleanupOutcome) {
       return Promise.resolve();
     },
     assertCurrent: () => Promise.resolve(),
-    runUnlessNewerStart: async (cleanup) => {
+  };
+  const sessionOwnership = {
+    runIfOwned: async (cleanup: () => Promise<void>) => {
       if (outcome === "ran") {
         await cleanup();
       }
@@ -42,6 +44,7 @@ function combined(outcome: ProcessCleanupOutcome) {
     },
     signalCleanup: null,
     sharedHelpers,
+    sessionOwnership,
   });
   return { events, cleanup: result.cleanup };
 }
@@ -53,7 +56,7 @@ test("an undecidable process cleanup keeps the helper holders too", async () => 
 });
 
 test("a decided process cleanup is followed by the helper rollback", async () => {
-  for (const outcome of ["ran", "newer-start"] as const) {
+  for (const outcome of ["ran", "adopted"] as const) {
     const { events, cleanup } = combined(outcome);
     await cleanup?.();
     expect(events).toEqual([

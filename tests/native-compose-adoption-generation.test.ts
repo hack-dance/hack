@@ -2500,7 +2500,7 @@ boundedTest(
       });
       expect(checked.status).toBe("warn");
       expect(checked.message).toContain("run 'hack up'");
-      expect(checked.message).toContain("then run 'hack config adopt'");
+      expect(checked.message).toContain("then run 'hack config adopt --stop'");
       expect(checked.message).not.toContain("--rollback");
       expect(checked.message).not.toContain(CANARY);
     } finally {
@@ -2516,10 +2516,13 @@ boundedTest(
         serviceEnv: { db: { MANAGED: CANARY, EMPTY: "" } },
       })?.text ?? ""
     );
-    const adopted = await adoptCli(["--json"], binary);
+    fixture.running = true;
+    await save();
+    const adopted = await adoptCli(["--stop", "--json"], binary);
     expect(adopted.code).toBe(0);
     expect(JSON.parse(adopted.stdout)).toMatchObject({ status: "active" });
     expect(adopted.output).not.toContain(CANARY);
+    expect(await mutationCommands()).toContainEqual(["container", "stop", ID]);
   },
   ADOPTION_CASE_TIMEOUT_MS
 );

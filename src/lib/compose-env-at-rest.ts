@@ -45,7 +45,7 @@ import {
  * `--recover --rollback` while a switch is pending, after first settling an
  * interrupted preparation stop or retained command), `hack up`, then adopting
  * again. An unpublished preparation with no interrupted stop instead needs
- * `hack up` and a new `hack config adopt`. New adoptions refuse a literal override.
+ * `hack up` and a new `hack config adopt --stop`. New adoptions refuse a literal override.
  */
 export const COMPOSE_ENV_OVERRIDE_FILENAME = "compose.env.override.yml";
 
@@ -546,7 +546,7 @@ export const ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
   "To drop them, stop the adopted containers ('hack down'), run 'hack config adopt --rollback', run 'hack up' so Hack rewrites the file with references only, then adopt again with 'hack config adopt --stop'.";
 /** An unpublished preparation has no active adoption to roll back. */
 export const PREPARED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
-  "To drop them, run 'hack up' so Hack rewrites the file with references only, then run 'hack config adopt' to prepare and publish a new adoption.";
+  "To drop them, run 'hack up' so Hack rewrites the file with references only, then run 'hack config adopt --stop' to stop the originals and prepare and publish a new adoption.";
 /**
  * The same, while the pinning adoption has a pending switch: `hack down` and
  * plain `--rollback` refuse in that state, and only explicit recovery releases

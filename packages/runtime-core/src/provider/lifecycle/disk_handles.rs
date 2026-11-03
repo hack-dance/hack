@@ -167,20 +167,41 @@ pub(super) mod tests {
     }
 
     /// A clock that moves only when the code under test sleeps. It refuses to pass an hour,
-    /// so a wait that never expires fails the test instead of spinning.
+    /// so a wait that never expires fails the test instead of spinning. With an oversleep,
+    /// the first sleep that starts at or after `from` wakes at `until` instead, as a waiter
+    /// descheduled on a loaded host would.
     #[derive(Default)]
-    struct FakeClock(Cell<Duration>);
+    struct FakeClock {
+        now: Cell<Duration>,
+        oversleep: Cell<Option<(Duration, Duration)>>,
+    }
 
     const RUNAWAY: Duration = Duration::from_secs(3600);
 
+    impl FakeClock {
+        fn oversleeping(from: Duration, until: Duration) -> Self {
+            assert!(until > from);
+            Self {
+                now: Cell::default(),
+                oversleep: Cell::new(Some((from, until))),
+            }
+        }
+    }
+
     impl Clock for FakeClock {
         fn now(&self) -> Duration {
-            self.0.get()
+            self.now.get()
         }
         fn sleep(&self, duration: Duration) {
-            let next = self.0.get() + duration;
+            let mut next = self.now.get() + duration;
+            if let Some((from, until)) = self.oversleep.get()
+                && self.now.get() >= from
+            {
+                self.oversleep.set(None);
+                next = next.max(until);
+            }
             assert!(next <= RUNAWAY, "the disk-handle wait never expired");
-            self.0.set(next);
+            self.now.set(next);
         }
     }
 
@@ -268,7 +289,11 @@ pub(super) mod tests {
     }
 
     fn scan(outcome: Outcome, wait: Duration) -> Run {
-        let clock = Rc::new(FakeClock::default());
+        scan_on(FakeClock::default(), outcome, wait)
+    }
+
+    fn scan_on(clock: FakeClock, outcome: Outcome, wait: Duration) -> Run {
+        let clock = Rc::new(clock);
         let record = Rc::new(RefCell::new(Record::default()));
         let probe = FakeProbe {
             clock: clock.clone(),
@@ -340,6 +365,33 @@ pub(super) mod tests {
             let run = scan(late, wait);
             assert_eq!(code(&run.result), "provider_timeout_uncertain");
             assert!(run.record.expired);
+        }
+    }
+
+    /// A waiter that oversleeps across both the bound and the scan's completion finds a
+    /// finished scan only after the bound. That late "no holder" is refused as uncertain;
+    /// the scan already finished, so it is not expired (nothing is signalled).
+    #[test]
+    fn an_oversleep_across_the_bound_and_completion_refuses_the_late_result() {
+        let ms = Duration::from_millis;
+        for wait in [STOP_HANDLE_WAIT, RELEASE_HANDLE_WAIT] {
+            let clock = FakeClock::oversleeping(wait - ms(10), wait + ms(50));
+            let run = scan_on(clock, Outcome::no_holder(wait + ms(20)), wait);
+            assert_eq!(code(&run.result), "provider_timeout_uncertain");
+            assert!(!run.record.expired, "a finished scan was signalled");
+            assert_eq!(run.elapsed, wait + ms(50));
+        }
+    }
+
+    /// An oversleep that still wakes inside the bound accepts a scan that finished in it.
+    #[test]
+    fn an_oversleep_that_wakes_inside_the_bound_accepts_the_scan() {
+        let ms = Duration::from_millis;
+        for wait in [STOP_HANDLE_WAIT, RELEASE_HANDLE_WAIT] {
+            let clock = FakeClock::oversleeping(wait - ms(60), wait - ms(20));
+            let run = scan_on(clock, Outcome::no_holder(wait - ms(30)), wait);
+            assert_eq!(code(&run.result), "ok");
+            assert_eq!(run.elapsed, wait - ms(20));
         }
     }
 

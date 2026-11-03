@@ -140,6 +140,14 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Wait for `pending` on `clock` until it completes, or expire it once `timeout` has passed
 /// since this call. The bound covers both the child's exit and its streams closing.
+///
+/// A result counts only if it is observed before the bound: the clock is read after each
+/// poll, so a waiter that oversleeps past the bound and then finds the child finished
+/// refuses it as `provider_timeout_uncertain` rather than accepting a result it cannot
+/// place inside the bound. Such a child has already exited and been reaped, so nothing is
+/// signalled. A child still running, or one whose streams are still held open, at the bound
+/// is expired by [`Pending::expire`], which keeps the timeout and output-retention outcomes
+/// apart.
 pub fn wait_within(
     pending: &mut dyn Pending,
     timeout: Duration,
@@ -147,14 +155,24 @@ pub fn wait_within(
 ) -> Result<Captured, CandidateError> {
     let start = clock.now();
     loop {
-        if let Some(captured) = pending.poll()? {
-            return Ok(captured);
+        let polled = pending.poll()?;
+        let within = clock.now().saturating_sub(start) < timeout;
+        match polled {
+            Some(captured) if within => return Ok(captured),
+            Some(_) => return Err(completed_late()),
+            None if within => clock.sleep(POLL_INTERVAL),
+            None => return Err(pending.expire()),
         }
-        if clock.now().saturating_sub(start) >= timeout {
-            return Err(pending.expire());
-        }
-        clock.sleep(POLL_INTERVAL);
     }
+}
+
+/// A child observed complete only after its bound: its result is not trusted.
+fn completed_late() -> CandidateError {
+    CandidateError::new(
+        "provider_timeout_uncertain",
+        "Provider request finished only after its time bound; its result is not trusted. \
+         Inspect before retry.",
+    )
 }
 
 pub fn capture(command: &mut Command, timeout: Duration) -> Result<Captured, CandidateError> {

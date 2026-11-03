@@ -175,9 +175,15 @@ test("when that stop is not confirmed, the entry and token stay so the session i
   expect(token).toBeDefined();
   const kept = await entries();
   expect(kept.map((entry) => entry.ownershipToken)).toEqual([token]);
-  // The operation still holds the token: abort() can reclaim once the kill
-  // succeeds, as can hack down from the kept entry.
+  // The caller's cleanup path (startLifecycleProcesses aborts on failure)
+  // must not drop the record while the stop is still unconfirmed.
   expect(starter.getOperationCleanup()).not.toBeNull();
+  await starter.abort();
+  expect(mux.sessions.get(SESSION)).toBe(token);
+  expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([
+    token,
+  ]);
+  // Once the session can be stopped, the kept token reclaims it.
   mux.failKill = false;
   await starter.abort();
   expect(mux.sessions.has(SESSION)).toBe(false);

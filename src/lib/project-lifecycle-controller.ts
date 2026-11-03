@@ -564,18 +564,28 @@ export function createLifecycleProcessController(opts: {
       return;
     }
     const backend = (await opts.mux()).backends.get(backendName);
-    if (backend?.available) {
-      await killLifecycleSessionWithOwnership({
-        backend,
-        sessionName,
-        ownershipToken: createdOwnershipToken,
+    const stopped = backend?.available
+      ? await killLifecycleSessionWithOwnership({
+          backend,
+          sessionName,
+          ownershipToken: createdOwnershipToken,
+        }).catch(() => false)
+      : false;
+    if (!stopped) {
+      // The session may still run: keep its ownership entry (and this
+      // operation's token) so a later abort, up or hack down can still prove
+      // ownership and reclaim it. Removing it would orphan the session.
+      logger.warn({
+        message: `Could not confirm that lifecycle session ${sessionName} stopped; kept its ownership record. Run hack down to stop it.`,
       });
+      return;
     }
     await removeLifecycleStateEntryIfOwned({
       projectDir: opts.project.projectDir,
       composeProject: opts.composeProject,
       ownershipToken: createdOwnershipToken,
     });
+    createdOwnershipToken = null;
   }
 }
 

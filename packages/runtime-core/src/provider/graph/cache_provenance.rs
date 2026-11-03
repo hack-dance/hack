@@ -1,3 +1,5 @@
+//! Cache quarantine rejects resources with `cache.is_some()` at admission.
+//! These dependency-cache identities cannot be touched by that operation.
 //! Historical evidence only: this does not authorize reclamation or prove cache contents.
 use super::*;
 use std::collections::BTreeSet;

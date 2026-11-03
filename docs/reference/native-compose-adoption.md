@@ -136,7 +136,14 @@ stop recovery can clear it. A retained operation that reaches its caller deadlin
 refuses with its own fixed message ("reached its caller deadline"), not the
 source-or-binding-changed message, which only an observed drift issues
 (HACK-1340). `hack up`, `hack down` and `config adopt --stop` pass the Compose
-startup budget as that deadline. These rechecks do not freeze external editors or
+startup budget as that deadline. Every adopted project command (`up --detach`,
+`restart`, `down`, `ps`, `logs`, `exec`) starts one such deadline before it opens the
+store, and each store inspection phase takes the time it has left, capped at 60
+seconds, instead of a fixed 15-second clock. Publication file moves, rollback
+restoration and scoped routing revalidation retain that live remaining budget;
+copying their operation context cannot restore time already spent. When that deadline expires the command
+returns `E_STARTUP_TIMEOUT` with the "reached its caller deadline" message, not
+`E_CONFIG_INVALID` (HACK-1458). These rechecks do not freeze external editors or
 the engine atomically. Public output remains field/count/status metadata;
 capabilities and authored probe arguments are private. Prior versions 1–4 keep
 their existing execution behavior, and older upgraded owners refuse version 5
@@ -836,3 +843,28 @@ pending receipt and leave both instances unchanged until that same original
 directory is restored. Independent rollbacks and exact owned cleanup retain the
 original resource and volume-birth checks. Registration and synthetic controls
 alone do not qualify live mounts or Docker behavior.
+
+## Saved-generation test layout
+
+The saved-generation regression suite is split by behavior so each file stays
+inside CI's 12-minute file budget, including on runners that are 2–2.5 times
+slower. No case deadline is shortened to make the split fit.
+
+| Test file (`tests/`) | Coverage |
+| --- | --- |
+| `native-compose-adoption-generation-jobs.test.ts` | Public static7 dispatch, completed jobs, freshness and refusal |
+| `native-compose-adoption-generation-retained.test.ts` | Ordered retained effects, aggregate deadlines, cancellation and plain-owner reprepare |
+| `native-compose-adoption-generation-managed.test.ts` | Canonical generated inputs, moved overrides and rollback of earlier literal overrides |
+| `native-compose-adoption-generation-recovery.test.ts` | CLI literal-input refusals, recovery and named rollback guidance |
+| `native-compose-adoption-generation-linked.test.ts` | Typed locals, linked managed inputs, branch selection and receipt compatibility |
+| `native-compose-adoption-generation-topology.test.ts` | Bridge/health ownership, crossed receipts and recovery |
+| `native-compose-adoption-generation.test.ts` | Generation storage, leases, input/resource drift, publication boundaries and stop recovery |
+
+Each file calls `createAdoptionGenerationFixture` from
+`tests/helpers/native-compose-adoption-generation-fixture.ts`. Its closure owns
+that file's mutable state and hooks; each case still creates and removes its own
+temporary checkout. The public-job settlement guard still refuses reuse after an
+unconfirmed owner. Keep these files separate when adding coverage, and update
+`scripts/test-shard-durations.json` with measured durations so the sharder can
+balance their work. Verify both isolated file processes (as CI runs them) and a
+single Bun process containing the family (as the local suite runs them).

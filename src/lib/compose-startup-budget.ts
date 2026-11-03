@@ -104,14 +104,17 @@ export function resolveNativeStorageTimeoutMs(
 }
 
 /**
- * Whole-phase cap on storage time excluded from one `up`/`restart` start
- * deadline. Each guard storage proof is bounded per carrier by
- * `HACK_NATIVE_STORAGE_TIMEOUT_MS` (S), and a phase runs up to (5B+3) guard
- * proofs for B builds, each with one carrier per enrolled volume (V). Without
- * a cap the excluded total is finite, at most (5B+3) x V x S, but it grows with
- * the build and volume counts and can reach hours: 4 builds and 3 volumes
- * allow 69 carriers, about 1.7 hours at the 90 s default and 11.5 hours at the
- * 600 s maximum. The excluded total may therefore not exceed
+ * Per-phase cap on storage time excluded from one native `up`/`restart`
+ * deadline (the image phase and the start phase each have their own). Each
+ * guard storage proof is bounded per carrier by
+ * `HACK_NATIVE_STORAGE_TIMEOUT_MS` (S), with one carrier per enrolled volume
+ * (V). The image phase runs B+2 guard proofs for B builds (one admission
+ * guard, one before each builder spawn, one closing guard) and the start phase
+ * runs one pre-spawn guard (two for a one-off `run`, which also guards after
+ * removing its container). Without a cap the excluded total is finite, at most
+ * (B+2) x V x S, but it grows with the build and volume counts: 4 builds and 3
+ * volumes allow 18 carriers, about 27 minutes at the 90 s default and 3 hours
+ * at the 600 s maximum. The excluded total of a phase may therefore not exceed
  * {@link NATIVE_STORAGE_EXCLUSION_MULTIPLE} x S or
  * {@link MAX_NATIVE_STORAGE_EXCLUSION_MS}, whichever is smaller: 24 minutes at
  * the 90 s default and 1 hour from S = 225 s up. Ordinary proofs take a small
@@ -119,10 +122,10 @@ export function resolveNativeStorageTimeoutMs(
  * their per-proof budget.
  */
 export const NATIVE_STORAGE_EXCLUSION_MULTIPLE = 16;
-/** Absolute ceiling of excluded storage time in one start phase (1 hour). */
+/** Absolute ceiling of excluded storage time in one phase (1 hour). */
 export const MAX_NATIVE_STORAGE_EXCLUSION_MS = 3_600_000;
 
-/** Excluded storage time one start phase may use for a per-carrier budget S. */
+/** Excluded storage time one phase may use for a per-carrier budget S. */
 export function nativeComposeStorageExclusionCapMs(
   storageTimeoutMs: number
 ): number {
@@ -133,7 +136,7 @@ export function nativeComposeStorageExclusionCapMs(
 }
 
 /**
- * Closed, value-free refusal once a start phase has spent its whole-phase
+ * Closed, value-free refusal once a phase has spent its whole-phase
  * storage exclusion cap. Its effect reason is `storage-budget`; it grants
  * nothing and relaxes no check.
  */
@@ -147,26 +150,31 @@ export class NativeStorageTotalBudgetError extends Error {
 }
 
 /**
- * Start deadline of a native `up`/`restart` workload phase (image builds,
- * container start, readiness and route verification), bounded by
- * `HACK_COMPOSE_STARTUP_TIMEOUT_MS`. Storage proofs that pre-spawn guards run
- * inside this phase are bounded by their own `HACK_NATIVE_STORAGE_TIMEOUT_MS`
- * carriers instead: their monotonic elapsed time extends this deadline rather
- * than consuming it. Only each carrier proof (carrier creation and witness
- * verification) is excluded; a guard's freshness checks and saved-state reads
- * around it consume the start budget. Overlapping exclusions count once, a
- * rejected proof still counts as excluded time, and the deadline never moves
- * earlier.
+ * Deadline of one native `up`/`restart` workload phase:
+ * - image phase: native image builds, bounded by
+ *   `HACK_COMPOSE_IMAGE_TIMEOUT_MS`. Unlike the Compose backend's
+ *   `up --no-start`, it does not cover pulls of `image:` services or container
+ *   creation; Compose `up` performs those in the start phase;
+ * - start phase: container start, readiness and route verification, bounded by
+ *   `HACK_COMPOSE_STARTUP_TIMEOUT_MS`. It begins only after the image phase
+ *   ends, so a long build never consumes it.
+ * Storage proofs that guards run inside a phase are bounded by their own
+ * `HACK_NATIVE_STORAGE_TIMEOUT_MS` carriers instead: their monotonic elapsed
+ * time extends the phase deadline rather than consuming it. Only each carrier
+ * proof (carrier creation and witness verification) is excluded; a guard's
+ * freshness checks and saved-state reads around it consume the phase budget.
+ * Overlapping exclusions count once, a rejected proof still counts as excluded
+ * time, and the deadline never moves earlier.
  *
- * The excluded total is capped by
+ * The excluded total is capped per phase by
  * {@link nativeComposeStorageExclusionCapMs}: the deadline moves at most that
  * far, a proof that would start at or past the cap is refused before it runs,
  * and a proof that ends past it refuses the phase with
  * {@link NativeStorageTotalBudgetError} (a failed proof keeps its own error).
- * The phase therefore ends within the start budget, plus the cap, plus at
- * most one in-flight guard proof, which is itself bounded per carrier.
+ * Each phase therefore ends within its budget, plus the cap, plus at most one
+ * in-flight guard proof, which is itself bounded per carrier.
  */
-export function createNativeComposeStartDeadline(opts: {
+export function createNativeComposePhaseDeadline(opts: {
   readonly timeoutMs: number;
   /** Per-carrier storage budget S, from {@link resolveNativeStorageTimeoutMs}. */
   readonly storageTimeoutMs: number;
@@ -212,6 +220,80 @@ export function createNativeComposeStartDeadline(opts: {
       return value;
     },
   };
+}
+
+type NativeComposePhaseDeadline = ReturnType<
+  typeof createNativeComposePhaseDeadline
+>;
+
+/**
+ * Sequential image and start phases of one native `up`/`restart`/`run`
+ * workload execution. The image phase (`HACK_COMPOSE_IMAGE_TIMEOUT_MS`) begins
+ * when this is created; `start()` ends it and begins the start phase
+ * (`HACK_COMPOSE_STARTUP_TIMEOUT_MS`), so build time never consumes the start
+ * budget. `excludeStorage` excludes a guard storage proof from whichever phase
+ * is current when the proof runs; each phase has its own exclusion cap.
+ */
+export type NativeComposeWorkloadPhases = {
+  readonly images: NativeComposePhaseDeadline;
+  /** Begin the start phase once; later calls return the same deadline. */
+  readonly start: () => NativeComposePhaseDeadline;
+  readonly excludeStorage: NativeComposePhaseDeadline["excludeStorage"];
+};
+
+export function createNativeComposeWorkloadPhases(opts: {
+  readonly imageTimeoutMs: number;
+  readonly startupTimeoutMs: number;
+  /** Per-carrier storage budget S, from {@link resolveNativeStorageTimeoutMs}. */
+  readonly storageTimeoutMs: number;
+  readonly wallNow?: () => number;
+  readonly monotonicNow?: () => number;
+}): NativeComposeWorkloadPhases {
+  const create = (timeoutMs: number) =>
+    createNativeComposePhaseDeadline({
+      timeoutMs,
+      storageTimeoutMs: opts.storageTimeoutMs,
+      ...(opts.wallNow ? { wallNow: opts.wallNow } : {}),
+      ...(opts.monotonicNow ? { monotonicNow: opts.monotonicNow } : {}),
+    });
+  const images = create(opts.imageTimeoutMs);
+  let start: NativeComposePhaseDeadline | null = null;
+  return {
+    images,
+    start: () => {
+      start ??= create(opts.startupTimeoutMs);
+      return start;
+    },
+    excludeStorage: (work) => (start ?? images).excludeStorage(work),
+  };
+}
+
+/**
+ * Run the native workload phases in order: optional builds under the image
+ * phase deadline (none for an unbounded one-off `run`), then begin the start
+ * phase and run the start step under its deadline. A failed build ends the
+ * sequence before the start phase begins.
+ */
+export async function runNativeComposeWorkloadPhases<T>(opts: {
+  readonly phases: NativeComposeWorkloadPhases;
+  /** False for a one-off `run`, whose builds keep their unbounded budget. */
+  readonly boundedBuilds: boolean;
+  readonly build:
+    | ((deadline: (() => number) | undefined) => Promise<number>)
+    | null;
+  readonly start: (deadline: () => number) => Promise<T>;
+  readonly failed: (code: number) => T;
+}): Promise<T> {
+  if (opts.build) {
+    const code = await opts.build(
+      opts.boundedBuilds ? opts.phases.images.deadline : undefined
+    );
+    if (code !== 0) {
+      return opts.failed(code);
+    }
+  }
+  // The start budget begins only after builds end.
+  return await opts.start(opts.phases.start().deadline);
 }
 
 function resolveBudget(opts: {

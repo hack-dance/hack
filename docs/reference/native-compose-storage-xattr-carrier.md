@@ -412,11 +412,11 @@ Budgets are layered and all finite:
   1,000–600,000 ms). It is never derived from `HACK_COMPOSE_STARTUP_TIMEOUT_MS`,
   so a short start budget cannot starve a helper proof and a long one does not
   lengthen it.
-- In a native `up` or `restart` start phase, guard proof time (each carrier's
-  creation and witness verification, not the guard's surrounding freshness
-  checks and saved-state reads) is excluded from
-  the start deadline but capped in total at 16 × the storage budget or 1 hour,
-  whichever is smaller. A guard proof that would start after the cap is spent is
+- In a native `up` or `restart` image or start phase, guard proof time (each
+  carrier's creation and witness verification, not the guard's surrounding
+  freshness checks and saved-state reads) is excluded from
+  that phase's deadline but capped in total, per phase, at 16 × the storage
+  budget or 1 hour, whichever is smaller. A guard proof that would start after the cap is spent is
   refused before it runs, and one that ends past it refuses as `storage-budget`.
 - Inside a carrier every Docker probe and command is bounded by the carrier's
   remaining budget (`nativeComposeStorageProbeTimeoutMs`), not by a fixed cap:

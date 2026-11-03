@@ -63,6 +63,16 @@ CI also lints those scripts and runs their transport tests; lint changed ones ex
 Rust default gates are `bun run check:local` and `bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
 changes; the toolchain Rust tasks already enable all features. Keep default coverage.
 
+`bun run test:local` does not enable `native-stream-relay`, so
+`stream_relay_contract` reports zero tests. This default pass does not qualify the
+relay contract. With Zig 0.15.2 available, run the local all-features equivalent:
+
+```sh
+cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --jobs 2 --all-features --test stream_relay_contract
+```
+
+The hosted all-features job covers this contract; retain the default gate as well.
+
 Before a full CLI suite, explicitly prepare the ignored compiler with
 `bun run build:config-compiler` on the host, or the toolchain `config-compiler` task
 inside Linux. Root `test`/`turbo:test`, direct CLI `test`, and no-argument toolchain

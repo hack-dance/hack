@@ -66,6 +66,7 @@ import {
   buildSessionStreamLogEvent,
   buildSessionStreamStartEvent,
   diffNewLines,
+  formatSessionListTable,
   parseTmuxPanesOutput,
   splitLines,
   writeSessionStreamEvent,
@@ -1154,23 +1155,17 @@ const handleList: CommandHandlerFor<
     return 0;
   }
 
-  console.log(
-    `${"Workspace".padEnd(20) + "Project".padEnd(20) + "Backend".padEnd(10)}Status`
-  );
-  console.log("-".repeat(60));
-
-  for (const session of sessions) {
-    const projectName = resolveWorkspaceProjectName({
+  const rows = sessions.map((session) => ({
+    workspace: session.name,
+    project: resolveWorkspaceProjectName({
       workspaceName: session.name,
       projects,
-    });
-    const status = session.attached === true ? "attached" : "detached";
-    console.log(
-      session.name.padEnd(20) +
-        projectName.padEnd(20) +
-        session.backend.padEnd(10) +
-        status
-    );
+    }),
+    backend: session.backend,
+    status: session.attached === true ? "attached" : "detached",
+  }));
+  for (const line of formatSessionListTable(rows)) {
+    console.log(line);
   }
 
   return 0;

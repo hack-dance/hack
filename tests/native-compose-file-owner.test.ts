@@ -42,7 +42,12 @@ import {
   renderNativeCompose,
 } from "../src/lib/native-compose-renderer.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { testBudgetMs } from "./helpers/test-budget.ts";
 import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
+
+/** Compiler-backed staging, durable up arm, child settlement and saved readback.
+ * Intel CI exceeded Bun's default 5 s before this fixture settled. */
+const PROJECTION_CASE_TIMEOUT_MS = testBudgetMs(5000);
 
 const KEYS = [
   "HACK_HOME",
@@ -101,9 +106,18 @@ function tracked<A extends unknown[]>(
     return run;
   };
 }
+// A case's own timeout is honored but never drops below the file budget.
 const test = Object.assign(
-  (name: string, body: () => Promise<void> | void) => {
-    bunTest(name, tracked(body));
+  (
+    name: string,
+    body: () => Promise<void> | void,
+    timeoutMs = FILE_OWNER_CASE_BUDGET_MS
+  ) => {
+    bunTest(
+      name,
+      tracked(body),
+      Math.max(timeoutMs, FILE_OWNER_CASE_BUDGET_MS)
+    );
   },
   {
     each:
@@ -426,42 +440,46 @@ test("actual acquisition stages binary and empty 0444 files outside checkout", a
     }
   });
 });
-test("exact bind/ref projection arms before simulated child and rejects a cloned capability", async () => {
-  await store.withMutation(async (mutation) => {
-    const selected = await staged(mutation);
-    let simulatedChildren = 0;
-    await mutation.runEffect({
-      generation: selected.generation,
-      operation: "up",
-      assertFresh: selected.assertFresh,
-      assertOwned: async () => {},
-      effect: async () => {
-        await selected.owner.arm({
-          attempt: selected.attempt,
-          generation: selected.generation,
-        });
-        simulatedChildren += 1;
-        await selected.owner.recordChildReaped({
-          attempt: selected.attempt,
-          generation: selected.generation,
-          assertReaped: async () => {},
-        });
-        expect(
-          await readFile(journalPath(selected.projection), "utf8")
-        ).toContain('"phase":"armed"');
-        return { outcome: "complete", value: 0 };
-      },
-    });
-    expect(simulatedChildren).toBe(1);
-    await selected.owner.assertSavedReady(selected.generation);
-    await expect(
-      selected.owner.arm({
-        attempt: { ...selected.attempt },
+test(
+  "exact bind/ref projection arms before simulated child and rejects a cloned capability",
+  async () => {
+    await store.withMutation(async (mutation) => {
+      const selected = await staged(mutation);
+      let simulatedChildren = 0;
+      await mutation.runEffect({
         generation: selected.generation,
-      })
-    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
-  });
-});
+        operation: "up",
+        assertFresh: selected.assertFresh,
+        assertOwned: async () => {},
+        effect: async () => {
+          await selected.owner.arm({
+            attempt: selected.attempt,
+            generation: selected.generation,
+          });
+          simulatedChildren += 1;
+          await selected.owner.recordChildReaped({
+            attempt: selected.attempt,
+            generation: selected.generation,
+            assertReaped: async () => {},
+          });
+          expect(
+            await readFile(journalPath(selected.projection), "utf8")
+          ).toContain('"phase":"armed"');
+          return { outcome: "complete", value: 0 };
+        },
+      });
+      expect(simulatedChildren).toBe(1);
+      await selected.owner.assertSavedReady(selected.generation);
+      await expect(
+        selected.owner.arm({
+          attempt: { ...selected.attempt },
+          generation: selected.generation,
+        })
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+    });
+  },
+  PROJECTION_CASE_TIMEOUT_MS
+);
 async function dollarFixture(): Promise<void> {
   materialRoot = join(parent, "material-${ROOT}-$cash");
   const authored = structuredClone(SOURCE);

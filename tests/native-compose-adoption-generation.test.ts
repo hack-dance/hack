@@ -1,4372 +1,69 @@
-import {
-  afterEach,
-  beforeEach,
-  test as boundedTest,
-  expect,
-  spyOn,
-} from "bun:test";
+import { test as boundedTest, expect, spyOn } from "bun:test";
 import {
   chmod,
   link,
   lstat,
   mkdir,
-  mkdtemp,
-  readdir,
   readFile,
-  realpath,
   rename,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  PENDING_CHANGED_SWITCH_BUSY_NEXT_STEP,
-  PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP,
-  PENDING_ROLLBACK_BUSY_NEXT_STEP,
-} from "../src/commands/config-adopt.ts";
-import { checkComposeEnvOverrideAtRest } from "../src/commands/doctor.ts";
-import {
-  resolveModernComposeEnvOverrides,
-  resolveRuntimeHostMetadataOverride,
-} from "../src/commands/project.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
-import {
-  composeEnvAtRestRepairs,
-  describeComposeEnvAtRest,
-  inspectComposeEnvAtRest,
-  removePlaintextComposeEnvOverride,
-} from "../src/lib/compose-env-at-rest.ts";
-import * as composeManagedEnv from "../src/lib/compose-managed-env.ts";
-import {
-  renderComposeEnvReferenceOverride,
-  renderManagedComposeEnvOverride,
-} from "../src/lib/compose-managed-env.ts";
-import { DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS } from "../src/lib/compose-startup-budget.ts";
-import { acquireLegacyComposeAdoptionPreparationBinding } from "../src/lib/native-compose-adoption-binding.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
-import {
-  type LegacyComposeRetainedOutcome,
-  runLegacyComposeRetainedOperation,
-} from "../src/lib/native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
   openLegacyComposeAdoptedGenerationStore,
 } from "../src/lib/native-compose-adoption-generation.ts";
 import { inspectLegacyComposeAdoptionSelection } from "../src/lib/native-compose-adoption-marker.ts";
-import {
-  LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE,
-  previewLegacyComposeAdoption,
-} from "../src/lib/native-compose-adoption-preview.ts";
-import {
-  defaultProjectSlugFromPath,
-  findProjectContextAtRoot,
-} from "../src/lib/project.ts";
-import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption-preview.ts";
 import {
   assertLegacyProjectInputFamily,
   discoverProjectInputs,
 } from "../src/lib/project-input-selection.ts";
-import { buildRuntimeHostMetadataOverride } from "../src/lib/runtime-host-metadata.ts";
-import { captureAdoptionDependencyFirstPrepare } from "./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts";
-import { completedJobFixtureSources } from "./e2e/scenarios/native-compose-adoption-job-inputs.ts";
-import { createCompletedJobFixtureSettlement } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
 import { restoreEnv } from "./helpers/env.ts";
-import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
+import { createAdoptionGenerationFixture } from "./helpers/native-compose-adoption-generation-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
-/**
- * The test budget of a case that prepares, publishes, reads or rolls back a
- * saved adoption, or runs a CLI adoption command, without waiting on a retained
- * operation's deadline. Every engine and compiler query is a cold Bun process.
- * With every limit lifted, the slowest such case took 27 s under synthetic CPU
- * load (load average about 90 on 20 cores); the former 20 s and 30 s limits
- * timed out there (HACK-1319). This is about four times that.
- */
-const ADOPTION_CASE_TIMEOUT_MS = 120_000;
-/**
- * The aggregate deadline a test gives each retained operation it runs: the
- * deadline the public adopted command gives one
- * (`DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS`). It replaces a 20 s literal that a
- * loaded host could exhaust before a healthy operation finished (HACK-1319).
- * Tests of deadline expiry name {@link EXPIRING_OPERATION_DEADLINE_MS} instead.
- */
-const RETAINED_OPERATION_DEADLINE_MS = DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
-/**
- * The test budget of a case that runs `operations` retained operations (direct
- * or through the public adopted command), each bounded by
- * {@link RETAINED_OPERATION_DEADLINE_MS}, after its own adoption work. A slow
- * host therefore ends in the operation's own closed refusal before Bun's
- * timeout. A Bun timeout is worse than a failure here: the timed-out owner may
- * still be running, so every later case in this file refuses to start.
- */
-function retainedOperationCaseTimeout(operations: number): number {
-  return ADOPTION_CASE_TIMEOUT_MS + operations * RETAINED_OPERATION_DEADLINE_MS;
-}
-/**
- * The aggregate deadline of a case that proves expiry. Work before its callback
- * must fit inside it, so it covers the pre-callback freshness probes under
- * load, and a held probe must still be ended by it rather than by the fake
- * child's 60 s sleep (HACK-1319; formerly 5 s).
- */
-const EXPIRING_OPERATION_DEADLINE_MS = 15_000;
-/** How late after its deadline an expired operation may refuse under load. */
-const DEADLINE_REFUSAL_SLACK_MS = 5000;
-/**
- * How soon after its abort a cancelled retained effect must refuse. It stays
- * far below the effect child's 60 s sleep and the operation's deadline, so only
- * the cancellation can end the effect in time.
- */
-const CANCELLED_EFFECT_REFUSAL_BOUND_MS = 10_000;
-// Unnamed cases are saved-adoption cases (see ADOPTION_CASE_TIMEOUT_MS).
-const test = (name: string, run: () => Promise<void>) =>
-  boundedTest(name, run, ADOPTION_CASE_TIMEOUT_MS);
-const CANARY = "synthetic-private-adoption-canary";
-/**
- * Budget for a rollback-recovery test that runs several saved adoption reads,
- * rollbacks or CLI adoption commands; adoption tests are load-sensitive on
- * shared hosts (HACK-1367). The slowest took 49 s under the load above.
- */
-const ROLLBACK_RECOVERY_BUDGET_MS = 240_000;
-const ID = "a".repeat(64);
-const NETWORK = "b".repeat(64);
-const VOLUME = "original_private_database";
-const CREATED = "2026-01-01T01:02:03Z";
-/**
- * Synthetic engine config hash over every `${NAME}` reference in the selected
- * Compose files, resolved from the Compose process env (blank when unset), as
- * the engine does when it labels a container. The stub engine below computes
- * the same digest from its own argv and environment.
- */
-async function composeReferenceHash(opts: {
-  readonly files: readonly string[];
-  readonly env: Readonly<Record<string, string>>;
-}): Promise<string> {
-  const names: string[] = [];
-  for (const file of opts.files) {
-    for (const match of (await readFile(file, "utf8")).matchAll(
-      /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
-    )) {
-      names.push(match[1] ?? "");
-    }
-  }
-  return new Bun.CryptoHasher("sha256")
-    .update(JSON.stringify(names.map((name) => [name, opts.env[name] ?? ""])))
-    .digest("hex");
-}
-type Fixture = {
-  engine: string;
-  container: Record<string, unknown>[];
-  volume: Record<string, unknown>[];
-  network: Record<string, unknown>[];
-  mode?: string;
-  configHash?: string;
-  /** Hash Compose references like the engine: with the values in the Compose env. */
-  envConfigHash?: boolean;
-  running?: boolean;
-  mutationFailure?: boolean;
-  states?: Record<string, boolean>;
-  health?: Record<string, string>;
-  ordered?: boolean;
-  jobs?: Record<
-    string,
-    {
-      startedAt: string;
-      finishedAt: string;
-      exitCode: number;
-      attempts: number;
-    }
-  >;
-  jobFinalRace?: boolean;
-  jobObservation?:
-    | "shape"
-    | "timestamp"
-    | "restart-policy"
-    | "membership"
-    | "probe";
-  jobRestartPolicy?: "" | "no" | "always";
-  aliases?: Record<string, string[]>;
-  foreignAfterFirstStart?: boolean;
-  sourceRace?: boolean;
-  hangMutation?: boolean;
-  dependencyReadScope?: {
-    readonly projectRoot: string;
-    readonly first: Awaited<
-      ReturnType<typeof captureAdoptionDependencyFirstPrepare>
-    >;
-    readonly allowFirstPrepare: boolean;
-  };
-};
-let root: string;
-let projectRoot: string;
-let priorPath: string | undefined;
-let priorCI: string | undefined;
-let priorExecutionMode: string | undefined;
-let priorRuntimeBackend: string | undefined;
-let fixture: Fixture;
-let publicStatic7Commands = 0;
-const publicStatic7Settlement = createCompletedJobFixtureSettlement();
-beforeEach(async () => {
-  // An outer test timeout does not cancel an awaited owner. Never recycle its globals or roots.
-  publicStatic7Settlement.assertConfirmed();
-  priorPath = process.env.PATH;
-  priorCI = process.env.CI;
-  priorExecutionMode = process.env.HACK_EXECUTION_MODE;
-  priorRuntimeBackend = process.env.HACK_RUNTIME_BACKEND;
-  process.env.HACK_RUNTIME_BACKEND = "compose";
-  root = await realpath(
-    await mkdtemp(join(tmpdir(), "native-adoption-binding-"))
-  );
-  projectRoot = join(root, "checkout");
-  await mkdir(join(projectRoot, ".hack"), { recursive: true });
-  await writeFile(
-    join(projectRoot, ".hack/hack.config.json"),
-    '{"name":"fixture"}\n'
-  );
-  await writeFile(
-    join(projectRoot, ".hack/docker-compose.yml"),
-    `name: fixture\nservices:\n  db:\n    image: ${CANARY}\n    environment:\n      PRIVATE: ${CANARY}\n      EMPTY: ""\n    volumes:\n      - data:/var/lib/database\nvolumes:\n  data:\n    name: ${VOLUME}\n`
-  );
-  fixture = {
-    engine: CANARY,
-    container: [
-      {
-        id: ID,
-        name: "/fixture-db-1",
-        project: "fixture",
-        native: "",
-        service: "db",
-        number: "1",
-        oneoff: "False",
-        workingDir: join(projectRoot, ".hack"),
-        configFiles: join(projectRoot, ".hack/docker-compose.yml"),
-        mounts: [
-          {
-            type: "volume",
-            name: VOLUME,
-            source: "/var/lib/docker/volumes/original/_data",
-            target: "/var/lib/database",
-            rw: true,
-          },
-        ],
-        networks: [{ name: "fixture_default", id: NETWORK }],
-      },
-    ],
-    volume: [
-      {
-        id: VOLUME,
-        name: VOLUME,
-        project: "fixture",
-        native: "",
-        storage: "data",
-        createdAt: CREATED,
-        driver: "local",
-        scope: "local",
-        mountpoint: "/var/lib/docker/volumes/original/_data",
-        options: null,
-      },
-    ],
-    network: [
-      {
-        id: NETWORK,
-        name: "fixture_default",
-        project: "fixture",
-        native: "",
-        logical: "default",
-        createdAt: CREATED,
-        driver: "bridge",
-        scope: "local",
-        internal: false,
-        containers: [ID],
-      },
-    ],
-  };
-  await writeFile(
-    join(root, "docker"),
-    `#!${process.execPath}
-import {appendFileSync, readFileSync, renameSync, writeFileSync} from "node:fs";
-const root = ${JSON.stringify(root)};
-// Publish a hanging child's PID by rename: a child killed mid-write must never leave an empty file (HACK-1319).
-const publishPid = (name) => {writeFileSync(root + "/" + name + ".tmp", String(process.pid));renameSync(root + "/" + name + ".tmp", root + "/" + name);};
-const args = process.argv.slice(2);
-appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
-const fixture = JSON.parse(readFileSync(root + "/fixture.json", "utf8"));
-const [kind, action] = args;
-if(fixture.dependencyReadScope && !(kind === 'container' && ['start','stop','restart'].includes(action))) {
- const {adoptionDependencyReadAllowed}=await import(${JSON.stringify(new URL("./e2e/scenarios/native-compose-adoption-dependency-inputs.ts", import.meta.url).pathname)});
- const {adoptionDependencyStagedReadAllowed}=await import(${JSON.stringify(new URL("./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts", import.meta.url).pathname)});
- let saved=null;try {saved=JSON.parse(readFileSync(fixture.dependencyReadScope.projectRoot+'/.hack/.internal/legacy-compose-adoption-v1/receipt.json','utf8'));}catch{}
- const allowed=adoptionDependencyReadAllowed({args,projectRoot:fixture.dependencyReadScope.projectRoot,project:'fixture',containerIds:fixture.container.map(row=>row.id),networkId:fixture.network[0].id,volumeName:fixture.volume[0].id,generationId:saved?.prepared?.id ?? saved?.publication?.generation?.id}) || (fixture.dependencyReadScope.allowFirstPrepare && await adoptionDependencyStagedReadAllowed({args,project:'fixture',first:fixture.dependencyReadScope.first}));
- const stage=kind==='compose' && args[10]?.includes('/generations/') ? saved?.prepared ? 'published' : 'staged' : 'original';
- appendFileSync(root+'/read-stages',JSON.stringify({stage,allowed})+'\\n');
- if(!allowed){console.error('dependency-read-refused stage='+stage+' code=93');process.exit(93);}
-}
-if (kind === 'container' && ['start','restart','stop'].includes(action)) {
- if (!args.slice(2).length || args.slice(2).some(id => !fixture.container.some(container => container.id === id))) { writeFileSync(root + '/mutation','unverified effect');process.exit(99); }
- if(fixture.hangMutation) {publishPid('effect-started');await Bun.sleep(60_000);}
- if (fixture.ordered) {for(const id of args.slice(2)) fixture.states[id] = action !== 'stop';}
- else fixture.running = action !== 'stop';
- if(fixture.jobs) for(const id of args.slice(2)) if(fixture.jobs[id]) {
-  fixture.states[id]=false;
-  if(action==='start') {fixture.jobs[id].attempts++;fixture.jobs[id].startedAt='2026-10-08T00:00:02.'+String(fixture.jobs[id].attempts).padStart(9,'0')+'Z';fixture.jobs[id].finishedAt='2026-10-08T00:00:03Z';}
- }
- if (fixture.aliases) {for(const id of args.slice(2)) {const row=fixture.container.find(container=>container.id===id);if(row) row.networks[0].aliases=action==='stop'?[]:[row.name.slice(1),row.service,...(fixture.aliases[row.service]??[])];}}
- if (fixture.foreignAfterFirstStart && action==='start' && args.includes(${JSON.stringify(ID)})) {fixture.network[0].containers.push('e'.repeat(64));delete fixture.foreignAfterFirstStart;}
- if(fixture.sourceRace) { writeFileSync(${JSON.stringify(join(projectRoot, ".hack/hack.project.json"))}, 'synthetic-private-source-race'); }
- writeFileSync(root+'/fixture.json',JSON.stringify(fixture));process.exit(fixture.mutationFailure ? 7 : 0);
-}
-if (kind === 'container' && ['exec','logs'].includes(action)) { process.exit(0); }
-if (kind === "compose") {
- let hash = 'd'.repeat(64);
- if (fixture.envConfigHash) { const names = args.flatMap((arg, index) => args[index - 1] === '--file' ? [...readFileSync(arg, 'utf8').matchAll(/\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}/g)].map((match) => match[1]) : []); hash = new Bun.CryptoHasher('sha256').update(JSON.stringify(names.map((name) => [name, process.env[name] ?? '']))).digest('hex'); }
- for (const container of fixture.container) console.log(container.service + ' ' + hash); process.exit(0);
-}
-if (!(kind === "info" && action === "--format") && (!['container','volume','network'].includes(kind) || !['ls','inspect'].includes(action) || !args.includes('--format'))) {writeFileSync(root + "/mutation", "unauthorized command");process.exit(99);}
-if (fixture.mode === "fail") {console.error(${JSON.stringify(CANARY)});process.exit(29);}
-if (fixture.mode === "malformed") {console.log(${JSON.stringify(CANARY)});process.exit(0);}
-if (fixture.mode === "hang") {publishPid("started");await Bun.sleep(60_000);}
-if (fixture.mode === "hang-state" && kind === "container" && action === "inspect" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) {publishPid("started");await Bun.sleep(60_000);}
-if (fixture.mode === "overflow") {await Bun.write(Bun.stdout, "x".repeat(9 * 1024 * 1024));process.exit(0);}
-if (fixture.mode === "stderr-overflow") {await Bun.write(Bun.stderr, "x".repeat(17 * 1024));process.exit(0);}
-if (kind === "info") {console.log(JSON.stringify({id: fixture.engine, os: "linux"}));}
-else if (action === "ls") {for (const row of fixture[kind]) console.log(JSON.stringify({id: row.id, name: kind === 'container' ? row.name.slice(1) : row.name, project: row.project ?? ""}));}
-else {
- if(args.join().includes('.State.Health')) {console.error('map has no entry for key Health');process.exit(49);}
- const id = args.at(-1);const rows = fixture[kind].filter(row => row.id === id);
- if (!rows.length) process.exit(1);
- if (kind === "container" && args.join().includes('config-hash')) { console.log(JSON.stringify({id,hash:fixture.configHash ?? 'd'.repeat(64)})); process.exit(0); }
- if (kind === "container" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) { const running=fixture.states?.[id] ?? fixture.running ?? false;
-  if(args.join().includes('.State.ExitCode')) {
-   if(fixture.jobObservation==='probe') {console.error(${JSON.stringify(CANARY)});process.exit(29);}
-   if(fixture.jobFinalRace) writeFileSync(${JSON.stringify(join(projectRoot, ".hack/hack.project.json"))}, 'synthetic-private-final-job-race');
-   const observed={id,running,paused:false,status:running?'running':'exited',health:fixture.health?.[id]??'',exitCode:fixture.jobs?.[id]?.exitCode??0,startedAt:fixture.jobs?.[id]?.startedAt??'2026-10-08T00:00:01Z',finishedAt:fixture.jobs?.[id]?.finishedAt??'2026-10-08T00:00:03Z',restartPolicy:fixture.jobRestartPolicy??'no',maximumRetryCount:0};
-   if(fixture.jobObservation==='shape') delete observed.health;
-   if(fixture.jobObservation==='timestamp') observed.startedAt=${JSON.stringify(CANARY)};
-   if(fixture.jobObservation==='restart-policy') observed.restartPolicy=${JSON.stringify(CANARY)};
-   if(fixture.jobObservation==='membership') observed.id='f'.repeat(64);
-   console.log(JSON.stringify(observed)); process.exit(0);
-  }
-  console.log(JSON.stringify({id,running,paused:false,status:running ? 'running' : 'exited', ...(args.join().includes('index .State "Health"') ? {health: fixture.health?.[id] ?? ''} : {})})); process.exit(0); }
- for (const row of rows) {
-  if (kind === 'container') console.log(JSON.stringify({...row,running:fixture.states?.[id] ?? fixture.running ?? false}));
-  else if (kind === 'network') console.log(JSON.stringify({...row,containers:row.containers.filter(id=>!fixture.container.some(container=>container.id===id) || (fixture.states?.[id] ?? fixture.running ?? false))}));
-  else console.log(JSON.stringify(row));
- }
-}
-if (fixture.mode === "replace-volume" && kind === "volume" && action === "inspect") {fixture.volume[0].createdAt = '2026-02-02T01:02:03Z';delete fixture.mode;writeFileSync(root + '/fixture.json',JSON.stringify(fixture));}
-if (fixture.mode === "source-change" && kind === "info") {appendFileSync(${JSON.stringify(join(projectRoot, ".hack/docker-compose.yml"))}, '\\n');}
-if (fixture.mode === "inventory-change" && kind === "container" && action === "ls") {fixture.container.push({...fixture.container[0],id:'c'.repeat(64),name:'/fixture-db-2'});delete fixture.mode;writeFileSync(root+'/fixture.json',JSON.stringify(fixture));}
-`
-  );
-  await chmod(join(root, "docker"), 0o700);
-  process.env.PATH = root;
-  await mkdir(join(projectRoot, ".git"));
-  await save();
-});
-afterEach(async () => {
-  if (publicStatic7Commands !== 0) {
-    publicStatic7Settlement.markUnconfirmed();
-  }
-  try {
-    publicStatic7Settlement.assertConfirmed();
-  } catch {
-    // Retain the still-owned fixture; a late callback cannot restore teardown authority.
-    return;
-  }
-  restoreEnv("PATH", priorPath);
-  restoreEnv("CI", priorCI);
-  restoreEnv("HACK_EXECUTION_MODE", priorExecutionMode);
-  restoreEnv("HACK_RUNTIME_BACKEND", priorRuntimeBackend);
-  await rm(root, { recursive: true, force: true });
-});
-async function save() {
-  await writeFile(join(root, "fixture.json"), JSON.stringify(fixture));
-}
-async function ownedBridge() {
-  await writeFile(
-    join(projectRoot, ".hack/docker-compose.yml"),
-    `name: fixture\nservices:\n  db:\n    image: ${CANARY}\n    environment:\n      PRIVATE: ${CANARY}\n      EMPTY: ""\n    networks:\n      lab:\n        aliases: [db-alias]\n    volumes:\n      - data:/var/lib/database\nnetworks:\n  lab:\n    driver: bridge\n    internal: true\nvolumes:\n  data:\n    name: ${VOLUME}\n`
-  );
-  fixture.container[0]!.networks = [
-    { name: "fixture_lab", id: NETWORK, aliases: [] },
-  ];
-  fixture.network[0] = {
-    ...fixture.network[0],
-    name: "fixture_lab",
-    logical: "lab",
-    internal: true,
-  };
-  await save();
-}
-async function twoOwnedBridges() {
-  await writeFile(
-    join(projectRoot, ".hack/docker-compose.yml"),
-    `name: fixture\nservices:\n  db:\n    image: ${CANARY}\n    environment:\n      PRIVATE: ${CANARY}\n      EMPTY: ""\n    networks:\n      edge:\n        aliases: [writer]\n      lab:\n        aliases: [database]\n    volumes:\n      - data:/var/lib/database\nnetworks:\n  edge:\n    driver: bridge\n    internal: false\n  lab:\n    driver: bridge\n    internal: true\nvolumes:\n  data:\n    name: ${VOLUME}\n`
-  );
-  fixture.container[0]!.networks = [
-    { name: "fixture_edge", id: "e".repeat(64), aliases: [] },
-    { name: "fixture_lab", id: NETWORK, aliases: [] },
-  ];
-  fixture.network[0] = {
-    ...fixture.network[0],
-    name: "fixture_lab",
-    logical: "lab",
-    internal: true,
-  };
-  fixture.network.push({
-    ...fixture.network[0],
-    id: "e".repeat(64),
-    name: "fixture_edge",
-    logical: "edge",
-    internal: false,
-  });
-  await save();
-}
-function container() {
-  const row = fixture.container[0];
-  if (!row) {
-    throw new Error("fixture missing");
-  }
-  return row;
-}
-function volume() {
-  const row = fixture.volume[0];
-  if (!row) {
-    throw new Error("fixture missing");
-  }
-  return row;
-}
-function network() {
-  const row = fixture.network[0];
-  if (!row) {
-    throw new Error("fixture missing");
-  }
-  return row;
-}
-
-async function compiler(body = "") {
-  const binary = join(root, "compiler");
-  await writeFile(
-    binary,
-    `#!${process.execPath}
-if(process.argv[2]==='--protocol'){console.log(${JSON.stringify(JSON.stringify({ transport_version: 1, authored_version: 1, plan_version: 1, network_plan_version: 1 }))})}
-else { const raw=await Bun.stdin.text(); await Bun.write(${JSON.stringify(join(root, "candidate-received"))},raw); ${body}; const input=JSON.parse(raw); const networkAware=Object.hasOwn(input,'networks'); const plan=networkAware?{...input,plan_version:1,selected_profiles:[],networks:Object.fromEntries(Object.entries(input.networks).map(([name,value])=>[name,{internal:value.internal===true}])),jobs:input.jobs??{}}:{plan_version:1}; const result={transport_version:1,ok:true,plan,semantic_hash:'a'.repeat(64),...(networkAware?{declared_workloads:Object.fromEntries(Object.keys(input.services).map(name=>[name,'service']))}:{})}; console.log(JSON.stringify(result)); }
-`
-  );
-  await chmod(binary, 0o700);
-  return binary;
-}
-
-function stateRoot() {
-  return join(projectRoot, ".hack/.internal/legacy-compose-adoption-v1");
-}
-async function prepared(binary?: string) {
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({
-      binary: binary ?? (await compiler()),
-    });
-    return { store, generation };
-  } catch (error: unknown) {
-    await store.close();
-    throw error;
-  }
-}
-
-async function dependencyFixture() {
-  const worker = "c".repeat(64);
-  await writeFile(
-    join(projectRoot, ".hack/docker-compose.yml"),
-    JSON.stringify({
-      name: "fixture",
-      services: {
-        web: {
-          image: CANARY,
-          depends_on: { db: { condition: "service_healthy" } },
-        },
-        db: {
-          image: CANARY,
-          healthcheck: {
-            test: ["CMD", "probe", CANARY],
-            interval: "1s",
-            timeout: "1s",
-            retries: 2,
-          },
-          volumes: ["data:/var/lib/database"],
-        },
-      },
-      volumes: { data: { name: VOLUME } },
-    })
-  );
-  fixture.container.push({
-    ...container(),
-    id: worker,
-    name: "/fixture-web-1",
-    service: "web",
-    mounts: [],
-  });
-  network().containers = [ID, worker];
-  fixture.ordered = true;
-  fixture.states = { [ID]: false, [worker]: false };
-  fixture.health = { [ID]: "healthy", [worker]: "" };
-  await save();
-  return worker;
-}
-
-async function combinedBridgeHealthFixture() {
-  const worker = await dependencyFixture();
-  const composePath = join(projectRoot, ".hack/docker-compose.yml");
-  const compose = JSON.parse(await readFile(composePath, "utf8"));
-  compose.networks = { lab: { driver: "bridge", internal: true } };
-  compose.services.db.networks = { lab: { aliases: ["db-alias"] } };
-  compose.services.web.networks = { lab: { aliases: ["web-alias"] } };
-  await writeFile(composePath, JSON.stringify(compose));
-  for (const row of fixture.container) {
-    row.networks = [{ name: "fixture_lab", id: NETWORK, aliases: [] }];
-  }
-  fixture.network[0] = {
-    ...network(),
-    name: "fixture_lab",
-    logical: "lab",
-    internal: true,
-  };
-  fixture.aliases = { db: ["db-alias"], web: ["web-alias"] };
-  await save();
-  return worker;
-}
-
-async function mutationCommands() {
-  const lines = (await readFile(join(root, "commands"), "utf8"))
-    .trim()
-    .split("\n");
-  return lines
-    .map((line) => JSON.parse(line))
-    .filter(
-      (args) =>
-        args[0] === "container" &&
-        ["start", "stop", "restart"].includes(args[1])
-    );
-}
-
-async function completedJobFixture() {
-  const app = await dependencyFixture(),
-    job = "e".repeat(64);
-  await writeFile(
-    join(projectRoot, ".hack/docker-compose.yml"),
-    JSON.stringify({
-      name: "fixture",
-      services: {
-        db: {
-          image: CANARY,
-          volumes: ["data:/var/lib/database"],
-          healthcheck: {
-            test: ["CMD", "probe"],
-            interval: "1s",
-            timeout: "1s",
-            retries: 2,
-          },
-        },
-        seed: {
-          image: CANARY,
-          command: ["seed-once"],
-          labels: { "hack.service.one-shot": "true" },
-          depends_on: { db: { condition: "service_healthy" } },
-        },
-        web: {
-          image: CANARY,
-          depends_on: { seed: { condition: "service_completed_successfully" } },
-        },
-      },
-      volumes: { data: { name: VOLUME } },
-    })
-  );
-  fixture.container.push({
-    ...container(),
-    id: job,
-    name: "/fixture-seed-1",
-    service: "seed",
-    mounts: [],
-  });
-  network().containers = [ID, app, job];
-  fixture.states = { [ID]: false, [app]: false, [job]: false };
-  fixture.jobs = {
-    [job]: {
-      startedAt: "2026-10-08T00:00:01Z",
-      finishedAt: "2026-10-08T00:00:01.5Z",
-      exitCode: 0,
-      attempts: 0,
-    },
-  };
-  await save();
-  return { app, job };
-}
-
-async function maintainedCompletedJobFixture() {
-  const ids = await completedJobFixture();
-  const authored = completedJobFixtureSources({
-    name: "fixture",
-    image: `sha256:${"d".repeat(64)}`,
-    marker: "retained-seed",
-  });
-  await writeFile(
-    join(projectRoot, ".hack/hack.config.json"),
-    JSON.stringify(authored.config)
-  );
-  await writeFile(
-    join(projectRoot, ".hack/docker-compose.yml"),
-    JSON.stringify(authored.compose)
-  );
-  const originalVolume = fixture.volume[0];
-  if (!originalVolume) {
-    throw new Error("missing original volume");
-  }
-  originalVolume.id = "fixture_data";
-  originalVolume.name = "fixture_data";
-  for (const row of fixture.container) {
-    if (row.id === ids.app) {
-      row.service = "app";
-      row.name = "/fixture-app-1";
-    }
-    row.mounts = [
-      {
-        type: "volume",
-        name: "fixture_data",
-        source: originalVolume.mountpoint,
-        target: "/var/lib/postgresql/data",
-        rw: row.service === "db",
-      },
-    ];
-  }
-  await save();
-  return ids;
-}
-
-/** Transport stand-in for the maintained authored family; compiler semantic qualification remains separate. */
-async function maintainedJobCompiler() {
-  const binary = join(root, "job-compiler");
-  await writeFile(
-    binary,
-    `#!${process.execPath}
-if(process.argv[2]==='--protocol') {console.log(JSON.stringify({transport_version:1, authored_version:1, plan_version:1, process_plan_version:1, acquisition_plan_version:1}));}
-else {
- const raw=await Bun.stdin.text();const input=JSON.parse(raw);
- const workloads=(values)=>Object.fromEntries(Object.entries(values??{}).map(([name,value])=>{
-  const next={...value};if(next.shutdown){if(next.shutdown.grace!=='3s') throw new Error('fixture shutdown mismatch');next.shutdown={...next.shutdown,grace:'3000ms'};}return[name,next];
- }));
- const plan={...input, plan_version:1, selected_profiles:[], services:workloads(input.services), jobs:workloads(input.jobs)};
- const declared_workloads=Object.fromEntries([...Object.keys(input.services).map(name=>[name,'service']),...Object.keys(input.jobs).map(name=>[name,'job'])]);
- console.log(JSON.stringify({transport_version:1,ok:true,plan,declared_workloads,semantic_hash:'a'.repeat(64)}));
-}`
-  );
-  await chmod(binary, 0o700);
-  return binary;
-}
-
-async function publicStatic7Case(run: () => Promise<void>) {
-  publicStatic7Commands += 1;
-  try {
-    await run();
-  } finally {
-    publicStatic7Commands -= 1;
-  }
-}
-
-function publicStatic7Stages() {
-  const started = Date.now();
-  return (
-    phase: "prepare" | "publish" | "start" | "stop",
-    status: "enter" | "settled"
-  ) => {
-    console.info(
-      `static7-public phase=${phase} status=${status} elapsedMs=${Date.now() - started}`
-    );
-  };
-}
-
-boundedTest(
-  "retained Compose fixture admits its explicit backend and preserves opposite-backend refusal before probes",
-  async () => {
-    await publicStatic7Case(async () => {
-      expect(process.env.HACK_RUNTIME_BACKEND).toBe("compose");
-      const binary = await compiler();
-      const { store, generation } = await prepared(binary);
-      const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-      try {
-        process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-        await store.publish({ generation, binary });
-        const commands = await readFile(join(root, "commands"), "utf8");
-        process.env.HACK_RUNTIME_BACKEND = "native";
-        try {
-          await expect(
-            tryLegacyComposeAdoptedCommand({
-              cwd: projectRoot,
-              operation: "up",
-              detach: true,
-            })
-          ).rejects.toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
-          expect(await readFile(join(root, "commands"), "utf8")).toBe(commands);
-          expect((await readReceipt()).pendingOperation).toBeNull();
-        } finally {
-          process.env.HACK_RUNTIME_BACKEND = "compose";
-        }
-        expect(
-          await tryLegacyComposeAdoptedCommand({
-            cwd: projectRoot,
-            operation: "up",
-            detach: true,
-          })
-        ).toBe(0);
-        expect(await mutationCommands()).toEqual([["container", "start", ID]]);
-      } finally {
-        restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-        await store.close();
-      }
-    });
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest.each(["no", ""] as const)(
-  "public retained up dispatches the maintained static7 family with disabled policy %j",
-  async (jobRestartPolicy) => {
-    await publicStatic7Case(async () => {
-      const stages = publicStatic7Stages();
-      stages("prepare", "enter");
-      const { app, job } = await maintainedCompletedJobFixture();
-      const binary = await maintainedJobCompiler();
-      const { store, generation } = await prepared(binary);
-      stages("prepare", "settled");
-      const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-      try {
-        process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-        stages("publish", "enter");
-        await store.publish({ generation, binary });
-        stages("publish", "settled");
-        fixture.jobRestartPolicy = jobRestartPolicy;
-        await save();
-        expect(generation.report.adoption_generation_version).toBe(7);
-        stages("start", "enter");
-        expect(
-          await tryLegacyComposeAdoptedCommand({
-            cwd: projectRoot,
-            operation: "up",
-            detach: true,
-          })
-        ).toBe(0);
-        stages("start", "settled");
-        expect(await mutationCommands()).toEqual([
-          ["container", "start", ID],
-          ["container", "start", job],
-          ["container", "start", app],
-        ]);
-        expect((await readReceipt()).pendingOperation).toBeNull();
-        stages("stop", "enter");
-        expect(
-          await tryLegacyComposeAdoptedCommand({
-            cwd: projectRoot,
-            operation: "down",
-          })
-        ).toBe(0);
-        stages("stop", "settled");
-        expect((await mutationCommands()).slice(-3)).toEqual([
-          ["container", "stop", app],
-          ["container", "stop", job],
-          ["container", "stop", ID],
-        ]);
-      } finally {
-        restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-        await store.close();
-      }
-    });
-  },
-  // Cover prepare/publish and separate bounded up/down operations without changing their deadlines.
-  retainedOperationCaseTimeout(2)
-);
-
-boundedTest.each([
-  "shape",
-  "timestamp",
-  "restart-policy",
-  "membership",
-  "probe",
-] as const)(
-  "public static7 observer refuses %s with only closed diagnostics and keeps pending",
-  async (reason) => {
-    await publicStatic7Case(async () => {
-      await maintainedCompletedJobFixture();
-      const binary = await maintainedJobCompiler();
-      const { store, generation } = await prepared(binary);
-      const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-      try {
-        process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-        await store.publish({ generation, binary });
-        fixture.jobObservation = reason;
-        await save();
-        let rejection: unknown;
-        try {
-          await tryLegacyComposeAdoptedCommand({
-            cwd: projectRoot,
-            operation: "up",
-            detach: true,
-          });
-        } catch (error: unknown) {
-          rejection = error;
-        }
-        expect(rejection).toBeInstanceOf(HackCliError);
-        if (!(rejection instanceof HackCliError)) {
-          throw new Error("missing public refusal");
-        }
-        expect(rejection.code).toBe("E_CONFIG_INVALID");
-        expect(rejection.detail).toEqual({
-          legacy_adoption_refusal: {
-            stage: "ordered-observation",
-            reason: reason === "probe" ? "probe-child" : reason,
-          },
-        });
-        expect(
-          JSON.stringify({
-            message: rejection.message,
-            detail: rejection.detail,
-          })
-        ).not.toContain(CANARY);
-        expect((await readReceipt()).pendingOperation.operation).toBe("start");
-        expect(
-          (await mutationCommands()).some(
-            (args) => args[2] === "e".repeat(64) || args[2] === "c".repeat(64)
-          )
-        ).toBe(false);
-      } finally {
-        restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-        await store.close();
-      }
-    });
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest(
-  "public static7 scheduler classifies actual nonzero job exit without starting its dependent",
-  async () => {
-    await publicStatic7Case(async () => {
-      const { job, app } = await maintainedCompletedJobFixture();
-      const binary = await maintainedJobCompiler();
-      const { store, generation } = await prepared(binary);
-      const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-      try {
-        process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-        await store.publish({ generation, binary });
-        const jobState = fixture.jobs?.[job];
-        if (!jobState) {
-          throw new Error("missing job state");
-        }
-        jobState.exitCode = 17;
-        await save();
-        let rejection: unknown;
-        try {
-          await tryLegacyComposeAdoptedCommand({
-            cwd: projectRoot,
-            operation: "up",
-            detach: true,
-          });
-        } catch (error: unknown) {
-          rejection = error;
-        }
-        expect(rejection).toBeInstanceOf(HackCliError);
-        if (!(rejection instanceof HackCliError)) {
-          throw new Error("missing public refusal");
-        }
-        expect(rejection.detail).toEqual({
-          legacy_adoption_refusal: {
-            stage: "ordered-scheduler",
-            reason: "job-failed",
-          },
-        });
-        expect(await mutationCommands()).toEqual([
-          ["container", "start", ID],
-          ["container", "start", job],
-        ]);
-        expect((await mutationCommands()).some((args) => args[2] === app)).toBe(
-          false
-        );
-        expect((await readReceipt()).pendingOperation.operation).toBe("start");
-      } finally {
-        restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-        await store.close();
-      }
-    });
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest.each(["start", "restart", "stop"] as const)(
-  "v7 %s preserves original IDs, fresh job proof and stopped rollback",
-  async (operation) => {
-    const { app, job } = await completedJobFixture(),
-      { store, generation } = await prepared();
-    const signal = new AbortController().signal;
-    try {
-      const binary = await compiler();
-      expect(generation.report.adoption_generation_version).toBe(7);
-      await store.publish({ generation, binary });
-      expect((await readReceipt()).adoption_receipt_version).toBe(7);
-      // Restart/stop independently exercise retained running facts, not an inferred prior start effect.
-      if (operation !== "start") {
-        fixture.states = { [ID]: true, [app]: true, [job]: false };
-        await save();
-      }
-      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
-      expect(
-        await store.withMutation({
-          generation,
-          binary,
-          operation,
-          services: [],
-          deadline,
-          run: (input) =>
-            runLegacyComposeRetainedOperation({
-              input,
-              operation,
-              deadline,
-              signal,
-            }),
-        })
-      ).toBe(0);
-      const forward = [
-        ["container", "start", ID],
-        ["container", "start", job],
-        ["container", "start", app],
-      ];
-      const reverse = [
-        ["container", "stop", app],
-        ["container", "stop", job],
-        ["container", "stop", ID],
-      ];
-      let expected = forward;
-      if (operation === "restart") {
-        expected = [...reverse, ...forward];
-      } else if (operation === "stop") {
-        expected = reverse;
-      }
-      expect(await mutationCommands()).toEqual(expected);
-      expect((await readReceipt()).pendingOperation).toBeNull();
-      const observed: unknown = JSON.parse(
-        await readFile(join(root, "fixture.json"), "utf8")
-      );
-      expect(observed).toMatchObject({
-        container: [{ id: ID }, { id: app }, { id: job }],
-        volume: [{ id: VOLUME, createdAt: CREATED }],
-        jobs: { [job]: { attempts: operation === "stop" ? 0 : 1 } },
-        states: {
-          [ID]: operation !== "stop",
-          [job]: false,
-          [app]: operation !== "stop",
-        },
-      });
-      if (operation === "stop") {
-        await store.rollback();
-        expect((await readReceipt()).publication.phase).toBe("rolled-back");
-        expect(
-          await Bun.file(join(projectRoot, ".hack/hack.project.json")).exists()
-        ).toBe(false);
-      }
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest(
-  "v7 old exit0 and callback numeric0 cannot clear the pending job attempt; recovery never starts jobs",
-  async () => {
-    const { app, job } = await completedJobFixture(),
-      { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      await expect(
-        store.withMutation({
-          generation,
-          binary,
-          operation: "start",
-          services: [],
-          deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
-          run: async () => {
-            fixture.states = { [ID]: true, [app]: true, [job]: false };
-            await save();
-            return 0;
-          },
-        })
-      ).rejects.toThrow("values omitted");
-      expect((await readReceipt()).pendingOperation.operation).toBe("start");
-      expect(await mutationCommands()).toEqual([]);
-      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
-      expect(
-        await store.withMutation({
-          generation,
-          binary,
-          operation: "stop",
-          recover: true,
-          services: [],
-          deadline,
-          run: (input) =>
-            runLegacyComposeRetainedOperation({
-              input,
-              operation: "stop",
-              deadline,
-              signal: new AbortController().signal,
-            }),
-        })
-      ).toBe(0);
-      expect(await mutationCommands()).toEqual([
-        ["container", "stop", app],
-        ["container", "stop", job],
-        ["container", "stop", ID],
-      ]);
-      expect((await readReceipt()).pendingOperation).toBeNull();
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(2)
-);
-
-boundedTest(
-  "v7 immediate job exit17 keeps pending and prevents every dependent start",
-  async () => {
-    const { job } = await completedJobFixture();
-    if (!fixture.jobs?.[job]) {
-      throw new Error("missing job fixture");
-    }
-    fixture.jobs[job].exitCode = 17;
-    await save();
-    const { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
-      await expect(
-        store.withMutation({
-          generation,
-          binary,
-          operation: "start",
-          services: [],
-          deadline,
-          run: (input) =>
-            runLegacyComposeRetainedOperation({
-              input,
-              operation: "start",
-              deadline,
-              signal: new AbortController().signal,
-            }),
-        })
-      ).rejects.toThrow("values omitted");
-      expect(await mutationCommands()).toEqual([
-        ["container", "start", ID],
-        ["container", "start", job],
-      ]);
-      expect((await readReceipt()).pendingOperation.operation).toBe("start");
-      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest(
-  "v7 consumed production completion cannot acknowledge a later invocation",
-  async () => {
-    await completedJobFixture();
-    const { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      let previous: LegacyComposeRetainedOutcome | undefined;
-      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
-      expect(
-        await store.withMutation({
-          generation,
-          binary,
-          operation: "start",
-          services: [],
-          deadline,
-          run: async (input) => {
-            previous = await runLegacyComposeRetainedOperation({
-              input,
-              operation: "start",
-              deadline,
-              signal: new AbortController().signal,
-            });
-            expect(JSON.stringify(previous)).toBe("{}");
-            return previous;
-          },
-        })
-      ).toBe(0);
-      const before = await mutationCommands();
-      await expect(
-        store.withMutation({
-          generation,
-          binary,
-          operation: "start",
-          services: [],
-          deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
-          run: async () => {
-            if (!previous) {
-              throw new Error("missing completion");
-            }
-            return previous;
-          },
-        })
-      ).rejects.toThrow("values omitted");
-      expect(await mutationCommands()).toEqual(before);
-      expect((await readReceipt()).pendingOperation.operation).toBe("start");
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(2)
-);
-
-boundedTest(
-  "v7 cloned production completion cannot acknowledge otherwise ready original workloads",
-  async () => {
-    await completedJobFixture();
-    const { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
-      await expect(
-        store.withMutation({
-          generation,
-          binary,
-          operation: "start",
-          services: [],
-          deadline,
-          run: async (input) => {
-            const outcome = await runLegacyComposeRetainedOperation({
-              input,
-              operation: "start",
-              deadline,
-              signal: new AbortController().signal,
-            });
-            if (typeof outcome !== "object") {
-              throw new Error("missing completion");
-            }
-            return { ...outcome };
-          },
-        })
-      ).rejects.toThrow("values omitted");
-      expect(
-        (await mutationCommands()).filter((args) => args[1] === "start")
-      ).toHaveLength(3);
-      expect((await readReceipt()).pendingOperation.operation).toBe("start");
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest(
-  "v7 source drift in the final job probe prevents pending publication after successful children",
-  async () => {
-    const { app, job } = await completedJobFixture(),
-      { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      const original = await readFile(
-        join(projectRoot, ".hack/hack.project.json"),
-        "utf8"
-      );
-      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
-      await refusal(
-        store.withMutation({
-          generation,
-          binary,
-          operation: "start",
-          services: [],
-          deadline,
-          run: async (input) => {
-            const outcome = await runLegacyComposeRetainedOperation({
-              input,
-              operation: "start",
-              deadline,
-              signal: new AbortController().signal,
-            });
-            fixture = JSON.parse(
-              await readFile(join(root, "fixture.json"), "utf8")
-            );
-            fixture.jobFinalRace = true;
-            await save();
-            return outcome;
-          },
-        }),
-        "E_LEGACY_ADOPTION_STATE"
-      );
-      expect(await mutationCommands()).toEqual([
-        ["container", "start", ID],
-        ["container", "start", job],
-        ["container", "start", app],
-      ]);
-      expect((await readReceipt()).pendingOperation.operation).toBe("start");
-      fixture.jobFinalRace = false;
-      await save();
-      await writeFile(join(projectRoot, ".hack/hack.project.json"), original);
-      const recoveryDeadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
-      expect(
-        await store.withMutation({
-          generation,
-          binary,
-          operation: "stop",
-          recover: true,
-          services: [],
-          deadline: recoveryDeadline,
-          run: (input) =>
-            runLegacyComposeRetainedOperation({
-              input,
-              operation: "stop",
-              deadline: recoveryDeadline,
-              signal: new AbortController().signal,
-            }),
-        })
-      ).toBe(0);
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(2)
-);
-
-boundedTest(
-  "v7 final historical exit0 cannot clear pending even after a minted successful attempt",
-  async () => {
-    const { job } = await completedJobFixture(),
-      { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
-      await expect(
-        store.withMutation({
-          generation,
-          binary,
-          operation: "start",
-          services: [],
-          deadline,
-          run: async (input) => {
-            const outcome = await runLegacyComposeRetainedOperation({
-              input,
-              operation: "start",
-              deadline,
-              signal: new AbortController().signal,
-            });
-            fixture = JSON.parse(
-              await readFile(join(root, "fixture.json"), "utf8")
-            );
-            const state = fixture.jobs?.[job];
-            if (!state) {
-              throw new Error("missing job fixture");
-            }
-            state.startedAt = "2026-10-08T00:00:01.000Z";
-            await save();
-            return outcome;
-          },
-        })
-      ).rejects.toThrow("values omitted");
-      expect(
-        (await mutationCommands()).filter((args) => args[1] === "start")
-      ).toHaveLength(3);
-      expect((await readReceipt()).pendingOperation.operation).toBe("start");
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest(
-  "v7 managed layout refuses before compiler/value acquisition or engine probe",
-  async () => {
-    await completedJobFixture();
-    await writeFile(
-      join(projectRoot, ".hack/hack.env.prod.yaml"),
-      "synthetic-private-unqualified-managed-input"
-    );
-    const store = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-    });
-    try {
-      await expect(store.prepare({ binary: await compiler() })).rejects.toThrow(
-        "values omitted"
-      );
-      expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
-      expect(await Bun.file(join(root, "candidate-received")).exists()).toBe(
-        false
-      );
-      expect((await readReceipt()).prepared).toBeNull();
-    } finally {
-      await store.close();
-    }
-  },
-  ADOPTION_CASE_TIMEOUT_MS
-);
-
-boundedTest(
-  "v5 explicit preparation stop uses reverse original-ID order and can publish after verified completion",
-  async () => {
-    const worker = await dependencyFixture();
-    fixture.states = { [ID]: true, [worker]: true };
-    await save();
-    const { store, generation } = await prepared();
-    const controller = new AbortController();
-    try {
-      const binary = await compiler(),
-        deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
-      expect(
-        await store.withPreparationStop({
-          generation,
-          binary,
-          deadline,
-          run: async (input) => {
-            expect((await readReceipt()).pendingOperation.operation).toBe(
-              "stop"
-            );
-            return await runLegacyComposeRetainedOperation({
-              input,
-              operation: "stop",
-              deadline,
-              signal: controller.signal,
-            });
-          },
-        })
-      ).toBe(0);
-      expect(await mutationCommands()).toEqual([
-        ["container", "stop", worker],
-        ["container", "stop", ID],
-      ]);
-      expect((await readReceipt()).pendingOperation).toBeNull();
-      await store.publish({ generation, binary });
-      expect((await readReceipt()).publication.phase).toBe("active");
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest(
-  "v5 expired aggregate deadline after callback keeps pending instead of acknowledging completion",
-  async () => {
-    await dependencyFixture();
-    const { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      const deadline = Date.now() + EXPIRING_OPERATION_DEADLINE_MS;
-      await refusal(
-        store.withMutation({
-          generation,
-          binary,
-          operation: "stop",
-          services: [],
-          deadline,
-          run: async () => {
-            await Bun.sleep(Math.max(1, deadline - Date.now() + 5));
-            return 0;
-          },
-        }),
-        // Nothing drifted: expiry is not reported as a binding change (HACK-1340).
-        "E_LEGACY_ADOPTION_DEADLINE"
-      );
-      expect((await readReceipt()).pendingOperation.operation).toBe("stop");
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest(
-  "v5 requires one finite aggregate deadline before probing or journaling a mutation",
-  async () => {
-    await dependencyFixture();
-    const { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      const before = await readFile(join(root, "commands"), "utf8");
-      let called = false;
-      for (const deadline of [
-        undefined,
-        Number.NaN,
-        Number.POSITIVE_INFINITY,
-        Date.now() - 1,
-      ]) {
-        await refusal(
-          store.withMutation({
-            generation,
-            binary,
-            operation: "stop",
-            services: [],
-            deadline,
-            run: async () => {
-              called = true;
-              return 0;
-            },
-          }),
-          "E_LEGACY_ADOPTION_UNSUPPORTED"
-        );
-      }
-      expect(called).toBe(false);
-      expect(await readFile(join(root, "commands"), "utf8")).toBe(before);
-      expect((await readReceipt()).pendingOperation).toBeNull();
-    } finally {
-      await store.close();
-    }
-  },
-  ADOPTION_CASE_TIMEOUT_MS
-);
-
-for (const linked of [false, true]) {
-  boundedTest(
-    `rolled-back v5 can reprepare a verified plain generation with ${linked ? "linked" : "directory"} checkout receipt version`,
-    async () => {
-      const captureStages =
-        process.env.HACK_TEST_ADOPTION_REPREPARE_STAGES === "1";
-      const started = performance.now();
-      const stage = (
-        value:
-          | "entry"
-          | "checkout"
-          | "dependencies"
-          | "v5-prepared"
-          | "v5-published"
-          | "v5-rolled-back"
-          | "plain-source"
-          | "plain-prepared"
-          | "plain-loaded-prepared"
-          | "plain-published"
-          | "plain-loaded-active"
-          | "closed"
-      ) => {
-        if (captureStages) {
-          // Opt-in diagnostic only: fixed stages and elapsed time, no fixture
-          // path, source, private receipt, child argv or resource values.
-          process.stderr.write(
-            `${JSON.stringify({
-              diagnostic: "v5-reprepare-stage",
-              layout: linked ? "linked" : "directory",
-              stage: value,
-              elapsedMs: Math.round(performance.now() - started),
-            })}\n`
-          );
-        }
-      };
-      stage("entry");
-      if (linked) {
-        await linkedCheckout();
-      }
-      stage("checkout");
-      const worker = await dependencyFixture();
-      stage("dependencies");
-      const { store, generation } = await prepared();
-      stage("v5-prepared");
-      try {
-        const binary = await compiler();
-        await store.publish({ generation, binary });
-        stage("v5-published");
-        await store.rollback();
-        stage("v5-rolled-back");
-        const composePath = join(projectRoot, ".hack/docker-compose.yml");
-        const authored = JSON.parse(await readFile(composePath, "utf8"));
-        authored.services.web.depends_on = undefined;
-        authored.services.db.healthcheck = undefined;
-        await writeFile(composePath, JSON.stringify(authored));
-        stage("plain-source");
-        // The synthetic engine config-hash owner continues to attest the new source.
-        const plain = await store.prepare({ binary });
-        stage("plain-prepared");
-        expect(plain.report.adoption_generation_version).toBe(1);
-        expect((await readReceipt()).adoption_receipt_version).toBe(
-          linked ? 2 : 1
-        );
-        expect(
-          (await store.loadPrepared())?.report.adoption_generation_version
-        ).toBe(1);
-        stage("plain-loaded-prepared");
-        await store.publish({ generation: plain, binary });
-        stage("plain-published");
-        expect(
-          (await store.loadActive())?.report.adoption_generation_version
-        ).toBe(1);
-        stage("plain-loaded-active");
-        expect(await mutationCommands()).toEqual([]);
-        expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
-        expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-      } finally {
-        await store.close();
-        stage("closed");
-      }
-    },
-    ADOPTION_CASE_TIMEOUT_MS
-  );
-}
-
-for (const stage of ["per-effect freshness", "final observation"] as const) {
-  boundedTest(
-    `v5 remaining aggregate clock terminates held ${stage} and retains pending`,
-    async () => {
-      await dependencyFixture();
-      const { store, generation } = await prepared();
-      try {
-        const binary = await compiler();
-        await store.publish({ generation, binary });
-        const deadline = Date.now() + EXPIRING_OPERATION_DEADLINE_MS;
-        let reachedCallback = false;
-        await refusal(
-          store.withMutation({
-            generation,
-            binary,
-            operation: "stop",
-            services: [],
-            deadline,
-            run: async (input) => {
-              reachedCallback = true;
-              fixture.mode =
-                stage === "per-effect freshness" ? "hang" : "hang-state";
-              await save();
-              if (stage === "per-effect freshness") {
-                await input.assertFresh();
-              }
-              return 0;
-            },
-          }),
-          "E_LEGACY_ADOPTION_DEADLINE"
-        );
-        expect(reachedCallback).toBe(true);
-        expect(Date.now()).toBeLessThan(deadline + DEADLINE_REFUSAL_SLACK_MS);
-        const pid = Number(
-          (await readFile(join(root, "started"), "utf8")).trim()
-        );
-        expect(Number.isSafeInteger(pid)).toBe(true);
-        let alive = true;
-        try {
-          process.kill(pid, 0);
-        } catch {
-          alive = false;
-        }
-        expect(alive).toBe(false);
-        expect((await readReceipt()).pendingOperation.operation).toBe("stop");
-        expect(await mutationCommands()).toEqual([]);
-        expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-      } finally {
-        await store.close();
-      }
-    },
-    retainedOperationCaseTimeout(1)
-  );
-}
-
-boundedTest(
-  "final prepared anchor cannot authorize the earlier staged query; old temporal guard refuses before effects",
-  async () => {
-    await dependencyFixture();
-    fixture.dependencyReadScope = {
-      projectRoot,
-      first: await captureAdoptionDependencyFirstPrepare({ projectRoot }),
-      allowFirstPrepare: false,
-    };
-    await save();
-    await refusal(prepared(), "E_LEGACY_ADOPTION_STATE");
-    const stages = (await readFile(join(root, "read-stages"), "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    expect(stages.at(-1)).toEqual({ stage: "staged", allowed: false });
-    expect((await readReceipt()).prepared).toBeNull();
-    expect((await readReceipt()).pendingOperation).toBeNull();
-    expect(await mutationCommands()).toEqual([]);
-    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-  },
-  ADOPTION_CASE_TIMEOUT_MS
-);
-
-boundedTest(
-  "dependency fixture admits first preparation before publication and checks later reads against their current receipt",
-  async () => {
-    await dependencyFixture();
-    fixture.dependencyReadScope = {
-      projectRoot,
-      first: await captureAdoptionDependencyFirstPrepare({ projectRoot }),
-      allowFirstPrepare: true,
-    };
-    await save();
-    const { store, generation } = await prepared();
-    try {
-      await store.publish({ generation, binary: await compiler() });
-      const stages = (await readFile(join(root, "read-stages"), "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-      expect(
-        stages.filter((row) => row.stage === "staged").length
-      ).toBeGreaterThan(0);
-      expect(
-        stages.filter((row) => row.stage === "published").length
-      ).toBeGreaterThan(0);
-      expect(stages.every((row) => row.allowed)).toBe(true);
-      expect(await mutationCommands()).toEqual([]);
-      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-    } finally {
-      await store.close();
-    }
-  },
-  ADOPTION_CASE_TIMEOUT_MS
-);
-
-boundedTest(
-  "v5 retained dispatch orders exact originals and reverses stops without creating data",
-  async () => {
-    const worker = await dependencyFixture(),
-      original = await originalSnapshots();
-    fixture.dependencyReadScope = {
-      projectRoot,
-      first: await captureAdoptionDependencyFirstPrepare({ projectRoot }),
-      allowFirstPrepare: true,
-    };
-    await save();
-    const { store, generation } = await prepared();
-    const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-    try {
-      const binary = await compiler();
-      process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-      expect(generation.report.adoption_generation_version).toBe(5);
-      expect((await readReceipt()).adoption_receipt_version).toBe(5);
-      expect(JSON.stringify(generation)).not.toContain(CANARY);
-      await store.publish({ generation, binary });
-      expect(
-        await tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
-          operation: "up",
-          detach: true,
-        })
-      ).toBe(0);
-      expect(await mutationCommands()).toEqual([
-        ["container", "start", ID],
-        ["container", "start", worker],
-      ]);
-      expect(
-        await tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
-          operation: "down",
-        })
-      ).toBe(0);
-      expect((await mutationCommands()).slice(2)).toEqual([
-        ["container", "stop", worker],
-        ["container", "stop", ID],
-      ]);
-      fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
-      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-      expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
-      expect((await readReceipt()).pendingOperation).toBeNull();
-      const reads = (await readFile(join(root, "read-stages"), "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-      expect(reads.length).toBeGreaterThan(20);
-      expect(reads.every((row) => row.allowed)).toBe(true);
-      await store.rollback();
-      await expectOriginals(original);
-    } finally {
-      restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(2)
-);
-
-boundedTest(
-  "v5 partial selection refuses before a journal or effect; private recheck expires at callback return",
-  async () => {
-    await dependencyFixture();
-    const { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      let calls = 0;
-      await refusal(
-        store.withMutation({
-          deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
-          generation,
-          binary,
-          operation: "start",
-          services: ["db"],
-          run: async () => {
-            calls++;
-            return 0;
-          },
-        }),
-        "E_LEGACY_ADOPTION_UNSUPPORTED"
-      );
-      expect(calls).toBe(0);
-      expect((await readReceipt()).pendingOperation).toBeNull();
-      let retained: (() => Promise<void>) | undefined;
-      await store.withMutation({
-        deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
-        generation,
-        binary,
-        operation: "stop",
-        services: [],
-        run: async (input) => {
-          expect(Object.keys(input)).toEqual([]);
-          expect(JSON.stringify(input)).toBe("{}");
-          retained = input.assertFresh;
-          await input.assertFresh();
-          return 0;
-        },
-      });
-      const before = await readFile(join(root, "commands"), "utf8");
-      if (!retained) {
-        throw new Error("missing test capability");
-      }
-      await expect(retained()).rejects.toThrow("values omitted");
-      expect(await readFile(join(root, "commands"), "utf8")).toBe(before);
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(2)
-);
-
-boundedTest(
-  "v5 source drift between ordered effects retains pending evidence and explicit repair permits stop recovery",
-  async () => {
-    const worker = await dependencyFixture();
-    const { store, generation } = await prepared();
-    const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-    try {
-      const binary = await compiler();
-      process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-      await store.publish({ generation, binary });
-      const candidate = await readFile(
-        join(projectRoot, ".hack/hack.project.json"),
-        "utf8"
-      );
-      fixture.sourceRace = true;
-      await save();
-      await expect(
-        tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
-          operation: "up",
-          detach: true,
-        })
-      ).rejects.toThrow("values omitted");
-      expect(await mutationCommands()).toEqual([["container", "start", ID]]);
-      expect((await readReceipt()).pendingOperation.operation).toBe("start");
-      fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
-      fixture.sourceRace = false;
-      await save();
-      await writeFile(join(projectRoot, ".hack/hack.project.json"), candidate);
-      expect(
-        await tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
-          operation: "down",
-          recover: true,
-        })
-      ).toBe(0);
-      expect((await mutationCommands()).slice(1)).toEqual([
-        ["container", "stop", worker],
-        ["container", "stop", ID],
-      ]);
-      expect((await readReceipt()).pendingOperation).toBeNull();
-      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-    } finally {
-      restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(2)
-);
-
-boundedTest(
-  "v5 final unhealthy observation cannot acknowledge a successful effect",
-  async () => {
-    await dependencyFixture();
-    const { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      await refusal(
-        store.withMutation({
-          deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
-          generation,
-          binary,
-          operation: "start",
-          services: [],
-          run: async () => {
-            fixture.states = Object.fromEntries(
-              fixture.container.map((row) => [String(row.id), true])
-            );
-            fixture.health = { [ID]: "unhealthy" };
-            await save();
-            return 0;
-          },
-        }),
-        "E_LEGACY_ADOPTION_CHANGED"
-      );
-      expect((await readReceipt()).pendingOperation.operation).toBe("start");
-      await refusal(store.loadActive(), "E_LEGACY_ADOPTION_BUSY");
-      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest(
-  "v5 recheck cancellation refuses a next effect and retains the journal",
-  async () => {
-    await dependencyFixture();
-    const controller = new AbortController();
-    const store = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-      signal: controller.signal,
-    });
-    try {
-      const binary = await compiler(),
-        generation = await store.prepare({ binary });
-      await store.publish({ generation, binary });
-      let effects = 0;
-      await refusal(
-        store.withMutation({
-          deadline: Date.now() + RETAINED_OPERATION_DEADLINE_MS,
-          generation,
-          binary,
-          operation: "start",
-          services: [],
-          run: async (input) => {
-            effects++;
-            controller.abort(CANARY);
-            await input.assertFresh();
-            effects++;
-            return 0;
-          },
-        }),
-        "E_LEGACY_ADOPTION_CANCELLED"
-      );
-      expect(effects).toBe(1);
-      expect((await readReceipt()).pendingOperation.operation).toBe("start");
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest(
-  "v5 active captured signal reaps the actual retained effect and keeps pending",
-  async () => {
-    await dependencyFixture();
-    const controller = new AbortController();
-    const store = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-      signal: controller.signal,
-    });
-    try {
-      const binary = await compiler(),
-        generation = await store.prepare({ binary });
-      await store.publish({ generation, binary });
-      fixture.hangMutation = true;
-      await save();
-      const deadline = Date.now() + RETAINED_OPERATION_DEADLINE_MS;
-      let effectStartedAt = 0;
-      await refusal(
-        store.withMutation({
-          generation,
-          binary,
-          operation: "start",
-          services: [],
-          deadline,
-          run: async (input) => {
-            const operation = runLegacyComposeRetainedOperation({
-              input,
-              operation: "start",
-              deadline,
-              signal: controller.signal,
-            });
-            // Handshake, not a timed wait: the effect child publishes its PID,
-            // or the operation settles without one (HACK-1319).
-            let settled = false;
-            operation.then(
-              () => {
-                settled = true;
-              },
-              () => {
-                settled = true;
-              }
-            );
-            while (
-              !(
-                (await Bun.file(join(root, "effect-started")).exists()) ||
-                settled
-              )
-            ) {
-              await Bun.sleep(10);
-            }
-            expect(await Bun.file(join(root, "effect-started")).exists()).toBe(
-              true
-            );
-            effectStartedAt = Date.now();
-            controller.abort(CANARY);
-            return await operation;
-          },
-        }),
-        "E_LEGACY_ADOPTION_CANCELLED"
-      );
-      expect(Date.now() - effectStartedAt).toBeLessThan(
-        CANCELLED_EFFECT_REFUSAL_BOUND_MS
-      );
-      const pid = Number(await Bun.file(join(root, "effect-started")).text());
-      let alive = true;
-      try {
-        process.kill(pid, 0);
-      } catch {
-        alive = false;
-      }
-      expect(alive).toBe(false);
-      expect(await mutationCommands()).toEqual([["container", "start", ID]]);
-      expect((await readReceipt()).pendingOperation.operation).toBe("start");
-      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-    } finally {
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
-  "v5 supplied previous upgraded owner refuses before compiler, key or engine reads",
-  async () => {
-    await dependencyFixture();
-    const { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      const oldBinary = process.env.HACK_TEST_OLD_ADOPTION_BINARY;
-      if (!oldBinary) {
-        throw new Error("required previous binary unavailable");
-      }
-      const before = await readFile(join(root, "commands"), "utf8");
-      const child = Bun.spawn(
-        [oldBinary, "--path", projectRoot, "ps", "--json"],
-        {
-          env: {
-            PATH: `${root}:/usr/bin:/bin`,
-            HOME: root,
-            HACK_HOME: join(root, "old-owner-home"),
-            HACK_CONFIG_COMPILER_BINARY: binary,
-          },
-          stdin: "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
-          timeout: 5000,
-        }
-      );
-      const [stdout, stderr, code] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      expect(code).not.toBe(0);
-      expect(stdout + stderr).toContain("Legacy adoption selection");
-      expect(stdout + stderr).not.toContain(CANARY);
-      expect(await readFile(join(root, "commands"), "utf8")).toBe(before);
-    } finally {
-      await store.close();
-    }
-  },
-  ADOPTION_CASE_TIMEOUT_MS
-);
-
-/** Current writers keep references at rest; "literal" models a file an earlier
- * Hack version left, which neither adoption nor its publication may pin. */
-async function managedGenerated(form: "literal" | "reference" = "reference") {
-  const composeText = await readFile(
-    join(projectRoot, ".hack/docker-compose.yml"),
-    "utf8"
-  );
-  await mkdir(join(projectRoot, ".hack/.internal"), { recursive: true });
-  await writeFile(
-    join(projectRoot, ".hack/hack.env.default.yaml"),
-    JSON.stringify({
-      version: 1,
-      secretsprovider: "project_key",
-      values: { global: { MANAGED: CANARY, EMPTY: "" } },
-    })
-  );
-  const runtime = buildRuntimeHostMetadataOverride({
-    composeYamls: [composeText],
-    branch: null,
-    devHost: `${defaultProjectSlugFromPath(projectRoot)}.hack`,
-    aliasHost: null,
-    composeProject: "fixture",
-  });
-  const projection = {
-    targetServices: ["db"],
-    globalEnv: { MANAGED: CANARY, EMPTY: "" },
-    serviceEnv: { db: { MANAGED: CANARY, EMPTY: "" } },
-  };
-  const env =
-    form === "reference"
-      ? renderComposeEnvReferenceOverride(projection)?.text
-      : renderManagedComposeEnvOverride(projection);
-  if (!(runtime && env)) {
-    throw new Error("Synthetic projections missing");
-  }
-  const files = [
-    join(projectRoot, ".hack/docker-compose.yml"),
-    join(projectRoot, ".hack/.internal/compose.runtime.override.yml"),
-    join(projectRoot, ".hack/.internal/compose.env.override.yml"),
-  ];
-  await writeFile(files[1] ?? "", runtime);
-  await writeFile(files[2] ?? "", env);
-  container().configFiles = files.join(",");
-  await save();
-  return files;
-}
-
-async function trackedManagedCheckout() {
-  await rm(join(projectRoot, ".git"), { recursive: true });
-  for (const args of [
-    ["init", "--quiet", "-b", "main"],
-    ["add", ".hack"],
-    [
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.invalid",
-      "commit",
-      "--quiet",
-      "-m",
-      "fixture",
-    ],
-  ]) {
-    const child = Bun.spawn(["/usr/bin/git", "-C", projectRoot, ...args], {
-      env: {
-        PATH: priorPath ?? "/usr/bin:/bin",
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-      },
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    expect(await child.exited).toBe(0);
-  }
-  await symlink("/usr/bin/git", join(root, "git"));
-}
-
-test("v3 saved adoption consumes canonical original generated sources without env or key delivery", async () => {
-  Reflect.deleteProperty(process.env, "CI");
-  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
-  await trackedManagedCheckout();
-  const files = await managedGenerated();
-  const envOverride = await readFile(files[2] ?? "", "utf8");
-  await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
-  await setProjectEnvValue({
-    projectRoot,
-    projectDir: join(projectRoot, ".hack"),
-    envName: null,
-    scope: "global",
-    key: "MANAGED",
-    value: CANARY,
-    secret: true,
-  });
-  const binary = await managedEnvCompilerFixture(
-    join(root, "managed-compiler")
-  );
-  // The current writer's reference form; an earlier version's literal form
-  // can be neither prepared through the CLI nor published (HACK-1273/1318).
-  expect(envOverride).not.toContain(CANARY);
-  expect(
-    (await previewLegacyComposeAdoption({ projectRoot, binary })).complete
-  ).toBe(true);
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    expect(generation.report.adoption_generation_version).toBe(3);
-    const receipt = JSON.parse(
-      await readFile(join(stateRoot(), "receipt.json"), "utf8")
-    );
-    expect(receipt.adoption_receipt_version).toBe(3);
-    const metaText = await readFile(
-      await artifactPath("manifest.json"),
-      "utf8"
-    );
-    const meta = JSON.parse(metaText);
-    expect(meta.adoption_generation_version).toBe(3);
-    expect(meta.binding.composeFiles).toEqual(files);
-    expect(meta.runtimeConfig).toEqual([
-      { id: ID, service: "db", hash: "d".repeat(64) },
-    ]);
-    expect(metaText).not.toContain('"MANAGED"');
-    expect(JSON.stringify(generation)).not.toContain(
-      meta.projectionProof.managedRevision
-    );
-    await store.publish({ generation, binary });
-    await store.close();
-    await rm(join(projectRoot, ".hack.secret.key"));
-    await mkdir(join(projectRoot, ".hack.secret.key"));
-    const savedStore = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-      mode: "saved",
-    });
-    try {
-      const active = await savedStore.loadActive();
-      if (!active) {
-        throw new Error("Expected active adopted generation");
-      }
-      expect(active.report.adoption_generation_version).toBe(3);
-      await savedStore.withLease({
-        generation: active,
-        run: async (input) => {
-          expect(input.binding.containers[0]?.id).toBe(ID);
-          expect(input.binding.volumes[0]?.createdAt).toBe(CREATED);
-          expect(JSON.stringify(input)).toBe("{}");
-        },
-      });
-      await savedStore.rollback();
-      expect(await readFile(files[0] ?? "", "utf8")).toContain("name: fixture");
-      expect(await readFile(files[2] ?? "", "utf8")).toBe(envOverride);
-      expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-        "rolled-back"
-      );
-    } finally {
-      await savedStore.close();
-    }
-  } finally {
-    await store.close();
-  }
-});
-
-/** A published v3 adoption over reference-form generated overrides. */
-async function publishedManagedAdoption() {
-  Reflect.deleteProperty(process.env, "CI");
-  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
-  await trackedManagedCheckout();
-  const files = await managedGenerated();
-  await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
-  await setProjectEnvValue({
-    projectRoot,
-    projectDir: join(projectRoot, ".hack"),
-    envName: null,
-    scope: "global",
-    key: "MANAGED",
-    value: CANARY,
-    secret: true,
-  });
-  const binary = await managedEnvCompilerFixture(
-    join(root, "managed-compiler")
-  );
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    await store.publish({ generation, binary });
-  } finally {
-    await store.close();
-  }
-  return files;
-}
-
-boundedTest(
-  "rollback releases a moved-aside generated env override that execution still refuses (HACK-1437)",
-  async () => {
-    const files = await publishedManagedAdoption();
-    const override = files[2] ?? "";
-    const envText = await readFile(override, "utf8");
-    const aside = join(root, "moved-aside-override.yml");
-    await rename(override, aside);
-    const saved = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-      mode: "saved",
-    });
-    try {
-      // Execution keeps the exact binding: the adoption no longer loads.
-      await refusal(saved.loadActive());
-      expect((await readReceipt()).publication.phase).toBe("active");
-      // Rollback never reads or writes the override, so it is released.
-      await saved.rollback();
-    } finally {
-      await saved.close();
-    }
-    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-      "rolled-back"
-    );
-    expect(await readFile(files[0] ?? "", "utf8")).toContain("name: fixture");
-    expect(await lstat(override).catch(() => null)).toBeNull();
-    expect(await readFile(aside, "utf8")).toBe(envText);
-  },
-  ROLLBACK_RECOVERY_BUDGET_MS
-);
-
-boundedTest(
-  "rollback still binds the generated runtime override when the env override is released (HACK-1437)",
-  async () => {
-    const files = await publishedManagedAdoption();
-    // Releasing the env override must not release its sibling: a runtime
-    // override rewritten with its exact bytes (new mtime and ctime, so only
-    // the identity proof can notice) still refuses rollback before anything
-    // moves.
-    await rename(files[2] ?? "", join(root, "moved-aside-override.yml"));
-    const runtimeText = await readFile(files[1] ?? "", "utf8");
-    const runtimeBefore = await lstat(files[1] ?? "");
-    await Bun.sleep(5);
-    await writeFile(files[1] ?? "", runtimeText);
-    expect(await readFile(files[1] ?? "", "utf8")).toBe(runtimeText);
-    expect((await lstat(files[1] ?? "")).ctimeMs).not.toBe(
-      runtimeBefore.ctimeMs
-    );
-    const saved = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-      mode: "saved",
-    });
-    try {
-      await refusal(saved.rollback());
-    } finally {
-      await saved.close();
-    }
-    expect((await readReceipt()).publication.phase).toBe("active");
-    expect(
-      await Bun.file(join(projectRoot, ".hack/hack.project.json")).exists()
-    ).toBe(true);
-  },
-  ROLLBACK_RECOVERY_BUDGET_MS
-);
-
-test("an adoption bound to an earlier version's literal env override keeps it loadable until rollback frees it (HACK-1273)", async () => {
-  Reflect.deleteProperty(process.env, "CI");
-  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
-  await trackedManagedCheckout();
-  const files = await managedGenerated("literal");
-  const override = files[2] ?? "";
-  const projectDir = join(projectRoot, ".hack");
-  await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
-  await setProjectEnvValue({
-    projectRoot,
-    projectDir,
-    envName: null,
-    scope: "global",
-    key: "MANAGED",
-    value: CANARY,
-    secret: true,
-  });
-  const binary = await managedEnvCompilerFixture(
-    join(root, "managed-compiler")
-  );
-  // Models an adoption that an earlier version published over its literal
-  // file: that version had no publication check, so the bound form reads as
-  // references during this one publish only (HACK-1318 now refuses it).
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  const earlierVersion = spyOn(
-    composeManagedEnv,
-    "classifyComposeEnvOverrideText"
-  ).mockReturnValue({ kind: "references" });
-  try {
-    const generation = await store.prepare({ binary });
-    await store.publish({ generation, binary });
-  } finally {
-    earlierVersion.mockRestore();
-    await store.close();
-  }
-  const pinned = await lstat(override);
-
-  // What `hack doctor --fix` and the down and no-override scrubs run.
-  const kept = await removePlaintextComposeEnvOverride({
-    projectDir,
-    includeUnverifiable: true,
-  });
-  expect(kept).toMatchObject({ removed: false, adoptionBound: true });
-  expect(kept.state.kind).toBe("plaintext");
-  expect((await lstat(override)).ino).toBe(pinned.ino);
-  expect(await readFile(override, "utf8")).toContain(CANARY);
-  const report = await inspectComposeEnvAtRest({ projectDir });
-  expect(report.adoptionBound).toBe(true);
-  expect(composeEnvAtRestRepairs(report)).toEqual({
-    override: false,
-    asides: false,
-  });
-  const described = describeComposeEnvAtRest({
-    report,
-    projectDirName: ".hack",
-  });
-  expect(described.status).toBe("warn");
-  expect(described.message).toContain("hack config adopt --rollback");
-  expect(JSON.stringify([kept, report, described])).not.toContain(CANARY);
-  // The doctor check reaches the adopted project, whose inputs ordinary
-  // discovery now refuses, and names the supported next step.
-  const checked = await checkComposeEnvOverrideAtRest({
-    startDir: projectRoot,
-  });
-  expect(checked.status).toBe("warn");
-  expect(checked.message).toContain("pins this file");
-  expect(checked.message).toContain("hack config adopt --rollback");
-  expect(checked.message).not.toContain(CANARY);
-
-  // The adoption still loads with key-free saved reads, then rolls back.
-  await rm(join(projectRoot, ".hack.secret.key"));
-  const savedStore = await openLegacyComposeAdoptedGenerationStore({
-    projectRoot,
-    mode: "saved",
-  });
-  try {
-    expect(await savedStore.loadActive()).toBeTruthy();
-    await savedStore.rollback();
-  } finally {
-    await savedStore.close();
-  }
-  expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-    "rolled-back"
-  );
-  // Rolled back, nothing pins the file: the same removal now takes it.
-  expect(
-    await removePlaintextComposeEnvOverride({
-      projectDir,
-      includeUnverifiable: true,
-    })
-  ).toMatchObject({ removed: true, adoptionBound: false });
-  expect(await lstat(override).catch(() => null)).toBeNull();
-});
-
-/**
- * A tracked managed checkout with a secret key, a managed value and a compiler
- * that the CLI adopts end to end once its env override is in reference form.
- * A refusal over the literal form can then come only from the literal check,
- * not from an incomplete fixture.
- */
-async function adoptableManagedFixture(form: "literal" | "reference") {
-  Reflect.deleteProperty(process.env, "CI");
-  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
-  await trackedManagedCheckout();
-  const files = await managedGenerated(form);
-  await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-cli-key");
-  await setProjectEnvValue({
-    projectRoot,
-    projectDir: join(projectRoot, ".hack"),
-    envName: null,
-    scope: "global",
-    key: "MANAGED",
-    value: CANARY,
-    secret: true,
-  });
-  const binary = await managedEnvCompilerFixture(
-    join(root, "managed-compiler")
-  );
-  return { override: files[2] ?? "", binary };
-}
-/** Each command a fixed recovery step names, in order. */
-function namedAdoptCommands(message: string): string[][] {
-  return [...message.matchAll(/'hack config adopt([^']*)'/g)].map((match) =>
-    (match[1] ?? "").split(" ").filter(Boolean)
-  );
-}
-/**
- * Runs the only command a pending-switch step names and asserts it finishes
- * the rollback: originals restored, the selection rolled back, and the
- * moved or restored override neither read into output nor rewritten.
- */
-async function runNamedRecoveryStep(opts: {
-  readonly message: string;
-  readonly binary: string;
-  readonly original: Awaited<ReturnType<typeof originalSnapshots>>;
-  readonly moved: {
-    readonly path: string;
-    readonly text: string;
-    readonly ino: number;
-  };
-  readonly override: string;
-}) {
-  const named = namedAdoptCommands(opts.message);
-  expect(named).toEqual([["--recover", "--rollback"]]);
-  const released = await adoptCli([...(named[0] ?? []), "--json"], opts.binary);
-  expect(released.code).toBe(0);
-  expect(JSON.parse(released.stdout)).toMatchObject({ status: "rolled-back" });
-  expect(released.output).not.toContain(CANARY);
-  await expectOriginals(opts.original);
-  expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-    "rolled-back"
-  );
-  expect(await readFile(opts.moved.path, "utf8")).toBe(opts.moved.text);
-  expect((await lstat(opts.moved.path)).ino).toBe(opts.moved.ino);
-  if (opts.moved.path !== opts.override) {
-    expect(await lstat(opts.override).catch(() => null)).toBeNull();
-  }
-}
-async function adoptCli(flags: readonly string[], binary: string) {
-  const child = Bun.spawn(
-    [
-      process.execPath,
-      join(import.meta.dir, "../index.ts"),
-      "config",
-      "adopt",
-      "--path",
-      projectRoot,
-      ...flags,
-    ],
-    {
-      env: privateCliEnv({
-        root,
-        env: {
-          HACK_HOME: join(root, "isolated-home"),
-          HACK_CONFIG_COMPILER_BINARY: binary,
-        },
-      }),
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  );
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  return { code, stdout, output: stdout + stderr };
-}
-
-boundedTest(
-  "CLI adoption and its preview refuse a literal env override that the same fixture otherwise adopts (HACK-1273)",
-  async () => {
-    const { override, binary } = await adoptableManagedFixture("literal");
-    for (const flags of [
-      [],
-      ["--dry-run"],
-      ["--stop"],
-      ["--dry-run", "--json"],
-    ]) {
-      const result = await adoptCli(flags, binary);
-      expect(result.code).not.toBe(0);
-      expect(result.output).toContain(
-        flags.includes("--json")
-          ? LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE
-          : "Run 'hack up' once so Hack rewrites it with references only"
-      );
-      expect(result.output).not.toContain(CANARY);
-      expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
-      expect(await Bun.file(stateRoot()).exists()).toBe(false);
-    }
-    // Control: once the current writer rewrites the override with references
-    // (what `hack up` does), the same fixture adopts. Each refusal above came
-    // from the literal check.
-    await writeFile(
-      override,
-      renderComposeEnvReferenceOverride({
-        targetServices: ["db"],
-        globalEnv: { MANAGED: CANARY, EMPTY: "" },
-        serviceEnv: { db: { MANAGED: CANARY, EMPTY: "" } },
-      })?.text ?? ""
-    );
-    const adopted = await adoptCli(["--json"], binary);
-    expect(adopted.code).toBe(0);
-    expect(JSON.parse(adopted.stdout)).toMatchObject({ status: "active" });
-    expect(adopted.output).not.toContain(CANARY);
-    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-      "active"
-    );
-  },
-  ADOPTION_CASE_TIMEOUT_MS
-);
-
-boundedTest(
-  "CLI recovery neither publishes nor completes a preparation bound to an earlier version's literal env override (HACK-1318)",
-  async () => {
-    const { override, binary } = await adoptableManagedFixture("literal");
-    const original = await originalSnapshots();
-    // Models a preparation that an earlier version made over its literal
-    // file, left with an interrupted preparation stop. The store itself does
-    // not refuse preparing it; only the CLI's new-preparation check does.
-    const store = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-    });
-    try {
-      const generation = await store.prepare({ binary });
-      expect(
-        await store.withPreparationStop({
-          generation,
-          binary,
-          run: async () => 7,
-        })
-      ).toBe(7);
-    } finally {
-      await store.close();
-    }
-    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-      "pending"
-    );
-    const pinned = await lstat(override);
-    // Interrupted preparation stop, before any switch (HACK-1414): rollback,
-    // explicit or plain, refuses and changes nothing, so doctor must name
-    // `--recover --stop` first, not `--recover --rollback`.
-    const interrupted = await readReceipt();
-    expect(interrupted.pendingOperation).not.toBeNull();
-    expect(interrupted.publication).toBeNull();
-    for (const flags of [
-      ["--recover", "--rollback", "--json"],
-      ["--rollback", "--json"],
-    ]) {
-      const refused = await adoptCli(flags, binary);
-      expect(refused.code).not.toBe(0);
-      expect(refused.output).not.toContain(CANARY);
-      expect(await readReceipt()).toEqual(interrupted);
-    }
-    expect(
-      await inspectComposeEnvAtRest({ projectDir: join(projectRoot, ".hack") })
-    ).toMatchObject({
-      override: { kind: "plaintext" },
-      adoptionBound: true,
-      adoptionPending: "preparation-stop",
-    });
-    const beforeStop = await checkComposeEnvOverrideAtRest({
-      startDir: projectRoot,
-    });
-    expect(beforeStop.status).toBe("warn");
-    expect(beforeStop.message).toContain(
-      "first retry the interrupted adoption stop with 'hack config adopt --recover --stop'"
-    );
-    expect(beforeStop.message).not.toContain(
-      "release the pending adoption switch with"
-    );
-    expect(beforeStop.message).not.toContain(CANARY);
-    // `--recover --stop` retries the stop and then publishes; plain
-    // `--recover` completes the journaled switch. Both refuse before any
-    // original moves and name the release step.
-    for (const flags of [
-      ["--recover", "--stop", "--json"],
-      ["--recover", "--json"],
-    ]) {
-      const result = await adoptCli(flags, binary);
-      expect(result.code).not.toBe(0);
-      expect(JSON.parse(result.stdout)).toEqual({
-        ok: false,
-        error: {
-          code: "E_CONFIG_INVALID",
-          message: new LegacyComposeAdoptedGenerationError(
-            "E_LEGACY_ADOPTION_LITERAL_ENV"
-          ).message,
-          detail: {
-            legacy_adoption_publication_refusal: {
-              stage: "publication-inputs",
-              reason: "literal-env-override",
-            },
-          },
-        },
-      });
-      expect(result.output).toContain("hack config adopt --recover --rollback");
-      expect(result.output).not.toContain(CANARY);
-      const receipt = await readReceipt();
-      expect(receipt.pendingOperation).toBeNull();
-      expect(receipt.publication).toMatchObject({
-        phase: "switching",
-        native: null,
-      });
-      await expectOriginals(original);
-      expect((await lstat(override)).ino).toBe(pinned.ino);
-    }
-    // A second `--recover --stop` no longer reaches the publication boundary:
-    // the switch is already journaled, so the retried preparation stop refuses
-    // it as a pending publication (the generic busy code) without the
-    // literal-env message or a publication diagnostic (HACK-1391). Plain
-    // `--recover` (the busy text's "interrupted-lock recovery") completes the
-    // switch, which refuses the literal override, so the message names the
-    // release step instead (HACK-1414).
-    const repeated = await adoptCli(["--recover", "--stop", "--json"], binary);
-    expect(repeated.code).not.toBe(0);
-    expect(JSON.parse(repeated.stdout)).toEqual({
-      ok: false,
-      error: {
-        code: "E_CONFIG_INVALID",
-        message: `${
-          new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_BUSY")
-            .message
-        } ${PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP}`,
-      },
-    });
-    expect(repeated.output).toContain("hack config adopt --recover --rollback");
-    expect(repeated.output).not.toContain("'hack config adopt --recover' to");
-    expect(repeated.output).not.toContain(CANARY);
-    expect((await readReceipt()).publication).toMatchObject({
-      phase: "switching",
-      native: null,
-    });
-    // Doctor's next step for the pinned literal override must be a command
-    // this pending state accepts: explicit recovery rollback, not plain
-    // rollback or `hack down`, which it refuses (HACK-1391).
-    const report = await inspectComposeEnvAtRest({
-      projectDir: join(projectRoot, ".hack"),
-    });
-    expect(report).toMatchObject({
-      override: { kind: "plaintext" },
-      adoptionBound: true,
-      adoptionPending: "switch",
-    });
-    const checked = await checkComposeEnvOverrideAtRest({
-      startDir: projectRoot,
-    });
-    expect(checked.status).toBe("warn");
-    expect(checked.message).toContain("pins this file");
-    expect(checked.message).toContain("hack config adopt --recover --rollback");
-    expect(checked.message).not.toContain("'hack config adopt --rollback'");
-    expect(checked.message).not.toContain("stop the adopted containers");
-    expect(checked.message).not.toContain(CANARY);
-    // The named step releases the switch; nothing pins the file afterwards.
-    const released = await adoptCli(
-      ["--recover", "--rollback", "--json"],
-      binary
-    );
-    expect(released.code).toBe(0);
-    expect(JSON.parse(released.stdout)).toMatchObject({
-      status: "rolled-back",
-    });
-    await expectOriginals(original);
-    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-      "rolled-back"
-    );
-    expect(
-      await removePlaintextComposeEnvOverride({
-        projectDir: join(projectRoot, ".hack"),
-        includeUnverifiable: true,
-      })
-    ).toMatchObject({ removed: true, adoptionBound: false });
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest(
-  "CLI busy refusal over an interrupted rollback names only the recovery rollback that finishes it (HACK-1427)",
-  async () => {
-    // A reference-form override, so the busy step cannot come from the
-    // literal-override branch.
-    const { override, binary } = await adoptableManagedFixture("reference");
-    const original = await originalSnapshots();
-    const adopted = await adoptCli(["--json"], binary);
-    expect(adopted.code).toBe(0);
-    const active = await readReceipt();
-    expect(active.publication).toMatchObject({ phase: "active" });
-    const pinned = await lstat(override);
-    // An interrupted rollback: `rollback()` journals `rolling-back` and is
-    // stopped before it restores the originals.
-    const rollingBack = {
-      ...active,
-      publication: { ...active.publication, phase: "rolling-back" },
-    };
-    await writeReceipt(rollingBack);
-    const busy = await adoptCli(["--recover", "--stop", "--json"], binary);
-    expect(busy.code).not.toBe(0);
-    expect(JSON.parse(busy.stdout)).toEqual({
-      ok: false,
-      error: {
-        code: "E_CONFIG_INVALID",
-        message: `${
-          new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_BUSY")
-            .message
-        } ${PENDING_ROLLBACK_BUSY_NEXT_STEP}`,
-      },
-    });
-    expect(busy.output).not.toContain("'hack config adopt --recover' to");
-    expect(busy.output).not.toContain(CANARY);
-    expect(await readReceipt()).toEqual(rollingBack);
-    // Plain `--recover`, which the generic pending-switch step names first,
-    // refuses in this state and changes nothing.
-    const completed = await adoptCli(["--recover", "--json"], binary);
-    expect(completed.code).not.toBe(0);
-    expect(completed.output).not.toContain(CANARY);
-    expect(await readReceipt()).toEqual(rollingBack);
-    // The named step finishes the rollback.
-    const released = await adoptCli(
-      ["--recover", "--rollback", "--json"],
-      binary
-    );
-    expect(released.code).toBe(0);
-    expect(JSON.parse(released.stdout)).toMatchObject({
-      status: "rolled-back",
-    });
-    await expectOriginals(original);
-    expect((await lstat(override)).ino).toBe(pinned.ino);
-    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-      "rolled-back"
-    );
-  },
-  ADOPTION_CASE_TIMEOUT_MS
-);
-
-boundedTest(
-  "CLI busy refusal over an interrupted rollback of a literal-bound switch does not name plain recovery once the override is moved aside, and that rollback finishes (HACK-1427, HACK-1437)",
-  async () => {
-    // The reported state: the HACK-1318 fixture after its switch is
-    // journaled, rewritten to an interrupted rollback, with the bound literal
-    // override moved aside so the busy step no longer comes from the
-    // literal-override branch.
-    const { override, binary } = await adoptableManagedFixture("literal");
-    const original = await originalSnapshots();
-    const store = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-    });
-    try {
-      const generation = await store.prepare({ binary });
-      expect(
-        await store.withPreparationStop({
-          generation,
-          binary,
-          run: async () => 7,
-        })
-      ).toBe(7);
-    } finally {
-      await store.close();
-    }
-    const journaled = await adoptCli(["--recover", "--stop", "--json"], binary);
-    expect(journaled.code).not.toBe(0);
-    const switching = await readReceipt();
-    expect(switching.publication).toMatchObject({ phase: "switching" });
-    const rollingBack = {
-      ...switching,
-      publication: { ...switching.publication, phase: "rolling-back" },
-    };
-    await writeReceipt(rollingBack);
-    const literalText = await readFile(override, "utf8");
-    const literalInfo = await lstat(override);
-    const aside = join(root, "moved-aside-override.yml");
-    await rename(override, aside);
-    for (const flags of [
-      ["--recover", "--stop", "--json"],
-      ["--json"],
-      ["--stop", "--json"],
-    ]) {
-      const busy = await adoptCli(flags, binary);
-      expect(busy.code).not.toBe(0);
-      expect(JSON.parse(busy.stdout)).toEqual({
-        ok: false,
-        error: {
-          code: "E_CONFIG_INVALID",
-          message: `${
-            new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_BUSY")
-              .message
-          } ${PENDING_ROLLBACK_BUSY_NEXT_STEP}`,
-        },
-      });
-      expect(busy.output).not.toContain("'hack config adopt --recover' to");
-      expect(busy.output).not.toContain(CANARY);
-      expect(await readReceipt()).toEqual(rollingBack);
-    }
-    // The step the generic message named first refuses here, and its
-    // refusal names the step that state accepts (HACK-1437).
-    const completed = await adoptCli(["--recover", "--json"], binary);
-    expect(completed.code).not.toBe(0);
-    expect(JSON.parse(completed.stdout).error.message).toEndWith(
-      ` ${PENDING_ROLLBACK_BUSY_NEXT_STEP}`
-    );
-    expect(completed.output).not.toContain(CANARY);
-    expect(await readReceipt()).toEqual(rollingBack);
-    // The named step finishes the rollback with the override still moved
-    // aside: rollback releases it instead of looping (HACK-1437).
-    await runNamedRecoveryStep({
-      message: PENDING_ROLLBACK_BUSY_NEXT_STEP,
-      binary,
-      original,
-      moved: { path: aside, text: literalText, ino: literalInfo.ino },
-      override,
-    });
-  },
-  ROLLBACK_RECOVERY_BUDGET_MS
-);
-
-boundedTest(
-  "CLI recovery rollback finishes a pending switch whose bound literal override was moved aside and back, without hand edits (HACK-1437)",
-  async () => {
-    // The reachable state: the HACK-1318 literal fixture with its switch
-    // journaled by the CLI itself, then the bound override moved aside.
-    const { override, binary } = await adoptableManagedFixture("literal");
-    const original = await originalSnapshots();
-    const store = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-    });
-    try {
-      const generation = await store.prepare({ binary });
-      expect(
-        await store.withPreparationStop({
-          generation,
-          binary,
-          run: async () => 7,
-        })
-      ).toBe(7);
-    } finally {
-      await store.close();
-    }
-    const journaled = await adoptCli(["--recover", "--stop", "--json"], binary);
-    expect(journaled.code).not.toBe(0);
-    const switching = await readReceipt();
-    expect(switching.publication).toMatchObject({ phase: "switching" });
-    const literalText = await readFile(override, "utf8");
-    const pinned = await lstat(override);
-    const aside = join(root, "moved-aside-override.yml");
-    await rename(override, aside);
-    // Busy names only the step this state accepts: completing refuses,
-    // because the saved read binds the override's bytes and identity.
-    const busy = await adoptCli(["--recover", "--stop", "--json"], binary);
-    expect(busy.code).not.toBe(0);
-    expect(JSON.parse(busy.stdout)).toEqual({
-      ok: false,
-      error: {
-        code: "E_CONFIG_INVALID",
-        message: `${
-          new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_BUSY")
-            .message
-        } ${PENDING_CHANGED_SWITCH_BUSY_NEXT_STEP}`,
-      },
-    });
-    expect(busy.output).not.toContain("'hack config adopt --recover' to");
-    expect(busy.output).not.toContain(CANARY);
-    // Plain completion refuses, journals nothing, and names the same step.
-    const completed = await adoptCli(["--recover", "--json"], binary);
-    expect(completed.code).not.toBe(0);
-    expect(JSON.parse(completed.stdout).error.message).toEndWith(
-      ` ${PENDING_CHANGED_SWITCH_BUSY_NEXT_STEP}`
-    );
-    expect(completed.output).not.toContain(CANARY);
-    expect(await readReceipt()).toEqual(switching);
-    // Moving it back keeps its bytes and inode but not its ctime, which the
-    // saved read binds; rollback does not depend on it. The literal bytes
-    // are back, so the step comes from the literal branch.
-    await rename(aside, override);
-    const restored = await lstat(override);
-    expect(restored.ino).toBe(pinned.ino);
-    expect(restored.ctimeMs).not.toBe(pinned.ctimeMs);
-    const busyBack = await adoptCli(["--recover", "--stop", "--json"], binary);
-    expect(JSON.parse(busyBack.stdout).error.message).toEndWith(
-      ` ${PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP}`
-    );
-    await runNamedRecoveryStep({
-      message: PENDING_LITERAL_SWITCH_BUSY_NEXT_STEP,
-      binary,
-      original,
-      moved: { path: override, text: literalText, ino: pinned.ino },
-      override,
-    });
-    // Nothing pins the literal file once the switch is rolled back.
-    expect(
-      await removePlaintextComposeEnvOverride({
-        projectDir: join(projectRoot, ".hack"),
-        includeUnverifiable: true,
-      })
-    ).toMatchObject({ removed: true, adoptionBound: false });
-  },
-  ROLLBACK_RECOVERY_BUDGET_MS
-);
-
-boundedTest(
-  "CLI rollback of an active adoption releases a replaced generated env override while plain recovery stays refused (HACK-1437)",
-  async () => {
-    const { override, binary } = await adoptableManagedFixture("reference");
-    const original = await originalSnapshots();
-    const adopted = await adoptCli(["--json"], binary);
-    expect(adopted.code).toBe(0);
-    // A different value-free override at the bound path (a new inode).
-    const replaced = `${await readFile(override, "utf8")}# replaced\n`;
-    await rm(override);
-    await writeFile(override, replaced, { mode: 0o600 });
-    const rolledBack = await adoptCli(["--rollback", "--json"], binary);
-    expect(rolledBack.code).toBe(0);
-    expect(JSON.parse(rolledBack.stdout)).toMatchObject({
-      status: "rolled-back",
-    });
-    expect(rolledBack.output).not.toContain(CANARY);
-    await expectOriginals(original);
-    // Rollback neither read nor rewrote the replaced file.
-    expect(await readFile(override, "utf8")).toBe(replaced);
-    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-      "rolled-back"
-    );
-  },
-  ROLLBACK_RECOVERY_BUDGET_MS
-);
-
-test("v3 value-free env override binds the engine config hash computed with the values (HACK-1273)", async () => {
-  Reflect.deleteProperty(process.env, "CI");
-  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
-  await trackedManagedCheckout();
-  // Distinct from CANARY, which the stub engine also uses as its engine ID.
-  const value = "synthetic-private-reference-env-value";
-  const files = await managedGenerated("reference");
-  expect(await readFile(files[2] ?? "", "utf8")).not.toContain(CANARY);
-  await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
-  await setProjectEnvValue({
-    projectRoot,
-    projectDir: join(projectRoot, ".hack"),
-    envName: null,
-    scope: "global",
-    key: "MANAGED",
-    value,
-    secret: true,
-  });
-  const reference = renderComposeEnvReferenceOverride({
-    targetServices: ["db"],
-    globalEnv: { MANAGED: value, EMPTY: "" },
-    serviceEnv: { db: { MANAGED: value, EMPTY: "" } },
-  });
-  if (!reference) {
-    throw new Error("Synthetic reference projection missing");
-  }
-  // The label Compose writes when Hack starts the stack with the values in
-  // its environment, and the hash the same files give without them.
-  const label = await composeReferenceHash({ files, env: reference.env });
-  const blank = await composeReferenceHash({ files, env: {} });
-  expect(label).not.toBe(blank);
-  fixture.envConfigHash = true;
-  fixture.configHash = label;
-  await save();
-  const binary = await managedEnvCompilerFixture(
-    join(root, "managed-compiler")
-  );
-  expect(
-    (await previewLegacyComposeAdoption({ projectRoot, binary })).complete
-  ).toBe(true);
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    expect(generation.report.adoption_generation_version).toBe(3);
-    const metaText = await readFile(
-      await artifactPath("manifest.json"),
-      "utf8"
-    );
-    const meta = JSON.parse(metaText);
-    expect(meta.binding.composeFiles).toEqual(files);
-    expect(meta.runtimeConfig).toEqual([
-      { id: ID, service: "db", hash: label },
-    ]);
-    for (const text of [metaText, JSON.stringify(generation)]) {
-      expect(text).not.toContain(value);
-      expect(text).not.toContain("HACK_ENV_");
-    }
-    await store.publish({ generation, binary });
-    await store.close();
-    // Saved reads run without key or value delivery.
-    await rm(join(projectRoot, ".hack.secret.key"));
-    await mkdir(join(projectRoot, ".hack.secret.key"));
-    const savedStore = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-      mode: "saved",
-    });
-    try {
-      const active = await savedStore.loadActive();
-      if (!active) {
-        throw new Error("Expected active adopted generation");
-      }
-      let effects = 0;
-      await savedStore.withLease({
-        generation: active,
-        run: async (input) => {
-          effects++;
-          expect(input.binding.containers[0]?.id).toBe(ID);
-        },
-      });
-      expect(effects).toBe(1);
-      // A recreated container carries a different engine label.
-      fixture.configHash = "e".repeat(64);
-      await save();
-      await refusal(
-        savedStore.withLease({
-          generation: active,
-          run: async () => {
-            effects++;
-          },
-        })
-      );
-      expect(effects).toBe(1);
-    } finally {
-      await savedStore.close();
-    }
-    expect(await readFile(join(root, "commands"), "utf8")).not.toContain(value);
-  } finally {
-    await store.close();
-  }
-});
-
-test("v3 raw managed drift fences saved execution and preserves the original stopped IDs", async () => {
-  Reflect.deleteProperty(process.env, "CI");
-  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
-  await trackedManagedCheckout();
-  await managedGenerated();
-  const binary = await managedEnvCompilerFixture(
-    join(root, "managed-compiler")
-  );
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    await store.publish({ generation, binary });
-    const path = join(projectRoot, ".hack/hack.env.default.yaml");
-    await writeFile(path, `${await readFile(path, "utf8")}\n`);
-    let effects = 0;
-    await refusal(
-      store.withLease({
-        generation,
-        run: async () => {
-          effects++;
-        },
-      })
-    );
-    expect(effects).toBe(0);
-    expect(container().id).toBe(ID);
-    expect(volume().createdAt).toBe(CREATED);
-    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-      "active"
-    );
-  } finally {
-    await store.close();
-  }
-});
-
-test("v4 typed locals preserve generated bytes, exact original IDs and key-free saved rollback", async () => {
-  Reflect.deleteProperty(process.env, "CI");
-  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
-  await trackedManagedCheckout();
-  // A fresh adoption binds the reference form; preview refuses a literal one.
-  const files = await managedGenerated("reference");
-  const generatedBytes = await Promise.all(
-    files.map((path) => readFile(path, "utf8"))
-  );
-  const localPath = join(projectRoot, ".hack/hack.local.json");
-  const original =
-    '{"schema_version":1,"environment":{"default_overlay":null}}';
-  await writeFile(localPath, original, { mode: 0o600 });
-  await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v4-key");
-  await setProjectEnvValue({
-    projectRoot,
-    projectDir: join(projectRoot, ".hack"),
-    envName: null,
-    scope: "global",
-    key: "MANAGED",
-    value: CANARY,
-    secret: true,
-  });
-  const binary = await managedEnvCompilerFixture(join(root, "local-compiler"));
-  const preview = await previewLegacyComposeAdoption({ projectRoot, binary });
-  expect(preview.complete).toBe(true);
-  expect(
-    preview.fields.some(
-      (field) =>
-        field.document === "checkout_local" &&
-        field.pointer === "/environment/default_overlay" &&
-        field.status === "exact"
-    )
-  ).toBe(true);
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    expect(generation.report.adoption_generation_version).toBe(4);
-    const receipt = JSON.parse(
-      await readFile(join(stateRoot(), "receipt.json"), "utf8")
-    );
-    expect(receipt.adoption_receipt_version).toBe(4);
-    const meta = JSON.parse(
-      await readFile(await artifactPath("manifest.json"), "utf8")
-    );
-    expect(meta.projectionProof.projection_version).toBe(2);
-    expect(meta.binding.composeFiles).toEqual(files);
-    expect(meta.runtimeConfig).toEqual([
-      { id: ID, service: "db", hash: "d".repeat(64) },
-    ]);
-    expect(JSON.stringify(generation)).not.toContain(
-      meta.projectionProof.localInputs.checkout.hash
-    );
-    await store.publish({ generation, binary });
-    await store.close();
-    const oldBinary = process.env.HACK_TEST_OLD_ADOPTION_BINARY;
-    if (oldBinary) {
-      const before = await readFile(join(root, "commands"), "utf8");
-      const child = Bun.spawn(
-        [oldBinary, "--path", projectRoot, "ps", "--json"],
-        {
-          env: {
-            PATH: `${root}:/usr/bin:/bin`,
-            HOME: root,
-            HACK_HOME: join(root, "old-client-home"),
-            HACK_CONFIG_COMPILER_BINARY: binary,
-          },
-          stdin: "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
-          timeout: 5000,
-        }
-      );
-      const [stdout, stderr, code] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      expect(code).not.toBe(0);
-      expect(JSON.parse(stdout)).toEqual({
-        ok: false,
-        error: {
-          code: "E_CONFIG_INVALID",
-          message:
-            "Legacy adoption selection is unsafe or interrupted. Use explicit adoption recovery; values omitted.",
-        },
-      });
-      expect(stderr).toBe("");
-      expect(stdout).not.toContain(CANARY);
-      expect(stderr).not.toContain(CANARY);
-      expect(await readFile(join(root, "commands"), "utf8")).toBe(before);
-    }
-    await rm(join(projectRoot, ".hack.secret.key"));
-    await mkdir(join(projectRoot, ".hack.secret.key"));
-    const savedStore = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-      mode: "saved",
-    });
-    try {
-      const active = await savedStore.loadActive();
-      if (!active) {
-        throw new Error("Expected active typed-local adoption");
-      }
-      expect(active.report.adoption_generation_version).toBe(4);
-      let effects = 0;
-      await writeFile(localPath, `${original}\n`);
-      await refusal(
-        savedStore.withLease({
-          generation: active,
-          run: async () => {
-            effects++;
-          },
-        })
-      );
-      expect(effects).toBe(0);
-      await writeFile(localPath, original);
-      await savedStore.withLease({
-        generation: active,
-        run: async (input) => {
-          expect(input.binding.containers[0]?.id).toBe(ID);
-          expect(input.binding.volumes[0]?.createdAt).toBe(CREATED);
-          expect(JSON.stringify(input)).toBe("{}");
-        },
-      });
-      await savedStore.rollback();
-      expect(await readFile(localPath, "utf8")).toBe(original);
-      expect(
-        await Promise.all(files.map((path) => readFile(path, "utf8")))
-      ).toEqual(generatedBytes);
-      expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-        "rolled-back"
-      );
-    } finally {
-      await savedStore.close();
-    }
-  } finally {
-    await store.close();
-  }
-});
-
-boundedTest(
-  "v3 linked saved proof preserves overlay, primary/current precedence, tombstones and original rollback",
-  async () => {
-    await linkedCheckout();
-    const primary = join(root, "checkout");
-    await writeFile(
-      join(projectRoot, ".hack/hack.config.json"),
-      JSON.stringify({
-        name: "fixture",
-        env: { default_overlay: "qa" },
-        worktree: { auto_branch: false },
-      })
-    );
-    await managedGenerated();
-    const layer = async (
-      selectedRoot: string,
-      filename: string,
-      values: Record<string, string | null>
-    ) =>
-      await writeFile(
-        join(selectedRoot, ".hack", filename),
-        JSON.stringify({
-          version: 1,
-          secretsprovider: "project_key",
-          values: { global: values },
-        })
-      );
-    await layer(projectRoot, "hack.env.qa.yaml", {
-      ORDER: "overlay",
-      DROP: "overlay",
-    });
-    await layer(primary, "hack.env.local.yaml", {
-      ORDER: "primary",
-      PRIMARY: "primary",
-    });
-    await layer(primary, "hack.env.qa.local.yaml", {
-      ORDER: "primary-qa",
-      PRIMARY_QA: "primary-qa",
-    });
-    await layer(projectRoot, "hack.env.local.yaml", {
-      ORDER: "current",
-      CURRENT: "current",
-    });
-    await layer(projectRoot, "hack.env.qa.local.yaml", {
-      ORDER: "current-qa",
-      DROP: null,
-      EMPTY: "",
-    });
-    const project = await findProjectContextAtRoot({
-      projectRoot,
-      projectDirName: ".hack",
-    });
-    if (!project) {
-      throw new Error("Expected canonical linked context");
-    }
-    await resolveRuntimeHostMetadataOverride({
-      project,
-      composeFiles: [project.composeFile],
-      branch: null,
-      devHost: `${defaultProjectSlugFromPath(projectRoot)}.hack`,
-      aliasHost: null,
-      composeProject: "fixture",
-    });
-    const delivery = await resolveModernComposeEnvOverrides({
-      project,
-      targetServices: ["db"],
-      allServiceNames: ["db"],
-    });
-    expect(delivery?.env.ORDER).toBe("current-qa");
-    expect(delivery?.env.DROP).toBeUndefined();
-    expect(delivery?.env.EMPTY).toBe("");
-    const binary = await managedEnvCompilerFixture(
-      join(root, "managed-compiler")
-    );
-    const store = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-    });
-    try {
-      const generation = await store.prepare({ binary });
-      await store.publish({ generation, binary });
-      await store.withLease({
-        generation,
-        run: async (input) => {
-          expect(input.binding.volumes[0]?.createdAt).toBe(CREATED);
-        },
-      });
-      const path = join(primary, ".hack/hack.env.qa.local.yaml");
-      const original = await readFile(path, "utf8");
-      await writeFile(path, `${original}\n`);
-      let effects = 0;
-      await refusal(
-        store.withLease({
-          generation,
-          run: async () => {
-            effects++;
-          },
-        })
-      );
-      expect(effects).toBe(0);
-      await writeFile(path, original);
-      await store.rollback();
-      expect(container().id).toBe(ID);
-      expect(volume().createdAt).toBe(CREATED);
-      expect(
-        await readFile(join(primary, ".hack/docker-compose.yml"), "utf8")
-      ).toContain("name: fixture");
-    } finally {
-      await store.close();
-    }
-  },
-  ROLLBACK_RECOVERY_BUDGET_MS
-);
-
-boundedTest(
-  "v3 source race after a preparation effect retains pending stop evidence and needs exact raw repair",
-  async () => {
-    Reflect.deleteProperty(process.env, "CI");
-    Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
-    await trackedManagedCheckout();
-    await managedGenerated();
-    const binary = await managedEnvCompilerFixture(
-      join(root, "managed-compiler")
-    );
-    const store = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-    });
-    const path = join(projectRoot, ".hack/hack.env.default.yaml");
-    const original = await readFile(path, "utf8");
-    try {
-      const generation = await store.prepare({ binary });
-      await refusal(
-        store.withPreparationStop({
-          generation,
-          binary,
-          run: async () => {
-            await writeFile(path, `${original}\n`);
-            return 0;
-          },
-        })
-      );
-      expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-        "pending"
-      );
-      let effects = 0;
-      await refusal(
-        store.withPreparationStop({
-          generation,
-          binary,
-          recover: true,
-          run: async () => {
-            effects++;
-            return 0;
-          },
-        })
-      );
-      expect(effects).toBe(0);
-      await writeFile(path, original);
-      expect(
-        await store.withPreparationStop({
-          generation,
-          binary,
-          recover: true,
-          run: async () => 0,
-        })
-      ).toBe(0);
-      await store.publish({ generation, binary });
-      await store.rollback();
-      expect(container().id).toBe(ID);
-      expect(volume().createdAt).toBe(CREATED);
-    } finally {
-      await store.close();
-    }
-  },
-  ADOPTION_CASE_TIMEOUT_MS
-);
-async function artifactPath(name: string) {
-  const receipt = JSON.parse(
-    await readFile(join(stateRoot(), "receipt.json"), "utf8")
-  );
-  return join(stateRoot(), "generations", receipt.prepared.id, name);
-}
-async function refusal(pending: Promise<unknown>, code?: string) {
-  try {
-    await pending;
-    throw new Error("unexpected adoption success");
-  } catch (error: unknown) {
-    expect(error).toBeInstanceOf(LegacyComposeAdoptedGenerationError);
-    if (code) {
-      expect(error).toMatchObject({ code });
-    }
-    for (const value of [CANARY, projectRoot, VOLUME, ID, NETWORK]) {
-      expect(String(error)).not.toContain(value);
-      expect(JSON.stringify(error)).not.toContain(value);
-    }
-  }
-  expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
-}
-
-async function linkedCheckout() {
-  Reflect.deleteProperty(process.env, "CI");
-  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
-  await rm(join(projectRoot, ".git"), { recursive: true });
-  await writeFile(
-    join(projectRoot, ".hack/hack.config.json"),
-    '{"name":"fixture","worktree":{"auto_branch":false}}\n'
-  );
-  const git = async (args: readonly string[]) => {
-    const child = Bun.spawn(["/usr/bin/git", "-C", projectRoot, ...args], {
-      env: {
-        PATH: priorPath ?? "/usr/bin:/bin",
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-      },
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    expect(await child.exited).toBe(0);
-  };
-  await git(["init", "--quiet", "-b", "main"]);
-  await git(["add", ".hack"]);
-  await git([
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "commit",
-    "--quiet",
-    "-m",
-    "fixture",
-  ]);
-  const linked = join(root, "linked-checkout");
-  await git(["worktree", "add", "--quiet", "-b", "linked", linked]);
-  await symlink("/usr/bin/git", join(root, "git"));
-  projectRoot = linked;
-  container().workingDir = join(linked, ".hack");
-  container().configFiles = join(linked, ".hack/docker-compose.yml");
-  await save();
-}
-
-test("a verified linked checkout adopts and rolls back using the original resources", async () => {
-  await linkedCheckout();
-  const config = await readFile(join(projectRoot, ".hack/hack.config.json"));
-  const compose = await readFile(join(projectRoot, ".hack/docker-compose.yml"));
-  const { store, generation } = await prepared();
-  try {
-    const saved = JSON.parse(
-      await readFile(join(stateRoot(), "receipt.json"), "utf8")
-    );
-    expect(saved.adoption_receipt_version).toBe(2);
-    expect(JSON.stringify(generation)).not.toContain(CANARY);
-    await store.publish({ generation, binary: await compiler() });
-    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-      "active"
-    );
-    await store.rollback();
-    expect(await readFile(join(projectRoot, ".hack/hack.config.json"))).toEqual(
-      config
-    );
-    expect(
-      await readFile(join(projectRoot, ".hack/docker-compose.yml"))
-    ).toEqual(compose);
-    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-      "rolled-back"
-    );
-    expect(fixture.container[0]?.id).toBe(ID);
-    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-  } finally {
-    await store.close();
-  }
-});
-
-async function linkedBranchCheckout() {
-  await linkedCheckout();
-  const composeText = await readFile(
-    join(projectRoot, ".hack/docker-compose.yml"),
-    "utf8"
-  );
-  await writeFile(
-    join(projectRoot, ".hack/hack.config.json"),
-    JSON.stringify({
-      name: "fixture",
-      dev_host: "fixture.test",
-      worktree: { auto_branch: true },
-    })
-  );
-  const physical = "fixture--linked";
-  const fragment = buildRuntimeHostMetadataOverride({
-    composeYamls: [composeText],
-    branch: "linked",
-    devHost: "fixture.test",
-    aliasHost: null,
-    composeProject: physical,
-  });
-  expect(fragment).toBeTruthy();
-  await mkdir(join(projectRoot, ".hack/.branch"));
-  const fragmentPath = join(
-    projectRoot,
-    ".hack/.branch/compose.linked.runtime.override.yml"
-  );
-  await writeFile(fragmentPath, fragment ?? "");
-  container().name = `/${physical}-db-1`;
-  container().project = physical;
-  container().configFiles = `${join(projectRoot, ".hack/docker-compose.yml")},${fragmentPath}`;
-  container().networks = [{ name: `${physical}_default`, id: NETWORK }];
-  fixture.volume[0]!.project = physical;
-  fixture.network[0]!.project = physical;
-  fixture.network[0]!.name = `${physical}_default`;
-  await save();
-  return physical;
-}
-
-test("v13 linked default pins the physical branch originals and explicit selection recovers after Git drift", async () => {
-  const physical = await linkedBranchCheckout();
-  const binary = await compiler();
-  const verified = await acquireLegacyComposeAdoptionPreparationBinding({
-    projectRoot,
-    binary,
-  });
-  const privateInputs = await verified.resolvePreparationInputs({
-    projectRoot,
-  });
-  expect(privateInputs.branch?.branch).toBe("linked");
-  expect(JSON.stringify(privateInputs)).toBe("{}");
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    expect(generation.report.adoption_generation_version).toBe(13);
-    const meta = JSON.parse(
-      await readFile(await artifactPath("manifest.json"), "utf8")
-    );
-    expect(meta.binding.binding_version).toBe(13);
-    expect(meta.binding.composeProject).toBe(physical);
-    expect(meta.binding.containers[0]?.id).toBe(ID);
-    expect(meta.binding.volumes[0]?.createdAt).toBe(CREATED);
-    expect(meta.branchProof.branch).toBe("linked");
-    expect(meta.branchProof.selection).toBe("worktree");
-    expect(Object.hasOwn(meta, "sourceBindProof")).toBe(false);
-    await store.publish({ generation, binary });
-  } finally {
-    await store.close();
-  }
-  const git = Bun.spawn(
-    ["/usr/bin/git", "-C", projectRoot, "switch", "-q", "-c", "drift"],
-    {
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-      env: {
-        PATH: priorPath ?? "/usr/bin:/bin",
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-      },
-    }
-  );
-  expect(await git.exited).toBe(0);
-  const defaultStore = await openLegacyComposeAdoptedGenerationStore({
-    projectRoot,
-    mode: "saved",
-  });
-  try {
-    await refusal(defaultStore.loadActive(), "E_LEGACY_ADOPTION_STATE");
-  } finally {
-    await defaultStore.close();
-  }
-  const saved = await openLegacyComposeAdoptedGenerationStore({
-    projectRoot,
-    mode: "saved",
-    requestedBranch: "linked",
-  });
-  try {
-    const active = await saved.loadActive();
-    expect(active?.report.adoption_generation_version).toBe(13);
-    if (!active) {
-      throw new Error("Expected exact saved branch");
-    }
-    await saved.withLease({
-      generation: active,
-      run: async ({ binding }) => {
-        expect(binding.composeProject).toBe(physical);
-        expect(binding.containers[0]?.id).toBe(ID);
-        expect(binding.volumes[0]?.createdAt).toBe(CREATED);
-      },
-    });
-    await saved.rollback();
-    expect(fixture.container[0]?.id).toBe(ID);
-    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-  } finally {
-    await saved.close();
-  }
-});
-
-test("version12 receipt cannot consume a saved version13 branch proof", async () => {
-  await linkedBranchCheckout();
-  const binary = await compiler();
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    expect(generation.report.adoption_generation_version).toBe(13);
-    await store.publish({ generation, binary });
-    const receiptPath = join(stateRoot(), "receipt.json");
-    const state = JSON.parse(await readFile(receiptPath, "utf8"));
-    expect(state.adoption_receipt_version).toBe(13);
-    const changed = JSON.stringify({ ...state, adoption_receipt_version: 12 });
-    await writeFile(receiptPath, changed);
-    const commands = await readFile(join(root, "commands"));
-    await refusal(store.loadActive(), "E_LEGACY_ADOPTION_STATE");
-    expect(await readFile(receiptPath, "utf8")).toBe(changed);
-    expect(await readFile(join(root, "commands"))).toEqual(commands);
-    expect(await mutationCommands()).toEqual([]);
-    expect(fixture.container[0]?.id).toBe(ID);
-    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-  } finally {
-    await store.close();
-  }
-});
-
-test("branch selection cannot retarget an older saved generation through dispatch, rollback or recovery", async () => {
-  const binary = await compiler();
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    expect(generation.report.adoption_generation_version).toBe(1);
-    await store.publish({ generation, binary });
-  } finally {
-    await store.close();
-  }
-  const receipt = await readFile(join(stateRoot(), "receipt.json"));
-  const commands = await readFile(join(root, "commands"));
-  const selected = await openLegacyComposeAdoptedGenerationStore({
-    projectRoot,
-    mode: "saved",
-    requestedBranch: "other",
-  });
-  try {
-    await refusal(selected.loadActive(), "E_LEGACY_ADOPTION_STATE");
-    await refusal(
-      selected.loadActive({ recoverOperation: true }),
-      "E_LEGACY_ADOPTION_STATE"
-    );
-    await refusal(selected.rollback(), "E_LEGACY_ADOPTION_STATE");
-  } finally {
-    await selected.close();
-  }
-  try {
-    await tryLegacyComposeAdoptedCommand({
-      cwd: projectRoot,
-      operation: "down",
-      instance: "other",
-    });
-    throw new Error("Unexpected public branch dispatch success");
-  } catch (error: unknown) {
-    expect(error).toBeInstanceOf(HackCliError);
-    expect(error).toMatchObject({ code: "E_CONFIG_INVALID" });
-    for (const value of [CANARY, projectRoot, VOLUME, ID, NETWORK]) {
-      expect(String(error)).not.toContain(value);
-      expect(JSON.stringify(error)).not.toContain(value);
-    }
-  }
-  expect(await readFile(join(stateRoot(), "receipt.json"))).toEqual(receipt);
-  expect(await readFile(join(root, "commands"))).toEqual(commands);
-  expect(await mutationCommands()).toEqual([]);
-  expect(fixture.container[0]?.id).toBe(ID);
-  expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-});
-
-test("v6 static owned bridge preserves the selected original IDs through saved publication and rollback", async () => {
-  await ownedBridge();
-  const original = await readFile(
-    join(projectRoot, ".hack/docker-compose.yml"),
-    "utf8"
-  );
-  const binary = await compiler();
-  const preview = await previewLegacyComposeAdoption({ projectRoot, binary });
-  expect(preview.complete).toBe(true);
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    expect(generation.report.adoption_generation_version).toBe(6);
-    const receipt = JSON.parse(
-      await readFile(join(stateRoot(), "receipt.json"), "utf8")
-    );
-    expect(receipt.adoption_receipt_version).toBe(6);
-    const meta = JSON.parse(
-      await readFile(await artifactPath("manifest.json"), "utf8")
-    );
-    expect(meta.adoption_generation_version).toBe(6);
-    expect(meta.binding.binding_version).toBe(3);
-    expect(meta.binding.network).toEqual({
-      id: NETWORK,
-      name: "fixture_lab",
-      createdAt: CREATED,
-      logical: "lab",
-      internal: true,
-    });
-    await store.publish({ generation, binary });
-    await store.close();
-    const saved = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-      mode: "saved",
-    });
-    try {
-      const active = await saved.loadActive();
-      expect(active?.report.adoption_generation_version).toBe(6);
-      if (!active) {
-        throw new Error("Expected active owned bridge adoption");
-      }
-      await saved.withLease({
-        generation: active,
-        run: async (input) => {
-          expect(input.binding.containers[0]?.id).toBe(ID);
-          if (input.binding.binding_version !== 3) {
-            throw new Error("Expected one owned bridge binding");
-          }
-          expect(input.binding.network.id).toBe(NETWORK);
-          expect(input.binding.volumes[0]?.createdAt).toBe(CREATED);
-          expect(JSON.stringify(input)).toBe("{}");
-        },
-      });
-      await saved.rollback();
-      expect(
-        await readFile(join(projectRoot, ".hack/docker-compose.yml"), "utf8")
-      ).toBe(original);
-      expect(fixture.container[0]?.id).toBe(ID);
-      expect(fixture.network[0]?.id).toBe(NETWORK);
-    } finally {
-      await saved.close();
-    }
-  } finally {
-    await store.close();
-  }
-});
-
-test("v11 two static bridges retain both original identities through publication and rollback", async () => {
-  await twoOwnedBridges();
-  const original = await readFile(
-    join(projectRoot, ".hack/docker-compose.yml"),
-    "utf8"
-  );
-  const binary = await compiler();
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    expect(generation.report.adoption_generation_version).toBe(11);
-    expect((await readReceipt()).adoption_receipt_version).toBe(11);
-    const meta = JSON.parse(
-      await readFile(await artifactPath("manifest.json"), "utf8")
-    );
-    expect(meta.binding.binding_version).toBe(5);
-    expect(meta.binding.networks).toEqual([
-      {
-        id: "e".repeat(64),
-        name: "fixture_edge",
-        createdAt: CREATED,
-        logical: "edge",
-        internal: false,
-      },
-      {
-        id: NETWORK,
-        name: "fixture_lab",
-        createdAt: CREATED,
-        logical: "lab",
-        internal: true,
-      },
-    ]);
-    await store.publish({ generation, binary });
-    await store.withLease({
-      generation,
-      run: async (input) => {
-        expect(input.binding.containers[0]?.id).toBe(ID);
-        expect(input.binding.binding_version).toBe(5);
-        if (input.binding.binding_version !== 5) {
-          throw new Error("missing plural binding");
-        }
-        expect(input.binding.networks.map((network) => network.id)).toEqual([
-          "e".repeat(64),
-          NETWORK,
-        ]);
-      },
-    });
-    await store.rollback();
-    expect(
-      await readFile(join(projectRoot, ".hack/docker-compose.yml"), "utf8")
-    ).toBe(original);
-    expect(container().id).toBe(ID);
-    expect(fixture.network.map((network) => network.id).sort()).toEqual(
-      [NETWORK, "e".repeat(64)].sort()
-    );
-    expect(volume().createdAt).toBe(CREATED);
-  } finally {
-    await store.close();
-  }
-});
-
-test("v11 rejects crossed saved receipt and foreign bridge membership before callback", async () => {
-  await twoOwnedBridges();
-  const binary = await compiler();
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    const original = await readReceipt();
-    for (const foreignVersion of [5, 6, 7, 8, 9, 10]) {
-      await writeReceipt({
-        ...original,
-        adoption_receipt_version: foreignVersion,
-      });
-      await refusal(store.loadPrepared());
-    }
-    await writeReceipt(original);
-    await store.publish({ generation, binary });
-    fixture.network[1]!.containers = ["f".repeat(64)];
-    await save();
-    let calls = 0;
-    await refusal(
-      store.withLease({
-        generation,
-        run: async () => {
-          calls++;
-        },
-      })
-    );
-    expect(calls).toBe(0);
-    expect((await readReceipt()).adoption_receipt_version).toBe(11);
-  } finally {
-    await store.close();
-  }
-});
-
-test("v11 saved source drift refuses before callback and rollback can prepare a plain owner", async () => {
-  const composePath = join(projectRoot, ".hack/docker-compose.yml");
-  const plainCompose = await readFile(composePath, "utf8");
-  await twoOwnedBridges();
-  const binary = await compiler();
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    await store.publish({ generation, binary });
-    const activePath = join(projectRoot, ".hack/hack.project.json");
-    const active = await readFile(activePath, "utf8");
-    await writeFile(activePath, `${active}\n`);
-    let calls = 0;
-    await refusal(
-      store.withLease({
-        generation,
-        run: async () => {
-          calls++;
-        },
-      })
-    );
-    expect(calls).toBe(0);
-    // A byte-exact restoration permits only the selected old owner to roll back.
-    await writeFile(activePath, active);
-    await store.rollback();
-    fixture.container[0]!.networks = [{ name: "fixture_default", id: NETWORK }];
-    fixture.network = [
-      {
-        ...fixture.network[0],
-        id: NETWORK,
-        name: "fixture_default",
-        logical: "default",
-        internal: false,
-      },
-    ];
-    await writeFile(composePath, plainCompose);
-    await save();
-    const plain = await store.prepare({ binary });
-    expect(plain.report.adoption_generation_version).toBe(1);
-    expect((await readReceipt()).adoption_receipt_version).toBe(1);
-    expect(container().id).toBe(ID);
-    expect(volume().createdAt).toBe(CREATED);
-  } finally {
-    await store.close();
-  }
-});
-
-test("two bridges with health dependencies refuse before generation writes or effects", async () => {
-  const worker = await combinedBridgeHealthFixture();
-  const composePath = join(projectRoot, ".hack/docker-compose.yml");
-  const compose = JSON.parse(await readFile(composePath, "utf8"));
-  compose.networks.edge = { driver: "bridge", internal: false };
-  compose.services.db.networks.edge = { aliases: ["writer"] };
-  compose.services.web.networks.edge = { aliases: ["reader"] };
-  await writeFile(composePath, JSON.stringify(compose));
-  for (const row of fixture.container) {
-    if (!Array.isArray(row.networks)) {
-      throw new Error("fixture networks missing");
-    }
-    row.networks = [
-      ...row.networks,
-      { name: "fixture_edge", id: "e".repeat(64), aliases: [] },
-    ];
-  }
-  fixture.network.push({
-    ...network(),
-    id: "e".repeat(64),
-    name: "fixture_edge",
-    logical: "edge",
-    internal: false,
-  });
-  await save();
-  const binary = await compiler();
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const receipt = await readReceipt();
-    await refusal(store.prepare({ binary }), "E_LEGACY_ADOPTION_UNSUPPORTED");
-    expect(await readReceipt()).toEqual(receipt);
-    expect(await readdir(join(stateRoot(), "generations"))).toEqual([]);
-    expect(await mutationCommands()).toEqual([]);
-    expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
-    expect(fixture.network.map((row) => row.id).sort()).toEqual(
-      [NETWORK, "e".repeat(64)].sort()
-    );
-    expect(volume().createdAt).toBe(CREATED);
-  } finally {
-    await store.close();
-  }
-});
-
-boundedTest(
-  "v10 binds the original bridge while starting and stopping healthy dependencies in order",
-  async () => {
-    const worker = await combinedBridgeHealthFixture();
-    const original = await originalSnapshots();
-    const binary = await compiler();
-    const store = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-    });
-    const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-    try {
-      process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-      const generation = await store.prepare({ binary });
-      expect(generation.report.adoption_generation_version).toBe(10);
-      expect((await readReceipt()).adoption_receipt_version).toBe(10);
-      const meta = JSON.parse(
-        await readFile(await artifactPath("manifest.json"), "utf8")
-      );
-      expect(meta.adoption_generation_version).toBe(10);
-      expect(meta.binding.binding_version).toBe(3);
-      expect(meta.binding.network).toMatchObject({
-        id: NETWORK,
-        logical: "lab",
-        internal: true,
-      });
-      await store.publish({ generation, binary });
-      expect(
-        await tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
-          operation: "up",
-          detach: true,
-        })
-      ).toBe(0);
-      expect(await mutationCommands()).toEqual([
-        ["container", "start", ID],
-        ["container", "start", worker],
-      ]);
-      expect(
-        await tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
-          operation: "down",
-        })
-      ).toBe(0);
-      expect((await mutationCommands()).slice(2)).toEqual([
-        ["container", "stop", worker],
-        ["container", "stop", ID],
-      ]);
-      fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
-      expect((await readReceipt()).pendingOperation).toBeNull();
-      expect(network().id).toBe(NETWORK);
-      expect(network().containers).toEqual([ID, worker]);
-      expect(fixture.states).toEqual({ [ID]: false, [worker]: false });
-      expect(volume().createdAt).toBe(CREATED);
-      await store.rollback();
-      await expectOriginals(original);
-    } finally {
-      restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(2)
-);
-
-test("v10 saved bridge and health owner rejects other contract receipts", async () => {
-  const worker = await combinedBridgeHealthFixture();
-  const { store, generation } = await prepared();
-  try {
-    expect(generation.report.adoption_generation_version).toBe(10);
-    const current = await readReceipt();
-    for (const foreignVersion of [5, 6, 7, 8, 9, 11]) {
-      await writeReceipt({
-        ...current,
-        adoption_receipt_version: foreignVersion,
-      });
-      await refusal(store.loadPrepared());
-      expect((await readReceipt()).adoption_receipt_version).toBe(
-        foreignVersion
-      );
-      await writeReceipt(current);
-    }
-    expect(
-      (await store.loadPrepared())?.report.adoption_generation_version
-    ).toBe(10);
-    expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
-    expect(network().id).toBe(NETWORK);
-    expect(volume().createdAt).toBe(CREATED);
-  } finally {
-    await store.close();
-  }
-});
-
-for (const owner of ["health", "bridge"] as const) {
-  test(`${owner} saved owner refuses a version 10 receipt without gaining combined authority`, async () => {
-    if (owner === "health") {
-      await dependencyFixture();
-    } else {
-      await ownedBridge();
-    }
-    const { store, generation } = await prepared();
-    try {
-      expect(generation.report.adoption_generation_version).toBe(
-        owner === "health" ? 5 : 6
-      );
-      const current = await readReceipt();
-      await writeReceipt({ ...current, adoption_receipt_version: 10 });
-      await refusal(store.loadPrepared());
-      expect((await readReceipt()).adoption_receipt_version).toBe(10);
-      expect(network().id).toBe(NETWORK);
-      expect(volume().createdAt).toBe(CREATED);
-      expect(await mutationCommands()).toEqual([]);
-    } finally {
-      await store.close();
-    }
-  });
-}
-
-boundedTest(
-  "v10 foreign bridge member after first start retains pending before the dependent effect",
-  async () => {
-    const worker = await combinedBridgeHealthFixture();
-    const { store, generation } = await prepared();
-    const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
-    try {
-      const binary = await compiler();
-      process.env.HACK_CONFIG_COMPILER_BINARY = binary;
-      await store.publish({ generation, binary });
-      fixture.foreignAfterFirstStart = true;
-      await save();
-      await expect(
-        tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
-          operation: "up",
-          detach: true,
-        })
-      ).rejects.toThrow("values omitted");
-      expect(await mutationCommands()).toEqual([["container", "start", ID]]);
-      expect((await readReceipt()).pendingOperation.operation).toBe("start");
-      fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
-      expect(network().id).toBe(NETWORK);
-      expect(network().containers).toContain("e".repeat(64));
-      expect(fixture.states).toEqual({ [ID]: true, [worker]: false });
-      expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
-      expect(volume().createdAt).toBe(CREATED);
-    } finally {
-      restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
-      await store.close();
-    }
-  },
-  retainedOperationCaseTimeout(1)
-);
-
-boundedTest(
-  "v10 refuses a missing aggregate deadline before a retained effect",
-  async () => {
-    await combinedBridgeHealthFixture();
-    const { store, generation } = await prepared();
-    try {
-      const binary = await compiler();
-      await store.publish({ generation, binary });
-      const before = await readFile(join(root, "commands"), "utf8");
-      let called = false;
-      await refusal(
-        store.withMutation({
-          generation,
-          binary,
-          operation: "start",
-          services: [],
-          run: async () => {
-            called = true;
-            return 0;
-          },
-        }),
-        "E_LEGACY_ADOPTION_UNSUPPORTED"
-      );
-      expect(called).toBe(false);
-      expect(await readFile(join(root, "commands"), "utf8")).toBe(before);
-      expect((await readReceipt()).pendingOperation).toBeNull();
-      expect(network().id).toBe(NETWORK);
-      expect(volume().createdAt).toBe(CREATED);
-    } finally {
-      await store.close();
-    }
-  },
-  ADOPTION_CASE_TIMEOUT_MS
-);
-
-test("rolled-back v10 can reprepare the same owned bridge without health under v6", async () => {
-  const worker = await combinedBridgeHealthFixture();
-  const binary = await compiler();
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const combined = await store.prepare({ binary });
-    expect(combined.report.adoption_generation_version).toBe(10);
-    await store.publish({ generation: combined, binary });
-    await store.rollback();
-    const composePath = join(projectRoot, ".hack/docker-compose.yml");
-    const authored = JSON.parse(await readFile(composePath, "utf8"));
-    authored.services.web.depends_on = undefined;
-    authored.services.db.healthcheck = undefined;
-    await writeFile(composePath, JSON.stringify(authored));
-    const bridge = await store.prepare({ binary });
-    expect(bridge.report.adoption_generation_version).toBe(6);
-    expect((await readReceipt()).adoption_receipt_version).toBe(6);
-    expect(
-      (await store.loadPrepared())?.report.adoption_generation_version
-    ).toBe(6);
-    expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
-    expect(network().id).toBe(NETWORK);
-    expect(volume().createdAt).toBe(CREATED);
-  } finally {
-    await store.close();
-  }
-});
-
-test("rolled-back v10 resets a later plain receipt to the checkout owner", async () => {
-  const composePath = join(projectRoot, ".hack/docker-compose.yml");
-  const worker = await combinedBridgeHealthFixture();
-  const binary = await compiler();
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const combined = await store.prepare({ binary });
-    expect(combined.report.adoption_generation_version).toBe(10);
-    await store.publish({ generation: combined, binary });
-    await store.rollback();
-    const authored = JSON.parse(await readFile(composePath, "utf8"));
-    authored.services.web.depends_on = undefined;
-    authored.services.db.healthcheck = undefined;
-    authored.services.web.networks = undefined;
-    authored.services.db.networks = undefined;
-    authored.networks = undefined;
-    await writeFile(composePath, JSON.stringify(authored));
-    for (const row of fixture.container) {
-      row.networks = [{ name: "fixture_default", id: NETWORK }];
-    }
-    fixture.network[0] = {
-      ...network(),
-      name: "fixture_default",
-      logical: "default",
-      internal: false,
-    };
-    fixture.aliases = undefined;
-    await save();
-    const plain = await store.prepare({ binary });
-    expect(plain.report.adoption_generation_version).toBe(1);
-    expect((await readReceipt()).adoption_receipt_version).toBe(1);
-    expect(
-      (await store.loadPrepared())?.report.adoption_generation_version
-    ).toBe(1);
-    expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
-    expect(network().id).toBe(NETWORK);
-    expect(volume().createdAt).toBe(CREATED);
-  } finally {
-    await store.close();
-  }
-});
-
-test("v6 saved bridge refuses a changed policy before another retained effect", async () => {
-  await ownedBridge();
-  const binary = await compiler();
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const generation = await store.prepare({ binary });
-    await store.publish({ generation, binary });
-    fixture.network[0]!.internal = false;
-    await save();
-    let effects = 0;
-    await refusal(
-      store.withLease({
-        generation,
-        run: async () => {
-          effects++;
-        },
-      }),
-      "E_LEGACY_ADOPTION_STATE"
-    );
-    expect(effects).toBe(0);
-    expect(fixture.container[0]?.id).toBe(ID);
-    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-  } finally {
-    await store.close();
-  }
-});
-
-test("v6 manifest and receipt must select the same saved topology owner", async () => {
-  await ownedBridge();
-  const { store, generation } = await prepared();
-  try {
-    expect(generation.report.adoption_generation_version).toBe(6);
-    const current = await readReceipt();
-    for (const foreignVersion of [4, 5, 7]) {
-      await writeReceipt({
-        ...current,
-        adoption_receipt_version: foreignVersion,
-      });
-      await refusal(store.loadPrepared());
-      expect(await readReceipt()).toEqual({
-        ...current,
-        adoption_receipt_version: foreignVersion,
-      });
-    }
-    expect(fixture.container[0]?.id).toBe(ID);
-    expect(fixture.network[0]?.id).toBe(NETWORK);
-  } finally {
-    await store.close();
-  }
-});
-
-test("v5 retained health owner refuses a v6 topology receipt", async () => {
-  await dependencyFixture();
-  const { store, generation } = await prepared();
-  try {
-    expect(generation.report.adoption_generation_version).toBe(5);
-    const current = await readReceipt();
-    expect(current.adoption_receipt_version).toBe(5);
-    await writeReceipt({ ...current, adoption_receipt_version: 6 });
-    await refusal(store.loadPrepared());
-    expect(await readReceipt()).toEqual({
-      ...current,
-      adoption_receipt_version: 6,
-    });
-    expect(fixture.container.map((row) => row.id)).toEqual([
-      ID,
-      "c".repeat(64),
-    ]);
-    expect(network().id).toBe(NETWORK);
-  } finally {
-    await store.close();
-  }
-});
-
-boundedTest(
-  "v7 retained completion owner refuses a v6 topology receipt",
-  async () => {
-    const { app, job } = await completedJobFixture();
-    const { store, generation } = await prepared();
-    try {
-      expect(generation.report.adoption_generation_version).toBe(7);
-      const current = await readReceipt();
-      expect(current.adoption_receipt_version).toBe(7);
-      await writeReceipt({ ...current, adoption_receipt_version: 6 });
-      await refusal(store.loadPrepared());
-      expect(await readReceipt()).toEqual({
-        ...current,
-        adoption_receipt_version: 6,
-      });
-      expect(await mutationCommands()).toEqual([]);
-      expect(fixture.container.map((row) => row.id)).toEqual([ID, app, job]);
-      expect(network().id).toBe(NETWORK);
-      expect(volume().createdAt).toBe(CREATED);
-    } finally {
-      await store.close();
-    }
-  },
-  ADOPTION_CASE_TIMEOUT_MS
-);
-
-test("v6 rollback permits a later plain owner without inheriting topology authority", async () => {
-  const composePath = join(projectRoot, ".hack/docker-compose.yml");
-  const plainCompose = await readFile(composePath, "utf8");
-  await ownedBridge();
-  const binary = await compiler();
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  try {
-    const custom = await store.prepare({ binary });
-    expect(custom.report.adoption_generation_version).toBe(6);
-    await store.publish({ generation: custom, binary });
-    await store.rollback();
-    expect(network().id).toBe(NETWORK);
-    expect(volume().createdAt).toBe(CREATED);
-
-    const plainNetwork = "e".repeat(64);
-    await writeFile(composePath, plainCompose);
-    container().networks = [{ name: "fixture_default", id: plainNetwork }];
-    fixture.network[0] = {
-      ...network(),
-      id: plainNetwork,
-      name: "fixture_default",
-      logical: "default",
-      internal: false,
-    };
-    await save();
-    const plain = await store.prepare({ binary });
-    expect(plain.report.adoption_generation_version).toBe(1);
-    expect((await readReceipt()).adoption_receipt_version).toBe(1);
-    await store.publish({ generation: plain, binary });
-    await store.close();
-    const saved = await openLegacyComposeAdoptedGenerationStore({
-      projectRoot,
-      mode: "saved",
-    });
-    try {
-      expect(
-        (await saved.loadActive())?.report.adoption_generation_version
-      ).toBe(1);
-      expect(container().id).toBe(ID);
-      expect(network().id).toBe(plainNetwork);
-      expect(volume().createdAt).toBe(CREATED);
-    } finally {
-      await saved.close();
-    }
-  } finally {
-    await store.close();
-  }
-});
-
-test("v6 journals a running original stop before effect and retains the owned bridge on recovery", async () => {
-  await ownedBridge();
-  fixture.running = true;
-  fixture.container[0]!.networks = [
-    {
-      name: "fixture_lab",
-      id: NETWORK,
-      aliases: ["fixture-db-1", "db", "db-alias"],
-    },
-  ];
-  await save();
-  const binary = await compiler();
-  expect(
-    (await previewLegacyComposeAdoption({ projectRoot, binary })).complete
-  ).toBe(false);
-  expect(
-    (await previewLegacyComposeAdoption({ projectRoot, binary, stop: true }))
-      .complete
-  ).toBe(true);
-  const { store, generation } = await prepared();
-  try {
-    expect(
-      await store.withPreparationStop({
-        generation,
-        binary,
-        run: async (input) => {
-          if (input.binding.binding_version !== 3) {
-            throw new Error("Expected one owned bridge binding");
-          }
-          expect(input.binding.network.id).toBe(NETWORK);
-          expect((await readReceipt()).adoption_receipt_version).toBe(6);
-          expect((await readReceipt()).pendingOperation).toMatchObject({
-            operation: "stop",
-            services: ["db"],
-          });
-          fixture.running = false;
-          fixture.container[0]!.networks = [
-            { name: "fixture_lab", id: NETWORK, aliases: [] },
-          ];
-          await save();
-          return 7;
-        },
-      })
-    ).toBe(7);
-    await refusal(store.loadPrepared(), "E_LEGACY_ADOPTION_BUSY");
-    const recovered = await store.loadPrepared({ recoverOperation: true });
-    if (!recovered) {
-      throw new Error("Expected exact selected recovery");
-    }
-    await store.withPreparationStop({
-      generation: recovered,
-      binary,
-      recover: true,
-      run: async () => 0,
-    });
-    await store.publish({ generation: recovered, binary });
-    await store.rollback();
-    expect(fixture.container[0]?.id).toBe(ID);
-    expect(fixture.network[0]?.id).toBe(NETWORK);
-    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-  } finally {
-    await store.close();
-  }
-});
+const context = createAdoptionGenerationFixture();
+const {
+  retainedOperationCaseTimeout,
+  test,
+  CANARY,
+  ID,
+  NETWORK,
+  VOLUME,
+  CREATED,
+  save,
+  container,
+  volume,
+  network,
+  compiler,
+  stateRoot,
+  prepared,
+  artifactPath,
+  refusal,
+  linkedCheckout,
+  mutationCommands,
+  readReceipt,
+  writeReceipt,
+  originalSnapshots,
+  expectOriginals,
+} = context;
 
 test("unsupported inherited primary inputs refuse before engine inspection or preparation writes", async () => {
   await linkedCheckout();
-  const primaryFile = join(root, "checkout/.hack/hack.env.local.yaml");
+  const primaryFile = join(context.root, "checkout/.hack/hack.env.local.yaml");
   await writeFile(primaryFile, CANARY);
   const preview = await previewLegacyComposeAdoption({
-    projectRoot,
+    projectRoot: context.projectRoot,
     binary: await compiler(),
   });
   expect(preview.complete).toBe(false);
   expect(JSON.stringify(preview)).not.toContain(CANARY);
-  expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+  expect(await Bun.file(join(context.root, "commands")).exists()).toBe(false);
   expect(await Bun.file(join(stateRoot(), "receipt.json")).exists()).toBe(
     false
   );
@@ -4376,24 +73,27 @@ test("unsupported inherited primary inputs refuse before engine inspection or pr
 for (const mode of ["policy", "ci"] as const) {
   test(`the existing inheritance opt-out ${mode} excludes primary managed inputs`, async () => {
     await linkedCheckout();
-    const primaryFile = join(root, "checkout/.hack/hack.env.local.yaml");
+    const primaryFile = join(
+      context.root,
+      "checkout/.hack/hack.env.local.yaml"
+    );
     await writeFile(primaryFile, CANARY);
     const inherited = await previewLegacyComposeAdoption({
-      projectRoot,
+      projectRoot: context.projectRoot,
       binary: await compiler(),
     });
     expect(inherited.complete).toBe(false);
     expect(JSON.stringify(inherited)).not.toContain(CANARY);
     if (mode === "policy") {
       await writeFile(
-        join(projectRoot, ".hack/hack.config.json"),
+        join(context.projectRoot, ".hack/hack.config.json"),
         '{"name":"fixture","worktree":{"auto_branch":false,"inherit_local":false}}'
       );
     } else {
       process.env.CI = "1";
     }
     const preview = await previewLegacyComposeAdoption({
-      projectRoot,
+      projectRoot: context.projectRoot,
       binary: await compiler(),
     });
     expect(preview.complete).toBe(true);
@@ -4404,11 +104,11 @@ for (const mode of ["policy", "ci"] as const) {
 
 test("preparation durably binds original sources and resources without active publication or native labels", async () => {
   const originalConfig = await readFile(
-    join(projectRoot, ".hack/hack.config.json"),
+    join(context.projectRoot, ".hack/hack.config.json"),
     "utf8"
   );
   const originalCompose = await readFile(
-    join(projectRoot, ".hack/docker-compose.yml"),
+    join(context.projectRoot, ".hack/docker-compose.yml"),
     "utf8"
   );
   const { store, generation } = await prepared();
@@ -4431,7 +131,7 @@ test("preparation durably binds original sources and resources without active pu
         VOLUME,
         ID,
         NETWORK,
-        projectRoot,
+        context.projectRoot,
         "hash",
         "revision",
         "generationId",
@@ -4464,17 +164,25 @@ test("preparation durably binds original sources and resources without active pu
       },
     });
     expect(
-      await readFile(join(projectRoot, ".hack/hack.config.json"), "utf8")
+      await readFile(
+        join(context.projectRoot, ".hack/hack.config.json"),
+        "utf8"
+      )
     ).toBe(originalConfig);
     expect(
-      await readFile(join(projectRoot, ".hack/docker-compose.yml"), "utf8")
+      await readFile(
+        join(context.projectRoot, ".hack/docker-compose.yml"),
+        "utf8"
+      )
     ).toBe(originalCompose);
     expect(
-      await Bun.file(join(projectRoot, ".hack/hack.project.json")).exists()
+      await Bun.file(
+        join(context.projectRoot, ".hack/hack.project.json")
+      ).exists()
     ).toBe(false);
     expect(
       await Bun.file(
-        join(projectRoot, ".hack/.internal/native-compose")
+        join(context.projectRoot, ".hack/.internal/native-compose")
       ).exists()
     ).toBe(false);
     const receipt = JSON.parse(
@@ -4489,7 +197,7 @@ test("preparation durably binds original sources and resources without active pu
       "pendingOperation",
     ]);
     expect(receipt.kind).toBe("legacy-compose-adopted");
-    expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+    expect(await Bun.file(join(context.root, "mutation")).exists()).toBe(false);
   } finally {
     await store.close();
   }
@@ -4498,22 +206,22 @@ test("preparation durably binds original sources and resources without active pu
 test("saved lease uses anchored originals without decoding current authored inputs or reading keys", async () => {
   const first = await prepared();
   await first.store.close();
-  await rm(join(projectRoot, ".hack/hack.config.json"));
-  await rm(join(projectRoot, ".hack/docker-compose.yml"));
+  await rm(join(context.projectRoot, ".hack/hack.config.json"));
+  await rm(join(context.projectRoot, ".hack/docker-compose.yml"));
   await writeFile(
-    join(projectRoot, ".hack/hack.project.json"),
+    join(context.projectRoot, ".hack/hack.project.json"),
     "malformed-private-current-input"
   );
   await writeFile(
-    join(projectRoot, ".hack/hack.env.default.yaml"),
+    join(context.projectRoot, ".hack/hack.env.default.yaml"),
     "malformed-private-env: ["
   );
   await symlink(
-    join(root, "missing-private-key"),
-    join(projectRoot, ".hack/hack.env.key")
+    join(context.root, "missing-private-key"),
+    join(context.projectRoot, ".hack/hack.env.key")
   );
   const store = await openLegacyComposeAdoptedGenerationStore({
-    projectRoot,
+    projectRoot: context.projectRoot,
     mode: "saved",
   });
   try {
@@ -4548,7 +256,7 @@ for (const changed of [
     const { store, generation } = await prepared();
     try {
       if (changed === "volume missing") {
-        fixture.volume = [];
+        context.fixture.volume = [];
       }
       if (changed === "volume replacement") {
         volume().createdAt = "2026-02-02T01:02:03Z";
@@ -4560,7 +268,7 @@ for (const changed of [
         network().id = "c".repeat(64);
       }
       if (changed === "engine replacement") {
-        fixture.engine = "different-engine";
+        context.fixture.engine = "different-engine";
       }
       if (changed === "foreign volume") {
         volume().project = "foreign";
@@ -4604,14 +312,14 @@ for (const changed of [
         await chmod(path, 0o644);
       }
       if (changed === "hardlink") {
-        await link(path, join(root, "extra-candidate-link"));
+        await link(path, join(context.root, "extra-candidate-link"));
       }
       if (changed === "symlink") {
-        await rename(path, join(root, "candidate-original"));
-        await symlink(join(root, "candidate-original"), path);
+        await rename(path, join(context.root, "candidate-original"));
+        await symlink(join(context.root, "candidate-original"), path);
       }
       if (changed === "replacement") {
-        await rename(path, join(root, "candidate-original"));
+        await rename(path, join(context.root, "candidate-original"));
         await writeFile(path, original, { mode: 0o600 });
       }
       let calls = 0;
@@ -4631,8 +339,10 @@ for (const changed of [
 }
 
 test("source change during compiler admission cannot commit a prepared generation", async () => {
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
-  const source = join(projectRoot, ".hack/docker-compose.yml");
+  const store = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot: context.projectRoot,
+  });
+  const source = join(context.projectRoot, ".hack/docker-compose.yml");
   try {
     const binary = await compiler(
       `await Bun.write(${JSON.stringify(source)}, raw + "\\n");`
@@ -4640,7 +350,9 @@ test("source change during compiler admission cannot commit a prepared generatio
     await refusal(store.prepare({ binary }));
     expect(await store.loadPrepared()).toBeNull();
     expect(
-      await Bun.file(join(projectRoot, ".hack/hack.project.json")).exists()
+      await Bun.file(
+        join(context.projectRoot, ".hack/hack.project.json")
+      ).exists()
     ).toBe(false);
   } finally {
     await store.close();
@@ -4648,7 +360,9 @@ test("source change during compiler admission cannot commit a prepared generatio
 });
 
 test("compiler refusal cannot commit a partially converted candidate", async () => {
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  const store = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot: context.projectRoot,
+  });
   try {
     const binary = await compiler(
       "console.error('synthetic-private-adoption-canary');process.exit(27);"
@@ -4734,16 +448,19 @@ test("forged and superseded public claims grant no private lease", async () => {
 
 test("saved open with no state creates no private adoption paths", async () => {
   await refusal(
-    openLegacyComposeAdoptedGenerationStore({ projectRoot, mode: "saved" })
+    openLegacyComposeAdoptedGenerationStore({
+      projectRoot: context.projectRoot,
+      mode: "saved",
+    })
   );
   expect(await Bun.file(stateRoot()).exists()).toBe(false);
 });
 
 test("original cancellation and immutable caller options protect later store use", async () => {
   const controller = new AbortController();
-  const opts = { projectRoot, signal: controller.signal };
+  const opts = { projectRoot: context.projectRoot, signal: controller.signal };
   const store = await openLegacyComposeAdoptedGenerationStore(opts);
-  opts.projectRoot = join(root, "wrong-private-root");
+  opts.projectRoot = join(context.root, "wrong-private-root");
   try {
     expect(await store.loadPrepared()).toBeNull();
     controller.abort(CANARY);
@@ -4756,45 +473,6 @@ test("original cancellation and immutable caller options protect later store use
   }
 });
 
-async function readReceipt() {
-  return JSON.parse(await readFile(join(stateRoot(), "receipt.json"), "utf8"));
-}
-async function writeReceipt(value: unknown) {
-  await writeFile(join(stateRoot(), "receipt.json"), JSON.stringify(value), {
-    mode: 0o600,
-  });
-}
-async function originalSnapshots() {
-  return Promise.all(
-    ["hack.config.json", "docker-compose.yml"].map(async (name) => {
-      const path = join(projectRoot, ".hack", name);
-      return {
-        name,
-        text: await readFile(path, "utf8"),
-        info: await lstat(path),
-      };
-    })
-  );
-}
-async function expectOriginals(
-  originals: Awaited<ReturnType<typeof originalSnapshots>>
-) {
-  for (const original of originals) {
-    const path = join(projectRoot, ".hack", original.name);
-    expect(await readFile(path, "utf8")).toBe(original.text);
-    const info = await lstat(path);
-    expect([info.dev, info.ino, info.mode, info.nlink]).toEqual([
-      original.info.dev,
-      original.info.ino,
-      original.info.mode,
-      1,
-    ]);
-  }
-  expect(
-    await Bun.file(join(projectRoot, ".hack/hack.project.json")).exists()
-  ).toBe(false);
-}
-
 test("explicit stopped publication and rollback preserve exact original files and resource identities", async () => {
   const original = await originalSnapshots();
   const { store, generation } = await prepared();
@@ -4803,17 +481,24 @@ test("explicit stopped publication and rollback preserve exact original files an
     await store.publish({ generation, binary });
     expect((await store.loadActive())?.report.status).toBe("active");
     expect(
-      await Bun.file(join(projectRoot, ".hack/hack.config.json")).exists()
+      await Bun.file(
+        join(context.projectRoot, ".hack/hack.config.json")
+      ).exists()
     ).toBe(false);
     expect(
-      await Bun.file(join(projectRoot, ".hack/docker-compose.yml")).exists()
+      await Bun.file(
+        join(context.projectRoot, ".hack/docker-compose.yml")
+      ).exists()
     ).toBe(false);
     expect((await readReceipt()).publication.phase).toBe("active");
     expect(
-      await readFile(join(projectRoot, ".hack/hack.project.json"), "utf8")
+      await readFile(
+        join(context.projectRoot, ".hack/hack.project.json"),
+        "utf8"
+      )
     ).toBe(await readFile(await artifactPath("candidate.json"), "utf8"));
-    expect(fixture.container[0]?.id).toBe(ID);
-    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+    expect(context.fixture.container[0]?.id).toBe(ID);
+    expect(context.fixture.volume[0]?.createdAt).toBe(CREATED);
     await store.rollback();
     expect((await readReceipt()).publication.phase).toBe("rolled-back");
     await expectOriginals(original);
@@ -4846,13 +531,13 @@ for (const boundary of [
         await writeReceipt(receipt);
         if (boundary !== "journal") {
           await rename(
-            join(projectRoot, ".hack/hack.config.json"),
+            join(context.projectRoot, ".hack/hack.config.json"),
             join(originals, "legacy-config.original")
           );
         }
         if (!["journal", "one-original"].includes(boundary)) {
           await rename(
-            join(projectRoot, ".hack/docker-compose.yml"),
+            join(context.projectRoot, ".hack/docker-compose.yml"),
             join(originals, "legacy-compose.original")
           );
         }
@@ -4862,7 +547,7 @@ for (const boundary of [
               "utf8"
             ),
             staged = join(originals, "native.publish"),
-            active = join(projectRoot, ".hack/hack.project.json");
+            active = join(context.projectRoot, ".hack/hack.project.json");
           await writeFile(staged, candidateText, { mode: 0o600 });
           await link(staged, active);
           if (boundary.startsWith("candidate-anchored")) {
@@ -4902,19 +587,19 @@ test("publication refuses a running original, changed source inode and config-ha
   const { store, generation } = await prepared();
   try {
     const binary = await compiler();
-    fixture.running = true;
+    context.fixture.running = true;
     await save();
     await refusal(
       store.publish({ generation, binary }),
       "E_LEGACY_ADOPTION_UNSUPPORTED"
     );
-    fixture.running = false;
-    fixture.configHash = "e".repeat(64);
+    context.fixture.running = false;
+    context.fixture.configHash = "e".repeat(64);
     await save();
     await refusal(store.publish({ generation, binary }));
-    fixture.configHash = "d".repeat(64);
+    context.fixture.configHash = "d".repeat(64);
     await save();
-    const path = join(projectRoot, ".hack/hack.config.json");
+    const path = join(context.projectRoot, ".hack/hack.config.json");
     await rename(path, `${path}.old`);
     await writeFile(path, original[0]?.text ?? "");
     await refusal(
@@ -4923,7 +608,9 @@ test("publication refuses a running original, changed source inode and config-ha
     );
     expect((await readReceipt()).publication).toBeNull();
     expect(
-      await Bun.file(join(projectRoot, ".hack/hack.project.json")).exists()
+      await Bun.file(
+        join(context.projectRoot, ".hack/hack.project.json")
+      ).exists()
     ).toBe(false);
   } finally {
     await store.close();
@@ -4934,7 +621,7 @@ test("active candidate edits and rollback conflicts retain pending evidence and 
   const { store, generation } = await prepared();
   try {
     await store.publish({ generation, binary: await compiler() });
-    const active = join(projectRoot, ".hack/hack.project.json");
+    const active = join(context.projectRoot, ".hack/hack.project.json");
     await writeFile(active, CANARY);
     await refusal(store.loadActive());
     await refusal(store.rollback());
@@ -4947,7 +634,7 @@ test("active candidate edits and rollback conflicts retain pending evidence and 
 
 test("dry-run reports storage provenance and existing counts without state, source values or engine effects", async () => {
   const report = await previewLegacyComposeAdoption({
-    projectRoot,
+    projectRoot: context.projectRoot,
     binary: await compiler(),
   });
   expect(report.complete).toBe(true);
@@ -4964,14 +651,14 @@ test("dry-run reports storage provenance and existing counts without state, sour
     VOLUME,
     ID,
     NETWORK,
-    projectRoot,
+    context.projectRoot,
     "hash",
     "revision",
   ]) {
     expect(JSON.stringify(report)).not.toContain(value);
   }
   expect(await Bun.file(stateRoot()).exists()).toBe(false);
-  expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+  expect(await Bun.file(join(context.root, "mutation")).exists()).toBe(false);
 });
 
 test("CLI adoption refuses other backends before probes, preparation or engine effects", async () => {
@@ -4983,15 +670,15 @@ test("CLI adoption refuses other backends before probes, preparation or engine e
         "config",
         "adopt",
         "--path",
-        projectRoot,
+        context.projectRoot,
         ...flags,
       ],
       {
         env: privateCliEnv({
-          root,
+          root: context.root,
           env: {
             HACK_RUNTIME_BACKEND: "native",
-            HACK_HOME: join(root, "isolated-home"),
+            HACK_HOME: join(context.root, "isolated-home"),
           },
         }),
         stdin: "ignore",
@@ -5007,7 +694,7 @@ test("CLI adoption refuses other backends before probes, preparation or engine e
     expect(code).not.toBe(0);
     expect(stdout + stderr).toContain("Compose backend");
     expect(stdout + stderr).not.toContain(CANARY);
-    expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+    expect(await Bun.file(join(context.root, "commands")).exists()).toBe(false);
     expect(await Bun.file(stateRoot()).exists()).toBe(false);
   }
 });
@@ -5023,21 +710,23 @@ test("upgraded discovery refuses an interrupted switch before ancestor selection
     };
     await writeReceipt(receipt);
     await rename(
-      join(projectRoot, ".hack/hack.config.json"),
+      join(context.projectRoot, ".hack/hack.config.json"),
       await artifactPath("originals/legacy-config.original")
     );
-    const nested = join(projectRoot, "nested");
+    const nested = join(context.projectRoot, "nested");
     await mkdir(nested);
-    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-      "pending"
-    );
+    expect(
+      await inspectLegacyComposeAdoptionSelection({
+        projectRoot: context.projectRoot,
+      })
+    ).toBe("pending");
     await expect(discoverProjectInputs({ startDir: nested })).rejects.toThrow(
       "interrupted"
     );
     await expect(
-      assertLegacyProjectInputFamily({ projectRoot })
+      assertLegacyProjectInputFamily({ projectRoot: context.projectRoot })
     ).rejects.toThrow("interrupted");
-    expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+    expect(await Bun.file(join(context.root, "mutation")).exists()).toBe(false);
   } finally {
     await store.close();
   }
@@ -5058,7 +747,7 @@ test("failed retained-container effects stay pending and only explicit verified 
           operation: "start",
           services: ["db"],
         });
-        fixture.running = true;
+        context.fixture.running = true;
         await save();
         return 7;
       },
@@ -5066,9 +755,11 @@ test("failed retained-container effects stay pending and only explicit verified 
     expect(code).toBe(7);
     await refusal(store.loadActive(), "E_LEGACY_ADOPTION_BUSY");
     await refusal(store.rollback(), "E_LEGACY_ADOPTION_BUSY");
-    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
-      "pending"
-    );
+    expect(
+      await inspectLegacyComposeAdoptionSelection({
+        projectRoot: context.projectRoot,
+      })
+    ).toBe("pending");
     const recovery = await store.loadActive({ recoverOperation: true });
     if (!recovery) {
       throw new Error("missing recovery claim");
@@ -5090,7 +781,7 @@ test("failed retained-container effects stay pending and only explicit verified 
       services: [],
       recover: true,
       run: async () => {
-        fixture.running = false;
+        context.fixture.running = false;
         await save();
         return 0;
       },
@@ -5114,8 +805,8 @@ test("post-effect resource loss cannot acknowledge success or enable automatic r
         operation: "start",
         services: ["db"],
         run: async () => {
-          fixture.running = true;
-          fixture.volume = [];
+          context.fixture.running = true;
+          context.fixture.volume = [];
           await save();
           return 0;
         },
@@ -5139,17 +830,18 @@ boundedTest(
       process.env.HACK_CONFIG_COMPILER_BINARY = binary;
       await store.publish({ generation, binary });
       const options = {
-        cwd: projectRoot,
+        cwd: context.projectRoot,
         operation: "up" as const,
         detach: true,
       };
       expect(await tryLegacyComposeAdoptedCommand(options)).toBe(0);
       expect(
-        JSON.parse(await readFile(join(root, "fixture.json"), "utf8")).running
+        JSON.parse(await readFile(join(context.root, "fixture.json"), "utf8"))
+          .running
       ).toBe(true);
       expect(
         await tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
+          cwd: context.projectRoot,
           operation: "exec",
           service: "db",
           command: ["true"],
@@ -5157,7 +849,7 @@ boundedTest(
       ).toBe(0);
       await expect(
         tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
+          cwd: context.projectRoot,
           operation: "run",
           service: "db",
           command: ["true"],
@@ -5165,32 +857,36 @@ boundedTest(
       ).rejects.toThrow("Recreation");
       expect(
         await tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
+          cwd: context.projectRoot,
           operation: "down",
         })
       ).toBe(0);
-      fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
-      expect(fixture.container[0]?.id).toBe(ID);
-      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
-      fixture.mutationFailure = true;
+      context.fixture = JSON.parse(
+        await readFile(join(context.root, "fixture.json"), "utf8")
+      );
+      expect(context.fixture.container[0]?.id).toBe(ID);
+      expect(context.fixture.volume[0]?.createdAt).toBe(CREATED);
+      context.fixture.mutationFailure = true;
       await save();
       expect(await tryLegacyComposeAdoptedCommand(options)).toBe(7);
       await expect(tryLegacyComposeAdoptedCommand(options)).rejects.toThrow(
         "busy"
       );
-      fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
-      fixture.mutationFailure = undefined;
+      context.fixture = JSON.parse(
+        await readFile(join(context.root, "fixture.json"), "utf8")
+      );
+      context.fixture.mutationFailure = undefined;
       await save();
       expect(
         await tryLegacyComposeAdoptedCommand({
-          cwd: projectRoot,
+          cwd: context.projectRoot,
           operation: "down",
           recover: true,
         })
       ).toBe(0);
       await store.rollback();
       await expectOriginals(original);
-      const commands = (await readFile(join(root, "commands"), "utf8"))
+      const commands = (await readFile(join(context.root, "commands"), "utf8"))
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line));
@@ -5217,7 +913,9 @@ boundedTest(
 );
 
 test("receipt changes during compile cannot overwrite a newer owner decision", async () => {
-  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  const store = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot: context.projectRoot,
+  });
   try {
     const body = `const receiptFile=${JSON.stringify(join(stateRoot(), "receipt.json"))}; const owner=JSON.parse(await Bun.file(receiptFile).text()); await Bun.write(receiptFile, JSON.stringify(owner)+' ');`;
     await refusal(store.prepare({ binary: await compiler(body) }));
@@ -5228,14 +926,23 @@ test("receipt changes during compile cannot overwrite a newer owner decision", a
 });
 
 test("explicit preparation stop journals before effect and running dry-run needs the stop request", async () => {
-  fixture.running = true;
+  context.fixture.running = true;
   await save();
   const binary = await compiler();
   expect(
-    (await previewLegacyComposeAdoption({ projectRoot, binary })).complete
+    (
+      await previewLegacyComposeAdoption({
+        projectRoot: context.projectRoot,
+        binary,
+      })
+    ).complete
   ).toBe(false);
   expect(
-    await previewLegacyComposeAdoption({ projectRoot, binary, stop: true })
+    await previewLegacyComposeAdoption({
+      projectRoot: context.projectRoot,
+      binary,
+      stop: true,
+    })
   ).toMatchObject({
     complete: true,
     stop: "requested",
@@ -5261,10 +968,12 @@ test("explicit preparation stop journals before effect and running dry-run needs
           services: ["db"],
         });
         expect(
-          await inspectLegacyComposeAdoptionSelection({ projectRoot })
+          await inspectLegacyComposeAdoptionSelection({
+            projectRoot: context.projectRoot,
+          })
         ).toBe("pending");
         calls++;
-        fixture.running = false;
+        context.fixture.running = false;
         await save();
         return 0;
       },
@@ -5280,21 +989,21 @@ test("explicit preparation stop journals before effect and running dry-run needs
 
 test("partial preparation stop retains originals and only explicit all-container recovery enables adoption", async () => {
   const second = "c".repeat(64),
-    originalCompose = join(projectRoot, ".hack/docker-compose.yml");
+    originalCompose = join(context.projectRoot, ".hack/docker-compose.yml");
   const text = await readFile(originalCompose, "utf8"),
     insert = text.lastIndexOf("volumes:\n  data:");
   await writeFile(
     originalCompose,
     `${text.slice(0, insert)}  worker:\n    image: ${CANARY}\n    volumes:\n      - data:/var/lib/database\n${text.slice(insert)}`
   );
-  fixture.container.push({
+  context.fixture.container.push({
     ...container(),
     id: second,
     name: "/fixture-worker-1",
     service: "worker",
   });
   network().containers = [ID, second];
-  fixture.states = { [ID]: true, [second]: true };
+  context.fixture.states = { [ID]: true, [second]: true };
   await save();
   const original = await originalSnapshots(),
     { store, generation } = await prepared();
@@ -5305,7 +1014,7 @@ test("partial preparation stop retains originals and only explicit all-container
         generation,
         binary,
         run: async () => {
-          fixture.states = { [ID]: false, [second]: true };
+          context.fixture.states = { [ID]: false, [second]: true };
           await save();
           return 7;
         },
@@ -5329,7 +1038,7 @@ test("partial preparation stop retains originals and only explicit all-container
         expect(
           input.binding.containers.map((container) => container.id).sort()
         ).toEqual([ID, second]);
-        fixture.states = { [ID]: false, [second]: false };
+        context.fixture.states = { [ID]: false, [second]: false };
         await save();
         return 0;
       },
@@ -5338,7 +1047,7 @@ test("partial preparation stop retains originals and only explicit all-container
     await store.publish({ generation: recovered, binary });
     await store.rollback();
     await expectOriginals(original);
-    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+    expect(context.fixture.volume[0]?.createdAt).toBe(CREATED);
   } finally {
     await store.close();
   }
@@ -5356,13 +1065,13 @@ test("preparation stop refuses changed source, forged claims and config drift be
     await refusal(
       store.withPreparationStop({ generation: { ...generation }, binary, run })
     );
-    fixture.configHash = "e".repeat(64);
+    context.fixture.configHash = "e".repeat(64);
     await save();
     await refusal(store.withPreparationStop({ generation, binary, run }));
-    fixture.configHash = "d".repeat(64);
+    context.fixture.configHash = "d".repeat(64);
     await save();
     await writeFile(
-      join(projectRoot, ".hack/hack.config.json"),
+      join(context.projectRoot, ".hack/hack.config.json"),
       '{"name":"changed-private"}'
     );
     await refusal(
@@ -5375,3 +1084,91 @@ test("preparation stop refuses changed source, forged claims and config drift be
     await store.close();
   }
 });
+
+/**
+ * HACK-1458: public adoption dispatch derives each store inspection phase from
+ * the command's caller deadline. A synthetic clock jumps once, right after the
+ * dispatch's first engine probe, so these cases need no real waiting: the
+ * phase that probe opened must survive the jump while the deadline remains,
+ * and must end as a timeout once the deadline has passed.
+ *
+ * The case budget is a ceiling only: prepare and publish spawn hundreds of
+ * stub-engine probes, so a loaded host needs minutes; a passing case never
+ * waits on it.
+ */
+const PUBLIC_DEADLINE_CASE_MS = 300_000;
+async function publicDispatchAfterClockJump(opts: {
+  readonly startupTimeoutMs: number;
+  readonly jumpMs: number;
+}): Promise<{ readonly result: unknown; readonly jumped: boolean }> {
+  const { store, generation } = await prepared();
+  const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+  const priorStartup = process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS;
+  const realNow = Date.now;
+  let clock: { mockRestore: () => void } | undefined;
+  let offset = 0;
+  try {
+    const binary = await compiler();
+    process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+    await store.publish({ generation, binary });
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = String(opts.startupTimeoutMs);
+    const commands = join(context.root, "commands");
+    const before = Bun.file(commands).size;
+    clock = spyOn(Date, "now").mockImplementation(() => {
+      if (offset === 0 && Bun.file(commands).size > before) {
+        offset = opts.jumpMs;
+      }
+      return realNow() + offset;
+    });
+    const result = await tryLegacyComposeAdoptedCommand({
+      cwd: context.projectRoot,
+      operation: "up",
+      detach: true,
+    }).catch((error: unknown) => error);
+    return { result, jumped: offset === opts.jumpMs };
+  } finally {
+    clock?.mockRestore();
+    restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+    restoreEnv("HACK_COMPOSE_STARTUP_TIMEOUT_MS", priorStartup);
+    await store.close();
+  }
+}
+
+boundedTest(
+  "HACK-1458: public dispatch inspection outlives the former fixed 15 s phase clock while the caller deadline remains",
+  async () => {
+    const { result, jumped } = await publicDispatchAfterClockJump({
+      startupTimeoutMs: 120_000,
+      jumpMs: 16_000,
+    });
+    expect(jumped).toBe(true);
+    expect(result).toBe(0);
+    expect(await mutationCommands()).toEqual([["container", "start", ID]]);
+  },
+  PUBLIC_DEADLINE_CASE_MS
+);
+
+boundedTest(
+  "HACK-1458: an expired public dispatch deadline ends inspection as a startup timeout, not invalid config",
+  async () => {
+    const { result, jumped } = await publicDispatchAfterClockJump({
+      startupTimeoutMs: 5000,
+      jumpMs: 6000,
+    });
+    expect(jumped).toBe(true);
+    expect(result).toBeInstanceOf(HackCliError);
+    if (!(result instanceof HackCliError)) {
+      throw new Error("missing public refusal");
+    }
+    expect(result.code).toBe("E_STARTUP_TIMEOUT");
+    // The fixed store message keeps the closed `legacy-deadline` diagnostic.
+    expect(result.message).toBe(
+      new LegacyComposeAdoptedGenerationError("E_LEGACY_ADOPTION_DEADLINE")
+        .message
+    );
+    expect(result.message).not.toContain(CANARY);
+    expect(await mutationCommands()).toEqual([]);
+    expect((await readReceipt()).pendingOperation).toBeNull();
+  },
+  PUBLIC_DEADLINE_CASE_MS
+);

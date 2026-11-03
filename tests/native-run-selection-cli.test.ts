@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  NATIVE_EXEC_SELECTION_REFUSAL,
   NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
   NATIVE_RUN_SELECTION_REFUSAL,
 } from "../src/backends/native-project-one-off.ts";
@@ -286,6 +287,35 @@ for (const request of [
     expect(result.stdout).toBe("");
     expect(result.stderr.trim()).toBe(
       `ERROR: E_USAGE: ${NATIVE_RUN_EMPTY_SELECTION_REFUSAL}`
+    );
+    expect(result.stderr).not.toMatch(STACK_FRAME);
+    expect(await nativeCalls(f.root)).toEqual([]);
+  }, 30_000);
+}
+
+/**
+ * HACK-1360: native exec never changes the running selection, so any given
+ * `--env` or `--profile` refuses with one closed E_USAGE line, an empty value
+ * included. An empty value was once silently ignored and the command ran.
+ */
+for (const request of [
+  { name: "an empty --env", args: ["--env", ""] },
+  { name: "an empty --env=", args: ["--env="] },
+  { name: "a whitespace --env", args: ["--env", "  "] },
+  { name: "an empty --profile", args: ["--profile", ""] },
+  { name: "a comma-only --profile", args: ["--profile", " , "] },
+  { name: "a named --env", args: ["--env", "staging"] },
+]) {
+  test(`exec with ${request.name} refuses with one closed line and no runtime request`, async () => {
+    const f = await fixture({ profiles: [], effectiveEnvName: null });
+    const result = await cli({
+      fixture: f,
+      args: ["exec", ...request.args, "toolchain", "bun", "--version"],
+    });
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr.trim()).toBe(
+      `ERROR: E_USAGE: ${NATIVE_EXEC_SELECTION_REFUSAL}`
     );
     expect(result.stderr).not.toMatch(STACK_FRAME);
     expect(await nativeCalls(f.root)).toEqual([]);

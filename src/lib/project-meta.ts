@@ -1,6 +1,6 @@
 import { dirname, resolve } from "node:path";
 import { YAML } from "bun";
-import type { MuxSession } from "../mux/mux-backend.ts";
+import { MuxCommandTimeoutError, type MuxSession } from "../mux/mux-backend.ts";
 import { getMuxBackends } from "../mux/mux-resolver.ts";
 import { parseSessionBase } from "../mux/session-names.ts";
 import { mergeBranchUsage, readBranchUsage } from "./branch-usage.ts";
@@ -424,7 +424,14 @@ export async function resolveSessionsMeta(opts: {
     if (!backend.available) {
       continue;
     }
-    const listed = await backend.listSessions();
+    // Display only: a timed-out listing (unknown) is skipped rather than
+    // failing the command. Ownership decisions never use this path.
+    const listed = await backend.listSessions().catch((error: unknown) => {
+      if (error instanceof MuxCommandTimeoutError) {
+        return [];
+      }
+      throw error;
+    });
     for (const s of listed) {
       const base = parseSessionBase({ name: s.name });
       if (base === opts.projectName) {

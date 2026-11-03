@@ -157,6 +157,12 @@ export type SharedHostEnsureResult =
       /** Present for owned helpers only. */
       readonly pid?: number;
       readonly spawned: boolean;
+      /**
+       * True when this call recorded `holder` (it was not in the claim before).
+       * Decided under the helper lock, so a caller that rolls back a failed
+       * operation releases only the holder that operation added.
+       */
+      readonly holderAdded: boolean;
     }
   | {
       readonly state: "failed";
@@ -886,6 +892,7 @@ async function reuseOwned(
     endpoint: endpointFor(spec.port),
     pid: claim.pid,
     spawned: false,
+    holderAdded: !claim.holders.includes(holder),
   };
 }
 
@@ -997,6 +1004,7 @@ async function adoptOrRefuse(
         ownership: "adopted",
         endpoint: endpointFor(spec.port),
         spawned: false,
+        holderAdded: !carried.includes(holder),
       };
     default:
       return null;
@@ -1097,6 +1105,7 @@ async function spawnOwned(
       endpoint: endpointFor(spec.port),
       pid: identity.pid,
       spawned: true,
+      holderAdded: !carried.includes(holder),
     };
   } catch (error: unknown) {
     // An observer or a state write failed. Never leave a gate waiting while

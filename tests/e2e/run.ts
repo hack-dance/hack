@@ -68,6 +68,7 @@ import { patternP02PortableToolchainScenario } from "./scenarios/pattern-p02-por
 import { patternP07CapabilityOverlaysScenario } from "./scenarios/pattern-p07-capability-overlays.ts";
 import { portableBootstrapNegativesScenario } from "./scenarios/portable-bootstrap-negatives.ts";
 import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
+import { sharedHostHelpersScenario } from "./scenarios/shared-host-helpers.ts";
 import { upDownScenario } from "./scenarios/up-down.ts";
 import { worktreeBranchDefaultScenario } from "./scenarios/worktree-branch-default.ts";
 import { worktreeParallelUpScenario } from "./scenarios/worktree-parallel-up.ts";
@@ -109,6 +110,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   doctorScenario,
   domainMigrationFilesScenario,
   lifecycleSessionRecoveryScenario,
+  sharedHostHelpersScenario,
   cachePruneScenario,
   dependencyCacheScenario,
   dependencyCacheBootstrapScenario,

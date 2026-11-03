@@ -155,3 +155,31 @@ test("managed env schema models entry kind, metadata, and service scope", () => 
     },
   ]);
 });
+
+test("project config schema declares lifecycle.sharedHelpers", () => {
+  const schema = JSON.parse(renderProjectConfigSchemaJson()) as {
+    properties: {
+      lifecycle: { properties: Record<string, Record<string, unknown>> };
+    };
+  };
+  const sharedHelpers = schema.properties.lifecycle.properties.sharedHelpers;
+  const items = sharedHelpers?.items as Record<string, unknown>;
+  expect(items.additionalProperties).toBe(false);
+  expect(items.required).toEqual(["name", "command", "port"]);
+  expect(items.oneOf).toEqual([
+    { required: ["upstream"] },
+    { required: ["upstreamEnv"] },
+  ]);
+  expect(Object.keys(items.properties as object).sort()).toEqual([
+    "command",
+    "cwd",
+    "enabled",
+    "env",
+    "identityPath",
+    "name",
+    "port",
+    "readyTimeoutMs",
+    "upstream",
+    "upstreamEnv",
+  ]);
+});

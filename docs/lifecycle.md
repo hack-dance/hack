@@ -236,7 +236,8 @@ Behavior:
   lifecycle processes start, Hack releases only the holders that run added and stops a
   helper it had just started. Overlapping `hack up` runs of the same instance are ordered by
   an instance lock; an earlier run's rollback never releases a holder after a later run of
-  that instance has started (the holder stays recorded until `hack down`).
+  that instance has started (the holder stays recorded until `hack down`). Holders of
+  containers that may still be running are kept instead (see below).
 - A disabled helper (`enabled: false`) needs none of its `env` or `upstreamEnv` values.
 - A project with `sharedHelpers` and a lifecycle session (lifecycle processes or a
   persistent `up.before` hook) needs tmux for that session. With zellij selected,
@@ -258,7 +259,9 @@ Behavior:
   stopped. `hack restart` keeps the containers running, so it keeps their holders and
   reuses the helpers. Once a detached `hack up` or `hack restart` started the
   containers, a later failure (such as a failing `up.after` hook) stops the lifecycle
-  processes but keeps the holders for `hack down`. If `docker compose down` fails, times out or is interrupted, the holders are
+  processes but keeps the holders for `hack down`. If Compose fails or times out while
+  starting containers (including a failed restart repair), the holders are kept unless
+  `docker compose ps` confirms that no container of the instance may still run. If `docker compose down` fails, times out or is interrupted, the holders are
   kept (with a warning) and the command fails with Compose's error; run `hack down`
   again. If the session stop fails or cannot be confirmed (including when tmux cannot
   say whether the session exists), the session's processes may still use the helpers: `hack

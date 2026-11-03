@@ -1040,7 +1040,16 @@ test("packages a verified MCP selection with exact nested checksums and inventor
       await renderChecksums({ root: bundle, names })
     );
     const output = join(root, "assets");
-    await packagePrerelease({ plan, bundle, output });
+    const packaged = packagePrerelease({ plan, bundle, output });
+    if (process.platform === "darwin" && process.arch === "arm64") {
+      await packaged;
+    } else {
+      // The MCP fixture describes this host; the prerelease installer accepts
+      // only macOS arm64 payloads even when packaging runs elsewhere.
+      await expect(packaged).rejects.toThrow(
+        "Incompatible MCP protocol or host."
+      );
+    }
     expect(
       (await archiveMembers(join(output, plan.archive)))
         .map((entry) => entry.name)

@@ -5,11 +5,18 @@ import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compos
 import { fixture, invoke } from "./helpers/native-compose-command.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
+const STORAGE_PROOF_TIMEOUT_MS = 30_000;
+const COMMAND_CAPTURE_TIMEOUT_MS = 4 * STORAGE_PROOF_TIMEOUT_MS;
 const storage = { data: { kind: "persistent", scope: "worktree" } } as const;
 // Each synthetic carrier has the ordinary finite 30s proof budget. The wrapper
 // accommodates several real source-CLI transactions, not an unbounded helper.
 function command(root: string, args = ["up", "--detach", "--json"]) {
-  return invoke(root, args, 30_000, 120_000);
+  return invoke(
+    root,
+    args,
+    STORAGE_PROOF_TIMEOUT_MS,
+    COMMAND_CAPTURE_TIMEOUT_MS
+  );
 }
 // The cold case owns three separate 120s CLI transactions. A whole-callback
 // timeout or unconfirmed child retains its fixture and refuses further calls.
@@ -28,7 +35,8 @@ async function ownedColdCase(
       root: string,
       args: readonly string[]
     ) => Promise<{ code: number; stdout: string; stderr: string }>;
-  }) => Promise<void>
+  }) => Promise<void>,
+  opts: { readonly commandCaptureTimeoutMs?: number } = {}
 ) {
   if (coldLifetimeUnknown) {
     throw new Error(
@@ -83,13 +91,16 @@ async function ownedColdCase(
                 HACK_RUNTIME_BACKEND: "compose",
                 HACK_LOGGER: "console",
                 HACK_NATIVE_COMPOSE_PHASE_TRACE: "1",
-                HACK_COMPOSE_STARTUP_TIMEOUT_MS: "30000",
+                HACK_COMPOSE_STARTUP_TIMEOUT_MS: String(
+                  STORAGE_PROOF_TIMEOUT_MS
+                ),
                 CI: "1",
                 HACK_EXECUTION_MODE: "non_interactive",
               },
             }),
             captures: join(root, `storage-capture-${capture++}`),
-            timeoutMs: 120_000,
+            timeoutMs:
+              opts.commandCaptureTimeoutMs ?? COMMAND_CAPTURE_TIMEOUT_MS,
             onUnconfirmed: retain,
           });
         } catch (error) {
@@ -458,47 +469,59 @@ test(
 test(
   "source CLI warm up with an after hook keeps both finalization proofs",
   async () =>
-    await ownedColdCase(async (owner) => {
-      const root = await fixture("", false, {
-        storage,
-        hooks: {
-          up: {
-            after: [
-              {
-                name: "after",
-                command: { exec: [process.execPath, "-e", "0"] },
-              },
-            ],
+    await ownedColdCase(
+      async (owner) => {
+        const root = await fixture("", false, {
+          storage,
+          hooks: {
+            up: {
+              after: [
+                {
+                  name: "after",
+                  command: { exec: [process.execPath, "-e", "0"] },
+                },
+              ],
+            },
           },
-        },
-        cleanupAllowed: owner.cleanupAllowed,
-      });
-      const eventsFile = join(root, "storage-events");
-      const events = async () =>
-        (await Bun.file(eventsFile).exists())
-          ? (await Bun.file(eventsFile).text()).trim().split("\n")
-          : [];
-      const counted = async (args: readonly string[]) => {
-        const before = (await events()).length;
-        const result = await owner.invoke(root, args);
-        expect(result.code, await disposition(root, result.code)).toBe(0);
-        return (await events()).slice(before);
-      };
-      const proofs = (count: number) =>
-        Array.from({ length: count }, () => ["root", "verify", "root"]).flat();
-      expect(await counted(["up", "--detach", "--json"])).toEqual([
-        "root",
-        "seed",
-        ...proofs(3),
-        "workload",
-        ...proofs(8),
-      ]);
-      expect(await counted(["up", "--detach", "--json"])).toEqual([
-        ...proofs(5),
-        "workload",
-        ...proofs(8),
-      ]);
-      expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
-    }),
+          cleanupAllowed: owner.cleanupAllowed,
+        });
+        const eventsFile = join(root, "storage-events");
+        const events = async () =>
+          (await Bun.file(eventsFile).exists())
+            ? (await Bun.file(eventsFile).text()).trim().split("\n")
+            : [];
+        const counted = async (args: readonly string[]) => {
+          const before = (await events()).length;
+          const result = await owner.invoke(root, args);
+          expect(result.code, await disposition(root, result.code)).toBe(0);
+          return (await events()).slice(before);
+        };
+        const proofs = (count: number) =>
+          Array.from({ length: count }, () => [
+            "root",
+            "verify",
+            "root",
+          ]).flat();
+        expect(await counted(["up", "--detach", "--json"])).toEqual([
+          "root",
+          "seed",
+          ...proofs(3),
+          "workload",
+          ...proofs(8),
+        ]);
+        expect(await counted(["up", "--detach", "--json"])).toEqual([
+          ...proofs(5),
+          "workload",
+          ...proofs(8),
+        ]);
+        expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
+      },
+      {
+        // The after-hook finalization adds another bounded witness proof. The
+        // capture must cover it without changing the per-proof deadline/counts.
+        commandCaptureTimeoutMs:
+          COMMAND_CAPTURE_TIMEOUT_MS + STORAGE_PROOF_TIMEOUT_MS,
+      }
+    ),
   390_000
 );

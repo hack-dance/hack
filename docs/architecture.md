@@ -370,7 +370,8 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
 
 ## Files and directories
 
-- `~/.hack/` (default; override the whole root with `HACK_HOME`)
+- `~/.hack/` (default; override the whole root with `HACK_HOME`, which must be an absolute path.
+  An empty or relative `HOME` is treated as unset, so global state never lands under the cwd.)
   - `hack.config.json` (global config: control-plane defaults, gateway bind/port/allowWrites,
     extension settings)
   - `daemon/hackd.sock`
@@ -391,7 +392,8 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
 - `<repo>/.hack/`
   - `docker-compose.yml`
   - `hack.config.json`
-  - `hack.branches.json` (optional)
+  - `hack.branches.json` (optional committed branch registry; written only by `hack branch add`/
+    `remove`, never by runtime commands)
   - `.gitignore` (committed; created by `init`, and by `doctor --fix` when an existing project
     lacks it or its managed block; runtime commands put the same
     rules in the repository's local `info/exclude` instead of writing it; covers machine-local generated files —
@@ -407,6 +409,7 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
   - `.internal/compose.env.override.yml`
   - `.internal/compose.runtime.override.yml`
   - `.internal/extra-hosts.json`
+  - `.internal/branch-usage.json` (machine-local branch `last_used_at`, written by runtime commands)
   - `.internal/lifecycle/state.json` and `.internal/lifecycle/*.log`
   - `.branch/compose.<branch>.override.yml`
   - `.branch/compose.<branch>.runtime.override.yml`

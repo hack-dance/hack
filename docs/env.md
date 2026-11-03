@@ -176,12 +176,27 @@ Hack resolves env in this order:
 
 1. load `.hack/hack.env.default.yaml`
 2. if `--env=<name>` is selected, load `.hack/hack.env.<name>.yaml`
-3. load `.hack/hack.env.local.yaml`
-4. if `--env=<name>` is selected, load `.hack/hack.env.<name>.local.yaml`
-5. merge `values.global`
-6. if a service scope is requested, merge `values.<service>` on top
+3. in a linked git worktree, load the primary checkout's `.hack/hack.env.local.yaml`
+4. if `--env=<name>` is selected, load the primary checkout's `.hack/hack.env.<name>.local.yaml`
+5. load this checkout's `.hack/hack.env.local.yaml`
+6. if `--env=<name>` is selected, load this checkout's `.hack/hack.env.<name>.local.yaml`
+7. merge `values.global`
+8. if a service scope is requested, merge `values.<service>` on top
 
 Worktree-local overrides win over shared repo overlays. Service values override global values.
+Primary local overlays are read live, without copying or creating files. Checkout-local
+overrides always win over primary local overlays; `hack env set --local` writes only to
+the current checkout. Inheritance is disabled by `CI=1` or `CI=true`,
+`HACK_EXECUTION_MODE=slim` or `codex`, `HACK_WORKTREE_INHERIT_LOCAL=0` (also
+`false`, `off`, or `no`), or `"worktree": { "inherit_local": false }` in
+`.hack/hack.config.json`. Symlinked primary project directories are ignored;
+symlinked, non-regular, or unreadable primary local files are rejected, and an
+unreadable `.hack/hack.config.json` in a linked worktree is an error rather than a
+silent opt-in. Checkout paths containing newlines never inherit. A worktree
+whose only env input is an inherited overlay still uses the YAML commands. If every
+input of a materialized `.hack/.env` later disappears (including by opting out),
+`hack doctor` reports the output as obsolete.
+
 Host execution applies `host` values last. This includes `hack host exec`, `hack host shell`,
 and lifecycle hooks/processes, which all run on the host rather than in Compose.
 
@@ -362,8 +377,10 @@ identity for as long as the adoption exists, and adopted commands never rewrite 
   refuse a literal override before they prepare anything. Run `hack up` once so Hack
   rewrites it with references, then adopt.
 - A preparation that an earlier version made over a literal override is never
-  published. `hack config adopt --recover --stop` (which retries the stop, then
-  publishes) and `hack config adopt --recover` (which completes a pending switch) refuse
+  published. If it has no interrupted stop or pending switch, doctor names
+  `hack up` followed by `hack config adopt --stop`: there is no active adoption to roll
+  back, and `hack up` starts the originals. For an interrupted stop, `hack config adopt --recover --stop` (which retries
+  the stop, then publishes) and `hack config adopt --recover` (which completes a pending switch) refuse
   before any original file moves. The switch stays journaled as pending, and the error
   names `hack config adopt --recover --rollback` as the step that releases it. After that
   rollback, run `hack up` and adopt again.
@@ -608,10 +625,11 @@ per-checkout values you don't want to commit.
 With no env layers yet, `hack env set --local` writes legacy `.hack/.env` (or
 `.hack/.env.<overlay>`), including when a `hack.env.json` contract exists.
 Use `hack env add --local` to migrate first and then write the machine-local layer.
-Contract migration writes `plain_env` values from legacy dotenv files (or the shell)
-to the gitignored machine-local layer, never a tracked layer. It reports each moved
-key and destination path, without values. It refuses a local destination already
-tracked by Git. Values declared as `keychain` migrate to tracked layers as ciphertext.
+Contract migration writes `plain_env` values from legacy dotenv files to the gitignored
+machine-local layer, never a tracked layer, and refuses a `plain_env` value that comes only
+from your shell. It reports each moved key and destination path, without values. It refuses
+a local destination already tracked by Git. Values declared as `keychain` migrate to tracked
+layers as ciphertext.
 Migration requires effective ignore protection before writing plaintext. It refuses
 an outdated read-only `.hack/.gitignore` or a local destination that Git does not ignore.
 Without `hack.env.json`, `set --local` still writes `.hack/.env`; if a contract is
@@ -1150,7 +1168,7 @@ files, when:
   become global layer values that Hack applies after `environment`, so the service would
   switch to the `.env` value. This includes an entry that only refers to its own key
   (`PORT: ${PORT}`), whose result can differ when an overlay or the shell sets the key. The error names the keys and services, never values.
-  Remove the key from the `.hack/.env` file or from that service's `environment`, then retry;
+  Remove the key from the legacy `.env` file or overlay that sets it, or from that service's `environment`, then retry;
 - a service does not list a legacy file with values to migrate in `env_file` (`E_CONFIG_INVALID`).
   Migrated values are global and reach every service, including third-party images, so that
   service would receive values it never had. This includes a file no service lists, whose values
@@ -1188,9 +1206,12 @@ files, when:
   overlay file doesn't set (`E_CONFIG_INVALID`), because a local base outranks tracked and inherited
   overlay layers. Remove the key from `.hack/.env`, or set the value you want in that legacy overlay
   file, creating it if needed; the Compose `env_file` checks above then apply to that file;
+- env layers include a symlink while legacy values remain undelivered (`E_PATH_CONFLICT`).
+  Replace linked layers with regular files containing the intended layer content, then retry
+  `hack doctor --migrate-env-config`. The migration does not write through a linked layer;
 - `.hack/.env` has a state file, env layers exist, and its text isn't what `hack env materialize`
   would write (`E_PATH_CONFLICT`). The file is out of date or was edited by hand, and Hack can't
-  tell which. If it's generated, move any value of your own with `hack env set`, then run
+  tell which. If it's generated, move any value of your own with `hack env set --local`, then run
   `hack env materialize`, which replaces it. If it's your own file, delete `.hack/.env.state.json`
   so it's read as a legacy file, but not for generated output, whose values would then migrate as
   your own. When the text does match, the migration doesn't read the file or offer it for cleanup;
@@ -1217,6 +1238,48 @@ files, when:
   or a dangling symlink (`E_PERMISSION`), so its values would be lost. A symlinked overlay
   that resolves to a readable file inside `.hack` is migrated like a regular one; cleanup
   removes only the link, never its target.
+
+A refused migration keeps the legacy source files. Earlier layer merges or ignore-rule
+updates may remain, and removing newly created layers after a failure can itself fail.
+Check the layers and ignore rules before retrying; migration compares the values again.
+
+With `hack.env.json`, the migration refuses (`E_CONFIG_INVALID`) when a `plain_env` value comes only
+from your shell, because it would otherwise be saved to a plaintext file you didn't ask for. This applies to commands
+that migrate implicitly, such as `hack env exec`. Simply skipping the value isn't enough, because
+env layers don't read the contract, so services would stop receiving it. The error names the key and
+never the value, and gives the commands for the scope the contract declares:
+
+1. Run one command without the variable, so the migration runs: `env -u KEY hack env exec -- true`.
+   Add a `-u` for each key it names.
+2. Set it for the declared scope: `hack env set KEY --service <name> --local --value-stdin`, or
+   without `--service` for a key the contract doesn't scope. `--local` alone delivers it to every
+   service, so keep `--service` for a scoped key.
+3. If an overlay file also sets the key, the migration moves that value to the overlay's
+   machine-local layer, which outranks the local base, so the overlay keeps it. To change it:
+   `hack env set KEY --env <overlay> --local --value-stdin`, with `--service` as above.
+   The error prints a command only for a name the CLI accepts. It names an overlay file `--env`
+   can't select, such as `.env.My_Staging` or `.env.default`, or a service `--service` can't. Fix
+   those before step 1, because env layers don't read the contract once the project migrates.
+4. Keep it exported if Compose interpolation, or a host command run without that service's scope,
+   reads a key you set with `--service`, because a service value doesn't reach them. A value set
+   without `--service` does reach them, and overrides your shell.
+
+The refusal comes before Hack provisions any secret-store key. If plaintext values are mirrored to a
+secret backend whose key isn't available, Hack can't tell whether a key your shell sets is also in
+the backend, so it refuses that key the same way. Make the backend's key available and retry. If the
+backend has nothing stored yet and `HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK` isn't set, you can run
+these steps instead, and the migration creates its key; set the key only if the backend doesn't hold
+it. Any other backend failure, such as a corrupt store, stops the migration with that error.
+
+With `hack.env.json`, the migration also refuses (`E_CONFIG_INVALID`), writing no env layer, an
+overlay named `default`, `local` or `<name>.local`, in any case, that sets a value of its own, because
+it would replace the base layer or write a machine-local file, and a contract service that isn't a
+valid env scope when a value would be written for it, because no read could parse that layer. A
+legacy `.env.default` or `.env.local` refuses even when it sets no value of its own, and so does a
+different-case spelling of either, through the destination check. A
+secret backend's key may already have been created by then. The migration also refuses, writing nothing
+itself, a `hack.env.json` it can't open or read as a contract, and it doesn't quote the file. Earlier
+`hack doctor` steps, such as creating `.hack/.gitignore`, can still have run.
 
 With `hack.env.json`, the migration discovers only regular `.hack/.env.<overlay>` files, so a
 symlinked overlay is not migrated. It refuses (`E_PATH_CONFLICT`) when `.hack/.env` or a
@@ -1371,3 +1434,17 @@ and group members without a surviving identity are explicitly unverified.
 
 See [runtime performance diagnostics](performance.md) for project-listing timings,
 container details, watcher measurements and read-only cleanup previews.
+
+### Disabling native keychain access
+
+`HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK=1` disables native keychain reads, writes,
+and deletes, including `hack secrets`, project keychain stores, and macOS node
+auth tokens. All three operations throw an explicit disabled error.
+Encrypted-file stores still accept a configured key file or `HACK_SECRETS_FILE_KEY`,
+and can generate a new key file when no encrypted store exists.
+
+`bun test` loads `tests/preload.ts`, which sets this flag and replaces `Bun.secrets`
+with an in-memory backend. Tests that exercise keychain behavior can temporarily
+clear the flag; the preload still prevents native keychain access. Child CLI
+processes inherit the flag, so tests must pass it through when supplying a custom
+process environment. The in-memory backend is cleared after each test.

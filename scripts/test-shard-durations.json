@@ -1,6 +1,6 @@
 {
   "schema": "hack.test-shard-durations.v1",
-  "source": "Sum of per-test times from the serial hosted test job (blacksmith-6vcpu-macos-15, Bun 1.4.2), CI run 39873410893 job 120153061379 on next 4e0bfa55; excludes per-file load and hook time",
+  "source": "Sum of per-test times from the serial hosted test job (blacksmith-6vcpu-macos-15, Bun 1.4.2), CI run 39873410893 job 120153061379 on next 4e0bfa55; excludes per-file load and hook time; HACK-1811 adoption-generation family overrides: isolated Bun 1.4.4 test-process elapsed seconds on Linux x86_64, 2026-11-03 (790e1871 plus seven-file split; excludes launcher queue waits); recovery-file override after merging c0191243/HACK-1359: 36.80s isolated Bun elapsed (new case 5.35s), same Linux/Bun setup",
   "seconds": {
     "packages/db/tests/smoke.test.ts": 0,
     "tests/aes-gcm-v1-context-binding.test.ts": 0.3,
@@ -232,7 +232,13 @@
     "tests/native-compose-adoption-execution.test.ts": 0.5,
     "tests/native-compose-adoption-file-generation.test.ts": 45.7,
     "tests/native-compose-adoption-files.test.ts": 0.1,
-    "tests/native-compose-adoption-generation.test.ts": 317.2,
+    "tests/native-compose-adoption-generation-jobs.test.ts": 69.2,
+    "tests/native-compose-adoption-generation-linked.test.ts": 18,
+    "tests/native-compose-adoption-generation-managed.test.ts": 7.5,
+    "tests/native-compose-adoption-generation-recovery.test.ts": 36.8,
+    "tests/native-compose-adoption-generation-retained.test.ts": 90.3,
+    "tests/native-compose-adoption-generation-topology.test.ts": 27.6,
+    "tests/native-compose-adoption-generation.test.ts": 42.2,
     "tests/native-compose-adoption-job-diagnostics.test.ts": 0,
     "tests/native-compose-adoption-job-inputs.test.ts": 0.1,
     "tests/native-compose-adoption-job-worktrees.test.ts": 6.8,

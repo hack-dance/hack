@@ -11,6 +11,7 @@ import {
   writeTextFile,
 } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
 import type { DaemonPaths } from "./paths.ts";
 
@@ -73,8 +74,9 @@ export function resolveLaunchdAccess(
   if (override.length === 0) {
     return { allowed: true };
   }
-  const home = (env.HOME ?? homedir()).trim();
-  if (resolve(override) === resolve(home, GLOBAL_HACK_DIR_NAME)) {
+  // A home that is not absolute cannot own the service, so it never matches.
+  const home = normalizeHomeDir(env.HOME) ?? normalizeHomeDir(homedir());
+  if (home && resolve(override) === resolve(home, GLOBAL_HACK_DIR_NAME)) {
     return { allowed: true };
   }
   if ((env[LAUNCHD_ALLOW_ISOLATED_ENV] ?? "").trim() === "1") {
@@ -228,7 +230,7 @@ export async function installLaunchdService({
       error: "Could not resolve hack binary path for launchd service",
     };
   }
-  const home = process.env.HOME ?? homedir();
+  const home = resolveUserHomeDir();
 
   const plistContent = renderLaunchdPlist({
     hackBinPath,

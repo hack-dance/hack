@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   stat,
   symlink,
@@ -178,8 +179,10 @@ test("dnsmasq file create is exclusive and rollback requires same inode and cont
   });
   await writeFile(file.path, "changed\n");
   expect(await f.dependencies.removeIfOwned(owned)).toBe(false);
-  await rm(file.path);
+  const original = join(f.root, "original-dnsmasq");
+  await rename(file.path, original);
   await writeFile(file.path, file.content);
+  expect((await stat(file.path)).ino).not.toBe((await stat(original)).ino);
   expect(await f.dependencies.removeIfOwned(owned)).toBe(false);
   expect(await readFile(file.path, "utf8")).toBe(file.content);
 });
@@ -395,8 +398,10 @@ test("fixed privileged resolver program guards inode, content, and symlinks in a
   expect(await f.dependencies.removeIfOwned(owned)).toBe(false);
   expect(await readFile(expected.path, "utf8")).toBe("foreign\n");
 
-  await rm(expected.path);
+  const original = join(f.root, "original-resolver");
+  await rename(expected.path, original);
   await writeFile(expected.path, expected.content);
+  expect((await stat(expected.path)).ino).not.toBe((await stat(original)).ino);
   expect(await f.dependencies.removeIfOwned(owned)).toBe(false);
   expect(await readFile(expected.path, "utf8")).toBe(expected.content);
 

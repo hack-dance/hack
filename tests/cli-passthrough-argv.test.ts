@@ -164,6 +164,19 @@ test("Hack's own flags still work before the child command", () => {
   expect(findPassthroughStart(CLI_SPEC, ["up", "web", "--json"])).toBeNull();
 });
 
+test("an inline option value never consumes the next token", () => {
+  // `--workdir=/x` carries its value, so `web` is the service and `ls` the child.
+  expect(
+    findPassthroughStart(CLI_SPEC, ["run", "--workdir=/x", "web", "ls"])
+  ).toBe(3);
+  expect(findPassthroughStart(CLI_SPEC, ["run", "-p=dir", "web", "ls"])).toBe(
+    3
+  );
+  expect(
+    findPassthroughStart(CLI_SPEC, ["--path=dir", "exec", "web", "ls"])
+  ).toBe(3);
+});
+
 test("the boundary skips option values, including omitted defaulted values", () => {
   expect(
     findPassthroughStart(CLI_SPEC, ["run", "--workdir", "web", "svc", "ls"])

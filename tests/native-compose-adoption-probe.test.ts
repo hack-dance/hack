@@ -20,6 +20,7 @@ import {
   NativeComposeOwnershipError,
   nativeComposeProbeFailure,
 } from "../src/lib/native-compose-ownership.ts";
+import { withCaseExecutables } from "./helpers/case-executables.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 const ID = "a".repeat(64);
@@ -54,8 +55,17 @@ async function ownedCase(run: () => Promise<void>) {
     activeCases--;
   }
 }
-const test = (name: string, run: () => Promise<void>) =>
-  bunTest(name, () => ownedCase(run));
+// The stub is pinned when the case starts: the global-state guard puts PATH back
+// after a timed-out case even though afterEach keeps it, and a late body's next
+// probe must still find only this case's stub (HACK-1792).
+const test = (
+  name: string,
+  run: () => Promise<void>,
+  docker: () => string | null = () => join(root, "docker")
+) =>
+  bunTest(name, () =>
+    ownedCase(() => withCaseExecutables({ docker: docker() }, run))
+  );
 beforeEach(async () =>
   ownedCase(async () => {
     previousPath = process.env.PATH;
@@ -103,6 +113,7 @@ afterEach(async () => {
   }
   if (unconfirmed) {
     // An outer timeout cannot cancel its callback. Keep PATH, spies and roots until process exit.
+    // The global-state guard still restores PATH; the case's pinned stub keeps a late probe off the host.
     return;
   }
   restoreEnv("PATH", previousPath);
@@ -335,14 +346,26 @@ test("operation admission and spawn failure remain distinct from child failure",
   expect(await Bun.file(join(root, "started")).exists()).toBe(false);
 });
 
-test("missing executable refuses before any child", async () => {
-  await rm(join(root, "docker"));
-  publicRefusal(
-    await rejection(() => inspectLegacyComposeJobStates({ binding })),
-    "probe-operation"
-  );
-  expect(await Bun.file(join(root, "started")).exists()).toBe(false);
-});
+// Pinned as missing rather than to the stub, so the lookup itself fails (as it
+// does with no docker on PATH) and a late body still cannot find the host's.
+test(
+  "missing executable refuses before any child",
+  async () => {
+    await rm(join(root, "docker"));
+    const spawn = spyOn(Bun, "spawn");
+    try {
+      publicRefusal(
+        await rejection(() => inspectLegacyComposeJobStates({ binding })),
+        "probe-operation"
+      );
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      spawn.mockRestore();
+    }
+    expect(await Bun.file(join(root, "started")).exists()).toBe(false);
+  },
+  () => null
+);
 
 test("real timed out capture retains timeout classification and settles its exact child", async () => {
   await observedChild(async (child) => {

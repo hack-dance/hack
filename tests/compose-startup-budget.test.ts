@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import {
-  createNativeComposeStartDeadline,
+  createNativeComposePhaseDeadline,
   DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   DEFAULT_NATIVE_STORAGE_TIMEOUT_MS,
@@ -164,7 +164,7 @@ function fakeClocks() {
 
 test("start deadline is consumed by start work but not by excluded storage proofs", async () => {
   const { advance, options } = fakeClocks();
-  const start = createNativeComposeStartDeadline({
+  const start = createNativeComposePhaseDeadline({
     timeoutMs: 15_000,
     storageTimeoutMs: 90_000,
     ...options,
@@ -189,7 +189,7 @@ test("start deadline is consumed by start work but not by excluded storage proof
 
 test("rejected and overlapping storage proofs are excluded once and the deadline never moves earlier", async () => {
   const { advance, options } = fakeClocks();
-  const start = createNativeComposeStartDeadline({
+  const start = createNativeComposePhaseDeadline({
     timeoutMs: 15_000,
     storageTimeoutMs: 90_000,
     ...options,
@@ -227,7 +227,7 @@ test("rejected and overlapping storage proofs are excluded once and the deadline
 
 test("monotonic exclusion ignores wall-clock steps during a storage proof", async () => {
   const { clock, options } = fakeClocks();
-  const start = createNativeComposeStartDeadline({
+  const start = createNativeComposePhaseDeadline({
     timeoutMs: 15_000,
     storageTimeoutMs: 90_000,
     ...options,
@@ -252,7 +252,7 @@ test("the whole-phase storage exclusion cap is the smaller of 16 x S and one hou
 test("excluded storage time past the whole-phase cap refuses as storage-budget and stops extending the deadline", async () => {
   const { advance, options } = fakeClocks();
   // S = 1 s, so the phase may exclude at most 16 s of storage proofs.
-  const start = createNativeComposeStartDeadline({
+  const start = createNativeComposePhaseDeadline({
     timeoutMs: 15_000,
     storageTimeoutMs: 1000,
     ...options,
@@ -305,7 +305,7 @@ test("excluded storage time past the whole-phase cap refuses as storage-budget a
 
 test("a storage proof that fails past the whole-phase cap keeps its own error", async () => {
   const { advance, options } = fakeClocks();
-  const start = createNativeComposeStartDeadline({
+  const start = createNativeComposePhaseDeadline({
     timeoutMs: 15_000,
     storageTimeoutMs: 1000,
     ...options,

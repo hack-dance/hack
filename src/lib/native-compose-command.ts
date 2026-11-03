@@ -10,7 +10,9 @@ import {
   okResult,
 } from "./cli-result.ts";
 import {
-  createNativeComposeStartDeadline,
+  createNativeComposeWorkloadPhases,
+  type NativeComposeWorkloadPhases,
+  resolveComposeImageTimeoutMs,
   resolveComposeStartupTimeoutMs,
   resolveNativeStorageTimeoutMs,
 } from "./compose-startup-budget.ts";
@@ -1426,16 +1428,20 @@ async function executePreparedNativeWorkloads(opts: {
   readonly observeStorage: (
     observed: NativeComposeOwnershipObservation
   ) => void;
-  /** Start budget whose deadline excludes guard storage proof time. */
-  readonly start: ReturnType<typeof createNativeComposeStartDeadline>;
+  /** Image phase, then start phase; each excludes its own guard proof time. */
+  readonly phases: NativeComposeWorkloadPhases;
 }) {
-  const deadline =
-    opts.options.operation === "run" ? undefined : opts.start.deadline;
   if (opts.builds.length > 0) {
+    // Builds run under the image budget (HACK_COMPOSE_IMAGE_TIMEOUT_MS), like
+    // the Compose backend's `up --no-start`. One-off `run` builds keep their
+    // unbounded command budget.
     const code = await buildNativeComposeImages({
       intents: opts.builds,
       projectRoot: opts.projectRoot,
-      deadline,
+      deadline:
+        opts.options.operation === "run"
+          ? undefined
+          : opts.phases.images.deadline,
       signal: opts.signal,
       env: opts.base.env,
       json: opts.options.json === true,
@@ -1445,15 +1451,18 @@ async function executePreparedNativeWorkloads(opts: {
     if (code !== 0) {
       return { value: code, outcome: "uncertain" as const };
     }
-    await opts.assertFresh();
-    await opts.assertOwned();
+    // No separate post-build guard: the build closes with its own guard, and
+    // the spawn below (Compose `up` or one-off `run`) runs a full guard first.
   }
+  // The start budget begins only after builds end, so build time never
+  // consumes it.
+  const start = opts.phases.start();
   if (opts.options.operation === "run") {
     return await runOneOff(opts);
   }
   return await startNativeComposeWorkloads({
     ...opts,
-    deadline: opts.start.deadline,
+    deadline: start.deadline,
   });
 }
 
@@ -1613,6 +1622,13 @@ async function executePreparedGeneration(opts: {
   if (operation !== "up" && operation !== "restart" && operation !== "run") {
     return invalid();
   }
+  // Resolve every workload budget before any effect, so an invalid value
+  // refuses before enrollment, builds or container start.
+  const budgets = {
+    imageTimeoutMs: resolveComposeImageTimeoutMs(),
+    startupTimeoutMs: resolveComposeStartupTimeoutMs(),
+    storageTimeoutMs: resolveNativeStorageTimeoutMs(),
+  };
   const after = preparedAfterHookPhase({
     inputs,
     acquire,
@@ -1723,13 +1739,11 @@ async function executePreparedGeneration(opts: {
           storage?.enroll(generation, document)
         );
         stage = "workload-execution";
-        // The start budget begins after enrollment. Guard storage proofs are
-        // bounded by their own storage carriers and do not consume it; their
-        // excluded total is capped by a multiple of the storage budget.
-        const start = createNativeComposeStartDeadline({
-          timeoutMs: resolveComposeStartupTimeoutMs(),
-          storageTimeoutMs: resolveNativeStorageTimeoutMs(),
-        });
+        // The image and start budgets begin after enrollment, one after the
+        // other. Guard storage proofs are bounded by their own storage
+        // carriers and do not consume either; their excluded total is capped
+        // per phase by a multiple of the storage budget.
+        const phases = createNativeComposeWorkloadPhases(budgets);
         return await executePreparedNativeWorkloads({
           options,
           generation,
@@ -1743,7 +1757,7 @@ async function executePreparedGeneration(opts: {
           projectRoot,
           signal,
           assertFresh,
-          start,
+          phases,
           observeStorage: ownership.observeStorage,
           assertOwned: () =>
             assertNativeComposeEffectOwned({
@@ -1753,7 +1767,7 @@ async function executePreparedGeneration(opts: {
                 ? nativeComposeGuardStorageProof({
                     verify: storage.verify,
                     generation,
-                    excludeStorage: start.excludeStorage,
+                    excludeStorage: phases.excludeStorage,
                     takeAdjacentProof: () => {
                       const adjacentProof = adjacentGuardProof;
                       adjacentGuardProof = false;

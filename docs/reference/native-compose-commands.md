@@ -34,17 +34,28 @@ fallback.
 ## Execution and completion
 
 The first command slice supports whole-project detached `up`, `restart`, `run`,
-`down`, `ps`, plain `logs`, and `exec`. Startup uses the existing configurable
-Compose startup budget (`HACK_COMPOSE_STARTUP_TIMEOUT_MS`) for builds, container
-start, readiness and route verification. Storage preparation, enrollment and
-every storage proof use the separate per-carrier storage budget
+`down`, `ps`, plain `logs`, and `exec`. Startup runs in two phases with the
+same budgets as the Compose backend. Image builds use the image budget
+(`HACK_COMPOSE_IMAGE_TIMEOUT_MS`, default 30 minutes); container start,
+readiness and route verification then use the start budget
+(`HACK_COMPOSE_STARTUP_TIMEOUT_MS`, default 90 seconds), which begins only after
+builds end, so a long build never consumes it. A one-off `run` build keeps its
+unbounded command budget. Storage preparation, enrollment and every storage
+proof use the separate per-carrier storage budget
 (`HACK_NATIVE_STORAGE_TIMEOUT_MS`, default 90 seconds); proofs in the build and
-pre-spawn guards extend the start deadline by their own elapsed time instead of
-consuming it. That excluded time is capped per start phase at 16 × the storage
-budget or 1 hour, whichever is smaller: the deadline moves at most that far, a
-guard proof that would start after the cap is refused before it runs, and one
-that ends past it refuses the phase as `storage-budget`. The phase thus ends
-within the start budget, plus the cap, plus at most one in-flight guard proof.
+pre-spawn guards extend the current phase's deadline by their own elapsed time
+instead of consuming it. That excluded time is capped per phase at 16 × the
+storage budget or 1 hour, whichever is smaller: the deadline moves at most that
+far, a guard proof that would start after the cap is refused before it runs, and
+one that ends past it refuses the phase as `storage-budget`. Each phase thus ends
+within its budget, plus the cap, plus at most one in-flight guard proof.
+
+Builds run B + 2 guards for B builds: one before the cached tags are admitted,
+one immediately before each builder spawn (after that build's last image read),
+and one before the closing image reread. Each guard checks source freshness,
+ownership with its storage proof, and the same Docker engine. Image reads are
+read-only, so consecutive reads share one guard; the Compose `up` or one-off
+`run` that follows always runs its own full pre-spawn guard.
 Compose owns dependency startup, restart, and exec
 health checks. Hack checks the exact proposed generation: each service must be
 running, healthy when it declares a health check, and each initializer job must
@@ -371,7 +382,7 @@ retirement. A policy or state refusal keeps its reason even when it is
 caught after the carrier's deadline. A timeout,
 budget or otherwise unclassified refusal that finds its carrier's storage budget
 exhausted, and not cancelled, reports `storage-budget`, which names
-`HACK_NATIVE_STORAGE_TIMEOUT_MS`; a start phase
+`HACK_NATIVE_STORAGE_TIMEOUT_MS`; an image or start phase
 that spends its whole-phase storage cap reports the same reason at
 `guard-storage`. Unknown errors
 remain `unclassified`. Diagnostics contain no paths, resource names, helper replies,

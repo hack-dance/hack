@@ -135,7 +135,7 @@ test("down keeps every helper holder and reports them when the session stop fail
   const outcome = await stopSessionBeforeReleasingHelpers({
     stopSession: () =>
       Promise.reject(new Error("Failed to stop owned lifecycle session")),
-    containersStopped: true,
+    containers: "stopped",
     releaseHelpers: () => {
       released.push("release");
       return Promise.resolve([]);
@@ -155,7 +155,7 @@ test("down releases the helper holders once the session stop succeeded", async (
       events.push("stop");
       return Promise.resolve();
     },
-    containersStopped: true,
+    containers: "stopped",
     releaseHelpers: () => {
       events.push("release");
       return Promise.resolve(["mail"]);
@@ -303,7 +303,7 @@ test("down keeps every helper holder when the containers were not confirmed stop
       return Promise.resolve();
     },
     // Compose down failed or timed out (exit 124), or was interrupted.
-    containersStopped: false,
+    containers: "unconfirmed",
     releaseHelpers: () => {
       events.push("release");
       return Promise.resolve([]);
@@ -314,4 +314,22 @@ test("down keeps every helper holder when the containers were not confirmed stop
   expect(events).toEqual(["stop"]);
   expect(outcome.sessionStopFailed).toBeNull();
   expect(outcome.notReleased).toEqual(["mail"]);
+});
+
+test("containers kept on purpose (restart preserves the runtime) keep the holders without a failure", async () => {
+  const events: string[] = [];
+  const outcome = await stopSessionBeforeReleasingHelpers({
+    stopSession: () => {
+      events.push("stop");
+      return Promise.resolve();
+    },
+    containers: "kept",
+    releaseHelpers: () => {
+      events.push("release");
+      return Promise.resolve([]);
+    },
+    heldHelperNames: () => Promise.resolve(["mail"]),
+  });
+  expect(events).toEqual(["stop"]);
+  expect(outcome).toEqual({ sessionStopFailed: null, notReleased: [] });
 });

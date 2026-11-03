@@ -148,7 +148,7 @@ export const sharedHostHelpersScenario: Scenario = {
     };
 
     const cli = (opts: {
-      readonly verb: "up" | "down";
+      readonly verb: "up" | "down" | "restart";
       readonly branch: string;
       readonly upstream?: string;
       readonly failCompose?: boolean;
@@ -338,6 +338,43 @@ export const sharedHostHelpersScenario: Scenario = {
       expect({
         that: !(await isRunning(replaced)),
         message: "down left the replaced helper running",
+      });
+
+      ctx.log("restart keeps the helper of the containers it preserves");
+      expectExit({
+        result: await cli({ verb: "up", branch: branchA }),
+        codes: [0],
+        message: "branch A up before restart",
+      });
+      const beforeRestart = await ownedHelper();
+      // Restart preserves the Compose runtime, so the containers keep
+      // running: their sole holder must not stop the helper underneath them.
+      const restarted = await cli({ verb: "restart", branch: branchA });
+      expectExit({
+        result: restarted,
+        codes: [0],
+        message: "branch A restart",
+      });
+      const afterRestart = await ownedHelper();
+      expect({
+        that:
+          afterRestart.pid === beforeRestart.pid &&
+          afterRestart.birth === beforeRestart.birth &&
+          (await isRunning(beforeRestart)) &&
+          (await served(port)) === `served:${UPSTREAM}` &&
+          (await readClaim())?.holders.join(",") === holderA,
+        message:
+          "restart stopped or replaced the helper of its preserved containers",
+        result: restarted,
+      });
+      expectExit({
+        result: await cli({ verb: "down", branch: branchA }),
+        codes: [0],
+        message: "branch A down after restart",
+      });
+      expect({
+        that: !(await isRunning(afterRestart)) && (await readClaim()) === null,
+        message: "down after a restart left the helper running",
       });
 
       ctx.log("stale PID: a reused PID is discarded and never signalled");

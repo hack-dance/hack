@@ -2102,18 +2102,42 @@ export async function releaseAfterFailedProcessStart(opts: {
 }
 
 /**
+ * What happened to the instance's containers before its helpers would be
+ * released: "stopped" (Compose or graph shutdown succeeded), "unconfirmed"
+ * (shutdown failed, timed out or was interrupted) or "kept" (deliberately
+ * left running, as by hack restart, which preserves the Compose runtime).
+ */
+export type ContainerShutdown = "stopped" | "unconfirmed" | "kept";
+
+/**
+ * The restart down phase's container outcome. A preserved Compose runtime
+ * was never shut down: its containers are kept, so their helpers stay held.
+ * Exported for tests.
+ */
+export function restartContainerShutdown(opts: {
+  readonly preserveComposeRuntime: boolean;
+  readonly downCode: number;
+}): ContainerShutdown {
+  if (opts.preserveComposeRuntime) {
+    return "kept";
+  }
+  return opts.downCode === 0 ? "stopped" : "unconfirmed";
+}
+
+/**
  * Stop the lifecycle session, then release this instance's shared helper
  * holders only once both the session and the containers are confirmed
  * stopped. When the session stop failed or its outcome is unknown, or the
- * containers were not confirmed stopped (Compose down failed, timed out or
- * was interrupted), something may still use the helpers: every holder is
- * kept (a later hack down releases them) and reported as not released, so
- * down, restart and native retirement fail visibly. Never throws.
+ * containers were not confirmed stopped, something may still use the
+ * helpers: every holder is kept (a later hack down releases them) and
+ * reported as not released, so down, restart and native retirement fail
+ * visibly. Containers kept on purpose keep their holders too, but that is
+ * not a failure: nothing is reported. Never throws.
  */
 export async function stopSessionBeforeReleasingHelpers(opts: {
   readonly stopSession: () => Promise<void>;
-  /** Compose (or graph) shutdown succeeded; false keeps every holder. */
-  readonly containersStopped: boolean;
+  /** Only "stopped" lets the holders be released. */
+  readonly containers: ContainerShutdown;
   /** Returns the helpers whose release failed; must not throw. */
   readonly releaseHelpers: () => Promise<readonly string[]>;
   /** Helpers the instance may still hold, configured or recorded; must not throw. */
@@ -2130,7 +2154,10 @@ export async function stopSessionBeforeReleasingHelpers(opts: {
       notReleased: await opts.heldHelperNames(),
     };
   }
-  if (!opts.containersStopped) {
+  if (opts.containers === "kept") {
+    return { sessionStopFailed: null, notReleased: [] };
+  }
+  if (opts.containers === "unconfirmed") {
     return {
       sessionStopFailed: null,
       notReleased: await opts.heldHelperNames(),
@@ -2507,7 +2534,7 @@ async function stopLifecycleProcesses(opts: {
   const outcome = await stopSessionBeforeReleasingHelpers({
     stopSession: () => stopLifecycleSession(opts),
     // Native retirement runs after the graph's own shutdown succeeded.
-    containersStopped: true,
+    containers: "stopped",
     releaseHelpers: () => releaseLifecycleSharedHelpersReporting(opts),
     heldHelperNames: () => heldSharedHelperNames(opts),
   });
@@ -2611,18 +2638,19 @@ async function markLifecycleSharedHelpersStopping(opts: {
  */
 async function stopLifecycleProcessesBestEffort(
   opts: Parameters<typeof stopLifecycleProcesses>[0] & {
-    /** Compose shutdown succeeded; false keeps every helper holder. */
-    readonly containersStopped: boolean;
+    /** Only "stopped" lets the helper holders be released. */
+    readonly containers: ContainerShutdown;
   }
 ): Promise<readonly string[]> {
   const outcome = await stopSessionBeforeReleasingHelpers({
     stopSession: () => stopLifecycleSession(opts),
-    containersStopped: opts.containersStopped,
+    containers: opts.containers,
     releaseHelpers: () => releaseLifecycleSharedHelpersReporting(opts),
     heldHelperNames: () => heldSharedHelperNames(opts),
   });
   if (
-    !(outcome.sessionStopFailed || opts.containersStopped) &&
+    !outcome.sessionStopFailed &&
+    opts.containers === "unconfirmed" &&
     outcome.notReleased.length > 0
   ) {
     logger.warn({
@@ -6778,7 +6806,7 @@ async function runDownCommand({
   // Holders are released only once Compose confirmed the containers
   // stopped; an interrupted or failed shutdown keeps them for the next down.
   const lifecycleDownCleanup = async (
-    containersStopped: boolean
+    containers: ContainerShutdown
   ): Promise<readonly string[]> =>
     await stopLifecycleProcessesBestEffort({
       project,
@@ -6786,11 +6814,11 @@ async function runDownCommand({
       projectName,
       branch,
       composeProject: lifecycleComposeProject,
-      containersStopped,
+      containers,
     });
   const signalCleanup = installLifecycleSignalCleanup({
     cleanup: async () => {
-      await lifecycleDownCleanup(false);
+      await lifecycleDownCleanup("unconfirmed");
     },
   });
   let code: number;
@@ -6828,7 +6856,9 @@ async function runDownCommand({
       cwd: dirname(project.composeFile),
       routeStdoutToStderr: json,
     });
-    helperReleaseFailures = await lifecycleDownCleanup(code === 0);
+    helperReleaseFailures = await lifecycleDownCleanup(
+      code === 0 ? "stopped" : "unconfirmed"
+    );
   } finally {
     signalCleanup.dispose();
   }
@@ -6951,9 +6981,11 @@ async function runRestartDownPhase(opts: {
   readonly sharedHelperFailures?: readonly string[];
 }> {
   // As in hack down: holders are released only once the containers are
-  // confirmed stopped.
+  // confirmed stopped. A restart that preserves the Compose runtime keeps
+  // the containers running, so it keeps their holders (not a failure); the
+  // up phase then reuses the helpers.
   const lifecycleDownCleanup = async (
-    containersStopped: boolean
+    containers: ContainerShutdown
   ): Promise<readonly string[]> =>
     await stopLifecycleProcessesBestEffort({
       project: opts.project,
@@ -6961,11 +6993,11 @@ async function runRestartDownPhase(opts: {
       projectName: opts.projectName,
       branch: opts.branch,
       composeProject: opts.lifecycleComposeProject,
-      containersStopped,
+      containers,
     });
   const signalCleanup = installLifecycleSignalCleanup({
     cleanup: async () => {
-      await lifecycleDownCleanup(false);
+      await lifecycleDownCleanup("unconfirmed");
     },
   });
   let downCode: number;
@@ -6996,7 +7028,12 @@ async function runRestartDownPhase(opts: {
           cwd: dirname(opts.project.composeFile),
           routeStdoutToStderr: opts.routeStdoutToStderr === true,
         });
-    helperReleaseFailures = await lifecycleDownCleanup(downCode === 0);
+    helperReleaseFailures = await lifecycleDownCleanup(
+      restartContainerShutdown({
+        preserveComposeRuntime: opts.preserveComposeRuntime === true,
+        downCode,
+      })
+    );
   } finally {
     signalCleanup.dispose();
   }
@@ -7976,7 +8013,7 @@ async function runRestartCommand({
       projectName,
       branch,
       composeProject: lifecycleComposeProject,
-      containersStopped: false,
+      containers: "unconfirmed",
     });
     await removeProjectRuntimeStateEntry({
       projectDir: project.projectDir,

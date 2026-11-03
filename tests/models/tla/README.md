@@ -1004,8 +1004,10 @@ tmux/zellij backends is bounded by `runMuxCommand`: the caller stops waiting
 within the bound (a timed-out client is killed), and a timed-out call is unknown,
 never absence. That does not prove the server will not still apply the command;
 see the timeout residual below. The model covers tmux only: projects with shared
-helpers refuse zellij for their lifecycle session
-(`assertSharedHelperSessionMuxSupported`), because zellij records the ownership
+helpers refuse zellij for their lifecycle session, both before any hook runs
+(`assertSharedHelperSessionMuxSupported`) and again at the backend the controller
+actually selects (`MuxBackend.createsWithOwnerToken`), so a selection that changes
+while hooks run is refused too, because zellij records the ownership
 token with a separate `rename-tab` after creation, so an interrupted start could
 leave a live session without a token that neither `hack up` nor `hack down` can
 reclaim. tmux sets the token as part of `new-session` (`-e`), which is what

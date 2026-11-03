@@ -11,6 +11,7 @@ import {
   type SharedHostEnsureResult,
   type SharedHostHelperSpec,
   type SharedHostReleaseResult,
+  sharedHostFailureMessage,
 } from "./shared-host-lifecycle.ts";
 
 /**
@@ -534,17 +535,41 @@ export async function releaseProjectSharedHelpers(opts: {
     return [];
   }
   const holder = resolveSharedHelperHolder(opts.composeProject);
-  return await releaseSpecs({
-    specs: [...helpers].reverse().map((helper) => ({
+  const specs = [...helpers].reverse().map((helper) => ({
+    name: helper.name,
+    stateDir: resolveSharedHelperStateDir({
+      ...(opts.hackDir ? { hackDir: opts.hackDir } : {}),
       name: helper.name,
-      stateDir: resolveSharedHelperStateDir({
-        ...(opts.hackDir ? { hackDir: opts.hackDir } : {}),
-        name: helper.name,
-        port: helper.port,
-      }),
-    })),
-    holder,
-  });
+      port: helper.port,
+    }),
+  }));
+  const instance = instancePaths({ hackDir: opts.hackDir, holder });
+  // The instance lock serializes this release with a start of the same
+  // instance, so up and down can never split the instance's helper set (up
+  // holding one helper while down stops another). Clearing the operation
+  // record also keeps an earlier start's rollback from acting after this.
+  try {
+    await mkdir(instance.dir, { recursive: true, mode: 0o700 });
+    return await withInstanceLock({
+      instance,
+      timeoutMs:
+        helpers.reduce((sum, helper) => sum + helper.readyTimeoutMs, 0) +
+        10_000,
+      run: async () => {
+        await rm(instance.operationPath, { force: true });
+        return await releaseSpecs({ specs, holder });
+      },
+    });
+  } catch {
+    return specs.map((spec) => ({
+      name: spec.name,
+      result: {
+        state: "failed",
+        reason: "lock-unavailable",
+        message: sharedHostFailureMessage("lock-unavailable"),
+      },
+    }));
+  }
 }
 
 async function releaseSpecs(opts: {

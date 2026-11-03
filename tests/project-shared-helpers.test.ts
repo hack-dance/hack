@@ -688,3 +688,57 @@ console.log("not reached");
   },
   TIMEOUT
 );
+
+test(
+  "a release waits for a start of the same instance, so up and down never split the helper set",
+  async () => {
+    const root = await scratch();
+    const first = helperConfig({ port: freePort() });
+    // The second helper never becomes ready, so the start holds the
+    // instance for its whole deadline after the first helper is up.
+    const second = helperConfig({
+      port: freePort(),
+      name: "second-bridge",
+      mode: "placeholder",
+      readyTimeoutMs: 2000,
+    });
+    let startSettledAt = 0;
+    const start = startProjectSharedHelpers({
+      ...context(root),
+      helpers: [first, second],
+      composeProject: BRANCH_A,
+    })
+      .catch((error: unknown) => error)
+      .finally(() => {
+        startSettledAt = performance.now();
+      });
+    const deadline = performance.now() + 10_000;
+    while (!(await isReadyOwned(root, first)) && performance.now() < deadline) {
+      await Bun.sleep(25);
+    }
+    const owned = await ownedIdentity(root, first);
+    const releases = await releaseProjectSharedHelpers({
+      helpers: [first, second],
+      composeProject: BRANCH_A,
+      hackDir: join(root, "hack-home"),
+    });
+    const releasedAt = performance.now();
+    expect(String(await start)).toContain("(deadline)");
+    // The release ran only after the start settled (and rolled back).
+    expect(startSettledAt).toBeGreaterThan(0);
+    expect(releasedAt).toBeGreaterThanOrEqual(startSettledAt);
+    expect(releases.every((entry) => entry.result.state === "absent")).toBe(
+      true
+    );
+    expect(await isAlive(owned)).toBe(false);
+  },
+  TIMEOUT
+);
+
+async function isReadyOwned(
+  root: string,
+  helper: ProjectSharedHelperConfig
+): Promise<boolean> {
+  const claim = await readHelperClaim(root, helper);
+  return claim?.ownership === "owned" && claim.phase === "ready";
+}

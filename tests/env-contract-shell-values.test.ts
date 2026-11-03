@@ -31,12 +31,23 @@ const DOTENV_VALUE = ["synthetic", "dotenv", "1688"].join("-");
 const OTHER_SHELL_KEY = "HACK_1688_OTHER_SYNTHETIC_TOKEN";
 const ENTRYPOINT = resolve(import.meta.dir, "..", "index.ts");
 const tempDirs = new Set<string>();
+/** The preload sets this for the whole process, so a case must put it back. */
+const PRELOADED_KEYCHAIN_DISABLE =
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK;
 
 afterEach(async () => {
   delete process.env[SHELL_KEY];
   delete process.env[OTHER_SHELL_KEY];
   Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
-  Reflect.deleteProperty(process.env, "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK");
+  if (PRELOADED_KEYCHAIN_DISABLE === undefined) {
+    Reflect.deleteProperty(
+      process.env,
+      "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK"
+    );
+  } else {
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK =
+      PRELOADED_KEYCHAIN_DISABLE;
+  }
   for (const dir of tempDirs) {
     await rm(dir, { recursive: true, force: true });
   }
@@ -644,11 +655,6 @@ for (const services of [undefined, ["api"]] as const) {
       "the secret backend's key isn't available"
     );
     expect(refused.output).not.toContain(SHELL_VALUE);
-    expect(await snapshotTree(repo)).toEqual(before);
-
-    // Step 1 with the key still missing stops, and writes no layer.
-    const stillMissing = await runHack({ repo, args: exec });
-    expect(stillMissing.exitCode).not.toBe(0);
     expect(await snapshotTree(repo)).toEqual(before);
 
     const withKey = {

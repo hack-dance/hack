@@ -36,13 +36,6 @@ export type BranchesReadResult = {
   readonly parseError?: string;
 };
 
-export type TouchBranchUsageResult = {
-  readonly updated: boolean;
-  readonly created: boolean;
-  readonly path: string;
-  readonly error?: string;
-};
-
 export async function readBranchesFile(opts: {
   readonly projectDir: string;
 }): Promise<BranchesReadResult> {
@@ -95,69 +88,6 @@ export async function writeBranchesFile(opts: {
   const dir = dirname(opts.path);
   await ensureDir(dir);
   await writeTextFileIfChanged(opts.path, `${JSON.stringify(out, null, 2)}\n`);
-}
-
-export async function touchBranchUsage(opts: {
-  readonly projectDir: string;
-  readonly branch: string;
-  readonly nowIso?: string;
-  readonly createIfMissing?: boolean;
-}): Promise<TouchBranchUsageResult> {
-  const nowIso = opts.nowIso ?? new Date().toISOString();
-  const read = await readBranchesFile({ projectDir: opts.projectDir });
-  if (read.parseError) {
-    return {
-      updated: false,
-      created: false,
-      path: read.path,
-      error: read.parseError,
-    };
-  }
-
-  if (!(read.exists || opts.createIfMissing)) {
-    return { updated: false, created: false, path: read.path };
-  }
-
-  let updated = false;
-  let created = false;
-  let matched = false;
-
-  const nextBranches = read.file.branches.map((entry) => {
-    if (
-      entry.slug !== opts.branch &&
-      entry.name.toLowerCase() !== opts.branch.toLowerCase()
-    ) {
-      return entry;
-    }
-    matched = true;
-    updated = true;
-    return {
-      ...entry,
-      created_at: entry.created_at ?? nowIso,
-      last_used_at: nowIso,
-    };
-  });
-
-  if (!matched && opts.createIfMissing) {
-    updated = true;
-    created = true;
-    nextBranches.push({
-      name: opts.branch,
-      slug: opts.branch,
-      created_at: nowIso,
-      last_used_at: nowIso,
-    });
-  }
-
-  if (!updated) {
-    return { updated: false, created: false, path: read.path };
-  }
-
-  await writeBranchesFile({
-    path: read.path,
-    file: { ...read.file, branches: nextBranches },
-  });
-  return { updated: true, created, path: read.path };
 }
 
 export type EffectiveBranchSource =

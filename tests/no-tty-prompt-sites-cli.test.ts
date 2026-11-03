@@ -237,7 +237,11 @@ async function secretsLog(): Promise<string> {
 }
 
 function secretsEnv(): Record<string, string> {
-  return { HACK_TEST_SECRETS_LOG: join(requireCaseRoot(), "secrets.log") };
+  // The child preload stubs the keychain, so its gate can stay open.
+  return {
+    HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "0",
+    HACK_TEST_SECRETS_LOG: join(requireCaseRoot(), "secrets.log"),
+  };
 }
 
 test(

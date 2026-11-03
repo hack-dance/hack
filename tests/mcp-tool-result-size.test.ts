@@ -20,8 +20,9 @@ import {
   MCP_TOOL_RESULT_TEXT_LIMIT_BYTES,
 } from "../src/mcp/result-budget.ts";
 
-/** `STDIO_DEFAULT_MAX_BUFFER_SIZE` in MCP SDK 1.32. Older SDKs have no limit, so
- * these tests also measure the bytes on the wire. */
+/** `STDIO_DEFAULT_MAX_BUFFER_SIZE` in the pinned MCP SDK 1.32: past it the client
+ * closes the transport. These tests also measure the bytes on the wire, so a
+ * size regression shows as a number and not only as a lost connection. */
 const SDK_CLIENT_READ_LIMIT_BYTES = 10 * 1024 * 1024;
 /** Everything JSON-RPC adds around `result`: `{"jsonrpc":"2.0","id":N,"result":}`. */
 const ENVELOPE_ALLOWANCE_BYTES = 64;
@@ -101,7 +102,7 @@ afterEach(async () => {
 /**
  * Drive the real server over stdio with a real SDK client on default limits. A
  * `tee` records the exact bytes the client reads, which keeps the size assertion
- * meaningful on an SDK version without a read limit.
+ * independent of how the SDK enforces its read limit.
  */
 async function startSession(scenario: string) {
   const root = await mkdtemp(join(tmpdir(), "hack-mcp-result-size-"));

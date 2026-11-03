@@ -1,11 +1,11 @@
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import {
+  PROJECT_CONFIG_FILENAME,
+  PROJECT_CONFIG_LEGACY_FILENAME,
+} from "../constants.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isSlimExecutionMode } from "./execution-mode.ts";
-import {
-  isLinkedGitWorktree,
-  resolveGitPrimaryWorktreeRoot,
-} from "./git-worktree.ts";
 import { isRecord } from "./guards.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { readProjectConfig, sanitizeBranchSlug } from "./project.ts";
@@ -584,74 +584,176 @@ function worktreeVerificationError(): HackCliError {
   });
 }
 
-/** Resolve only the matching primary configuration directory; never copy state. */
+/** `HACK_WORKTREE_INHERIT_LOCAL=0` opts this checkout out of local env inheritance. */
+function isLocalInheritanceDisabledByEnv(): boolean {
+  return ["0", "false", "off", "no"].includes(
+    (process.env.HACK_WORKTREE_INHERIT_LOCAL ?? "").trim().toLowerCase()
+  );
+}
+
+/**
+ * Resolve only an existing, direct primary project directory; never copy state.
+ * Every opt-out (env, CI, slim mode, project config) is checked before any Git
+ * subprocess runs. A linkage that fails verification does not inherit.
+ */
 export async function resolvePrimaryLocalProjectDir(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
 }): Promise<string | null> {
-  if (!shouldInheritPrimaryLocalInputs({ inheritLocal: true })) {
+  if (
+    !shouldInheritPrimaryLocalInputs({ inheritLocal: true }) ||
+    isLocalInheritanceDisabledByEnv()
+  ) {
     return null;
   }
   const name = basename(opts.projectDir);
   if (
-    ![".hack", ".dev"].includes(name) ||
+    (name !== ".hack" && name !== ".dev") ||
     relative(opts.projectRoot, opts.projectDir) !== name
   ) {
     return null;
   }
+  // Primary checkouts never inherit; only a `.git` file marks a linked worktree.
+  const marker = await lstat(resolve(opts.projectRoot, ".git")).catch(
+    () => null
+  );
+  if (!marker?.isFile()) {
+    return null;
+  }
   const cfg = await readProjectConfig({
     ...opts,
-    projectDirName: name === ".dev" ? ".dev" : ".hack",
+    projectDirName: name,
     composeFile: resolve(opts.projectDir, "docker-compose.yml"),
     envFile: resolve(opts.projectDir, ".env"),
     configFile: resolve(opts.projectDir, "hack.config.json"),
   });
-  if (cfg.parseError) {
-    throw new Error(
-      "Cannot inherit worktree configuration with invalid project config"
-    );
+  if (cfg.worktree?.inheritLocal === false) {
+    return null;
   }
+  const primaryRoot = await resolveVerifiedPrimaryWorktreeRoot({
+    projectRoot: opts.projectRoot,
+  }).catch((error: unknown) => {
+    // Unverifiable linkage (bare common dirs, foreign git dirs) reads no primary.
+    if (error instanceof HackCliError) {
+      return null;
+    }
+    throw error;
+  });
+  if (!primaryRoot) {
+    return null;
+  }
+  await assertProjectConfigReadable({ projectDir: opts.projectDir });
+  const candidate = resolve(primaryRoot, name);
+  const info = await lstat(candidate).catch(() => null);
   if (
-    cfg.worktree?.inheritLocal === false ||
-    !(await isLinkedGitWorktree({ repoRoot: opts.projectRoot }))
+    !info?.isDirectory() ||
+    (await realpath(candidate).catch(() => {
+      throw primaryLocalReadError(candidate);
+    })) !== candidate
   ) {
     return null;
   }
-  const primary = await resolveGitPrimaryWorktreeRoot({
-    repoRoot: opts.projectRoot,
-  });
-  if (!primary || resolve(primary) === resolve(opts.projectRoot)) {
-    return null;
-  }
-  const candidate = resolve(primary, name);
-  try {
-    // A symlinked primary configuration must not redirect inheritance elsewhere.
-    if (
-      (await realpath(candidate)) !== resolve(await realpath(primary), name)
-    ) {
-      return null;
+  return candidate;
+}
+
+/**
+ * The config loader treats unreadable files as absent, which would hide a
+ * `worktree.inherit_local: false` opt-out; fail closed instead (path only).
+ * Field errors elsewhere in a well-formed file do not block env resolution.
+ */
+async function assertProjectConfigReadable(opts: {
+  readonly projectDir: string;
+}): Promise<void> {
+  for (const name of [
+    PROJECT_CONFIG_FILENAME,
+    PROJECT_CONFIG_LEGACY_FILENAME,
+  ]) {
+    const path = resolve(opts.projectDir, name);
+    let text: string;
+    try {
+      text = await readFile(path, "utf8");
+    } catch (error: unknown) {
+      if (!isEnoent(error)) {
+        throw new Error(`Cannot read project config: ${path}`);
+      }
+      continue;
     }
-    return candidate;
-  } catch {
-    return null;
+    let parsed: unknown;
+    try {
+      parsed =
+        name === PROJECT_CONFIG_FILENAME
+          ? JSON.parse(text)
+          : Bun.TOML.parse(text);
+    } catch {
+      throw new Error("Cannot inherit local env with invalid project config");
+    }
+    if (!isRecord(parsed)) {
+      throw new Error("Cannot inherit local env with invalid project config");
+    }
+    return;
   }
 }
 
-/** Inherited inputs may not redirect through a file or nested-directory symlink. */
-export async function validatePrimaryLocalFile(path: string): Promise<void> {
+/** Whether the primary checkout holds any local overlay this checkout could inherit. */
+export async function hasPrimaryLocalInputs(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<boolean> {
+  const primaryDir = await resolvePrimaryLocalProjectDir(opts);
+  if (primaryDir === null) {
+    return false;
+  }
+  const entries = await readdir(primaryDir, { withFileTypes: true });
+  // Match by name only: a symlinked or non-regular overlay must still route to
+  // the YAML commands so resolution can reject it instead of falling back to .env.
+  return entries.some(
+    (entry) =>
+      entry.name.startsWith("hack.env.") && entry.name.endsWith(".local.yaml")
+  );
+}
+
+/** Read an inherited file; only a missing file is skipped, other errors fail closed. */
+export async function readPrimaryLocalFile(
+  path: string
+): Promise<string | null> {
   try {
-    if ((await realpath(path)) !== resolve(path)) {
-      throw new Error("Refusing redirected primary local configuration");
-    }
+    return await readFile(path, "utf8");
   } catch (error: unknown) {
-    if (
-      error &&
-      typeof error === "object" &&
-      "code" in error &&
-      error.code === "ENOENT"
-    ) {
-      return;
+    if (isEnoent(error)) {
+      return null;
     }
-    throw error;
+    throw primaryLocalReadError(path);
+  }
+}
+
+function primaryLocalReadError(path: string): Error {
+  return new Error(`Cannot read primary local env file: ${path}`);
+}
+
+function isEnoent(error: unknown): boolean {
+  return isRecord(error) && error.code === "ENOENT";
+}
+
+/**
+ * Inherited files must be regular files with no symlink redirection. Any
+ * filesystem error other than a missing file fails closed with the path only
+ * (macOS realpath raises EACCES for unreadable files).
+ */
+export async function validatePrimaryLocalFile(path: string): Promise<void> {
+  const failClosed = (error: unknown): null => {
+    if (isEnoent(error)) {
+      return null;
+    }
+    throw primaryLocalReadError(path);
+  };
+  const info = await lstat(path).catch(failClosed);
+  if (!info) {
+    return;
+  }
+  const real = info.isFile() ? await realpath(path).catch(failClosed) : "";
+  if (real !== null && real !== resolve(path)) {
+    throw new Error(
+      `Refusing redirected or non-regular primary local env file: ${path}`
+    );
   }
 }

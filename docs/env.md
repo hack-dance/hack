@@ -362,8 +362,10 @@ identity for as long as the adoption exists, and adopted commands never rewrite 
   refuse a literal override before they prepare anything. Run `hack up` once so Hack
   rewrites it with references, then adopt.
 - A preparation that an earlier version made over a literal override is never
-  published. `hack config adopt --recover --stop` (which retries the stop, then
-  publishes) and `hack config adopt --recover` (which completes a pending switch) refuse
+  published. If it has no interrupted stop or pending switch, doctor names
+  `hack up` followed by `hack config adopt`: there is no active adoption to roll
+  back. For an interrupted stop, `hack config adopt --recover --stop` (which retries
+  the stop, then publishes) and `hack config adopt --recover` (which completes a pending switch) refuse
   before any original file moves. The switch stays journaled as pending, and the error
   names `hack config adopt --recover --rollback` as the step that releases it. After that
   rollback, run `hack up` and adopt again.

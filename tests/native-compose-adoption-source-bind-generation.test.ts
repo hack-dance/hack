@@ -13,6 +13,7 @@ import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption
 import * as privateState from "../src/lib/native-compose-private-state.ts";
 import { buildRuntimeHostMetadataOverride } from "../src/lib/runtime-host-metadata.ts";
 import { run } from "../src/lib/shell.ts";
+import { assertInvalidRetainedMutationDeadlines } from "./helpers/retained-mutation-deadline.ts";
 import {
   retainedSourceBindFixture,
   SOURCE_BIND_CANARY,
@@ -636,6 +637,23 @@ test("version12 saved directory proof rejects branch retargeting before observat
     expect(await readFile(receiptPath)).toEqual(receipt);
     expect(await readFile(join(h.outer, "commands"))).toEqual(commands);
     await noAllocation();
+  } finally {
+    await store.close();
+  }
+});
+
+test("HACK-1359: version12 rejects missing and non-finite mutation deadlines without effects", async () => {
+  const { store, generation } = await prepared();
+  try {
+    await assertInvalidRetainedMutationDeadlines({
+      store,
+      generation,
+      binary: h.compiler,
+      snapshot: async () => ({
+        commands: await h.commands(),
+        receipt: await h.receipt(),
+      }),
+    });
   } finally {
     await store.close();
   }

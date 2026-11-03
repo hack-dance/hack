@@ -41,10 +41,11 @@ import {
  * and inode in its integrity proof, and adopted commands never write it. While
  * such a generation exists (prepared, active or pending), nothing here removes
  * the file, because removal would make the adoption unloadable; the supported
- * way to drop its values is rollback (`hack config adopt --rollback`, or
+ * way to drop its values for a published adoption is rollback (`hack config adopt --rollback`, or
  * `--recover --rollback` while a switch is pending, after first settling an
  * interrupted preparation stop or retained command), `hack up`, then adopting
- * again. New adoptions refuse a literal override (`hack config adopt`).
+ * again. An unpublished preparation with no interrupted stop instead needs
+ * `hack up` and a new `hack config adopt`. New adoptions refuse a literal override.
  */
 export const COMPOSE_ENV_OVERRIDE_FILENAME = "compose.env.override.yml";
 
@@ -352,6 +353,7 @@ export async function composeEnvOverrideAdoptionBinding(opts: {
 }): Promise<{
   readonly bound: boolean;
   readonly pending: false | LegacyComposeAdoptionPending;
+  readonly prepared?: boolean;
 }> {
   const projectDir = resolve(opts.projectDir);
   if (basename(projectDir) !== HACK_PROJECT_DIR_PRIMARY) {
@@ -364,6 +366,7 @@ export async function composeEnvOverrideAdoptionBinding(opts: {
     return {
       bound: detail !== null && detail.status !== "rolled-back",
       pending: detail?.pending ?? false,
+      prepared: detail?.status === "prepared",
     };
   } catch {
     return { bound: true, pending: false };
@@ -481,6 +484,8 @@ export type ComposeEnvAtRestReport = {
    * {@link composeEnvOverrideAdoptionBinding}. False when not pending or not
    * bound. */
   readonly adoptionPending: false | LegacyComposeAdoptionPending;
+  /** An unpublished preparation uses the original Compose inputs, not rollback. */
+  readonly adoptionPrepared?: boolean;
   /** Asides left by interrupted removals; each may hold literal values. */
   readonly asides: { readonly stale: number; readonly fresh: number };
 };
@@ -509,6 +514,7 @@ export async function inspectComposeEnvAtRest(opts: {
     override,
     adoptionBound: binding.bound,
     adoptionPending: binding.bound ? binding.pending : false,
+    adoptionPrepared: binding.prepared === true,
     asides: { stale: asides.stale.length, fresh: asides.fresh.length },
   };
 }
@@ -538,6 +544,9 @@ export function composeEnvAtRestRepairs(report: ComposeEnvAtRestReport): {
 /** Supported way to drop values that a saved adoption pins; see the module doc. */
 export const ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
   "To drop them, stop the adopted containers ('hack down'), run 'hack config adopt --rollback', run 'hack up' so Hack rewrites the file with references only, then adopt again with 'hack config adopt --stop'.";
+/** An unpublished preparation has no active adoption to roll back. */
+export const PREPARED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
+  "To drop them, run 'hack up' so Hack rewrites the file with references only, then run 'hack config adopt' to prepare and publish a new adoption.";
 /**
  * The same, while the pinning adoption has a pending switch: `hack down` and
  * plain `--rollback` refuse in that state, and only explicit recovery releases
@@ -564,7 +573,7 @@ export const INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP =
 
 /** The next step for a report whose override a saved adoption pins. */
 export function adoptedComposeEnvOverrideNextStep(
-  report: Pick<ComposeEnvAtRestReport, "adoptionPending">
+  report: Pick<ComposeEnvAtRestReport, "adoptionPending" | "adoptionPrepared">
 ): string {
   switch (report.adoptionPending) {
     case "switch":
@@ -574,7 +583,9 @@ export function adoptedComposeEnvOverrideNextStep(
     case "retained-operation":
       return INTERRUPTED_OPERATION_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
     default:
-      return ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
+      return report.adoptionPrepared
+        ? PREPARED_COMPOSE_ENV_OVERRIDE_NEXT_STEP
+        : ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP;
   }
 }
 

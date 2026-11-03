@@ -23,6 +23,7 @@ import {
   nativeRoutedDownPhaseMatches,
   writeNativeRoutedDownEnvFixture,
 } from "./e2e/scenarios/native-config-routed-down-hooks.ts";
+import { withCaseExecutables } from "./helpers/case-executables.ts";
 
 const pin = {
   root: "/fixture/primary",
@@ -55,36 +56,40 @@ console.log("linux");
   process.env.PATH = root;
   const wallClock = spyOn(Date, "now").mockReturnValue(0);
   try {
-    const args = ["info", "--format", "{{.OSType}}"];
-    // This is the pre-fix hook's exact aggregate acquisition: it cannot be reused
-    // for the later final inventory even when the outer proof window is open.
-    const original = createNativeComposeProbe({ timeoutMs: 10_000 });
-    expect((await original(args)).trim()).toBe("linux");
-    const window = createNativeRoutedDownProofWindow({ timeoutMs: 30_000 });
-    expect(window.deadline).toBe(30_000);
-    expect(
-      await window.capture(async (docker) => (await docker(args)).trim())
-    ).toBe("linux");
-    wallClock.mockReturnValue(10_001);
-    await expect(original(args)).rejects.toMatchObject({
-      code: "E_NATIVE_COMPOSE_PROBE_TIMEOUT",
+    // Pinned at case start: if this body outlives its case and PATH is put
+    // back under it, its later probes still find only this stub (HACK-1792).
+    await withCaseExecutables({ docker: script }, async () => {
+      const args = ["info", "--format", "{{.OSType}}"];
+      // This is the pre-fix hook's exact aggregate acquisition: it cannot be reused
+      // for the later final inventory even when the outer proof window is open.
+      const original = createNativeComposeProbe({ timeoutMs: 10_000 });
+      expect((await original(args)).trim()).toBe("linux");
+      const window = createNativeRoutedDownProofWindow({ timeoutMs: 30_000 });
+      expect(window.deadline).toBe(30_000);
+      expect(
+        await window.capture(async (docker) => (await docker(args)).trim())
+      ).toBe("linux");
+      wallClock.mockReturnValue(10_001);
+      await expect(original(args)).rejects.toMatchObject({
+        code: "E_NATIVE_COMPOSE_PROBE_TIMEOUT",
+      });
+      expect(
+        await window.capture(async (docker) => (await docker(args)).trim())
+      ).toBe("linux");
+      wallClock.mockReturnValue(29_000);
+      expect(
+        await window.capture(async (docker) => (await docker(args)).trim())
+      ).toBe("linux");
+      wallClock.mockReturnValue(30_000);
+      await expect(
+        window.capture(async (docker) => docker(args))
+      ).rejects.toThrow("proof window expired");
+      expect(() => window.assertOpen()).toThrow("proof window expired");
+      expect(
+        (await readFile(commands, "utf8")).trim().split("\n")
+      ).toHaveLength(4);
+      expect(await Bun.file(join(root, "unexpected")).exists()).toBe(false);
     });
-    expect(
-      await window.capture(async (docker) => (await docker(args)).trim())
-    ).toBe("linux");
-    wallClock.mockReturnValue(29_000);
-    expect(
-      await window.capture(async (docker) => (await docker(args)).trim())
-    ).toBe("linux");
-    wallClock.mockReturnValue(30_000);
-    await expect(
-      window.capture(async (docker) => docker(args))
-    ).rejects.toThrow("proof window expired");
-    expect(() => window.assertOpen()).toThrow("proof window expired");
-    expect((await readFile(commands, "utf8")).trim().split("\n")).toHaveLength(
-      4
-    );
-    expect(await Bun.file(join(root, "unexpected")).exists()).toBe(false);
   } finally {
     wallClock.mockRestore();
     if (previous === undefined) {

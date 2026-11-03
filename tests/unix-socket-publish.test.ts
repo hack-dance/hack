@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -177,11 +178,14 @@ test("a restart after owned cleanup publishes a fresh endpoint at the same path"
   const path = join(directory, "mcp.sock");
   const first = echoServer();
   const initial = await listenPublishedUnixSocket(first, path);
+  const retained = join(directory, "original.sock");
+  await link(path, retained);
   await close(first);
   await removeOwned(path, initial);
   const second = echoServer();
   const restarted = await listenPublishedUnixSocket(second, path);
   expect(restarted).not.toEqual(initial);
+  await unlink(retained);
   expect(await reply(path)).toBe("ok");
   expect(await readdir(directory)).toEqual(["mcp.sock"]);
 });

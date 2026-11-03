@@ -185,6 +185,7 @@ test("malformed and oversized sessions close without disrupting a healthy sessio
   const healthy = await session(backend.socketPath, root);
   const badFrames = [
     Buffer.from('{"hack_mcp":1,"cwd":"relative","env":{}}\n'),
+    Buffer.from('{"hack_mcp":1,"cwd":"/tmp","env":{"HACK_HOME":"relative"}}\n'),
     Buffer.from('{"hack_mcp":1,"cwd":"/tmp","env":{"X":3}}\n'),
     Buffer.from([0xff, 10]),
     Buffer.alloc(256 * 1024 + 1, 65),

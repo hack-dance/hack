@@ -40,8 +40,8 @@ if [ "$(zig version)" != 0.15.2 ]; then
   exit 69
 fi
 command -v python3 >/dev/null
-if [ "$(bun --version)" != 1.4.2 ]; then
-  echo "Pinned Bun 1.4.2 is required" >&2
+if [ "$(bun --version)" != 1.4.4 ]; then
+  echo "Pinned Bun 1.4.4 is required" >&2
   exit 69
 fi
 # Zig's musl link of hack-storage-root-witness exceeds the default macOS soft

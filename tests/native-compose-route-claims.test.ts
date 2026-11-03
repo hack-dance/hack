@@ -962,8 +962,12 @@ for (const change of [
     const path = claimPath(root);
     const text = await Bun.file(path).text();
     if (change === "inode") {
-      await fs.rename(path, `${path}.old`);
+      // Retain the original inode so immediate filesystem reuse cannot make
+      // this replacement indistinguishable from the saved file identity.
+      const original = join(root, "original-claim.json");
+      await fs.rename(path, original);
       await fs.writeFile(path, text, { mode: 0o600 });
+      expect((await fs.stat(path)).ino).not.toBe((await fs.stat(original)).ino);
     }
     if (change === "symlink") {
       await fs.rename(path, `${path}.old`);
@@ -1076,8 +1080,12 @@ test("claim replacement in the proof callback cannot authorize deletion of a new
   await expect(
     result.release({
       assertAbsent: async () => {
-        await fs.rename(claimPath(root), `${claimPath(root)}.old`);
+        const original = join(root, "original-claim.json");
+        await fs.rename(claimPath(root), original);
         await fs.writeFile(claimPath(root), before, { mode: 0o600 });
+        expect((await fs.stat(claimPath(root))).ino).not.toBe(
+          (await fs.stat(original)).ino
+        );
       },
     })
   ).rejects.toThrow("values omitted");
@@ -1093,8 +1101,10 @@ test("private reference and journal replacement cannot reopen or authorize effec
   ).rejects.toThrow();
   const path = join(attemptPath(root, attempt), "intent.json");
   const text = await Bun.file(path).text();
-  await fs.rename(path, `${path}.old`);
+  const original = join(root, "original-intent.json");
+  await fs.rename(path, original);
   await fs.writeFile(path, text, { mode: 0o600 });
+  expect((await fs.stat(path)).ino).not.toBe((await fs.stat(original)).ino);
   await expect(result.markEffectsPossible(attempt)).rejects.toThrow(
     "values omitted"
   );

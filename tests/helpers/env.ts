@@ -3,11 +3,11 @@
  * to a `process.env` key stores the string "undefined" in Bun 1.4 (as in Node), which then leaks
  * into later tests in the same process, so a missing value must be deleted instead.
  *
- * Before a delete, the key is set to "". Bun 1.4 copies assignments to the proxy keys
- * (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lower-case forms) into the environment that
- * `fetch` and `Bun.spawn` without `env` use, but a delete never reaches it. Without the empty
- * assignment, a proxy a test set and then deleted keeps routing every later `fetch` in the
- * process, including loopback requests, through that proxy (HACK-1327). An empty proxy is no proxy.
+ * Before a delete, the key is set to "". Bun copies assignments to the proxy keys (`HTTP_PROXY`,
+ * `HTTPS_PROXY`, `NO_PROXY` and their lower-case forms) into the environment that `fetch` and
+ * `Bun.spawn` without `env` use. Bun 1.4.2 did not carry a delete there, so a deleted proxy kept
+ * routing later `fetch` calls (HACK-1327). Bun 1.4.4 does; tests/global-state-guard.test.ts checks
+ * this, and the empty assignment stays as a harmless guard against a regression.
  */
 export function restoreEnv(key: string, value: string | undefined): void {
   if (value === undefined) {

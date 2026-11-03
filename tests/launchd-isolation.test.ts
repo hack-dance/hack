@@ -120,6 +120,8 @@ async function makeFixture(): Promise<Fixture> {
     ].join("\n")
   );
 
+  await writeStub(join(tools, "security"), "exit 0");
+
   return {
     root,
     home,
@@ -594,3 +596,80 @@ for (const autostartCase of AUTOSTART_CASES) {
     ).toBe(started);
   });
 }
+
+const FOLLOWUPS_DRIVER = resolve(
+  import.meta.dir,
+  "fixtures/launchd-followups-driver.ts"
+);
+
+for (const mode of ["client", "offer", "tls"] as const) {
+  for (const accessCase of [
+    "isolated",
+    "disabled",
+    "default",
+    "opt-in",
+  ] as const) {
+    test(`launchd follow-ups: ${mode} ${accessCase}`, async () => {
+      const fixture = await makeFixture();
+      const allowed = accessCase === "default" || accessCase === "opt-in";
+      const hackHome =
+        accessCase === "default"
+          ? join(fixture.home, GLOBAL_HACK_DIR_NAME)
+          : fixture.isolatedHackHome;
+      const socketPath = join(
+        hackHome,
+        GLOBAL_DAEMON_DIR_NAME,
+        GLOBAL_DAEMON_SOCKET_FILENAME
+      );
+      const run = await runAsDarwin({
+        argv: [FOLLOWUPS_DRIVER, mode],
+        cwd: fixture.root,
+        env: fixture.env({
+          HACK_HOME: hackHome,
+          HACK_NO_INTERACTIVE: undefined,
+          HACK_TEST_STUB_SOCKET: socketPath,
+          [LAUNCHD_ALLOW_ISOLATED_ENV]:
+            accessCase === "opt-in" || accessCase === "disabled"
+              ? "1"
+              : undefined,
+          [LAUNCHD_DISABLE_ENV]: accessCase === "disabled" ? "1" : undefined,
+        }),
+      });
+      expect(run.stderr).toBe("");
+      expect(run.code).toBe(0);
+      const output = JSON.parse(run.stdout.trim().split("\n").at(-1) ?? "") as {
+        readonly statusCalls: number;
+      };
+      if (mode === "tls") {
+        expect(
+          await readFile(
+            join(hackHome, "caddy", "pki", "caddy-host-trust-env.sh"),
+            "utf8"
+          )
+        ).toContain("NODE_EXTRA_CA_CERTS");
+        const calls = await launchctlCalls(fixture);
+        expect(calls.length > 0).toBe(allowed);
+        expect(calls.every((call) => call.startsWith("setenv "))).toBe(true);
+        expect(
+          run.stdout.includes("registered it for future macOS shells")
+        ).toBe(allowed);
+      } else {
+        // Observe entry to the helper: its own admission guards must not mask
+        // removal of the caller's independent defense-in-depth guard.
+        expect(output.statusCalls).toBe(allowed ? 1 : 0);
+        expect(await launchctlCalls(fixture)).toEqual([]);
+        if (mode === "client") {
+          expect(await loggedCalls(fixture.hackLog)).toEqual(["daemon start"]);
+        }
+      }
+    });
+  }
+}
+
+test("a relative HOME cannot make a cwd-relative HACK_HOME look like the owner", () => {
+  expect(
+    resolveLaunchdAccess({
+      env: { HOME: "relative-home", HACK_HOME: "relative-home/.hack" },
+    }).allowed
+  ).toBe(false);
+});

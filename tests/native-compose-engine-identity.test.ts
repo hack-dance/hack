@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -621,8 +622,10 @@ test("pure socket path binding refuses ancestor rebinding even to the same targe
   const alias = join(root, "pure-parent");
   await symlink(root, alias);
   const bound = bindNativeComposeEngineSocketPath(join(alias, "engine.sock"));
-  await rename(alias, join(root, "pure-parent-original"));
+  const original = join(root, "original-pure-parent");
+  await rename(alias, original);
   await symlink(root, alias);
+  expect((await lstat(alias)).ino).not.toBe((await lstat(original)).ino);
   expect(() => bound.assertFresh()).toThrow(NativeComposeEngineIdentityError);
   expect(requests).toHaveLength(0);
 });

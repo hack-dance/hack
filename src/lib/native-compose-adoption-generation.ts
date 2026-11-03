@@ -2574,7 +2574,7 @@ function requireMutationDeadline(
       captured.deadline === undefined ||
       !Number.isFinite(captured.deadline)
     ) {
-      refuse("E_LEGACY_ADOPTION_CHANGED");
+      refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
     }
     if (captured.deadline <= Date.now()) {
       refuseMutationDeadline();

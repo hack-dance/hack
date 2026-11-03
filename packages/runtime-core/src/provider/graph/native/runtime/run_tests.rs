@@ -152,7 +152,7 @@ fn selected() -> run::RunSelection {
     }
 }
 fn ready(session: &mut Session<'_, Fake>, graph: &execution::Graph) {
-    execution::run(graph, session, Duration::from_secs(2)).unwrap();
+    execution::run(graph, session, RUN_BUDGET).unwrap();
     let mut state = session.backend.state.borrow_mut();
     let member = state.containers.values_mut().next().unwrap();
     member["State"]["StartedAt"] = json!("2026-10-09T00:00:00.000000000Z");
@@ -204,7 +204,7 @@ fn finite_one_off_derives_the_exact_member_and_discards_its_record_after_proven_
         one_offs: RefCell::new(BTreeMap::new()),
     };
     let original = fs::read(session.root.join("state.json")).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + RUN_BUDGET;
     let result = run::execute_with(
         &backend,
         session.receipt.clone(),
@@ -290,7 +290,7 @@ fn finite_one_off_refuses_changed_member_mounts_or_data_before_create_and_retain
             + if mode == "deadline" {
                 Duration::ZERO
             } else {
-                Duration::from_secs(2)
+                RUN_BUDGET
             };
         assert!(
             run::execute_with(
@@ -337,7 +337,7 @@ fn cleanup_reaps_a_recorded_one_off_before_stopping_members_and_refuses_foreign_
                 session.receipt.clone(),
                 &session.root,
                 &selected(),
-                Instant::now() + Duration::from_secs(2)
+                Instant::now() + RUN_BUDGET
             )
             .is_err()
         );

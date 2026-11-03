@@ -425,9 +425,11 @@ test("privateCliEnv keeps only the allow-list, test values and a private HOME", 
     expect((await stat(join(root, "user-home"))).mode & 0o777).toBe(0o700);
     expect(env.HACK_HOME).toBe(join(root, "home"));
     expect(env.PATH).toBe("/fixture/bin");
+    expect(env.BUN_RUNTIME_TRANSPILER_CACHE_PATH).toBe("0");
     expect(env.DOCKER_CONFIG).toBe(join(root, "docker-client"));
     expect(Object.keys(env).sort()).toEqual(
       [
+        "BUN_RUNTIME_TRANSPILER_CACHE_PATH",
         "DOCKER_CONFIG",
         "HACK_HOME",
         "HOME",
@@ -439,6 +441,7 @@ test("privateCliEnv keeps only the allow-list, test values and a private HOME", 
     for (const key of Object.keys(inherited)) {
       expect([
         ...PRIVATE_CLI_INHERITED_ENV,
+        "BUN_RUNTIME_TRANSPILER_CACHE_PATH",
         "HOME",
         PRIVATE_CLI_DAEMON_AUTOSTART_ENV,
       ]).toContain(key);

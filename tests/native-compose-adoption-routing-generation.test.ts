@@ -10,6 +10,7 @@ import { legacyComposePublicationRefusal } from "../src/lib/native-compose-adopt
 import { runLegacyComposeRetainedRoutingOperation } from "../src/lib/native-compose-adoption-routing-execution.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { assertInvalidRetainedMutationDeadlines } from "./helpers/retained-mutation-deadline.ts";
 import {
   type RetainedRoutingStoreTimeoutMs,
   ROUTING_CANARY,
@@ -1622,6 +1623,23 @@ test("HACK-1391: the callback revocation fence past the caller deadline refuses 
     expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
   } finally {
     clock.mockRestore();
+    await store.close();
+  }
+});
+
+test("HACK-1359: version14 rejects missing and non-finite mutation deadlines without effects", async () => {
+  const { store, generation } = await prepare();
+  try {
+    await assertInvalidRetainedMutationDeadlines({
+      store,
+      generation,
+      binary: h.compiler,
+      snapshot: async () => ({
+        commands: h.commands,
+        receipt: await h.receipt(),
+      }),
+    });
+  } finally {
     await store.close();
   }
 });

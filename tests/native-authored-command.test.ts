@@ -8,9 +8,13 @@ import {
   NativeAuthoredProjectStartError,
   type serveNativeAuthoredProject,
 } from "../src/backends/native-authored-project-start.ts";
+import { NativeAuthoredProjectNotStartedError } from "../src/backends/native-authored-runtime-binary.ts";
 import { CliUsageError } from "../src/cli/command.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
-import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
+import {
+  nativeAuthoredCommandFailure,
+  tryNativeAuthoredCommand,
+} from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
 import { refuseUnsupportedNativeUpOptions } from "../src/lib/native-up-refusals.ts";
 
@@ -213,6 +217,7 @@ macTest(
       serve: () => {
         throw new Error("Recovery cannot invoke startup.");
       },
+      nothingToRecover: () => Promise.resolve(false),
       recover: (value) => {
         calls++;
         recovery = value;
@@ -364,6 +369,7 @@ macTest(
     const pending = tryNativeAuthoredCommand({
       ...selected,
       options: { ...selected.options, operation: "down", recover: true },
+      nothingToRecover: () => Promise.resolve(false),
       recover: (value) =>
         new Promise((_, reject) => {
           value.signal?.addEventListener(
@@ -484,7 +490,12 @@ macTest(
   "signals await the exact owner result and remove command listeners",
   async () => {
     const selected = await fixture();
-    for (const outcome of ["removed", "retained"] as const) {
+    for (const outcome of [
+      "not-started",
+      "removed",
+      "unreserved",
+      "retained",
+    ] as const) {
       const before = [
         process.listenerCount("SIGINT"),
         process.listenerCount("SIGTERM"),
@@ -511,7 +522,9 @@ macTest(
       await entered.promise;
       process.emit("SIGINT");
       const value = await result;
-      if (outcome === "removed") {
+      if (outcome !== "retained") {
+        // A cancellation that retained nothing, including one in preflight
+        // (`not-started`), is a cancel rather than a startup failure.
         expect(value).toBe(130);
       } else {
         expect(value).toBeInstanceOf(HackCliError);
@@ -680,7 +693,7 @@ if (process.platform !== "darwin") {
         env: { HACK_RUNTIME_BACKEND: "native" },
       })
     ).rejects.toThrow(
-      "requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec, or explicit stored-generation down --recover on macOS"
+      "requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS"
     );
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   });
@@ -947,6 +960,88 @@ macTest(
     }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(CliUsageError);
     expect(String(error)).not.toContain("8443");
+    expect(calls).toBe(0);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+test.each([
+  ["exec", false, "Native project has not been started; nothing was executed."],
+  [
+    "exec",
+    true,
+    "Native project startup is pending and has not reached Ready; nothing was executed.",
+  ],
+  ["run", false, "Native project has not been started; nothing was run."],
+  [
+    "run",
+    true,
+    "Native project startup is pending and has not reached Ready; nothing was run.",
+  ],
+] as const)("HACK-1312: %s without a Ready generation (pending %p) is a closed refusal, not an unknown outcome", (operation, pending, prefix) => {
+  const refusal = nativeAuthoredCommandFailure({
+    operation,
+    error: new NativeAuthoredProjectNotStartedError({ pending }),
+  });
+  expect(refusal.code).toBe("E_LIFECYCLE_FAILED");
+  expect(refusal.message).toStartWith(prefix);
+  expect(refusal.message).not.toContain("unconfirmed");
+  expect(refusal.message).not.toContain("may have occurred");
+  expect(refusal.detail).toEqual({
+    status: pending ? "pending" : "not_started",
+  });
+  // Any other failure keeps the unknown-outcome contract.
+  const unknown = nativeAuthoredCommandFailure({
+    operation,
+    error: new Error("Private diagnostic must not escape."),
+  });
+  expect(unknown.message).toContain("completion is unconfirmed");
+  expect(unknown.message).not.toContain("Private diagnostic");
+});
+
+macTest(
+  "HACK-1312: public exec on a never-started selection reports not started without a request",
+  async () => {
+    const selected = await fixture();
+    const result = await tryNativeAuthoredCommand({
+      ...selected,
+      options: {
+        ...selected.options,
+        operation: "exec",
+        service: "web",
+        command: ["true"],
+      },
+    }).catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(HackCliError);
+    expect(result).toHaveProperty("code", "E_LIFECYCLE_FAILED");
+    expect((result as HackCliError).message).toStartWith(
+      "Native project has not been started; nothing was executed."
+    );
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "HACK-1312: repeated down --recover with nothing retained is a no-op",
+  async () => {
+    const selected = await fixture();
+    let calls = 0;
+    const result = await tryNativeAuthoredCommand({
+      ...selected,
+      options: { ...selected.options, operation: "down", recover: true },
+      serve: () => {
+        throw new Error("Recovery cannot invoke startup.");
+      },
+      recover: () => {
+        calls++;
+        throw new Error("Nothing is retained to recover.");
+      },
+      retireUnreserved: () => {
+        calls++;
+        throw new Error("No startup intent is retained.");
+      },
+    });
+    expect(result).toBe(0);
     expect(calls).toBe(0);
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   }

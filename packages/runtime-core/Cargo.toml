@@ -14,6 +14,9 @@ native-http-probe = []
 native-stream-relay = []
 storage-root-witness-tool = []
 shared-mcp = []
+# Test-only supervisor pause points for the real SIGKILL harness. Refused in
+# optimized builds; never listed by a release build script.
+node-kill-harness = []
 
 [lib]
 name = "hack_runtime_core"
@@ -54,6 +57,10 @@ flate2 = { version = "=1.1.10", default-features = false, features = ["rust_back
 [profile.release]
 lto = "thin"
 strip = true
+
+[[test]]
+name = "node_kill_harness"
+required-features = ["node-kill-harness"]
 
 [[bin]]
 name = "hack-mcp-owner"

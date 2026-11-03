@@ -19,8 +19,10 @@ import {
 import {
   nativeAuthoredProjectNamespace,
   saveNativeAuthoredProjectRun,
+  withNativeAuthoredProjectAdmission,
   withNativeAuthoredProjectStatus,
 } from "../src/backends/native-authored-project-run.ts";
+import { NativeAuthoredProjectNotStartedError } from "../src/backends/native-authored-runtime-binary.ts";
 import {
   invokeNativeRuntime,
   NATIVE_EXIT_DRAIN_BOUND_MS,
@@ -328,6 +330,34 @@ test("finite authored exec preserves literal argv, binary streams and nonzero ex
         workdir: "/app",
       })
     ).toEqual(result);
+  }));
+
+test.each([
+  false,
+  true,
+])("HACK-1312: exec without a Ready generation (pending %p) is a closed not-started refusal with zero runtime calls", async (pending) =>
+  owned(`exec never-started ${pending}`, async () => {
+    const f = await fixture(false);
+    if (pending) {
+      // A startup intent retained without reaching Ready.
+      await withNativeAuthoredProjectAdmission(f.scope, async (admission) => {
+        await admission.reserve({ review: f.receipt.review });
+        throw new Error("synthetic preparation failure");
+      }).catch(() => undefined);
+    }
+    let calls = 0;
+    const error = await nativeAuthoredProjectExec({
+      ...f,
+      service: "web",
+      command,
+      invoke: async () => {
+        calls++;
+        return f.reply;
+      },
+    }).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(NativeAuthoredProjectNotStartedError);
+    expect(error).toHaveProperty("pending", pending);
+    expect(calls).toBe(0);
   }));
 
 test.each([

@@ -106,6 +106,41 @@ export async function withPinnedRuntimeBinary<T>(
 }
 
 /**
+ * Closed refusal for a selection with no saved Ready generation (HACK-1312).
+ * It is selected inside the held saved-status owner before any runtime binary
+ * pin or native request, so nothing was dispatched and no command effect occurred.
+ * `pending` is true when a startup intent is retained without reaching Ready.
+ */
+export class NativeAuthoredProjectNotStartedError extends Error {
+  readonly pending: boolean;
+  constructor(opts: { readonly pending: boolean }) {
+    super(
+      opts.pending
+        ? "Native authored project startup is pending; no request was sent."
+        : "Native authored project has not been started; no request was sent."
+    );
+    this.name = "NativeAuthoredProjectNotStartedError";
+    this.pending = opts.pending;
+  }
+}
+
+/**
+ * The closed refusal for a selection without a saved Ready generation, or null
+ * when one is saved (the caller then keeps its own receipt checks). The held
+ * saved-status owner turns any error raised inside it into its own refusal, so
+ * callers return this value from the owner and throw it once the owner has
+ * re-asserted the unchanged saved selection and closed.
+ */
+export function unstartedNativeAuthoredProject(saved: {
+  readonly ready: NativeAuthoredProjectRunSelection | null;
+  readonly pending: boolean;
+}): NativeAuthoredProjectNotStartedError | null {
+  return saved.ready
+    ? null
+    : new NativeAuthoredProjectNotStartedError({ pending: saved.pending });
+}
+
+/**
  * The saved ready run must belong to this scope's namespace and own a container
  * for the requested service. Returns null for the caller's own closed refusal.
  */

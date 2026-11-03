@@ -261,7 +261,9 @@ Behavior:
   containers, a later failure (such as a failing `up.after` hook) stops the lifecycle
   processes but keeps the holders for `hack down`. If Compose fails or times out while
   starting containers (including a failed restart repair), the holders are kept unless
-  `docker compose ps` confirms that no container of the instance may still run. If `docker compose down` fails, times out or is interrupted, the holders are
+  `docker compose ps` confirms that no container of the instance may still run.
+  SIGINT/SIGTERM once a container start has begun keeps the holders too (the start may
+  still be starting services). If `docker compose down` fails, times out or is interrupted, the holders are
   kept (with a warning) and the command fails with Compose's error; run `hack down`
   again. If the session stop fails or cannot be confirmed (including when tmux cannot
   say whether the session exists), the session's processes may still use the helpers: `hack

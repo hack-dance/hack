@@ -1,12 +1,17 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   readLifecycleState,
   upsertLifecycleStateEntry,
 } from "../src/lib/lifecycle-runtime.ts";
-import { createLifecycleProcessController } from "../src/lib/project-lifecycle-controller.ts";
+import {
+  createLifecycleProcessController,
+  LifecycleSessionDisplacedError,
+  MuxCommandDeadlineError,
+  stopLifecycleProcessController,
+} from "../src/lib/project-lifecycle-controller.ts";
 import { createSharedHelperSessionOwnership } from "../src/lib/project-shared-helpers.ts";
 import type {
   MuxBackend,
@@ -40,6 +45,11 @@ const SESSION = "demo--lifecycle-branch-a";
 type FakeMux = MuxBackend & {
   readonly sessions: Map<string, string>;
   failKill: boolean;
+  /** createSession never settles until completeHungCreate() is called. */
+  hangCreate: boolean;
+  /** readLifecycleOwnerToken never settles (outcome unknown). */
+  hangToken: boolean;
+  completeHungCreate: () => void;
 };
 
 function fakeMux(): FakeMux {
@@ -52,14 +62,27 @@ function fakeMux(): FakeMux {
     windows: 1,
     createdAt: null,
   });
+  let pendingCreate: (() => void) | null = null;
   const fake: FakeMux = {
     name: "zellij",
     available: true,
     sessions,
     failKill: false,
+    hangCreate: false,
+    hangToken: false,
+    completeHungCreate: () => pendingCreate?.(),
     listSessions: () =>
       Promise.resolve([...sessions.keys()].map((name) => session(name))),
     createSession: (opts): Promise<MuxSessionCreateResult> => {
+      if (fake.hangCreate) {
+        // A hung tmux/zellij: the session appears only if the command
+        // eventually completes, after the caller stopped waiting.
+        return new Promise(() => {
+          pendingCreate = () => {
+            sessions.set(opts.name, opts.lifecycleOwnerToken ?? "");
+          };
+        });
+      }
       if (sessions.has(opts.name)) {
         return Promise.resolve({ ok: false, error: "session exists" });
       }
@@ -74,7 +97,9 @@ function fakeMux(): FakeMux {
       return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
     },
     readLifecycleOwnerToken: (opts) =>
-      Promise.resolve(sessions.get(opts.name) ?? null),
+      fake.hangToken
+        ? new Promise(() => undefined)
+        : Promise.resolve(sessions.get(opts.name) ?? null),
     readSessionPresence: (opts) =>
       Promise.resolve(sessions.has(opts.name) ? "present" : "absent"),
     listSessionWindowNames: () => Promise.resolve(new Set(["helper-client"])),
@@ -91,6 +116,15 @@ async function fixture() {
   const projectDir = join(root, ".hack");
   await mkdir(projectDir, { recursive: true });
   const mux = fakeMux();
+  // A stand-in zellij for process starts (`zellij --session ... run`).
+  const bin = join(root, "bin");
+  await mkdir(bin, { recursive: true });
+  await writeFile(join(bin, "zellij"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const resolvedMux = () =>
+    Promise.resolve({
+      mode: "zellij" as const,
+      backends: new Map([["zellij" as const, mux as MuxBackend]]),
+    });
   const ownership = createSharedHelperSessionOwnership({
     composeProject: COMPOSE_PROJECT,
     hackDir: join(root, "hack-home"),
@@ -101,17 +135,17 @@ async function fixture() {
       typeof createLifecycleProcessController
     >[0]["sessionOwnership"];
     readonly prepareLaunch?: () => Promise<void>;
+    readonly muxCommandTimeoutMs?: number;
   }) =>
     createLifecycleProcessController({
-      mux: () =>
-        Promise.resolve({
-          mode: "zellij",
-          backends: new Map([["zellij", mux]]),
-        }),
+      mux: resolvedMux,
       project: { projectRoot: root, projectDir },
       projectName: "demo",
       branch: "branch-a",
-      env: {},
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
+      ...(opts.muxCommandTimeoutMs
+        ? { muxCommandTimeoutMs: opts.muxCommandTimeoutMs }
+        : {}),
       composeProject: COMPOSE_PROJECT,
       definitionHash: "sha256:test",
       ...(opts.sessionOwnership
@@ -131,7 +165,32 @@ async function fixture() {
     (await readLifecycleState({ projectDir })).filter(
       (entry) => entry.composeProject === COMPOSE_PROJECT
     );
-  return { root, projectDir, mux, ownership, controller, entries };
+  // hack down's stop path, against the same backend.
+  const stop = () =>
+    stopLifecycleProcessController({
+      project: { projectRoot: root, projectDir },
+      definitionHash: "sha256:test",
+      projectName: "demo",
+      branch: "branch-a",
+      composeProject: COMPOSE_PROJECT,
+      mux: resolvedMux,
+    });
+  const newOwnership = () =>
+    createSharedHelperSessionOwnership({
+      composeProject: COMPOSE_PROJECT,
+      hackDir: join(root, "hack-home"),
+      decisionTimeoutMs: 5000,
+    });
+  return {
+    root,
+    projectDir,
+    mux,
+    ownership,
+    controller,
+    entries,
+    stop,
+    newOwnership,
+  };
 }
 
 const PROCESS = { name: "helper-client", command: "sleep 600" };
@@ -251,4 +310,76 @@ test("a start that decided to create refuses after an overlapping start created 
   expect(a.getOperationCleanup()).toBeNull();
   await a.abort();
   expect(mux.sessions.get(SESSION)).toBe("token-b");
+});
+
+test("a start displaced after creating its session, before finalizing, leaves the replacement owned and reclaimable", async () => {
+  const { mux, controller, entries, stop, newOwnership } = await fixture();
+  // A creates its session and starts a persistent up.before process, then
+  // waits in a later foreground hook (its entry is still pending).
+  const a = controller({ sessionOwnership: newOwnership() });
+  await a.startFromCommand({
+    command: { command: "sleep 600", persistent: true },
+    serviceName: "persistent-hook",
+  });
+  const tokenA = mux.sessions.get(SESSION);
+  expect(tokenA).toBeDefined();
+  expect((await entries())[0]?.processes).toEqual([]);
+  // B sees an owned stale (pending) session, replaces it, creates its own
+  // and finalizes.
+  const b = controller({ sessionOwnership: newOwnership() });
+  await b.startMany({ processes: [PROCESS] });
+  await b.finalize();
+  const tokenB = mux.sessions.get(SESSION);
+  expect(tokenB).toBeDefined();
+  expect(tokenB).not.toBe(tokenA);
+  // A resumes and finalizes: it must not publish over B's entry.
+  await expect(a.finalize()).rejects.toBeInstanceOf(
+    LifecycleSessionDisplacedError
+  );
+  expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([
+    tokenB,
+  ]);
+  // A gave up its authority: its abort leaves B's session alone.
+  expect(a.getOperationCleanup()).toBeNull();
+  await a.abort();
+  expect(mux.sessions.get(SESSION)).toBe(tokenB);
+  // hack down reclaims B through the persisted entry.
+  await stop();
+  expect(mux.sessions.has(SESSION)).toBe(false);
+  expect(await entries()).toEqual([]);
+});
+
+test("a hung session creation releases the instance lock within its bound and stays reclaimable", async () => {
+  const { mux, controller, entries, stop, newOwnership } = await fixture();
+  mux.hangCreate = true;
+  mux.hangToken = true;
+  const a = controller({
+    sessionOwnership: newOwnership(),
+    muxCommandTimeoutMs: 200,
+  });
+  const started = performance.now();
+  await expect(a.startMany({ processes: [PROCESS] })).rejects.toBeInstanceOf(
+    MuxCommandDeadlineError
+  );
+  expect(performance.now() - started).toBeLessThan(5000);
+  // The lock is free again: another start can take it at once.
+  const free = newOwnership();
+  await expect(
+    Promise.race([
+      free.withLock(() => Promise.resolve("acquired")),
+      Bun.sleep(2000).then(() => "still-held"),
+    ])
+  ).resolves.toBe("acquired");
+  // The outcome is unknown, so the pending entry and token are kept.
+  const kept = await entries();
+  expect(kept).toHaveLength(1);
+  expect(a.getOperationCleanup()).not.toBeNull();
+  // The hung command completes later: the session carries the kept token,
+  // so hack down can still reclaim it.
+  mux.completeHungCreate();
+  mux.hangToken = false;
+  expect(mux.sessions.get(SESSION)).toBe(kept[0]?.ownershipToken);
+  await stop();
+  expect(mux.sessions.has(SESSION)).toBe(false);
+  expect(await entries()).toEqual([]);
 });

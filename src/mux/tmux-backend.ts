@@ -1,10 +1,11 @@
 import type { ExecResult, RunOptions } from "../lib/shell.ts";
 import { exec, findExecutableInPath } from "../lib/shell.ts";
 
-import type {
-  MuxBackend,
-  MuxSession,
-  MuxSessionCreateResult,
+import {
+  MUX_COMMAND_TIMEOUT_MS,
+  type MuxBackend,
+  type MuxSession,
+  type MuxSessionCreateResult,
 } from "./mux-backend.ts";
 
 const LIFECYCLE_OWNER_OPTION = "@hack_lifecycle_owner";
@@ -75,6 +76,7 @@ export function createTmuxBackend(): MuxBackend {
 
     const result = await exec(["tmux", "list-sessions", "-F", format], {
       stdin: "ignore",
+      timeoutMs: MUX_COMMAND_TIMEOUT_MS,
     });
 
     if (result.exitCode !== 0) {
@@ -134,7 +136,10 @@ export function createTmuxBackend(): MuxBackend {
       args.push("-e", `${LIFECYCLE_OWNER_ENV}=${opts.lifecycleOwnerToken}`);
     }
 
-    const result = await exec(args, { stdin: "ignore" });
+    const result = await exec(args, {
+      stdin: "ignore",
+      timeoutMs: MUX_COMMAND_TIMEOUT_MS,
+    });
     if (result.exitCode !== 0) {
       return {
         ok: false,
@@ -153,11 +158,12 @@ export function createTmuxBackend(): MuxBackend {
           LIFECYCLE_OWNER_OPTION,
           opts.lifecycleOwnerToken,
         ],
-        { stdin: "ignore" }
+        { stdin: "ignore", timeoutMs: MUX_COMMAND_TIMEOUT_MS }
       );
       if (ownerResult.exitCode !== 0) {
         await exec(["tmux", "kill-session", "-t", opts.name], {
           stdin: "ignore",
+          timeoutMs: MUX_COMMAND_TIMEOUT_MS,
         });
         return {
           ok: false,
@@ -177,6 +183,7 @@ export function createTmuxBackend(): MuxBackend {
   }): Promise<ExecResult> => {
     return await exec(["tmux", "kill-session", "-t", opts.name], {
       stdin: "ignore",
+      timeoutMs: MUX_COMMAND_TIMEOUT_MS,
     });
   };
 
@@ -186,6 +193,7 @@ export function createTmuxBackend(): MuxBackend {
     }
     const result = await exec(["tmux", "has-session", "-t", `=${opts.name}`], {
       stdin: "ignore",
+      timeoutMs: MUX_COMMAND_TIMEOUT_MS,
     });
     return classifyTmuxSessionPresence({ result, name: opts.name });
   };
@@ -195,7 +203,7 @@ export function createTmuxBackend(): MuxBackend {
   }): Promise<string | null> => {
     const result = await exec(
       ["tmux", "show-options", "-v", "-t", opts.name, LIFECYCLE_OWNER_OPTION],
-      { stdin: "ignore" }
+      { stdin: "ignore", timeoutMs: MUX_COMMAND_TIMEOUT_MS }
     );
     if (result.exitCode === 0) {
       const token = result.stdout.trim();
@@ -205,7 +213,7 @@ export function createTmuxBackend(): MuxBackend {
     }
     const environment = await exec(
       ["tmux", "show-environment", "-t", opts.name, LIFECYCLE_OWNER_ENV],
-      { stdin: "ignore" }
+      { stdin: "ignore", timeoutMs: MUX_COMMAND_TIMEOUT_MS }
     );
     if (environment.exitCode !== 0) {
       return null;
@@ -222,7 +230,7 @@ export function createTmuxBackend(): MuxBackend {
   }): Promise<ReadonlySet<string> | null> => {
     const result = await exec(
       ["tmux", "list-windows", "-t", opts.name, "-F", "#{window_name}"],
-      { stdin: "ignore" }
+      { stdin: "ignore", timeoutMs: MUX_COMMAND_TIMEOUT_MS }
     );
     if (result.exitCode !== 0) {
       return null;
@@ -254,6 +262,7 @@ export function createTmuxBackend(): MuxBackend {
       ],
       {
         stdin: "ignore",
+        timeoutMs: MUX_COMMAND_TIMEOUT_MS,
       }
     );
   };
@@ -264,6 +273,7 @@ export function createTmuxBackend(): MuxBackend {
   }): Promise<ExecResult> => {
     return await exec(["tmux", "send-keys", "-t", opts.name, opts.keys], {
       stdin: "ignore",
+      timeoutMs: MUX_COMMAND_TIMEOUT_MS,
     });
   };
 

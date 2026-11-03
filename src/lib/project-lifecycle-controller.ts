@@ -1,6 +1,10 @@
 import { rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import type { MuxBackend, MuxBackendName } from "../mux/mux-backend.ts";
+import {
+  MUX_COMMAND_TIMEOUT_MS,
+  type MuxBackend,
+  type MuxBackendName,
+} from "../mux/mux-backend.ts";
 import {
   getMuxBackends,
   type ResolvedMux,
@@ -209,6 +213,13 @@ export function createLifecycleProcessController(opts: {
     SharedHelperSessionOwnership,
     "withLock" | "record"
   >;
+  /**
+   * Deadline for each mux call made while deciding or creating the session
+   * (some run under the shared helper instance lock). A backstop above the
+   * backends' own subprocess bound; a call that exceeds it is treated as an
+   * unknown outcome. Defaults to twice MUX_COMMAND_TIMEOUT_MS.
+   */
+  readonly muxCommandTimeoutMs?: number;
 }): {
   readonly sessionName: string;
   startFromCommand: (opts: {
@@ -237,6 +248,9 @@ export function createLifecycleProcessController(opts: {
   let operationSignalCleanup: { readonly dispose: () => void } | null = null;
   let sessionCreationSettled: Promise<void> = Promise.resolve();
   let nextIndex = 0;
+  const muxDeadlineMs = opts.muxCommandTimeoutMs ?? MUX_COMMAND_TIMEOUT_MS * 2;
+  const withinMuxDeadline = <T>(work: Promise<T>): Promise<T> =>
+    withDeadline({ work, timeoutMs: muxDeadlineMs });
 
   const resolveSessionDisposition = async (): Promise<void> => {
     if (sessionDispositionResolved) {
@@ -290,13 +304,15 @@ export function createLifecycleProcessController(opts: {
       definitionHash: opts.definitionHash,
     });
     backendName = resolvedBackend;
-    const inspection = await inspectLifecycleSession({
-      backend,
-      entry,
-      expectedSessionName: sessionName,
-      expectedProjectRoot: opts.project.projectRoot,
-      expectedDefinitionHash: opts.definitionHash,
-    });
+    const inspection = await withinMuxDeadline(
+      inspectLifecycleSession({
+        backend,
+        entry,
+        expectedSessionName: sessionName,
+        expectedProjectRoot: opts.project.projectRoot,
+        expectedDefinitionHash: opts.definitionHash,
+      })
+    );
     if (inspection.decision.kind === "block") {
       throw new Error(inspection.decision.reason);
     }
@@ -309,13 +325,15 @@ export function createLifecycleProcessController(opts: {
     }
     if (inspection.decision.kind === "replace") {
       await opts.assertFresh?.();
-      await replaceInspectedLifecycleSession({
-        backend,
-        inspection,
-        sessionName,
-        projectDir: opts.project.projectDir,
-        composeProject: opts.composeProject,
-      });
+      await withinMuxDeadline(
+        replaceInspectedLifecycleSession({
+          backend,
+          inspection,
+          sessionName,
+          projectDir: opts.project.projectDir,
+          composeProject: opts.composeProject,
+        })
+      );
     }
     sessionDispositionResolved = true;
     return "create";
@@ -353,7 +371,9 @@ export function createLifecycleProcessController(opts: {
       processes: [],
       updatedAt: new Date().toISOString(),
     };
-    let sessionCreated = false;
+    // true: created; false: definitely not created; "unknown": the create
+    // call did not settle within its deadline or failed without a result.
+    let sessionCreated: boolean | "unknown" = false;
     // Revalidate, publish pending ownership, create and record as one
     // transition. With shared helper ownership it runs under the instance
     // lock, so an overlapping start cannot create the session (and finalize
@@ -371,12 +391,16 @@ export function createLifecycleProcessController(opts: {
         entry: pendingEntry,
       });
       await opts.assertFresh?.();
-      const created = await backend.createSession({
-        name: sessionName,
-        cwd: opts.project.projectRoot,
-        lifecycleOwnerToken: ownershipToken,
-      });
+      sessionCreated = "unknown";
+      const created = await withinMuxDeadline(
+        backend.createSession({
+          name: sessionName,
+          cwd: opts.project.projectRoot,
+          lifecycleOwnerToken: ownershipToken,
+        })
+      );
       if (!created.ok) {
+        sessionCreated = false;
         throw new Error(`Failed to create lifecycle session: ${sessionName}`);
       }
       sessionCreated = true;
@@ -419,13 +443,15 @@ export function createLifecycleProcessController(opts: {
       entries.find(
         (candidate) => candidate.composeProject === opts.composeProject
       ) ?? null;
-    const inspection = await inspectLifecycleSession({
-      backend,
-      entry,
-      expectedSessionName: sessionName,
-      expectedProjectRoot: opts.project.projectRoot,
-      expectedDefinitionHash: opts.definitionHash,
-    });
+    const inspection = await withinMuxDeadline(
+      inspectLifecycleSession({
+        backend,
+        entry,
+        expectedSessionName: sessionName,
+        expectedProjectRoot: opts.project.projectRoot,
+        expectedDefinitionHash: opts.definitionHash,
+      })
+    );
     if (inspection.decision.kind !== "create") {
       throw new Error(
         `Another hack up of this instance changed lifecycle session ${sessionName} while this one prepared it; nothing was changed. Run the command again.`
@@ -434,24 +460,40 @@ export function createLifecycleProcessController(opts: {
   };
 
   /**
-   * After a failed creation transition: a session that was created is stopped
-   * with its ownership token before its entry is removed. If that stop is not
-   * confirmed, the entry and token are kept so abort() or hack down can still
-   * reclaim the session; nothing is left running without an ownership record.
+   * After a failed creation transition. A session that was (or may have
+   * been) created with this start's token is stopped with that token before
+   * its entry is removed. Whenever the outcome stays unknown (a mux call hung,
+   * the stop is unconfirmed), the entry and token are kept so abort(), a
+   * later up or hack down can still prove ownership and reclaim the session.
+   * Nothing is left running without an ownership record.
    */
   const releaseFailedSessionCreation = async (release: {
     readonly backend: MuxBackend;
     readonly ownershipToken: string;
-    readonly sessionCreated: boolean;
+    readonly sessionCreated: boolean | "unknown";
   }): Promise<void> => {
-    if (release.sessionCreated) {
-      const stopped = await killLifecycleSessionWithOwnership({
-        backend: release.backend,
-        sessionName,
-        ownershipToken: release.ownershipToken,
-      }).catch(() => false);
-      if (!stopped) {
+    if (release.sessionCreated !== false) {
+      const observed = await withinMuxDeadline(
+        Promise.resolve(
+          release.backend.readLifecycleOwnerToken?.({ name: sessionName }) ??
+            null
+        )
+      ).catch(() => undefined);
+      if (observed === undefined) {
         return;
+      }
+      const foreign = observed !== null && observed !== release.ownershipToken;
+      if (!foreign) {
+        const stopped = await withinMuxDeadline(
+          killLifecycleSessionWithOwnership({
+            backend: release.backend,
+            sessionName,
+            ownershipToken: release.ownershipToken,
+          })
+        ).catch(() => false);
+        if (!stopped) {
+          return;
+        }
       }
     }
     await removeLifecycleStateEntryIfOwned({
@@ -460,6 +502,104 @@ export function createLifecycleProcessController(opts: {
       ownershipToken: release.ownershipToken,
     });
     createdOwnershipToken = null;
+  };
+
+  const publishFinalEntry = async (): Promise<void> => {
+    if (startedProcesses.length === 0 || !backendName) {
+      await removeLifecycleStateEntry({
+        projectDir: opts.project.projectDir,
+        composeProject: opts.composeProject,
+      });
+      return;
+    }
+    const ownershipToken =
+      createdOwnershipToken ?? adoptedEntry?.ownershipToken;
+    await upsertLifecycleStateEntry({
+      projectDir: opts.project.projectDir,
+      entry: {
+        composeProject: opts.composeProject,
+        projectName: opts.projectName,
+        branch: opts.branch,
+        sessionName,
+        backend: backendName,
+        ...(ownershipToken ? { ownershipToken } : {}),
+        definitionHash: opts.definitionHash,
+        processes: startedProcesses,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  };
+
+  /**
+   * Publish the final entry only while the persisted entry and the live
+   * session still carry this start's token (created or adopted). Otherwise
+   * another start replaced the session: this start gives up its cleanup and
+   * finalize authority and fails, leaving the replacement's entry intact.
+   * With no processes of its own, it removes only an entry it owns or one
+   * whose session is gone, never another start's live one.
+   */
+  const publishFinalEntryIfStillOwned = async (): Promise<void> => {
+    const entries = await readLifecycleState({
+      projectDir: opts.project.projectDir,
+    });
+    const entry =
+      entries.find(
+        (candidate) => candidate.composeProject === opts.composeProject
+      ) ?? null;
+    const backend = backendName
+      ? (await opts.mux()).backends.get(backendName)
+      : undefined;
+    if (startedProcesses.length === 0 || !backendName) {
+      if (entry && (await entryRemovable({ entry, backend }))) {
+        await removeLifecycleStateEntryIfOwned({
+          projectDir: opts.project.projectDir,
+          composeProject: opts.composeProject,
+          ownershipToken: entry.ownershipToken ?? "",
+        });
+      }
+      return;
+    }
+    const expected =
+      createdOwnershipToken ?? adoptedEntry?.ownershipToken ?? null;
+    const persistedOurs =
+      entry !== null && (entry.ownershipToken ?? null) === expected;
+    const liveOurs =
+      expected === null || !backend?.readLifecycleOwnerToken
+        ? true
+        : (await withinMuxDeadline(
+            backend.readLifecycleOwnerToken({ name: sessionName })
+          ).catch(() => undefined)) === expected;
+    if (!(persistedOurs && liveOurs)) {
+      createdOwnershipToken = null;
+      adoptedEntry = null;
+      throw new LifecycleSessionDisplacedError(sessionName);
+    }
+    await publishFinalEntry();
+  };
+
+  const entryRemovable = async (check: {
+    readonly entry: LifecycleStateEntry;
+    readonly backend: MuxBackend | undefined;
+  }): Promise<boolean> => {
+    if (
+      createdOwnershipToken !== null &&
+      check.entry.ownershipToken === createdOwnershipToken
+    ) {
+      return true;
+    }
+    if (!check.backend?.available) {
+      return false;
+    }
+    const inspection = await withinMuxDeadline(
+      inspectLifecycleSession({
+        backend: check.backend,
+        entry: check.entry,
+        expectedSessionName: sessionName,
+        expectedProjectRoot: opts.project.projectRoot,
+        expectedDefinitionHash: opts.definitionHash,
+      })
+    ).catch(() => null);
+    return inspection?.classification === "absent";
   };
 
   const startProcess = async (
@@ -520,29 +660,14 @@ export function createLifecycleProcessController(opts: {
       }
     },
     finalize: async () => {
-      if (startedProcesses.length === 0 || !backendName) {
-        await removeLifecycleStateEntry({
-          projectDir: opts.project.projectDir,
-          composeProject: opts.composeProject,
-        });
+      const ownership = opts.sessionOwnership;
+      if (!ownership) {
+        await publishFinalEntry();
         return;
       }
-      const ownershipToken =
-        createdOwnershipToken ?? adoptedEntry?.ownershipToken;
-      await upsertLifecycleStateEntry({
-        projectDir: opts.project.projectDir,
-        entry: {
-          composeProject: opts.composeProject,
-          projectName: opts.projectName,
-          branch: opts.branch,
-          sessionName,
-          backend: backendName,
-          ...(ownershipToken ? { ownershipToken } : {}),
-          definitionHash: opts.definitionHash,
-          processes: startedProcesses,
-          updatedAt: new Date().toISOString(),
-        },
-      });
+      // Conditional publication under the instance lock: another start may
+      // have replaced this start's pending session since it was created.
+      await ownership.withLock(publishFinalEntryIfStillOwned);
     },
     abort: async () => {
       await starterAbort();
@@ -565,11 +690,13 @@ export function createLifecycleProcessController(opts: {
     }
     const backend = (await opts.mux()).backends.get(backendName);
     const stopped = backend?.available
-      ? await killLifecycleSessionWithOwnership({
-          backend,
-          sessionName,
-          ownershipToken: createdOwnershipToken,
-        }).catch(() => false)
+      ? await withinMuxDeadline(
+          killLifecycleSessionWithOwnership({
+            backend,
+            sessionName,
+            ownershipToken: createdOwnershipToken,
+          })
+        ).catch(() => false)
       : false;
     if (!stopped) {
       // The session may still run: keep its ownership entry (and this
@@ -587,6 +714,42 @@ export function createLifecycleProcessController(opts: {
     });
     createdOwnershipToken = null;
   }
+}
+
+/** Raised by finalize when another start replaced this start's session. */
+export class LifecycleSessionDisplacedError extends Error {
+  constructor(sessionName: string) {
+    super(
+      `Another hack up replaced lifecycle session ${sessionName} while this one was starting; this up stopped without taking it over. Run the command again.`
+    );
+    this.name = "LifecycleSessionDisplacedError";
+  }
+}
+
+/** A mux call that did not settle within its deadline: its outcome is unknown. */
+export class MuxCommandDeadlineError extends Error {
+  constructor() {
+    super(
+      "A tmux/zellij command did not finish in time; its outcome is unknown."
+    );
+    this.name = "MuxCommandDeadlineError";
+  }
+}
+
+function withDeadline<T>(opts: {
+  readonly work: Promise<T>;
+  readonly timeoutMs: number;
+}): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new MuxCommandDeadlineError()),
+      opts.timeoutMs
+    );
+  });
+  return Promise.race([opts.work, deadline]).finally(() => {
+    clearTimeout(timer);
+  });
 }
 
 async function applyTmuxSessionEnvironment(opts: {
@@ -793,6 +956,8 @@ export async function stopLifecycleProcessController(opts: {
   readonly composeProject: string;
   /** Internal frontend fence. Legacy callers retain their original owner path. */
   readonly assertFresh?: () => Promise<void>;
+  /** Mux backends; defaults to the installed tmux/zellij backends. */
+  readonly mux?: () => Promise<ResolvedMux>;
 }): Promise<void> {
   await opts.assertFresh?.();
   const sessionName = resolveLifecycleSessionName({
@@ -808,7 +973,9 @@ export async function stopLifecycleProcessController(opts: {
     ) ?? null;
 
   const backend = lifecycleEntry
-    ? getMuxBackends().get(lifecycleEntry.backend)
+    ? (opts.mux ? (await opts.mux()).backends : getMuxBackends()).get(
+        lifecycleEntry.backend
+      )
     : null;
   if (!lifecycleEntry) {
     return;

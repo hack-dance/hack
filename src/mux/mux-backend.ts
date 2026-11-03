@@ -15,6 +15,14 @@ export type MuxSessionCreateResult =
   | { readonly ok: true; readonly session: MuxSession | null }
   | { readonly ok: false; readonly error: string; readonly stderr?: string };
 
+/**
+ * Bound for every non-interactive mux command. Some run while the shared
+ * helper instance lock is held (session decision and creation), so a hung
+ * tmux or zellij must not hold that lock indefinitely; a timed-out command is
+ * killed and its outcome treated as unknown by the caller.
+ */
+export const MUX_COMMAND_TIMEOUT_MS = 15_000;
+
 export interface MuxBackend {
   readonly name: MuxBackendName;
   readonly available: boolean;

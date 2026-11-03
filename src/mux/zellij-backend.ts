@@ -1,10 +1,11 @@
 import type { ExecResult, RunOptions } from "../lib/shell.ts";
 import { exec, findExecutableInPath } from "../lib/shell.ts";
 
-import type {
-  MuxBackend,
-  MuxSession,
-  MuxSessionCreateResult,
+import {
+  MUX_COMMAND_TIMEOUT_MS,
+  type MuxBackend,
+  type MuxSession,
+  type MuxSessionCreateResult,
 } from "./mux-backend.ts";
 
 const LIFECYCLE_OWNER_TAB_PREFIX = "hack-lifecycle-owner-";
@@ -24,6 +25,7 @@ export function createZellijBackend(): MuxBackend {
       ["zellij", "list-sessions", "--no-formatting", "--short"],
       {
         stdin: "ignore",
+        timeoutMs: MUX_COMMAND_TIMEOUT_MS,
       }
     );
     if (result.exitCode !== 0) {
@@ -63,6 +65,7 @@ export function createZellijBackend(): MuxBackend {
       ["zellij", "attach", "--create-background", opts.name],
       {
         stdin: "ignore",
+        timeoutMs: MUX_COMMAND_TIMEOUT_MS,
         cwd: opts.cwd,
         env: opts.env,
       }
@@ -85,10 +88,14 @@ export function createZellijBackend(): MuxBackend {
         ],
         {
           stdin: "ignore",
+          timeoutMs: MUX_COMMAND_TIMEOUT_MS,
         }
       );
       if (ownerResult.exitCode !== 0) {
-        await exec(["zellij", "kill-session", opts.name], { stdin: "ignore" });
+        await exec(["zellij", "kill-session", opts.name], {
+          stdin: "ignore",
+          timeoutMs: MUX_COMMAND_TIMEOUT_MS,
+        });
         return {
           ok: false,
           error: "owner_metadata_failed",
@@ -107,6 +114,7 @@ export function createZellijBackend(): MuxBackend {
   }): Promise<ExecResult> => {
     return await exec(["zellij", "kill-session", opts.name], {
       stdin: "ignore",
+      timeoutMs: MUX_COMMAND_TIMEOUT_MS,
     });
   };
 
@@ -115,7 +123,7 @@ export function createZellijBackend(): MuxBackend {
   }): Promise<string | null> => {
     const result = await exec(
       ["zellij", "--session", opts.name, "action", "dump-layout"],
-      { stdin: "ignore" }
+      { stdin: "ignore", timeoutMs: MUX_COMMAND_TIMEOUT_MS }
     );
     if (result.exitCode !== 0) {
       return null;
@@ -129,7 +137,7 @@ export function createZellijBackend(): MuxBackend {
   }): Promise<ReadonlySet<string> | null> => {
     const result = await exec(
       ["zellij", "--session", opts.name, "action", "dump-layout"],
-      { stdin: "ignore" }
+      { stdin: "ignore", timeoutMs: MUX_COMMAND_TIMEOUT_MS }
     );
     if (result.exitCode !== 0) {
       return null;
@@ -159,6 +167,7 @@ export function createZellijBackend(): MuxBackend {
       ],
       {
         stdin: "ignore",
+        timeoutMs: MUX_COMMAND_TIMEOUT_MS,
         env: { ...(opts.env ?? {}) },
       }
     );
@@ -171,7 +180,7 @@ export function createZellijBackend(): MuxBackend {
     // Best-effort. This sends raw characters and does not attempt to encode special key chords.
     return await exec(
       ["zellij", "--session", opts.name, "action", "write-chars", opts.keys],
-      { stdin: "ignore" }
+      { stdin: "ignore", timeoutMs: MUX_COMMAND_TIMEOUT_MS }
     );
   };
 

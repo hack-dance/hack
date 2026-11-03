@@ -73,5 +73,5 @@ whose target is not mounted, and the checks still pass because they do not need
 Git. A failing check exits non-zero, Hack returns the command's exact exit
 status, and an ordinary down keeps both instances' cache volumes. Each instance gets
 its own caches; cross-worktree reuse is still open. The copy uses the runner's
-cached `oven/bun:1.4.2-slim` digest instead of the pinned Alpine image, and
+cached `oven/bun:1.4.4-slim` digest instead of the pinned Alpine image, and
 never pulls.

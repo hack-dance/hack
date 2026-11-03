@@ -19,7 +19,7 @@ export async function buildStorageWitnessHelper(opts: {
   readonly outputDirectory: string;
 }): Promise<void> {
   const directory = opts.outputDirectory;
-  if (!isAbsolute(directory) || Bun.version !== "1.4.2") {
+  if (!isAbsolute(directory) || Bun.version !== "1.4.4") {
     throw new Error(
       "Pinned Bun and an absolute exclusive output directory are required."
     );
@@ -67,7 +67,7 @@ export async function buildStorageWitnessHelper(opts: {
       typeof packageJson === "object" &&
       packageJson !== null &&
       "packageManager" in packageJson &&
-      packageJson.packageManager === "bun@1.4.2"
+      packageJson.packageManager === "bun@1.4.4"
     )
   ) {
     throw new Error("Helper source Bun pin refused.");

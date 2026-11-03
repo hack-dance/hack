@@ -263,7 +263,7 @@ async function setup(ctx: ScenarioContext) {
   const image = await docker([
     "image",
     "inspect",
-    "oven/bun:1.4.2-slim",
+    "oven/bun:1.4.4-slim",
     "--format",
     "{{.Id}}",
   ]);

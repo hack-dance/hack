@@ -594,3 +594,11 @@ for (const autostartCase of AUTOSTART_CASES) {
     ).toBe(started);
   });
 }
+
+test("a relative HOME cannot make a cwd-relative HACK_HOME look like the owner", () => {
+  expect(
+    resolveLaunchdAccess({
+      env: { HOME: "relative-home", HACK_HOME: "relative-home/.hack" },
+    }).allowed
+  ).toBe(false);
+});

@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 
 import { readOptionalTextFile } from "../lib/fs.ts";
+import { readHomeEnv } from "../lib/home-dir.ts";
 import { renderCodexSkill } from "./codex-skill.ts";
 import { normalizeInstructionText } from "./instruction-source.ts";
 import {
@@ -132,11 +133,12 @@ function resolveSharedSkillPath(opts: {
 }):
   | { readonly ok: true; readonly path: string }
   | { readonly ok: false; readonly message: string } {
-  const home = (process.env.HOME ?? "").trim();
+  const home = readHomeEnv();
   if (!home) {
     return {
       ok: false,
-      message: "HOME is not set; cannot resolve shared skills.",
+      message:
+        "HOME is not set to an absolute path; cannot resolve shared skills.",
     };
   }
   return {

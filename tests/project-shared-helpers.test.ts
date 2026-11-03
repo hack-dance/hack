@@ -10,6 +10,7 @@ import {
 import { readProjectConfig } from "../src/lib/project.ts";
 import {
   buildSharedHelperSpec,
+  captureSharedHelperShutdownGeneration,
   markSharedHelperInstanceStopping,
   type ProjectSharedHelperConfig,
   parseProjectSharedHelpers,
@@ -1173,22 +1174,132 @@ test(
       return Promise.resolve();
     };
     // No newer start: the earlier start still owns its processes.
-    expect(await earlier.runUnlessNewerStart(cleanup("alone"))).toBe(true);
+    expect(await earlier.runUnlessNewerStart(cleanup("alone"))).toBe("ran");
     await startProjectSharedHelpers({
       ...context(root),
       helpers: [helper],
       composeProject: BRANCH_A,
     });
     // A newer start is current: it may have adopted the session.
-    expect(await earlier.runUnlessNewerStart(cleanup("newer"))).toBe(false);
+    expect(await earlier.runUnlessNewerStart(cleanup("newer"))).toBe(
+      "newer-start"
+    );
     // After a down, nothing newer owns the session: clean up.
     await markSharedHelperInstanceStopping({
       helpers: [helper],
       composeProject: BRANCH_A,
       hackDir,
     });
-    expect(await earlier.runUnlessNewerStart(cleanup("down"))).toBe(true);
+    expect(await earlier.runUnlessNewerStart(cleanup("down"))).toBe("ran");
     expect(cleaned).toEqual(["alone", "down"]);
+    await releaseProjectSharedHelpers({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+  },
+  TIMEOUT
+);
+
+test(
+  "when the instance lock outlasts the cleanup timeout, an earlier start keeps the session a newer start may have adopted",
+  async () => {
+    const root = await scratch();
+    const hackDir = join(root, "hack-home");
+    const helper = helperConfig({ port: freePort() });
+    const earlier = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    // B is already successful: it is current and may have adopted the session.
+    await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    // C holds the instance lock (as a slow helper ensure would) for longer
+    // than the cleanup's lock timeout.
+    let releaseLock = (): void => undefined;
+    const held = new Promise<void>((resolveHeld) => {
+      releaseLock = resolveHeld;
+    });
+    let acquired = (): void => undefined;
+    const isHeld = new Promise<void>((resolveAcquired) => {
+      acquired = resolveAcquired;
+    });
+    const lockHolder = withProjectsRegistryLock({
+      lockPath: join(
+        hackDir,
+        "shared-helpers",
+        ".instances",
+        `${BRANCH_A}.lock`
+      ),
+      run: async () => {
+        acquired();
+        await held;
+      },
+    });
+    await isHeld;
+    let cleaned = false;
+    const outcome = await earlier.runUnlessNewerStart(() => {
+      cleaned = true;
+      return Promise.resolve();
+    });
+    releaseLock();
+    await lockHolder;
+    expect(outcome).toBe("undecidable");
+    expect(cleaned).toBe(false);
+    await releaseProjectSharedHelpers({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+  },
+  TIMEOUT
+);
+
+test(
+  "a down during an operation's preparation hooks supersedes it before any helper starts",
+  async () => {
+    const root = await scratch();
+    const hackDir = join(root, "hack-home");
+    const helper = helperConfig({ port: freePort() });
+    // Captured when the operation begins, before its up.before hooks.
+    const captured = await captureSharedHelperShutdownGeneration({
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    // A down completes while the hooks run.
+    await markSharedHelperInstanceStopping({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    await releaseProjectSharedHelpers({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    const error = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      shutdownGeneration: captured,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SharedHelperSupersededError);
+    expect(await readHelperClaim(root, helper)).toBeNull();
+    // A start that captures after the down proceeds normally.
+    const fresh = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      shutdownGeneration: await captureSharedHelperShutdownGeneration({
+        composeProject: BRANCH_A,
+        hackDir,
+      }),
+    });
+    await fresh.assertCurrent();
     await releaseProjectSharedHelpers({
       helpers: [helper],
       composeProject: BRANCH_A,

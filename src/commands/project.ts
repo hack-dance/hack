@@ -289,12 +289,15 @@ import {
   upsertProjectRuntimeStateEntry,
 } from "../lib/project-runtime-state.ts";
 import {
+  captureSharedHelperShutdownGeneration,
   describeSharedHelperRelease,
   describeSharedHelperStart,
   isSharedHelperReleaseProblem,
   markSharedHelperInstanceStopping,
+  type ProcessCleanupOutcome,
   releaseProjectSharedHelpers,
   type SharedHelperRelease,
+  type SharedHelperShutdownGeneration,
   SharedHelperSupersededError,
   startProjectSharedHelpers,
   withTerminationAbort,
@@ -1882,6 +1885,14 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
       `Invalid lifecycle.sharedHelpers; nothing was started: ${opts.cfg.sharedHelpersError}`
     );
   }
+  // Captured before any preparation hook runs: a down that completes while
+  // the hooks run supersedes this operation (see startProjectSharedHelpers).
+  const shutdownGeneration =
+    (opts.cfg.lifecycle?.sharedHelpers ?? []).length > 0
+      ? await captureSharedHelperShutdownGeneration({
+          composeProject: opts.composeProject,
+        })
+      : undefined;
   const beforeCommands = opts.cfg.lifecycle?.up?.before;
   const definitionHash = resolveProjectLifecycleDefinitionHash({
     beforeCommands,
@@ -1908,6 +1919,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     }
     const lifecycleStart = await startWithSharedHelpers({
       ...opts,
+      shutdownGeneration,
       startProcesses: () =>
         startLifecycleProcesses({
           project: opts.project,
@@ -1975,6 +1987,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
 
   const started = await startWithSharedHelpers({
     ...opts,
+    shutdownGeneration,
     startProcesses: async () => {
       await starter.startMany({
         processes: opts.cfg.lifecycle?.processes ?? [],
@@ -2055,6 +2068,7 @@ async function startWithSharedHelpers(opts: {
   readonly composeProject: string;
   readonly startProcesses: () => Promise<LifecycleProcessStart>;
   readonly abortProcesses: () => Promise<void>;
+  readonly shutdownGeneration: SharedHelperShutdownGeneration | undefined;
 }): Promise<LifecycleProcessStart> {
   const failed = (error: unknown): Error =>
     error instanceof Error
@@ -2103,7 +2117,7 @@ type LifecycleSharedHelpers = {
   }) => Promise<void>;
   readonly runUnlessNewerStart: (
     cleanup: () => Promise<void>
-  ) => Promise<boolean>;
+  ) => Promise<ProcessCleanupOutcome>;
 };
 
 /**
@@ -2116,6 +2130,7 @@ async function startLifecycleSharedHelpers(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly composeProject: string;
   readonly signal: AbortSignal;
+  readonly shutdownGeneration: SharedHelperShutdownGeneration | undefined;
 }): Promise<LifecycleSharedHelpers> {
   const started = await startProjectSharedHelpers({
     helpers: opts.cfg.lifecycle?.sharedHelpers,
@@ -2123,6 +2138,9 @@ async function startLifecycleSharedHelpers(opts: {
     composeProject: opts.composeProject,
     env: opts.env,
     signal: opts.signal,
+    ...(opts.shutdownGeneration
+      ? { shutdownGeneration: opts.shutdownGeneration }
+      : {}),
     report: (record) => {
       if (record.result.state !== "failed") {
         logger.info({ message: describeSharedHelperStart(record) });
@@ -2166,7 +2184,14 @@ function withSharedHelperCleanup(opts: {
         // session, which keeps this start's ownership token: only clean up
         // processes while no newer start is current.
         if (processCleanup) {
-          await sharedHelpers.runUnlessNewerStart(processCleanup);
+          const outcome =
+            await sharedHelpers.runUnlessNewerStart(processCleanup);
+          if (outcome === "undecidable") {
+            logger.warn({
+              message:
+                "Kept this instance's lifecycle session: the shared helper instance lock was busy, so whether a newer hack up adopted it could not be checked. Run hack down to stop it if nothing uses it.",
+            });
+          }
         }
       } finally {
         await sharedHelpers.rollback();

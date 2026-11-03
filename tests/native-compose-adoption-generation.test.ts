@@ -43,7 +43,6 @@ const {
   compiler,
   stateRoot,
   prepared,
-  mutationCommands,
   artifactPath,
   refusal,
   linkedCheckout,

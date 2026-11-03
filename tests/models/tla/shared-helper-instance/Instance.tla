@@ -17,15 +17,22 @@
 \*   AbandonReplace      a timed-out replacement releases the lock while its
 \*                       stale ownership read and name-based kill continue
 \*   MisreadTimeout      a timed-out session listing reads as absence
+\*   UnlockedFailureCleanup  a failed creation's cleanup reads the token
+\*                       under the lock but kills by name after releasing it
+\*   UnfencedLaunch      process launch (and environment setup) mutate the
+\*                       session by name without the lock and token check
+\*   ReleaseOnFailedStop a down whose session stop failed or is unknown still
+\*                       releases the instance's helper holders
 EXTENDS Naturals, TLC
 CONSTANTS CheckEpoch, Revalidate, StopOnEpochFailure, FinalizeRecheck,
-          AbandonCreate, AbandonReplace, MisreadTimeout
+          AbandonCreate, AbandonReplace, MisreadTimeout,
+          UnlockedFailureCleanup, UnfencedLaunch, ReleaseOnFailedStop
 Ups == {"a", "b"}
 None == "none"
 VARIABLES pc, cap, gen, epoch, owned, session, token, entry, healthy, lock, down,
-          mytok, stale
+          mytok, stale, foreign, released
 vars == <<pc, cap, gen, epoch, owned, session, token, entry, healthy, lock, down,
-          mytok, stale>>
+          mytok, stale, foreign, released>>
 
 Init == /\ pc = [u \in Ups |-> "idle"]
         /\ cap = [u \in Ups |-> 0]
@@ -45,6 +52,11 @@ Init == /\ pc = [u \in Ups |-> "idle"]
         /\ mytok = [u \in Ups |-> None]
         \* Token an abandoned replacement read before its lock was released.
         /\ stale = [u \in Ups |-> None]
+        \* A start launched a process into a session carrying another token.
+        /\ foreign = FALSE
+        \* The instance's helper holders were released (by a down) and not
+        \* acquired again since.
+        /\ released = FALSE
 
 Free == lock = None
 
@@ -52,12 +64,12 @@ Free == lock = None
 Capture(u) == /\ pc[u] = "idle"
               /\ pc' = [pc EXCEPT ![u] = "captured"]
               /\ cap' = [cap EXCEPT ![u] = gen]
-              /\ UNCHANGED <<gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale>>
+              /\ UNCHANGED <<gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale, foreign, released>>
 
 \* startProjectSharedHelpers refuses a start a down superseded.
 Superseded(u) == /\ pc[u] = "captured" /\ gen # cap[u] /\ Free
                  /\ pc' = [pc EXCEPT ![u] = "done"]
-                 /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale>>
+                 /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale, foreign, released>>
 
 \* Helpers ready, then the controller's session decision under the lock:
 \* adopt an owned healthy session (recording the adoption epoch), refuse a
@@ -81,7 +93,8 @@ Decide(u) == /\ pc[u] = "captured" /\ gen = cap[u] /\ Free
                         /\ UNCHANGED <<epoch, session, token, entry, healthy, mytok, stale>>
                    ELSE /\ pc' = [pc EXCEPT ![u] = "create"]
                         /\ UNCHANGED <<epoch, session, token, entry, healthy, mytok, stale>>
-             /\ UNCHANGED <<cap, gen, owned, lock, down, stale>>
+             /\ released' = FALSE
+             /\ UNCHANGED <<cap, gen, owned, lock, down, stale, foreign>>
 
 \* Session creation transaction, one lock acquisition: revalidate, publish
 \* pending ownership, create, record the epoch.
@@ -91,12 +104,12 @@ CreateBegin(u) == /\ pc[u] = "create" /\ Free
                              /\ UNCHANGED lock
                         ELSE /\ pc' = [pc EXCEPT ![u] = "publish"]
                              /\ lock' = u
-                  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, down, mytok, stale>>
+                  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, down, mytok, stale, foreign, released>>
 
 Publish(u) == /\ pc[u] = "publish" /\ lock = u
               /\ entry' = u /\ healthy' = FALSE
               /\ pc' = [pc EXCEPT ![u] = "createsess"]
-              /\ UNCHANGED <<cap, gen, epoch, owned, session, token, lock, down, mytok, stale>>
+              /\ UNCHANGED <<cap, gen, epoch, owned, session, token, lock, down, mytok, stale, foreign, released>>
 
 \* createSession fails when a session already exists; the pending entry is
 \* removed only if it is still this start's (removeLifecycleStateEntryIfOwned).
@@ -106,11 +119,11 @@ CreateSession(u) ==
         THEN /\ entry' = IF entry = u THEN None ELSE entry
              /\ lock' = None
              /\ pc' = [pc EXCEPT ![u] = "done"]
-             /\ UNCHANGED <<session, token, mytok, stale>>
+             /\ UNCHANGED <<session, token, mytok, stale, foreign, released>>
         ELSE /\ session' = "alive" /\ token' = u
              /\ pc' = [pc EXCEPT ![u] = "record"]
-             /\ UNCHANGED <<entry, lock, mytok, stale>>
-  /\ UNCHANGED <<cap, gen, epoch, owned, healthy, down, mytok, stale>>
+             /\ UNCHANGED <<entry, lock, mytok, stale, foreign, released>>
+  /\ UNCHANGED <<cap, gen, epoch, owned, healthy, down, mytok, stale, foreign, released>>
 
 Record(u) == /\ pc[u] = "record" /\ lock = u
              /\ epoch' = <<u, "created">>
@@ -118,13 +131,29 @@ Record(u) == /\ pc[u] = "record" /\ lock = u
              /\ mytok' = [mytok EXCEPT ![u] = u]
              /\ lock' = None
              /\ pc' = [pc EXCEPT ![u] = "starting"]
-             /\ UNCHANGED <<cap, gen, session, token, entry, healthy, down, stale>>
+             /\ UNCHANGED <<cap, gen, session, token, entry, healthy, down, stale, foreign, released>>
 
-\* Lifecycle processes start in the session outside the lock; the entry is
-\* still pending (not healthy), so another start may replace the session.
-StartProcesses(u) == /\ pc[u] = "starting"
-                     /\ pc' = [pc EXCEPT ![u] = "finalize"]
-                     /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale>>
+\* Lifecycle processes start while the entry is still pending (not healthy),
+\* so another start may replace the session between launches. Each launch
+\* is fenced: under the lock, and only while the persisted entry and the
+\* live session still carry this start's token; a displaced start gives up
+\* its authority and fails. (tmux environment setup runs inside the locked
+\* creation transaction, Publish..Record, so it needs no step of its own.)
+\* The unfenced control launches by session name whatever it now holds.
+StartProcesses(u) ==
+  /\ pc[u] = "starting"
+  /\ IF UnfencedLaunch
+        THEN /\ pc' = [pc EXCEPT ![u] = "finalize"]
+             /\ foreign' = (foreign \/ (session = "alive" /\ token # mytok[u]))
+             /\ UNCHANGED owned
+        ELSE /\ Free
+             /\ IF entry = mytok[u] /\ token = mytok[u]
+                   THEN /\ pc' = [pc EXCEPT ![u] = "finalize"]
+                        /\ UNCHANGED owned
+                   ELSE /\ owned' = [owned EXCEPT ![u] = "no"]
+                        /\ pc' = [pc EXCEPT ![u] = "done"]
+             /\ UNCHANGED foreign
+  /\ UNCHANGED <<cap, gen, epoch, session, token, entry, healthy, lock, down, mytok, stale, released>>
 
 \* finalize() under the lock: publish the final (healthy) entry only while the
 \* persisted entry and the live session still carry this start's token;
@@ -137,41 +166,51 @@ Finalize(u) ==
              /\ UNCHANGED owned
         ELSE /\ owned' = [owned EXCEPT ![u] = "no"]
              /\ pc' = [pc EXCEPT ![u] = "done"]
-             /\ UNCHANGED <<entry, healthy, stale>>
-  /\ UNCHANGED <<cap, gen, epoch, session, token, lock, down, mytok, stale>>
+             /\ UNCHANGED <<entry, healthy>>
+  /\ UNCHANGED <<cap, gen, epoch, session, token, lock, down, mytok, stale, foreign, released>>
 
-\* The epoch record fails after the session was created.
+\* The epoch record fails after the session was created. Its cleanup (token
+\* read, name-based kill, entry removal) runs inside the creation lock.
 RecordFailStopped(u) ==
-  /\ StopOnEpochFailure /\ pc[u] = "record" /\ lock = u
+  /\ StopOnEpochFailure /\ ~UnlockedFailureCleanup
+  /\ pc[u] = "record" /\ lock = u
   /\ session' = "absent" /\ token' = None
   /\ entry' = IF entry = u THEN None ELSE entry
   /\ lock' = None /\ pc' = [pc EXCEPT ![u] = "done"]
-  /\ UNCHANGED <<cap, gen, epoch, owned, healthy, down, mytok, stale>>
+  /\ UNCHANGED <<cap, gen, epoch, owned, healthy, down, mytok, stale, foreign, released>>
+\* Control: the cleanup reads the token under the lock, releases it, and the
+\* name-based kill lands later (LateKill), possibly on a replacement.
+RecordFailReadUnlocked(u) ==
+  /\ StopOnEpochFailure /\ UnlockedFailureCleanup
+  /\ pc[u] = "record" /\ lock = u
+  /\ stale' = [stale EXCEPT ![u] = token]
+  /\ lock' = None /\ pc' = [pc EXCEPT ![u] = "pendingkill"]
+  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, down, mytok, foreign, released>>
 RecordFailUnconfirmed(u) ==
   /\ StopOnEpochFailure /\ pc[u] = "record" /\ lock = u
   /\ owned' = [owned EXCEPT ![u] = "token"]
   /\ lock' = None /\ pc' = [pc EXCEPT ![u] = "failed"]
-  /\ UNCHANGED <<cap, gen, epoch, session, token, entry, healthy, down, mytok, stale>>
+  /\ UNCHANGED <<cap, gen, epoch, session, token, entry, healthy, down, mytok, stale, foreign, released>>
 RecordFailUnstopped(u) ==
   /\ ~StopOnEpochFailure /\ pc[u] = "record" /\ lock = u
   /\ entry' = IF entry = u THEN None ELSE entry
   /\ lock' = None /\ pc' = [pc EXCEPT ![u] = "done"]
-  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, healthy, down, mytok, stale>>
+  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, healthy, down, mytok, stale, foreign, released>>
 
 \* assertCurrent before containers start.
 Launch(u) == /\ pc[u] = "ready" /\ gen = cap[u] /\ Free
              /\ pc' = [pc EXCEPT ![u] = "launched"]
-             /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale>>
+             /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale, foreign, released>>
 
 \* assertCurrent after containers start.
 Succeed(u) == /\ pc[u] = "launched" /\ gen = cap[u] /\ Free
               /\ pc' = [pc EXCEPT ![u] = "succeeded"]
-              /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale>>
+              /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale, foreign, released>>
 
 \* Compose failure, SIGINT/SIGTERM, or a failed assertCurrent.
 Fail(u) == /\ pc[u] \in {"starting", "finalize", "ready", "launched"}
            /\ pc' = [pc EXCEPT ![u] = "failed"]
-           /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale>>
+           /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale, foreign, released>>
 
 \* runIfOwned under the lock, then the token-checked kill and entry removal.
 Authorized(u) == \/ owned[u] = "token"
@@ -182,13 +221,13 @@ Cleanup(u) == /\ pc[u] = "failed" /\ Free
               /\ IF Authorized(u) /\ session = "alive" /\ token = u
                     THEN /\ session' = "absent" /\ token' = None
                          /\ entry' = IF entry = u THEN None ELSE entry
-                    ELSE UNCHANGED <<session, token, entry, mytok, stale>>
-              /\ UNCHANGED <<cap, gen, epoch, owned, healthy, lock, down, mytok, stale>>
+                    ELSE UNCHANGED <<session, token, entry, mytok, stale, foreign, released>>
+              /\ UNCHANGED <<cap, gen, epoch, owned, healthy, lock, down, mytok, stale, foreign, released>>
 
 \* The instance lock stayed busy: ownership undecidable, session kept.
 CleanupUndecidable(u) == /\ pc[u] = "failed"
                          /\ pc' = [pc EXCEPT ![u] = "done"]
-                         /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale>>
+                         /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale, foreign, released>>
 
 \* A committed down: the stopping mark advances the generation; then the
 \* normal stop controller stops the session through the persisted entry
@@ -196,14 +235,23 @@ CleanupUndecidable(u) == /\ pc[u] = "failed"
 \* release advances the generation again (one step here; see README).
 DownMark == /\ down = "idle" /\ Free
             /\ down' = "marked" /\ gen' = gen + 1
-            /\ UNCHANGED <<pc, cap, epoch, owned, session, token, entry, healthy, lock, mytok, stale>>
+            /\ UNCHANGED <<pc, cap, epoch, owned, session, token, entry, healthy, lock, mytok, stale, foreign, released>>
 DownStop == /\ down = "marked" /\ Free
             /\ down' = "stopped" /\ gen' = gen + 1
             /\ IF session = "alive" /\ entry = token
                   THEN /\ session' = "absent" /\ token' = None
-                  ELSE UNCHANGED <<session, token, mytok, stale>>
-            /\ entry' = None /\ healthy' = FALSE
-            /\ UNCHANGED <<pc, cap, epoch, owned, lock, mytok, stale>>
+                  ELSE UNCHANGED <<session, token>>
+            /\ entry' = None /\ healthy' = FALSE /\ released' = TRUE
+            /\ UNCHANGED <<pc, cap, epoch, owned, lock, mytok, stale, foreign>>
+\* The session stop failed or its outcome is unknown: the session and its
+\* entry stay, and so do the helper holders (the down fails; a later down
+\* releases both). The control releases the holders anyway.
+DownStopFailed == /\ down = "marked" /\ Free /\ session = "alive"
+                  /\ down' = "failed"
+                  /\ IF ReleaseOnFailedStop
+                        THEN /\ gen' = gen + 1 /\ released' = TRUE
+                        ELSE UNCHANGED <<gen, released>>
+                  /\ UNCHANGED <<pc, cap, epoch, owned, session, token, entry, healthy, lock, mytok, stale, foreign>>
 
 \* Bounded mux calls settle under the lock (positive design): a timed-out
 \* createSession was killed; the server either created the session first
@@ -213,25 +261,25 @@ CreateTimeoutCreated(u) ==
   /\ session' = "alive" /\ token' = u
   /\ owned' = [owned EXCEPT ![u] = "token"]
   /\ lock' = None /\ pc' = [pc EXCEPT ![u] = "failed"]
-  /\ UNCHANGED <<cap, gen, epoch, entry, healthy, down, mytok, stale>>
+  /\ UNCHANGED <<cap, gen, epoch, entry, healthy, down, mytok, stale, foreign, released>>
 CreateTimeoutNotCreated(u) ==
   /\ ~AbandonCreate /\ pc[u] = "createsess" /\ lock = u /\ session = "absent"
   /\ entry' = IF entry = u THEN None ELSE entry
   /\ lock' = None /\ pc' = [pc EXCEPT ![u] = "done"]
-  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, healthy, down, mytok, stale>>
+  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, healthy, down, mytok, stale, foreign, released>>
 
 \* Broken design: the deadline stops waiting but the call keeps running.
 CreateAbandon(u) ==
   /\ AbandonCreate /\ pc[u] = "createsess" /\ lock = u /\ session = "absent"
   /\ lock' = None /\ pc' = [pc EXCEPT ![u] = "pending"]
-  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, down, mytok, stale>>
+  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, down, mytok, stale, foreign, released>>
 LateCreate(u) ==
   /\ pc[u] = "pending"
   /\ IF session = "absent"
         THEN /\ session' = "alive" /\ token' = u
         ELSE UNCHANGED <<session, token>>
   /\ pc' = [pc EXCEPT ![u] = "done"]
-  /\ UNCHANGED <<cap, gen, epoch, owned, entry, healthy, lock, down, mytok, stale>>
+  /\ UNCHANGED <<cap, gen, epoch, owned, entry, healthy, lock, down, mytok, stale, foreign, released>>
 
 \* Broken design: a stale (pending) session's replacement reads its token,
 \* then its deadline releases the lock; the kill and retirement continue.
@@ -240,37 +288,37 @@ ReplaceAbandon(u) ==
   /\ session = "alive" /\ entry = token /\ ~healthy
   /\ stale' = [stale EXCEPT ![u] = token]
   /\ pc' = [pc EXCEPT ![u] = "pendingkill"]
-  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok>>
+  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, foreign, released>>
 LateKill(u) ==
   /\ pc[u] = "pendingkill"
   \* The stale read matched, so the kill goes out by session name.
   /\ session' = "absent" /\ token' = None
   /\ entry' = IF entry = stale[u] THEN None ELSE entry
   /\ pc' = [pc EXCEPT ![u] = "done"]
-  /\ UNCHANGED <<cap, gen, epoch, owned, healthy, lock, down, mytok, stale>>
+  /\ UNCHANGED <<cap, gen, epoch, owned, healthy, lock, down, mytok, stale, foreign, released>>
 
 \* A timed-out inspection (positive design): unknown, fail closed.
 InspectTimeout(u) ==
   /\ pc[u] \in {"captured", "create"} /\ Free
   /\ pc' = [pc EXCEPT ![u] = "done"]
-  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale>>
+  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale, foreign, released>>
 \* Broken design: a timed-out listing reads as absence, both in the decision
 \* and in the creation transaction's revalidation.
 MisreadDecide(u) ==
   /\ MisreadTimeout /\ pc[u] = "captured" /\ gen = cap[u] /\ Free
   /\ session = "alive"
   /\ pc' = [pc EXCEPT ![u] = "create"]
-  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale>>
+  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, lock, down, mytok, stale, foreign, released>>
 MisreadCreateBegin(u) ==
   /\ MisreadTimeout /\ pc[u] = "create" /\ Free /\ session = "alive"
   /\ pc' = [pc EXCEPT ![u] = "publish"] /\ lock' = u
-  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, down, mytok, stale>>
+  /\ UNCHANGED <<cap, gen, epoch, owned, session, token, entry, healthy, down, mytok, stale, foreign, released>>
 
 Next == \/ \E u \in Ups :
              \/ Capture(u) \/ Superseded(u) \/ Decide(u)
              \/ CreateBegin(u) \/ Publish(u) \/ CreateSession(u)
              \/ Record(u) \/ StartProcesses(u) \/ Finalize(u)
-             \/ RecordFailStopped(u)
+             \/ RecordFailStopped(u) \/ RecordFailReadUnlocked(u)
              \/ RecordFailUnconfirmed(u) \/ RecordFailUnstopped(u)
              \/ CreateTimeoutCreated(u) \/ CreateTimeoutNotCreated(u)
              \/ CreateAbandon(u) \/ LateCreate(u)
@@ -278,7 +326,7 @@ Next == \/ \E u \in Ups :
              \/ InspectTimeout(u) \/ MisreadDecide(u) \/ MisreadCreateBegin(u)
              \/ Launch(u) \/ Succeed(u) \/ Fail(u)
              \/ Cleanup(u) \/ CleanupUndecidable(u)
-        \/ DownMark \/ DownStop
+        \/ DownMark \/ DownStop \/ DownStopFailed
 Spec == Init /\ [][Next]_vars
 
 \* An up that succeeded with no down since its capture keeps a live session.
@@ -288,4 +336,11 @@ SessionSafe == \A u \in Ups :
 \* A live session always has a persisted entry naming its token, so the
 \* normal stop controller (hack down) can reclaim it.
 Reclaimable == session = "alive" => entry = token
+
+\* A start never mutates (launches into) a session carrying another token.
+NoForeignLaunch == ~foreign
+
+\* A down that could not confirm the session stopped keeps the helper
+\* holders that session's processes may still use.
+HelpersKeptForSession == (down = "failed" /\ session = "alive") => ~released
 ====

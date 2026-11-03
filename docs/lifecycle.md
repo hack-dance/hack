@@ -245,6 +245,12 @@ Behavior:
 - A release that fails or cannot confirm the stop keeps the claim and fails `hack down` and
   `hack restart` with `E_LIFECYCLE_FAILED` (non-zero exit, the helper names in `detail`).
   Fix the claim and run `hack down` again.
+- Holders are released only after the instance's lifecycle session stopped. If that stop
+  fails or cannot be confirmed, the session's processes may still use the helpers: `hack
+  down`, `hack restart` and native retirement keep every holder, warn, and fail the same
+  way. Run `hack down` again once the session can be stopped. Likewise, an up whose failed
+  start kept its lifecycle session (its stop could not be confirmed) keeps the holders it
+  added.
 - A `hack down` that overlaps a `hack up` of the same instance (same branch):
   - `hack down` marks the instance as stopping once the down is committed: after its
     `lifecycle.down.before` hooks succeed (and, on the native path, after the ownership and
@@ -277,7 +283,8 @@ Behavior:
     An up that only adopted the session never stops it.
   - An up whose lifecycle session another up replaced while it was still starting (its
     entry was still pending) fails with an error saying so. It does not publish over the
-    replacement or stop it; the replacement stays owned and `hack down` can stop it.
+    replacement, start processes or set environment in it, or stop it; the replacement
+    stays owned and `hack down` can stop it.
   - A failed up releases only the helper holders it added, and only while it is the latest
     up of the instance to have its helpers ready.
   - The failed up's other failure handling is unchanged (for example, it still clears the

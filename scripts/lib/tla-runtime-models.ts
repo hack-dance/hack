@@ -1237,14 +1237,15 @@ const contracts: readonly ModelContract[] = [
   {
     // Shared helper instance lifecycle-session ownership (HACK-1142): the
     // controller's session decision, the locked creation transaction
-    // (revalidate, publish, create, record) and its failure outcomes, process
-    // start outside the lock, the locked conditional finalize, bounded mux
-    // calls that settle under the lock (with controls for abandoned calls
-    // and timeouts read as absence), and creator cleanup by session epoch;
-    // see tests/models/tla/README.md.
+    // (revalidate, publish, create, environment, record) and its failure
+    // outcomes and cleanup, fenced process launches, the locked conditional
+    // finalize, bounded mux calls that settle under the lock (with controls
+    // for abandoned calls and timeouts read as absence), creator cleanup by
+    // session epoch, and a down whose session stop fails; see
+    // tests/models/tla/README.md.
     name: "shared-helper-instance",
     module: "Instance",
-    states: 6039,
+    states: 7466,
     invariant: "SessionSafe",
     action: "Succeed",
     fields: [
@@ -1368,6 +1369,61 @@ const contracts: readonly ModelContract[] = [
             ],
           },
         ],
+      },
+      {
+        name: "unlocked-failure-cleanup",
+        negative: true,
+        invariant: "SessionSafe",
+        action: "LateKill",
+        fields: [
+          'session = "absent"',
+          'pc = [a |-> "done", b |-> "succeeded"]',
+        ],
+        // The stale kill can land before or after the victim's Succeed;
+        // either up can be the victim.
+        alternativeWitnesses: [
+          {
+            action: "LateKill",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "succeeded", b |-> "done"]',
+            ],
+          },
+          {
+            action: "Succeed",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "done", b |-> "succeeded"]',
+            ],
+          },
+          {
+            action: "Succeed",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "succeeded", b |-> "done"]',
+            ],
+          },
+        ],
+      },
+      {
+        name: "unfenced-launch",
+        negative: true,
+        invariant: "NoForeignLaunch",
+        action: "StartProcesses",
+        fields: ["foreign = TRUE", 'token = "b"', 'entry = "b"'],
+        alternativeWitnesses: [
+          {
+            action: "StartProcesses",
+            fields: ["foreign = TRUE", 'token = "a"', 'entry = "a"'],
+          },
+        ],
+      },
+      {
+        name: "release-on-failed-stop",
+        negative: true,
+        invariant: "HelpersKeptForSession",
+        action: "DownStopFailed",
+        fields: ['down = "failed"', "released = TRUE", 'session = "alive"'],
       },
       {
         name: "timeout-as-absence",

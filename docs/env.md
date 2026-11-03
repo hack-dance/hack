@@ -1151,7 +1151,7 @@ files, when:
   become global layer values that Hack applies after `environment`, so the service would
   switch to the `.env` value. This includes an entry that only refers to its own key
   (`PORT: ${PORT}`), whose result can differ when an overlay or the shell sets the key. The error names the keys and services, never values.
-  Remove the key from the `.hack/.env` file or from that service's `environment`, then retry;
+  Remove the key from the legacy `.env` file or overlay that sets it, or from that service's `environment`, then retry;
 - a service does not list a legacy file with values to migrate in `env_file` (`E_CONFIG_INVALID`).
   Migrated values are global and reach every service, including third-party images, so that
   service would receive values it never had. This includes a file no service lists, whose values
@@ -1189,9 +1189,12 @@ files, when:
   overlay file doesn't set (`E_CONFIG_INVALID`), because a local base outranks tracked and inherited
   overlay layers. Remove the key from `.hack/.env`, or set the value you want in that legacy overlay
   file, creating it if needed; the Compose `env_file` checks above then apply to that file;
+- env layers include a symlink while legacy values remain undelivered (`E_PATH_CONFLICT`).
+  Replace linked layers with regular files containing the intended layer content, then retry
+  `hack doctor --migrate-env-config`. The migration does not write through a linked layer;
 - `.hack/.env` has a state file, env layers exist, and its text isn't what `hack env materialize`
   would write (`E_PATH_CONFLICT`). The file is out of date or was edited by hand, and Hack can't
-  tell which. If it's generated, move any value of your own with `hack env set`, then run
+  tell which. If it's generated, move any value of your own with `hack env set --local`, then run
   `hack env materialize`, which replaces it. If it's your own file, delete `.hack/.env.state.json`
   so it's read as a legacy file, but not for generated output, whose values would then migrate as
   your own. When the text does match, the migration doesn't read the file or offer it for cleanup;
@@ -1218,6 +1221,10 @@ files, when:
   or a dangling symlink (`E_PERMISSION`), so its values would be lost. A symlinked overlay
   that resolves to a readable file inside `.hack` is migrated like a regular one; cleanup
   removes only the link, never its target.
+
+A refused migration keeps the legacy source files. Earlier layer merges or ignore-rule
+updates may remain, and removing newly created layers after a failure can itself fail.
+Check the layers and ignore rules before retrying; migration compares the values again.
 
 With `hack.env.json`, the migration refuses (`E_CONFIG_INVALID`) when a `plain_env` value comes only
 from your shell, because it would otherwise be saved to a plaintext file you didn't ask for. This applies to commands

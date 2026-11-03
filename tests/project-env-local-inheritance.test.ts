@@ -479,6 +479,6 @@ test("injected: a failed listing of the primary's env layers refuses, before any
 
   expect(result).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
   expect((result as Error).message).toContain("can't be listed");
-  expect((result as Error).message).toContain("Nothing was written");
+  expect((result as Error).message).toContain("The legacy files are kept");
   expect(await readdir(f.linked)).toEqual(entries);
 });

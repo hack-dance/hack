@@ -247,7 +247,11 @@ Behavior:
   Fix the claim and run `hack down` again.
 - A `hack down` that overlaps a `hack up` of the same instance (same branch):
   - `hack down` marks the instance as stopping before Compose shutdown, and its release
-    removes the instance's operation record.
+    removes the instance's operation record. Both advance the instance's shutdown
+    generation.
+  - A down supersedes every `hack up` of the instance that started before it, even after a
+    later `hack up` succeeds: that later up's helpers need not be the earlier up's (an entry
+    may have been disabled or changed), so the earlier up never counts as current again.
   - **Prevented during preparation.** A `hack up` checks the instance right before its
     containers start (after detached image preparation, before an attached `up`, and at the
     end of native preparation). If a down marked or released it by then, that up fails with
@@ -258,8 +262,16 @@ Behavior:
     with `E_LIFECYCLE_FAILED` (its containers may already run); an attached up only checks
     after Compose exits. In that case run `hack down` for the branch (`--branch <name>`) to
     stop the containers, then `hack up` again.
-  - A newer `hack up` of the same instance does not count as a down: an earlier, slower up
-    of that instance still starts, and never tears down what the newer one adopted.
+- Two overlapping `hack up` runs of the same instance, with no down in between:
+  - The newer up does not supersede the earlier one: an earlier, slower up still starts,
+    because the newer up holds the same helpers.
+  - Once the newer up has become current (its helpers are ready), the earlier up's cleanup
+    (after it fails, or on SIGINT/SIGTERM) leaves the lifecycle session and helper holders
+    alone, since the newer up may have adopted the session. Only the earlier up's own
+    containers and state are cleaned up.
+  - This applies to projects with `sharedHelpers`. The decision uses the shared helper
+    instance lock; if that lock is unavailable for 10 s, the earlier up falls back to cleaning
+    up its lifecycle session as before.
 - Claims live under `~/.hack/shared-helpers/<name>-<port>/` (or `$HACK_HOME`), shared by
   every project and branch that uses that helper name and port.
 - Helpers are not part of the lifecycle mux session and do not appear in `hack logs`.

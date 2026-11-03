@@ -297,6 +297,8 @@ same helper through the CLI on two branches of one project (`hack up`/`down
 | lost parent | SIGKILL to `hack up` leaves the helper recorded; the next up stops it at its deadline and a later up starts fresh. |
 | down during a paused up | `hack up` is paused at Compose image preparation after its helpers are ready; `hack down` completes and stops the helper; the resumed up fails `E_LIFECYCLE_FAILED` and never runs `compose up -d`. |
 | entry removed after start | After `hack up`, the `sharedHelpers` entry is removed from config; `hack down` still releases the recorded helper and stops it. |
+| overlapping ups | A newer up adopts the session and helpers of an earlier up paused at image preparation. The earlier up then succeeds, fails in Compose, or receives SIGTERM; in every case the session, its ownership token and the helper survive. |
+| disabled helper after down | An up is paused, a down completes, the helper is disabled, and a newer up succeeds; the earlier up still fails `E_LIFECYCLE_FAILED` and never runs `up -d`. |
 | unreleased helper | With an unreadable claim, `hack down` exits non-zero with `E_LIFECYCLE_FAILED` naming the helper; the claim and helper are kept; after the claim is restored, down stops it. |
 
 The pull request records the source mutations used as negative controls and which

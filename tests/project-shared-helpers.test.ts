@@ -20,6 +20,7 @@ import {
   SharedHelperSupersededError,
   startProjectSharedHelpers,
 } from "../src/lib/project-shared-helpers.ts";
+import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
 import {
   isSharedHostProcessRunning,
   parseSharedHostClaim,
@@ -889,6 +890,112 @@ test(
     });
     expect(retried.map((entry) => entry.result.state)).toEqual(["stopped"]);
     expect(await isAlive(owned)).toBe(false);
+  },
+  TIMEOUT
+);
+
+test(
+  "a newer start of the same instance does not supersede an earlier one; a down supersedes both",
+  async () => {
+    const root = await scratch();
+    const helper = helperConfig({ port: freePort() });
+    const first = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    const second = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    // The newer start holds the helpers: the earlier start may still launch.
+    await first.assertCurrent();
+    await first.assertCurrent({ servicesStarted: true });
+    await second.assertCurrent();
+    expect(
+      await markSharedHelperInstanceStopping({
+        helpers: [helper],
+        composeProject: BRANCH_A,
+        hackDir: join(root, "hack-home"),
+      })
+    ).toBe(true);
+    for (const start of [first, second]) {
+      expect(
+        await start.assertCurrent().catch((caught: unknown) => caught)
+      ).toBeInstanceOf(SharedHelperSupersededError);
+    }
+    await releaseProjectSharedHelpers({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir: join(root, "hack-home"),
+    });
+  },
+  TIMEOUT
+);
+
+test(
+  "with no helper configured, an unreadable record or a held lock still fails the release",
+  async () => {
+    const root = await scratch();
+    const hackDir = join(root, "hack-home");
+    const instanceDir = join(hackDir, "shared-helpers", ".instances");
+    await mkdir(instanceDir, { recursive: true, mode: 0o700 });
+    const record = join(instanceDir, `${BRANCH_A}.acquired.json`);
+    await writeFile(record, "{not json\n", { mode: 0o600 });
+    const unreadable = await releaseProjectSharedHelpers({
+      helpers: [],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    expect(unreadable.map((entry) => [entry.name, entry.result])).toEqual([
+      [
+        "recorded-helpers",
+        expect.objectContaining({
+          state: "failed",
+          reason: "state-unavailable",
+        }),
+      ],
+    ]);
+    expect(await readFile(record, "utf8")).toBe("{not json\n");
+
+    await writeFile(
+      record,
+      `${JSON.stringify([{ name: "issuer-bridge", port: 4100 }])}\n`,
+      { mode: 0o600 }
+    );
+    let releaseLock = (): void => undefined;
+    const held = new Promise<void>((resolveHeld) => {
+      releaseLock = resolveHeld;
+    });
+    let acquired = (): void => undefined;
+    const isHeld = new Promise<void>((resolveAcquired) => {
+      acquired = resolveAcquired;
+    });
+    const holder = withProjectsRegistryLock({
+      lockPath: join(instanceDir, `${BRANCH_A}.lock`),
+      run: async () => {
+        acquired();
+        await held;
+      },
+    });
+    await isHeld;
+    const locked = await releaseProjectSharedHelpers({
+      helpers: undefined,
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    releaseLock();
+    await holder;
+    expect(locked.map((entry) => [entry.name, entry.result])).toEqual([
+      [
+        "recorded-helpers",
+        expect.objectContaining({
+          state: "failed",
+          reason: "lock-unavailable",
+        }),
+      ],
+    ]);
   },
   TIMEOUT
 );

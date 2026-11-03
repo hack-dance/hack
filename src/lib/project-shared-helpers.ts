@@ -367,6 +367,8 @@ export class SharedHelperSupersededError extends Error {
  *   anything ({@link markSharedHelperInstanceStopping}) and releases under the
  *   same lock. `assertCurrent` fails once that happened, so the caller can
  *   refuse to launch services whose helpers a concurrent down released.
+ *   A newer start of the same instance does not fail it: that start holds
+ *   the helpers, and tearing down the earlier start would break it.
  * - Before each helper is ensured its identity (name and port) is added to
  *   the instance's acquired record, so `hack down` still releases it after the
  *   entry is removed or renamed in config.
@@ -430,7 +432,7 @@ export async function startProjectSharedHelpers(opts: {
     const current = await withInstanceLock({
       instance,
       timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
-      run: async () => (await readOperation(instance)) === operation,
+      run: async () => !isShutdown(await readOperation(instance)),
     });
     if (!current) {
       throw new SharedHelperSupersededError(check);
@@ -518,6 +520,13 @@ async function ensureOne(opts: {
 }
 
 const INSTANCE_LOCK_TIMEOUT_MS = 10_000;
+const STOPPING_PREFIX = "stopping:";
+/**
+ * Failure name used when this instance's helpers cannot be listed (its
+ * acquired record is unreadable or its lock is unavailable) and no helper is
+ * configured to name instead: the failure must still reach `hack down`.
+ */
+const UNLISTED_HELPERS = "recorded-helpers";
 const MAX_ACQUIRED = 256;
 
 type HelperIdentity = { readonly name: string; readonly port: number };
@@ -567,6 +576,17 @@ async function readOperation(instance: InstancePaths): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether the instance's operation record shows a shutdown: `hack down` wrote
+ * its stopping mark, or a release removed the record. A newer start of the
+ * same instance writes its own id, which is not a shutdown: its helpers are
+ * held, so services of an earlier start may still launch (and its cleanup
+ * must not tear down what the newer start adopted).
+ */
+function isShutdown(operation: string | null): boolean {
+  return operation === null || operation.startsWith(STOPPING_PREFIX);
 }
 
 async function writeOperation(
@@ -702,7 +722,7 @@ export async function markSharedHelperInstanceStopping(opts: {
     await withInstanceLock({
       instance,
       timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
-      run: () => writeOperation(instance, `stopping:${randomUUID()}`),
+      run: () => writeOperation(instance, `${STOPPING_PREFIX}${randomUUID()}`),
     });
     return true;
   } catch {
@@ -739,7 +759,10 @@ export async function releaseProjectSharedHelpers(opts: {
     identities: readonly HelperIdentity[],
     reason: "lock-unavailable" | "state-unavailable"
   ): SharedHelperRelease[] =>
-    identities.map((identity) => ({
+    (identities.length > 0
+      ? identities
+      : [{ name: UNLISTED_HELPERS, port: 0 }]
+    ).map((identity) => ({
       name: identity.name,
       result: {
         state: "failed",

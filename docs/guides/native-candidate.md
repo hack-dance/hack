@@ -1742,7 +1742,16 @@ record still resumes, and its bytes are still counted. A digest reviewed before 
 earlier quarantine of the same volume no longer matches; inspect again. If the
 volume changes during the guest effect, the command fails with
 `graph_cache_quarantine_unsettled` and the record stays pending for explicit resume
-or resolution.
+or resolution. A failed recheck inspection or guest directory-identity read instead
+returns `graph_cache_quarantine_unobserved`: the command could not observe the
+volume after a possible effect. It makes no claim that the volume changed. The
+record stays pending, and explicit resolution can settle it once observation is
+available again.
+
+Retained-volume recovery and removal use stable inspection fields plus the guest
+`_data` device/inode, so a quarantine does not invalidate their selection. See the
+[volume identity audit](../reference/volume-identity.md) for covered workflows,
+excluded protocols, and compatibility limits.
 
 A private record under the candidate home's `run/cache-quarantine/` is written
 before the guest effect and marked `quarantined` after the guest syncs the move.

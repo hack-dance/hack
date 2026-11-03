@@ -1,3 +1,6 @@
+//! Cache quarantine accepts only receipt-owned ordinary `hkg-` graph volumes;
+//! native enrollments use `hkp-` names and cannot enter that path. Their timestamp
+//! fence is retained for this separate protocol.
 //! Data-only persistent-volume identity codec for the private native candidate.
 //!
 //! A decoded enrolled record is an assertion to compare, not proof of durable enrollment,

@@ -56,6 +56,13 @@ fn unsettled() -> CandidateError {
         "The volume changed during the cache quarantine; the record stays pending for explicit resume or resolution.",
     )
 }
+/// Observation failed after a possible effect; do not assert replacement.
+fn unobserved() -> CandidateError {
+    error(
+        "graph_cache_quarantine_unobserved",
+        "The volume could not be observed after the cache quarantine; the record stays pending for explicit resume or resolution.",
+    )
+}
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -194,30 +201,7 @@ fn parse_observation(output: &str) -> Result<Option<(String, u64, u64, u64)>, Ca
     Ok(Some((identity.to_owned(), bytes, allocated, entries)))
 }
 
-/// The inspected fields that identify a volume incarnation: everything except
-/// `CreatedAt`, which the local driver derives from a directory mtime that the
-/// first quarantine's `mkdir hack-quarantine` changes.
-fn stable_volume_fields(inspected: &Value) -> Value {
-    let mut stable = inspected.clone();
-    if let Some(fields) = stable.as_object_mut() {
-        fields.remove("CreatedAt");
-    }
-    stable
-}
-
-/// Whether `current` is the same volume incarnation as the admitted one. A
-/// `CreatedAt` change alone is accepted; any other inspected change, or a
-/// different guest-observed `_data` identity (a replaced volume), refuses.
-fn same_incarnation(
-    admitted: &Value,
-    admitted_root: &str,
-    current: &Value,
-    current_root: &str,
-) -> bool {
-    admitted.is_object()
-        && admitted_root == current_root
-        && stable_volume_fields(admitted) == stable_volume_fields(current)
-}
+use super::volume_identity::same as same_incarnation;
 
 fn same_device(a: &str, b: &str) -> bool {
     a.split_once(':').map(|v| v.0) == b.split_once(':').map(|v| v.0)
@@ -509,15 +493,14 @@ impl Admitted {
     fn recheck(&self, port: &impl Port) -> Result<(), CandidateError> {
         let current = port
             .inspect(&self.receipt, &self.resource)
-            .ok()
-            .flatten()
+            .map_err(|_| unobserved())?
             .ok_or_else(unsettled)?;
         let current_root = volume_subpaths::directory_identity_with(
             |script, arguments| port.execute(script, arguments),
             &self.resource,
             &current,
         )
-        .map_err(|_| unsettled())?;
+        .map_err(|_| unobserved())?;
         if !same_incarnation(
             &self.inspected,
             &self.root_identity,

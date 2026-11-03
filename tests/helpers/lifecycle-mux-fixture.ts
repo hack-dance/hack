@@ -8,9 +8,10 @@ export async function writeLifecycleMuxFixture(root: string): Promise<string> {
   const path = join(root, "tmux");
   const source = `#!${process.execPath}
 import { readFile, writeFile, appendFile, unlink } from "node:fs/promises";
-const args=process.argv.slice(2), file=process.env.HACK_TEST_MUX_STATE;
+// Like tmux, accept the client-level -u (force UTF-8) flag before the command.
+const rawArgs=process.argv.slice(2), args=rawArgs[0]==="-u"?rawArgs.slice(1):rawArgs, file=process.env.HACK_TEST_MUX_STATE;
 if (!file) process.exit(92);
-await appendFile(file+".calls",JSON.stringify(args)+"\\n");
+await appendFile(file+".calls",JSON.stringify(rawArgs)+"\\n");
 const selected=(flag)=>args[args.indexOf(flag)+1];
 let state=await readFile(file,"utf8").then(JSON.parse).catch(()=>null);
 switch(args[0]) {

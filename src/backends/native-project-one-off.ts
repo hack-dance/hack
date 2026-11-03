@@ -40,6 +40,14 @@ export const NATIVE_RUN_EMPTY_SELECTION_REFUSAL =
   "Native `hack run` does not accept an empty --env or --profile value. Omit the option to use the running selection, or pass the env or profiles `hack up` started with. No command ran.";
 
 /**
+ * The closed `E_USAGE` refusal of native `exec --env` or `--profile`. Exec
+ * runs in the running service's environment, so any given value refuses,
+ * an empty one included; omitting both options is the only accepted form.
+ */
+export const NATIVE_EXEC_SELECTION_REFUSAL =
+  "Native exec does not support --env or --profile changes; it uses the running service environment.";
+
+/**
  * Refuse an empty native `run --env` or `--profile` value before it is
  * resolved. Elsewhere an empty `--env` means base layers and an empty
  * `--profile` means no profiles, but a native run never changes the running

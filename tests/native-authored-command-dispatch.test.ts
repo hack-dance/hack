@@ -134,20 +134,30 @@ test.each([
  * same closed E_USAGE refusal for an authored project as for a legacy one. It
  * is checked before authored dispatch, which would otherwise refuse it with
  * the broader E_NATIVE_PROJECT_UNSUPPORTED.
+ *
+ * HACK-1360: an authored project on the Compose backend (the default, or an
+ * explicit `compose`) refuses the same way before any compiler work, instead
+ * of reading `--env ""` as the base env and `--profile ""` as no profiles.
  */
-test.each([
-  { args: ["--profile", ""] },
-  { args: ["--profile", " , "] },
-  { args: ["--env", ""] },
-  { args: ["--env=  "] },
-])("source CLI native run %j refuses as an empty selection before authored dispatch", async ({
+const EMPTY_RUN_SELECTIONS = [
+  ["--profile", ""],
+  ["--profile", " , "],
+  ["--env", ""],
+  ["--env=  "],
+] as const;
+test.each(
+  ["native", "compose", undefined].flatMap((backend) =>
+    EMPTY_RUN_SELECTIONS.map((args) => ({ backend, args: [...args] }))
+  )
+)("source CLI run %j refuses as an empty selection before authored dispatch", async ({
+  backend,
   args,
 }) => {
   const selected = await fixture();
   const value = await invoke({
     selected,
     args: ["run", ...args, "web", "--", "true"],
-    backend: "native",
+    backend,
     logger: "console",
   });
   expect(value.code).toBe(1);

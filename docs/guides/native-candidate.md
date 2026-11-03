@@ -893,7 +893,12 @@ the option to inherit. A profile list is empty only when every entry is, so
 `--profile "web,"` asks for `web`. On the native backend the empty check runs
 first, before the project is selected, so an authored `hack.project.json`
 project refuses an empty value with the same `E_USAGE` line rather than its
-`E_NATIVE_PROJECT_UNSUPPORTED` refusal of any `--env` or `--profile`.
+`E_NATIVE_PROJECT_UNSUPPORTED` refusal of any `--env` or `--profile`. An
+authored project on the Compose backend refuses an empty value with the same
+line before any compiler work, so every native `run` agrees; a legacy Compose
+project keeps its meaning, where an empty `--env` selects the base layers.
+Native `exec` uses the running service environment: any `--env` or `--profile`,
+an empty value included, refuses with one closed `E_USAGE` line.
 `run` never restarts the project to change its selection.
 Services with no managed environment values also support `run`; they keep the
 admitted image's environment without creating a private environment mount or

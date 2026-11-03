@@ -52,6 +52,7 @@ import {
   requireComposeOperationAvailable,
 } from "../backends/native-project-observe.ts";
 import {
+  NATIVE_EXEC_SELECTION_REFUSAL,
   type NativeRunSelection,
   nativeProjectOneOff,
   requireNonEmptyNativeRunOptions,
@@ -7757,10 +7758,16 @@ async function handleExec({
     return authored;
   }
   const native = resolveNativeRuntimeSelection();
-  if (native && [args.options.env, args.options.profile].some(Boolean)) {
-    throw new CliUsageError(
-      "Native exec does not support --env or --profile changes; it uses the running service environment."
-    );
+  // Any given value refuses, an empty one included, with the same closed
+  // E_USAGE line (no usage hint) as native run's selection refusals.
+  if (
+    native &&
+    (args.options.env !== undefined || args.options.profile !== undefined)
+  ) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: NATIVE_EXEC_SELECTION_REFUSAL,
+    });
   }
   const project = await resolveProjectForArgs({
     ctx,

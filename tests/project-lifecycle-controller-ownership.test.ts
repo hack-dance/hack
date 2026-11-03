@@ -28,7 +28,11 @@ import { setLoggerBackendOverride } from "../src/ui/logger.ts";
 
 /**
  * Lifecycle-session creation for projects with shared helpers, driven
- * against the real controller with an in-memory mux backend:
+ * against the real controller with an in-memory mux backend. Its sessions
+ * carry their ownership token from creation, as tmux's do (`new-session -e`);
+ * it borrows the zellij name only for the simple `zellij run` launch path.
+ * Real zellij writes the token with a separate `rename-tab`, so projects with
+ * shared helpers refuse it (assertSharedHelperSessionMuxSupported).
  * - a failure after the session was created (including a failed session
  *   epoch record) never leaves a session without an ownership record;
  * - a start that decided to create, then lost to an overlapping start that
@@ -202,6 +206,8 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
     readonly prepareLaunch?: () => Promise<void>;
     readonly muxCommandTimeoutMs?: number;
     readonly env?: Readonly<Record<string, string>>;
+    /** Receives the cleanup the controller registers for SIGINT/SIGTERM. */
+    readonly onSignalCleanup?: (cleanup: () => Promise<unknown>) => void;
   }) =>
     createLifecycleProcessController({
       mux: resolvedMux,
@@ -217,7 +223,10 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
       ...(opts.sessionOwnership
         ? { sessionOwnership: opts.sessionOwnership }
         : {}),
-      installSignalCleanup: () => ({ dispose: () => undefined }),
+      installSignalCleanup: ({ cleanup }) => {
+        opts.onSignalCleanup?.(cleanup);
+        return { dispose: () => undefined };
+      },
       ...(opts.prepareLaunch
         ? {
             prepareLaunch: async () => {
@@ -268,6 +277,7 @@ test("a failed session epoch record stops the created session before removing it
   const starter = controller({
     sessionOwnership: {
       withLock: ownership.withLock,
+      runIfOwned: ownership.runIfOwned,
       record: (kind) =>
         kind === "created"
           ? Promise.reject(new Error("epoch record unwritable"))
@@ -289,6 +299,7 @@ test("when that stop is not confirmed, the entry and token stay so the session i
   const starter = controller({
     sessionOwnership: {
       withLock: ownership.withLock,
+      runIfOwned: ownership.runIfOwned,
       record: (kind) =>
         kind === "created"
           ? Promise.reject(new Error("epoch record unwritable"))
@@ -771,6 +782,7 @@ test("failed-creation cleanup reads the token and kills under the creation lock:
   const a = controller({
     sessionOwnership: {
       withLock: ownership.withLock,
+      runIfOwned: ownership.runIfOwned,
       record: (kind) => {
         if (kind !== "created") {
           return ownership.record(kind);
@@ -797,6 +809,52 @@ test("failed-creation cleanup reads the token and kills under the creation lock:
   expect(mux.killed).not.toContain(tokenB);
   expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([
     tokenB,
+  ]);
+  await stop();
+  expect(mux.sessions.has(SESSION)).toBe(false);
+});
+
+test("a signal cleanup already waiting on the lock never kills a session another up adopted meanwhile", async () => {
+  const { mux, controller, entries, stop, newOwnership } = await fixture();
+  let signalCleanup: (() => Promise<unknown>) | null = null;
+  const a = controller({
+    sessionOwnership: newOwnership(),
+    onSignalCleanup: (cleanup) => {
+      signalCleanup = cleanup;
+    },
+  });
+  await a.startMany({ processes: [PROCESS] });
+  await a.finalize();
+  const tokenA = mux.sessions.get(SESSION);
+  expect(tokenA).toBeDefined();
+  // B holds the instance lock while it adopts A's finalized session; A's
+  // signal callback starts meanwhile and waits on that lock.
+  const b = newOwnership();
+  let release = (): void => undefined;
+  const gate = new Promise<void>((resolvePromise) => {
+    release = resolvePromise;
+  });
+  let entered = (): void => undefined;
+  const inLock = new Promise<void>((resolvePromise) => {
+    entered = resolvePromise;
+  });
+  const adoption = b.withLock(async () => {
+    entered();
+    await gate;
+    await b.record("adopted");
+  });
+  await inLock;
+  expect(signalCleanup).not.toBeNull();
+  const signalled = (signalCleanup as unknown as () => Promise<unknown>)();
+  await Bun.sleep(100);
+  release();
+  await adoption;
+  expect(await signalled).toBeUndefined();
+  // The adopter's session and entry are intact.
+  expect(mux.sessions.get(SESSION)).toBe(tokenA);
+  expect(mux.killed).not.toContain(tokenA);
+  expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([
+    tokenA,
   ]);
   await stop();
   expect(mux.sessions.has(SESSION)).toBe(false);

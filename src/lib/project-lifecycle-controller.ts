@@ -245,7 +245,7 @@ export function createLifecycleProcessController(opts: {
    */
   readonly sessionOwnership?: Pick<
     SharedHelperSessionOwnership,
-    "withLock" | "record"
+    "withLock" | "record" | "runIfOwned"
   >;
   /**
    * Bound for this controller's own tmux/zellij commands (environment setup,
@@ -762,10 +762,15 @@ export function createLifecycleProcessController(opts: {
   };
 
   /**
-   * Abort and signal cleanup. The token read and name-based kill run under
-   * the instance lock, as replacement does, so this start never kills a
-   * session that replaced its own in between. Creation settles first: it
-   * holds the lock until its own failure cleanup is done.
+   * Abort and signal cleanup. With shared helper ownership it takes the same
+   * decision as the operation cleanup (SharedHelperSessionOwnership
+   * .runIfOwned): under the instance lock, it stops the session only while
+   * the recorded session epoch is still this start's own. Adoption keeps the
+   * creator's token, so the token check alone would let a callback that was
+   * already waiting on the lock kill a session another up adopted
+   * meanwhile. The token read and name-based kill also run under that lock,
+   * as replacement does. Creation settles first: it holds the lock until its
+   * own failure cleanup is done.
    */
   async function starterAbort(): Promise<
     undefined | typeof LIFECYCLE_SESSION_RETAINED
@@ -774,14 +779,31 @@ export function createLifecycleProcessController(opts: {
     if (!(createdOwnershipToken && backendName)) {
       return undefined;
     }
+    const ownership = opts.sessionOwnership;
+    if (!ownership) {
+      return await abortOwnedSession();
+    }
+    let result: undefined | typeof LIFECYCLE_SESSION_RETAINED;
+    let outcome: Awaited<ReturnType<typeof ownership.runIfOwned>>;
     try {
-      return await underInstanceLock(abortOwnedSession);
+      outcome = await ownership.runIfOwned(async () => {
+        result = await abortOwnedSession();
+      });
     } catch {
+      outcome = "undecidable";
+    }
+    if (outcome === "adopted") {
+      // Another up adopted the session: it is no longer this start's to stop.
+      createdOwnershipToken = null;
+      return undefined;
+    }
+    if (outcome === "undecidable") {
       logger.warn({
         message: `Could not confirm that lifecycle session ${sessionName} stopped; kept its ownership record. Run hack down to stop it.`,
       });
       return LIFECYCLE_SESSION_RETAINED;
     }
+    return result;
   }
 
   /** Stop this start's created session; the caller holds the instance lock. */

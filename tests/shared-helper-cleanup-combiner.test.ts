@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertSharedHelperSessionMuxSupported,
   type LifecycleSharedHelpers,
   releaseAfterFailedProcessStart,
   runGuardedSharedHelperStart,
@@ -19,6 +20,7 @@ import {
   resolveSharedHelperHolder,
   withTerminationAbort,
 } from "../src/lib/project-shared-helpers.ts";
+import type { MuxBackend } from "../src/mux/mux-backend.ts";
 import { setLoggerBackendOverride } from "../src/ui/logger.ts";
 
 /**
@@ -245,4 +247,44 @@ test("helpers recorded as acquired but removed from config are still reported as
   } finally {
     await rm(hackDir, { recursive: true, force: true });
   }
+});
+
+function resolvedMux(available: readonly ("tmux" | "zellij")[]) {
+  const backend = (name: "tmux" | "zellij") =>
+    ({ name, available: available.includes(name) }) as unknown as MuxBackend;
+  return () =>
+    Promise.resolve({
+      mode: "auto" as const,
+      backends: new Map([
+        ["tmux" as const, backend("tmux")],
+        ["zellij" as const, backend("zellij")],
+      ]),
+    });
+}
+
+test("shared helpers with a lifecycle session refuse zellij before anything starts", async () => {
+  await expect(
+    assertSharedHelperSessionMuxSupported({
+      sharedHelpersConfigured: true,
+      needsSession: true,
+      mux: resolvedMux(["zellij"]),
+    })
+  ).rejects.toThrow("need tmux");
+  // tmux records the token with the session: allowed.
+  await assertSharedHelperSessionMuxSupported({
+    sharedHelpersConfigured: true,
+    needsSession: true,
+    mux: resolvedMux(["tmux", "zellij"]),
+  });
+  // No session, or no shared helpers: zellij is unaffected.
+  await assertSharedHelperSessionMuxSupported({
+    sharedHelpersConfigured: true,
+    needsSession: false,
+    mux: resolvedMux(["zellij"]),
+  });
+  await assertSharedHelperSessionMuxSupported({
+    sharedHelpersConfigured: false,
+    needsSession: true,
+    mux: resolvedMux(["zellij"]),
+  });
 });

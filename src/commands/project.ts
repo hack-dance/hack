@@ -334,7 +334,11 @@ import {
   buildWorktreeRetargetWarning,
   findSameCheckoutRetargetConflicts,
 } from "../lib/worktree-runtime-target.ts";
-import { type ResolvedMux, resolveMux } from "../mux/mux-resolver.ts";
+import {
+  type ResolvedMux,
+  resolveDefaultBackendName,
+  resolveMux,
+} from "../mux/mux-resolver.ts";
 import {
   renderProjectConfigJson,
   renderProjectEnvConfigYaml,
@@ -1867,6 +1871,31 @@ type LifecycleUpResult = {
   }) => Promise<void>;
 };
 
+/**
+ * Lifecycle sessions of projects with shared helpers need tmux. zellij
+ * creates the session first and records its ownership token with a separate
+ * `rename-tab`, so a start interrupted between the two leaves a live session
+ * without a token: neither a later up nor hack down can prove ownership, and
+ * the helper holders kept for it could never be released. tmux sets the
+ * token as part of `new-session`. Refuses before any hook, helper or process
+ * runs. Exported for tests.
+ */
+export async function assertSharedHelperSessionMuxSupported(opts: {
+  readonly sharedHelpersConfigured: boolean;
+  readonly needsSession: boolean;
+  readonly mux: () => Promise<ResolvedMux>;
+}): Promise<void> {
+  if (!(opts.sharedHelpersConfigured && opts.needsSession)) {
+    return;
+  }
+  const mux = await opts.mux();
+  if (resolveDefaultBackendName(mux) === "zellij") {
+    throw new Error(
+      "Lifecycle sessions for projects with lifecycle.sharedHelpers need tmux; zellij cannot record the session's ownership with its creation. Install tmux or set sessions.mux to tmux. Nothing was started."
+    );
+  }
+}
+
 function hasPersistentLifecycleCommands(
   commands: readonly ProjectLifecycleCommand[] | undefined
 ): boolean {
@@ -1893,6 +1922,13 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   // Captured before any preparation hook runs: a down that completes while
   // the hooks run supersedes this operation (see startProjectSharedHelpers).
   const sharedHelperConfigs = opts.cfg.lifecycle?.sharedHelpers ?? [];
+  await assertSharedHelperSessionMuxSupported({
+    sharedHelpersConfigured: sharedHelperConfigs.length > 0,
+    needsSession:
+      (opts.cfg.lifecycle?.processes ?? []).length > 0 ||
+      hasPersistentLifecycleCommands(opts.cfg.lifecycle?.up?.before),
+    mux: () => resolveMux({ project: opts.project }),
+  });
   const shutdownGeneration =
     sharedHelperConfigs.length > 0
       ? await captureSharedHelperShutdownGeneration({

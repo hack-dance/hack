@@ -1008,3 +1008,43 @@ test(
   },
   TIMEOUT
 );
+
+test(
+  "a start that fails after a down keeps the shutdown in force for an earlier start",
+  async () => {
+    const root = await scratch();
+    const helper = helperConfig({ port: freePort() });
+    const hackDir = join(root, "hack-home");
+    const earlier = await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [helper],
+      composeProject: BRANCH_A,
+    });
+    // A down marks the instance stopping and releases its helpers.
+    await markSharedHelperInstanceStopping({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    await releaseProjectSharedHelpers({
+      helpers: [helper],
+      composeProject: BRANCH_A,
+      hackDir,
+    });
+    // A later start of the same instance fails before any helper is ready.
+    const failing = startProjectSharedHelpers({
+      ...context(root),
+      helpers: [
+        { ...helper, upstream: undefined, upstreamEnv: "UNSET_E2E_UPSTREAM" },
+      ],
+      composeProject: BRANCH_A,
+    });
+    await expect(failing).rejects.toThrow("UNSET_E2E_UPSTREAM");
+    // The earlier start must still see the shutdown.
+    expect(
+      await earlier.assertCurrent().catch((caught: unknown) => caught)
+    ).toBeInstanceOf(SharedHelperSupersededError);
+    expect(await readHelperClaim(root, helper)).toBeNull();
+  },
+  TIMEOUT
+);

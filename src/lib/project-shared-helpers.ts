@@ -360,7 +360,8 @@ export class SharedHelperSupersededError extends Error {
  * does the same after a later phase of the operation fails.
  *
  * Instance coordination (all under one per-instance lock):
- * - Each start records its operation id as the instance's current operation.
+ * - A start whose helpers are all ready records its operation id as the
+ *   instance's current operation (a start that fails never does).
  *   A rollback releases only while that is still current, so it never revokes
  *   a newer start of the same instance.
  * - `hack down` replaces the record with a stopping marker before it stops
@@ -444,7 +445,6 @@ export async function startProjectSharedHelpers(opts: {
     timeoutMs: lockTimeoutMs,
     ...(opts.signal ? { signal: opts.signal } : {}),
     run: async () => {
-      await writeOperation(instance, operation);
       try {
         for (const helper of helpers) {
           if (helper.enabled) {
@@ -468,11 +468,18 @@ export async function startProjectSharedHelpers(opts: {
           }
         }
       } catch (error: unknown) {
-        // Still under the instance lock: this operation is the latest start.
+        // Still under the instance lock, and this start never became the
+        // current operation: release exactly what it added. The operation
+        // record is left as it was, so a shutdown mark stays in force.
         rolledBack = releaseAdded();
         await rolledBack;
         throw error;
       }
+      // Only a start whose helpers are all ready becomes the current
+      // operation. Recording earlier would let a start that then fails
+      // replace a down's shutdown mark, so an older start would launch its
+      // services without helpers.
+      await writeOperation(instance, operation);
     },
   });
   return { started, rollback, assertCurrent };

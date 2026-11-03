@@ -267,8 +267,9 @@ Behavior:
     because the newer up holds the same helpers.
   - Once the newer up has become current (its helpers are ready), the earlier up's cleanup
     (after it fails, or on SIGINT/SIGTERM) leaves the lifecycle session and helper holders
-    alone, since the newer up may have adopted the session. Only the earlier up's own
-    containers and state are cleaned up.
+    alone, since the newer up may have adopted the session. The earlier up's other failure
+    handling is unchanged (for example, it still clears the instance's runtime-state entry,
+    which `hack ps` rebuilds), so check `hack ps --branch <name>` after such an overlap.
   - This applies to projects with `sharedHelpers`. The decision uses the shared helper
     instance lock; if that lock is unavailable for 10 s, the earlier up falls back to cleaning
     up its lifecycle session as before.

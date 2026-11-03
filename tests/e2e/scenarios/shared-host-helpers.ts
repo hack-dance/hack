@@ -157,6 +157,8 @@ export const sharedHostHelpersScenario: Scenario = {
       readonly branch: string;
       readonly upstream?: string;
       readonly failCompose?: boolean;
+      /** Compose fails after starting some services. */
+      readonly failComposePartial?: boolean;
     }): Promise<CliResult> =>
       ctx.cli({
         args: [
@@ -171,6 +173,9 @@ export const sharedHostHelpersScenario: Scenario = {
           PATH: path,
           E2E_ISSUER_UPSTREAM: opts.upstream ?? UPSTREAM,
           ...(opts.failCompose ? { E2E_DOCKER_FAIL_UP: "1" } : {}),
+          ...(opts.failComposePartial
+            ? { E2E_DOCKER_FAIL_UP_PARTIAL: "1" }
+            : {}),
         },
       });
 
@@ -564,6 +569,7 @@ async function runRetainedHelperPhases(opts: {
   readonly cli: (opts: {
     readonly verb: "up" | "down" | "restart";
     readonly branch: string;
+    readonly failComposePartial?: boolean;
   }) => Promise<CliResult>;
   readonly readClaim: () => Promise<ReturnType<
     typeof parseSharedHostClaim
@@ -627,6 +633,29 @@ async function runRetainedHelperPhases(opts: {
   const started = await opts.ownedHelper();
   await opts.writeConfig({ mode: "identity" });
   await downStops(started, "a failed up.after hook");
+
+  ctx.log("a Compose failure after a partial start keeps the helper");
+  // Compose exits non-zero (as on a dependency failure or a timeout) after
+  // starting some services, which `ps` still reports as running.
+  const partial = await opts.cli({
+    verb: "up",
+    branch,
+    failComposePartial: true,
+  });
+  const claimAfterPartial = await opts.readClaim();
+  expect({
+    that:
+      partial.exitCode !== 0 &&
+      claimAfterPartial?.ownership === "owned" &&
+      (await keptFor({
+        pid: claimAfterPartial.pid,
+        birth: claimAfterPartial.birth,
+      })),
+    message:
+      "a Compose failure after a partial start released the helper under running services",
+    result: partial,
+  });
+  await downStops(await opts.ownedHelper(), "a partial start");
 }
 
 /**

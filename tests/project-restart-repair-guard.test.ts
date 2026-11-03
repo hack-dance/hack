@@ -85,3 +85,27 @@ test("a current restart repair runs guarded and reports the original failure", a
   expect(result).toEqual({ code: 3, phase: "compose", composePhase: "start" });
   expect(checks).toEqual(["before-start", { servicesStarted: true }]);
 });
+
+test("a failed repair keeps the shared helpers when containers may run, before cleanup", async () => {
+  const projectDir = await scratch();
+  const events: string[] = [];
+  const result = await repairFailedRestart({
+    budgets,
+    upCode: 1,
+    composePhase: "start",
+    assertCurrent: () => Promise.resolve(),
+    cleanup: () => {
+      events.push("cleanup");
+      return Promise.resolve();
+    },
+    retainHelpersIfContainersMayRun: () => {
+      events.push("retain-check");
+      return Promise.resolve();
+    },
+    projectDir,
+    lifecycleComposeProject: "demo--branch-a",
+    up: () => Promise.resolve(124),
+  });
+  expect(result.code).toBe(1);
+  expect(events).toEqual(["retain-check", "cleanup"]);
+});

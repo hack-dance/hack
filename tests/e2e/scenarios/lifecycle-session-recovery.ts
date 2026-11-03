@@ -685,6 +685,9 @@ export async function writeFakeDocker(opts: {
       'if [ "$1" = "compose" ]; then',
       '  case " $* " in',
       '    *" ps "*)',
+      // A failed up started nothing, unless it failed after starting some
+      // services (E2E_DOCKER_FAIL_UP_PARTIAL).
+      '      if [ "${E2E_DOCKER_FAIL_UP:-}" = "1" ]; then exit 0; fi',
       '      printf \'%s\\n\' \'{"Service":"api","State":"running","ExitCode":0}\'',
       "      exit 0",
       "      ;;",
@@ -704,6 +707,7 @@ export async function writeFakeDocker(opts: {
       "        exit 143",
       "      fi",
       '      if [ "${E2E_DOCKER_FAIL_UP:-}" = "1" ]; then exit 42; fi',
+      '      if [ "${E2E_DOCKER_FAIL_UP_PARTIAL:-}" = "1" ]; then exit 42; fi',
       "      exit 0",
       "      ;;",
       "    *) exit 0 ;;",

@@ -6,6 +6,7 @@ import {
   assertSharedHelperSessionMuxSupported,
   type LifecycleSharedHelpers,
   releaseAfterFailedProcessStart,
+  retainHelpersUnlessContainersAbsent,
   runGuardedSharedHelperStart,
   stopSessionBeforeReleasingHelpers,
   withSharedHelperCleanup,
@@ -356,4 +357,26 @@ test("once the containers run, the combined cleanup stops the processes but keep
   combinedCleanup.keepSharedHelpers?.();
   await combinedCleanup.cleanup?.();
   expect(events).toEqual(["processes"]);
+});
+
+test("after an unsuccessful container start, helpers are kept unless Compose confirms no container may run", async () => {
+  const outcomes = [
+    ["absent", false],
+    ["present", true],
+    ["unknown", true],
+    ["throws", true],
+  ] as const;
+  for (const [probe, kept] of outcomes) {
+    let keptHelpers = false;
+    await retainHelpersUnlessContainersAbsent({
+      probe: () =>
+        probe === "throws"
+          ? Promise.reject(new Error("docker unavailable"))
+          : Promise.resolve(probe),
+      keepSharedHelpers: () => {
+        keptHelpers = true;
+      },
+    });
+    expect([probe, keptHelpers]).toEqual([probe, kept]);
+  }
 });

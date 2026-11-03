@@ -2125,6 +2125,52 @@ export async function releaseAfterFailedProcessStart(opts: {
 export type ContainerShutdown = "stopped" | "unconfirmed" | "kept";
 
 /**
+ * After a container start that did not succeed (Compose failed, timed out or
+ * was interrupted, possibly after starting some services): keep the shared
+ * helper holders unless Compose confirms that no container of the project
+ * exists in a state that may run. Unknown counts as running. Exported for
+ * tests.
+ */
+export async function retainHelpersUnlessContainersAbsent(opts: {
+  readonly probe: () => Promise<"absent" | "present" | "unknown">;
+  readonly keepSharedHelpers: (() => void) | undefined;
+}): Promise<void> {
+  if (!opts.keepSharedHelpers) {
+    return;
+  }
+  const containers = await opts.probe().catch(() => "unknown" as const);
+  if (containers !== "absent") {
+    opts.keepSharedHelpers();
+  }
+}
+
+/** Whether any container of the Compose project exists in a state that may run. */
+async function probeComposeContainers(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly composeProjectName: string | null;
+  readonly profiles: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+}): Promise<"absent" | "present" | "unknown"> {
+  const res = await composeRuntimeBackend.psJson({
+    composeFiles: [opts.project.composeFile],
+    composeProject: opts.composeProjectName,
+    profiles: opts.profiles,
+    cwd: dirname(opts.project.composeFile),
+    all: true,
+    env: opts.env,
+  });
+  if (res.exitCode !== 0) {
+    return "unknown";
+  }
+  const stopped = new Set(["exited", "dead"]);
+  return parseJsonLines(res.stdout).some(
+    (entry) => !stopped.has((getString(entry, "State") ?? "").toLowerCase())
+  )
+    ? "present"
+    : "absent";
+}
+
+/**
  * The restart down phase's container outcome. A preserved Compose runtime
  * was never shut down: its containers are kept, so their helpers stay held.
  * Exported for tests.
@@ -6148,6 +6194,17 @@ async function runUpCommand({
   let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
   let assertHelpersCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
   let keepSharedHelpers: LifecycleUpResult["keepSharedHelpers"];
+  const retainHelpersIfContainersMayRun = (): Promise<void> =>
+    retainHelpersUnlessContainersAbsent({
+      probe: () =>
+        probeComposeContainers({
+          project,
+          composeProjectName,
+          profiles,
+          env: envOverrides.env,
+        }),
+      keepSharedHelpers,
+    });
   try {
     const lifecycleUp: LifecycleUpResult = serviceScoped
       ? { code: 0, cleanup: null, signalCleanup: null, sessionName: null }
@@ -6322,6 +6379,9 @@ async function runUpCommand({
     }
     const upCode = guarded.code;
     if (upCode !== 0) {
+      // Compose may have started some services before it failed or timed
+      // out: their helpers stay unless no container may run.
+      await retainHelpersIfContainersMayRun();
       await lifecycleCleanup?.();
       await removeProjectRuntimeStateEntry({
         projectDir: project.projectDir,
@@ -6446,6 +6506,7 @@ async function runUpCommand({
       exitCode: 0,
     });
   } catch (error: unknown) {
+    await retainHelpersIfContainersMayRun();
     await lifecycleCleanup?.();
     await removeProjectRuntimeStateEntry({
       projectDir: project.projectDir,
@@ -7135,6 +7196,11 @@ export async function repairFailedRestart(opts: {
   readonly composePhase: ComposeStartupPhase;
   readonly assertCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
   readonly cleanup: LifecycleOperationCleanup | null;
+  /**
+   * Runs before the cleanup of a failed repair: keeps the shared helpers
+   * when the failed starts may have left containers running.
+   */
+  readonly retainHelpersIfContainersMayRun?: () => Promise<void>;
   readonly projectDir: string;
   readonly lifecycleComposeProject: string;
   readonly up: (beforeStart?: () => Promise<void>) => Promise<number>;
@@ -7169,6 +7235,7 @@ export async function repairFailedRestart(opts: {
     logger.error({
       message: `Restart failed and automatic runtime repair also failed (exit ${repair.code}). Run 'hack doctor --fix'.`,
     });
+    await opts.retainHelpersIfContainersMayRun?.();
     await opts.cleanup?.();
     await removeProjectRuntimeStateEntry({
       projectDir: opts.projectDir,
@@ -7286,6 +7353,17 @@ async function runRestartUpPhase(opts: {
   let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
   let assertHelpersCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
   let keepSharedHelpers: LifecycleUpResult["keepSharedHelpers"];
+  const retainHelpersIfContainersMayRun = (): Promise<void> =>
+    retainHelpersUnlessContainersAbsent({
+      probe: () =>
+        probeComposeContainers({
+          project: opts.project,
+          composeProjectName: opts.composeProjectName,
+          profiles: opts.profiles,
+          env: envOverrides.env,
+        }),
+      keepSharedHelpers,
+    });
   try {
     const lifecycleUp = await runLifecycleUpBeforeAndProcesses({
       title: "Lifecycle (restart up before)",
@@ -7406,6 +7484,7 @@ async function runRestartUpPhase(opts: {
         composePhase: upPhase.phase(),
         assertCurrent: assertHelpersCurrent,
         cleanup: lifecycleCleanup,
+        retainHelpersIfContainersMayRun,
         projectDir: opts.project.projectDir,
         lifecycleComposeProject: opts.lifecycleComposeProject,
         up: (beforeStart) =>
@@ -7446,6 +7525,7 @@ async function runRestartUpPhase(opts: {
     }
     return { code: upAfter, phase: "lifecycle" };
   } catch (error: unknown) {
+    await retainHelpersIfContainersMayRun();
     await lifecycleCleanup?.();
     await removeProjectRuntimeStateEntry({
       projectDir: opts.project.projectDir,

@@ -28,7 +28,16 @@
 //! inspected field (name, driver, mountpoint, labels, options, scope) plus the
 //! guest-observed `_data` directory identity, which each guest script
 //! re-verifies and the post-effect recheck observes again. A volume replaced
-//! under the same name gets a new `_data` directory and is refused.
+//! under the same name is refused when its `_data` device/inode differs.
+//!
+//! Residual risk: device/inode pairs are not generation identifiers. Removing
+//! and recreating a volume between IDENTITY and MOVE can reuse the original
+//! inode numbers with identical inspection fields; these checks cannot detect
+//! that replacement. No Hack-written generation marker is enrolled here.
+//! Adding one requires a durable enrollment/recovery contract for existing
+//! volumes, rather than creating or repairing identity during quarantine.
+//! External volume removal/recreation must therefore be excluded during this
+//! operation; the provider lease only serializes Hack mutations.
 use super::*;
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::DirBuilderExt;
@@ -48,12 +57,12 @@ fn refused() -> CandidateError {
         "The disposable cache selection is missing, unsafe, changed or in use; no cache bytes were moved.",
     )
 }
-/// A changed volume after a guest effect. Bytes may already have moved, so the
+/// An unconfirmed guest effect or changed volume. Bytes may already have moved, so the
 /// pre-effect wording would be false; the durable record stays `pending`.
 fn unsettled() -> CandidateError {
     error(
         "graph_cache_quarantine_unsettled",
-        "The volume changed during the cache quarantine; the record stays pending for explicit resume or resolution.",
+        "The cache quarantine outcome is unsettled; cache bytes may have moved. The record stays pending for explicit resume or resolution.",
     )
 }
 fn digest(bytes: &[u8]) -> String {
@@ -641,7 +650,7 @@ fn quarantine_with(
     let moved = match output.as_str() {
         "cache-quarantine-v1 moved\n" => true,
         "cache-quarantine-v1 resumed\n" => false,
-        _ => return Err(refused()),
+        _ => return Err(unsettled()),
     };
     admitted.recheck(port)?;
     // Commit point 2: completion follows the guest's synchronized rename.

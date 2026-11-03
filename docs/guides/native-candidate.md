@@ -1744,6 +1744,18 @@ volume changes during the guest effect, the command fails with
 `graph_cache_quarantine_unsettled` and the record stays pending for explicit resume
 or resolution.
 
+A successful guest exit with an unrecognized or truncated MOVE reply also reports
+`graph_cache_quarantine_unsettled`: bytes may have moved, so the record stays pending
+for explicit resume or resolution.
+
+Volume identity has a residual inode-reuse risk. If an external actor removes and
+recreates the volume between IDENTITY and MOVE with the same inspection fields and
+reused device/inode numbers, quarantine cannot detect the replacement. Exclude
+external volume removal/recreation during quarantine; the provider lease serializes
+Hack mutations only. A Hack-written generation nonce is deferred because existing
+volumes need a durable enrollment and interrupted-enrollment recovery contract;
+quarantine must not silently create or repair identity for an existing volume.
+
 A private record under the candidate home's `run/cache-quarantine/` is written
 before the guest effect and marked `quarantined` after the guest syncs the move.
 If the command is interrupted, `inspect-cache-quarantine` reports the recorded

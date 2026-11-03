@@ -207,7 +207,7 @@ export async function prepareNativeRoutingFixtureIngress(opts: {
     });
     return id;
   };
-  const bunImage = await image("oven/bun:1.4.2-slim");
+  const bunImage = await image("oven/bun:1.4.4-slim");
   const caddyImage = await image(CADDY_IMAGE);
   const token = randomBytes(16).toString("hex");
   const proxyName = `e2e-native-routing-proxy-${token}`;

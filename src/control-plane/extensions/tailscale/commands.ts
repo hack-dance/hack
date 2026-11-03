@@ -1,4 +1,3 @@
-import { secrets } from "bun";
 import { updateGlobalConfig } from "../../../lib/config.ts";
 import {
   getRecord,
@@ -6,6 +5,7 @@ import {
   getStringArray,
   isRecord,
 } from "../../../lib/guards.ts";
+import { keychain } from "../../../lib/keychain.ts";
 import { exec, findExecutableInPath } from "../../../lib/shell.ts";
 import { display } from "../../../ui/display.ts";
 
@@ -191,7 +191,7 @@ export const TAILSCALE_COMMANDS: readonly ExtensionCommand[] = [
         fallback: DEFAULT_TAILSCALE_KEY_EXPIRY_SECONDS,
       });
 
-      await secrets.set({
+      await keychain.set({
         service: TAILSCALE_OAUTH_SECRET_SERVICE,
         name: authRef,
         value: secret.clientSecret,
@@ -265,7 +265,7 @@ export const TAILSCALE_COMMANDS: readonly ExtensionCommand[] = [
         parsed.value.authRef?.trim() ||
         settings.authRef ||
         DEFAULT_TAILSCALE_OAUTH_AUTH_REF;
-      const deleted = await secrets.delete({
+      const deleted = await keychain.delete({
         service: TAILSCALE_OAUTH_SECRET_SERVICE,
         name: authRef,
       });
@@ -999,7 +999,7 @@ async function validateTailscaleOauthPayload(opts: {
   }
 
   const clientSecret = (
-    (await secrets.get({
+    (await keychain.get({
       service: TAILSCALE_OAUTH_SECRET_SERVICE,
       name: authRef,
     })) ?? ""

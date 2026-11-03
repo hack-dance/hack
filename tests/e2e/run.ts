@@ -1,4 +1,14 @@
 import {
+  describeResources,
+  listFixtureNetworks,
+  listOwnedNetworks,
+  ownedFixtureNames,
+  recoverStaleOwnership,
+  runDocker,
+  settleRunOwnership,
+  sweepOwnedComposeResources,
+} from "./docker-ownership.ts";
+import {
   blockedLaunchctlCalls,
   describeLaunchAgentChange,
   fingerprintLaunchAgentPlist,
@@ -82,9 +92,10 @@ import { parseShard, type ShardSelection, selectShard } from "./shard.ts";
  *   HACK_E2E_REQUIRE_DOCKER=1 ...            # fail if a Docker scenario skips
  *   HACK_E2E_REQUIRE_TMUX=1 ...              # fail if tmux recovery cannot run
  *
- * Exit codes: 0 all pass/skip, 1 any scenario failed, 2 isolation canary
- * failed (nothing ran) or the launchd canary saw the real hackd plist change
- * or a refused hackd launchctl call (HACK-1313).
+ * Exit codes: 0 all pass/skip, 1 any scenario failed or the run left an
+ * owned Docker network behind, 2 isolation canary failed (nothing ran) or
+ * the launchd canary saw the real hackd plist change or a refused hackd
+ * launchctl call (HACK-1313).
  */
 
 export const ALL_SCENARIOS: readonly Scenario[] = [
@@ -301,21 +312,113 @@ async function runSuite(opts: {
   const dockerEnabled = (process.env.HACK_E2E_DOCKER ?? "") === "1";
   const requireDocker = (process.env.HACK_E2E_REQUIRE_DOCKER ?? "") === "1";
   const keepTempDirs = (process.env.HACK_E2E_KEEP ?? "") === "1";
+  const networksBefore = dockerEnabled ? await prepareDockerRun() : null;
   const outcomes = await runScenarios({
     scenarios: ALL_SCENARIOS,
     dockerEnabled,
     only: shardNames ?? args.only,
     keepTempDirs,
   });
+  const networksLeft = dockerEnabled
+    ? await finishDockerRun({ networksBefore })
+    : false;
 
   const dockerSkipped = outcomes.some(
     (outcome) => outcome.tier === "docker" && outcome.status === "skip"
   );
   process.exitCode =
     outcomes.some((outcome) => outcome.status === "fail") ||
+    networksLeft ||
     (requireDocker && dockerSkipped)
       ? 1
       : 0;
+}
+
+const TERMINATION_SIGNALS = {
+  SIGHUP: 1,
+  SIGINT: 2,
+  SIGTERM: 15,
+} as const;
+
+/**
+ * Before any docker scenario: reclaim resources journaled by e2e runs that
+ * died without cleaning up, count fixture networks, and make an interrupted
+ * run sweep what it owns before exiting.
+ */
+async function prepareDockerRun(): Promise<number | null> {
+  const { recovered } = await recoverStaleOwnership({ docker: runDocker });
+  for (const sweep of recovered) {
+    if (sweep.removed.length > 0) {
+      process.stdout.write(
+        `reclaimed from a dead e2e run: ${describeResources(sweep.removed)}\n`
+      );
+    }
+  }
+  installInterruptCleanup();
+  const networks = await listFixtureNetworks({ docker: runDocker });
+  return networks?.length ?? null;
+}
+
+let interrupted = false;
+
+function installInterruptCleanup(): void {
+  for (const [signal, number] of Object.entries(TERMINATION_SIGNALS)) {
+    process.on(signal, async () => {
+      if (interrupted) {
+        return;
+      }
+      interrupted = true;
+      process.stdout.write(
+        `\n${signal}: removing Docker resources owned by this run\n`
+      );
+      const sweep = await sweepOwnedComposeResources({
+        docker: runDocker,
+        names: ownedFixtureNames(),
+      });
+      if (sweep.removed.length > 0) {
+        process.stdout.write(`removed: ${describeResources(sweep.removed)}\n`);
+      }
+      // The journal stays: a CLI child still running may recreate resources,
+      // and the next run reclaims them once this process is gone.
+      process.exit(128 + number);
+    });
+  }
+}
+
+/**
+ * After all scenarios: count fixture networks again and fail the run when
+ * any network owned by this run is still present. A full sweep of the run's
+ * owned resources always follows; the ownership journal is cleared only when
+ * that sweep listed every resource kind and every removal succeeded, so a
+ * later run can still reclaim anything left.
+ */
+async function finishDockerRun(opts: {
+  readonly networksBefore: number | null;
+}): Promise<boolean> {
+  const names = ownedFixtureNames();
+  const owned = await listOwnedNetworks({ docker: runDocker, names });
+  const after = await listFixtureNetworks({ docker: runDocker });
+  if (owned === null || after === null || opts.networksBefore === null) {
+    process.stdout.write("\nnetwork check skipped: docker network ls failed\n");
+  } else {
+    process.stdout.write(
+      `\nfixture networks: before=${opts.networksBefore} after=${after.length} left by this run=${owned.length}\n`
+    );
+  }
+  if (owned !== null && owned.length > 0) {
+    process.stdout.write(
+      `LEAK: this run left Docker networks: ${describeResources(owned)}\n`
+    );
+  }
+  const { sweep, journalCleared } = await settleRunOwnership({
+    docker: runDocker,
+  });
+  if (!journalCleared) {
+    process.stdout.write(
+      `ownership journal kept for a later run: sweep incomplete (could not list: ${sweep.unlisted.join(", ") || "none"}; failed removals: ${describeResources(sweep.failed.map((failure) => failure.resource)) || "none"})\n`
+    );
+  }
+  return owned !== null && owned.length > 0;
 }
 
 if (import.meta.main) {

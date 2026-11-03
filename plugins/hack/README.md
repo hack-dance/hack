@@ -4,12 +4,14 @@ Optional Hack integration for Codex, Claude Code, and Cursor, and the default wa
 give an agent Hack guidance. Install the `hack` executable first; the plugin uses it
 from PATH.
 
-The bundle contains seven skills:
+The bundle contains eight skills:
 
 - `hack-cli`: services, logs, routed URLs, lifecycle and workspaces.
 - `hack-branches`: parallel branch instances (`--branch <name>`) and branch aliases.
 - `hack-env`: env values, overlays and worktree-local overrides without exposing secrets.
 - `hack-diagnose`: read-first diagnosis and the `--json` error-code reference.
+- `hack-feedback`: privacy-reviewed, offline feedback drafts about Hack; posting
+  needs a confirmed destination and approval of the exact text.
 - `hack-init`: configure a new or existing project for Hack.
 - `hack-install`: installation, stable/prerelease selection, upgrade and rollback.
 - `hack-remote`: prepare an existing project on another machine or in Codex Cloud.
@@ -41,7 +43,7 @@ codex plugin add hack@hack-dance
 codex plugin list --json --marketplace hack-dance
 ```
 
-Start a fresh client and confirm all seven plugin skills load. If you also installed
+Start a fresh client and confirm all eight plugin skills load. If you also installed
 `hack-mcp`, call a harmless MCP tool such as `hack.projects.list` against an isolated
 registry, after inspecting the actual discovered tool names.
 The Claude hooks and the `hack-mcp` server still resolve `hack` from the client's

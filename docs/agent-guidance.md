@@ -22,8 +22,9 @@ run only `hack agent prime`. See [model-policy ownership](reference/agent-client
 | `src/agents/init-patterns.ts`, `init-assistant.ts` | Repo inventory embedded by the onboarding builder, and pattern hints |
 | `src/agents/install-skill.ts`, `remote-bootstrap-skill.ts` | Plugin installation/channel selection and fresh-host/cloud setup skills |
 | `src/agents/focused-skills.ts` | Plugin `hack-branches`, `hack-env` and `hack-diagnose` skills, composed from canonical section ids, and the plugin `hack-cli` routing description |
+| `src/agents/feedback-review.ts`, `feedback-skill.ts` | Plugin `hack-feedback` skill, its issue-template and examples references, and `.github/ISSUE_TEMPLATE/hack-feedback.md`, all rendered from one typed contract (taxonomy, statuses, evidence classes, redaction kinds, posting-gate refusals) |
 | `src/agents/error-code-reference.ts` | `hack-diagnose` error-code reference, rendered from the exported `HACK_ERROR_CODES` registry in `src/lib/cli-result.ts` |
-| `scripts/generate-agent-plugins.ts` | Skills-only `hack` plugin (portable manifest, three client compatibility manifests, seven skills, Cursor rule) and the complete opt-in `hack-mcp` plugin |
+| `scripts/generate-agent-plugins.ts` | Skills-only `hack` plugin (portable manifest, three client compatibility manifests, eight skills, Cursor rule), the feedback issue template, and the complete opt-in `hack-mcp` plugin |
 
 The `hack` plugin is skills-only: the generator refuses a client manifest that
 declares `mcpServers` and removes stale `.mcp.json`/`mcp.json` files from it. Each
@@ -120,6 +121,40 @@ renders from `HACK_ERROR_CODES` in `src/lib/cli-result.ts`.
 `tests/focused-skills.test.ts` checks section ids, CLI_SPEC resolution,
 error-code parity and trigger overlap.
 
+The plugin-only `hack-feedback` skill drafts privacy-reviewed reports about Hack
+itself. Its vocabularies, the issue template (packaged as a reference and generated
+into `.github/ISSUE_TEMPLATE/hack-feedback.md`) and the synthetic examples render
+from `src/agents/feedback-review.ts`. That module also holds the reference
+sanitizer and the posting gate the skill describes: a confirmed destination, a
+single-use approval of the exact payload, recheck after edits, and no automatic
+retry. A retry after a failed send also needs a recorded check that the failure
+created no issue. Hack ships no sender. `tests/feedback-review.test.ts` drives the
+gate with a mock sender over synthetic secret, path, URL, config, log-instruction,
+command-shape, duplicate, partial-reproduction, denial, edit and failed-send cases.
+Live issue creation is not part of any test and needs the user's own authorization.
+
+Rendering and the gate walk `CLI_SPEC` over every `hack` command: the command path
+and that path's flag names stay, and positional arguments, flag values and unknown
+flags become placeholders. Only the skill renderer and tests import this code, so
+what protects a user in practice is an agent following the skill's prose. A passing
+gate does not prove a draft is clean: a hostname under a public suffix, a
+single-label machine name, a bare username, a relative project path or a project,
+service, branch, repository or organization name in prose can still pass, so the
+user's review of the exact payload still matters.
+
+Command matching fails closed. Inside code spans, fences and indented code, `hack`
+in any case starts a command. In prose, so does a lowercase `hack`, even when the
+next word is not a command; a capitalized `Hack` in prose is the product name and is
+not matched. Launcher and version spellings such as `hack-local` and `hack@latest`,
+and a repository prefix such as `hack-dance/hack up`, count too; a bare repository
+reference with no words after it does not. A command stays open to the end of its
+line, across code spans and the prose between them. A code span that wraps keeps it
+open through the span and to the end of the line where the span closes. Every later
+word on that line is an argument: prose keeps registered error codes, sentence
+punctuation and an HTML comment end, and code keeps none of them. So a draft should end each line with its
+command and put any error code before it. Flag values are always replaced, including
+enum and number values the spec could validate.
+
 Skill candidates and where their patterns live now:
 
 | Candidate | Decision | Patterns live in | Promotion owner and missing contract |
@@ -129,4 +164,4 @@ Skill candidates and where their patterns live now:
 | checks | Defer | `hack-cli` "Running things"; catalogue HACK-P02, P10, P11 | WU11: qualified portable toolchain fixture with a distinct trigger |
 | sessions | Defer | `hack-cli` "Workspaces" and [sessions](sessions.md) | WU18: trigger evaluations showing `hack-cli` misroutes session work |
 | hack-run | Defer | `hack-cli` "Running things" | WU26: decides between a hack-run skill and references |
-| hack-feedback | Defer | Not shipped | WU25: privacy-reviewed feedback drafts |
+| hack-feedback | Shipped | Plugin `hack-feedback` and its references | WU25: posting stays with the user's own tooling after review; no built-in sender |

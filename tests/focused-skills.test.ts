@@ -4,6 +4,7 @@ import { parse as parseYaml } from "yaml";
 
 import { renderPluginSkill } from "../scripts/generate-agent-plugins.ts";
 import { renderErrorCodeReference } from "../src/agents/error-code-reference.ts";
+import { HACK_FEEDBACK_ROUTING } from "../src/agents/feedback-skill.ts";
 import {
   composeCanonicalSections,
   FOCUSED_SKILLS,
@@ -73,6 +74,11 @@ function pluginRouting(): RoutedSkill[] {
       description: descriptionOf(renderPluginSkill(skill.name)),
       triggers: skill.routing.triggers,
     })),
+    {
+      name: "hack-feedback",
+      description: descriptionOf(renderPluginSkill("hack-feedback")),
+      triggers: HACK_FEEDBACK_ROUTING.triggers,
+    },
     ...[
       ["hack-init", renderHackInitSkill()],
       ["hack-install", renderHackInstallSkill()],
@@ -375,15 +381,23 @@ test("rendered descriptions are the routing sentences and parse as YAML", () => 
       renderSkillDescription(skill.routing)
     );
   }
+  expect(descriptionOf(renderPluginSkill("hack-feedback"))).toBe(
+    renderSkillDescription(HACK_FEEDBACK_ROUTING)
+  );
   const cli = descriptionOf(renderPluginSkill("hack-cli"));
-  for (const name of ["hack-branches", "hack-env", "hack-diagnose"]) {
+  for (const name of [
+    "hack-branches",
+    "hack-env",
+    "hack-diagnose",
+    "hack-feedback",
+  ]) {
     expect(cli).toContain(name);
   }
 });
 
 test("no trigger phrase is shared between plugin skill descriptions", () => {
   const skills = pluginRouting();
-  expect(skills.map((skill) => skill.name)).toHaveLength(7);
+  expect(skills.map((skill) => skill.name)).toHaveLength(8);
   const owned = skills.flatMap((skill) => skill.triggers);
   expect(owned.length).toBeGreaterThan(0);
   expect(new Set(owned.map((trigger) => trigger.toLowerCase())).size).toBe(

@@ -1015,7 +1015,7 @@ export async function prepareFixtureInputs(
     ? await probe([
         "image",
         "inspect",
-        "oven/bun:1.4.2-slim",
+        "oven/bun:1.4.4-slim",
         "--format",
         "{{.Id}}",
       ])

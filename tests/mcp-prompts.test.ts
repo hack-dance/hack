@@ -89,7 +89,7 @@ async function startMcpClient(): Promise<Client> {
   const repoRoot = resolve(import.meta.dir, "..");
 
   const transport = new StdioClientTransport({
-    command: "bun",
+    command: process.execPath,
     args: ["index.ts", "mcp", "serve"],
     cwd: repoRoot,
     env: privateCliEnv({ root: tempDir, home: homeDir }),
@@ -97,7 +97,7 @@ async function startMcpClient(): Promise<Client> {
   });
 
   const mcp = new Client({ name: "hack-cli-tests", version: "0.0.0" });
-  await mcp.connect(transport);
   client = mcp;
+  await mcp.connect(transport);
   return mcp;
 }

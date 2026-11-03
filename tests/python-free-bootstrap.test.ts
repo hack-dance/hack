@@ -42,7 +42,7 @@ function fixture(
   }
   for (const tool of ["shasum", "mktemp", "chmod", "rm", "cp", "date"]) {
     symlinkSync(
-      `/bin/${tool === "shasum" || tool === "mktemp" ? "../usr/bin/" : ""}${tool}`,
+      `${tool === "shasum" || tool === "mktemp" ? "/usr/bin" : "/bin"}/${tool}`,
       join(bin, tool)
     );
   }

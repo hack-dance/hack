@@ -11,6 +11,7 @@ import * as retainedRouting from "../src/lib/native-compose-adoption-routing.ts"
 import { runLegacyComposeRetainedRoutingOperation } from "../src/lib/native-compose-adoption-routing-execution.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { assertInvalidRetainedMutationDeadlines } from "./helpers/retained-mutation-deadline.ts";
 import {
   type RetainedRoutingStoreTimeoutMs,
   ROUTING_CANARY,
@@ -1740,3 +1741,20 @@ test(
   },
   { timeoutMs: SINGLE_OPERATION_TEST_BUDGET_MS }
 );
+
+test("HACK-1359: version14 rejects missing and non-finite mutation deadlines without effects", async () => {
+  const { store, generation } = await prepare();
+  try {
+    await assertInvalidRetainedMutationDeadlines({
+      store,
+      generation,
+      binary: h.compiler,
+      snapshot: async () => ({
+        commands: h.commands,
+        receipt: await h.receipt(),
+      }),
+    });
+  } finally {
+    await store.close();
+  }
+});

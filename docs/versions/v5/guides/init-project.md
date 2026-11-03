@@ -1,6 +1,6 @@
 # Prepare a project for the native candidate
 
-Start with [Install](../install.md), [Native preparation](native-candidate.md) and [Getting started](../getting-started.md). Select the explicit next.5 launcher and prepare its provider pool, image and private home before starting an application.
+Start with [Install](../install.md), [Native preparation](native-candidate.md) and [Getting started](../getting-started.md). Select the explicit next.6 launcher and prepare its provider pool, image and private home before starting an application.
 
 For ordinary Compose initialization, select v4 in the documentation version selector. Its init/detached-start recipe is not the v5 native setup procedure.
 

@@ -123,7 +123,9 @@ reports `not_started`. Any other inspection result keeps the attempt retained.
 Examples include `native_graph_receipt` for damaged or foreign evidence,
 `native_graph_foreground` for a published owner, and a stopped runtime. This
 applies only to attempts without lifecycle hooks, host processes or a live-stop
-owner. A canceled `unreserved` startup exits 130, like confirmed removal.
+owner. A canceled startup that retains nothing (`not-started`, such as Ctrl-C
+during preflight, `unreserved`, or confirmed removal) prints a cancellation note
+and exits 130; a canceled start that retained evidence still fails.
 Readiness requires authenticated current observations and unchanged input before
 publication. The foreground owner remains attached until owned shutdown finishes;
 Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
@@ -236,6 +238,12 @@ changed files and rebooted guests refuse. Env/profile changes, service subsets a
 nor acquires managed values or starts a provider.
 Omit `--profile` to recover the stored generation; explicit empty or named profile
 overrides both refuse.
+
+Repeating `down --recover` after confirmed retirement is a read-only no-op,
+including when authenticated completed recovery history remains. It does not
+contact the native runtime or acquire recovery locks. Incomplete recovery,
+pending writes, retained owner records and changed history still select recovery
+or refuse; they do not qualify for the no-op.
 
 When the selection has a retained startup intent but no Ready mapping and no
 recovery intent, `down --recover` takes a different path. It handles only an

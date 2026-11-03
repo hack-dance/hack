@@ -29,7 +29,13 @@ hack logs --pretty
 ```
 
 `hack up` starts the declared services and project lifecycle. Use `hack ps` to
-inspect them and `hack logs` to read their output. When finished:
+inspect them and `hack logs` to read their output. On the Compose backend,
+`hack ps` includes stopped containers in the selected project or branch, with
+state and exit-code columns. An exited one-shot with code `0` completed
+successfully; a nonzero code indicates failure. `hack ps --json` reads Compose
+directly and retains each item's `State` and `ExitCode`, including immediately
+after a failed startup. Removed containers are not retained as run history.
+When finished:
 
 ```sh
 hack down

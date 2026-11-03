@@ -203,7 +203,7 @@ function publishedCliText(text: string, version: "v4" | "v5"): string {
   if (version === "v5") {
     curated = curated.replace(
       "# hack CLI reference",
-      `# hack CLI reference\n\nThis editorial command selection omits guidance-writing and primer setup from the default reference. Those commands still exist at next.5: see [Agent compatibility reference](${documentRoute(version, "reference/agent-compatibility")}). This is a publication choice, not a shipped runtime removal.`
+      `# hack CLI reference\n\nThis editorial command selection omits guidance-writing and primer setup from the default reference. Automatic instruction injection is retired in next.6; historical availability and current refusals are recorded here: see [Agent compatibility reference](${documentRoute(version, "reference/agent-compatibility")}). Explicit skills and MCP setup remain opt-in.`
     );
   }
   return curated.replace(

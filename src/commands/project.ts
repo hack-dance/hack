@@ -16,7 +16,7 @@ export function wrapLifecyclePersistentCommand(
   return wrapSharedLifecyclePersistentCommand(opts);
 }
 
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import {
   autocompleteMultiselect,
   confirm,
@@ -115,7 +115,6 @@ import {
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
-import { requestDaemonJson } from "../daemon/client.ts";
 import { renderCompose, TODO_IMAGE_SENTINEL } from "../init/compose.ts";
 import type { ServiceCandidate } from "../init/discovery.ts";
 import { discoverRepo } from "../init/discovery.ts";
@@ -199,6 +198,7 @@ import {
   ensureDir,
   pathExists,
   readTextFile,
+  writeTextFileAtomicIfChanged,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
@@ -259,14 +259,18 @@ import {
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import {
+  describeUnmigratedLegacyDotenv,
   discoverComposeServiceNames,
   ensureHackDirGitignore,
+  findUnmigratedLegacyDotenv,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
+  hasUnmigratedLegacyDotenv,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import { assertProjectEnvLayerPath } from "../lib/project-env-layer-path.ts";
 import {
   parseRequestedTarget,
   resolveProjectExecutionTarget,
@@ -1319,6 +1323,16 @@ export async function resolveModernComposeEnvOverrides(opts: {
   });
   if (!modern) {
     return null;
+  }
+  const unmigrated = await findUnmigratedLegacyDotenv({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    serviceNames: opts.allServiceNames,
+  });
+  if (hasUnmigratedLegacyDotenv(unmigrated)) {
+    logger.warn({
+      message: `This checkout ${describeUnmigratedLegacyDotenv(unmigrated)} in its legacy .hack/.env files, and the env layers don't deliver those values, so services that rely on them may not get them. Run \`hack doctor --migrate-env-config\`, which moves them to this checkout's local layers or says what to change first.`,
+    });
   }
   const lifecycleEnv = selectProjectEnvValuesForExecutionTarget({
     resolved: modern,
@@ -3462,6 +3476,13 @@ async function writeInitScaffoldFile(opts: {
   readonly content: string;
 }): Promise<void> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
+  if (basename(opts.file) === PROJECT_ENV_CONFIG_DEFAULT_FILENAME) {
+    await writeTextFileAtomicIfChanged(opts.file, opts.content, {
+      validatePath: async (path) =>
+        await assertProjectEnvLayerPath({ projectRoot: opts.repoRoot, path }),
+    });
+    return;
+  }
   await writeTextFileIfChanged(opts.file, opts.content);
 }
 
@@ -7435,26 +7456,14 @@ async function handlePs({
 
   const cwd = dirname(project.composeFile);
 
-  if (json) {
-    const daemon = await requestDaemonJson({
-      path: "/v1/ps",
-      query: {
-        compose_project: composeProjectName ?? baseProjectName,
-        project: baseProjectName,
-        branch,
-      },
-    });
-    if (daemon?.ok && daemon.json) {
-      process.stdout.write(`${JSON.stringify(daemon.json, null, 2)}\n`);
-      return 0;
-    }
-  }
-
+  // Read Compose directly: the daemon cache omits state and exit codes and can
+  // lag behind a failed startup. Both formats must observe the same containers.
   const res = await composeRuntimeBackend.psJson({
     composeFiles: [project.composeFile],
     composeProject: composeProjectName,
     profiles,
     cwd,
+    all: true,
   });
 
   if (res.exitCode !== 0) {
@@ -7467,6 +7476,7 @@ async function handlePs({
       composeProject: composeProjectName,
       profiles,
       cwd,
+      all: true,
     });
   }
 
@@ -7484,12 +7494,16 @@ async function handlePs({
   const rows = entries.map((e) => [
     getString(e, "Service") ?? "",
     getString(e, "Name") ?? "",
+    getString(e, "State") ?? "",
+    (getString(e, "State") ?? "").toLowerCase() === "exited"
+      ? String(parseComposeExitCode(e.ExitCode) ?? "")
+      : "",
     getString(e, "Status") ?? "",
     getString(e, "Ports") ?? "",
   ]);
 
   await display.table({
-    columns: ["SERVICE", "NAME", "STATUS", "PORTS"],
+    columns: ["SERVICE", "NAME", "STATE", "EXIT CODE", "STATUS", "PORTS"],
     rows,
   });
 

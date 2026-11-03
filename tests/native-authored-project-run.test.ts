@@ -14,6 +14,7 @@ import {
   stat,
   symlink,
   unlink,
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ import { parseNativeAuthoredReceipt } from "../src/backends/native-authored-grap
 import {
   withNativeAuthoredProjectAdmission as admit,
   loadNativeAuthoredProjectRun as load,
+  nativeAuthoredProjectNothingToRecover as nothingToRecover,
   prepareNativeAuthoredProjectRunStorage as prepare,
   removeNativeAuthoredProjectRun as remove,
   saveNativeAuthoredProjectRun as save,
@@ -947,4 +949,46 @@ test("an asynchronous rejecting ready guard never publishes or leaks a private d
       readdirSync(root).filter((name) => name.endsWith(".pending"))
     ).toEqual([]);
   });
+});
+
+test("HACK-1312: nothing-to-recover selects only a scope that retains no recovery evidence", async () => {
+  const opts = await fixture();
+  // No storage at all, then prepared empty storage.
+  expect(await nothingToRecover(opts)).toBe(true);
+  expect(await readdir(opts.projectDir)).toEqual([]);
+  await prepare(opts);
+  expect(await nothingToRecover(opts)).toBe(true);
+  const root = join(opts.projectDir, ".internal", "native-authored-runs");
+  // A retained startup intent and a Ready mapping each select recovery.
+  await admit(opts, async (admission) => {
+    const expectedStart = await admission.reserve({
+      review: record().receipt.review,
+    });
+    expect(await nothingToRecover(opts)).toBe(false);
+    const expectedRun = await admission.publish({
+      expectedStart,
+      record: record(),
+    });
+    expect(await nothingToRecover(opts)).toBe(false);
+    await admission.retire({ expectedStart, expectedRun, cleaned: cleaned() });
+  });
+  // A completed retirement leaves nothing, so a repeat is a no-op.
+  const after = await readdir(root);
+  expect(await nothingToRecover(opts)).toBe(true);
+  expect(await readdir(root)).toEqual(after);
+  // Stray owner or recovery evidence still selects the recovery owner.
+  const key = createHash("sha256").update("null").digest("hex");
+  for (const name of [
+    `${key}.live-stop.json`,
+    `${key}.hooks.json`,
+    `${key}.json.recovery.json`,
+    `${key}.lock`,
+    `${key}.admission.lock`,
+  ]) {
+    const path = join(root, name);
+    await writeFile(path, "{}", { mode: 0o600 });
+    expect(await nothingToRecover(opts)).toBe(false);
+    await unlink(path);
+  }
+  expect(await nothingToRecover(opts)).toBe(true);
 });

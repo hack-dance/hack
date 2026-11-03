@@ -21,7 +21,7 @@ terminal).
 - `hack exec <service> -- <cmd...>` — command in an already-running service container
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
-- `hack daemon` — optional local daemon for faster JSON status/ps
+- `hack daemon` — optional local daemon for faster JSON project status
 - `hack agent onboard` — agent-assisted onboarding for existing projects
 - `hack setup` — install/refresh agent integrations (Cursor rules, Claude hooks, Codex skill, MCP)
 

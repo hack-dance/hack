@@ -10,7 +10,15 @@ import {
   type NativeComposeRouteOwner,
   openNativeComposeRouteClaims,
 } from "../src/lib/native-compose-route-claims.ts";
+import { waitForFileContent } from "./helpers/wait-for-file-content.ts";
 
+const BARRIER_BUDGET_MS = 5000;
+/**
+ * Gap between creating the rollback barrier and writing its reference. It makes
+ * the empty-file window happen on every run, so a case that waits for existence
+ * alone and then kills the writer fails every time.
+ */
+const TORN_BARRIER_GAP_MS = 50;
 const BINDING: NativeComposeRouteBinding = {
   engineId: "fixture-engine:1",
   proxyId: "a".repeat(64),
@@ -91,8 +99,9 @@ async function complete(
   await result.markEffectsPossible(attempt);
   await result.complete({ attempt, assertTransition: async () => {} });
 }
+/** A barrier only: a case that reads the file uses waitForFileContent. */
 async function waitForFile(path: string) {
-  const deadline = performance.now() + 5000;
+  const deadline = performance.now() + BARRIER_BUDGET_MS;
   while (!(await Bun.file(path).exists())) {
     if (performance.now() >= deadline) {
       throw new Error("fixture barrier timed out");
@@ -604,6 +613,7 @@ test("interrupted rollback before deletion-intent publication never hides its ex
   ).href;
   const child = spawn(`
     import {spyOn} from "bun:test";
+    import {writeFileSync} from "node:fs";
     import * as fs from "node:fs/promises";
     import {openNativeComposeRouteClaims} from ${JSON.stringify(module)};
     const root = ${JSON.stringify(root)};
@@ -612,6 +622,8 @@ test("interrupted rollback before deletion-intent publication never hides its ex
     const original = fs.open;
     spyOn(fs, "open").mockImplementation(async (...args) => {
       if (String(args[0]).includes("/releases/") && String(args[0]).endsWith(".tmp")) {
+        writeFileSync(root + "/rollback-barrier", "");
+        await Bun.sleep(${TORN_BARRIER_GAP_MS});
         await Bun.write(root + "/rollback-barrier", JSON.stringify(attempt.reference));
         await Bun.sleep(60_000);
       }
@@ -619,13 +631,22 @@ test("interrupted rollback before deletion-intent publication never hides its ex
     });
     await store.rollback(attempt);
   `);
-  await waitForFile(join(root, "rollback-barrier"));
+  const reference = await waitForFileContent({
+    path: join(root, "rollback-barrier"),
+    budgetMs: BARRIER_BUDGET_MS,
+    what: "rollback barrier",
+    complete: (text) => {
+      try {
+        return JSON.parse(text) as NativeComposeRouteAttempt["reference"];
+      } catch {
+        return undefined;
+      }
+    },
+  });
   child.kill("SIGKILL");
   await child.exited;
   const reopened = await store(root);
-  const saved = await reopened.reopen(
-    await Bun.file(join(root, "rollback-barrier")).json()
-  );
+  const saved = await reopened.reopen(reference);
   expect(["reserved", "aborted"]).toContain(saved.phase);
   let observed: readonly string[] = [];
   await reopened.release({

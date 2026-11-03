@@ -16,7 +16,7 @@ const excludedGroups = new Set([
   "## Extensions",
 ]);
 
-/** Shipped next.5 commands retained only in the agent compatibility reference. */
+/** Compatibility commands excluded from the default tutorial selection. */
 export const agentCompatibilityCommands = new Set([
   "mcp install",
   "setup cursor",

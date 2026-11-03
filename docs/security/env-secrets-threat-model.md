@@ -62,7 +62,7 @@ refer to `hack-dance/hack`.
 
 | Threat | Mitigation on `next` |
 | --- | --- |
-| A secret passed as a command argument lands in shell history and in `ps` output that other local users can read. | `--value-stdin` on `hack env add` and `hack env set` reads the value from stdin (at most 64 KiB, fixed refusals that never repeat the input). See `src/lib/env-value-stdin.ts` (`readEnvValueFromStdin`, `assertEnvValueStdinUsage`), #308. The hidden prompt stays available in a terminal. |
+| A secret passed as a command argument lands in shell history and in `ps` output that other local users can read. | `--value-stdin` on `hack env add` and `hack env set` reads the value from stdin (at most 64 KiB, read to end of input within a 30-second deadline, fixed refusals that never repeat the input). The stdin deadline is proven by `tests/env-value-stdin-bounds-cli.test.ts`. OS keychain calls have a 60-second deadline with a closed refusal (`src/lib/native-keychain.ts`); `tests/native-keychain.test.ts` proves the deadline with a call that never settles. The end-to-end keychain case in `tests/env-value-stdin-bounds-cli.test.ts` runs only on Linux hosts with libsecret installed and is skipped elsewhere, so hosted CI may not run it. See `src/lib/env-value-stdin.ts` (`readEnvValueFromStdin`, `assertEnvValueStdinUsage`), #308. The hidden prompt stays available in a terminal. |
 | A mistyped `KEY=value` argument is echoed back in an error, or turned into a file name or overlay name. | Key, scope and `--env` arguments are validated before any file access, and the refusal text never contains the argument: `src/cli/env-arguments.ts`, `src/cli/env-selection.ts`, `parseEnvConfigSelection` in `src/lib/project.ts`, the shared check in `src/cli/run.ts` (#308). `--project` and `--target` follow the same rule through `src/cli/project-selector.ts` (`parseProjectSelectorOption`, `unknownProjectMessage`, `resolveRegisteredProjectOption`) and the `runCli` check (#318). Proven by `tests/env-key-argument-redaction-cli.test.ts` and `tests/project-target-argument-redaction-cli.test.ts`. |
 | Diagnostics print key bytes or absolute paths. | The `hack doctor` env key check uses closed codes and project-relative subjects only: `src/lib/doctor-env-key.ts` (#309). Envelope and key-file failures use one fixed message: `src/lib/private-file.ts`, `src/lib/project-env-config.ts`, `src/lib/secret-store.ts` (#288). |
 | Host command records keep arguments or env values. | `hack host exec` and `hack env exec` records are payload-free (see [host command lifetime](../env.md#host-command-lifetime-and-diagnostics)). |
@@ -95,7 +95,7 @@ refer to `hack-dance/hack`.
 | The key is committed. | The root `.gitignore` gets a `.hack.secret.key` entry before the key is created, so a failed entry write leaves no key; an existing checkout-local key git does not ignore is repaired or refused before a `--secret` write uses it, and `hack doctor` reports it as `env-key-unignored` (HACK-1375). Encryption refuses a git-tracked key, including an inherited primary key, before it is copied (#288). `hack doctor` reports `env-key-tracked` at any depth (#309) and the "generated files" check can untrack a root key with `--fix`. |
 | A key copy ships in build output or a static site. | `hack doctor` reports `env-key-public-path` for copies under `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` and `.output/` (#309). |
 | A weak, short or repetitive key. | `env-key-wrong-length` and `env-key-low-entropy` (#309). Generated keys are 32 random bytes in base64url. |
-| Materialized `.hack/.env` or local overrides are committed. | Hack owns a committed `.hack/.gitignore` block, and `hack doctor` flags tracked generated files (see [ignore rules](../env.md#ignore-rules-committed-hackgitignore)). |
+| Materialized `.hack/.env` or local overrides are committed. | Hack owns a committed `.hack/.gitignore` block, and `hack doctor` flags tracked generated files (see [ignore rules](../env.md#ignore-rules-committed-hackgitignore)). Contract migration puts legacy `plain_env` values in the ignored machine-local layer, refuses a tracked destination, and reports only keys and destination paths (HACK-1712/1713). |
 | A secret leaks into a public artifact through a path nobody listed. | `tests/env-secret-sentinel-scan.test.ts` runs in one of the hosted CI `test shard i/4` jobs; the required `test` check passes only when every shard passes. It gives a primary checkout and a linked worktree random synthetic secrets through `env add --secret --value-stdin` (shared and `--local`), runs materialize, exec, up (Compose generation), env apply, logs, list, explain and doctor, then commits everything with `git add -A`. It requires zero occurrences of any value or the project key, raw or hex/base64/base64url encoded, in CLI output, recorded child argv, tracked files, every Git object, HACK_HOME, the private HOME and its caches, and generated Compose and runtime files. Plaintext may exist only in `.hack/.env`, and key text only in key files; each must be git-ignored, untracked and mode 0600. `.hack/.internal/compose.env.override.yml` must hold `${HACK_ENV_...}` references and no value, and must also be private and ignored. Values may reach a child's environment only for the exec'd command and `docker compose`. Positive controls prove delivery and that the scanner finds planted encodings in files and Git objects. Docker is a recording shim; no engine, keychain or installed Hack is reached. |
 | A dependency vulnerability ships in Hack. | `bun install --frozen-lockfile`, and the read-only `scripts/dependabot-inventory.ts` lists open alerts (#309). Hack does not sandbox project dependencies that run under `hack host exec`; they receive the injected env by design. |
 
@@ -155,11 +155,22 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    published now (HACK-1318); until `hack config adopt --recover --rollback` releases
    its journaled switch, it also keeps the file. Other generated files under `.hack/.internal/` and `.hack/.branch/` are
    written with the process umask; the scan shows they hold no values today.
-5. **YAML env file writes.** `writeProjectEnvConfigFile` in
-   `src/lib/project-env-config.ts` also uses `writeTextFileIfChanged`, so
-   `.hack/hack.env.*.yaml` writes follow a symlink at the file. These files hold
-   ciphertext and non-secret plaintext, but a hostile repository could redirect the
-   write.
+5. **YAML env layer TOCTOU (narrowed, HACK-1685).** Base and overlay YAML layers,
+   including local layers and init scaffold writes, may follow links only when the whole chain resolves inside
+   `realpath(projectRoot)`. Component-aware resolution handles relative targets,
+   chains, symlinked roots and missing targets; segment-aware containment refuses
+   sibling-prefix escapes. Outside targets, dangling outside links, loops and failed
+   inspections produce closed, value-free errors. Mutation discovery and commands
+   check before value stdin, and readers check before decryption or hydration output.
+   `writeProjectEnvConfigFile` uses `writeTextFileAtomicIfChanged` in
+   `src/lib/fs.ts`: allowed links keep their link and writes rename over their real
+   target. The writer rechecks the original layer and captured destination before
+   staging and commit, including after a concurrent link swap. These checks are
+   path-based, not descriptor-relative `openat`/`renameat`: an ancestor directory
+   swapped after the last check can still redirect an operation. This residual race
+   remains open; ordinary outside-link redirection is refused. In-project dangling
+   links are refused by `hack env set`, `hack env unset` and strict reads; `hack env add`
+   replaces them.
 6. **`encrypted_file` key file reads.** Key writes now use the
    `src/lib/private-file.ts` helpers: explicit provisioning replaces the key
    atomically, and first-use generation publishes it exclusively. `readEncryptedFileKey`

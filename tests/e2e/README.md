@@ -372,7 +372,9 @@ The scenario requires these results:
   payload may contain U+FFFD, so a split code point fails the run. Where the
   cut falls varies from run to run, so a single pass does not prove that this
   run cut inside a code point; `tests/mcp-logs-contract.test.ts` covers that
-  case deterministically.
+  case deterministically. The scenario's SDK client keeps its default read limit,
+  so a result over that limit closes the session. `tests/mcp-tool-result-size.test.ts`
+  covers the result limit without Docker.
 - With `DOCKER_HOST` pointing at a missing socket, a snapshot and a tail both
   return the closed `backend_error`. The tail ends at end of stream, not at
   `maxMs`.
@@ -650,6 +652,25 @@ stop that now:
    plist's contents. A changed fingerprint or any refused shim call sets exit
    code 2. A `hack daemon install` you run outside the suite during the run
    also trips this check.
+
+### Daemon guard (HACK-1696)
+
+`hack doctor --fix` and `hack doctor --migrate-env-config` run
+`hack daemon start` with or without a TTY, so `HACK_NO_INTERACTIVE=1` does not
+stop them. `hack global up` does the same after its Docker check when
+`daemon.autoStart` is on. The command comes from `resolveHackInvocation`:
+`HACK_MCP_COMMAND`, then the first `hack` on `PATH`, then the running CLI, so
+taking `hack` off `PATH` does not prevent a start. That daemon does not exit
+when its scenario does. `buildCliEnv` and `privateCliEnv` therefore set
+`HACK_DAEMON_AUTOSTART_DISABLE=1`. An explicit `hack daemon start` still works.
+A test that needs the implicit start opts in and stops what it starts:
+`agent-surface-freeze` passes `0` and runs `hack daemon stop` when it finishes,
+and `privateCliEnv` callers pass `undefined`. A harness outside these helpers
+sets the variable itself.
+
+The variable does not cover `hack gateway enable` or `hack gateway setup`, which
+start a daemon as part of the command. `tests/gateway-e2e.test.ts` needs
+`HACK_GATEWAY_E2E=1` to run.
 
 ## Tiers
 

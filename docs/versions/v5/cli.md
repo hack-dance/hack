@@ -134,7 +134,7 @@ Historical remote guides are excluded from the supported documentation.
   apply documented defaults or fail fast with `E_INTERACTIVE_REQUIRED`.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
 
-Agent context is explicitly selected through the [versioned docs and optional interfaces](integrations.md). No guidance freshness or instruction-writing workflow is part of this onboarding. [Historical compatibility](reference/agent-compatibility.md) records the released next.5 interfaces omitted from this editorial selection.
+Agent context is explicitly selected through the [versioned docs and optional interfaces](integrations.md). No guidance freshness or instruction-writing workflow is part of this onboarding. [Historical compatibility](reference/agent-compatibility.md) records next.5 history and the shipped next.6 retirement. See [release contracts](reference/next6-contracts.md) for new read-only task/target and env hydrate inputs.
 
 ## First-run path
 

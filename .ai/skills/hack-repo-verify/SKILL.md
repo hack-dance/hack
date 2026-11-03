@@ -41,6 +41,16 @@ For native setup use root `mise.toml`, the Bun pin in `package.json`, and
 proceeds with a warning for a deliberate experiment; such a result is not CI evidence.
 Raw `bun test <paths>` does not run the guard.
 
+The storage fence cost experiment is opt-in:
+`HACK_TEST_STORAGE_FENCE_COST=1 bun test tests/native-compose-storage-fence-cost.test.ts`.
+Its four integration cases launch thousands of real source-CLI subprocesses;
+host load can exhaust a storage proof or command budget before reaching the
+request-count assertion. The default suite reports those cases as skipped and
+still runs the small request-log quota regression. A default pass does not
+qualify the opt-in counts or their integrated safety counterexamples. Keep
+the exact counts and production capture/proof limits when running the experiment;
+report a timeout or refusal as inconclusive, never as a cost improvement.
+
 CI's "Config compiler" job also runs compiled-bundle CLI checks
 (`scripts/check-config-compiler-cli.ts`, `scripts/check-native-*-plan-cli.ts`,
 `scripts/check-native-config-import-cli.ts`) that `bun run test` does not. For
@@ -146,6 +156,11 @@ needs source mapping and implementation regression evidence; use
 
 Do not overlap stateful runs against one checkout, daemon, port range or runtime.
 Record owned resources before a live run, use bounded fixtures and verify cleanup.
+A harness outside `privateCliEnv` and `buildCliEnv` sets
+`HACK_DAEMON_AUTOSTART_DISABLE=1` for every CLI run: `doctor --fix`,
+`doctor --migrate-env-config` and `global up` start a daemon that outlives the run,
+even with `HACK_NO_INTERACTIVE=1`. `gateway enable` and `gateway setup` start one
+regardless of it.
 Never hand-edit managed internal state or prune unowned resources to repair a test.
 Report exact command, source/executable, host/container context, result, skips/cache
 and remaining gate. Do not upgrade a mocked/unit result into live runtime evidence.

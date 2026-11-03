@@ -5,8 +5,16 @@ import {
   randomBytes,
 } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, readdir, rm, stat, unlink } from "node:fs/promises";
-import { basename, dirname, relative, resolve } from "node:path";
+import {
+  access,
+  lstat,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  unlink,
+} from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
   HACK_PROJECT_DIR_PRIMARY,
@@ -39,6 +47,7 @@ import {
   mergeManagedGitignoreBlock,
   pathExists,
   readAtomicWriteTargetText,
+  readOptionalTextFile,
   readTextFile,
   writeTextFile,
   writeTextFileAtomicIfChanged,
@@ -51,7 +60,12 @@ import {
   resolveGitWorktreeDir,
 } from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
-import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
+import {
+  type HackEnvResolveResult,
+  readHackEnvContract,
+  resolveEnvFilePath,
+  resolveHackEnv,
+} from "./hack-env.ts";
 import {
   isOwnedLegacyAdoptionManagedEnvAdmission,
   type LegacyAdoptionManagedEnvAdmission,
@@ -74,7 +88,11 @@ import {
   readReplaceablePrivateFile,
   replacePrivateFileAtomic,
 } from "./private-file.ts";
-import { readProjectDefaultEnvConfig } from "./project.ts";
+import {
+  parseEnvConfigSelection,
+  readProjectDefaultEnvConfig,
+} from "./project.ts";
+import { assertProjectEnvLayerPath } from "./project-env-layer-path.ts";
 import {
   assertLegacyProjectDirectory,
   assertLegacyProjectInputFamily,
@@ -795,6 +813,10 @@ async function isInsideGitCheckoutMarker(opts: {
 async function hasLegacyLocalEnvironment(opts: {
   readonly path: string;
 }): Promise<boolean> {
+  await assertProjectEnvLayerPath({
+    projectRoot: dirname(dirname(opts.path)),
+    path: opts.path,
+  });
   const text = await readTextFile(opts.path);
   if (text === null) {
     return false;
@@ -818,6 +840,10 @@ async function isLegacyTrackedLocalOverlay(opts: {
   const localDefaultPath = resolveProjectEnvLocalConfigPath({
     projectDir: opts.projectDir,
     envName: null,
+  });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: localDefaultPath,
   });
   if (!(await pathExists(localDefaultPath))) {
     return false;
@@ -868,9 +894,37 @@ function resolveProjectEnvStatePath(opts: {
   return resolve(opts.projectDir, PROJECT_ENV_STATE_FILENAME);
 }
 
+/** Preflight all named layers before stdin, migration or mutation discovery. */
+export async function assertProjectEnvLayerPaths(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<void> {
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: opts.projectDir,
+  });
+  const entries = await readdir(opts.projectDir);
+  for (const name of entries) {
+    const canonicalName = name.toLowerCase();
+    if (
+      canonicalName.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+      canonicalName.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+    ) {
+      await assertProjectEnvLayerPath({
+        projectRoot: opts.projectRoot,
+        path: resolve(opts.projectDir, name),
+      });
+    }
+  }
+}
+
 export async function projectEnvConfigExists(opts: {
   readonly projectDir: string;
 }): Promise<boolean> {
+  await assertProjectEnvLayerPaths({
+    projectRoot: dirname(opts.projectDir),
+    projectDir: opts.projectDir,
+  });
   const defaultPath = resolveProjectEnvConfigPath({
     projectDir: opts.projectDir,
     envName: null,
@@ -892,6 +946,62 @@ export async function projectEnvConfigExists(opts: {
     }
     return entry.name !== PROJECT_ENV_CONFIG_DEFAULT_FILENAME;
   });
+}
+
+/**
+ * Closed refusal for a `.hack/hack.env.*.yaml` entry that is neither a regular
+ * file nor a symlink to one: a dangling symlink, a link to a directory, a
+ * directory or another special file. The message names the path and a fixed
+ * remedy only; the CLI prints it as one `E_PATH_CONFLICT: message` line.
+ */
+export class ProjectEnvLayerPathConflictError extends HackCliError {
+  readonly path: string;
+
+  constructor(opts: { readonly path: string }) {
+    super({
+      code: "E_PATH_CONFLICT",
+      message: `Refusing to choose the env format: ${opts.path} is not a regular file (for example a dangling symlink or a directory). Replace it with a regular env layer file or remove it, then retry.`,
+    });
+    this.name = "ProjectEnvLayerPathConflictError";
+    this.path = opts.path;
+  }
+}
+
+/**
+ * The env-format decision of a command that writes either the env layers or
+ * the legacy `.hack/.env` (`hack env set`, `hack env unset`).
+ *
+ * {@link projectEnvConfigExists} reads a dangling default layer, and any
+ * symlinked overlay, as absent, so such a project would silently fall back to
+ * the legacy file. Here every entry named like an env layer must be a regular
+ * file or a symlink inside the project that resolves to one, and either counts
+ * as an env layer; any other entry is refused before anything is read from stdin
+ * or written.
+ */
+export async function projectEnvConfigExistsForMutation(opts: {
+  readonly projectDir: string;
+}): Promise<boolean> {
+  const entries = await readdir(opts.projectDir, { withFileTypes: true });
+  let linkedLayer = false;
+  for (const entry of entries) {
+    if (
+      entry.isFile() ||
+      !entry.name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) ||
+      !entry.name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+    ) {
+      continue;
+    }
+    const path = resolve(opts.projectDir, entry.name);
+    const target = await stat(path).catch(() => null);
+    if (!target?.isFile()) {
+      throw new ProjectEnvLayerPathConflictError({ path });
+    }
+    linkedLayer = true;
+  }
+  // Always, not only without a linked layer: this is what checks that `.hack` and
+  // every layer stay inside the project (HACK-1685).
+  const regularLayerExists = await projectEnvConfigExists(opts);
+  return linkedLayer || regularLayerExists;
 }
 
 export async function listProjectEnvOverlayNames(opts: {
@@ -928,12 +1038,45 @@ export async function listProjectEnvOverlayNames(opts: {
 }
 
 /** Strict planning reads distinguish missing paths from failed/non-file layers. */
+/**
+ * Read a selected layer for the CLI and runtime paths. Only an absent entry
+ * (ENOENT on lstat) is an absent layer. An entry that exists but is not a
+ * readable regular file (a dangling symlink, a link to a directory, a
+ * directory, an unreadable file) refuses closed, so a broken layer never
+ * makes a read silently fall back to the legacy `.hack/.env` format.
+ */
+async function readLenientProjectEnvLayerText(opts: {
+  readonly path: string;
+}): Promise<string | null> {
+  const text = await readTextFile(opts.path);
+  if (text !== null) {
+    return text;
+  }
+  try {
+    await lstat(opts.path);
+  } catch (error: unknown) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw new ClosedCliError(`Cannot read the env layer ${opts.path}.`);
+  }
+  const target = await stat(opts.path).catch(() => null);
+  if (!target?.isFile()) {
+    throw new ProjectEnvLayerPathConflictError({ path: opts.path });
+  }
+  throw new ClosedCliError(
+    `Cannot read the env layer ${opts.path}. Check its permissions, then retry.`
+  );
+}
+
 async function readProjectEnvLayerText(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly strictRead?: boolean;
 }): Promise<string | null> {
+  await assertProjectEnvLayerPath(opts);
   if (!opts.strictRead) {
-    return await readTextFile(opts.path);
+    return await readLenientProjectEnvLayerText({ path: opts.path });
   }
   try {
     const selected = await stat(opts.path);
@@ -959,6 +1102,7 @@ async function readProjectEnvLayerText(opts: {
 }
 
 async function readProjectEnvConfigFile(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly environment: string;
   readonly strictRead?: boolean;
@@ -1054,7 +1198,10 @@ function parseProjectEnvConfig(opts: {
     if (!isValidProjectEnvScopeName({ scopeName: scope })) {
       return {
         ok: false,
-        error: `Invalid env scope: ${scope}`,
+        // The name is not echoed: it is file content and may hold a pasted
+        // value or a line break, and this error is printed as one line.
+        error:
+          'Invalid env scope name; scopes must be "global" or match ^[a-z0-9][a-z0-9._-]*$.',
       };
     }
     if (!isRecord(scopeRaw)) {
@@ -1191,6 +1338,7 @@ async function readProjectEnvLayers(opts: {
   });
 
   const defaultRead = await readProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     strictRead: opts.strictRead,
     path: selection.defaultPath,
     environment: "default",
@@ -1199,11 +1347,13 @@ async function readProjectEnvLayers(opts: {
     selection.overlayPath === null
       ? null
       : await readProjectEnvConfigFile({
+          projectRoot: opts.projectRoot,
           strictRead: opts.strictRead,
           path: selection.overlayPath,
           environment: selection.effectiveEnv ?? "default",
         });
   const localDefaultRead = await readProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     strictRead: opts.strictRead,
     path: selection.localDefaultPath,
     environment: "default",
@@ -1212,6 +1362,7 @@ async function readProjectEnvLayers(opts: {
     selection.localOverlayPath === null
       ? null
       : await readProjectEnvConfigFile({
+          projectRoot: opts.projectRoot,
           strictRead: opts.strictRead,
           path: selection.localOverlayPath,
           environment: selection.effectiveEnv ?? "default",
@@ -1225,9 +1376,14 @@ async function readProjectEnvLayers(opts: {
       projectDir: primaryDir,
       envName: null,
     });
+    await assertProjectEnvLayerPath({
+      projectRoot: dirname(primaryDir),
+      path: primaryDefaultPath,
+    });
     await validatePrimaryLocalFile(primaryDefaultPath);
     inheritedReads.push(
       await readProjectEnvConfigFile({
+        projectRoot: dirname(primaryDir),
         strictRead: opts.strictRead,
         path: primaryDefaultPath,
         environment: "default",
@@ -1238,9 +1394,14 @@ async function readProjectEnvLayers(opts: {
         projectDir: primaryDir,
         envName: selection.effectiveEnv,
       });
+      await assertProjectEnvLayerPath({
+        projectRoot: dirname(primaryDir),
+        path: primaryOverlayPath,
+      });
       await validatePrimaryLocalFile(primaryOverlayPath);
       inheritedReads.push(
         await readProjectEnvConfigFile({
+          projectRoot: dirname(primaryDir),
           strictRead: opts.strictRead,
           path: primaryOverlayPath,
           environment: selection.effectiveEnv,
@@ -1261,7 +1422,10 @@ async function readProjectEnvLayers(opts: {
   }
   for (const read of reads) {
     if (read?.parseError) {
-      throw new Error(`Failed to parse ${read.path}: ${read.parseError}`);
+      // The same closed, value-free line as the write path's refusal.
+      throw new ClosedCliError(
+        `Failed to parse ${read.path}: ${read.parseError}`
+      );
     }
   }
   const envLayers = reads.map((read) => (read?.exists ? read.config : null));
@@ -2708,6 +2872,7 @@ function opensToPlaintext(opts: {
  * value-free message. Both refusals happen before anything is written.
  */
 async function readProjectEnvLayerForMutation(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly environment: string;
 }): Promise<{
@@ -2715,6 +2880,7 @@ async function readProjectEnvLayerForMutation(opts: {
   /** The exact bytes read (null when absent), for the compare-and-swap. */
   readonly text: string | null;
 }> {
+  await assertProjectEnvLayerPath(opts);
   const text = await readAtomicWriteTargetText(opts.path);
   const read = parseProjectEnvConfigText({
     path: opts.path,
@@ -2761,6 +2927,10 @@ export async function setProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: filePath,
+  });
   // The read, the change and the write form one critical section per layer,
   // so a concurrent set or unset of another key is never lost (HACK-1376).
   return await withEnvLayerLock({
@@ -2784,6 +2954,7 @@ async function setLockedProjectEnvValue(opts: {
 }): Promise<ProjectEnvMutationResult> {
   const { filePath, scope } = opts;
   const { read, text } = await readProjectEnvLayerForMutation({
+    projectRoot: opts.projectRoot,
     path: filePath,
     environment: opts.envName ?? "default",
   });
@@ -2830,6 +3001,7 @@ async function setLockedProjectEnvValue(opts: {
   // The lock excludes cooperating writers; the compare-and-swap turns a write
   // by anything else since the read into a closed, retryable conflict.
   const changed = await writeProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     path: filePath,
     config: nextConfig,
     expectedExisting: text,
@@ -2866,6 +3038,10 @@ export async function unsetProjectEnvValue(opts: {
           projectDir: opts.projectDir,
           envName: opts.envName,
         });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: filePath,
+  });
   // Same per-layer critical section as `setProjectEnvValue` (HACK-1376).
   return await withEnvLayerLock({
     layerPath: filePath,
@@ -2885,6 +3061,7 @@ async function unsetLockedProjectEnvValue(opts: {
 }): Promise<{ readonly changed: boolean; readonly filePath: string }> {
   const { filePath } = opts;
   const { read, text } = await readProjectEnvLayerForMutation({
+    projectRoot: opts.projectRoot,
     path: filePath,
     environment: opts.envName ?? "default",
   });
@@ -2916,6 +3093,7 @@ async function unsetLockedProjectEnvValue(opts: {
   }
 
   const changed = await writeProjectEnvConfigFile({
+    projectRoot: opts.projectRoot,
     path: filePath,
     config: {
       version: PROJECT_ENV_CONFIG_VERSION,
@@ -3066,6 +3244,10 @@ export async function hydrateProjectEnvLocalLayer(opts: {
     projectDir: opts.projectDir,
     envName: opts.envName,
   });
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: filePath,
+  });
   const lockPath = resolve(
     opts.projectDir,
     ".internal",
@@ -3130,6 +3312,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
 }): Promise<ProjectEnvHydrationResult> {
   const environment = opts.envName ?? "default";
   const layer = await readProjectEnvHydrationLayer({
+    projectRoot: opts.projectRoot,
     filePath: opts.filePath,
     environment,
     refuse: opts.refuse,
@@ -3185,6 +3368,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
   await ensureHackDirGitignoreForLocalEnvWrite({ projectDir: opts.projectDir });
   try {
     await writeProjectEnvConfigFile({
+      projectRoot: opts.projectRoot,
       path: opts.filePath,
       config: {
         version: PROJECT_ENV_CONFIG_VERSION,
@@ -3205,6 +3389,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
 
 /** The layer's exact bytes (null when absent) and its parsed config. */
 async function readProjectEnvHydrationLayer(opts: {
+  readonly projectRoot: string;
   readonly filePath: string;
   readonly environment: string;
   readonly refuse: ProjectEnvHydrationRefuse;
@@ -3212,9 +3397,14 @@ async function readProjectEnvHydrationLayer(opts: {
   readonly text: string | null;
   readonly config: ProjectEnvConfig;
 }> {
+  await assertProjectEnvLayerPath({
+    projectRoot: opts.projectRoot,
+    path: opts.filePath,
+  });
   let text: string | null;
   try {
     text = await readProjectEnvLayerText({
+      projectRoot: opts.projectRoot,
       path: opts.filePath,
       strictRead: true,
     });
@@ -3458,24 +3648,58 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+function serializeProjectEnvConfig(config: ProjectEnvConfig): string {
+  const yaml = YAML.stringify(config, null, 2);
+  return yaml.endsWith("\n") ? yaml : `${yaml}\n`;
+}
+
+/**
+ * Creates a machine-local layer of the `.env`-only migration as a private
+ * (0600) file, published only where no entry exists. An existing entry,
+ * including a symlink, refuses; nothing is replaced or followed.
+ */
+async function publishMigrationLocalLayer(opts: {
+  readonly projectDir: string;
+  readonly write: PlannedEnvLayerWrite;
+}): Promise<void> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  const refusal = () =>
+    new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `${opts.write.path} already exists or is not a regular file path.`,
+    });
+  const published = await publishPrivateFileExclusive({
+    path: opts.write.path,
+    text: serializeProjectEnvConfig(opts.write.config),
+    directories: [opts.projectDir],
+    refusal,
+  });
+  if (!published) {
+    throw refusal();
+  }
+}
+
 async function writeProjectEnvConfigFile(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly config: ProjectEnvConfig;
   /** Compare-and-swap guard; see `writeTextFileAtomicIfChanged`. */
   readonly expectedExisting?: string | null;
 }): Promise<boolean> {
-  const yaml = YAML.stringify(opts.config, null, 2);
-  const text = yaml.endsWith("\n") ? yaml : `${yaml}\n`;
+  const text = serializeProjectEnvConfig(opts.config);
   await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
   // Rename-committed: an interrupted mutation leaves the previous layer intact.
   return (
-    await writeTextFileAtomicIfChanged(
-      opts.path,
-      text,
-      opts.expectedExisting === undefined
+    await writeTextFileAtomicIfChanged(opts.path, text, {
+      ...(opts.expectedExisting === undefined
         ? {}
-        : { expectedExisting: opts.expectedExisting }
-    )
+        : { expectedExisting: opts.expectedExisting }),
+      validatePath: async (path) =>
+        await assertProjectEnvLayerPath({
+          projectRoot: opts.projectRoot,
+          path,
+        }),
+    })
   ).changed;
 }
 
@@ -3545,6 +3769,10 @@ async function buildProjectEnvStateDigests(opts: {
 }): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const filePath of opts.files) {
+    await assertProjectEnvLayerPath({
+      projectRoot: dirname(dirname(filePath)),
+      path: filePath,
+    });
     const contents = (await readTextFile(filePath)) ?? "";
     out[filePath] = createHash("sha256").update(contents, "utf8").digest("hex");
   }
@@ -3564,6 +3792,17 @@ export async function inspectProjectEnvMaterialization(opts: {
     pathExists(envPath),
     pathExists(statePath),
   ]);
+
+  const unmigrated = await findUnmigratedLegacyDotenv(opts);
+  if (hasUnmigratedLegacyDotenv(unmigrated)) {
+    return {
+      envPath,
+      statePath,
+      status: "warn",
+      message: `The legacy .hack/.env files hold values the env layers don't deliver: this checkout ${describeUnmigratedLegacyDotenv(unmigrated)} (run: hack doctor --migrate-env-config)`,
+      issues: ["unmigrated legacy env values"],
+    };
+  }
 
   if (!(envExists || stateExists)) {
     return {
@@ -4788,9 +5027,95 @@ function removeLegacyComposeEnvFileEntries(opts: {
   return kept.length > 0 ? kept : undefined;
 }
 
+/** Reject aliases between tracked and effective local destinations before any writes. */
+async function preflightLegacyEnvMigrationPaths(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+}): Promise<readonly string[]> {
+  const destinations = new Set<string>();
+  const localPaths: string[] = [];
+  for (const envName of [null, ...opts.overlayNames]) {
+    const trackedPath = resolveProjectEnvConfigPath({
+      projectDir: opts.projectDir,
+      envName,
+    });
+    const localPath = await resolveProjectEnvEffectiveLocalConfigPath({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      envName,
+    });
+    for (const path of [trackedPath, localPath]) {
+      await assertProjectEnvLayerPath({ projectRoot: opts.projectRoot, path });
+      // Refuse portable aliases too: macOS checkouts may fold filename case.
+      const identity = path.toLowerCase();
+      if (destinations.has(identity)) {
+        throw new ClosedCliError(
+          "Refusing legacy env migration: env layer destination paths collide. Rename conflicting legacy overlays and update their project references before retrying. No env migration files were written (values omitted)."
+        );
+      }
+      destinations.add(identity);
+    }
+    localPaths.push(localPath);
+  }
+  return localPaths;
+}
+
+/** Migration must establish effective ignore protection before publishing any plaintext. */
+async function ensureLegacyMigrationLocalLayersIgnored(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly localPaths: readonly string[];
+}): Promise<void> {
+  const ignored = await ensureHackDirGitignore({ projectDir: opts.projectDir });
+  if (ignored.readOnly) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .hack/.gitignore is read-only and cannot protect machine-local values. Make it writable and retry. No env migration values were written (values omitted)."
+    );
+  }
+  if (!(await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))) {
+    return;
+  }
+  for (const path of opts.localPaths) {
+    if (
+      (await isGitIgnoredProjectEnvPath({
+        projectRoot: opts.projectRoot,
+        path,
+      })) !== true
+    ) {
+      throw new ClosedCliError(
+        "Refusing legacy env migration: a machine-local destination is not ignored by Git or its ignore status cannot be checked. Repair ignore rules and retry. No env migration values were written (values omitted)."
+      );
+    }
+  }
+}
+
+/** Outcome of {@link migrateLegacyProjectEnv}. */
+export type LegacyProjectEnvMigration = {
+  readonly wroteFiles: readonly string[];
+  readonly migratedOverlays: readonly string[];
+  readonly movedPlainValues: readonly {
+    readonly key: string;
+    readonly path: string;
+  }[];
+  readonly legacyDetected: boolean;
+  readonly updatedProjectConfig: boolean;
+  readonly cleanupCandidates: readonly string[];
+  readonly blockedCleanupCandidates: readonly string[];
+  readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
+  readonly retainedEnvFiles: readonly {
+    readonly path: string;
+    readonly keys: readonly string[];
+  }[];
+};
+
 /**
  * Migrates a legacy v2 `.env`-based project env layout to the v3
  * `hack.env.*.yaml` config system.
+ *
+ * Without a `.hack/hack.env.json` contract nothing is migrated
+ * (`legacyDetected: false`) unless `migrateUndeclaredDotenv` is set; see
+ * {@link migrateUndeclaredLegacyDotenv} for that explicit-request path.
  *
  * @deprecated v2→v3 migration path. TODO(remove: v3.2) together with its
  * callers in commands/project.ts, commands/doctor.ts, commands/session.ts,
@@ -4802,29 +5127,66 @@ export async function migrateLegacyProjectEnv(opts: {
   readonly projectName: string;
   readonly serviceNames: readonly string[];
   readonly materialize: boolean;
-}): Promise<{
-  readonly wroteFiles: readonly string[];
-  readonly migratedOverlays: readonly string[];
-  readonly legacyDetected: boolean;
-  readonly updatedProjectConfig: boolean;
-  readonly cleanupCandidates: readonly string[];
-  readonly blockedCleanupCandidates: readonly string[];
-  readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
-}> {
+  /**
+   * Also migrate a project that has no contract: the legacy `.hack/.env`
+   * and `.hack/.env.<overlay>` files become plaintext global values in the
+   * gitignored machine-local layers, never in a tracked layer. Only an
+   * explicit migration request (`hack doctor --migrate-env-config`) sets it;
+   * the implicit migrations run by other commands keep requiring a contract.
+   */
+  readonly migrateUndeclaredDotenv?: boolean;
+}): Promise<LegacyProjectEnvMigration> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const contract = await readHackEnvContract({ projectDir: opts.projectDir });
   if (!contract.exists) {
+    if (opts.migrateUndeclaredDotenv === true) {
+      return await migrateUndeclaredLegacyDotenv(opts);
+    }
     return {
       wroteFiles: [],
       migratedOverlays: [],
+      movedPlainValues: [],
       legacyDetected: false,
       updatedProjectConfig: false,
       cleanupCandidates: [],
       blockedCleanupCandidates: [],
       composeEnvFileReferences: [],
+      retainedEnvFiles: [],
     };
   }
+  // Callers gate on projectEnvConfigExists, which reads a dangling default
+  // layer or a symlinked overlay as absent. Decide the format here with the
+  // mutation check: an unusable entry refuses (E_PATH_CONFLICT) instead of
+  // being replaced, and a linked regular layer means env layers are in use.
+  if (
+    await projectEnvConfigExistsForMutation({ projectDir: opts.projectDir })
+  ) {
+    return {
+      wroteFiles: [],
+      migratedOverlays: [],
+      movedPlainValues: [],
+      legacyDetected: false,
+      updatedProjectConfig: false,
+      cleanupCandidates: [],
+      blockedCleanupCandidates: [],
+      composeEnvFileReferences: [],
+      retainedEnvFiles: [],
+    };
+  }
+
+  // Discovered overlays are regular files only, and a link that remains (the
+  // base file, or a configured default overlay) refuses wherever it points: a
+  // repository's symlink must not pull another file's values into this project's
+  // env layers, even one in .hack such as a machine-local .env.local.
+  const overlayNames = await discoverLegacyOverlayNames({
+    projectDir: opts.projectDir,
+    includeSymlinks: false,
+  });
+  await assertNoLegacyDotenvLinks({
+    projectDir: opts.projectDir,
+    overlayNames,
+  });
 
   const baseResolved = await resolveHackEnv({
     projectDir: opts.projectDir,
@@ -4832,20 +5194,115 @@ export async function migrateLegacyProjectEnv(opts: {
     envName: null,
   });
 
-  const overlayNames = await discoverLegacyOverlayNames({
+  if (overlayNames.includes("default")) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .env.default would overwrite the base hack.env.default.yaml layer. Rename the legacy default overlay and update its project references before retrying. No env migration files were written."
+    );
+  }
+  if (overlayNames.includes("local")) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .env.local would collide with the machine-local hack.env.local.yaml layer. Rename the legacy local overlay and update its project references before retrying. No env migration files were written."
+    );
+  }
+  const localPaths = await preflightLegacyEnvMigrationPaths({
+    projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
+    overlayNames,
   });
+  const resolvedOverlays: { name: string; resolved: HackEnvResolveResult }[] =
+    [];
+  for (const name of overlayNames) {
+    resolvedOverlays.push({
+      name,
+      resolved: await resolveHackEnv({
+        projectDir: opts.projectDir,
+        projectName: opts.projectName,
+        envName: name,
+      }),
+    });
+  }
   const keyInfo = baseResolved.values.some(
     (value) => value.source === "keychain"
   )
     ? await ensureProjectEnvSecretKey({ projectRoot: opts.projectRoot })
     : null;
+  if (
+    [baseResolved, ...resolvedOverlays.map((overlay) => overlay.resolved)].some(
+      (resolved) =>
+        resolved.values.some(
+          (value) => value.source === "plain_env" && value.value !== null
+        )
+    )
+  ) {
+    await ensureLegacyMigrationLocalLayersIgnored({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      localPaths,
+    });
+  }
 
+  // An overlay may inherit an equal base value without writing its own entry.
+  // Keep the full resolved delivery per source file, including inherited values.
+  const deliveredValues = new Map<string, ReadonlyMap<string, string | null>>();
+  deliveredValues.set(
+    resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+    new Map(baseResolved.values.map((entry) => [entry.key, entry.value]))
+  );
   const wroteFiles: string[] = [];
+  const movedPlainValues: { key: string; path: string }[] = [];
+  /** Keep plaintext in ignored layers; hydration preserves other entries and refuses unsafe targets. */
+  const migratePlainValues = async (migration: {
+    readonly resolvedValues: typeof baseResolved.values;
+    readonly envName: string | null;
+    readonly baseValues: ReadonlyMap<string, string | null> | null;
+  }) => {
+    const values = buildMigratedValues({
+      resolvedValues: migration.resolvedValues.filter(
+        (entry) => entry.source === "plain_env"
+      ),
+      baseValues: migration.baseValues,
+      keyText: null,
+    });
+    let hasEntries = false;
+    for (const [scope, entries] of Object.entries(values)) {
+      const plainEntries = new Map<string, string>();
+      for (const [key, value] of Object.entries(entries)) {
+        if (typeof value === "string") {
+          plainEntries.set(key, value);
+        }
+      }
+      if (plainEntries.size === 0) {
+        continue;
+      }
+      hasEntries = true;
+      const result = await hydrateProjectEnvLocalLayer({
+        projectRoot: opts.projectRoot,
+        projectDir: opts.projectDir,
+        envName: migration.envName,
+        scope,
+        entries: plainEntries,
+        secret: false,
+      });
+      if (result.changed && !wroteFiles.includes(result.filePath)) {
+        wroteFiles.push(result.filePath);
+      }
+      for (const key of plainEntries.keys()) {
+        movedPlainValues.push({ key, path: result.filePath });
+      }
+    }
+    return hasEntries;
+  };
+  await migratePlainValues({
+    resolvedValues: baseResolved.values,
+    envName: null,
+    baseValues: null,
+  });
   const defaultConfig = buildMigratedProjectEnvConfig({
     environment: "default",
     values: buildMigratedValues({
-      resolvedValues: baseResolved.values,
+      resolvedValues: baseResolved.values.filter(
+        (entry) => entry.source === "keychain"
+      ),
       baseValues: null,
       keyText: keyInfo?.keyText ?? null,
     }),
@@ -4856,23 +5313,37 @@ export async function migrateLegacyProjectEnv(opts: {
   });
   if (
     await writeProjectEnvConfigFile({
+      projectRoot: opts.projectRoot,
       path: defaultPath,
       config: defaultConfig,
+      // Create only: no layer existed at the format check above.
+      expectedExisting: null,
     })
   ) {
     wroteFiles.push(defaultPath);
   }
 
-  for (const overlayName of overlayNames) {
-    const overlayResolved = await resolveHackEnv({
-      projectDir: opts.projectDir,
-      projectName: opts.projectName,
+  for (const {
+    name: overlayName,
+    resolved: overlayResolved,
+  } of resolvedOverlays) {
+    deliveredValues.set(
+      resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlayName}`),
+      new Map(overlayResolved.values.map((entry) => [entry.key, entry.value]))
+    );
+    const hasPlainOverlayEntries = await migratePlainValues({
+      resolvedValues: overlayResolved.values,
       envName: overlayName,
+      baseValues: new Map(
+        baseResolved.values.map((value) => [value.key, value.value])
+      ),
     });
     const overlayConfig = buildMigratedProjectEnvConfig({
       environment: overlayName,
       values: buildMigratedValues({
-        resolvedValues: overlayResolved.values,
+        resolvedValues: overlayResolved.values.filter(
+          (entry) => entry.source === "keychain"
+        ),
         baseValues: new Map(
           baseResolved.values.map((value) => [value.key, value.value])
         ),
@@ -4882,7 +5353,7 @@ export async function migrateLegacyProjectEnv(opts: {
     const hasOverlayEntries = Object.entries(overlayConfig.values).some(
       ([scope, values]) => scope !== "global" || Object.keys(values).length > 0
     );
-    if (!hasOverlayEntries) {
+    if (!(hasOverlayEntries || hasPlainOverlayEntries)) {
       continue;
     }
 
@@ -4892,8 +5363,10 @@ export async function migrateLegacyProjectEnv(opts: {
     });
     if (
       await writeProjectEnvConfigFile({
+        projectRoot: opts.projectRoot,
         path: overlayPath,
         config: overlayConfig,
+        expectedExisting: null,
       })
     ) {
       wroteFiles.push(overlayPath);
@@ -4923,18 +5396,2232 @@ export async function migrateLegacyProjectEnv(opts: {
     overlayNames,
     materialize: opts.materialize,
     configCleanupCandidates: configCleanup.cleanupCandidates,
+    deliveredValues,
     composeEnvFileReferences,
   });
 
   return {
     wroteFiles,
     migratedOverlays: overlayNames,
+    movedPlainValues,
     legacyDetected: true,
     updatedProjectConfig: configCleanup.changed,
     cleanupCandidates: cleanupCandidates.allowed,
     blockedCleanupCandidates: cleanupCandidates.blocked,
+    retainedEnvFiles: cleanupCandidates.retainedEnvFiles,
     composeEnvFileReferences,
   };
+}
+
+/**
+ * Closed, value-free refusal of the explicit migration of a project without a
+ * `.hack/hack.env.json` contract ({@link migrateUndeclaredLegacyDotenv}). It is
+ * raised before any file is written, so the legacy `.hack/.env*` files and any
+ * existing entries stay as they were. The message names paths, legacy file
+ * names and counts only, never a key or a value.
+ */
+export class LegacyDotenvMigrationRefusalError extends HackCliError {
+  constructor(opts: {
+    readonly code: "E_CONFIG_INVALID" | "E_PATH_CONFLICT" | "E_PERMISSION";
+    readonly reason: string;
+  }) {
+    super({
+      code: opts.code,
+      message: `Refusing to migrate the legacy .hack/.env files: ${opts.reason} Nothing was written, and the legacy files are kept.`,
+    });
+    this.name = "LegacyDotenvMigrationRefusalError";
+  }
+}
+
+/** `.hack/.env.state.json` is Hack's own state file, not a dotenv overlay. */
+const LEGACY_DOTENV_STATE_OVERLAY = PROJECT_ENV_STATE_FILENAME.slice(
+  `${PROJECT_ENV_FILENAME}.`.length
+);
+
+/** `.hack/.env.<name>` copies that are templates or backups, not overlays. */
+const LEGACY_DOTENV_NON_OVERLAY_NAMES: ReadonlySet<string> = new Set([
+  "example",
+  "sample",
+  "template",
+  "dist",
+  "bak",
+  "backup",
+  "old",
+  "orig",
+]);
+
+/** Cleanup candidates git does not track; unknown status inside a checkout is kept out. */
+async function filterUntrackedLegacyCleanupCandidates(opts: {
+  readonly projectRoot: string;
+  readonly paths: readonly string[];
+}): Promise<string[]> {
+  const kept: string[] = [];
+  for (const path of opts.paths) {
+    const tracked = await isGitTrackedProjectEnvPath({
+      projectRoot: opts.projectRoot,
+      path,
+    });
+    const untracked =
+      tracked === null
+        ? !(await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+        : !tracked;
+    if (untracked) {
+      kept.push(path);
+    }
+  }
+  return kept;
+}
+
+/**
+ * Legacy overlay names whose env layers would be the default layer or a
+ * machine-local layer instead of an overlay (`.env.default`, `.env.local`,
+ * `.env.<name>.local`).
+ */
+function isReservedLegacyOverlayName(name: string): boolean {
+  return (
+    name === "default" ||
+    name === PROJECT_ENV_LOCAL_SEGMENT ||
+    name.endsWith(`.${PROJECT_ENV_LOCAL_SEGMENT}`)
+  );
+}
+
+function countLabel(opts: {
+  readonly count: number;
+  readonly noun: string;
+}): string {
+  return `${opts.count} ${opts.noun}${opts.count === 1 ? "" : "s"}`;
+}
+
+type PlannedEnvLayerWrite = {
+  readonly path: string;
+  readonly config: ProjectEnvConfig;
+};
+
+/**
+ * Refuses a machine-local migration target that git tracks, or that sits in a
+ * git checkout where git cannot say (fail closed), since migrated values
+ * written there could be committed. Mirrors `hack env hydrate`.
+ */
+async function assertUntrackedMigrationLocalLayer(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<void> {
+  const tracked = await isGitTrackedProjectEnvPath(opts);
+  if (tracked === true) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `git tracks the machine-local env layer ${opts.path}, so migrated values would be committed. Untrack it with \`git rm --cached\` and retry.`,
+    });
+  }
+  if (
+    tracked === null &&
+    (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+  ) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `this checkout is a git repository, but git could not report whether it tracks ${opts.path}, so migrated values could be committed. Make \`git status\` work in this checkout and retry.`,
+    });
+  }
+}
+
+/**
+ * Legacy `.hack/.env.<name>` overlays the `.env`-only migration converts.
+ * Refuses, before anything is written, names that are not overlay names or
+ * that would land on the default or a machine-local layer.
+ */
+/**
+ * Names legacy overlay files for a refusal. File names are not values, but
+ * each is JSON-quoted so a control character cannot break the one-line message.
+ */
+function legacyOverlayFileList(names: readonly string[]): string {
+  return names
+    .map((name) => JSON.stringify(`${PROJECT_ENV_FILENAME}.${name}`))
+    .join(", ");
+}
+
+function isExcludedLegacyDotenvName(name: string): boolean {
+  return (
+    name === LEGACY_DOTENV_STATE_OVERLAY ||
+    LEGACY_DOTENV_NON_OVERLAY_NAMES.has(name)
+  );
+}
+
+/**
+ * Refuses when Compose uses a `.hack/.env.<name>` file the migration leaves
+ * out: its values reach no layer, and the Compose repair that follows removes
+ * every `.hack/.env*` reference, so the next launch would lose them.
+ */
+async function assertComposeUsesNoExcludedLegacyDotenv(opts: {
+  readonly projectDir: string;
+}): Promise<void> {
+  const references = await inspectLegacyComposeEnvFileReferences({
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+    projectDir: opts.projectDir,
+  });
+  const excluded = [
+    ...new Set(
+      references
+        .map((reference) =>
+          basename(reference.resolvedPath).slice(
+            `${PROJECT_ENV_FILENAME}.`.length
+          )
+        )
+        .filter(isExcludedLegacyDotenvName)
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+  if (excluded.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose env_file uses ${legacyOverlayFileList(excluded)}, which the migration does not carry over, so those values would be lost. Rename the file to an overlay name or move it out of .hack, update env_file to match, then retry.`,
+    });
+  }
+}
+
+/**
+ * Refuses when Compose uses a migrated overlay that a launch without `--env`
+ * would not select. Compose loads that file unconditionally, but the migration
+ * puts its values only in the overlay's layers and the Compose repair removes
+ * the reference, so the service would lose them. An overlay with no entries
+ * beyond the base loses nothing, because the base layer already holds them.
+ */
+async function assertComposeOverlaysStaySelected(opts: {
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): Promise<void> {
+  const references = await inspectLegacyComposeEnvFileReferences({
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+    projectDir: opts.projectDir,
+  });
+  const referenced = new Set(
+    references.map((reference) =>
+      basename(reference.resolvedPath).slice(`${PROJECT_ENV_FILENAME}.`.length)
+    )
+  );
+  const defaultOverlay = await readProjectDefaultEnvConfig({
+    projectDir: opts.projectDir,
+  });
+  const baseValues = opts.legacyValues.get(null) ?? {};
+  const unselected = opts.overlayNames.filter(
+    (name) =>
+      name !== defaultOverlay &&
+      referenced.has(name) &&
+      Object.keys(
+        legacyOverlayChangedValues({
+          overlayValues: opts.legacyValues.get(name) ?? {},
+          baseValues,
+        })
+      ).length > 0
+  );
+  if (unselected.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose env_file uses ${legacyOverlayFileList(unselected)}, but a launch without --env would not select ${unselected.length === 1 ? "that overlay" : "those overlays"}, so the service would lose its values. Set env.defaultOverlay to the overlay every launch should use, or move its values out of the file and set them with \`hack env set --env <name> --service\` after migrating, then retry.`,
+    });
+  }
+}
+
+/**
+ * Keys a Compose service sets in its own `environment` (map keys, or the
+ * names of `KEY=value` / `KEY` list entries). Null when the entry has a shape
+ * this check cannot read.
+ */
+function composeServiceEnvironmentKeys(
+  environment: unknown
+): ReadonlySet<string> | null {
+  if (environment === undefined || environment === null) {
+    return new Set();
+  }
+  if (Array.isArray(environment)) {
+    const keys = new Set<string>();
+    for (const entry of environment) {
+      if (typeof entry !== "string") {
+        return null;
+      }
+      const key = entry.split("=", 1)[0]?.trim() ?? "";
+      if (key.length > 0) {
+        keys.add(key);
+      }
+    }
+    return keys;
+  }
+  return isRecord(environment) ? new Set(Object.keys(environment)) : null;
+}
+
+/** Compose's own settings: it reads these from `.hack/.env`, so only a changed value matters. */
+const COMPOSE_OWN_KEY_PATTERN = /^COMPOSE_/;
+
+/**
+ * Settings the Docker client, build tools or the process itself read from their
+ * environment. Migrated values enter Compose's process environment, where before
+ * they only reached Compose's project environment, so even an unchanged value
+ * could select another daemon or proxy.
+ */
+const COMPOSE_TOOL_KEY_PATTERN =
+  /^(?:DOCKER_|BUILDKIT_|BUILDX_|HTTP_PROXY$|HTTPS_PROXY$|NO_PROXY$|ALL_PROXY$|SOURCE_DATE_EPOCH$|HOME$|PATH$)/;
+
+function assertNoComposeToolKeys(opts: {
+  readonly migratedKeys: ReadonlySet<string>;
+}): void {
+  const toolKeys = [...opts.migratedKeys]
+    .filter((key) => COMPOSE_TOOL_KEY_PATTERN.test(key))
+    .map((key) => JSON.stringify(key))
+    .sort();
+  if (toolKeys.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `the legacy .env files set ${toolKeys.join(", ")}, which Docker, its build tools or the process read from their environment. After the migration these would reach the Docker client as well as the services. Set them for one service with \`hack env set --service --local\` after migrating, or in your shell, and remove them from the legacy file, then retry.`,
+    });
+  }
+}
+
+/**
+ * Text of each non-legacy `env_file`, because Compose expands variables inside
+ * those files too. An absent file adds nothing; an unreadable one was refused
+ * by {@link composeEnvFileKeyConflicts}.
+ */
+async function composeOtherEnvFileText(opts: {
+  readonly projectDir: string;
+  readonly services: Record<string, unknown>;
+}): Promise<string> {
+  const paths = new Set(
+    composeServiceEntries(opts.services).flatMap(([, rawService]) =>
+      readComposeEnvFilePaths({ rawService })
+        .map((configured) => resolve(opts.projectDir, configured))
+        .filter(
+          (candidatePath) =>
+            !isLegacyProjectEnvFilePath({
+              projectDir: opts.projectDir,
+              candidatePath,
+            })
+        )
+    )
+  );
+  const texts: string[] = [];
+  for (const path of paths) {
+    const read = await readOptionalTextFile(path);
+    if (read.kind !== "absent" && read.kind !== "unreadable") {
+      texts.push(read.text);
+    }
+  }
+  return texts.join("\n");
+}
+
+/**
+ * Keys the default overlay changes that Compose reads from its own environment:
+ * any whose name appears in `searchText` (the Compose file and other `env_file`
+ * text), however it is used (`${KEY}`, a bare `build.args` entry, a secret's
+ * `environment:`), and Compose's own settings. Compose reads these from `.hack/.env` alone before the migration,
+ * and from the selected layers after it. Matching the name anywhere can refuse
+ * more than it must, which is the safe direction. Key names only, JSON-quoted.
+ */
+function composeReferencedOverlayKeys(opts: {
+  readonly searchText: string;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+  readonly defaultOverlay: string | null;
+}): readonly string[] {
+  if (opts.defaultOverlay === null) {
+    return [];
+  }
+  const changed = legacyOverlayChangedValues({
+    overlayValues: opts.legacyValues.get(opts.defaultOverlay) ?? {},
+    baseValues: opts.legacyValues.get(null) ?? {},
+  });
+  return Object.keys(changed)
+    .filter(
+      // Keys match PROJECT_ENV_KEY_PATTERN, so they are safe in a pattern.
+      (key) =>
+        COMPOSE_OWN_KEY_PATTERN.test(key) ||
+        new RegExp(`(?<![A-Za-z0-9_])${key}(?![A-Za-z0-9_])`).test(
+          opts.searchText
+        )
+    )
+    .map((key) => JSON.stringify(key))
+    .sort();
+}
+
+const COMPOSE_MERGE_TAG_PATTERN = /!(?:reset|override)\b/;
+
+/** Whether a map-form `env_file` entry sets a `format`, which changes how Compose reads the file. */
+function composeEnvFileHasFormat(rawEnvFile: unknown): boolean {
+  return (
+    Array.isArray(rawEnvFile) &&
+    rawEnvFile.some((entry) => isRecord(entry) && "format" in entry)
+  );
+}
+
+/**
+ * Compose inputs that can add, hide or reinterpret an `env_file` this check
+ * cannot read: a top-level `include`, a service `extends`, an `env_file` path
+ * with a variable or a `~`, a `!reset` or `!override` tag, a repeated entry (Compose versions may drop a repeat, which
+ * changes the order), or a `format`. Returned as refusal labels naming the
+ * service or field only.
+ */
+function uncheckableComposeEnvInputs(opts: {
+  readonly projectDir: string;
+  readonly composeText: string;
+  readonly parsed: Record<string, unknown>;
+  readonly services: Record<string, unknown>;
+}): readonly string[] {
+  const labels: string[] =
+    "include" in opts.parsed ? ["top-level include"] : [];
+  if (COMPOSE_MERGE_TAG_PATTERN.test(opts.composeText)) {
+    labels.push("a !reset or !override tag");
+  }
+  for (const [service, rawService] of composeServiceEntries(opts.services)) {
+    if ("extends" in rawService) {
+      labels.push(`extends in ${JSON.stringify(service)}`);
+    }
+    const paths = readComposeEnvFilePaths({ rawService });
+    if (paths.some((path) => path.includes("$"))) {
+      labels.push(`a variable env_file path in ${JSON.stringify(service)}`);
+    }
+    if (paths.some((path) => path.startsWith("~"))) {
+      labels.push(
+        `a home-relative env_file path in ${JSON.stringify(service)}`
+      );
+    }
+    const resolved = paths.map((path) => resolve(opts.projectDir, path));
+    if (new Set(resolved).size < resolved.length) {
+      labels.push(`a repeated env_file entry in ${JSON.stringify(service)}`);
+    }
+    if (composeEnvFileHasFormat(rawService.env_file)) {
+      labels.push(`an env_file format in ${JSON.stringify(service)}`);
+    }
+  }
+  return labels;
+}
+
+/**
+ * Migrated keys a service's other `env_file` entries set, as refusal labels.
+ * Those files stay in Compose, but Hack's generated override applies migrated
+ * values after them. An absent file sets nothing; an unreadable one refuses.
+ */
+async function composeEnvFileKeyConflicts(opts: {
+  readonly projectDir: string;
+  readonly service: string;
+  readonly rawService: Record<string, unknown>;
+  readonly migratedKeys: ReadonlySet<string>;
+}): Promise<readonly string[]> {
+  const conflicts: string[] = [];
+  for (const configuredPath of readComposeEnvFilePaths({
+    rawService: opts.rawService,
+  })) {
+    const path = resolve(opts.projectDir, configuredPath);
+    if (
+      isLegacyProjectEnvFilePath({
+        projectDir: opts.projectDir,
+        candidatePath: path,
+      })
+    ) {
+      continue;
+    }
+    const text = await readLegacyDotenvText({ path });
+    for (const key of composeEnvFileEntryNames(text ?? "")) {
+      if (opts.migratedKeys.has(key)) {
+        conflicts.push(
+          `${JSON.stringify(key)} (${JSON.stringify(configuredPath)} in ${JSON.stringify(opts.service)})`
+        );
+      }
+    }
+  }
+  return conflicts;
+}
+
+// `\s` includes a BOM. The quotes are there for text after a closing quote, and the
+// space is what finds the key in `export KEY=value`.
+const COMPOSE_ENV_FILE_ENTRY_NAME =
+  /(?:^|[\s'"])([^\s=:#'"]+)[ \t]*(?:[=:#]|$)/g;
+const ENV_FILE_LINE_BREAK = /\r?\n/;
+const ENV_FILE_QUOTE = /['"]/;
+const ENV_FILE_TRAILING_COMMENT = /\s#.*$/;
+
+/**
+ * Key names a Compose `env_file` can set, read line by line instead of with
+ * `parseDotEnv`, which doesn't see `export KEY=value`, `KEY: value`, a bare `KEY`, or
+ * `A='x' KEY=value`, where Compose reads the text after the closing quote as another
+ * entry. A value that holds such text, a comment after a quoted value, or a line inside
+ * a multi-line value can match too, which refuses more than it must. A trailing comment
+ * is dropped only from a line without quotes, because `A='x # y' KEY=value` sets KEY, so
+ * an apostrophe in a comment keeps that comment.
+ */
+function composeEnvFileEntryNames(text: string): ReadonlySet<string> {
+  const names = new Set(Object.keys(parseDotEnv(text)));
+  for (const line of text.split(ENV_FILE_LINE_BREAK)) {
+    if (line.trimStart().startsWith("#")) {
+      continue;
+    }
+    const entries = ENV_FILE_QUOTE.test(line)
+      ? line
+      : line.replace(ENV_FILE_TRAILING_COMMENT, "");
+    for (const match of entries.matchAll(COMPOSE_ENV_FILE_ENTRY_NAME)) {
+      if (match[1] !== undefined) {
+        names.add(match[1]);
+      }
+    }
+  }
+  return names;
+}
+
+/** Per-service `environment` and other `env_file` entries that set a migrated key. */
+async function collectComposeServiceConflicts(opts: {
+  readonly projectDir: string;
+  readonly services: Record<string, unknown>;
+  readonly migratedKeys: ReadonlySet<string>;
+}): Promise<{
+  readonly conflicts: string[];
+  readonly unreadable: string[];
+  readonly envFileConflicts: string[];
+}> {
+  const conflicts: string[] = [];
+  const unreadable: string[] = [];
+  const envFileConflicts: string[] = [];
+  for (const [service, rawService] of Object.entries(opts.services)) {
+    if (!isRecord(rawService)) {
+      continue;
+    }
+    envFileConflicts.push(
+      ...(await composeEnvFileKeyConflicts({
+        projectDir: opts.projectDir,
+        service,
+        rawService,
+        migratedKeys: opts.migratedKeys,
+      }))
+    );
+    const keys = composeServiceEnvironmentKeys(rawService.environment);
+    if (keys === null) {
+      unreadable.push(JSON.stringify(service));
+      continue;
+    }
+    for (const key of [...keys].filter((name) => opts.migratedKeys.has(name))) {
+      conflicts.push(`${JSON.stringify(key)} in ${JSON.stringify(service)}`);
+    }
+  }
+  return { conflicts, unreadable, envFileConflicts };
+}
+
+/**
+ * Refuses when a migrated key is also set in a Compose service's own
+ * `environment` or another of its `env_file` entries. Legacy `env_file` values rank below `environment`, but the
+ * migrated values become global layer values, which Hack's generated Compose
+ * override applies to every service after `environment`; the service would
+ * silently switch to the dotenv value. The refusal names services and keys,
+ * JSON-quoted, never values.
+ */
+async function assertComposeEnvironmentKeepsPrecedence(opts: {
+  readonly projectDir: string;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): Promise<void> {
+  const migratedKeys = new Set<string>();
+  for (const values of opts.legacyValues.values()) {
+    for (const key of Object.keys(values)) {
+      migratedKeys.add(key);
+    }
+  }
+  const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
+  const composeRead = await readOptionalTextFile(composeFile);
+  if (composeRead.kind === "unreadable") {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PERMISSION",
+      reason: `${PROJECT_COMPOSE_FILENAME} exists but cannot be read, so the migration cannot tell which values services receive. Make it a readable regular file, then retry.`,
+    });
+  }
+  if (migratedKeys.size === 0) {
+    return;
+  }
+  assertNoComposeToolKeys({ migratedKeys });
+  const composeText = composeRead.kind === "text" ? composeRead.text : "";
+  const parsed = await readComposeFile({ composeFile });
+  if (parsed === null && composeText.trim().length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${PROJECT_COMPOSE_FILENAME} is not a single YAML document this check can read, such as a file with several "---" documents, so the migration cannot tell which values services receive. Merge it into one document, then retry.`,
+    });
+  }
+  if (!parsed) {
+    return;
+  }
+  // No `services` still runs the checks: `include` can supply every service.
+  const services = getRecord(parsed, "services") ?? {};
+  const uncheckable = uncheckableComposeEnvInputs({
+    projectDir: opts.projectDir,
+    composeText,
+    parsed,
+    services,
+  });
+  if (uncheckable.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose uses ${uncheckable.join(", ")}, so the migration cannot tell which values services receive from the legacy .env files. Write those services' env_file entries directly in ${PROJECT_COMPOSE_FILENAME}, each file once, with a plain path and no format, and remove any !reset or !override text (a comment or value containing it also matches), then retry.`,
+    });
+  }
+  const { conflicts, unreadable, envFileConflicts } =
+    await collectComposeServiceConflicts({
+      projectDir: opts.projectDir,
+      services,
+      migratedKeys,
+    });
+  if (unreadable.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `the Compose environment of ${unreadable.sort().join(", ")} cannot be read, so the migration cannot check that it keeps precedence over the migrated values. Use a map or a list of KEY=value entries, then retry.`,
+    });
+  }
+  if (conflicts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose environment sets ${conflicts.sort().join(", ")}, which the legacy .env files also set; after the migration the .env value would override the Compose value. Remove the key from the .hack/.env file or from that service's environment, then retry.`,
+    });
+  }
+  if (envFileConflicts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose env_file sets ${envFileConflicts.sort().join(", ")}, which the legacy .env files also set; after the migration the .env value would override that file's value. Remove the key from the .hack/.env file or from that env_file, then retry.`,
+    });
+  }
+  const defaultOverlay = await readProjectDefaultEnvConfig({
+    projectDir: opts.projectDir,
+  });
+  const referenced = composeReferencedOverlayKeys({
+    searchText: `${JSON.stringify(parsed)}\n${await composeOtherEnvFileText({
+      projectDir: opts.projectDir,
+      services,
+    })}`,
+    legacyValues: opts.legacyValues,
+    defaultOverlay,
+  });
+  if (referenced.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose reads ${referenced.join(", ")}, which the default overlay sets differently from .hack/.env. Compose takes these from .hack/.env today, but after the migration the overlay value would apply. Make the two files agree or stop using the key in Compose, then retry.`,
+    });
+  }
+  assertComposeServicesKeepLegacyValues({
+    projectDir: opts.projectDir,
+    services,
+    legacyValues: opts.legacyValues,
+    defaultOverlay,
+  });
+}
+
+/** Compose services as records, skipping entries that are not service maps. */
+function composeServiceEntries(
+  services: Record<string, unknown>
+): readonly (readonly [string, Record<string, unknown>])[] {
+  return Object.entries(services).filter(
+    (entry): entry is [string, Record<string, unknown>] => isRecord(entry[1])
+  );
+}
+
+/** Legacy files a service lists in `env_file`, as `legacyValues` keys. */
+function composeServiceLegacyEnvNames(opts: {
+  readonly projectDir: string;
+  readonly rawService: Record<string, unknown>;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): readonly (string | null)[] {
+  const listed = readComposeEnvFilePaths({ rawService: opts.rawService }).map(
+    (configured) => resolve(opts.projectDir, configured)
+  );
+  return [...opts.legacyValues.keys()].filter((envName) =>
+    listed.includes(
+      resolveEnvFilePath({ projectDir: opts.projectDir, envName })
+    )
+  );
+}
+
+/**
+ * Before the migration a legacy dotenv file listed in `env_file` reached only
+ * the services that list it; after it, its values are global layer values that
+ * Hack applies to every service, including third-party images. So each service
+ * must list each file with values to migrate, which is also how a developer
+ * consents to that exposure. Returns refusal labels (file, service and key names
+ * only) for the services that don't.
+ *
+ * This includes a file no service lists, whose values today reach only Compose
+ * interpolation: migrating it would put credentials in containers that never had
+ * them, and a warning afterwards wouldn't prevent that.
+ */
+function composeServicesMissingLegacyDotenv(opts: {
+  readonly projectDir: string;
+  readonly services: Record<string, unknown>;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): string[] {
+  const baseValues = opts.legacyValues.get(null) ?? {};
+  const services = composeServiceEntries(opts.services).map(
+    ([service, rawService]) => ({
+      label: JSON.stringify(service),
+      listed: composeServiceLegacyEnvNames({
+        projectDir: opts.projectDir,
+        rawService,
+        legacyValues: opts.legacyValues,
+      }),
+    })
+  );
+  const labels: string[] = [];
+  for (const [envName, values] of opts.legacyValues) {
+    const migrated =
+      envName === null
+        ? values
+        : legacyOverlayChangedValues({ overlayValues: values, baseValues });
+    if (Object.keys(migrated).length === 0) {
+      continue;
+    }
+    const missing = services
+      .filter((service) => !service.listed.includes(envName))
+      .map((service) => service.label)
+      .sort();
+    if (missing.length > 0) {
+      labels.push(
+        `${missing.join(", ")} ${missing.length === 1 ? "does" : "do"} not list ${JSON.stringify(basename(resolveEnvFilePath({ projectDir: opts.projectDir, envName })))} in env_file`
+      );
+    }
+  }
+  for (const service of services) {
+    const had = new Set(
+      service.listed.flatMap((envName) =>
+        Object.keys(opts.legacyValues.get(envName) ?? {})
+      )
+    );
+    const gained = Object.keys(baseValues)
+      .filter((key) => !had.has(key))
+      .map((key) => JSON.stringify(key))
+      .sort();
+    if (gained.length > 0 && !service.listed.includes(null)) {
+      labels.push(
+        `${service.label} lists no legacy file that sets ${gained.join(", ")}`
+      );
+    }
+  }
+  return labels.sort();
+}
+
+/**
+ * Refuses when a service would gain a value it never had, or a listed key
+ * would change because the migration ignores `env_file` order.
+ */
+function assertComposeServicesKeepLegacyValues(opts: {
+  readonly projectDir: string;
+  readonly services: Record<string, unknown>;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+  readonly defaultOverlay: string | null;
+}): void {
+  const unlisted = composeServicesMissingLegacyDotenv(opts);
+  if (unlisted.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${unlisted.join("; ")}. Migrated values are global and reach every service, so those services would receive values they never had, including a value that today only feeds Compose interpolation. List the file in env_file for each service that may have its values (an overlay must also be env.defaultOverlay), or move the values out of it and set them with \`hack env set --service\` after migrating, adding \`--env <name>\` for an overlay. A value Compose interpolates can't be set per service, because service values don't reach interpolation: keep it in your shell, or list the file. Then retry.`,
+    });
+  }
+  const orderConflicts = composeLegacyEnvFileOrderConflicts(opts);
+  if (orderConflicts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `the order of Compose env_file gives ${orderConflicts.join(", ")} a different value from the migrated layers, where the default overlay wins over .hack/.env. List .env before the overlay, or make the files agree, then retry.`,
+    });
+  }
+}
+
+/**
+ * Keys whose value a service would change because the migration ignores
+ * `env_file` order. Compose lets the last listed file win; the selected layers
+ * always let the default overlay win over the base. Refusal labels naming keys
+ * and services, never values.
+ */
+function composeLegacyEnvFileOrderConflicts(opts: {
+  readonly projectDir: string;
+  readonly services: Record<string, unknown>;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+  readonly defaultOverlay: string | null;
+}): readonly string[] {
+  const selected = {
+    ...(opts.legacyValues.get(null) ?? {}),
+    ...(opts.defaultOverlay === null
+      ? {}
+      : (opts.legacyValues.get(opts.defaultOverlay) ?? {})),
+  };
+  const envNameByPath = new Map(
+    [...opts.legacyValues.keys()].map((envName) => [
+      resolveEnvFilePath({ projectDir: opts.projectDir, envName }),
+      envName,
+    ])
+  );
+  const conflicts: string[] = [];
+  for (const [service, rawService] of composeServiceEntries(opts.services)) {
+    const effective: Record<string, string> = {};
+    for (const configured of readComposeEnvFilePaths({ rawService })) {
+      const envName = envNameByPath.get(resolve(opts.projectDir, configured));
+      if (envName !== undefined) {
+        Object.assign(effective, opts.legacyValues.get(envName) ?? {});
+      }
+    }
+    for (const [key, value] of Object.entries(effective)) {
+      if (key in selected && selected[key] !== value) {
+        conflicts.push(`${JSON.stringify(key)} in ${JSON.stringify(service)}`);
+      }
+    }
+  }
+  return conflicts.sort();
+}
+
+/**
+ * Entries the current layers don't deliver with the same value. With no layers
+ * that is all of them. Skipping the rest keeps a teammate from pinning a team
+ * value in their local layer, where a later team change wouldn't reach them.
+ */
+function legacyValuesNotDelivered(opts: {
+  readonly values: Record<string, string>;
+  readonly delivered: Readonly<Record<string, string>>;
+}): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(opts.values).filter(
+      ([key, value]) => opts.delivered[key] !== value
+    )
+  );
+}
+
+/** Overlay entries a migrated overlay layer must hold: those that differ from the base. */
+function legacyOverlayChangedValues(opts: {
+  readonly overlayValues: Record<string, string>;
+  readonly baseValues: Record<string, string>;
+}): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(opts.overlayValues).filter(
+      ([key, value]) => opts.baseValues[key] !== value
+    )
+  );
+}
+
+async function selectLegacyDotenvOverlays(opts: {
+  readonly projectDir: string;
+}): Promise<readonly string[]> {
+  // Template and backup copies (`.env.example`, `.env.bak`, ...) are not
+  // overlays: they are neither migrated nor offered for cleanup.
+  const overlayNames =
+    // A symlinked overlay is an overlay too: skipping it would switch formats
+    // without its values. Its target is checked by the migration before reading.
+    (
+      await discoverLegacyOverlayNames({
+        projectDir: opts.projectDir,
+        includeSymlinks: true,
+      })
+    ).filter((name) => !isExcludedLegacyDotenvName(name));
+  const invalidOverlays = overlayNames.filter(
+    (name) =>
+      !(
+        isReservedLegacyOverlayName(name) ||
+        NATIVE_ENV_OVERLAY_PATTERN.test(name)
+      )
+  );
+  if (invalidOverlays.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${legacyOverlayFileList(invalidOverlays)} in ${opts.projectDir} ${invalidOverlays.length === 1 ? "is not named" : "are not named"} like an overlay (lowercase letters, digits and single dashes). Rename ${invalidOverlays.length === 1 ? "it" : "them"} (and select the overlay by its new name with --env) or remove ${invalidOverlays.length === 1 ? "it" : "them"}, then retry.`,
+    });
+  }
+  const reservedOverlays = overlayNames.filter(isReservedLegacyOverlayName);
+  if (reservedOverlays.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${legacyOverlayFileList(reservedOverlays)} would become the default or a machine-local env layer rather than an overlay. Rename it to another overlay name or remove it, then retry.`,
+    });
+  }
+  return overlayNames;
+}
+
+export type UnmigratedLegacyDotenv = {
+  /** Valid key names the layers don't deliver with the same value. */
+  readonly keys: readonly string[];
+  /** Entries whose name isn't a valid key; a name could hold a value, so never shown. */
+  readonly malformedCount: number;
+  /** Legacy file names that exist but can't be read. */
+  readonly unreadableFiles: readonly string[];
+};
+
+/** The value each key has from the layers selected for `envName`. Empty when none can be read. */
+async function deliveredLayerValues(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly envName: string | null;
+}): Promise<Readonly<Record<string, string>>> {
+  try {
+    return (await resolveProjectEnvConfig(opts))?.globalEnv ?? {};
+  } catch {
+    // An unusable layer delivers nothing, and its own commands report it.
+    return {};
+  }
+}
+
+/**
+ * How to see a layer's error. A file name comes from the repository and this text
+ * gets pasted, so only a name `--env` accepts unchanged goes into a command; `base`,
+ * `default` and `none` select no overlay, so they get the file name too.
+ */
+function unusableLayerRemedy(envName: string | null): string {
+  if (envName === null) {
+    return "Run `hack env list` to see the error, fix it, then retry.";
+  }
+  if (parseEnvConfigSelection(envName) === envName) {
+    return `Run \`hack env list --env ${envName}\` to see the error, fix it, then retry.`;
+  }
+  return `Check ${JSON.stringify(`hack.env.${envName}.yaml`)} and its local layer, fix the problem, then retry.`;
+}
+
+/**
+ * {@link deliveredLayerValues} for a caller that plans writes from the answer. A
+ * layer it can't read might set any key, so it refuses instead of reporting nothing
+ * delivered, which would pin legacy values over that layer once it's readable again.
+ * The caught message isn't repeated, because a parser's message might quote the file.
+ */
+async function deliveredLayerValuesForMigration(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly envName: string | null;
+}): Promise<Readonly<Record<string, string>>> {
+  try {
+    return (await resolveProjectEnvConfig(opts))?.globalEnv ?? {};
+  } catch {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `an env layer can't be read or resolved, for example it doesn't parse, its project env key is missing or its path leaves the project, so the migration can't tell which values the layers already deliver. ${unusableLayerRemedy(opts.envName)}`,
+    });
+  }
+}
+
+/**
+ * What this checkout's legacy `.hack/.env*` files hold that its env layers don't
+ * deliver, in a project that already has layers, for example after a teammate's
+ * migration was committed. The answer comes from comparing values, not from which
+ * files exist: an unrelated local layer doesn't make a value safe to overwrite.
+ *
+ * A contract project is out of scope, because its own migration owns those files.
+ * `.hack/.env` with a valid state file is treated as generated output, so it is
+ * skipped. A migration that runs for another reason checks its text
+ * ({@link legacyBaseDotenvIsGenerated}); with nothing else to migrate, nothing does.
+ * Overlays are not generated by materialize, so they are always compared.
+ */
+export async function findUnmigratedLegacyDotenv(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  /** Only `.hack/.env`, for a caller that replaces that file and leaves overlays alone. */
+  readonly baseOnly?: boolean;
+}): Promise<UnmigratedLegacyDotenv> {
+  const none = { keys: [], malformedCount: 0, unreadableFiles: [] };
+  const entries = await readdir(opts.projectDir, { withFileTypes: true });
+  const hasLayers = entries.some(
+    (entry) =>
+      entry.name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+      entry.name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+  );
+  if (
+    !hasLayers ||
+    (await pathExists(resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME)))
+  ) {
+    return none;
+  }
+  const state = await readProjectEnvStateFile({
+    statePath: resolveProjectEnvStatePath({ projectDir: opts.projectDir }),
+  });
+  const overlayNames = opts.baseOnly
+    ? []
+    : (
+        await discoverLegacyOverlayNames({
+          projectDir: opts.projectDir,
+          includeSymlinks: true,
+        })
+      ).filter(
+        (name) =>
+          !(
+            isExcludedLegacyDotenvName(name) ||
+            isReservedLegacyOverlayName(name)
+          ) && NATIVE_ENV_OVERLAY_PATTERN.test(name)
+      );
+  const keys = new Set<string>();
+  const unreadableFiles: string[] = [];
+  let malformedCount = 0;
+  for (const envName of [...(state.ok ? [] : [null]), ...overlayNames]) {
+    const path = resolveEnvFilePath({ projectDir: opts.projectDir, envName });
+    const read = await readOptionalTextFile(path);
+    if (read.kind === "unreadable") {
+      unreadableFiles.push(basename(path));
+    }
+    if (read.kind !== "text") {
+      continue;
+    }
+    const delivered = await deliveredLayerValues({ ...opts, envName });
+    for (const [key, value] of Object.entries(parseDotEnv(read.text))) {
+      if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
+        malformedCount += 1;
+      } else if (delivered[key] !== value) {
+        keys.add(key);
+      }
+    }
+  }
+  return {
+    keys: [...keys].sort((left, right) => left.localeCompare(right)),
+    malformedCount,
+    unreadableFiles,
+  };
+}
+
+export function hasUnmigratedLegacyDotenv(
+  unmigrated: UnmigratedLegacyDotenv
+): boolean {
+  return (
+    unmigrated.keys.length > 0 ||
+    unmigrated.malformedCount > 0 ||
+    unmigrated.unreadableFiles.length > 0
+  );
+}
+
+/** Value-free description: valid key names, a count of malformed names, and file names. */
+export function describeUnmigratedLegacyDotenv(
+  unmigrated: UnmigratedLegacyDotenv
+): string {
+  const parts: string[] = [];
+  if (unmigrated.keys.length > 0) {
+    parts.push(`sets ${unmigrated.keys.join(", ")}`);
+  }
+  if (unmigrated.malformedCount > 0) {
+    parts.push(
+      `has ${countLabel({ count: unmigrated.malformedCount, noun: "malformed entry" })} (not shown, because a malformed line may contain a value)`
+    );
+  }
+  if (unmigrated.unreadableFiles.length > 0) {
+    parts.push(`can't read ${unmigrated.unreadableFiles.join(", ")}`);
+  }
+  return parts.join("; ");
+}
+
+/** Whether `doctor --migrate-env-config` can move these values: regular layer files only. */
+export async function canMigrateCheckoutLegacyDotenv(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+}): Promise<boolean> {
+  const entries = await readdir(opts.projectDir, { withFileTypes: true });
+  const allRegular = entries
+    .filter(
+      (entry) =>
+        entry.name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        entry.name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+    )
+    .every((entry) => entry.isFile());
+  return (
+    allRegular &&
+    hasUnmigratedLegacyDotenv(await findUnmigratedLegacyDotenv(opts))
+  );
+}
+
+/**
+ * Refuses a legacy `.hack/.env` or overlay that is a symlink at all, dangling or
+ * not, for a migration that publishes values to tracked layers.
+ */
+async function assertNoLegacyDotenvLinks(opts: {
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+}): Promise<void> {
+  const linked: string[] = [];
+  for (const envName of [null, ...opts.overlayNames]) {
+    const path = resolveEnvFilePath({ projectDir: opts.projectDir, envName });
+    const entry = await lstat(path).catch(() => null);
+    if (entry?.isSymbolicLink()) {
+      linked.push(JSON.stringify(basename(path)));
+    }
+  }
+  if (linked.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `${linked.join(", ")} ${linked.length === 1 ? "is a symlink" : "are symlinks"}, and this migration must not pull another file's values into this project's env layers. Replace the link with a regular file, or remove it, then retry.`,
+    });
+  }
+}
+
+/**
+ * Refuses a legacy `.hack/.env` or overlay that is a symlink resolving outside
+ * `.hack`, so a repository cannot pull an outside file, such as a root `.env`,
+ * into its env layers. A dangling link stays for the read to refuse.
+ */
+async function assertLegacyDotenvLinksStayInProject(opts: {
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+}): Promise<void> {
+  const projectDir = await realpath(opts.projectDir);
+  const escaping: string[] = [];
+  for (const envName of [null, ...opts.overlayNames]) {
+    const path = resolveEnvFilePath({ projectDir: opts.projectDir, envName });
+    const entry = await lstat(path).catch(() => null);
+    if (!entry?.isSymbolicLink()) {
+      continue;
+    }
+    const target = await realpath(path).catch(() => null);
+    if (target === null) {
+      continue;
+    }
+    const inside = relative(projectDir, target);
+    if (inside.startsWith("..") || isAbsolute(inside)) {
+      escaping.push(JSON.stringify(basename(path)));
+    }
+  }
+  if (escaping.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `${escaping.join(", ")} ${escaping.length === 1 ? "is a symlink" : "are symlinks"} to a file outside .hack, so migrating would copy that file's values into this project's env layers. Replace the link with a regular file in .hack, or remove it, then retry.`,
+    });
+  }
+}
+
+/**
+ * In a git checkout, a machine-local layer the migration writes must be
+ * ignored by git, or its plaintext values could be committed. Unknown status
+ * inside a checkout refuses too. Outside a checkout nothing can be committed.
+ */
+async function assertIgnoredMigrationLocalLayer(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<void> {
+  const ignored = await isGitIgnoredProjectEnvPath(opts);
+  if (ignored === true) {
+    return;
+  }
+  if (
+    ignored === null &&
+    !(await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+  ) {
+    return;
+  }
+  throw new LegacyDotenvMigrationRefusalError({
+    code: "E_PATH_CONFLICT",
+    reason: `git does not ignore the machine-local env layer ${opts.path}, so migrated values could be committed. Make .hack/.gitignore writable (or ignore that path), then retry.`,
+  });
+}
+
+const COMPOSE_UNQUOTED_INLINE_COMMENT_PATTERN = /\s#/;
+
+/** End of the quoted value in `text`, or -1 when it continues on the next line. */
+function closingQuoteIndex(opts: {
+  readonly text: string;
+  readonly quote: string;
+}): number {
+  for (let index = 0; index < opts.text.length; index += 1) {
+    if (opts.text[index] === "\\") {
+      index += 1;
+    } else if (opts.text[index] === opts.quote) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Counts dotenv entries Compose reads differently from {@link parseDotEnv}.
+ * Compose drops an unquoted inline comment, expands `$` outside single quotes,
+ * reads backslashes in quoted values differently (across lines too), reads
+ * text after a closing quote as another entry, and accepts `KEY: value` and a
+ * bare `KEY`, while the parser keeps the text literally or skips it. A migrated value goes through Hack's generated override, so
+ * the service would receive the parser's reading instead.
+ */
+function countComposeOnlyDotenvEntries(text: string): number {
+  let count = 0;
+  let open: { quote: string; flagged: boolean } | null = null;
+  for (const rawLine of text.split("\n")) {
+    let quoted = rawLine;
+    if (open === null) {
+      const entry = readComposeDotenvEntryStart(rawLine);
+      count += entry.differs ? 1 : 0;
+      if (entry.quote === null) {
+        continue;
+      }
+      open = { quote: entry.quote, flagged: false };
+      quoted = entry.text;
+    }
+    const end = closingQuoteIndex({ text: quoted, quote: open.quote });
+    if (
+      !open.flagged &&
+      composeReadsQuotedTextDifferently({
+        text: quoted,
+        end,
+        quote: open.quote,
+      })
+    ) {
+      open.flagged = true;
+      count += 1;
+    }
+    if (end !== -1) {
+      open = null;
+    }
+  }
+  return count;
+}
+
+/** Whether Compose reads this line of a quoted value differently from the parser. */
+function composeReadsQuotedTextDifferently(opts: {
+  readonly text: string;
+  readonly end: number;
+  readonly quote: string;
+}): boolean {
+  const content = opts.end === -1 ? opts.text : opts.text.slice(0, opts.end);
+  const trailing = opts.end === -1 ? "" : opts.text.slice(opts.end + 1).trim();
+  return (
+    content.includes("\\") ||
+    (opts.quote === '"' && content.includes("$")) ||
+    !(trailing.length === 0 || trailing.startsWith("#"))
+  );
+}
+
+/**
+ * Reads a dotenv line that starts an entry. `quote` is set when the value is
+ * quoted, with `text` as what follows the opening quote; otherwise `differs`
+ * says whether Compose reads the whole line differently.
+ */
+function readComposeDotenvEntryStart(rawLine: string): {
+  readonly differs: boolean;
+  readonly quote: string | null;
+  readonly text: string;
+} {
+  const line = rawLine.trim();
+  if (line.length === 0 || line.startsWith("#")) {
+    return { differs: false, quote: null, text: "" };
+  }
+  const separator = rawLine.indexOf("=");
+  if (separator <= 0) {
+    return { differs: true, quote: null, text: "" };
+  }
+  const value = rawLine.slice(separator + 1).trimStart();
+  const first = value[0];
+  if (first === '"' || first === "'") {
+    return { differs: false, quote: first, text: value.slice(1) };
+  }
+  return {
+    differs:
+      value.includes("$") ||
+      COMPOSE_UNQUOTED_INLINE_COMMENT_PATTERN.test(value),
+    quote: null,
+    text: "",
+  };
+}
+
+/**
+ * Entries of `.hack/.env` (key `null`) and each legacy overlay file. Refuses,
+ * before anything is written, when a key cannot be an env layer key; the
+ * refusal counts such keys per file and never shows them.
+ */
+async function readValidatedLegacyDotenvFiles(opts: {
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+  /** Leaves out `.hack/.env` when it is generated output, not a legacy source. */
+  readonly skipBase: boolean;
+}): Promise<ReadonlyMap<string | null, Record<string, string>>> {
+  const legacyFiles = [
+    ...(opts.skipBase ? [] : [{ envName: null, label: PROJECT_ENV_FILENAME }]),
+    ...opts.overlayNames.map((name) => ({
+      envName: name,
+      label: `${PROJECT_ENV_FILENAME}.${name}`,
+    })),
+  ];
+  const legacyValues = new Map<string | null, Record<string, string>>();
+  const invalidKeyCounts: string[] = [];
+  const composeSyntaxCounts: string[] = [];
+  for (const file of legacyFiles) {
+    const path = resolveEnvFilePath({
+      projectDir: opts.projectDir,
+      envName: file.envName,
+    });
+    const values = await readLegacyDotenvFile({ path });
+    legacyValues.set(file.envName, values);
+    const read = await readOptionalTextFile(path);
+    const composeSyntax =
+      read.kind === "absent" || read.kind === "unreadable"
+        ? 0
+        : countComposeOnlyDotenvEntries(read.text);
+    if (composeSyntax > 0) {
+      composeSyntaxCounts.push(
+        `${countLabel({ count: composeSyntax, noun: "line" })} in ${file.label}`
+      );
+    }
+    const invalid = Object.keys(values).filter(
+      (key) => !PROJECT_ENV_KEY_PATTERN.test(key)
+    ).length;
+    if (invalid > 0) {
+      invalidKeyCounts.push(
+        `${countLabel({ count: invalid, noun: "key" })} in ${file.label}`
+      );
+    }
+  }
+  if (invalidKeyCounts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `env keys must match ^[A-Z_][A-Z0-9_]*$, but ${invalidKeyCounts.join(", ")} do not (for example a lowercase name or an "export " prefix). The keys are not shown because a malformed line may contain a value. Rename or remove them, then retry.`,
+    });
+  }
+  if (composeSyntaxCounts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `Compose reads ${composeSyntaxCounts.join(", ")} differently from Hack, so the migrated value would change or be lost: an unquoted " #" starts a comment, "$" outside single quotes is expanded, "\\" in a quoted value is read differently, text after a closing quote is another entry, and a line without "=" still sets a key. Write each one on its own as KEY='the value Compose uses' with real line breaks and no backslashes, or remove it, then retry. The lines are not shown because they may contain values.`,
+    });
+  }
+  return legacyValues;
+}
+
+/**
+ * Overlays a migrated local value can affect: this checkout's, plus any with only a
+ * primary checkout's local layer, which a linked worktree inherits below its own.
+ */
+async function overlaysAffectedByMigration(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<readonly string[]> {
+  const names = new Set(
+    await listProjectEnvOverlayNames({ projectDir: opts.projectDir })
+  );
+  const primaryDir = await resolvePrimaryLocalProjectDir(opts);
+  if (primaryDir !== null) {
+    const suffix = `.${PROJECT_ENV_LOCAL_SEGMENT}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`;
+    // macOS drops inheritance before this when the directory can't be listed; Linux gets here.
+    let entries: readonly string[];
+    try {
+      entries = await readdir(primaryDir);
+    } catch {
+      throw new LegacyDotenvMigrationRefusalError({
+        code: "E_CONFIG_INVALID",
+        reason: `the primary checkout's env layers in ${primaryDir} can't be listed, so the migration can't tell which overlays it would change. Fix that directory's permissions, then retry.`,
+      });
+    }
+    for (const entry of entries) {
+      if (
+        entry.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        entry.endsWith(suffix)
+      ) {
+        const name = entry.slice(
+          PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
+          -suffix.length
+        );
+        if (
+          parseEnvConfigSelection(name) === name &&
+          !isReservedLegacyOverlayName(name)
+        ) {
+          names.add(name);
+        }
+      }
+    }
+  }
+  return [...names].sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Refuses when a migrated base value would replace what an overlay's layers
+ * deliver for a key its legacy overlay file doesn't set. The local base outranks
+ * tracked and inherited overlay layers, so that env would silently change value and stop receiving
+ * later team changes to the key. Names keys and overlays, never values.
+ */
+async function assertBaseDoesNotOutrankTrackedOverlays(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly baseToMigrate: Record<string, string>;
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): Promise<void> {
+  const conflicts: string[] = [];
+  const deliveredBase = await deliveredLayerValuesForMigration({
+    ...opts,
+    envName: null,
+  });
+  for (const overlayName of await overlaysAffectedByMigration(opts)) {
+    const delivered = await deliveredLayerValuesForMigration({
+      ...opts,
+      envName: overlayName,
+    });
+    const legacyOverlay = opts.legacyValues.get(overlayName) ?? {};
+    for (const [key, value] of Object.entries(opts.baseToMigrate)) {
+      // Equal to the base means the overlay's layers set nothing different.
+      if (
+        key in delivered &&
+        delivered[key] !== value &&
+        delivered[key] !== deliveredBase[key] &&
+        !(key in legacyOverlay)
+      ) {
+        conflicts.push(
+          `${JSON.stringify(key)} for ${JSON.stringify(overlayName)}`
+        );
+      }
+    }
+  }
+  if (conflicts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `.hack/.env sets ${conflicts.sort().join(", ")}, and its migrated value would replace what that overlay's env layers deliver. Remove the key from .hack/.env, or set the value you want in that legacy overlay file, creating it if needed; the Compose env_file checks then apply to that file. Then retry.`,
+    });
+  }
+}
+
+/** `layer` with the migration's planned global values added, as the merge will write it. */
+function layerWithPlannedGlobals(opts: {
+  readonly layer: ProjectEnvConfig | null;
+  readonly environment: string;
+  readonly planned: Readonly<Record<string, ProjectEnvStoredValue>>;
+}): ProjectEnvConfig | null {
+  if (Object.keys(opts.planned).length === 0) {
+    return opts.layer;
+  }
+  const layer =
+    opts.layer ??
+    buildMigratedProjectEnvConfig({
+      environment: opts.environment,
+      values: { global: {} },
+    });
+  return {
+    ...layer,
+    values: {
+      ...layer.values,
+      global: { ...layer.values.global, ...opts.planned },
+    },
+  };
+}
+
+/**
+ * The scope whose deletion is the last word on `key`, in resolution order, whether
+ * or not a global value exists for it to hide. Null when the last word isn't a
+ * scoped deletion. Resolved entries can't show this: a deletion leaves no entry.
+ */
+function scopeDeletingKey(opts: {
+  readonly layers: readonly (ProjectEnvConfig | null)[];
+  readonly scopeNames: readonly string[];
+  readonly key: string;
+}): string | null {
+  let deletedBy: string | null = null;
+  for (const layer of opts.layers) {
+    for (const scope of opts.scopeNames) {
+      const value = layer?.values[scope]?.[opts.key];
+      if (value !== undefined) {
+        deletedBy = value === null && scope !== "global" ? scope : null;
+      }
+    }
+  }
+  return deletedBy;
+}
+
+/** `keys` whose scoped value or scoped deletion the planned layers replace for one target. */
+function scopedValuesReplacedForTarget(opts: {
+  readonly target: {
+    readonly name: string;
+    readonly scopeNames: readonly string[];
+    readonly before: Readonly<Record<string, string>>;
+  };
+  readonly keys: readonly string[];
+  readonly envLayers: readonly (ProjectEnvConfig | null)[];
+  readonly plannedLayers: readonly (ProjectEnvConfig | null)[];
+  readonly envName: string | null;
+}): readonly string[] {
+  const { target } = opts;
+  const before = resolveEffectiveStoredEntries({
+    layers: opts.envLayers,
+    scopeNames: target.scopeNames,
+  });
+  const after = resolveEffectiveStoredEntries({
+    layers: opts.plannedLayers,
+    scopeNames: target.scopeNames,
+  });
+  return opts.keys.flatMap((key) => {
+    const entry = before[key];
+    // A scoped value, or a scoped deletion, with or without a global value to hide.
+    const scope = entry
+      ? entry.scope
+      : scopeDeletingKey({
+          layers: opts.envLayers,
+          scopeNames: target.scopeNames,
+          key,
+        });
+    const value = after[key]?.value;
+    const replaced =
+      scope !== null &&
+      scope !== "global" &&
+      value !== undefined &&
+      !isProjectEnvSecretValue(value) &&
+      String(value) !== target.before[key];
+    return replaced
+      ? [
+          `${JSON.stringify(key)} for ${JSON.stringify(scope)} in ${JSON.stringify(opts.envName ?? "default")}`,
+        ]
+      : [];
+  });
+}
+
+/**
+ * Which service and host values a planned local write would replace in one env.
+ * A later layer beats an earlier one whatever their scopes, so a local global
+ * value outranks a service or host value in a tracked layer, while a scoped value
+ * in the same local layer still wins. So this resolves the layers as they will be,
+ * not by comparing scopes. Returns names only.
+ */
+async function scopedValuesReplacedInEnv(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly envName: string | null;
+  readonly planned: ReadonlyMap<
+    string,
+    Readonly<Record<string, ProjectEnvStoredValue>>
+  >;
+}): Promise<readonly string[]> {
+  const layers = await readProjectEnvLayers(opts);
+  const resolved = await resolveProjectEnvConfig(opts);
+  if (!(layers && resolved)) {
+    return [];
+  }
+  const { selection, envLayers } = layers;
+  const plannedBase = opts.planned.get(selection.localDefaultPath) ?? {};
+  const plannedOverlay =
+    (selection.localOverlayPath &&
+      opts.planned.get(selection.localOverlayPath)) ||
+    {};
+  const keys = Object.keys({ ...plannedBase, ...plannedOverlay });
+  if (keys.length === 0) {
+    return [];
+  }
+  // The two machine-local layers always come last (readProjectEnvLayers).
+  const plannedLayers = [
+    ...envLayers.slice(0, -2),
+    layerWithPlannedGlobals({
+      layer: envLayers.at(-2) ?? null,
+      environment: "default",
+      planned: plannedBase,
+    }),
+    layerWithPlannedGlobals({
+      layer: envLayers.at(-1) ?? null,
+      environment: selection.effectiveEnv ?? "default",
+      planned: plannedOverlay,
+    }),
+  ];
+  const projection = projectEnvProjection({
+    layers,
+    serviceNames: opts.serviceNames,
+  });
+  const targets = [
+    ...projection.serviceTargets.flatMap((target) => [
+      {
+        name: target.serviceName,
+        scopeNames: target.composeScopeNames,
+        before: resolved.serviceEnv[target.serviceName] ?? {},
+      },
+      {
+        name: target.serviceName,
+        scopeNames: target.hostScopeNames,
+        before: resolved.hostTargetEnv[target.serviceName] ?? {},
+      },
+    ]),
+    {
+      name: PROJECT_ENV_HOST_SCOPE as string,
+      scopeNames: projection.globalHostScopeNames,
+      before: resolved.hostTargetEnv.global ?? {},
+    },
+  ];
+  const replaced = targets.flatMap((target) =>
+    scopedValuesReplacedForTarget({
+      target,
+      keys,
+      envLayers,
+      plannedLayers,
+      envName: opts.envName,
+    })
+  );
+  return [...new Set(replaced)];
+}
+
+/**
+ * Refuses a planned local write that would replace a service or host value from
+ * an env layer, in the base or in any overlay. That target would silently change
+ * value and stop receiving later team changes to the key. Names only.
+ */
+async function assertMigrationKeepsScopedValues(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly overlayNames: readonly string[];
+  readonly localWrites: readonly PlannedEnvLayerWrite[];
+}): Promise<void> {
+  if (opts.localWrites.length === 0) {
+    return;
+  }
+  const planned = new Map(
+    opts.localWrites.map((write) => [
+      write.path,
+      write.config.values.global ?? {},
+    ])
+  );
+  const overlays = new Set([
+    ...opts.overlayNames,
+    ...(await overlaysAffectedByMigration(opts)),
+  ]);
+  const replaced: string[] = [];
+  for (const envName of [null, ...overlays]) {
+    replaced.push(
+      ...(await scopedValuesReplacedInEnv({
+        projectRoot: opts.projectRoot,
+        projectDir: opts.projectDir,
+        serviceNames: opts.serviceNames,
+        envName,
+        planned,
+      }))
+    );
+  }
+  if (replaced.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `a legacy env file sets ${replaced.sort().join(", ")}, and its migrated value would replace what that env layer gives that target, because a machine-local global value outranks a service or host value in an earlier layer. Remove the key from the legacy file, or change that value in its env layer, then retry.`,
+    });
+  }
+}
+
+/**
+ * An existing machine-local layer the migration may add to, or null when absent.
+ * Refuses one it can't read or parse, or that isn't a regular file: `.config`
+ * would be an empty default, and treating it as absent or empty loses values.
+ * The refusal names the file, never its content.
+ */
+async function readExistingLocalLayer(opts: {
+  readonly path: string;
+  readonly environment: string;
+}): Promise<{
+  readonly text: string;
+  readonly config: ProjectEnvConfig;
+} | null> {
+  const read = await readOptionalTextFile(opts.path);
+  if (read.kind === "absent") {
+    return null;
+  }
+  const parsed =
+    read.kind === "text"
+      ? parseProjectEnvConfigText({ ...opts, text: read.text })
+      : null;
+  const entry = await lstat(opts.path).catch(() => null);
+  if (
+    read.kind !== "text" ||
+    parsed?.parseError !== undefined ||
+    !entry?.isFile() ||
+    !parsed
+  ) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `${basename(opts.path)} can't be read as an env layer, so migrated values can't be added to it safely. Fix or move that file, then retry.`,
+    });
+  }
+  return { text: read.text, config: parsed.config };
+}
+
+/**
+ * Refuses when an existing local overlay sets a key its legacy overlay file sets
+ * differently. Planning drops an overlay entry equal to the base, and this layer
+ * would keep winning over it, so the disagreement would pass unnoticed and leave
+ * a key reported as undelivered that no further migration could clear.
+ */
+async function assertLocalOverlaysAgreeWithLegacy(opts: {
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+  readonly legacyValues: ReadonlyMap<string | null, Record<string, string>>;
+}): Promise<void> {
+  const conflicts: string[] = [];
+  for (const overlayName of opts.overlayNames) {
+    const path = resolveProjectEnvLocalConfigPath({
+      projectDir: opts.projectDir,
+      envName: overlayName,
+    });
+    const layer = await readExistingLocalLayer({
+      path,
+      environment: overlayName,
+    });
+    if (layer === null) {
+      continue;
+    }
+    const global = layer.config.values.global ?? {};
+    for (const [key, value] of Object.entries(
+      opts.legacyValues.get(overlayName) ?? {}
+    )) {
+      if (key in global && global[key] !== value) {
+        conflicts.push(`${JSON.stringify(key)} in ${basename(path)}`);
+      }
+    }
+  }
+  if (conflicts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `the legacy .env files and the local layer set ${conflicts.sort().join(", ")} to different values. Keep the one you want, by removing the key from the other, then retry.`,
+    });
+  }
+}
+
+/**
+ * Replaces a local layer with mode 0600, because the values were in a private
+ * `.env` and a layer from `hack env set --local` may be readable by others. It
+ * doesn't follow a link at the path: the reader opens no-follow, staging is
+ * private from creation, and rename replaces the path itself.
+ *
+ * The content is compared with `expectedExisting` before staging and again after
+ * the staging file is fsynced, immediately before the rename. As with the shared
+ * atomic writer, the second check narrows, but cannot close, the window in which
+ * a writer that does not use this check can still be overwritten.
+ */
+export async function replaceLocalLayerPrivately(opts: {
+  readonly projectDir: string;
+  readonly path: string;
+  readonly config: ProjectEnvConfig;
+  readonly expectedExisting: string;
+  /** Test seam: runs just before the last comparison. */
+  readonly beforeFinalCheck?: () => Promise<void>;
+}): Promise<void> {
+  const options = {
+    path: opts.path,
+    directories: [opts.projectDir],
+    refusal: () =>
+      new LegacyDotenvMigrationRefusalError({
+        code: "E_PATH_CONFLICT",
+        reason: `${basename(opts.path)} changed during the migration or is not a regular file. Check it, then retry.`,
+      }),
+  };
+  const assertUnchanged = async (): Promise<void> => {
+    const current = await readReplaceablePrivateFile(options);
+    if (current?.text !== opts.expectedExisting) {
+      throw options.refusal();
+    }
+  };
+  await assertUnchanged();
+  await replacePrivateFileAtomic({
+    ...options,
+    text: serializeProjectEnvConfig(opts.config),
+    beforeRename: async () => {
+      await opts.beforeFinalCheck?.();
+      await assertUnchanged();
+    },
+  });
+}
+
+/**
+ * Plans adding migrated keys to machine-local layers that already exist. Refuses
+ * a key the layer sets to something else, because either value could be the one
+ * to keep. The refusal names keys and files, never values.
+ */
+async function planLocalLayerMerges(opts: {
+  readonly localWrites: readonly PlannedEnvLayerWrite[];
+}): Promise<
+  readonly {
+    readonly path: string;
+    readonly config: ProjectEnvConfig;
+    readonly expectedExisting: string;
+  }[]
+> {
+  const merges: {
+    path: string;
+    config: ProjectEnvConfig;
+    expectedExisting: string;
+  }[] = [];
+  const conflicts: string[] = [];
+  for (const write of opts.localWrites) {
+    const layer = await readExistingLocalLayer({
+      path: write.path,
+      environment: write.config.environment,
+    });
+    if (layer === null) {
+      continue;
+    }
+    const existing = layer.config;
+    const global = existing.values.global ?? {};
+    const added = write.config.values.global ?? {};
+    conflicts.push(
+      ...Object.keys(added)
+        .filter((key) => key in global && global[key] !== added[key])
+        .map((key) => `${JSON.stringify(key)} in ${basename(write.path)}`)
+    );
+    merges.push({
+      path: write.path,
+      config: {
+        ...existing,
+        values: { ...existing.values, global: { ...global, ...added } },
+      },
+      expectedExisting: layer.text,
+    });
+  }
+  if (conflicts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `the legacy .env files and the local layer set ${conflicts.sort().join(", ")} to different values. Keep the one you want, by removing the key from the other, then retry.`,
+    });
+  }
+  return merges;
+}
+
+/**
+ * Publishes machine-local layers, then tracked ones. If a write fails, removes
+ * what this call created, so the checkout keeps using the legacy files.
+ */
+async function publishMigratedLegacyLayers(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly localWrites: readonly PlannedEnvLayerWrite[];
+  readonly trackedWrites: readonly PlannedEnvLayerWrite[];
+  /** Local layers that exist and receive these values by merging instead. */
+  readonly mergedPaths: ReadonlySet<string>;
+}): Promise<string[]> {
+  // Machine-local layers first, so the tracked layers switch the format only
+  // once the values have a home.
+  const wroteFiles: string[] = [];
+  try {
+    for (const write of opts.localWrites) {
+      if (opts.mergedPaths.has(write.path)) {
+        continue;
+      }
+      // Created 0600 from the start: the values were in a private .env.
+      await publishMigrationLocalLayer({
+        projectDir: opts.projectDir,
+        write,
+      });
+      wroteFiles.push(write.path);
+    }
+    for (const write of opts.trackedWrites) {
+      // Another checkout's migration may already have committed this layer.
+      if (await pathExists(write.path)) {
+        continue;
+      }
+      if (
+        await writeProjectEnvConfigFile({
+          projectRoot: opts.projectRoot,
+          path: write.path,
+          config: write.config,
+          expectedExisting: null,
+        })
+      ) {
+        wroteFiles.push(write.path);
+      }
+    }
+  } catch (error: unknown) {
+    // Every target was absent before this call, so removing what it created
+    // leaves the project on the legacy files.
+    for (const path of [...wroteFiles].reverse()) {
+      await unlink(path).catch(() => undefined);
+    }
+    throw error;
+  }
+  return wroteFiles;
+}
+
+/**
+ * Refuses when `hack.env.local.yaml` serves as the `local` env overlay rather than the
+ * machine-local base. Base values written there would reach `--env local` and not the
+ * default env, past the scoped-value check, which models the machine-local base slot.
+ */
+async function assertLocalBaseIsTheDefaultEnvLayer(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly baseToMigrate: Readonly<Record<string, unknown>>;
+}): Promise<void> {
+  // Inside git, tracking decides what this file is, and the tracked-layer check
+  // refuses with the remedy that works there.
+  if (
+    Object.keys(opts.baseToMigrate).length === 0 ||
+    (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+  ) {
+    return;
+  }
+  const localBasePath = resolveProjectEnvLocalConfigPath({
+    projectDir: opts.projectDir,
+    envName: null,
+  });
+  const effectivePath = await resolveProjectEnvEffectiveLocalConfigPath({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    envName: null,
+  });
+  if (effectivePath !== localBasePath) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason:
+        "hack.env.local.yaml is this project's `local` env overlay, so migrated values would reach `--env local` and not the default env. If it's meant to be your machine-local layer, set its `environment` to `default`, then retry.",
+    });
+  }
+}
+
+/** What each selected legacy file's env receives now, so cleanup can compare, not assume. */
+async function deliveredValuesPerLegacyFile(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly overlayNames: readonly string[];
+}): Promise<ReadonlyMap<string, ReadonlyMap<string, string | null>>> {
+  const delivered = new Map<string, ReadonlyMap<string, string | null>>();
+  for (const envName of [null, ...opts.overlayNames]) {
+    const fileName =
+      envName === null
+        ? PROJECT_ENV_FILENAME
+        : `${PROJECT_ENV_FILENAME}.${envName}`;
+    delivered.set(
+      resolve(opts.projectDir, fileName),
+      new Map(Object.entries(await deliveredLayerValues({ ...opts, envName })))
+    );
+  }
+  return delivered;
+}
+
+/**
+ * Migrates a legacy project that has no `.hack/hack.env.json` contract, so
+ * its values live only in `.hack/.env` and `.hack/.env.<overlay>`.
+ *
+ * Contract:
+ * - Those files are gitignored, so their values stay out of tracked files:
+ *   every base entry becomes a plaintext global value in the machine-local
+ *   layer `hack.env.local.yaml`, and every overlay entry that differs from the
+ *   base becomes a global value in `hack.env.<overlay>.local.yaml`. The tracked
+ *   `hack.env.default.yaml` (and `hack.env.<overlay>.yaml` for each migrated
+ *   overlay) is written with no values, so the project switches to env layers.
+ *   With no legacy file at all only the empty default layer is written.
+ * - Refused before anything is written ({@link LegacyDotenvMigrationRefusalError},
+ *   or {@link ProjectEnvLayerPathConflictError} for an unusable layer entry):
+ *   any existing env layer entry, a legacy file that is a symlink out of
+ *   `.hack`, a legacy overlay named like the default or a
+ *   machine-local layer, a Compose `env_file` on a file the migration leaves
+ *   out or on an overlay a launch without `--env` would not select, a Compose
+ *   `environment` or `env_file` entry the migrated value would override, a
+ *   service that would gain values a legacy file gave only to others, a
+ *   service or host value in an env layer that a migrated value would replace, an
+ *   `env_file` order that gives a key a different value from the layers, a Compose
+ *   input that hides `env_file` from this check, a line Compose reads differently
+ *   from Hack, a key that does not match `^[A-Z_][A-Z0-9_]*$`
+ *   (counted per file, never shown), and a machine-local target that git
+ *   tracks or, inside a git checkout, cannot report on.
+ * - Layers are created only where nothing exists (compare-and-swap against an
+ *   absent file); if a later write fails, the layers this call created are
+ *   removed again, so the project keeps using the legacy files.
+ * - Without a contract nothing names secret-backend values, so none are read
+ *   or migrated, and `hack.config.json` (including any secret backend it
+ *   configures, and that backend's store) is left unchanged and never offered
+ *   for cleanup. Values are written to the layer files only, never returned or
+ *   printed.
+ */
+async function migrateUndeclaredLegacyDotenv(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly materialize: boolean;
+}): Promise<LegacyProjectEnvMigration> {
+  // Also refuses a dangling or non-file layer entry (E_PATH_CONFLICT), which
+  // an atomic write would otherwise replace or write through.
+  if (
+    (await projectEnvConfigExistsForMutation({
+      projectDir: opts.projectDir,
+    })) &&
+    !(await canMigrateCheckoutLegacyDotenv(opts))
+  ) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `env layer files already exist in ${opts.projectDir}.`,
+    });
+  }
+  const overlayNames = await selectLegacyDotenvOverlays({
+    projectDir: opts.projectDir,
+  });
+  await assertComposeUsesNoExcludedLegacyDotenv({
+    projectDir: opts.projectDir,
+  });
+  await assertLegacyDotenvLinksStayInProject({
+    projectDir: opts.projectDir,
+    overlayNames,
+  });
+
+  const generatedBase = await legacyBaseDotenvIsGenerated(opts);
+  const legacyValues = await readValidatedLegacyDotenvFiles({
+    projectDir: opts.projectDir,
+    overlayNames,
+    skipBase: generatedBase,
+  });
+  await assertComposeOverlaysStaySelected({
+    projectDir: opts.projectDir,
+    overlayNames,
+    legacyValues,
+  });
+  await assertComposeEnvironmentKeepsPrecedence({
+    projectDir: opts.projectDir,
+    legacyValues,
+  });
+
+  // Before the delivered values, so a local layer's refusal can name that file.
+  for (const envName of [null, ...overlayNames]) {
+    await readExistingLocalLayer({
+      path: resolveProjectEnvLocalConfigPath({
+        projectDir: opts.projectDir,
+        envName,
+      }),
+      environment: envName ?? "default",
+    });
+  }
+
+  const baseValues = legacyValues.get(null) ?? {};
+  const baseToMigrate = legacyValuesNotDelivered({
+    values: baseValues,
+    delivered: await deliveredLayerValuesForMigration({
+      ...opts,
+      envName: null,
+    }),
+  });
+  await assertLocalBaseIsTheDefaultEnvLayer({ ...opts, baseToMigrate });
+  const localWrites: PlannedEnvLayerWrite[] = [];
+  const trackedWrites: PlannedEnvLayerWrite[] = [
+    {
+      path: resolveProjectEnvConfigPath({
+        projectDir: opts.projectDir,
+        envName: null,
+      }),
+      config: buildMigratedProjectEnvConfig({
+        environment: "default",
+        values: { global: {} },
+      }),
+    },
+  ];
+  if (Object.keys(baseToMigrate).length > 0) {
+    localWrites.push({
+      path: resolveProjectEnvLocalConfigPath({
+        projectDir: opts.projectDir,
+        envName: null,
+      }),
+      config: buildMigratedProjectEnvConfig({
+        environment: "default",
+        values: { global: { ...baseToMigrate } },
+      }),
+    });
+  }
+  for (const overlayName of overlayNames) {
+    const changedValues = legacyValuesNotDelivered({
+      values: legacyValues.get(overlayName) ?? {},
+      // The local base about to be written outranks a tracked overlay, so compare
+      // with the layers as they will be, not as they are.
+      delivered: {
+        ...(await deliveredLayerValuesForMigration({
+          ...opts,
+          envName: overlayName,
+        })),
+        ...baseToMigrate,
+      },
+    });
+    if (Object.keys(changedValues).length === 0) {
+      continue;
+    }
+    localWrites.push({
+      path: resolveProjectEnvLocalConfigPath({
+        projectDir: opts.projectDir,
+        envName: overlayName,
+      }),
+      config: buildMigratedProjectEnvConfig({
+        environment: overlayName,
+        values: { global: changedValues },
+      }),
+    });
+    trackedWrites.push({
+      path: resolveProjectEnvConfigPath({
+        projectDir: opts.projectDir,
+        envName: overlayName,
+      }),
+      config: buildMigratedProjectEnvConfig({
+        environment: overlayName,
+        values: { global: {} },
+      }),
+    });
+  }
+
+  // Before anything is written, so these refusals leave the checkout unchanged.
+  await assertBaseDoesNotOutrankTrackedOverlays({
+    ...opts,
+    baseToMigrate,
+    legacyValues,
+  });
+  await assertLocalOverlaysAgreeWithLegacy({
+    projectDir: opts.projectDir,
+    overlayNames,
+    legacyValues,
+  });
+  await assertMigrationKeepsScopedValues({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    serviceNames: opts.serviceNames,
+    overlayNames,
+    localWrites,
+  });
+  const merges = await planLocalLayerMerges({ localWrites });
+  for (const write of localWrites) {
+    await assertUntrackedMigrationLocalLayer({
+      projectRoot: opts.projectRoot,
+      path: write.path,
+    });
+  }
+  if (localWrites.length > 0) {
+    await ensureHackDirGitignoreForLocalEnvWrite({
+      projectDir: opts.projectDir,
+    });
+  }
+  // The managed block may not have been written (a read-only .gitignore), so
+  // check the outcome, not the attempt.
+  for (const write of localWrites) {
+    await assertIgnoredMigrationLocalLayer({
+      projectRoot: opts.projectRoot,
+      path: write.path,
+    });
+  }
+
+  const wroteFiles = await publishMigratedLegacyLayers({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    localWrites,
+    trackedWrites,
+    mergedPaths: new Set(merges.map((merge) => merge.path)),
+  });
+  // Last, after everything that can roll back: each only adds keys, so a failure
+  // here leaves the rest for the next run.
+  for (const merge of merges) {
+    await replaceLocalLayerPrivately({
+      projectDir: opts.projectDir,
+      path: merge.path,
+      config: merge.config,
+      expectedExisting: merge.expectedExisting,
+    });
+    wroteFiles.push(merge.path);
+  }
+
+  if (opts.materialize) {
+    await materializeProjectEnv({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      envName: undefined,
+      serviceNames: opts.serviceNames,
+    });
+  }
+
+  const composeEnvFileReferences = await inspectLegacyComposeEnvFileReferences({
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+    projectDir: opts.projectDir,
+  });
+  const cleanupCandidates = await collectLegacyProjectEnvCleanupCandidates({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    overlayNames,
+    // Generated output wasn't read, so its values aren't in any layer this run wrote.
+    materialize: opts.materialize || generatedBase,
+    deliveredValues: await deliveredValuesPerLegacyFile({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      serviceNames: opts.serviceNames,
+      overlayNames,
+    }),
+    configCleanupCandidates: [],
+    composeEnvFileReferences,
+  });
+  // A legacy file git tracks may carry values teammates rely on; the values
+  // now live only in this machine's local layers, so it is never offered
+  // for deletion. Neither is one whose status git cannot report.
+  const allowedCleanup = await filterUntrackedLegacyCleanupCandidates({
+    projectRoot: opts.projectRoot,
+    paths: cleanupCandidates.allowed,
+  });
+  const blockedCleanup = await filterUntrackedLegacyCleanupCandidates({
+    projectRoot: opts.projectRoot,
+    paths: cleanupCandidates.blocked,
+  });
+
+  return {
+    wroteFiles,
+    migratedOverlays: overlayNames,
+    // These values are reported by the global-delivery note, not per key.
+    movedPlainValues: [],
+    legacyDetected: true,
+    updatedProjectConfig: false,
+    cleanupCandidates: allowedCleanup,
+    blockedCleanupCandidates: blockedCleanup,
+    composeEnvFileReferences,
+    retainedEnvFiles: cleanupCandidates.retainedEnvFiles,
+  };
+}
+
+/**
+ * Whether `.hack/.env` is generated output, not a legacy source: its text must be
+ * exactly what `hack env materialize` writes for the selection its state file
+ * records. Migrating generated output would pin that selection's values into the
+ * local base, possibly another env's.
+ *
+ * A valid state file alone proves nothing. It and `.env` are gitignored, so both
+ * survive a switch to a branch without layers, and `.env` may hold real values by
+ * then. With layers and different text, the file is either out of date or edited by
+ * hand, which this can't tell apart, so it refuses instead of dropping or pinning.
+ *
+ * A state entry counts as absent only when nothing is at that path: a dangling link
+ * or an unreadable entry is a state file this can't read, so it refuses too.
+ */
+async function legacyBaseDotenvIsGenerated(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+}): Promise<boolean> {
+  const statePath = resolveProjectEnvStatePath({ projectDir: opts.projectDir });
+  const read = await readOptionalTextFile(
+    resolve(opts.projectDir, PROJECT_ENV_FILENAME)
+  );
+  if (
+    read.kind !== "text" ||
+    (await readOptionalTextFile(statePath)).kind === "absent"
+  ) {
+    return false;
+  }
+  const stateRead = await readProjectEnvStateFile({ statePath });
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    envName: stateRead.ok ? stateRead.state.selectedOverlay : null,
+    serviceNames: opts.serviceNames,
+  });
+  if (!resolved) {
+    return false;
+  }
+  if (!stateRead.ok) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason:
+        ".hack/.env's state file can't be read, so Hack can't tell whether .env is generated output or holds values of your own. If it's your own file, delete .hack/.env.state.json so it's read as a legacy file. If it's generated output you don't need, delete both files, then run `hack env materialize`. Don't delete only the state file of generated output, because its values would then migrate as your own.",
+    });
+  }
+  const generated = serializeDotEnv(
+    selectProjectEnvValues({
+      resolved,
+      scopeName: stateRead.state.selectedService,
+    })
+  );
+  if (generated !== read.text) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `.hack/.env has a state file, but its text isn't what \`hack env materialize\` would write, so it may hold values of your own. If it's generated output, move any value of your own with \`hack env set\`, then run \`hack env materialize\`, which replaces the file. If it's your own file, delete .hack/.env.state.json so it's read as a legacy file. Don't do that for generated output, because its values would then migrate as your own.`,
+    });
+  }
+  return true;
+}
+
+/**
+ * Entries of a legacy dotenv file; an absent file has none. One that exists
+ * but cannot be read (for example mode 000, or a dangling symlink) refuses:
+ * reading it as empty would drop its values and then offer it for deletion.
+ */
+async function readLegacyDotenvFile(opts: {
+  readonly path: string;
+}): Promise<Record<string, string>> {
+  const text = await readLegacyDotenvText(opts);
+  return text === null ? {} : parseDotEnv(text);
+}
+
+/** Text of a legacy dotenv file, null when absent; refuses like {@link readLegacyDotenvFile}. */
+async function readLegacyDotenvText(opts: {
+  readonly path: string;
+}): Promise<string | null> {
+  const read = await readOptionalTextFile(opts.path);
+  if (read.kind === "unreadable") {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PERMISSION",
+      reason: `${opts.path} exists but cannot be read. Make it a readable regular file, then retry.`,
+    });
+  }
+  return read.kind === "absent" ? null : read.text;
 }
 
 export async function removeLegacyProjectEnvArtifacts(opts: {
@@ -4956,11 +7643,12 @@ export async function removeLegacyProjectEnvArtifacts(opts: {
 
 async function discoverLegacyOverlayNames(opts: {
   readonly projectDir: string;
+  readonly includeSymlinks: boolean;
 }): Promise<readonly string[]> {
   const names = new Set<string>();
   const entries = await readdir(opts.projectDir, { withFileTypes: true });
   for (const entry of entries) {
-    if (!entry.isFile()) {
+    if (!(entry.isFile() || (opts.includeSymlinks && entry.isSymbolicLink()))) {
       continue;
     }
     if (!entry.name.startsWith(`${PROJECT_ENV_FILENAME}.`)) {
@@ -5048,16 +7736,37 @@ function buildMigratedValues(opts: {
   return values;
 }
 
-async function collectLegacyProjectEnvCleanupCandidates(opts: {
+/** Cleanup requires readable contents, even when legacy resolution treated a read failure as absence. */
+async function readLegacyDotenvCleanupEntries(opts: {
+  readonly path: string;
+}): Promise<Readonly<Record<string, string>>> {
+  const source = await readOptionalTextFile(opts.path);
+  if (source.kind !== "text") {
+    throw new ClosedCliError(
+      `Refusing legacy env cleanup: could not read ${opts.path}. No legacy files were removed; env layers may already have been written. Check read access before cleaning up manually (values omitted).`
+    );
+  }
+  return parseDotEnv(source.text);
+}
+
+export async function collectLegacyProjectEnvCleanupCandidates(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly overlayNames: readonly string[];
   readonly materialize: boolean;
+  readonly deliveredValues: ReadonlyMap<
+    string,
+    ReadonlyMap<string, string | null>
+  >;
   readonly configCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
 }): Promise<{
   readonly allowed: readonly string[];
   readonly blocked: readonly string[];
+  readonly retainedEnvFiles: readonly {
+    readonly path: string;
+    readonly keys: readonly string[];
+  }[];
 }> {
   const candidates = new Set<string>();
   candidates.add(resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME));
@@ -5076,10 +7785,25 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
   const blockedPaths = new Set(
     opts.composeEnvFileReferences.map((reference) => reference.resolvedPath)
   );
+  const retainedEnvFiles: { path: string; keys: string[] }[] = [];
   const allowed: string[] = [];
   const blocked: string[] = [];
   for (const path of candidates) {
     if (await pathExists(path)) {
+      // Value retention is independent of Compose references: repairing Compose
+      // must never promote a file holding undelivered values into cleanup.
+      const delivered = opts.deliveredValues.get(path);
+      if (delivered) {
+        const entries = await readLegacyDotenvCleanupEntries({ path });
+        const keys = Object.entries(entries)
+          .filter(([key, value]) => delivered.get(key) !== value)
+          .map(([key]) => key)
+          .sort();
+        if (keys.length > 0) {
+          retainedEnvFiles.push({ path, keys });
+          continue;
+        }
+      }
       if (blockedPaths.has(path)) {
         blocked.push(path);
       } else {
@@ -5088,6 +7812,7 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
     }
   }
   return {
+    retainedEnvFiles,
     allowed: allowed.sort((left, right) => left.localeCompare(right)),
     blocked: blocked.sort((left, right) => left.localeCompare(right)),
   };

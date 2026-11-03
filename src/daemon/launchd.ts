@@ -129,8 +129,6 @@ export interface LaunchdPlistOptions {
   readonly home: string;
   readonly runAtLoad: boolean;
   readonly guiSessionOnly: boolean;
-  readonly stdoutPath: string;
-  readonly stderrPath: string;
 }
 
 /**
@@ -163,10 +161,10 @@ export function renderLaunchdPlist(opts: LaunchdPlistOptions): string {
     "  </dict>",
     "",
     "  <key>StandardOutPath</key>",
-    `  <string>${opts.stdoutPath}</string>`,
+    "  <string>/dev/null</string>",
     "",
     "  <key>StandardErrorPath</key>",
-    `  <string>${opts.stderrPath}</string>`,
+    "  <string>/dev/null</string>",
     "",
     "  <key>WorkingDirectory</key>",
     `  <string>${opts.home}</string>`,
@@ -237,8 +235,6 @@ export async function installLaunchdService({
     home,
     runAtLoad: config.runAtLoad,
     guiSessionOnly: config.guiSessionOnly,
-    stdoutPath: paths.launchdStdoutPath,
-    stderrPath: paths.launchdStderrPath,
   });
 
   await ensureDir(dirname(paths.launchdPlistPath));
@@ -354,6 +350,17 @@ export function extractLaunchdProgramPath(opts: {
   return match?.[1] ?? null;
 }
 
+/** launchd holds output descriptors open, so rename rotation cannot bound them.
+ * Keep diagnostics in the daemon's capped log instead of duplicating stderr.
+ */
+export function hasBoundedLaunchdOutput(opts: {
+  readonly plistText: string;
+}): boolean {
+  return ["StandardOutPath", "StandardErrorPath"].every((key) =>
+    opts.plistText.includes(`<key>${key}</key>\n  <string>/dev/null</string>`)
+  );
+}
+
 export type LaunchdProgramRepairResult =
   | "ok"
   | "repaired"
@@ -392,7 +399,7 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   // the OLD binary forever (incompatible-daemon loop). Normalize to the
   // current stable resolution whenever it differs.
   const valid = exists && (resolved === null || program === resolved);
-  if (valid) {
+  if (valid && hasBoundedLaunchdOutput({ plistText })) {
     return "ok";
   }
   if (!exists && resolved === null) {

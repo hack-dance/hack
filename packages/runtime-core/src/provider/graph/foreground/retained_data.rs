@@ -127,13 +127,13 @@ fn volume_matches(
     observed: Option<&Value>,
     recovering: bool,
 ) -> Result<(), CandidateError> {
-    match (expected, observed) {
-        (Some(a), Some(b)) if a == b => Ok(()),
-        (Some(_), None) if recovering => Ok(()),
-        (None, None) => Ok(()),
-        _ => Err(refused()),
+    if graph::volume_identity::retained_matches(expected, observed, recovering) {
+        Ok(())
+    } else {
+        Err(refused())
     }
 }
+
 pub(super) fn remove(
     candidate: &Candidate,
     run: &str,
@@ -261,20 +261,22 @@ fn remove_guarded(candidate: &Candidate, run: &str, guard: Guard) -> Result<Valu
     }
     let mut volumes = BTreeMap::new();
     for (key, resource) in &receipt.resources {
-        let observed = graph::inspect_resource(&engine, &receipt, resource)?;
+        let mut observed = graph::inspect_resource(&engine, &receipt, resource)?;
         if resource.kind != Kind::Volume {
             if observed.is_some() {
                 return Err(refused());
             }
             continue;
         }
+        if observed.is_some() {
+            observed = Some(graph::volume_identity::observe(
+                &engine, &receipt, resource,
+            )?);
+        }
         if let Some(intent) = &intent {
             volume_matches(intent.volumes.get(key), observed.as_ref(), true)?;
         }
         if let Some(value) = observed {
-            if value["CreatedAt"].as_str().is_none_or(str::is_empty) {
-                return Err(refused());
-            }
             graph::cache_provenance::verify(&engine, &receipt, resource)?;
             volumes.insert(key.clone(), value);
         } else if intent.is_none() && resource.phase == "created" {
@@ -475,13 +477,15 @@ mod tests {
     }
     #[test]
     fn volume_replacement_never_becomes_recovery_authority() {
-        let original =
-            json!({"Name":"owned","Driver":"local","CreatedAt":"original","Mountpoint":"/owned"});
+        let original = graph::volume_identity::projection(
+            &json!({"Name":"owned","Driver":"local","CreatedAt":"original","Mountpoint":"/owned"}),
+            "1:2",
+        );
         assert!(volume_matches(Some(&original), Some(&original), false).is_ok());
         assert!(volume_matches(Some(&original), None, false).is_err());
         assert!(volume_matches(Some(&original), None, true).is_ok());
         let mut replacement = original.clone();
-        replacement["CreatedAt"] = json!("replacement");
+        replacement["directory"] = json!("1:3");
         assert!(volume_matches(Some(&original), Some(&replacement), true).is_err());
         assert!(volume_matches(None, Some(&original), true).is_err());
     }

@@ -1132,7 +1132,10 @@ for (const hostname of [
   });
 }
 
-test("compaction removes interrupted publication temporaries and empty attempts", async () => {
+test.each([
+  "",
+  "unfinished",
+])("compaction removes interrupted publication temporary %j and empty attempts", async (contents) => {
   const root = await fixture();
   const result = await store(root);
   const obsolete = await acquire(result);
@@ -1146,12 +1149,20 @@ test("compaction removes interrupted publication temporaries and empty attempts"
       obsolete.reference.attemptId,
       `${"a".repeat(32)}.tmp`
     ),
-    "unfinished",
+    contents,
     { mode: 0o600 }
   );
   await fs.mkdir(join(ownerPath(root), "attempts", "b".repeat(32)), {
     mode: 0o700,
   });
+  await fs.mkdir(join(ownerPath(root), "attempts", "d".repeat(32)), {
+    mode: 0o700,
+  });
+  await fs.writeFile(
+    join(ownerPath(root), "attempts", "d".repeat(32), `${"e".repeat(32)}.tmp`),
+    contents,
+    { mode: 0o600 }
+  );
   await result.compact({ references: [current.reference] });
   expect(await fs.readdir(join(ownerPath(root), "attempts"))).toEqual([
     current.reference.attemptId,

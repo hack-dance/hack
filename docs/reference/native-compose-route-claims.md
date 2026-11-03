@@ -102,7 +102,8 @@ operation may temporarily add one attempt. This bound applies when the pinned
 journals witness every live claim. If an older attempt is the sole witness for a
 claim (for example after removing a hostname from config), compaction preserves
 the entire history until that claim is safely released or witnessed again.
-Empty directories preceding intent publication are removed under the mutation lock.
+Directories preceding intent publication, empty or containing only validated
+token-named temporary files (including zero-byte files), are removed under the mutation lock.
 Existing byte limits still apply;
 unsafe or unresolved histories refuse rather than being silently discarded.
 

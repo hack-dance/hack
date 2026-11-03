@@ -16,6 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { isRecord } from "./guards.ts";
 
 const TOKEN = /^[a-f0-9]{32}$/;
+const TEMPORARY = /^[a-f0-9]{32}\.tmp$/;
 const HASH = /^[a-f0-9]{64}$/;
 const PROJECT = /^[a-z0-9][a-z0-9_-]*$/;
 const ENGINE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/;
@@ -668,6 +669,35 @@ export async function openNativeComposeRouteClaims(opts: {
         .find((directory) => directory.path === dirname(path))
         ?.handle.sync();
     };
+    const unlinkTemporary = async (path: string) => {
+      await check();
+      const initial = await lstat(path);
+      const safe = (info: Stats) =>
+        info.isFile() &&
+        info.uid === process.getuid?.() &&
+        (info.mode & 0o777) === 0o600 &&
+        info.nlink === 1 &&
+        info.size >= 0 &&
+        info.size <= RECORD_LIMIT;
+      if (!safe(initial)) {
+        refuse();
+      }
+      await check();
+      const current = await lstat(path);
+      if (
+        !safe(current) ||
+        current.dev !== initial.dev ||
+        current.ino !== initial.ino ||
+        current.size !== initial.size ||
+        current.ctimeMs !== initial.ctimeMs
+      ) {
+        refuse();
+      }
+      await unlink(path);
+      await directories
+        .find((directory) => directory.path === dirname(path))
+        ?.handle.sync();
+    };
     const publish = async (path: string, value: unknown): Promise<Read> => {
       const text = JSON.stringify(value);
       if (Buffer.byteLength(text) > RECORD_LIMIT) {
@@ -683,17 +713,23 @@ export async function openNativeComposeRouteClaims(opts: {
           constants.O_NOFOLLOW,
         0o600
       );
+      let staged: Read;
       try {
-        await handle.writeFile(text);
-        await handle.sync();
-      } finally {
-        await handle.close();
+        try {
+          await handle.writeFile(text);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        staged = await readPrivate(temporary);
+        if (staged.text !== text) {
+          refuse();
+        }
+        await check();
+      } catch (error) {
+        await unlinkTemporary(temporary);
+        throw error;
       }
-      const staged = await readPrivate(temporary);
-      if (staged.text !== text) {
-        refuse();
-      }
-      await check();
       try {
         await link(temporary, path);
       } finally {
@@ -758,7 +794,7 @@ export async function openNativeComposeRouteClaims(opts: {
       const intentRead = await bounded(join(path, "intent.json"));
       // Empty directories precede intent publication and cannot own effects.
       if (!intentRead) {
-        if ((await readdir(path)).length !== 0) {
+        if ((await readdir(path)).some((file) => !TEMPORARY.test(file))) {
           refuse();
         }
         return null;
@@ -1194,19 +1230,20 @@ export async function openNativeComposeRouteClaims(opts: {
         // Retirement is already durable. A crash during cleanup may leave any
         // subset of these files; none grants claim or completion authority.
         for (const file of await readdir(path)) {
+          if (TEMPORARY.test(file)) {
+            await unlinkTemporary(join(path, file));
+            continue;
+          }
           if (
-            !(
-              [
-                "intent",
-                "reserved",
-                "armed",
-                "complete",
-                "retained",
-                "stopped",
-                "aborted",
-              ].some((kind) => file === `${kind}.json`) ||
-              (file.endsWith(".tmp") && TOKEN.test(file.slice(0, -4)))
-            )
+            ![
+              "intent",
+              "reserved",
+              "armed",
+              "complete",
+              "retained",
+              "stopped",
+              "aborted",
+            ].some((kind) => file === `${kind}.json`)
           ) {
             refuse();
           }
@@ -1233,6 +1270,12 @@ export async function openNativeComposeRouteClaims(opts: {
             }
             const path = join(attemptsRoot, name);
             await check();
+            for (const file of await readdir(path)) {
+              if (!TEMPORARY.test(file)) {
+                refuse();
+              }
+              await unlinkTemporary(join(path, file));
+            }
             // journals validated this intent-less directory as empty. rmdir
             // refuses if anything appeared; no journal authority is discarded.
             await rmdir(path);

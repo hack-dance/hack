@@ -1245,7 +1245,7 @@ const contracts: readonly ModelContract[] = [
     // tests/models/tla/README.md.
     name: "shared-helper-instance",
     module: "Instance",
-    states: 7466,
+    states: 7649,
     invariant: "SessionSafe",
     action: "Succeed",
     fields: [

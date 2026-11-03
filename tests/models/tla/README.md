@@ -971,13 +971,13 @@ lifecycle entry (`entry`, `healthy`) as explicit state.
 | `StartProcesses` | Each launch (`startLifecycleProcess`) runs under the lock and only while the persisted entry and the live session still carry this start's token; otherwise the start is displaced (`LifecycleSessionDisplacedError`) and launches nothing. The pending entry is not adoptable, so another start may replace the session between launches. Controller regression: a displaced start's later process never reaches the replacement. |
 | `Finalize` | `finalize()` under the lock (`publishFinalEntryIfStillOwned`): publish the final, adoptable entry only while the persisted entry and the live session still carry this start's created or adopted token; otherwise the start is displaced, gives up its authority and fails (`LifecycleSessionDisplacedError`). Controller regression: replacement after creation but before finalization, reclaimed by `stopLifecycleProcessController`. |
 | `CreateTimeoutCreated` / `CreateTimeoutNotCreated` | A `createSession` that exceeds `muxCommandTimeoutMs()` is killed by `runMuxCommand`, so the call settles under the lock and throws `MuxCommandTimeoutError`: either the server created the session first (outcome unknown: entry and token kept for reclaim) or it did not (proven absent: entry retired). Controller regressions for both. |
-| `InspectTimeout` | A timed-out listing, ownership-token read or window listing throws instead of returning an empty or absent result; the decision fails closed. Real tmux backend regression with a hanging `tmux`; controller regression over a healthy owned session. |
+| `InspectTimeout` | A timed-out listing, ownership-token read or window listing throws instead of returning an empty or absent result, and a listing that omits the session followed by an exact-presence query without a definite answer fails the inspection (`LifecycleSessionPresenceUnknownError`) instead of reading absence; the decision fails closed. Real tmux backend regressions with a hanging `tmux`, including that listing-omits-then-presence-times-out path; controller regression over a healthy owned session. |
 | `CreateAbandon` / `LateCreate`, `ReplaceAbandon` / `LateKill`, `RecordFailReadUnlocked`, `MisreadDecide` / `MisreadCreateBegin` | Broken designs only (each enabled by one control): a deadline that stops waiting without cancelling the call, a failure cleanup whose kill lands after the lock was released, and a timeout read as absence. |
 | `Launch` / `Succeed` / `Fail` | `assertCurrent` before and after containers start; Compose failure, SIGINT/SIGTERM or a failed check. |
-| `Cleanup` / `CleanupUndecidable` | `SharedHelperSessionOwnership.runIfOwned` and the controller's `abort()` / signal cleanup: under the lock, a creator with a recorded epoch kills only while the epoch is its own; a creator whose record failed kills by token; the kill always checks the token. An unavailable lock keeps the session (and the helper holders: `LIFECYCLE_SESSION_RETAINED`). Controller regressions (abort overlapping a replacement; a startup whose second process fails with an unconfirmed stop, through `startLifecycleProcesses`), module tests and e2e overlap variants. |
-| `DownMark` / `DownStop` / `DownStopFailed` | `markSharedHelperInstanceStopping` once the down is committed; the stop controller reclaims the session through the persisted entry; `releaseProjectSharedHelpers` advances the generation again. When the session stop failed or is unknown, `stopSessionBeforeReleasingHelpers` keeps every holder and down, restart and native retirement fail (`DownStopFailed`). Unit regressions for both outcomes. |
+| `Cleanup` / `CleanupUndecidable` | `SharedHelperSessionOwnership.runIfOwned`, which the combined operation cleanup and the controller's `abort()` / signal cleanup both go through: under the lock, a creator with a recorded epoch kills only while the epoch is its own; a creator whose record failed kills by token; the kill always checks the token. An unavailable lock keeps the session (and the helper holders: `LIFECYCLE_SESSION_RETAINED`). Controller regressions (abort overlapping a replacement; a signal callback already waiting on the lock while another up adopts; a startup whose second process fails with an unconfirmed stop, through `startLifecycleProcesses`), module tests and e2e overlap variants. |
+| `DownMark` / `DownStop` / `DownStopFailed` | `markSharedHelperInstanceStopping` once the down is committed; the stop controller reclaims the session through the persisted entry; `releaseProjectSharedHelpers` advances the generation again. When the session stop failed or is unknown (including an inspection that could not tell whether the session exists), `stopSessionBeforeReleasingHelpers` keeps every holder, configured or recorded, and down, restart and native retirement fail (`DownStopFailed`). Unit regressions for both outcomes. |
 
-The positive configuration checks all four invariants and exhausts 7,466 distinct states
+The positive configuration checks all four invariants and exhausts 7,649 distinct states
 (TLC 1.7.4, Java 17, no fairness, `CHECK_DEADLOCK FALSE`). Each control disables one
 fix through a constant and must fail with a named same-state witness:
 
@@ -1000,9 +1000,16 @@ creation steps (with environment setup), `Record`, its failure cleanup,
 not. Environment setup has no step of its own because it runs inside the creation
 transaction. `Decide` is one step because the source holds the lock
 across inspect and record. Every mux call made by the lifecycle controller and the
-tmux/zellij backends is bounded by `runMuxCommand` and settles before the caller
-continues (a timed-out client is killed), and a timed-out call is unknown, never
-absence; timeout settlement is narrowed per backend below. Helper ensure/holder counts, helper rollback
+tmux/zellij backends is bounded by `runMuxCommand`: the caller stops waiting
+within the bound (a timed-out client is killed), and a timed-out call is unknown,
+never absence. That does not prove the server will not still apply the command;
+see the timeout residual below. The model covers tmux only: projects with shared
+helpers refuse zellij for their lifecycle session
+(`assertSharedHelperSessionMuxSupported`), because zellij records the ownership
+token with a separate `rename-tab` after creation, so an interrupted start could
+leave a live session without a token that neither `hack up` nor `hack down` can
+reclaim. tmux sets the token as part of `new-session` (`-e`), which is what
+`CreateSession` and `CreateTimeoutCreated` assume. Helper ensure/holder counts, helper rollback
 ownership (the operation record), the acquired-helper record and claim-level stop
 confirmation are not modeled; the shared-host claim protocol has its own fixtures in
 `tests/shared-host-lifecycle.test.ts`. `DownStop` joins the down's session stop and
@@ -1012,30 +1019,30 @@ release; that is the documented first-slice limitation (launch prevention across
 concurrent down is detected after launch, not prevented). Real mux sessions,
 process groups, lock-file durability and Compose behavior are outside this model.
 
-Timeout settlement is an assumption of the positive model, narrowed per backend.
-`CreateTimeout*` treat a call as settled once `runMuxCommand` killed its client.
-Killing the client does not prove that the server will not still apply the
-command. tmux queues commands per client, so a command a stalled server already
-received may run after it answered a later client. zellij's background create
-daemonizes the session server, so a killed create may still create the session.
-The `abandoned-create` and `abandoned-replace` controls are that residual, and they
-fail. The residual needs a server that stalled past the deadline and then ran the
-dead client's command after answering a later client (for tmux, every call made
-while the server stays stalled also times out and fails closed), or a zellij
-create that completes after its client was killed. Consequences per late
-command, all for the same instance (one project and branch):
+Timeout settlement is an assumption of the positive model, not a guarantee of the
+code. `CreateTimeout*` treat a call as settled once `runMuxCommand` killed its
+client. Killing the client does not prove that the tmux server will not still apply
+the command: commands queue per client, so a command a stalled server already
+received may run after it answered a later client. The `abandoned-create` and
+`abandoned-replace` controls are that residual, and they fail. It needs a tmux
+server that stalled past the deadline and then ran the dead client's command after
+answering a later client; every call made while the server stays stalled also
+times out and fails closed. What the code guarantees is weaker than the positive
+model in that case. Consequences per late command, all for the same instance (one
+project and branch):
 
-- create (tmux `new-session`, zellij background create): a session that carries the
-  failed start's token, possibly without an entry. No lifecycle process runs in it,
-  because launches only follow a confirmed create. The next `hack up` refuses it
-  ("already exists without matching Hack lifecycle state"); stop it by hand. Helper
-  holders are not affected.
-- name-based kill (replacement, cleanup, down): it may stop a newer session of the
-  instance. That session's entry remains, so `hack down` and the next `hack up`
-  reclaim or recreate it.
+- create (`new-session`): a session that carries the failed start's token, possibly
+  without an entry. No lifecycle process runs in it, because launches only follow a
+  confirmed create. The next `hack up` refuses it ("already exists without matching
+  Hack lifecycle state"); stop it by hand. Helper holders are not affected.
+- name-based kill (replacement, cleanup, down): it may stop a newer, successful
+  session of the instance, so `SessionSafe` does not hold for that start. Its entry
+  remains, so `hack down` and the next `hack up` reclaim or recreate it: recovery,
+  not prevention.
 - environment, window or pane commands: they may reach a newer session of the
-  instance; its `hack down` stops the whole session.
+  instance after its ownership check, so `NoForeignLaunch` does not hold for that
+  start; its `hack down` stops the whole session.
 
-Closing the residual needs a per-backend protocol rather than a timeout: target tmux
+Closing the residual needs a mutation fence rather than a timeout: target tmux
 mutations by session ID (`#{session_id}`, never reused by a server) captured with
-the token read; zellij has no session ID, so its residual stays documented.
+the token read. That is not in this slice.

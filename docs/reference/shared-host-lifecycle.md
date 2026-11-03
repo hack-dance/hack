@@ -323,7 +323,16 @@ fail when that check is removed.
   macOS records the start time directly and is not affected.
 - Model coverage. `tests/models/tla/shared-helper-instance` checks lifecycle-session
   ownership across overlapping ups and a down (see its README section); the claim
-  protocol itself is covered by the fixtures above, not by a model.
+  protocol itself is covered by the fixtures above, not by a model. That model
+  assumes a timed-out tmux command, whose client Hack killed, has no later effect.
+  The code does not guarantee that: a stalled tmux server can still apply it, so a
+  late kill or window command can reach a newer session of the same instance
+  (recovered by `hack down` and `hack up`, not prevented). The README lists each
+  case. A session-ID mutation fence for tmux would close it and is not in this
+  slice.
+- zellij lifecycle sessions for projects with shared helpers. They are refused
+  before anything starts: zellij writes the ownership token after creating the
+  session, so an interrupted start could leave a session without a token.
 - The daemon. It has no lifecycle surface today; shared helpers are started and
   released only by the CLI's `up`, `restart` and `down`.
 - Migrating existing `lifecycle.singleton` configurations. `singleton` keeps its

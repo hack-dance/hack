@@ -250,8 +250,8 @@ export function createLifecycleProcessController(opts: {
   /**
    * Bound for this controller's own tmux/zellij commands (environment setup,
    * window creation, process start). Backend calls use muxCommandTimeoutMs().
-   * A timed-out command is killed, so the call settles; nothing keeps
-   * mutating after the caller moves on.
+   * A timed-out command's client is killed, so the caller stops waiting; the
+   * server may still apply the command later (see runMuxCommand).
    */
   readonly muxCommandTimeoutMs?: number;
 }): {
@@ -421,9 +421,11 @@ export function createLifecycleProcessController(opts: {
       });
       await opts.assertFresh?.();
       sessionCreated = "unknown";
-      // Bounded by the backend: the call settles (a timed-out client is
-      // killed) before this transaction releases the lock, so no creation
-      // can complete after another command takes the lock.
+      // Bounded by the backend: the call returns (a timed-out client is
+      // killed) before this transaction releases the lock, and a timeout is
+      // an unknown outcome, so the entry and token are kept for reclaim. The
+      // server may still create the session after the lock is released; that
+      // residual is documented in tests/models/tla/README.md.
       const created = await backend.createSession({
         name: sessionName,
         cwd: opts.project.projectRoot,

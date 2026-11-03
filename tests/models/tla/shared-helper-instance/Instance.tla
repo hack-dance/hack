@@ -243,10 +243,13 @@ DownStop == /\ down = "marked" /\ Free
                   ELSE UNCHANGED <<session, token>>
             /\ entry' = None /\ healthy' = FALSE /\ released' = TRUE
             /\ UNCHANGED <<pc, cap, epoch, owned, lock, mytok, stale, foreign>>
-\* The session stop failed or its outcome is unknown: the session and its
-\* entry stay, and so do the helper holders (the down fails; a later down
-\* releases both). The control releases the holders anyway.
-DownStopFailed == /\ down = "marked" /\ Free /\ session = "alive"
+\* The session stop failed or its outcome is unknown, including an inspection
+\* that could not tell whether the session exists (a timed-out listing or
+\* exact-presence query): the session and its entry stay, and so do the
+\* helper holders (the down fails; a later down releases both). It can happen
+\* whether or not the session is actually alive. The control releases the
+\* holders anyway.
+DownStopFailed == /\ down = "marked" /\ Free
                   /\ down' = "failed"
                   /\ IF ReleaseOnFailedStop
                         THEN /\ gen' = gen + 1 /\ released' = TRUE
@@ -297,7 +300,10 @@ LateKill(u) ==
   /\ pc' = [pc EXCEPT ![u] = "done"]
   /\ UNCHANGED <<cap, gen, epoch, owned, healthy, lock, down, mytok, stale, foreign, released>>
 
-\* A timed-out inspection (positive design): unknown, fail closed.
+\* A timed-out inspection (positive design): unknown, fail closed. Covers a
+\* timed-out listing and a listing that omits the session followed by an
+\* exact-presence query without a definite answer
+\* (LifecycleSessionPresenceUnknownError); the up refuses.
 InspectTimeout(u) ==
   /\ pc[u] \in {"captured", "create"} /\ Free
   /\ pc' = [pc EXCEPT ![u] = "done"]

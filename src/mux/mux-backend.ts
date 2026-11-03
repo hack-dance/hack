@@ -19,10 +19,15 @@ export type MuxSessionCreateResult =
  * Bound for every non-interactive mux command. Some run while the shared
  * helper instance lock is held (session decision and creation), so a hung
  * tmux or zellij must not hold that lock indefinitely. A command that exceeds
- * it is killed (the call settles; nothing keeps running after the caller
- * moves on) and reported as {@link MuxCommandTimeoutError}: its outcome is
- * unknown, never an empty or absent result. `HACK_MUX_COMMAND_TIMEOUT_MS`
- * overrides it (tests).
+ * it has its client killed and is reported as {@link MuxCommandTimeoutError}:
+ * its outcome is unknown, never an empty or absent result.
+ *
+ * Killing the client bounds the caller's wait, not the command: a tmux server
+ * that already received it may still apply it later (commands queue per
+ * client), and zellij's background create daemonizes its session server.
+ * Callers therefore never treat a timeout as "did not happen"; the remaining
+ * late-effect residual is described in tests/models/tla/README.md ("Shared
+ * helper instance"). `HACK_MUX_COMMAND_TIMEOUT_MS` overrides it (tests).
  */
 export const MUX_COMMAND_TIMEOUT_MS = 15_000;
 
@@ -45,7 +50,8 @@ export class MuxCommandTimeoutError extends Error {
 
 /**
  * Run a non-interactive mux command under {@link muxCommandTimeoutMs}. The
- * call always settles; a timeout throws {@link MuxCommandTimeoutError}.
+ * call always returns within the bound; a timeout throws
+ * {@link MuxCommandTimeoutError} (the server may still apply the command).
  */
 export async function runMuxCommand(
   command: readonly string[],

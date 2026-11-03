@@ -238,6 +238,12 @@ Behavior:
   an instance lock; an earlier run's rollback never releases a holder after a later run of
   that instance has started (the holder stays recorded until `hack down`).
 - A disabled helper (`enabled: false`) needs none of its `env` or `upstreamEnv` values.
+- A project with `sharedHelpers` and a lifecycle session (lifecycle processes or a
+  persistent `up.before` hook) needs tmux for that session. With zellij selected,
+  `hack up` and `hack restart` fail with `E_LIFECYCLE_FAILED` before any hook,
+  helper or process runs: zellij records the session's ownership after creating
+  it, so an interrupted start could leave a session `hack down` cannot reclaim.
+  Install tmux or set `sessions.mux` to `tmux`.
 - `hack down` releases the instance's holder. A helper still used by another branch keeps
   running; the last release stops a helper Hack started and never signals an adopted one.
   Down releases every helper the instance acquired, recorded at start, so removing or
@@ -246,7 +252,8 @@ Behavior:
   `hack restart` with `E_LIFECYCLE_FAILED` (non-zero exit, the helper names in `detail`).
   Fix the claim and run `hack down` again.
 - Holders are released only after the instance's lifecycle session stopped. If that stop
-  fails or cannot be confirmed, the session's processes may still use the helpers: `hack
+  fails or cannot be confirmed (including when tmux cannot say whether the session
+  exists), the session's processes may still use the helpers: `hack
   down`, `hack restart` and native retirement keep every holder, warn, and fail the same
   way. Run `hack down` again once the session can be stopped. Likewise, an up whose failed
   start kept its lifecycle session (its stop could not be confirmed) keeps the holders it
@@ -285,6 +292,13 @@ Behavior:
     entry was still pending) fails with an error saying so. It does not publish over the
     replacement, start processes or set environment in it, or stop it; the replacement
     stays owned and `hack down` can stop it.
+  - These guarantees hold for tmux commands that finish within their time limit
+    (15 s). Hack stops waiting for a command that does not, and treats its outcome
+    as unknown, but a stalled tmux server can still apply it later. A late kill
+    or window command from an earlier up can then stop or change a newer up's
+    session of the same branch; `hack down` and `hack up` recover it. A late
+    session creation leaves an empty session that the next `hack up` refuses;
+    stop it with tmux.
   - A failed up releases only the helper holders it added, and only while it is the latest
     up of the instance to have its helpers ready.
   - The failed up's other failure handling is unchanged (for example, it still clears the

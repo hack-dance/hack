@@ -943,8 +943,17 @@ test(
     await mkdir(instanceDir, { recursive: true, mode: 0o700 });
     const record = join(instanceDir, `${BRANCH_A}.acquired.json`);
     await writeFile(record, "{not json\n", { mode: 0o600 });
+    // Both "no sharedHelpers key" and an empty list must report it.
+    for (const helpers of [undefined, []]) {
+      const failed = await releaseProjectSharedHelpers({
+        helpers,
+        composeProject: BRANCH_A,
+        hackDir,
+      });
+      expect(failed.map((entry) => entry.name)).toEqual(["recorded-helpers"]);
+    }
     const unreadable = await releaseProjectSharedHelpers({
-      helpers: [],
+      helpers: undefined,
       composeProject: BRANCH_A,
       hackDir,
     });

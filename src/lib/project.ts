@@ -246,6 +246,12 @@ export interface ProjectConfig {
   readonly ownership: ProjectOwnershipConfig;
   readonly configPath?: string;
   readonly parseError?: string;
+  /**
+   * Set when `lifecycle.sharedHelpers` is invalid. Startup must refuse it
+   * rather than run without helpers: several Compose commands only warn on
+   * `parseError`, which would otherwise launch services with no helper.
+   */
+  readonly sharedHelpersError?: string;
 }
 
 export interface ProjectOpenConfig {
@@ -596,6 +602,9 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     ...(lifecycle ? { lifecycle } : {}),
     ownership: parsedOwnership.ownership,
     ...(parseErrors.length > 0 ? { parseError: parseErrors.join(" ") } : {}),
+    ...(sharedHelpers.errors.length > 0
+      ? { sharedHelpersError: sharedHelpers.errors.join(" ") }
+      : {}),
     configPath: path,
   };
 }

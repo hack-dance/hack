@@ -1874,6 +1874,13 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly effectiveEnvName: string | null;
   readonly composeProject: string;
 }): Promise<LifecycleUpResult> {
+  if (opts.cfg.sharedHelpersError) {
+    // Fail closed before any hook runs: starting without the configured
+    // helpers would launch services that depend on them.
+    throw new Error(
+      `Invalid lifecycle.sharedHelpers; nothing was started: ${opts.cfg.sharedHelpersError}`
+    );
+  }
   const beforeCommands = opts.cfg.lifecycle?.up?.before;
   const definitionHash = resolveProjectLifecycleDefinitionHash({
     beforeCommands,
@@ -5733,6 +5740,10 @@ async function runUpCommand({
       message: `Failed to parse ${configPath}: ${cfg.parseError}`,
     });
   }
+  const sharedHelperRefusal = refuseInvalidSharedHelpers({ cfg, json });
+  if (sharedHelperRefusal !== null) {
+    return sharedHelperRefusal;
+  }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
@@ -6418,6 +6429,10 @@ async function runDownCommand({
       message: `Failed to parse ${configPath}: ${cfg.parseError}`,
     });
   }
+  const sharedHelperRefusal = refuseInvalidSharedHelpers({ cfg, json });
+  if (sharedHelperRefusal !== null) {
+    return sharedHelperRefusal;
+  }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   let runtime: readonly RuntimeProject[] | null = null;
@@ -6748,6 +6763,105 @@ async function assertNativeSharedHelpersCurrent(opts: {
   }
 }
 
+/**
+ * After a failed restart start, attempt one repair start so the runtime is
+ * left startable. The repair launches containers, so it runs behind the same
+ * shared helper guard as the first attempt.
+ */
+export async function repairFailedRestart(opts: {
+  readonly budgets: ComposeStartupBudgets;
+  readonly upCode: number;
+  readonly composePhase: ComposeStartupPhase;
+  readonly assertCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
+  readonly cleanup: LifecycleOperationCleanup | null;
+  readonly projectDir: string;
+  readonly lifecycleComposeProject: string;
+  readonly up: (beforeStart?: () => Promise<void>) => Promise<number>;
+}): Promise<{
+  readonly code: number;
+  readonly phase: "compose" | "lifecycle";
+  readonly composePhase?: ComposeStartupPhase;
+}> {
+  reportComposeStartupBudget({
+    budgets: opts.budgets,
+    detach: true,
+    repair: true,
+  });
+  const repair = await composeUpGuardedBySharedHelpers({
+    assertCurrent: opts.assertCurrent,
+    up: opts.up,
+  });
+  if ("superseded" in repair) {
+    return await abandonSupersededRestart({
+      error: repair.superseded,
+      cleanup: opts.cleanup,
+      projectDir: opts.projectDir,
+      composeProject: opts.lifecycleComposeProject,
+    });
+  }
+  if (repair.code === 0) {
+    logger.warn({
+      message:
+        "Restart failed, but Hack repaired the Compose runtime to a startable state.",
+    });
+  } else {
+    logger.error({
+      message: `Restart failed and automatic runtime repair also failed (exit ${repair.code}). Run 'hack doctor --fix'.`,
+    });
+    await opts.cleanup?.();
+    await removeProjectRuntimeStateEntry({
+      projectDir: opts.projectDir,
+      composeProject: opts.lifecycleComposeProject,
+    });
+  }
+  return {
+    code: opts.upCode,
+    phase: "compose",
+    composePhase: opts.composePhase,
+  };
+}
+
+/**
+ * Refuse a command when `lifecycle.sharedHelpers` is invalid, before any
+ * lifecycle or runtime effect. Other config parse errors only warn on the
+ * Compose path, but running without the helpers would launch services that
+ * need them (or leave a down unable to name what to release). Returns the
+ * exit code to return, or null to continue.
+ */
+function refuseInvalidSharedHelpers(opts: {
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly json: boolean;
+}): number | null {
+  if (!opts.cfg.sharedHelpersError) {
+    return null;
+  }
+  const message = `Invalid lifecycle.sharedHelpers; nothing was changed: ${opts.cfg.sharedHelpersError}`;
+  if (opts.json) {
+    return emitLifecycleResult({
+      result: errorResult({ code: "E_LIFECYCLE_FAILED", message }),
+      exitCode: 1,
+    });
+  }
+  logger.error({ message });
+  return 1;
+}
+
+/** Restart's response to a concurrent down: clean up this start and stop. */
+async function abandonSupersededRestart(opts: {
+  readonly error: SharedHelperSupersededError;
+  readonly cleanup: LifecycleOperationCleanup | null;
+  readonly projectDir: string;
+  readonly composeProject: string;
+}): Promise<{ readonly code: number; readonly phase: "lifecycle" }> {
+  await opts.cleanup?.();
+  await removeProjectRuntimeStateEntry({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
+  logger.error({ message: opts.error.message });
+  return { code: 1, phase: "lifecycle" };
+}
+
 function reportLifecycleSession(sessionName: string | null): void {
   if (sessionName) {
     logger.info({
@@ -6914,56 +7028,42 @@ async function runRestartUpPhase(opts: {
         }),
     });
     if ("superseded" in guarded) {
-      const error = guarded.superseded;
-      await lifecycleCleanup?.();
-      await removeProjectRuntimeStateEntry({
+      return await abandonSupersededRestart({
+        error: guarded.superseded,
+        cleanup: lifecycleCleanup,
         projectDir: opts.project.projectDir,
         composeProject: opts.lifecycleComposeProject,
       });
-      logger.error({ message: error.message });
-      return { code: 1, phase: "lifecycle" };
     }
     const upCode = guarded.code;
     if (upCode !== 0) {
-      reportComposeStartupBudget({
+      return await repairFailedRestart({
         budgets: opts.budgets,
-        detach: true,
-        repair: true,
+        upCode,
+        composePhase: upPhase.phase(),
+        assertCurrent: assertHelpersCurrent,
+        cleanup: lifecycleCleanup,
+        projectDir: opts.project.projectDir,
+        lifecycleComposeProject: opts.lifecycleComposeProject,
+        up: (beforeStart) =>
+          composeRuntimeBackend.up({
+            ...(beforeStart ? { beforeStart } : {}),
+            dependencyProgress: resolveDependencyCacheProgress({
+              cache: dependencyCache,
+              project: opts.composeProjectName,
+              baseProject: opts.baseProjectName,
+            }),
+            startupTimeoutMs: opts.budgets.startupTimeoutMs,
+            imageTimeoutMs: opts.budgets.imageTimeoutMs,
+            composeFiles: composeFilesWithEnv,
+            composeProject: opts.composeProjectName,
+            profiles: opts.profiles,
+            detach: true,
+            cwd: dirname(opts.project.composeFile),
+            env: envOverrides.env,
+            routeStdoutToStderr: opts.routeStdoutToStderr === true,
+          }),
       });
-      const repairCode = await composeRuntimeBackend.up({
-        dependencyProgress: resolveDependencyCacheProgress({
-          cache: dependencyCache,
-          project: opts.composeProjectName,
-          baseProject: opts.baseProjectName,
-        }),
-        startupTimeoutMs: opts.budgets.startupTimeoutMs,
-        imageTimeoutMs: opts.budgets.imageTimeoutMs,
-        composeFiles: composeFilesWithEnv,
-        composeProject: opts.composeProjectName,
-        profiles: opts.profiles,
-        detach: true,
-        cwd: dirname(opts.project.composeFile),
-        env: envOverrides.env,
-        routeStdoutToStderr: opts.routeStdoutToStderr === true,
-      });
-      if (repairCode === 0) {
-        logger.warn({
-          message:
-            "Restart failed, but Hack repaired the Compose runtime to a startable state.",
-        });
-      } else {
-        logger.error({
-          message: `Restart failed and automatic runtime repair also failed (exit ${repairCode}). Run 'hack doctor --fix'.`,
-        });
-      }
-      if (repairCode !== 0) {
-        await lifecycleCleanup?.();
-        await removeProjectRuntimeStateEntry({
-          projectDir: opts.project.projectDir,
-          composeProject: opts.lifecycleComposeProject,
-        });
-      }
-      return { code: upCode, phase: "compose", composePhase: upPhase.phase() };
     }
 
     const upAfter = await runLifecycleCommands({
@@ -7375,6 +7475,10 @@ async function runRestartCommand({
     logger.warn({
       message: `Failed to parse ${configPath}: ${cfg.parseError}`,
     });
+  }
+  const sharedHelperRefusal = refuseInvalidSharedHelpers({ cfg, json });
+  if (sharedHelperRefusal !== null) {
+    return sharedHelperRefusal;
   }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });

@@ -75,43 +75,53 @@ export const sharedHostHelpersScenario: Scenario = {
       readonly readyTimeoutMs?: number;
       /** Write the config with no sharedHelpers entry at all. */
       readonly withoutHelpers?: boolean;
+      /** Add a long-running lifecycle process (needs tmux). */
+      readonly withProcess?: boolean;
+      /** Add a second entry with a shell-string command (invalid). */
+      readonly withInvalidEntry?: boolean;
     }): Promise<void> => {
-      const lifecycle = (baseConfig.lifecycle ?? {}) as Record<string, unknown>;
-      if (opts.withoutHelpers) {
-        await writeFile(
-          configPath,
-          `${JSON.stringify({ ...baseConfig, lifecycle }, null, 2)}\n`
-        );
-        return;
-      }
+      const lifecycle = {
+        ...((baseConfig.lifecycle ?? {}) as Record<string, unknown>),
+        ...(opts.withProcess
+          ? {
+              processes: [
+                {
+                  name: "e2e-helper-client",
+                  command: `${process.execPath} -e "setInterval(() => undefined, 60000)"`,
+                },
+              ],
+            }
+          : {}),
+      };
+      const helper = {
+        name: HELPER_NAME,
+        // HOME is the scenario temp root: the fixture exits once it is
+        // removed, so a failed run cannot leak a helper.
+        command: [
+          "/usr/bin/env",
+          `HOME=${ctx.tempRoot}`,
+          process.execPath,
+          HELPER,
+          opts.mode,
+          String(port),
+          HELPER_NAME,
+          UPSTREAM,
+        ],
+        port,
+        upstreamEnv: "E2E_ISSUER_UPSTREAM",
+        readyTimeoutMs: opts.readyTimeoutMs ?? 10_000,
+      };
+      const sharedHelpers = opts.withInvalidEntry
+        ? [helper, { ...helper, name: "second-bridge", command: "bun bridge" }]
+        : [helper];
       await writeFile(
         configPath,
         `${JSON.stringify(
           {
             ...baseConfig,
-            lifecycle: {
-              ...lifecycle,
-              sharedHelpers: [
-                {
-                  name: HELPER_NAME,
-                  // HOME is the scenario temp root: the fixture exits once
-                  // it is removed, so a failed run cannot leak a helper.
-                  command: [
-                    "/usr/bin/env",
-                    `HOME=${ctx.tempRoot}`,
-                    process.execPath,
-                    HELPER,
-                    opts.mode,
-                    String(port),
-                    HELPER_NAME,
-                    UPSTREAM,
-                  ],
-                  port,
-                  upstreamEnv: "E2E_ISSUER_UPSTREAM",
-                  readyTimeoutMs: opts.readyTimeoutMs ?? 10_000,
-                },
-              ],
-            },
+            lifecycle: opts.withoutHelpers
+              ? lifecycle
+              : { ...lifecycle, sharedHelpers },
           },
           null,
           2
@@ -488,6 +498,19 @@ export const sharedHostHelpersScenario: Scenario = {
         readClaim,
         ownedHelper,
       });
+      await runSecondReviewPhases({
+        ctx,
+        cwd: fixture.root,
+        hackDir: fixture.hackDir,
+        fixtureName: fixture.name,
+        path,
+        port,
+        branch: branchA,
+        writeConfig,
+        cli,
+        readClaim,
+        ownedHelper,
+      });
     } finally {
       await cleanupScenario({ foreign, readClaim });
     }
@@ -505,10 +528,7 @@ async function runReviewRegressionPhases(opts: {
   readonly path: string;
   readonly branch: string;
   readonly claimPath: string;
-  readonly writeConfig: (opts: {
-    readonly mode: HelperMode;
-    readonly withoutHelpers?: boolean;
-  }) => Promise<void>;
+  readonly writeConfig: (opts: ConfigOptions) => Promise<void>;
   readonly cli: (opts: {
     readonly verb: "up" | "down";
     readonly branch: string;
@@ -635,6 +655,240 @@ async function runReviewRegressionPhases(opts: {
   expect({
     that: !(await isRunning(keptHelper)) && (await opts.readClaim()) === null,
     message: "the retried down must stop the helper",
+  });
+}
+
+type ConfigOptions = {
+  readonly mode: HelperMode;
+  readonly withoutHelpers?: boolean;
+  readonly withProcess?: boolean;
+  readonly withInvalidEntry?: boolean;
+};
+
+/**
+ * Regressions from the second independent review of #565: an invalid entry
+ * is refused before any effect; a release failure with no helper configured
+ * still fails down; and a newer up of the same instance never makes an
+ * earlier, slower up tear down the lifecycle session it adopted.
+ */
+async function runSecondReviewPhases(opts: {
+  readonly ctx: Parameters<Scenario["run"]>[0];
+  readonly cwd: string;
+  readonly hackDir: string;
+  readonly fixtureName: string;
+  readonly path: string;
+  readonly port: number;
+  readonly branch: string;
+  readonly writeConfig: (opts: ConfigOptions) => Promise<void>;
+  readonly cli: (opts: {
+    readonly verb: "up" | "down";
+    readonly branch: string;
+  }) => Promise<CliResult>;
+  readonly readClaim: () => Promise<ReturnType<
+    typeof parseSharedHostClaim
+  > | null>;
+  readonly ownedHelper: () => Promise<Identity>;
+}): Promise<void> {
+  const { ctx, branch } = opts;
+  const holder = `${opts.fixtureName}--${branch}`;
+
+  ctx.log("an invalid sharedHelpers entry is refused before any effect");
+  await opts.writeConfig({ mode: "identity", withInvalidEntry: true });
+  const refusalLog = join(ctx.tempRoot, "refusal-docker.log");
+  for (const verb of ["up", "down", "restart"] as const) {
+    const refused = await ctx.cli({
+      args: [
+        verb,
+        ...(verb === "up" ? ["--detach"] : []),
+        "--json",
+        "--branch",
+        branch,
+      ],
+      cwd: opts.cwd,
+      env: {
+        PATH: opts.path,
+        E2E_ISSUER_UPSTREAM: UPSTREAM,
+        E2E_DOCKER_LOG: refusalLog,
+      },
+    });
+    const envelope = parseEnvelope(refused.stdout);
+    expect({
+      that:
+        refused.exitCode !== 0 &&
+        envelope?.error?.code === "E_LIFECYCLE_FAILED" &&
+        (envelope.error.message ?? "").includes(
+          "Invalid lifecycle.sharedHelpers"
+        ),
+      message: `hack ${verb} must refuse an invalid sharedHelpers entry`,
+      result: refused,
+    });
+  }
+  expect({
+    that:
+      !(await Bun.file(refusalLog).exists()) &&
+      (await opts.readClaim()) === null &&
+      !(await portBusy(opts.port)),
+    message:
+      "a refused command must run no Compose command and start no helper",
+  });
+  await opts.writeConfig({ mode: "identity" });
+
+  ctx.log("a release failure with no helper configured still fails down");
+  expectExit({
+    result: await opts.cli({ verb: "up", branch }),
+    codes: [0],
+    message: "up before removing the entry and corrupting the record",
+  });
+  const recordedHelper = await opts.ownedHelper();
+  const acquiredPath = join(
+    ctx.hackHome,
+    "shared-helpers",
+    ".instances",
+    `${holder}.acquired.json`
+  );
+  const acquiredText = await readFile(acquiredPath, "utf8");
+  await opts.writeConfig({ mode: "identity", withoutHelpers: true });
+  await writeFile(acquiredPath, "{not json\n", { mode: 0o600 });
+  const unlistedDown = await opts.cli({ verb: "down", branch });
+  const unlisted = parseEnvelope(unlistedDown.stdout);
+  expect({
+    that:
+      unlistedDown.exitCode !== 0 &&
+      unlisted?.error?.code === "E_LIFECYCLE_FAILED" &&
+      JSON.stringify(unlisted.error.detail ?? {}).includes(
+        "recorded-helpers"
+      ) &&
+      (await isRunning(recordedHelper)),
+    message:
+      "an unreadable acquired record must fail down even with no helper configured",
+    result: unlistedDown,
+  });
+  await writeFile(acquiredPath, acquiredText, { mode: 0o600 });
+  expectExit({
+    result: await opts.cli({ verb: "down", branch }),
+    codes: [0],
+    message: "down after restoring the acquired record",
+  });
+  expect({
+    that: !(await isRunning(recordedHelper)),
+    message: "the retried down must stop the recorded helper",
+  });
+
+  await runOverlappingUpPhase(opts);
+  await opts.writeConfig({ mode: "identity" });
+}
+
+async function runOverlappingUpPhase(opts: {
+  readonly ctx: Parameters<Scenario["run"]>[0];
+  readonly cwd: string;
+  readonly hackDir: string;
+  readonly fixtureName: string;
+  readonly path: string;
+  readonly branch: string;
+  readonly writeConfig: (opts: ConfigOptions) => Promise<void>;
+  readonly cli: (opts: {
+    readonly verb: "up" | "down";
+    readonly branch: string;
+  }) => Promise<CliResult>;
+  readonly ownedHelper: () => Promise<Identity>;
+}): Promise<void> {
+  const { ctx, branch } = opts;
+  const tmux = Bun.which("tmux");
+  if (!tmux) {
+    if (process.env.HACK_E2E_REQUIRE_TMUX === "1") {
+      throw new Error("tmux is required for the overlapping-up phase");
+    }
+    ctx.log("overlapping up phase skipped: tmux is not installed");
+    return;
+  }
+  ctx.log("a newer up never makes an earlier up tear down its session");
+  await opts.writeConfig({ mode: "identity", withProcess: true });
+  const sessionName = `${opts.fixtureName}--lifecycle-${branch}`;
+  const composeProject = `${opts.fixtureName}--${branch}`;
+  const statePath = join(opts.hackDir, ".internal", "lifecycle", "state.json");
+  const readToken = async (): Promise<string | null> => {
+    const text = await readFile(statePath, "utf8").catch(() => null);
+    if (text === null) {
+      return null;
+    }
+    const state = JSON.parse(text) as {
+      readonly entries?: readonly {
+        readonly composeProject?: string;
+        readonly ownershipToken?: string;
+      }[];
+    };
+    return (
+      state.entries?.find((entry) => entry.composeProject === composeProject)
+        ?.ownershipToken ?? null
+    );
+  };
+  const sessionAlive = async (): Promise<boolean> =>
+    (await Bun.spawn([tmux, "has-session", "-t", sessionName], {
+      stdout: "ignore",
+      stderr: "ignore",
+    }).exited) === 0;
+
+  const gate = join(ctx.tempRoot, "overlap-gate");
+  const earlier = Bun.spawn(
+    resolveCliSpawnArgs(["up", "--detach", "--json", "--branch", branch]),
+    {
+      cwd: opts.cwd,
+      env: buildCliEnv({
+        hackHome: ctx.hackHome,
+        extra: {
+          PATH: opts.path,
+          E2E_ISSUER_UPSTREAM: UPSTREAM,
+          E2E_DOCKER_GATE_UP: gate,
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    }
+  );
+  let reached = false;
+  await waitUntil(async () => {
+    reached = await Bun.file(`${gate}.reached`).exists();
+    return reached;
+  });
+  if (!reached) {
+    earlier.kill("SIGKILL");
+    await earlier.exited;
+    throw new Error("the earlier up never reached compose image preparation");
+  }
+  const helper = await opts.ownedHelper();
+  const token = await readToken();
+  expect({
+    that: token !== null && (await sessionAlive()),
+    message: "the earlier up should own a lifecycle session before pausing",
+  });
+  const newer = await opts.cli({ verb: "up", branch });
+  expectExit({
+    result: newer,
+    codes: [0],
+    message: "the newer up should adopt the session and helpers",
+  });
+  await writeFile(gate, "open\n");
+  const [earlierExit, earlierStdout] = await Promise.all([
+    earlier.exited,
+    new Response(earlier.stdout).text(),
+  ]);
+  expect({
+    that:
+      earlierExit === 0 &&
+      (await sessionAlive()) &&
+      (await readToken()) === token &&
+      (await isRunning(helper)),
+    message: `the earlier up must not tear down the adopted session or helpers (exit ${earlierExit}, stdout ${earlierStdout.trim().slice(0, 300)})`,
+  });
+  expectExit({
+    result: await opts.cli({ verb: "down", branch }),
+    codes: [0],
+    message: "down after the overlapping ups",
+  });
+  expect({
+    that: !((await sessionAlive()) || (await isRunning(helper))),
+    message: "down must stop the session and the helper",
   });
 }
 

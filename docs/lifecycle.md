@@ -219,7 +219,10 @@ started it and the last branch using it is released.
 - `env`: variable names passed to the helper. It also gets `PATH`; nothing else from the
   CLI environment is inherited. A listed name that is not set fails `hack up`.
 
-An invalid entry is a config error (`hack up` and `hack down` refuse to run), not a skipped one.
+An invalid `sharedHelpers` entry is refused, not skipped: `hack up`, `hack down` and
+`hack restart` fail with `E_LIFECYCLE_FAILED` before any hook, helper, lifecycle process or
+Compose command runs. This is stricter than other config parse errors, which these commands
+only warn about. Fix the entry and run the command again.
 
 Behavior:
 - `hack up` and `hack restart` ensure each helper after `lifecycle.up.before` hooks and before
@@ -242,10 +245,21 @@ Behavior:
 - A release that fails or cannot confirm the stop keeps the claim and fails `hack down` and
   `hack restart` with `E_LIFECYCLE_FAILED` (non-zero exit, the helper names in `detail`).
   Fix the claim and run `hack down` again.
-- `hack down` marks the instance as stopping before Compose shutdown. A `hack up` of the
-  same instance that is still preparing checks this right before its containers start and
-  again after they start; once a down released its helpers, that up fails with
-  `E_LIFECYCLE_FAILED` instead of starting services without them.
+- A `hack down` that overlaps a `hack up` of the same instance (same branch):
+  - `hack down` marks the instance as stopping before Compose shutdown, and its release
+    removes the instance's operation record.
+  - **Prevented during preparation.** A `hack up` checks the instance right before its
+    containers start (after detached image preparation, before an attached `up`, and at the
+    end of native preparation). If a down marked or released it by then, that up fails with
+    `E_LIFECYCLE_FAILED` and starts no container.
+  - **Detected after launch, not prevented.** The check takes the instance lock only
+    briefly, so a down can still complete between the check and container start, or while
+    containers start. The up checks again after Compose returns: a detached up then fails
+    with `E_LIFECYCLE_FAILED` (its containers may already run); an attached up only checks
+    after Compose exits. In that case run `hack down` for the branch (`--branch <name>`) to
+    stop the containers, then `hack up` again.
+  - A newer `hack up` of the same instance does not count as a down: an earlier, slower up
+    of that instance still starts, and never tears down what the newer one adopted.
 - Claims live under `~/.hack/shared-helpers/<name>-<port>/` (or `$HACK_HOME`), shared by
   every project and branch that uses that helper name and port.
 - Helpers are not part of the lifecycle mux session and do not appear in `hack logs`.

@@ -1,7 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  releaseAfterFailedProcessStart,
+  startLifecycleProcesses,
+} from "../src/commands/project.ts";
 import {
   readLifecycleState,
   upsertLifecycleStateEntry,
@@ -9,6 +14,7 @@ import {
 import {
   createLifecycleProcessController,
   LifecycleSessionDisplacedError,
+  LifecycleSessionRetainedError,
   stopLifecycleProcessController,
 } from "../src/lib/project-lifecycle-controller.ts";
 import { createSharedHelperSessionOwnership } from "../src/lib/project-shared-helpers.ts";
@@ -60,6 +66,8 @@ type FakeMux = MuxBackend & {
   readonly killed: string[];
   /** Mux calls still running: a bounded call must settle before return. */
   inFlight: number;
+  /** When set, session creations and kills are appended here (one per line). */
+  eventsPath: string | null;
 };
 
 const TIMEOUT_DELAY_MS = 50;
@@ -96,6 +104,7 @@ function fakeMux(backendName: "zellij" | "tmux" = "zellij"): FakeMux {
     tokenReads: 0,
     killed: [],
     inFlight: 0,
+    eventsPath: null,
     listSessions: () =>
       track(async () => {
         if (fake.timeoutList) {
@@ -117,6 +126,12 @@ function fakeMux(backendName: "zellij" | "tmux" = "zellij"): FakeMux {
           return { ok: false, error: "session exists" };
         }
         sessions.set(opts.name, opts.lifecycleOwnerToken ?? "");
+        if (fake.eventsPath) {
+          appendFileSync(
+            fake.eventsPath,
+            `create ${opts.lifecycleOwnerToken}\n`
+          );
+        }
         return { ok: true, session: session(opts.name) };
       }),
     killSession: (opts) =>
@@ -125,6 +140,9 @@ function fakeMux(backendName: "zellij" | "tmux" = "zellij"): FakeMux {
           return Promise.resolve({ exitCode: 1, stdout: "", stderr: "busy" });
         }
         fake.killed.push(sessions.get(opts.name) ?? "");
+        if (fake.eventsPath) {
+          appendFileSync(fake.eventsPath, `kill ${sessions.get(opts.name)}\n`);
+        }
         sessions.delete(opts.name);
         return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
       }),
@@ -183,13 +201,14 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
     >[0]["sessionOwnership"];
     readonly prepareLaunch?: () => Promise<void>;
     readonly muxCommandTimeoutMs?: number;
+    readonly env?: Readonly<Record<string, string>>;
   }) =>
     createLifecycleProcessController({
       mux: resolvedMux,
       project: { projectRoot: root, projectDir },
       projectName: "demo",
       branch: "branch-a",
-      env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, ...opts.env },
       ...(opts.muxCommandTimeoutMs
         ? { muxCommandTimeoutMs: opts.muxCommandTimeoutMs }
         : {}),
@@ -232,6 +251,7 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
     root,
     bin,
     projectDir,
+    resolvedMux,
     mux,
     ownership,
     controller,
@@ -556,4 +576,226 @@ test("SIGTERM during tmux environment setup settles within the mux bound", async
   } finally {
     process.env.PATH = originalPath;
   }
+});
+
+/** A stand-in zellij that logs each call and fails `run` once `fail-run` exists. */
+async function loggingZellij(bin: string): Promise<string> {
+  const log = join(bin, "zellij.log");
+  await writeFile(
+    join(bin, "zellij"),
+    [
+      "#!/bin/sh",
+      `echo "$*" >> '${log}'`,
+      `[ -e '${join(bin, "fail-run")}' ] && exit 1`,
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 }
+  );
+  return log;
+}
+
+async function readLines(path: string): Promise<string[]> {
+  const text = await readFile(path, "utf8").catch(() => "");
+  return text.split("\n").filter((line) => line.length > 0);
+}
+
+test("a startup whose second process fails and whose session stop is unconfirmed keeps the shared helpers (real startup catch)", async () => {
+  const { root, projectDir, bin, mux, resolvedMux, newOwnership, entries } =
+    await fixture();
+  const log = await loggingZellij(bin);
+  mux.failKill = true;
+  const second = { name: "second", command: "sleep 600" };
+  const startup = startLifecycleProcesses({
+    project: { projectRoot: root, projectDir } as Parameters<
+      typeof startLifecycleProcesses
+    >[0]["project"],
+    cfg: { lifecycle: { processes: [PROCESS, second] } } as Parameters<
+      typeof startLifecycleProcesses
+    >[0]["cfg"],
+    projectName: "demo",
+    branch: "branch-a",
+    env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
+    composeProject: COMPOSE_PROJECT,
+    definitionHash: "sha256:test",
+    sessionOwnership: newOwnership(),
+    mux: async () => {
+      // The second process start fails once the first one launched.
+      if ((await readLines(log)).length > 0) {
+        await writeFile(join(bin, "fail-run"), "");
+      }
+      return await resolvedMux();
+    },
+  });
+  const error = await startup.then(
+    () => null,
+    (failure: unknown) => failure
+  );
+  expect(error).toBeInstanceOf(LifecycleSessionRetainedError);
+  expect((error as Error).message).toContain('"second"');
+  // startWithSharedHelpers' catch: the session was kept, so are the helpers.
+  const events: string[] = [];
+  await releaseAfterFailedProcessStart({
+    error,
+    abortProcesses: () => Promise.resolve(),
+    rollbackHelpers: () => {
+      events.push("rollback");
+      return Promise.resolve();
+    },
+  });
+  expect(events).toEqual([]);
+  const token = mux.sessions.get(SESSION);
+  expect(token).toBeDefined();
+  expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([
+    token,
+  ]);
+});
+
+test("abort's token read and kill run under the instance lock: a replacement never loses its session to them", async () => {
+  const { mux, controller, entries, stop, newOwnership } = await fixture();
+  const a = controller({ sessionOwnership: newOwnership() });
+  await a.startFromCommand({
+    command: { command: "sleep 600", persistent: true },
+    serviceName: "persistent-hook",
+  });
+  const tokenA = mux.sessions.get(SESSION);
+  expect(tokenA).toBeDefined();
+  // A's abort stalls in its ownership-token read (it returns the value read
+  // when it started); B starts meanwhile and would replace A's session.
+  mux.stallTokenRead = mux.tokenReads + 1;
+  const aborted = a.abort();
+  await Bun.sleep(100);
+  const b = controller({ sessionOwnership: newOwnership() });
+  const bRun = b.startMany({ processes: [PROCESS] }).then(() => b.finalize());
+  await Promise.all([aborted, bRun]);
+  const tokenB = mux.sessions.get(SESSION);
+  expect(tokenB).toBeDefined();
+  expect(tokenB).not.toBe(tokenA);
+  expect(mux.killed).not.toContain(tokenB);
+  expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([
+    tokenB,
+  ]);
+  await stop();
+  expect(mux.sessions.has(SESSION)).toBe(false);
+});
+
+test("a displaced start never launches a process into its replacement's session", async () => {
+  const { bin, mux, controller, entries, newOwnership } = await fixture();
+  const log = await loggingZellij(bin);
+  const a = controller({ sessionOwnership: newOwnership() });
+  await a.startFromCommand({
+    command: { command: "sleep 600", persistent: true },
+    serviceName: "persistent-hook",
+  });
+  const b = controller({ sessionOwnership: newOwnership() });
+  await b.startMany({ processes: [PROCESS] });
+  await b.finalize();
+  const tokenB = mux.sessions.get(SESSION);
+  // A resumes with a later process: it must fail without touching B.
+  await expect(
+    a.startFromCommand({
+      command: { command: "sleep 600" },
+      serviceName: "late-a-process",
+    })
+  ).rejects.toBeInstanceOf(LifecycleSessionDisplacedError);
+  expect(
+    (await readLines(log)).filter((line) => line.includes("late-a-process"))
+  ).toEqual([]);
+  expect(mux.sessions.get(SESSION)).toBe(tokenB);
+  expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([
+    tokenB,
+  ]);
+  expect(a.getOperationCleanup()).toBeNull();
+});
+
+test("tmux environment setup finishes under the creation lock: a replacement never receives a displaced start's environment", async () => {
+  const { bin, mux, controller, newOwnership } = await fixture("tmux");
+  const events = join(bin, "events");
+  mux.eventsPath = events;
+  // set-environment is slow; new-window fails so no launch waits on a pane.
+  await writeFile(
+    join(bin, "tmux"),
+    [
+      "#!/bin/sh",
+      'case "$1" in',
+      `  set-environment) echo "env-start $4" >> '${events}'; sleep 0.4; echo "env-end $4" >> '${events}' ;;`,
+      "  new-window) exit 1 ;;",
+      "esac",
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 }
+  );
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${bin}:${originalPath ?? ""}`;
+  try {
+    const a = controller({
+      sessionOwnership: newOwnership(),
+      env: { A_MARK: "a" },
+    });
+    const aRun = a
+      .startMany({ processes: [PROCESS] })
+      .catch((error: unknown) => error);
+    // B starts while A's environment setup is in flight; it would replace
+    // A's pending session.
+    while (!(await readLines(events)).some((line) => line.startsWith("env-"))) {
+      await Bun.sleep(10);
+    }
+    const b = controller({ sessionOwnership: newOwnership() });
+    const bRun = b
+      .startMany({ processes: [] })
+      .catch((error: unknown) => error);
+    await Promise.all([aRun, bRun]);
+    const lines = await readLines(events);
+    const aEnv = lines.flatMap((line, index) =>
+      line.includes("A_MARK") || line.includes("PATH") ? [index] : []
+    );
+    const kill = lines.findIndex((line) => line.startsWith("kill "));
+    // A's session was replaced only after all of A's environment setup.
+    expect(kill).toBeGreaterThan(-1);
+    expect(aEnv.every((index) => index < kill)).toBe(true);
+    expect(mux.inFlight).toBe(0);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("failed-creation cleanup reads the token and kills under the creation lock: a replacement never loses its session to it", async () => {
+  const { mux, ownership, controller, entries, stop, newOwnership } =
+    await fixture();
+  let recordFailed = (): void => undefined;
+  const failedRecord = new Promise<void>((resolvePromise) => {
+    recordFailed = resolvePromise;
+  });
+  const a = controller({
+    sessionOwnership: {
+      withLock: ownership.withLock,
+      record: (kind) => {
+        if (kind !== "created") {
+          return ownership.record(kind);
+        }
+        // A's cleanup then stalls in its ownership-token read (it returns
+        // the value read when it started).
+        mux.stallTokenRead = mux.tokenReads + 1;
+        recordFailed();
+        return Promise.reject(new Error("epoch record unwritable"));
+      },
+    },
+  });
+  const aRun = a
+    .startMany({ processes: [PROCESS] })
+    .catch((error: unknown) => error);
+  await failedRecord;
+  await Bun.sleep(100);
+  const b = controller({ sessionOwnership: newOwnership() });
+  const bRun = b.startMany({ processes: [PROCESS] }).then(() => b.finalize());
+  await Promise.all([aRun, bRun]);
+  const tokenB = mux.sessions.get(SESSION);
+  expect(tokenB).toBeDefined();
+  expect(mux.killed).not.toContain(tokenB);
+  expect((await entries()).map((entry) => entry.ownershipToken)).toEqual([
+    tokenB,
+  ]);
+  await stop();
+  expect(mux.sessions.has(SESSION)).toBe(false);
 });

@@ -695,12 +695,10 @@ export function createSharedHelperSessionOwnership(opts: {
       }
     },
     runIfOwned: async (cleanup) => {
-      if (createdEpoch === null) {
-        // This operation never recorded a created session (creation failed
-        // before its record): nothing was published for anyone to adopt.
-        await cleanup();
-        return "ran";
-      }
+      // Always under the lock, even when this operation never recorded a
+      // created session (creation failed before its record): the cleanup
+      // reads the session token and kills by name, and a replacement under
+      // the lock must not run between the two.
       let decided = false;
       try {
         return await withInstanceLock({
@@ -708,7 +706,7 @@ export function createSharedHelperSessionOwnership(opts: {
           timeoutMs: INSTANCE_LOCK_TIMEOUT_MS,
           run: async (): Promise<ProcessCleanupOutcome> => {
             decided = true;
-            if ((await readEpoch()) !== createdEpoch) {
+            if (createdEpoch !== null && (await readEpoch()) !== createdEpoch) {
               return "adopted";
             }
             await cleanup();

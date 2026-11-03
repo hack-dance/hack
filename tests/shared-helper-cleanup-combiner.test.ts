@@ -3,6 +3,7 @@ import { afterEach, expect, test } from "bun:test";
 import {
   type LifecycleSharedHelpers,
   releaseAfterFailedProcessStart,
+  stopSessionBeforeReleasingHelpers,
   withSharedHelperCleanup,
 } from "../src/commands/project.ts";
 import {
@@ -117,4 +118,39 @@ test("a failed process start keeps the helper holders when its session was retai
       rolledBack: entry.rolledBack,
     });
   }
+});
+
+test("down keeps every helper holder and reports them when the session stop failed or is unknown", async () => {
+  const released: string[] = [];
+  const outcome = await stopSessionBeforeReleasingHelpers({
+    stopSession: () =>
+      Promise.reject(new Error("Failed to stop owned lifecycle session")),
+    releaseHelpers: () => {
+      released.push("release");
+      return Promise.resolve([]);
+    },
+    helperNames: ["chrome-bridge", "mail"],
+  });
+  expect(released).toEqual([]);
+  expect(outcome.sessionStopFailed?.error).toBeInstanceOf(Error);
+  // Callers (down, restart, native retirement) fail on a non-empty list.
+  expect(outcome.notReleased).toEqual(["chrome-bridge", "mail"]);
+});
+
+test("down releases the helper holders once the session stop succeeded", async () => {
+  const events: string[] = [];
+  const outcome = await stopSessionBeforeReleasingHelpers({
+    stopSession: () => {
+      events.push("stop");
+      return Promise.resolve();
+    },
+    releaseHelpers: () => {
+      events.push("release");
+      return Promise.resolve(["mail"]);
+    },
+    helperNames: ["chrome-bridge", "mail"],
+  });
+  expect(events).toEqual(["stop", "release"]);
+  expect(outcome.sessionStopFailed).toBeNull();
+  expect(outcome.notReleased).toEqual(["mail"]);
 });

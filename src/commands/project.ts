@@ -333,7 +333,7 @@ import {
   buildWorktreeRetargetWarning,
   findSameCheckoutRetargetConflicts,
 } from "../lib/worktree-runtime-target.ts";
-import { resolveMux } from "../mux/mux-resolver.ts";
+import { type ResolvedMux, resolveMux } from "../mux/mux-resolver.ts";
 import {
   renderProjectConfigJson,
   renderProjectEnvConfigYaml,
@@ -2061,6 +2061,30 @@ export async function releaseAfterFailedProcessStart(opts: {
 }
 
 /**
+ * Stop the lifecycle session, then release this instance's shared helper
+ * holders only once that stop succeeded. When it failed or its outcome is
+ * unknown, the session's processes may still use the helpers: every holder
+ * is kept (a later hack down releases both) and reported as not released, so
+ * down, restart and native retirement fail visibly. Never throws.
+ */
+export async function stopSessionBeforeReleasingHelpers(opts: {
+  readonly stopSession: () => Promise<void>;
+  /** Returns the helpers whose release failed; must not throw. */
+  readonly releaseHelpers: () => Promise<readonly string[]>;
+  readonly helperNames: readonly string[];
+}): Promise<{
+  readonly sessionStopFailed: { readonly error: unknown } | null;
+  readonly notReleased: readonly string[];
+}> {
+  try {
+    await opts.stopSession();
+  } catch (error: unknown) {
+    return { sessionStopFailed: { error }, notReleased: opts.helperNames };
+  }
+  return { sessionStopFailed: null, notReleased: await opts.releaseHelpers() };
+}
+
+/**
  * Run Compose up guarded by this instance's shared helper check: right
  * before containers start (via the backend's `beforeStart`) and again after a
  * successful start. A concurrent `hack down` that released the helpers is
@@ -2295,7 +2319,13 @@ function reportSharedHelperReleases(
   return releases.filter(isSharedHelperReleaseProblem);
 }
 
-async function startLifecycleProcesses(opts: {
+/**
+ * Start the configured lifecycle processes. On failure the started session
+ * is aborted; when that abort cannot confirm the session stopped, the
+ * failure is raised as LifecycleSessionRetainedError so the caller keeps the
+ * shared helpers the session uses. Exported for regression tests.
+ */
+export async function startLifecycleProcesses(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly projectName: string;
@@ -2304,6 +2334,8 @@ async function startLifecycleProcesses(opts: {
   readonly composeProject: string;
   readonly definitionHash: string;
   readonly sessionOwnership?: SharedHelperSessionOwnership;
+  /** Mux backends; defaults to the project's configured backends. */
+  readonly mux?: () => Promise<ResolvedMux>;
 }): Promise<{
   readonly cleanup: LifecycleOperationCleanup | null;
   readonly signalCleanup: { readonly dispose: () => void } | null;
@@ -2323,7 +2355,7 @@ async function startLifecycleProcesses(opts: {
   }
 
   const starter = createLifecycleProcessController({
-    mux: () => resolveMux({ project: opts.project }),
+    mux: opts.mux ?? (() => resolveMux({ project: opts.project })),
     project: opts.project,
     projectName: opts.projectName,
     branch: opts.branch,
@@ -2388,29 +2420,43 @@ async function stopLifecycleProcesses(opts: {
   readonly branch: string | null;
   readonly composeProject: string;
 }): Promise<void> {
-  try {
-    await stopLifecycleProcessController({
-      ...opts,
-      definitionHash: resolveProjectLifecycleDefinitionHash({
-        beforeCommands: opts.cfg.lifecycle?.up?.before,
-        processes: opts.cfg.lifecycle?.processes,
-      }),
-    });
-  } finally {
-    // Release this instance's shared helper holders even when the process
-    // stop failed: a release never signals anything but an owned helper with
-    // no remaining holder.
-    await releaseLifecycleSharedHelpers(opts);
+  const outcome = await stopSessionBeforeReleasingHelpers({
+    stopSession: () => stopLifecycleSession(opts),
+    releaseHelpers: () => releaseLifecycleSharedHelpersReporting(opts),
+    helperNames: sharedHelperNames(opts.cfg),
+  });
+  if (outcome.sessionStopFailed) {
+    warnSharedHelpersKeptForSession(outcome.notReleased);
+    throw outcome.sessionStopFailed.error;
+  }
+  if (outcome.notReleased.length > 0) {
+    throw new Error(sharedHelperReleaseFailureMessage(outcome.notReleased));
   }
 }
 
-async function releaseLifecycleSharedHelpers(opts: {
-  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
-  readonly composeProject: string;
-}): Promise<void> {
-  const failed = await releaseLifecycleSharedHelpersReporting(opts);
-  if (failed.length > 0) {
-    throw new Error(sharedHelperReleaseFailureMessage(failed));
+function stopLifecycleSession(
+  opts: Parameters<typeof stopLifecycleProcesses>[0]
+): Promise<void> {
+  return stopLifecycleProcessController({
+    ...opts,
+    definitionHash: resolveProjectLifecycleDefinitionHash({
+      beforeCommands: opts.cfg.lifecycle?.up?.before,
+      processes: opts.cfg.lifecycle?.processes,
+    }),
+  });
+}
+
+function sharedHelperNames(
+  cfg: Awaited<ReturnType<typeof readProjectConfig>>
+): readonly string[] {
+  return (cfg.lifecycle?.sharedHelpers ?? []).map((helper) => helper.name);
+}
+
+function warnSharedHelpersKeptForSession(kept: readonly string[]): void {
+  if (kept.length > 0) {
+    logger.warn({
+      message: `Kept shared helpers ${kept.join(", ")}: this instance's lifecycle session could not be confirmed stopped. Run hack down again once it can be stopped.`,
+    });
   }
 }
 
@@ -2467,29 +2513,31 @@ async function markLifecycleSharedHelpersStopping(opts: {
 
 /**
  * Stop lifecycle processes best-effort (failures are warnings) and release
- * shared helpers. Returns the helpers whose release failed: unlike process
+ * shared helpers. Returns the helpers that were not released: unlike process
  * cleanup, an unreleased helper keeps running, so callers on the main down
- * path must fail the command. Never throws (safe for signal cleanup).
+ * path must fail the command. When the session stop failed or is unknown,
+ * every helper is kept with the session and returned. Never throws (safe for
+ * signal cleanup).
  */
 async function stopLifecycleProcessesBestEffort(
   opts: Parameters<typeof stopLifecycleProcesses>[0]
 ): Promise<readonly string[]> {
-  try {
-    await stopLifecycleProcessController({
-      ...opts,
-      definitionHash: resolveProjectLifecycleDefinitionHash({
-        beforeCommands: opts.cfg.lifecycle?.up?.before,
-        processes: opts.cfg.lifecycle?.processes,
-      }),
+  const outcome = await stopSessionBeforeReleasingHelpers({
+    stopSession: () => stopLifecycleSession(opts),
+    releaseHelpers: () => releaseLifecycleSharedHelpersReporting(opts),
+    helperNames: sharedHelperNames(opts.cfg),
+  });
+  if (outcome.sessionStopFailed) {
+    const { error } = outcome.sessionStopFailed;
+    logger.warn({
+      message:
+        error instanceof Error
+          ? error.message
+          : "Failed to stop lifecycle processes",
     });
-  } catch (error: unknown) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "Failed to stop lifecycle processes";
-    logger.warn({ message });
+    warnSharedHelpersKeptForSession(outcome.notReleased);
   }
-  return await releaseLifecycleSharedHelpersReporting(opts);
+  return outcome.notReleased;
 }
 
 export async function mergeLifecycleCommandEnv(

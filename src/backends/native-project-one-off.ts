@@ -60,6 +60,8 @@ export const NATIVE_EXEC_SELECTION_REFUSAL =
 export function requireNonEmptyNativeRunOptions(opts: {
   readonly env: string | undefined;
   readonly profile: string | undefined;
+  /** The refusal text; native exec passes {@link NATIVE_EXEC_SELECTION_REFUSAL}. */
+  readonly refusal?: string;
 }): void {
   const emptyEnv = opts.env?.trim() === "";
   const emptyProfile =
@@ -67,7 +69,7 @@ export function requireNonEmptyNativeRunOptions(opts: {
   if (emptyEnv || emptyProfile) {
     throw new HackCliError({
       code: "E_USAGE",
-      message: NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
+      message: opts.refusal ?? NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
     });
   }
 }

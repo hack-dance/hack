@@ -2,7 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
+import {
+  NATIVE_EXEC_SELECTION_REFUSAL,
+  NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
+} from "../src/backends/native-project-one-off.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
@@ -171,6 +174,50 @@ test.each(
   expect(await readdir(join(selected.root, ".hack"))).toEqual([
     "hack.project.json",
   ]);
+});
+
+/**
+ * HACK-1360: on the native backend an authored project's exec refuses an empty
+ * `--env`/`--profile` with the same closed E_USAGE line as a legacy project,
+ * before authored dispatch, compiler or runtime work. A non-empty value still
+ * reaches authored dispatch and its E_NATIVE_PROJECT_UNSUPPORTED refusal.
+ */
+test.each(
+  EMPTY_RUN_SELECTIONS.map((args) => ({ args: [...args] }))
+)("source CLI native exec %j refuses as an empty selection before authored dispatch", async ({
+  args,
+}) => {
+  const selected = await fixture();
+  const value = await invoke({
+    selected,
+    args: ["exec", ...args, "web", "--", "true"],
+    backend: "native",
+    logger: "console",
+  });
+  expect(value.code).toBe(1);
+  expect(value.stdout).toBe("");
+  expect(value.stderr).toBe(
+    `ERROR: E_USAGE: ${NATIVE_EXEC_SELECTION_REFUSAL}\n`
+  );
+  expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
+    false
+  );
+  expect(await readdir(join(selected.root, ".hack"))).toEqual([
+    "hack.project.json",
+  ]);
+});
+
+test("source CLI native exec with a named --env reaches authored dispatch", async () => {
+  const selected = await fixture();
+  const value = await invoke({
+    selected,
+    args: ["exec", "--env", "staging", "web", "--", "true"],
+    backend: "native",
+    logger: "console",
+  });
+  expect(value.code).toBe(1);
+  expect(value.stdout + value.stderr).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+  expect(value.stderr).not.toContain(NATIVE_EXEC_SELECTION_REFUSAL);
 });
 
 test("source CLI native up --detach refuses with one line before compiler or runtime work", async () => {

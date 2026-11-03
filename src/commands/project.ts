@@ -7736,6 +7736,23 @@ async function handleRun({
   });
 }
 
+/**
+ * On the native backend an empty exec `--env` or `--profile` refuses before
+ * any dispatch, as for run, so authored and legacy projects give the same
+ * closed E_USAGE line. A non-empty value refuses later: legacy projects with
+ * that same line, authored projects with their E_NATIVE_PROJECT_UNSUPPORTED.
+ */
+function refuseEmptyNativeExecSelection(args: ExecArgs): void {
+  if (process.env.HACK_RUNTIME_BACKEND !== "native") {
+    return;
+  }
+  requireNonEmptyNativeRunOptions({
+    env: args.options.env,
+    profile: args.options.profile,
+    refusal: NATIVE_EXEC_SELECTION_REFUSAL,
+  });
+}
+
 async function handleExec({
   ctx,
   args,
@@ -7743,6 +7760,7 @@ async function handleExec({
   readonly ctx: CliContext;
   readonly args: ExecArgs;
 }): Promise<number> {
+  refuseEmptyNativeExecSelection(args);
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,

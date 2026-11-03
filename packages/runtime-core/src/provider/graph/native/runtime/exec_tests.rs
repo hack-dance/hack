@@ -76,7 +76,7 @@ fn selected() -> ExecSelection {
     }
 }
 fn ready(session: &mut Session<'_, Fake>, graph: &execution::Graph) {
-    execution::run(graph, session, Duration::from_secs(2)).unwrap();
+    execution::run(graph, session, RUN_BUDGET).unwrap();
     session
         .backend
         .state
@@ -105,7 +105,7 @@ fn finite_exec_uses_exact_live_member_and_one_original_source_data_deadline() {
         data_refusal: false,
     };
     let original = fs::read(session.root.join("state.json")).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + RUN_BUDGET;
     let result =
         exec::execute_with(&backend, session.receipt.clone(), &selected(), deadline).unwrap();
     assert_eq!(result.exit_code, 17);
@@ -163,7 +163,7 @@ fn finite_exec_refuses_changed_member_or_data_before_command_and_withholds_resta
             + if mode == "deadline" {
                 Duration::ZERO
             } else {
-                Duration::from_secs(2)
+                RUN_BUDGET
             };
         assert!(
             exec::execute_with(&backend, session.receipt.clone(), &request, deadline).is_err(),

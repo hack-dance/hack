@@ -1,5 +1,4 @@
 import { lookup } from "node:dns/promises";
-import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
@@ -45,6 +44,7 @@ import {
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
+  PROJECT_ENV_STATE_FILENAME,
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
@@ -123,6 +123,7 @@ import {
   inspectHackEnvOverlayWarnings,
   readHackEnvContract,
 } from "../lib/hack-env.ts";
+import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
 import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
@@ -2834,7 +2835,11 @@ async function checkProjectEnvMaterialization({
       message: "Skipped: an env layer entry is unusable (see env mode)",
     };
   }
-  if (format.kind === "legacy") {
+  // Recorded state means modern inputs once existed; inspect it for staleness.
+  if (
+    format.kind === "legacy" &&
+    !(await pathExists(resolve(ctx.projectDir, PROJECT_ENV_STATE_FILENAME)))
+  ) {
     return {
       name: "env materialization",
       status: "ok",
@@ -4573,7 +4578,7 @@ export async function inspectDoctorAgentIntegrations(opts: {
   readonly projectRoot: string | null;
   readonly homeDir?: string;
 }): Promise<{ readonly status: "current" | "stale" }> {
-  const home = (opts.homeDir ?? process.env.HOME ?? homedir()).trim();
+  const home = normalizeHomeDir(opts.homeDir) ?? resolveUserHomeDir();
   const hackOwnedPaths = [
     ...(opts.projectRoot
       ? [

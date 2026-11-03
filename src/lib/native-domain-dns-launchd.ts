@@ -1,5 +1,6 @@
 import { lstat } from "node:fs/promises";
 import { dirname, isAbsolute, normalize } from "node:path";
+import { resolveLaunchdAccess } from "../daemon/launchd.ts";
 import {
   type NativeDnsCommandRunner,
   runNativeDnsAttachedCommand,
@@ -288,6 +289,7 @@ async function processMatches(opts: {
 export async function prepareNativeDnsLaunchdRestart(
   opts: NativeDnsLaunchdRestartOptions
 ): Promise<() => Promise<void>> {
+  assertLaunchdAccess();
   const expectedArgs = [
     opts.dnsmasqBinary,
     "--keep-in-foreground",
@@ -309,8 +311,10 @@ export async function prepareNativeDnsLaunchdRestart(
   const runCommand = opts.runCommand ?? defaultCommand;
   const runPrivileged = opts.runPrivileged ?? defaultPrivileged;
   const statPath = opts.statPath ?? defaultStatPath;
-  const inspect = async () =>
-    await inspectLoadedJobs({ expectedArgs, runCommand, statPath });
+  const inspect = async () => {
+    assertLaunchdAccess();
+    return await inspectLoadedJobs({ expectedArgs, runCommand, statPath });
+  };
   const prepared = await inspect();
   if (!(await processMatches({ job: prepared, expectedArgs, runCommand }))) {
     throw new Error(
@@ -335,6 +339,7 @@ export async function prepareNativeDnsLaunchdRestart(
     }
     attempted = true;
     const target = `system/${before.label}`;
+    assertLaunchdAccess();
     const kickstart = await runPrivileged([
       "sudo",
       "-n",
@@ -369,4 +374,12 @@ export async function prepareNativeDnsLaunchdRestart(
       "Native DNS launchd job did not become ready after kickstart"
     );
   };
+}
+
+/** Recheck admission at preflight, observation, and the privileged effect boundary. */
+function assertLaunchdAccess(): void {
+  const access = resolveLaunchdAccess();
+  if (!access.allowed) {
+    throw new Error(access.message);
+  }
 }

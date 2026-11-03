@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture(PathBuf);
@@ -175,7 +175,7 @@ fn options<'a>(
         state_root: &fixture.0,
         binding,
         intent: "dddddddddddddddddddddddddddddddd",
-        deadline: Instant::now() + Duration::from_secs(10),
+        deadline: Instant::now() + crate::TEST_RUN_BUDGET,
         cancelled,
     }
 }
@@ -184,7 +184,7 @@ fn read(fixture: &Fixture, binding: &Binding, fake: &mut Fake) -> Result<Owner, 
         ReadOptions {
             state_root: &fixture.0,
             binding,
-            deadline: Instant::now() + Duration::from_secs(10),
+            deadline: Instant::now() + crate::TEST_RUN_BUDGET,
             cancelled: &AtomicBool::new(false),
         },
         fake,
@@ -550,7 +550,7 @@ fn private_file_rules_lock_exclusion_and_final_cancel_fences_are_real() {
             ReadOptions {
                 state_root: &fixture.0,
                 binding: &binding(),
-                deadline: Instant::now() + Duration::from_secs(10),
+                deadline: Instant::now() + crate::TEST_RUN_BUDGET,
                 cancelled: &cancelled
             },
             &mut fake

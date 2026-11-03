@@ -79,7 +79,7 @@ export function nativeNetworkFixtureCommandTimeout(opts: {
   );
   return COMMAND_TIMEOUT;
 }
-const BUN_TAG = "oven/bun:1.4.2-slim";
+const BUN_TAG = "oven/bun:1.4.4-slim";
 const CADDY_TAG = "lucaslorentz/caddy-docker-proxy:2.10.0-alpine";
 const ROOT_CA = "/data/caddy/pki/authorities/local/root.crt";
 const PRIVATE_TMPFS = "rw,nosuid,nodev,noexec,size=64m,mode=0700";

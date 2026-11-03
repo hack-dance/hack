@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs/promises";
 import {
   appendFile,
   chmod,
@@ -23,6 +24,7 @@ import {
 } from "../src/constants.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
+  canMigrateCheckoutLegacyDotenv,
   collectLegacyProjectEnvCleanupCandidates,
   ENV_SCOPE_INVALID_MESSAGE,
   findUnmigratedLegacyDotenv,
@@ -65,6 +67,181 @@ const BAD_SCOPE_ARGUMENT = "Bad Scope synthetic-91fa!";
 const LAYER = `version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    KEPT_SETTING: ${KEPT_VALUE}\n`;
 
 const tempDirs = new Set<string>();
+
+test("a refusal after updating gitignore does not claim nothing was written", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(resolve(repo.projectDir, ".env"), "EXTRA=synthetic\n");
+  await git({ repo, args: ["init", "-q"] });
+  const path = resolve(repo.projectDir, ".gitignore");
+  await writeFile(
+    path,
+    "# managed by hack — machine-local generated files (do not edit between markers)\n# end managed by hack\n!hack.env.local.yaml\n"
+  );
+  const before = await readFile(path, "utf8");
+  const error = await migrateLegacyRepo(repo, {
+    migrateUndeclaredDotenv: true,
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  expect(await readFile(path, "utf8")).not.toBe(before);
+  expect((error as Error).message).not.toContain("Nothing was written");
+  expect((error as Error).message).toContain("legacy files are kept");
+});
+
+test("doctor refuses with a repair for a linked layer and undelivered legacy values", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(resolve(repo.projectDir, ".env"), "EXTRA=synthetic\n");
+  const target = resolve(repo.projectDir, "layer-copy.yaml");
+  await writeFile(target, LAYER_EMPTY);
+  await symlink(target, resolve(repo.projectDir, "hack.env.default.yaml"));
+  await expect(
+    canMigrateCheckoutLegacyDotenv({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      serviceNames: ["api"],
+    })
+  ).rejects.toThrow("Replace symlinked env layers with regular files");
+  expect(await readFile(target, "utf8")).toBe(LAYER_EMPTY);
+  const doctor = await runCli({
+    repo,
+    args: ["doctor", "--migrate-env-config", "--path", repo.projectRoot],
+  });
+  expect(doctor.stdout + doctor.stderr).toContain(
+    "Replace symlinked env layers with regular files"
+  );
+  expect(doctor.stdout + doctor.stderr).not.toContain(
+    "Project already uses the new env config files."
+  );
+  await rm(resolve(repo.projectDir, "hack.env.default.yaml"));
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  await migrateLegacyRepo(repo, { migrateUndeclaredDotenv: true });
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { EXTRA: "synthetic" },
+  });
+}, 60_000);
+
+for (const source of ["environment", "env_file"]) {
+  test(`overlay-only Compose ${source} conflict names the legacy overlay in its remedy`, async () => {
+    const repo = await createLegacyRepo();
+    await writeFile(
+      resolve(repo.projectDir, ".env.staging"),
+      "EXTRA=synthetic\n"
+    );
+    await writeFile(resolve(repo.projectDir, "other.env"), "EXTRA=other\n");
+    await writeFile(
+      resolve(repo.projectDir, PROJECT_COMPOSE_FILENAME),
+      source === "environment"
+        ? "services:\n  api:\n    image: alpine:3.20\n    environment:\n      EXTRA: other\n"
+        : "services:\n  api:\n    image: alpine:3.20\n    env_file: [other.env]\n"
+    );
+    const error = await migrateLegacyRepo(repo, {
+      migrateUndeclaredDotenv: true,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+    expect((error as Error).message).toContain(
+      "legacy .env file or overlay that sets it"
+    );
+    expect((error as Error).message).not.toContain("from the .hack/.env file");
+  });
+}
+
+test("accepted: a checkout local overlay can conservatively block base migration", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  for (const name of ["hack.env.staging.yaml", "hack.env.staging.local.yaml"]) {
+    await writeFile(
+      resolve(repo.projectDir, name),
+      LAYER_EMPTY.replace(
+        "environment: default",
+        "environment: staging"
+      ).replace("global: {}", "global:\n    EXTRA: overlay")
+    );
+  }
+  await writeFile(resolve(repo.projectDir, ".env"), "EXTRA=base\n");
+  const before = await readFile(
+    resolve(repo.projectDir, "hack.env.staging.local.yaml"),
+    "utf8"
+  );
+  await expectMigrationRefusal({
+    repo,
+    code: "E_CONFIG_INVALID",
+    reason: '"EXTRA" for "staging"',
+    hidden: ["EXTRA=base"],
+  });
+  expect(
+    await readFile(
+      resolve(repo.projectDir, "hack.env.staging.local.yaml"),
+      "utf8"
+    )
+  ).toBe(before);
+});
+
+test("a later merge refusal reports that the first merge can remain", async () => {
+  const repo = await createLegacyRepo();
+  await useStagingAsDefaultOverlay(repo);
+  await writeFile(resolve(repo.projectDir, ".env"), "EXTRA=base\n");
+  await writeFile(resolve(repo.projectDir, ".env.staging"), "EXTRA=stage\n");
+  const base = resolve(repo.projectDir, "hack.env.local.yaml");
+  const overlay = resolve(repo.projectDir, "hack.env.staging.local.yaml");
+  await writeFile(base, LAYER_EMPTY);
+  await writeFile(
+    overlay,
+    LAYER_EMPTY.replace("environment: default", "environment: staging")
+  );
+  const original = fs.rename;
+  const spy = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+    await original(from, to);
+    if (String(to) === base) {
+      await appendFile(overlay, "# concurrent edit\n");
+    }
+  });
+  let error: unknown;
+  try {
+    error = await migrateLegacyRepo(repo, {
+      migrateUndeclaredDotenv: true,
+    }).catch((caught: unknown) => caught);
+  } finally {
+    spy.mockRestore();
+  }
+  expect(error).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  expect((error as Error).message).toContain(
+    "Earlier migration writes may remain"
+  );
+  expect((error as Error).message).not.toContain("Nothing was written");
+  expect(await readLayerValues(repo, "hack.env.local.yaml")).toEqual({
+    global: { EXTRA: "base" },
+  });
+  expect(await readFile(resolve(repo.projectDir, ".env"), "utf8")).toBe(
+    "EXTRA=base\n"
+  );
+});
+
+test("measured contract .env.default refuses before publishing a base or recovery command", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.json"),
+    '{"version":1,"vars":[]}\n'
+  );
+  await writeFile(
+    resolve(repo.projectDir, ".env.default"),
+    "EXTRA=synthetic\n"
+  );
+  const before = await readdir(repo.projectDir);
+  const result = await runCli({
+    repo,
+    args: ["env", "exec", "--path", repo.projectRoot, "--", "true"],
+  });
+  const output = result.stdout + result.stderr;
+  expect(result.exitCode).not.toBe(0);
+  expect(output).toContain(".env.default would overwrite the base");
+  expect(output).not.toContain("--env default");
+  expect(await readdir(repo.projectDir)).toEqual(before);
+});
 
 afterEach(async () => {
   for (const tempDir of tempDirs) {
@@ -758,9 +935,7 @@ async function expectMigrationRefusal(opts: {
   const refusal = error as LegacyDotenvMigrationRefusalError;
   expect(refusal.code).toBe(opts.code);
   expect(refusal.message).toContain(opts.reason);
-  expect(refusal.message).toContain(
-    "Nothing was written, and the legacy files are kept."
-  );
+  expect(refusal.message).toContain("The legacy files are kept.");
   expect(refusal.message.split("\n")).toHaveLength(1);
   for (const hidden of opts.hidden) {
     expect(refusal.message).not.toContain(hidden);
@@ -853,7 +1028,7 @@ test("the migration refuses existing layer entries and never writes through or r
   await expectMigrationRefusal({
     repo: linked,
     code: "E_PATH_CONFLICT",
-    reason: `env layer files already exist in ${linked.projectDir}`,
+    reason: "Replace symlinked env layers with regular files",
     hidden: [KEPT_VALUE, STAGING_VALUE],
   });
   expect(await readFile(target, "utf8")).toBe(targetText);
@@ -2332,7 +2507,7 @@ test("a contract project or a linked layer keeps the older behaviour", async () 
   await expectMigrationRefusal({
     repo: linked,
     code: "E_PATH_CONFLICT",
-    reason: "env layer files already exist",
+    reason: "Replace symlinked env layers with regular files",
     hidden: [KEPT_VALUE],
   });
 });
@@ -3289,6 +3464,7 @@ test("following the printed recovery through doctor keeps the overlay's and the 
   const refused = await doctor();
   const refusedOutput = `${refused.stdout}${refused.stderr}`;
   expect(refusedOutput).toContain("hack env materialize");
+  expect(refusedOutput).toContain("hack env set --local");
   expect(refusedOutput).not.toContain(BASE_ONLY_VALUE);
   expect(refusedOutput).not.toContain(KEPT_VALUE);
   expect(await readFile(envPath, "utf8")).toBe(editedBytes);
@@ -4357,7 +4533,7 @@ test("outside git, setting that local layer's environment to default, as the ref
   expect(resolved?.hostTargetEnv.global?.KEPT_SETTING).toBe(KEPT_VALUE);
 });
 
-test("in git, a tracked local layer still in the working tree gets the tracked-layer refusal and its remedy", async () => {
+test("in git, a tracked local layer still in the working tree gets the tracked-layer refusal", async () => {
   const repo = await createLegacyRepo();
   await git({ repo, args: ["init", "-q"] });
   const localPath = resolve(repo.projectDir, "hack.env.local.yaml");

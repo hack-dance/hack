@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -169,6 +170,32 @@ test("doctor rejects mutating repair flags combined with json", () => {
   ).not.toThrow();
 });
 
+for (const form of ["dangling link", "malformed"] as const) {
+  test(`doctor remediation plan says a ${form} contract refuses, and doesn't offer the migration`, async () => {
+    const root = await createDoctorTestProject({ legacy: true });
+    try {
+      const contract = resolve(root, ".hack", "hack.env.json");
+      await rm(contract);
+      if (form === "dangling link") {
+        await symlink(resolve(root, "contract-that-is-gone"), contract);
+      } else {
+        await writeFile(contract, "{not json\n");
+      }
+
+      const lines = await buildDoctorRemediationPlanLines({
+        startDir: root,
+        migrateEnvConfig: true,
+      });
+
+      expect(lines.at(-1)).toBe(
+        "3. Refuse env migration (E_CONFIG_INVALID) because .hack/hack.env.json can't be read or parsed."
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("doctor remediation plan mentions env migration when requested for a legacy project", async () => {
   const root = await createDoctorTestProject({ legacy: true });
   try {
@@ -200,6 +227,21 @@ test("doctor remediation plan skips env migration when modern env files already 
       "2. Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent.",
       "3. Skip env migration because this project already uses hack.env.*.yaml.",
     ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("doctor plans migration when existing layers leave a legacy key undelivered", async () => {
+  const root = await createDoctorTestProject({ modern: true });
+  try {
+    await writeFile(join(root, ".hack", ".env"), "EXTRA=synthetic\n");
+    const lines = await buildDoctorRemediationPlanLines({
+      startDir: root,
+      migrateEnvConfig: true,
+    });
+    expect(lines.join("\n")).toContain("Prompt to migrate legacy env values");
+    expect(lines.join("\n")).not.toContain("already uses");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

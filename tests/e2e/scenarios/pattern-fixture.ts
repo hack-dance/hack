@@ -26,7 +26,7 @@ import {
  * disposable, offline CI run needs:
  * - the project name and dev host become a random `e2e-<hex>` name;
  * - the digest-pinned Alpine Bun image becomes the repository digest of the
- *   runner's cached `oven/bun:1.4.2-slim` (same Bun release), with
+ *   runner's cached `oven/bun:1.4.4-slim` (same Bun release), with
  *   `pull_policy: never`, so nothing is downloaded during qualification;
  * - a declared `platform` becomes the daemon's architecture;
  * - every service and named volume gets an exact owner label for cleanup.
@@ -37,9 +37,9 @@ import {
 
 /** The image every pattern fixture declares today. */
 export const PATTERN_FIXTURE_IMAGE =
-  "oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f";
+  "oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a";
 /** Pre-pulled by the docker-e2e job; resolved to its repository digest. */
-export const CACHED_BUN_IMAGE = "oven/bun:1.4.2-slim";
+export const CACHED_BUN_IMAGE = "oven/bun:1.4.4-slim";
 
 const DOCKER_TIMEOUT_MS = 60_000;
 const ARCHITECTURES: Readonly<Record<string, string>> = {

@@ -56,7 +56,7 @@ Matrix version 3, latest observation 2026-10-18. Older cells retain their record
 | Capability | Meaning |
 | --- | --- |
 | Packaging | The client accepts, installs and enables the default `hack` plugin package in a session. |
-| Skill discovery | A fresh session discovers the plugin's bundled skills (hack-cli, hack-branches, hack-env, hack-diagnose, hack-init, hack-install, hack-remote). |
+| Skill discovery | A fresh session discovers the plugin's bundled skills (hack-cli, hack-branches, hack-env, hack-diagnose, hack-feedback, hack-init, hack-install, hack-remote). |
 | Hooks | The client runs plugin-shipped hooks; Hack v5 declares none. |
 | Plugin MCP | The client starts the `hack mcp serve` server declared by the opt-in `hack-mcp` plugin and lists its tools. The default `hack` plugin ships no MCP. |
 | Standalone MCP | The client loads an MCP entry written by `hack mcp install` (stdio or a selected MCP bundle) without the plugin. |
@@ -136,7 +136,7 @@ owner, and none of them replaces the others. Users choose one per client.
 
 | Layout | What it contains | Authoritative owner | Installed and updated by |
 | --- | --- | --- | --- |
-| Native plugin (`plugins/hack`) | Client manifests, seven skills, Claude primer hooks and Cursor rule; opt-in `plugins/hack-mcp` separately declares `hack mcp serve` | `scripts/generate-agent-plugins.ts`, rendering from `src/agents/instruction-source.ts` and the skill renderers in `src/agents/` | The client's plugin manager. Hack commands never install or update it. |
+| Native plugin (`plugins/hack`) | Client manifests, eight skills, Claude primer hooks and Cursor rule; opt-in `plugins/hack-mcp` separately declares `hack mcp serve` | `scripts/generate-agent-plugins.ts`, rendering from `src/agents/instruction-source.ts` and the skill renderers in `src/agents/` | The client's plugin manager. Hack commands never install or update it. |
 | Standalone setup | Project AGENTS.md/CLAUDE.md snippets, Cursor rules, shared skills, Claude primer hooks, MCP entries | `src/agents/instruction-source.ts` and its renderers, written by `hack setup` and `hack mcp install` | Explicit `hack setup` and `hack mcp install` commands in a chosen scope |
 | MCP bundle | Native MCP adapter, owner and backend executables with a content-derived identity | `src/mcp/bundle.ts` (packaging and verification) | `hack mcp install --bundle ... --cli ...` writes the client entry; the bundle is never modified after selection |
 

@@ -7,6 +7,7 @@ import {
   HACK_DIR_GITIGNORE_END_MARKER,
   HACK_DIR_GITIGNORE_ENTRIES,
 } from "../../src/templates.ts";
+import { fixtureGitEnv } from "../helpers/fixture-git.ts";
 import { recordOwnedFixture } from "./docker-ownership.ts";
 import { runCommand } from "./harness.ts";
 
@@ -144,6 +145,7 @@ export async function addLinkedWorktree(opts: {
     `${opts.fixture.name}-${opts.branch}`
   );
   const result = await runCommand({
+    exactEnv: fixtureGitEnv(),
     argv: [
       "git",
       "-C",
@@ -517,6 +519,7 @@ async function git(opts: {
   readonly args: readonly string[];
 }): Promise<void> {
   const result = await runCommand({
+    exactEnv: fixtureGitEnv(),
     argv: [
       "git",
       "-C",

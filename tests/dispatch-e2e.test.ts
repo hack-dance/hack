@@ -9,6 +9,7 @@ import {
 import { findProjectContext } from "../src/lib/project.ts";
 import { upsertProjectRegistration } from "../src/lib/projects-registry.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const shouldRun = process.env.HACK_DISPATCH_E2E === "1";
@@ -521,7 +522,7 @@ async function runGit(input: {
   const result = await runCommand({
     cmd: ["git", ...input.args],
     cwd: input.cwd,
-    env: childEnv({}),
+    env: fixtureGitEnv({ env: childEnv({}) }),
   });
   if (result.exitCode !== 0) {
     throw new Error(

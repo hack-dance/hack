@@ -16,6 +16,7 @@ import {
   validateNativeProject,
 } from "../src/lib/native-project-validation.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const PROTOCOL = {
   transport_version: 1,
@@ -166,6 +167,7 @@ async function managedValues(
 
 async function git(project: string, args: string[]) {
   const child = Bun.spawn(["git", "-C", project, ...args], {
+    env: fixtureGitEnv(),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

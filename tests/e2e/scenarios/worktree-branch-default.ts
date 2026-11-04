@@ -1,3 +1,4 @@
+import { fixtureGitEnv } from "../../helpers/fixture-git.ts";
 import { addLinkedWorktree, createMonorepoFixture } from "../fixture.ts";
 import {
   expect,
@@ -307,6 +308,7 @@ export const worktreeBranchDefaultScenario: Scenario = {
     });
 
     const detach = await runCommand({
+      exactEnv: fixtureGitEnv(),
       argv: ["git", "checkout", "--detach"],
       cwd: worktreePath,
     });

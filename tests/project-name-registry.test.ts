@@ -9,6 +9,7 @@ import {
   upsertProjectRegistration,
 } from "../src/lib/projects-registry.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { projectNameFixture } from "./helpers/project-name-fixture.ts";
 
 let fixture: Awaited<ReturnType<typeof projectNameFixture>>;
@@ -142,6 +143,7 @@ test("independent Git checkouts sharing a remote cannot take over a missing proj
       ["remote", "add", "origin", "https://example.invalid/same-repo.git"],
     ]) {
       const child = Bun.spawn(["git", ...args], {
+        env: fixtureGitEnv(),
         cwd: project.projectRoot,
         stdout: "pipe",
         stderr: "pipe",

@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareNativeProjectInput } from "../src/backends/native-project-input.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -146,6 +147,7 @@ test("linked worktree inherits primary local environment and observes checkout o
   const opts = await fixture({ services: { api: { image: "bun:1" } } });
   const git = async (args: string[]) => {
     const child = Bun.spawn(["git", ...args], {
+      env: fixtureGitEnv(),
       cwd: opts.projectRoot,
       stdout: "ignore",
       stderr: "ignore",

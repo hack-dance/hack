@@ -134,6 +134,20 @@ fn volume_matches(
     }
 }
 
+/// One observation decides absence: a volume absent at its first inspection
+/// takes the removal-recovery absent branch. `expected` is `Some` when a
+/// removal intent exists, holding that intent's recorded projection.
+fn observed_volume(
+    expected: Option<Option<&Value>>,
+    observe: impl FnOnce() -> Result<Option<Value>, CandidateError>,
+) -> Result<Option<Value>, CandidateError> {
+    let observed = observe()?;
+    if let Some(expected) = expected {
+        volume_matches(expected, observed.as_ref(), true)?;
+    }
+    Ok(observed)
+}
+
 pub(super) fn remove(
     candidate: &Candidate,
     run: &str,
@@ -261,21 +275,16 @@ fn remove_guarded(candidate: &Candidate, run: &str, guard: Guard) -> Result<Valu
     }
     let mut volumes = BTreeMap::new();
     for (key, resource) in &receipt.resources {
-        let mut observed = graph::inspect_resource(&engine, &receipt, resource)?;
         if resource.kind != Kind::Volume {
-            if observed.is_some() {
+            if graph::inspect_resource(&engine, &receipt, resource)?.is_some() {
                 return Err(refused());
             }
             continue;
         }
-        if observed.is_some() {
-            observed = Some(graph::volume_identity::observe(
-                &engine, &receipt, resource,
-            )?);
-        }
-        if let Some(intent) = &intent {
-            volume_matches(intent.volumes.get(key), observed.as_ref(), true)?;
-        }
+        let observed = observed_volume(
+            intent.as_ref().map(|intent| intent.volumes.get(key)),
+            || graph::volume_identity::observe(&engine, &receipt, resource),
+        )?;
         if let Some(value) = observed {
             graph::cache_provenance::verify(&engine, &receipt, resource)?;
             volumes.insert(key.clone(), value);
@@ -488,5 +497,50 @@ mod tests {
         replacement["directory"] = json!("1:3");
         assert!(volume_matches(Some(&original), Some(&replacement), true).is_err());
         assert!(volume_matches(None, Some(&original), true).is_err());
+    }
+    #[test]
+    fn removal_recovery_decides_volume_absence_from_one_observation() {
+        let resource: graph::Resource = serde_json::from_value(json!({
+            "kind":"volume","key":"data","name":"owned","id":null,"image":null,"phase":"created"
+        }))
+        .unwrap();
+        let inspected = json!({"Name":"owned","Driver":"local","CreatedAt":"t",
+            "Mountpoint":"/var/lib/docker/volumes/owned/_data"});
+        let recorded = graph::volume_identity::projection(&inspected, "1:2");
+        let resource = &resource;
+        let observe = |answers: Vec<Option<Value>>| {
+            let mut answers = answers.into_iter();
+            move || {
+                graph::volume_identity::observe_with(
+                    resource,
+                    || Ok(answers.next().unwrap()),
+                    |_, _| Ok("1:2\n".into()),
+                )
+            }
+        };
+        // Absent at the first inspection: the allowed removal-recovery branch.
+        assert_eq!(
+            observed_volume(Some(Some(&recorded)), observe(vec![None])).unwrap(),
+            None
+        );
+        // Present and unchanged: the recorded projection matches.
+        assert_eq!(
+            observed_volume(
+                Some(Some(&recorded)),
+                observe(vec![Some(inspected.clone()), Some(inspected.clone())])
+            )
+            .unwrap(),
+            Some(recorded.clone())
+        );
+        // Vanishing during the observation itself still fails closed.
+        assert!(
+            observed_volume(
+                Some(Some(&recorded)),
+                observe(vec![Some(inspected.clone()), None])
+            )
+            .is_err()
+        );
+        // Without a removal intent, absence is reported to the caller as-is.
+        assert_eq!(observed_volume(None, observe(vec![None])).unwrap(), None);
     }
 }

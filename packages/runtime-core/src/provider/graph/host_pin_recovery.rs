@@ -2,7 +2,9 @@
 //!
 //! The private witness precedes dead-owner cleanup. It never edits historical graph,
 //! publisher, control, or dependency receipts and grants no ordinary replay authority.
-use super::{Candidate, CandidateError, Engine, Kind, Receipt, directory, foreground, load, state};
+use super::{
+    Candidate, CandidateError, Engine, Receipt, Resource, directory, foreground, load, state,
+};
 use crate::provider::{
     ProjectShareIntent,
     host_pin::DeviceRebind,
@@ -264,9 +266,23 @@ pub(super) fn verify_volume_projections(
     selected: &BTreeMap<String, Value>,
 ) -> Result<(), CandidateError> {
     super::volume_identity::verify_with(receipt, selected, |resource| {
-        super::volume_identity::observe(engine, receipt, resource)
+        super::volume_identity::recovery(
+            super::volume_identity::observe(engine, receipt, resource),
+            refused,
+        )
     })
     .map_err(|_| refused())
+}
+
+/// Absence and identity refusals stay this module's closed refusal; provider
+/// inspection and guest transport failures propagate.
+fn retained_volumes_with(
+    receipt: &Receipt,
+    mut observe: impl FnMut(&Resource) -> Result<Option<Value>, CandidateError>,
+) -> Result<BTreeMap<String, Value>, CandidateError> {
+    super::volume_identity::select_with(receipt, |resource| {
+        super::volume_identity::recovery(observe(resource), refused)
+    })
 }
 
 /// Caller already holds the Engine lease and exact foreground owner lock.
@@ -529,17 +545,9 @@ fn select_content(
     if let Some(share) = &owner.project_share {
         share.validate()?;
     }
-    let mut retained_volumes = BTreeMap::new();
-    for (key, resource) in receipt
-        .resources
-        .iter()
-        .filter(|(_, value)| value.kind == Kind::Volume)
-    {
-        retained_volumes.insert(
-            key.clone(),
-            super::volume_identity::observe(engine, &receipt, resource)?,
-        );
-    }
+    let retained_volumes = retained_volumes_with(&receipt, |resource| {
+        super::volume_identity::observe(engine, &receipt, resource)
+    })?;
     Ok(Witness {
         version: 1,
         candidate: candidate.checkout.clone(),
@@ -605,6 +613,37 @@ pub fn recover(candidate: &Candidate, run: &str, expected: &str) -> Result<Value
 mod tests {
     use super::*;
     use std::{io::Write, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn retained_volume_absence_and_identity_refusals_stay_closed_recovery_refusals() {
+        let receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),
+            "namespace":"c".repeat(64),"plan_id":"d".repeat(64),
+            "phase":"stopped-data-retained","readiness":{},"resources":{"volume:data":{
+                "kind":"volume","key":"data","name":"owned-data","id":null,"image":null,"phase":"created"}}
+        }))
+        .unwrap();
+        let code = |failure: Option<&'static str>| {
+            retained_volumes_with(&receipt, |_| match failure {
+                None => Ok(None),
+                Some(code) => Err(CandidateError::new(code, "Synthetic observation failure.")),
+            })
+            .unwrap_err()
+            .code
+        };
+        // Absence and identity refusals map as before the stable projection.
+        for failure in [
+            None,
+            Some("graph_volume_identity"),
+            Some("graph_volume_subpath"),
+        ] {
+            assert_eq!(code(failure), refused().code, "{failure:?}");
+        }
+        // Provider and guest transport failures keep their own diagnostic.
+        for failure in ["graph_foreign_resource", "guest_lost"] {
+            assert_eq!(code(Some(failure)), failure);
+        }
+    }
 
     #[test]
     fn raw_selection_refuses_same_inode_in_place_substitution() {

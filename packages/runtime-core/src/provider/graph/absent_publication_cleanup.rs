@@ -2,9 +2,9 @@
 //! lost across a physical host reboot. Missing paths never create ordinary
 //! ownership authority: the selected, durable witness is the only admission.
 use super::{
-    Candidate, CandidateError, Engine, Kind, Receipt, dead_owner_cleanup, dependency_slots,
-    directory, foreground, host_pin_recovery, host_relay, initializer_cache, inspect_resource,
-    load, startup, state,
+    Candidate, CandidateError, Engine, Kind, Receipt, Resource, dead_owner_cleanup,
+    dependency_slots, directory, foreground, host_pin_recovery, host_relay, initializer_cache,
+    inspect_resource, load, startup, state,
 };
 use crate::provider::{
     ProjectShareIntent, artifact, host_pin::DeviceRebind, identity, lifecycle, state::Owner,
@@ -262,8 +262,17 @@ fn selected_volumes(
     engine: &Engine<'_>,
     receipt: &Receipt,
 ) -> Result<BTreeMap<String, Value>, CandidateError> {
-    super::volume_identity::select_with(receipt, |resource| {
+    selected_volumes_with(receipt, |resource| {
         super::volume_identity::observe(engine, receipt, resource)
+    })
+}
+
+fn selected_volumes_with(
+    receipt: &Receipt,
+    mut observe: impl FnMut(&Resource) -> Result<Option<Value>, CandidateError>,
+) -> Result<BTreeMap<String, Value>, CandidateError> {
+    super::volume_identity::select_with(receipt, |resource| {
+        super::volume_identity::recovery(observe(resource), refused)
     })
 }
 
@@ -1182,6 +1191,37 @@ mod tests {
         let fixture = super::super::tests::Fixture::new();
         let candidate = Candidate::discover(&fixture.0).unwrap();
         (fixture, candidate)
+    }
+
+    #[test]
+    fn retained_volume_absence_and_identity_refusals_stay_closed_recovery_refusals() {
+        let receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),
+            "namespace":"c".repeat(64),"plan_id":"d".repeat(64),
+            "phase":"stopped-data-retained","readiness":{},"resources":{"volume:data":{
+                "kind":"volume","key":"data","name":"owned-data","id":null,"image":null,"phase":"created"}}
+        }))
+        .unwrap();
+        let code = |failure: Option<&'static str>| {
+            selected_volumes_with(&receipt, |_| match failure {
+                None => Ok(None),
+                Some(code) => Err(CandidateError::new(code, "Synthetic observation failure.")),
+            })
+            .unwrap_err()
+            .code
+        };
+        // Absence and identity refusals map as before the stable projection.
+        for failure in [
+            None,
+            Some("graph_volume_identity"),
+            Some("graph_volume_subpath"),
+        ] {
+            assert_eq!(code(failure), refused().code, "{failure:?}");
+        }
+        // Provider and guest transport failures keep their own diagnostic.
+        for failure in ["graph_foreign_resource", "guest_lost"] {
+            assert_eq!(code(Some(failure)), failure);
+        }
     }
 
     #[test]

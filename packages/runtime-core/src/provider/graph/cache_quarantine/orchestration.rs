@@ -700,18 +700,19 @@ fn retained_volume_features_accept_quarantine_but_refuse_replacement() {
     let (mut receipt, _) = provider.load(&provider.candidate, RUN).unwrap();
     receipt.resources.remove("volume:redis");
     let resource = &receipt.resources["volume:www_next"];
-    let observe = |resource: &Resource| {
+    let observed = |resource: &Resource| {
         volume_identity::observe_with(
             resource,
             || Port::inspect(&provider, &receipt, resource),
             |program, args| provider.execute(program, args),
         )
     };
+    let observe = |resource: &Resource| observed(resource).map(Option::unwrap);
     let before_inspect = Port::inspect(&provider, &receipt, resource)
         .unwrap()
         .unwrap();
     let selected = volume_identity::select_with(&receipt, observe).unwrap();
-    let restore_selected = restore::observed_volumes_with(&receipt, observe).unwrap();
+    let restore_selected = restore::observed_volumes_with(&receipt, observed).unwrap();
     let saved = serde_json::to_vec(&selected).unwrap();
     let selected: BTreeMap<String, Value> = serde_json::from_slice(&saved).unwrap();
     let sha = selection_sha(&provider.inspect().unwrap());
@@ -729,7 +730,7 @@ fn retained_volume_features_accept_quarantine_but_refuse_replacement() {
     // Restore generation, source-device rebind and quiescent-dependency recovery
     // all persist and compare this same production selection.
     assert_eq!(
-        restore::observed_volumes_with(&receipt, observe).unwrap(),
+        restore::observed_volumes_with(&receipt, observed).unwrap(),
         restore_selected
     );
     assert!(volume_identity::retained_matches(
@@ -763,7 +764,7 @@ fn retained_volume_features_accept_quarantine_but_refuse_replacement() {
             selected
         );
         assert_ne!(
-            restore::observed_volumes_with(&receipt, observe).unwrap(),
+            restore::observed_volumes_with(&receipt, observed).unwrap(),
             restore_selected
         );
         assert!(!volume_identity::retained_matches(
@@ -775,6 +776,104 @@ fn retained_volume_features_accept_quarantine_but_refuse_replacement() {
             provider.restore_volume();
         }
     }
+}
+
+/// A retained volume removed outside Hack keeps each caller's absence contract:
+/// fresh restore, quiescent recovery and source-device rebind report missing
+/// data, and recovery selections report their own closed refusal.
+#[test]
+fn an_absent_retained_volume_keeps_each_callers_absence_diagnostic() {
+    use crate::provider::graph::{restore, volume_identity};
+    let provider = Provider::new();
+    let (mut receipt, _) = provider.load(&provider.candidate, RUN).unwrap();
+    receipt.resources.remove("volume:redis");
+    let resource = &receipt.resources["volume:www_next"];
+    let observed = |resource: &Resource| {
+        volume_identity::observe_with(
+            resource,
+            || Port::inspect(&provider, &receipt, resource),
+            |program, args| provider.execute(program, args),
+        )
+    };
+    *provider.inspected.borrow_mut() = Value::Null;
+    let missing = restore::observed_volumes_with(&receipt, observed).unwrap_err();
+    assert_eq!(missing.code, "graph_data_missing");
+    provider.calls.borrow_mut().clear();
+    assert_eq!(observed(resource).unwrap(), None);
+    // Absence is decided by the first inspection; no guest identity runs.
+    assert_eq!(*provider.calls.borrow(), ["inspect"]);
+    let refused = || CandidateError::new("caller_refused", "Caller refusal.");
+    let selection = volume_identity::select_with(&receipt, |resource| {
+        volume_identity::recovery(observed(resource), refused)
+    });
+    assert_eq!(selection.unwrap_err().code, "caller_refused");
+    // Provider inspection failures are not reclassified as refusals.
+    provider.inspect_failure.set(true);
+    let failure = volume_identity::recovery(observed(resource), refused).unwrap_err();
+    assert_eq!(failure.code, "inspect_failed");
+}
+
+/// Records persisted under the timestamp scheme have no recorded `_data`
+/// identity and must refuse; a fresh observation cannot supply historical
+/// inode evidence for them.
+#[test]
+fn legacy_timestamp_selections_refuse_after_upgrade() {
+    use crate::provider::graph::{restore, volume_identity};
+    use sha2::{Digest, Sha256};
+    let provider = Provider::new();
+    let (mut receipt, _) = provider.load(&provider.candidate, RUN).unwrap();
+    receipt.resources.remove("volume:redis");
+    let resource = &receipt.resources["volume:www_next"];
+    let observed = |resource: &Resource| {
+        volume_identity::observe_with(
+            resource,
+            || Port::inspect(&provider, &receipt, resource),
+            |program, args| provider.execute(program, args),
+        )
+    };
+    let observe = |resource: &Resource| observed(resource).map(Option::unwrap);
+    let inspected = Port::inspect(&provider, &receipt, resource)
+        .unwrap()
+        .unwrap();
+    let current = observe(resource).unwrap();
+    // Host-pin and absent-publication witnesses before the stable projection.
+    let legacy_witness = json!({
+        "expected_name": resource.name,
+        "observed_name": inspected["Name"],
+        "observed_created_at": inspected["CreatedAt"],
+        "observed_mountpoint": inspected["Mountpoint"],
+        "observed_driver": inspected["Driver"],
+        "observed_labels_sha256": format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&inspected["Labels"]).unwrap())
+        ),
+        "labels": inspected["Labels"],
+    });
+    // Removal intents recorded the raw inspection, including `CreatedAt`.
+    let legacy_removal = inspected.clone();
+    // A projection whose directory identity was normalized away.
+    let mut without_directory = current.clone();
+    without_directory
+        .as_object_mut()
+        .unwrap()
+        .remove("directory");
+    for legacy in [legacy_witness, legacy_removal, without_directory] {
+        let selected = BTreeMap::from([("volume:www_next".to_owned(), legacy.clone())]);
+        let refused = volume_identity::verify_with(&receipt, &selected, observe).unwrap_err();
+        assert_eq!(refused.code, "graph_volume_identity", "{legacy}");
+        for recovering in [false, true] {
+            assert!(
+                !volume_identity::retained_matches(Some(&legacy), Some(&current), recovering),
+                "{legacy}"
+            );
+        }
+    }
+    // Restore/rebind selections whose middle field is the old timestamp.
+    let current_restore = restore::observed_volumes_with(&receipt, observed).unwrap();
+    let mut legacy_restore = current_restore.clone();
+    legacy_restore.get_mut("volume:www_next").unwrap().1 =
+        inspected["CreatedAt"].as_str().unwrap().to_owned();
+    assert_ne!(current_restore, legacy_restore);
 }
 
 #[test]

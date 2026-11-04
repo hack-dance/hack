@@ -73,6 +73,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning: "Bounded startup ran out of time before services settled.",
     readFirst: "`hack ps --json`",
   },
+  E_CANCELLED: {
+    meaning:
+      "The caller cancelled the operation; pending ownership is retained.",
+    readFirst: "`hack ps --json`",
+  },
   E_LIFECYCLE_FAILED: {
     meaning: "A lifecycle hook or host process failed.",
     readFirst: "`hack projects --details`",

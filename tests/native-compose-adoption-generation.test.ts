@@ -826,6 +826,9 @@ boundedTest(
       { store, generation } = await prepared();
     const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
     try {
+      // This v1 dispatch signal belongs only to SIGINT/SIGTERM, never the
+      // newer mutation deadline timer or this case's teardown.
+      expect(generation.report.adoption_generation_version).toBe(1);
       const binary = await compiler();
       process.env.HACK_CONFIG_COMPILER_BINARY = binary;
       await store.publish({ generation, binary });

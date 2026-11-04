@@ -282,7 +282,11 @@ complete bundle to change the candidate.
    frontend `up` validates the retained selection offline, resumes its clean owned
    VM once if stopped, and then repeats live retained-data and restore-generation
    checks. Restore the application and read back a saved data marker before accepting
-   the upgrade.
+   the upgrade. A restore selection (`--expect-generation`) or recovery selection
+   reviewed by an older bundle can use the previous retained-volume encoding (see the
+   [volume identity audit](../reference/volume-identity.md)) and then refuses as
+   changed even when no volume changed: run the review and selection again with the
+   new bundle.
 4. For rollback, retain-stop the new candidate in the same way, select the previous
    verified bundle with the same home, and repeat application/data readback. A prior
    binary refusing newer state is an unsupported downgrade, not a successful rollback.
@@ -1778,6 +1782,18 @@ Retained-volume recovery and removal use stable inspection fields plus the guest
 `_data` device/inode, so a quarantine does not invalidate their selection. See the
 [volume identity audit](../reference/volume-identity.md) for covered workflows,
 excluded protocols, and compatibility limits.
+
+A successful guest exit with an unrecognized or truncated MOVE reply also reports
+`graph_cache_quarantine_unsettled`: bytes may have moved, so the record stays pending
+for explicit resume or resolution.
+
+Volume identity has a residual inode-reuse risk. If an external actor removes and
+recreates the volume between IDENTITY and MOVE with the same inspection fields and
+reused device/inode numbers, quarantine cannot detect the replacement. Exclude
+external volume removal/recreation during quarantine; the provider lease serializes
+Hack mutations only. A Hack-written generation nonce is deferred because existing
+volumes need a durable enrollment and interrupted-enrollment recovery contract;
+quarantine must not silently create or repair identity for an existing volume.
 
 A private record under the candidate home's `run/cache-quarantine/` is written
 before the guest effect and marked `quarantined` after the guest syncs the move.

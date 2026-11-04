@@ -42,7 +42,7 @@ pub fn serve(root: &Path, executable: &Path, checkout: &Path) -> Result<()> {
     listener.set_nonblocking(true).map_err(error)?;
     let mut workers: HashMap<String, Child> = HashMap::new();
     loop {
-        schedule(&mut store, executable, checkout, &mut workers)?;
+        schedule_tick(&mut store, executable, checkout, &mut workers)?;
         match listener.accept() {
             Ok((mut stream, _)) => {
                 let response = handle_stream(&mut stream, &mut store, checkout);
@@ -203,6 +203,21 @@ fn peer_uid(stream: &UnixStream) -> Result<u32> {
         return Err(error(std::io::Error::last_os_error()));
     }
     Ok(credentials.uid)
+}
+
+/// One scheduler pass for `serve`. Journal contention is retryable, so it skips this
+/// tick instead of ending the service; the next tick re-reads the committed journal.
+/// Every other scheduler failure still ends `serve`.
+fn schedule_tick(
+    store: &mut Store,
+    executable: &Path,
+    checkout: &Path,
+    workers: &mut HashMap<String, Child>,
+) -> Result<()> {
+    match schedule(store, executable, checkout, workers) {
+        Err(failure) if super::journal::is_journal_busy(&failure) => Ok(()),
+        outcome => outcome,
+    }
 }
 
 fn schedule(
@@ -401,6 +416,42 @@ mod tests {
         drop(child.stdin.take());
         assert_eq!(child.wait().unwrap().code(), Some(3));
         drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_busy_journal_skips_one_scheduler_tick_without_ending_serve() {
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hkl-node-busy-tick",
+        );
+        let mut store = Store::open(&root, true).unwrap();
+        let blocker = Store::open(&root, false).unwrap();
+        let id = "d".repeat(64);
+        super::super::test_support::job(&store, &id, "queued", 60_000);
+        // An expired queue deadline makes the tick's first action a journal write.
+        store
+            .update(&id, |r| {
+                r.queue_deadline_ms = 0;
+                Ok(())
+            })
+            .unwrap();
+        let unused = Path::new("/nonexistent");
+        let mut workers = HashMap::new();
+        // A competing writer (a supervisor's slow commit) holds the write lock for the
+        // whole tick: the tick refuses inside, and serve's tick treats that as a skip.
+        blocker.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        schedule_tick(&mut store, unused, unused, &mut workers)
+            .expect("E_TEST_BUSY_TICK_ENDED_SERVE");
+        assert_eq!(store.get(&id).unwrap().state, "queued");
+        assert!(workers.is_empty());
+
+        // After release the next tick applies the pending transition.
+        blocker.connection.execute_batch("ROLLBACK").unwrap();
+        schedule_tick(&mut store, unused, unused, &mut workers).unwrap();
+        assert_eq!(store.get(&id).unwrap().state, "queue_expired");
+        assert!(workers.is_empty());
+        drop((store, blocker));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

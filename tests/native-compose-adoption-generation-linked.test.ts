@@ -1,4 +1,4 @@
-import { test as boundedTest, expect } from "bun:test";
+import { test as boundedTest, expect, spyOn } from "bun:test";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -573,4 +573,32 @@ test("branch selection cannot retarget an older saved generation through dispatc
   expect(await mutationCommands()).toEqual([]);
   expect(context.fixture.container[0]?.id).toBe(ID);
   expect(context.fixture.volume[0]?.createdAt).toBe(CREATED);
+});
+
+test("HACK-1810: a v4 engine proof phase timeout keeps its timeout classification without a caller deadline", async () => {
+  await trackedManagedCheckout();
+  await managedGenerated("reference");
+  const binary = await managedEnvCompilerFixture(
+    join(context.root, "phase-compiler")
+  );
+  const store = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot: context.projectRoot,
+  });
+  const realNow = Date.now;
+  let clock: { mockRestore: () => void } | undefined;
+  let offset = 0;
+  try {
+    const before = Bun.file(join(context.root, "commands")).size;
+    clock = spyOn(Date, "now").mockImplementation(() => {
+      if (Bun.file(join(context.root, "commands")).size > before) {
+        offset = 16_000;
+      }
+      return realNow() + offset;
+    });
+    await refusal(store.prepare({ binary }), "E_LEGACY_ADOPTION_DEADLINE");
+    expect(offset).toBe(16_000);
+  } finally {
+    clock?.mockRestore();
+    await store.close();
+  }
 });

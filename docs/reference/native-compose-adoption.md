@@ -143,7 +143,12 @@ seconds, instead of a fixed 15-second clock. Publication file moves, rollback
 restoration and scoped routing revalidation retain that live remaining budget;
 copying their operation context cannot restore time already spent. When that deadline expires the command
 returns `E_STARTUP_TIMEOUT` with the "reached its caller deadline" message, not
-`E_CONFIG_INVALID` (HACK-1458). These rechecks do not freeze external editors or
+`E_CONFIG_INVALID` (HACK-1458). An expiry-driven signal abort keeps that timeout
+classification even if its timer fires in the last rounded millisecond. A timed-out
+engine inspection also keeps the timeout classification when no aggregate caller
+deadline was supplied. A caller's SIGINT or SIGTERM cancellation returns `E_CANCELLED`
+and retains pending ownership; it is never an invalid-configuration refusal.
+These rechecks do not freeze external editors or
 the engine atomically. Public output remains field/count/status metadata;
 capabilities and authored probe arguments are private. Prior versions 1–4 keep
 their existing execution behavior, and older upgraded owners refuse version 5

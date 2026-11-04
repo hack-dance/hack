@@ -563,9 +563,14 @@ a bounded experimental application graph executor, not a qualified native Linux 
 service and independent supervisors implement the WU04 contract (local `_docs/docs/plans/v5/wu04-contract.md`).
 
 Journal connections wait up to two seconds for SQLite contention. SQLITE_BUSY or
-SQLITE_LOCKED refuses with the closed code `journal_busy` and the fixed hint
-"Node journal is busy; retry with the same operation ID." A refused write records
-no mutation; retry the unchanged request with the same operation ID.
+SQLITE_LOCKED refuses with the closed code `journal_busy` and a fixed hint. A refused
+transaction is rolled back, so the journal records nothing. For a mutation the hint is
+"Node journal is busy; retry with the same operation ID." and the unchanged request with
+that operation ID applies at most once. Reads and other paths without an operation ID use
+"Node journal is busy; retry the unchanged request." Reconciliation may already have
+removed the owned container before a refused commit; that cleanup treats an absent
+container as success, so the retry is safe. The `node serve` scheduler skips a tick that
+meets contention and tries again on the next one.
 
 Its [versioned schema](node-protocol-v1.schema.json) precedes any TypeScript consumer. The
 Compose subset (local `_docs/docs/plans/v5/compose-subset.md`) defines the importer and refusal boundaries. The

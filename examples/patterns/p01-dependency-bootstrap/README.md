@@ -71,5 +71,5 @@ a warm start, a second worktree, a `bun.lock` change, and an installer killed
 mid-run. Every running consumer must read a complete old or complete new
 payload. The killed attempt must stay unready, a retry under the same
 generation must be refused, and a generation bump must recover. The copy uses
-the runner's cached `oven/bun:1.4.2-slim` digest and the daemon's platform
+the runner's cached `oven/bun:1.4.4-slim` digest and the daemon's platform
 instead of the pinned Alpine image, and never pulls.

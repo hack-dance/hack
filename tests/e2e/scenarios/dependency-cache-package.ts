@@ -15,10 +15,16 @@ import {
   type Scenario,
 } from "../harness.ts";
 
+import {
+  type DockerResource,
+  ownedContainers,
+  partitionContainerInspection,
+} from "./pattern-fixture.ts";
+
 const OWNER = "hack.e2e.cache-package-owner";
 const BRANCH = "package-linked";
 const TIMEOUT_MS = 60_000;
-const IMAGE = "node:24.11.0-bookworm-slim";
+const IMAGE = "node:24.22.1-bookworm-slim";
 const PACKAGE_VALUE = "installed-local-package-v1";
 const INSTALL = `set -eu
 echo install >> /deps/install-count
@@ -43,18 +49,7 @@ if (fs.readFileSync("/deps/install-count", "utf8") !== "install\\n") process.exi
 console.log(JSON.stringify(result));
 `;
 
-type Resource = {
-  readonly Id?: string;
-  readonly Name?: string;
-  readonly Labels?: Record<string, string>;
-  readonly Config?: { readonly Labels: Record<string, string> };
-  readonly Mounts?: readonly {
-    readonly Type: string;
-    readonly Name?: string;
-    readonly Destination: string;
-    readonly RW: boolean;
-  }[];
-};
+type Resource = DockerResource;
 type Generated = {
   readonly value: string;
   readonly source: string;
@@ -201,14 +196,47 @@ fs.writeFileSync("/fixture/tarball.sha256", require("node:crypto").createHash("s
           "--filter",
           `name=^/${preparationName}$`,
         ]);
-        for (const id of remaining.stdout.trim().split(/\s+/).filter(Boolean)) {
-          const inspected = await checkedDocker(["inspect", id]);
-          const item = (JSON.parse(inspected.stdout) as Resource[])[0];
+        const ids = remaining.stdout.trim().split(/\s+/).filter(Boolean);
+        for (const id of ids) {
+          const inspected = await docker([
+            "inspect",
+            "--type",
+            "container",
+            id,
+          ]);
+          const split = partitionContainerInspection({
+            ids: [id],
+            result: inspected,
+          });
+          if ("error" in split) {
+            expect({
+              that: false,
+              message: `preparation container inspection: ${split.error}`,
+              result: inspected,
+            });
+            continue;
+          }
+          if (split.missing.length > 0) {
+            const present = await checkedDocker([
+              "ps",
+              "-aq",
+              "--filter",
+              `id=${id}`,
+            ]);
+            expect({
+              that: present.stdout.trim() === "",
+              message: "missing preparation container must be absent",
+              result: inspected,
+            });
+            continue;
+          }
+          const item = split.resources[0];
           expect({
             that:
               item?.Name === `/${preparationName}` &&
-              item.Config?.Labels[OWNER] === fixture.name &&
-              item.Config.Labels["com.docker.compose.project"] === fixture.name,
+              item.Config?.Labels?.[OWNER] === fixture.name &&
+              item.Config.Labels?.["com.docker.compose.project"] ===
+                fixture.name,
             message:
               "refuse cleanup outside exact named preparation container ownership",
           });
@@ -357,28 +385,15 @@ fs.writeFileSync("/fixture/tarball.sha256", require("node:crypto").createHash("s
       });
       return labels;
     };
-    const containers = async (project?: string, service?: string) => {
-      const result = await checkedDocker([
-        "ps",
-        "-aq",
-        "--filter",
-        `label=${OWNER}=${fixture.name}`,
-        ...(project
-          ? ["--filter", `label=com.docker.compose.project=${project}`]
-          : []),
-        ...(service
-          ? ["--filter", `label=com.docker.compose.service=${service}`]
-          : []),
-      ]);
-      const ids = result.stdout.trim().split(/\s+/).filter(Boolean);
-      if (!ids.length) {
-        return [];
-      }
-      const inspected = await checkedDocker(["inspect", ...ids]);
-      const items = JSON.parse(inspected.stdout) as Resource[];
-      items.forEach(owned);
-      return items;
-    };
+    const containers = (project?: string, service?: string) =>
+      ownedContainers({
+        ctx,
+        owner: OWNER,
+        name: fixture.name,
+        projects,
+        project,
+        service,
+      });
     const mounts = async (project: string) => {
       const items = await containers(project, "web");
       expect({

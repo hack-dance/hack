@@ -94,7 +94,7 @@ Every result has the same structured content:
 | `exitCode` | The child's exit code (1 for a refusal) |
 | `stdout`, `stderr` | Captured child output (withheld for the env tools; `stdout` withheld for instances) |
 | `data` | Parsed or projected result, when the tool defines one |
-| `outputTruncated` | `true` when output reached the 8 MiB capture limit |
+| `outputTruncated` | `true` when output reached the 8 MiB capture limit, or this payload was cut to the result size limit |
 | `spawned` | `false` only on a refusal: no child, no audit line |
 | `error` | Closed refusal or backend error: `code`, `reason`, `message` |
 
@@ -102,6 +102,29 @@ When `ok` is `false`, the result also has `isError: true`. Output above the
 8 MiB capture limit stops the command, and `data` is omitted so that a prefix is
 never presented as a complete result. The log tools are the exception, as their
 contract describes.
+
+### Result size limit
+
+Every tool's serialized result is limited to 9.5 MiB of UTF-8, measured after
+JSON escaping. MCP SDK clients on stdio close the connection when a message passes
+10 MiB. The rest of that margin covers the JSON-RPC envelope. The 8 MiB capture
+limit cannot do this job, because it counts raw output, and a result repeats that
+output and escapes it.
+
+A result within the limit is unchanged. Above it, the server removes data in this
+order:
+
+1. `content` text. It becomes JSON of at most 256 KiB with the same shape as
+   `structuredContent`, carrying less output and its own `outputTruncated: true`.
+   If `structuredContent` now fits, it is complete and has no such flag.
+2. For the log tools, `stdout`, then whole events from the end. See the
+   [logs contract](mcp-logs.md). For other tools, `data`, then the end of `stdout`.
+3. The end of `stderr`, past its first 16 KiB, which step 2 cannot take.
+
+A payload that was cut has `outputTruncated: true`, and its `stderr` ends with a
+fixed line saying to use the CLI for full output. A cut never splits a code point.
+`ok` and `exitCode` still describe the command, so a command that succeeded stays
+`ok` with `data` omitted. Run the equivalent CLI command when full output is needed.
 
 ### Refusals
 

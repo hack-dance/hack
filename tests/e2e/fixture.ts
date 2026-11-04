@@ -2,6 +2,13 @@ import type { Stats } from "node:fs";
 import { lstat, mkdir, readdir, readlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
+import {
+  HACK_DIR_GITIGNORE_BEGIN_MARKER,
+  HACK_DIR_GITIGNORE_END_MARKER,
+  HACK_DIR_GITIGNORE_ENTRIES,
+} from "../../src/templates.ts";
+import { fixtureGitEnv } from "../helpers/fixture-git.ts";
+import { recordOwnedFixture } from "./docker-ownership.ts";
 import { runCommand } from "./harness.ts";
 
 /**
@@ -39,6 +46,8 @@ export type LifecycleFixtureOptions = {
   readonly upBeforeEnvMarkerFile?: string;
   /** Adds a long-running lifecycle host process (bun sleep loop). */
   readonly persistentProcess?: boolean;
+  /** Adds a persistent lifecycle.up.before step (a long-running tunnel-style helper). */
+  readonly persistentUpBefore?: boolean;
   /** Makes docker compose reject the fixture after lifecycle startup. */
   readonly composeFailure?: boolean;
   /** Runs fixture containers without a host bind mount. */
@@ -49,9 +58,15 @@ export type LifecycleFixtureOptions = {
   readonly downBeforeFailure?: boolean;
 };
 
-/** Random, collision-proof project slug (also used for dev_host). */
+/**
+ * Random, collision-proof project slug (also used for dev_host). The name is
+ * recorded as owned by this run, so the harness may remove its Docker
+ * resources (see docker-ownership.ts).
+ */
 export function randomProjectName(): string {
-  return `e2e-${Math.random().toString(16).slice(2, 10)}`;
+  const name = `e2e-${Math.random().toString(16).slice(2, 10)}`;
+  recordOwnedFixture({ name });
+  return name;
 }
 
 /**
@@ -63,8 +78,15 @@ export async function createMonorepoFixture(opts: {
   readonly name?: string;
   readonly lifecycle?: LifecycleFixtureOptions;
   readonly oauthEnabled?: boolean;
+  /**
+   * Also commit the canonical `.hack/.gitignore` that `hack init` writes, so
+   * scenarios can assert that runtime commands leave `git status` clean.
+   */
+  readonly withHackGitignore?: boolean;
 }): Promise<MonorepoFixture> {
   const name = opts.name ?? randomProjectName();
+  // Record ownership before anything can create Docker resources for it.
+  recordOwnedFixture({ name });
   const devHost = `${name}.hack`;
   const root = join(opts.parentDir, name);
   const hackDir = join(root, ".hack");
@@ -92,6 +114,17 @@ export async function createMonorepoFixture(opts: {
       lifecycle: opts.lifecycle,
       oauthEnabled: opts.oauthEnabled,
     });
+    if (opts.withHackGitignore === true) {
+      await Bun.write(
+        join(hackDir, ".gitignore"),
+        [
+          HACK_DIR_GITIGNORE_BEGIN_MARKER,
+          ...HACK_DIR_GITIGNORE_ENTRIES,
+          HACK_DIR_GITIGNORE_END_MARKER,
+          "",
+        ].join("\n")
+      );
+    }
   }
 
   await gitInitAndCommit({ root });
@@ -112,6 +145,7 @@ export async function addLinkedWorktree(opts: {
     `${opts.fixture.name}-${opts.branch}`
   );
   const result = await runCommand({
+    exactEnv: fixtureGitEnv(),
     argv: [
       "git",
       "-C",
@@ -380,6 +414,14 @@ function buildLifecycleConfig(opts: {
       cwd: ".",
     });
   }
+  if (opts.lifecycle.persistentUpBefore === true) {
+    upBefore.push({
+      name: "e2e-tunnel",
+      command: "bun -e 'setInterval(() => {}, 60000)'",
+      cwd: ".",
+      persistent: true,
+    });
+  }
   if (opts.lifecycle.persistentProcess === true) {
     processes.push({
       name: "e2e-sleeper",
@@ -477,6 +519,7 @@ async function git(opts: {
   readonly args: readonly string[];
 }): Promise<void> {
   const result = await runCommand({
+    exactEnv: fixtureGitEnv(),
     argv: [
       "git",
       "-C",

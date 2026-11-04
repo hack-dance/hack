@@ -816,6 +816,51 @@ export function renderProjectConfigSchemaJson(): string {
               },
             },
           },
+          sharedHelpers: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["name", "command", "port"],
+              oneOf: [
+                { required: ["upstream"] },
+                { required: ["upstreamEnv"] },
+              ],
+              properties: {
+                name: {
+                  type: "string",
+                  pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                },
+                enabled: { type: "boolean" },
+                command: {
+                  type: "array",
+                  minItems: 1,
+                  items: { type: "string", minLength: 1 },
+                },
+                cwd: { type: "string", minLength: 1 },
+                port: { type: "integer", minimum: 1, maximum: 65_535 },
+                identityPath: { type: "string", pattern: "^/" },
+                upstream: { type: "string", minLength: 1 },
+                upstreamEnv: {
+                  type: "string",
+                  pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
+                },
+                env: {
+                  type: "array",
+                  uniqueItems: true,
+                  items: {
+                    type: "string",
+                    pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
+                  },
+                },
+                readyTimeoutMs: {
+                  type: "integer",
+                  minimum: 1,
+                  maximum: 600_000,
+                },
+              },
+            },
+          },
         },
       },
       controlPlane: {
@@ -1081,7 +1126,12 @@ export function renderProjectBranchesSchemaJson(): string {
             },
             note: { type: "string" },
             created_at: { type: "string", format: "date-time" },
-            last_used_at: { type: "string", format: "date-time" },
+            last_used_at: {
+              type: "string",
+              format: "date-time",
+              description:
+                "Deprecated: read-only legacy value. Usage is now machine-local in .hack/.internal/branch-usage.json.",
+            },
           },
         },
       },

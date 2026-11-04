@@ -1,5 +1,7 @@
 //! WU04: private local operation journal and bounded fixture supervisors.
 mod journal;
+#[cfg(feature = "node-kill-harness")]
+pub mod kill_harness;
 mod ownership;
 mod supervisor;
 mod transport;
@@ -14,6 +16,34 @@ use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+
+// The kill harness pauses a live supervisor on request. Keep it out of every
+// optimized build, so no release artifact can carry it even if a script enables
+// the feature by mistake.
+#[cfg(all(feature = "node-kill-harness", not(debug_assertions)))]
+compile_error!("the node-kill-harness feature is test-only and refused in optimized builds");
+
+/// Supervisor pause points. Without `node-kill-harness` these are empty and inlined.
+#[inline(always)]
+#[cfg_attr(not(feature = "node-kill-harness"), allow(unused_variables))]
+pub(crate) fn pause_point(root: &Path, id: &str, point: PausePoint) -> Result<()> {
+    #[cfg(feature = "node-kill-harness")]
+    return kill_harness::pause(
+        root,
+        id,
+        match point {
+            PausePoint::ClaimSpawn => kill_harness::Point::ClaimSpawn,
+            PausePoint::ExitPersist => kill_harness::Point::ExitPersist,
+        },
+    );
+    #[cfg(not(feature = "node-kill-harness"))]
+    Ok(())
+}
+#[derive(Clone, Copy)]
+pub(crate) enum PausePoint {
+    ClaimSpawn,
+    ExitPersist,
+}
 
 pub(crate) type Result<T> = std::result::Result<T, CandidateError>;
 pub(crate) fn error(message: impl ToString) -> CandidateError {

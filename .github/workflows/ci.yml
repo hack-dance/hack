@@ -9,6 +9,12 @@ on:
       - "v*"
   pull_request:
 
+concurrency:
+  # PR updates supersede earlier runs. Pushes need unique groups: even with
+  # cancellation disabled, a shared group replaces an older pending run.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   config-compiler:
     name: Config compiler (${{ matrix.os }})
@@ -36,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
@@ -58,6 +64,13 @@ jobs:
         run: bun test tests/native-compose-file-sources.test.ts tests/native-compose-file-owner.test.ts
       - name: Test explicit imported jobs and readiness with the matching compiler
         run: HACK_TEST_NATIVE_COMPILER_BINARY="$PWD/dist/hack-config-compiler" bun test tests/native-config-import-jobs.test.ts tests/native-config-import-readiness.test.ts
+      # The test shards run on macOS, where this test skips. Fail if it skips here too.
+      - name: Test the native Linux primary-checkout listing refusal
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bun test tests/project-env-local-inheritance.test.ts --test-name-pattern 'on Linux, a primary checkout' 2>&1 | tee "$RUNNER_TEMP/listing-refusal.log"
+          grep -Eq '^ *1 pass$' "$RUNNER_TEMP/listing-refusal.log"
       - name: Independently validate generated schema shape corpus
         run: |
           python3 -m venv "$RUNNER_TEMP/config-schema"
@@ -104,7 +117,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -166,13 +179,33 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Install pinned Zig for guest helpers
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
-        with:
-          version: "2026.9.12"
-          install_args: zig
-          add_shims_to_path: false
-          cache: false
-          env: false
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep the mise.toml pin; avoid installer fallback to obsolete archive names
+          # when the upstream download index is unavailable or malformed.
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64)
+              platform=x86_64-linux
+              checksum=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+              ;;
+            macOS-ARM64)
+              platform=aarch64-macos
+              checksum=3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+              ;;
+            macOS-X64)
+              platform=x86_64-macos
+              checksum=375b6909fc1495d16fc2c7db9538f707456bfc3373b14ee83fdd3e22b3d43f7f
+              ;;
+            *) echo "Unsupported Zig runner platform" >&2; exit 1 ;;
+          esac
+          archive="zig-${platform}-0.15.2.tar.xz"
+          destination="${RUNNER_TEMP}/candidate-zig"
+          mkdir -p "$destination"
+          curl --fail --location --retry 3 "https://ziglang.org/download/0.15.2/${archive}" -o "$destination/$archive"
+          (cd "$destination" && echo "$checksum  $archive" | shasum -a 256 --check)
+          tar -xf "$destination/$archive" -C "$destination"
+          echo "$destination/zig-${platform}-0.15.2" >> "$GITHUB_PATH"
       - name: Check candidate formatting
         run: cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check
       - name: Lint candidate core
@@ -180,13 +213,23 @@ jobs:
       - name: Test candidate isolation contracts
         run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --jobs 2
       - name: Lint candidate optional features
-        run: mise exec zig -- cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --all-features --jobs 2 -- -D warnings
+        run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --all-features --jobs 2 -- -D warnings
       - name: Test candidate optional feature contracts
-        run: mise exec zig -- cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-features --jobs 2
+        run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-features --jobs 2
       - name: Build and inspect local candidate
         run: |
-          mise exec zig -- ./scripts/build-hack-local.sh
+          ./scripts/build-hack-local.sh
           ./hack-local info --json
+      - name: Check release candidate carries no kill harness
+        # The all-features test step built the debug candidate with node-kill-harness,
+        # so its marker proves this grep can see the harness when it is compiled in.
+        run: |
+          marker=node-kill-harness-
+          LC_ALL=C grep -q -a "$marker" .hack-local/target/debug/hack-runtime-candidate
+          if LC_ALL=C grep -q -a "$marker" .hack-local/target/release/hack-runtime-candidate; then
+            echo "release hack-runtime-candidate contains the test-only kill harness" >&2
+            exit 1
+          fi
 
   secret-scan:
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -195,7 +238,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
         with:
           fetch-depth: 0
       - name: Install Gitleaks
@@ -222,11 +265,11 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v1
       - name: Install dependencies
@@ -269,11 +312,11 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install --yes tmux
       - name: Install dependencies
@@ -284,7 +327,10 @@ jobs:
         run: |
           docker pull alpine:3.20
           docker pull alpine:3.22
-          docker pull node:24.11.0-bookworm-slim
+          docker pull node:24.22.1-bookworm-slim
+          docker pull oven/bun:1.4.4-slim
+          # The qualified native file and storage helper artifact stays on this image
+          # until its catalog pins are requalified (src/lib/native-compose-vm-file-protocol.ts).
           docker pull oven/bun:1.4.2-slim
           docker pull postgres:17.6-alpine
           docker pull lucaslorentz/caddy-docker-proxy:2.10.0-alpine
@@ -382,7 +428,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Install dependencies
         run: bun install --frozen-lockfile
       # The one-off checks and builds run once, on shard 1.
@@ -445,11 +491,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
       - name: Require native regression tools
         run: |
           command -v python3
@@ -457,4 +503,4 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Run process and terminal regressions
-        run: bun test tests/daemon-command.test.ts tests/daemon-orphan.test.ts tests/host-exec-lifetime.test.ts tests/host-exec-tty.test.ts tests/shell-observation.test.ts tests/shared-host-lifecycle.test.ts
+        run: bun test tests/daemon-command.test.ts tests/daemon-orphan.test.ts tests/host-exec-lifetime.test.ts tests/host-exec-tty.test.ts tests/shell-observation.test.ts tests/shared-host-lifecycle.test.ts tests/project-shared-helpers.test.ts

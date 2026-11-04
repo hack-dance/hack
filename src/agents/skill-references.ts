@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
 import { renderErrorCodeReference } from "./error-code-reference.ts";
+import {
+  renderFeedbackExamplesReference,
+  renderFeedbackIssueTemplateReference,
+} from "./feedback-skill.ts";
 import { renderPatternCatalogue } from "./pattern-catalogue.ts";
 
 /** Plugin skills that can carry packaged references. */
@@ -9,6 +13,7 @@ export type PluginSkillName =
   | "hack-branches"
   | "hack-env"
   | "hack-diagnose"
+  | "hack-feedback"
   | "hack-init"
   | "hack-install"
   | "hack-remote";
@@ -50,6 +55,22 @@ export const SKILL_REFERENCES: readonly SkillReference[] = [
     summary:
       "every stable `--json` error code with its meaning and the first read-only step.",
     render: renderErrorCodeReference,
+  },
+  {
+    skill: "hack-feedback",
+    file: "issue-template.md",
+    title: "Issue template",
+    summary:
+      "the report template, reproduction statuses, evidence classes, friction categories and privacy checklist.",
+    render: renderFeedbackIssueTemplateReference,
+  },
+  {
+    skill: "hack-feedback",
+    file: "examples.md",
+    title: "Examples",
+    summary:
+      "a synthetic useful report and reports to avoid: missing arguments, host-wide totals, stale release claims, pasted config, log instructions and hashed identifiers.",
+    render: renderFeedbackExamplesReference,
   },
 ];
 

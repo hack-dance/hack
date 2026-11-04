@@ -21,6 +21,10 @@ import { mapLegacyNativeRetainedRouting } from "../../src/lib/native-config-impo
 import type { NativeRoutingResolution } from "../../src/lib/native-routing-plan-protocol.ts";
 import * as shell from "../../src/lib/shell.ts";
 import { restoreEnv } from "./env.ts";
+import { optionalFixtureNode } from "./optional-fixture-node.ts";
+import { installStaticFixtureNode } from "./static-fixture-node.ts";
+
+let fixtureNode: Promise<string | null> | undefined;
 
 export const ROUTING_CANARY = "synthetic-retained-sql-row";
 /** Closed set: the product's 15 s default proof deadline or its 60 s cap. */
@@ -121,8 +125,12 @@ export function retainedRoutingFixtureLifetime(deadline: number) {
 /** Private-store model only. Docker metadata and child effects are injected;
  * this does not qualify Go formatting, compiler semantics, TLS, SQL or a daemon. */
 export async function retainedRoutingFixture(
-  lifetime: ReturnType<typeof retainedRoutingFixtureLifetime>
+  lifetime: ReturnType<typeof retainedRoutingFixtureLifetime>,
+  options: { readonly lightweightCompiler?: boolean } = {}
 ) {
+  const node = options.lightweightCompiler
+    ? await (fixtureNode ??= optionalFixtureNode())
+    : null;
   const outer = await realpath(
     await mkdtemp(join(tmpdir(), "retained-routing-owner-"))
   );
@@ -222,6 +230,7 @@ else {
 `,
     { mode: 0o700 }
   );
+  await installStaticFixtureNode({ binary: compiler, node });
   const previousHome = process.env.HACK_HOME;
   process.env.HACK_HOME = home;
   const model = {
@@ -239,6 +248,9 @@ else {
     effects: string[][] = [];
   const hooks: {
     afterProbe?: (args: readonly string[]) => Promise<void>;
+    beforeProbeOwner?: (
+      opts: Parameters<typeof ownership.createNativeComposeProbe>[0]
+    ) => void;
     afterEffect?: () => Promise<void>;
   } = {};
   const json = (value: unknown) => JSON.stringify(value);
@@ -249,6 +261,21 @@ else {
     input
   ) => {
     const args = [...input];
+    if (
+      args[1] === "inspect" &&
+      args[0] === "container" &&
+      args.length > 5 &&
+      (!args[3]?.includes('"sites"') || args[3]?.includes('"created"'))
+    ) {
+      const start = commands.length;
+      const rows: string[] = [];
+      for (const id of args.slice(4)) {
+        rows.push(await probe([...args.slice(0, 4), id]));
+      }
+      commands.splice(start);
+      commands.push(args);
+      return rows.join("\n");
+    }
     commands.push(args);
     const [kind, action] = args,
       format = args[args.indexOf("--format") + 1] ?? "",
@@ -514,9 +541,10 @@ else {
   };
   const originalKill = process.kill;
   const spies = [
-    spyOn(ownership, "createNativeComposeProbe").mockImplementation(
-      () => probe
-    ),
+    spyOn(ownership, "createNativeComposeProbe").mockImplementation((opts) => {
+      hooks.beforeProbeOwner?.(opts);
+      return probe;
+    }),
     spyOn(engine, "createNativeComposeEngineIdentityObserver").mockReturnValue(
       null
     ),
@@ -601,11 +629,15 @@ else {
      * a compound lifecycle test may ask for the 60 s product cap so suite load cannot
      * expire its rollback proof. Both values are well-known product bounds. */
     store: (
-      opts: { readonly timeoutMs?: RetainedRoutingStoreTimeoutMs } = {}
+      opts: {
+        readonly timeoutMs?: RetainedRoutingStoreTimeoutMs;
+        readonly deadline?: number;
+      } = {}
     ) =>
       openLegacyComposeAdoptedGenerationStore({
         projectRoot: root,
         timeoutMs: opts.timeoutMs ?? 15_000,
+        deadline: opts.deadline,
       }),
     operation: async (
       store: Awaited<

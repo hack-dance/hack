@@ -13,6 +13,7 @@ import { isRecord } from "../../../src/lib/guards.ts";
 import { createNativeComposeProbe } from "../../../src/lib/native-compose-ownership.ts";
 import { setProjectEnvValue } from "../../../src/lib/project-env-config.ts";
 import { buildRuntimeHostMetadataOverride } from "../../../src/lib/runtime-host-metadata.ts";
+import { fixtureGitEnv } from "../../helpers/fixture-git.ts";
 import {
   addLinkedWorktree,
   commitAll,
@@ -1015,7 +1016,7 @@ export async function prepareFixtureInputs(
     ? await probe([
         "image",
         "inspect",
-        "oven/bun:1.4.2-slim",
+        "oven/bun:1.4.4-slim",
         "--format",
         "{{.Id}}",
       ])
@@ -4316,6 +4317,7 @@ async function runBranchWorktrees(ctx: ScenarioContext) {
             refused();
           }
           const switched = await runCommand({
+            exactEnv: fixtureGitEnv(),
             argv: [
               "git",
               "-C",

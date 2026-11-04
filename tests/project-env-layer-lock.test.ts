@@ -18,7 +18,7 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
-import { ClosedCliError } from "../src/lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import { parseDotEnv } from "../src/lib/env.ts";
 import {
   EnvLayerLockRefusedError,
@@ -490,11 +490,12 @@ async function holdLayerLock(layerPath: string): Promise<string> {
   return lockPath;
 }
 
+/** The closed refusal `pending` rejects with: a coded or an uncoded one. */
 async function closedRefusalOf(pending: Promise<unknown>): Promise<Error> {
   try {
     await pending;
   } catch (error: unknown) {
-    if (error instanceof ClosedCliError) {
+    if (error instanceof ClosedCliError || error instanceof HackCliError) {
       return error;
     }
     throw error;
@@ -664,6 +665,7 @@ test("a symlinked .internal beside the layer is refused before any lock or write
     })
   );
   expect(refusal).toBeInstanceOf(EnvLayerLockRefusedError);
+  expect(refusal).toMatchObject({ code: "E_PATH_CONFLICT" });
   expect(refusal.message).toBe(
     `Refused to update ${file}: the .internal entry beside it is a symlink or not a directory, so its write lock cannot be taken safely. Replace it with a regular directory and retry. Nothing was written.`
   );

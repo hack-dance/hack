@@ -40,6 +40,14 @@ export const NATIVE_RUN_EMPTY_SELECTION_REFUSAL =
   "Native `hack run` does not accept an empty --env or --profile value. Omit the option to use the running selection, or pass the env or profiles `hack up` started with. No command ran.";
 
 /**
+ * The closed `E_USAGE` refusal of native `exec --env` or `--profile`. Exec
+ * runs in the running service's environment, so any given value refuses,
+ * an empty one included; omitting both options is the only accepted form.
+ */
+export const NATIVE_EXEC_SELECTION_REFUSAL =
+  "Native exec does not support --env or --profile changes; it uses the running service environment.";
+
+/**
  * Refuse an empty native `run --env` or `--profile` value before it is
  * resolved. Elsewhere an empty `--env` means base layers and an empty
  * `--profile` means no profiles, but a native run never changes the running
@@ -52,6 +60,8 @@ export const NATIVE_RUN_EMPTY_SELECTION_REFUSAL =
 export function requireNonEmptyNativeRunOptions(opts: {
   readonly env: string | undefined;
   readonly profile: string | undefined;
+  /** The refusal text; native exec passes {@link NATIVE_EXEC_SELECTION_REFUSAL}. */
+  readonly refusal?: string;
 }): void {
   const emptyEnv = opts.env?.trim() === "";
   const emptyProfile =
@@ -59,7 +69,7 @@ export function requireNonEmptyNativeRunOptions(opts: {
   if (emptyEnv || emptyProfile) {
     throw new HackCliError({
       code: "E_USAGE",
-      message: NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
+      message: opts.refusal ?? NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
     });
   }
 }

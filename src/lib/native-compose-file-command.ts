@@ -57,7 +57,11 @@ type Saved = {
  * Cancellation never grants a later retry authority over an earlier armed child. */
 export async function runNativeComposeOwnedFileChild(opts: {
   readonly arm: () => Promise<void>;
-  readonly assertOwned: () => Promise<void>;
+  /**
+   * Final guard. `admittedMs` is the time it may use and still leave the child
+   * {@link minimumChildMs}; a guard that takes longer is refused with no child.
+   */
+  readonly assertOwned: (admittedMs: number) => Promise<void>;
   readonly command: readonly string[];
   readonly signal: AbortSignal;
   /**
@@ -66,6 +70,8 @@ export async function runNativeComposeOwnedFileChild(opts: {
    * only by storage proof time that the guard excludes from the start budget.
    */
   readonly deadline: () => number;
+  /** Least time before the deadline that admits the child; defaults to 0. */
+  readonly minimumChildMs?: number;
   readonly options: Omit<
     RunOptions,
     "timeoutMs" | "beforeSpawn" | "onSpawn" | "onExit"
@@ -82,15 +88,17 @@ export async function runNativeComposeOwnedFileChild(opts: {
     options.unsetEnvKeys = [...opts.options.unsetEnvKeys];
   }
   const hooks = opts.hooks;
+  const minimumChildMs = opts.minimumChildMs ?? 0;
+  const admittedMs = () => deadline() - minimumChildMs - Date.now();
   const requireAdmission = () => {
-    if (signal.aborted || Date.now() >= deadline()) {
+    if (signal.aborted || admittedMs() <= 0) {
       throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
     }
   };
   requireAdmission();
   await arm();
   requireAdmission();
-  await assertOwned();
+  await assertOwned(admittedMs());
   requireAdmission();
   return await run(command, {
     ...options,

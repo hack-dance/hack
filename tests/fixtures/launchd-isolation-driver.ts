@@ -94,6 +94,13 @@ function recordBunEffects(): {
 }
 
 const paths = resolveDaemonPaths({});
+if (process.argv[2] === "repair-output") {
+  const repair = await repairLaunchdProgramIfInvalid({ paths });
+  const secondRepair = await repairLaunchdProgramIfInvalid({ paths });
+  process.stdout.write(`${JSON.stringify({ repair, secondRepair })}\n`);
+  process.exit(0);
+}
+
 const results = {
   platform: process.platform,
   access: resolveLaunchdAccess(),

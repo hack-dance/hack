@@ -1,6 +1,5 @@
 import { lookup } from "node:dns/promises";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
 import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../agents/integration-revision.ts";
@@ -43,7 +42,9 @@ import {
   HACK_PROJECT_DIR_PRIMARY,
   LEGACY_GRAFANA_HOST,
   PROJECT_ENV_CONTRACT_FILENAME,
+  PROJECT_ENV_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
+  PROJECT_ENV_STATE_FILENAME,
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
@@ -118,7 +119,11 @@ import {
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
-import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
+import {
+  inspectHackEnvOverlayWarnings,
+  readHackEnvContract,
+} from "../lib/hack-env.ts";
+import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
 import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
@@ -160,6 +165,7 @@ import {
 } from "../lib/project.ts";
 import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
+  canMigrateCheckoutLegacyDotenv,
   discoverComposeServiceNames,
   ensureHackDirGitignore,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
@@ -168,8 +174,11 @@ import {
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   type LegacyComposeEnvFileReference,
+  LegacyDotenvMigrationRefusalError,
+  type LegacyProjectEnvMigration,
   migrateLegacyProjectEnv,
-  projectEnvConfigExists,
+  ProjectEnvLayerPathConflictError,
+  projectEnvConfigExistsForMutation,
   removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
@@ -389,7 +398,6 @@ const DOCTOR_SUMMARY_GROUPS = [
       "native root trust",
       "native ca repair",
       "native https route",
-      "agent integrations",
     ]),
   },
   {
@@ -842,22 +850,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     checkProject({ startDir, adopted })
   );
   results.push(projectCtx);
-  const agentIntegrationCheck = await runCheck(
-    s,
-    "agent integrations",
-    () => checkAgentIntegrations({ startDir, adopted }),
-    { timeoutMs: 5000 }
-  );
-  results.push(
-    agentIntegrationCheck.status === "error"
-      ? {
-          ...agentIntegrationCheck,
-          status: "warn",
-          message:
-            "Freshness audit unavailable (verify: hack setup sync --all-scopes --check)",
-        }
-      : agentIntegrationCheck
-  );
   results.push(
     await runCheck(s, "sessions mux", () =>
       checkSessionsMuxConfig({ startDir, adopted })
@@ -1690,47 +1682,6 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     status: "warn",
     message: "hackd not running (run: hack daemon start)",
   };
-}
-
-async function checkAgentIntegrations(opts: {
-  readonly startDir: string;
-  readonly adopted?: DoctorAdoptedProject | null;
-}): Promise<CheckResult> {
-  try {
-    return await checkAgentIntegrationsUnsafe(opts);
-  } catch {
-    return {
-      name: "agent integrations",
-      status: "warn",
-      message:
-        "Freshness audit unavailable (verify: hack setup sync --all-scopes --check)",
-    };
-  }
-}
-
-async function checkAgentIntegrationsUnsafe(opts: {
-  readonly startDir: string;
-  readonly adopted?: DoctorAdoptedProject | null;
-}): Promise<CheckResult> {
-  const project = opts.adopted ?? (await findProjectContext(opts.startDir));
-  const report = await inspectDoctorAgentIntegrations({
-    projectRoot: project?.projectRoot ?? null,
-  });
-  return report.status === "current"
-    ? {
-        name: "agent integrations",
-        status: "ok",
-        message: project
-          ? "Project and global guidance current"
-          : "Global guidance current",
-      }
-    : {
-        name: "agent integrations",
-        status: "warn",
-        message: project
-          ? "Agent integration review needed (inspect: hack setup sync --all-scopes --check; repair only affected, authorized targets; missing optional integrations need not be installed)"
-          : "Global agent integration review needed (inspect: hack setup sync --global --check; repair only affected, authorized targets; missing optional integrations need not be installed)",
-      };
 }
 
 async function checkGatewayConfig(): Promise<CheckResult> {
@@ -2711,11 +2662,11 @@ async function checkProjectEnvMode({
     };
   }
 
-  if (
-    await projectEnvConfigExists({
-      projectDir: ctx.projectDir,
-    })
-  ) {
+  const format = await doctorEnvFormat({ projectDir: ctx.projectDir });
+  if (format.kind === "conflict") {
+    return { name: "env mode", status: "error", message: format.message };
+  }
+  if (format.kind === "layers") {
     const defaultOverlay =
       cfg.env?.defaultOverlay ?? cfg.defaultEnvConfig ?? null;
     return {
@@ -2728,12 +2679,21 @@ async function checkProjectEnvMode({
   }
 
   const contractPath = resolve(ctx.projectDir, PROJECT_ENV_CONTRACT_FILENAME);
-  const contractExists = await pathExists(contractPath);
-  if (!contractExists) {
+  const contract = await readHackEnvContract({ projectDir: ctx.projectDir });
+  if (!contract.exists) {
     return {
       name: "env mode",
       status: "warn",
       message: `Missing ${contractPath} and no .hack/hack.env.default.yaml present`,
+    };
+  }
+  // The migration refuses this contract, so don't send the user to it. The parser's
+  // message isn't printed, because it can quote the file.
+  if (contract.parseError !== undefined) {
+    return {
+      name: "env mode",
+      status: "warn",
+      message: `${contractPath} can't be read or parsed. Correct it or remove it, then run \`hack doctor --migrate-env-config\`.`,
     };
   }
 
@@ -2743,6 +2703,31 @@ async function checkProjectEnvMode({
     message:
       "Legacy env format detected (.hack/hack.env.json). Run `hack doctor --migrate-env-config` to upgrade.",
   };
+}
+
+/**
+ * The env format the doctor checks report, decided by the same check that
+ * `hack env set`/`unset` use. A dangling or non-file `.hack/hack.env.*.yaml`
+ * entry is a conflict to report, never a silent "legacy format" (HACK-1370).
+ */
+async function doctorEnvFormat(opts: {
+  readonly projectDir: string;
+}): Promise<
+  | { readonly kind: "layers" | "legacy" }
+  | { readonly kind: "conflict"; readonly message: string }
+> {
+  try {
+    return (await projectEnvConfigExistsForMutation({
+      projectDir: opts.projectDir,
+    }))
+      ? { kind: "layers" }
+      : { kind: "legacy" };
+  } catch (error: unknown) {
+    if (error instanceof ProjectEnvLayerPathConflictError) {
+      return { kind: "conflict", message: error.message };
+    }
+    throw error;
+  }
 }
 
 async function checkProjectEnvOverlayWarnings({
@@ -2768,11 +2753,15 @@ async function checkProjectEnvOverlayWarnings({
     };
   }
 
-  if (
-    await projectEnvConfigExists({
-      projectDir: ctx.projectDir,
-    })
-  ) {
+  const format = await doctorEnvFormat({ projectDir: ctx.projectDir });
+  if (format.kind === "conflict") {
+    return {
+      name: "env overlay warnings",
+      status: "warn",
+      message: "Skipped: an env layer entry is unusable (see env mode)",
+    };
+  }
+  if (format.kind === "layers") {
     const serviceNames = await discoverComposeServiceNames({
       composeFile: ctx.composeFile,
     });
@@ -2838,10 +2827,18 @@ async function checkProjectEnvMaterialization({
     };
   }
 
+  const format = await doctorEnvFormat({ projectDir: ctx.projectDir });
+  if (format.kind === "conflict") {
+    return {
+      name: "env materialization",
+      status: "warn",
+      message: "Skipped: an env layer entry is unusable (see env mode)",
+    };
+  }
+  // Recorded state means modern inputs once existed; inspect it for staleness.
   if (
-    !(await projectEnvConfigExists({
-      projectDir: ctx.projectDir,
-    }))
+    format.kind === "legacy" &&
+    !(await pathExists(resolve(ctx.projectDir, PROJECT_ENV_STATE_FILENAME)))
   ) {
     return {
       name: "env materialization",
@@ -3604,9 +3601,18 @@ async function runDoctorFix(opts: {
 
   await maybeInstallMutagenForDoctorFix();
   await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
-  await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
+  // Let env migration refuse before creating an unrelated missing gitignore.
+  if (!opts.migrateEnvConfig) {
+    await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
+  }
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
   await maybeRepairHackd();
+  // Env migration changes project files only, so it runs before the Docker
+  // gate: an unreachable Docker never skips a requested migration.
+  if (opts.migrateEnvConfig) {
+    await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
+    await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
+  }
 
   const dockerOk = await dockerInfoOk();
   if (!dockerOk) {
@@ -3643,9 +3649,6 @@ async function runDoctorFix(opts: {
   await maybeExportCaddyCaCert({ paths });
   await maybeRepairMacHostTlsTrust();
   await maybeMigrateDnsmasq();
-  if (opts.migrateEnvConfig) {
-    await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
-  }
 
   renderSkippedDoctorFixSteps();
 }
@@ -3711,6 +3714,57 @@ function renderSkippedDoctorFixSteps(): void {
   );
 }
 
+function buildEnvMigrationNote(opts: {
+  readonly migrated: LegacyProjectEnvMigration;
+  readonly projectRoot: string;
+  /** Only the migration without a contract makes every value global. */
+  readonly globalDelivery: boolean;
+}): string {
+  const { migrated } = opts;
+  const notes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
+  for (const moved of migrated.movedPlainValues) {
+    notes.push(
+      `Moved ${moved.key} to ${relative(opts.projectRoot, moved.path)} (values omitted).`
+    );
+  }
+  if (migrated.updatedProjectConfig) {
+    notes.push("Updated .hack/hack.config.json for the modern env format.");
+  }
+  if (opts.globalDelivery) {
+    notes.push(
+      "Migrated values are global: every service, including one added later, and every host lifecycle hook now receives them."
+    );
+  }
+  return notes.join("\n");
+}
+
+/** Describes the env migration and asks whether to run it. */
+async function confirmProjectEnvMigration(opts: {
+  readonly projectDir: string;
+  readonly contractPath: string;
+  readonly hasContract: boolean;
+}): Promise<boolean> {
+  const { projectDir, contractPath, hasContract } = opts;
+  note(
+    [
+      "Detected legacy project env files.",
+      hasContract
+        ? `- source: ${contractPath} and current local env state`
+        : `- source: ${resolve(projectDir, PROJECT_ENV_FILENAME)} and its overlays (no ${PROJECT_ENV_CONTRACT_FILENAME}; secret-backend values are not migrated)`,
+      hasContract
+        ? `- target: ${resolve(projectDir, "hack.env.default.yaml")}`
+        : `- target: values go to the gitignored ${resolve(projectDir, "hack.env.local.yaml")} (and hack.env.<overlay>.local.yaml); ${resolve(projectDir, "hack.env.default.yaml")} is written with no values`,
+      "- runtime: direct env injection by default; .hack/.env becomes compatibility-only",
+    ].join("\n"),
+    "env migration"
+  );
+  return await doctorConfirm({
+    message:
+      "Migrate project env from .hack/hack.env.json/.hack/.env to hack.env.*.yaml now?",
+    initialValue: true,
+  });
+}
+
 async function maybeMigrateProjectEnvConfig(opts: {
   readonly startDir: string;
 }): Promise<void> {
@@ -3719,10 +3773,23 @@ async function maybeMigrateProjectEnvConfig(opts: {
     return;
   }
 
+  // The migration writes env layers, so it decides the format like
+  // `hack env set`: a symlinked layer counts as an env layer (never written
+  // through), and a dangling or non-file layer entry refuses closed with
+  // E_PATH_CONFLICT instead of being replaced.
   if (
-    await projectEnvConfigExists({
+    (await projectEnvConfigExistsForMutation({
       projectDir: project.projectDir,
-    })
+    })) &&
+    // A checkout whose legacy files hold values its layers don't deliver still
+    // needs migrating, for example after a teammate's migration was committed.
+    !(await canMigrateCheckoutLegacyDotenv({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      serviceNames: await discoverComposeServiceNames({
+        composeFile: project.composeFile,
+      }),
+    }))
   ) {
     note("Project already uses the new env config files.", "doctor");
     await maybeRepairModernProjectComposeEnvReferences({
@@ -3732,13 +3799,17 @@ async function maybeMigrateProjectEnvConfig(opts: {
     return;
   }
 
+  // A project without the hack.env.json contract keeps its values only in
+  // .hack/.env and .hack/.env.<overlay>; it is migrated from those files.
+  // `hack env set`/`unset --service` refusals in such a project point here.
   const contractPath = resolve(
     project.projectDir,
     PROJECT_ENV_CONTRACT_FILENAME
   );
-  if (!(await pathExists(contractPath))) {
-    return;
-  }
+  const contract = await readHackEnvContract({
+    projectDir: project.projectDir,
+  });
+  const hasContract = contract.exists;
 
   const cfg = await readProjectConfig(project);
   const projectName = (
@@ -3749,21 +3820,15 @@ async function maybeMigrateProjectEnvConfig(opts: {
   const serviceNames = await discoverComposeServiceNames({
     composeFile: project.composeFile,
   });
-  note(
-    [
-      "Detected legacy project env files.",
-      `- source: ${contractPath} and current local env state`,
-      `- target: ${resolve(project.projectDir, "hack.env.default.yaml")}`,
-      "- runtime: direct env injection by default; .hack/.env becomes compatibility-only",
-    ].join("\n"),
-    "env migration"
-  );
-  const shouldMigrate = await doctorConfirm({
-    message:
-      "Migrate project env from .hack/hack.env.json/.hack/.env to hack.env.*.yaml now?",
-    initialValue: true,
-  });
-  if (!shouldMigrate) {
+  // The migration refuses this contract, so don't describe it or ask first.
+  if (
+    contract.parseError === undefined &&
+    !(await confirmProjectEnvMigration({
+      projectDir: project.projectDir,
+      contractPath,
+      hasContract,
+    }))
+  ) {
     return;
   }
 
@@ -3773,20 +3838,29 @@ async function maybeMigrateProjectEnvConfig(opts: {
     projectName,
     serviceNames,
     materialize: false,
+    migrateUndeclaredDotenv: true,
   });
   if (migrated.wroteFiles.length === 0) {
     note("Legacy env migration found nothing to write.", "doctor");
     return;
   }
-  const migrationNotes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
-  if (migrated.updatedProjectConfig) {
-    migrationNotes.push(
-      "Updated .hack/hack.config.json for the modern env format."
+  note(
+    buildEnvMigrationNote({
+      migrated,
+      projectRoot: project.projectRoot,
+      globalDelivery: !hasContract,
+    }),
+    "doctor"
+  );
+
+  for (const retained of migrated.retainedEnvFiles) {
+    note(
+      `Kept ${retained.path}: keys not preserved in env layers: ${retained.keys.join(", ")} (values omitted).`,
+      "env cleanup"
     );
   }
-  note(migrationNotes.join("\n"), "doctor");
 
-  let blockedCleanupCandidates = [...migrated.blockedCleanupCandidates];
+  let composeRepaired = false;
   if (migrated.composeEnvFileReferences.length > 0) {
     note(
       buildComposeEnvRepairNote({
@@ -3815,7 +3889,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
           ].join("\n"),
           "compose env repair"
         );
-        blockedCleanupCandidates = [];
+        composeRepaired = true;
       } else {
         note(
           "No compose env_file updates were needed; legacy compatibility files remain blocked from cleanup.",
@@ -3830,10 +3904,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
     }
   }
 
-  const cleanupCandidates = [
-    ...migrated.cleanupCandidates,
-    ...blockedCleanupCandidates,
-  ].sort((left, right) => left.localeCompare(right));
+  const cleanupCandidates = doctorEnvCleanupCandidates({
+    migrated,
+    composeRepaired,
+  });
   if (cleanupCandidates.length === 0) {
     return;
   }
@@ -3861,6 +3935,25 @@ async function maybeMigrateProjectEnvConfig(opts: {
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
   }
+}
+
+/**
+ * Legacy env files doctor offers to delete after a migration. Files compose
+ * still names as `env_file` (`blockedCleanupCandidates`) are offered only when
+ * the compose repair removed those references; deleting them otherwise would
+ * break the next `hack up`.
+ */
+export function doctorEnvCleanupCandidates(opts: {
+  readonly migrated: Pick<
+    LegacyProjectEnvMigration,
+    "cleanupCandidates" | "blockedCleanupCandidates"
+  >;
+  readonly composeRepaired: boolean;
+}): string[] {
+  return [
+    ...opts.migrated.cleanupCandidates,
+    ...(opts.composeRepaired ? opts.migrated.blockedCleanupCandidates : []),
+  ].sort((left, right) => left.localeCompare(right));
 }
 
 function buildComposeEnvRepairNote(opts: {
@@ -3932,7 +4025,7 @@ export async function buildDoctorRemediationPlanLines(opts: {
   readonly migrateEnvConfig: boolean;
 }): Promise<string[]> {
   const steps = [
-    "Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.",
+    "Review and repair global Docker networks, CoreDNS, CA, host TLS env, and daemon drift where needed.",
   ];
 
   const adopted = await findDoctorAdoptedProject({ startDir: opts.startDir });
@@ -4007,23 +4100,46 @@ async function buildEnvMigrationPlanStep(opts: {
     return "Skip env migration because no project was detected from this path.";
   }
 
-  if (
-    await projectEnvConfigExists({
+  // Match the execution gate, including checkout values not yet in the layers.
+  // A layer conflict is reported as a plan; escaping paths still stop the run.
+  let modernExists: boolean;
+  try {
+    modernExists = await projectEnvConfigExistsForMutation({
       projectDir: opts.project.projectDir,
-    })
-  ) {
+    });
+    if (modernExists) {
+      modernExists = !(await canMigrateCheckoutLegacyDotenv({
+        projectRoot: opts.project.projectRoot,
+        projectDir: opts.project.projectDir,
+        serviceNames: await discoverComposeServiceNames({
+          composeFile: opts.project.composeFile,
+        }),
+      }));
+    }
+  } catch (error: unknown) {
+    if (error instanceof LegacyDotenvMigrationRefusalError) {
+      return error.message;
+    }
+    if (error instanceof ProjectEnvLayerPathConflictError) {
+      return `Refuse env migration (E_PATH_CONFLICT) because ${error.path} is not a regular env layer file.`;
+    }
+    throw error;
+  }
+  if (modernExists) {
     return "Skip env migration because this project already uses hack.env.*.yaml.";
   }
 
-  const contractPath = resolve(
-    opts.project.projectDir,
-    PROJECT_ENV_CONTRACT_FILENAME
-  );
-  if (await pathExists(contractPath)) {
+  const contract = await readHackEnvContract({
+    projectDir: opts.project.projectDir,
+  });
+  if (contract.parseError !== undefined) {
+    return "Refuse env migration (E_CONFIG_INVALID) because .hack/hack.env.json can't be read or parsed.";
+  }
+  if (contract.exists) {
     return "Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.";
   }
 
-  return "Skip env migration because no legacy project env config was found.";
+  return "Prompt to migrate legacy env values (.hack/.env and its overlays, no .hack/hack.env.json) to the gitignored machine-local hack.env.local.yaml and hack.env.<overlay>.local.yaml layers.";
 }
 
 /**
@@ -4462,7 +4578,7 @@ export async function inspectDoctorAgentIntegrations(opts: {
   readonly projectRoot: string | null;
   readonly homeDir?: string;
 }): Promise<{ readonly status: "current" | "stale" }> {
-  const home = (opts.homeDir ?? process.env.HOME ?? homedir()).trim();
+  const home = normalizeHomeDir(opts.homeDir) ?? resolveUserHomeDir();
   const hackOwnedPaths = [
     ...(opts.projectRoot
       ? [

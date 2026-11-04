@@ -13,12 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import {
+  ProjectEnvLayerPathConflictError,
   type ProjectEnvResolvedConfig,
   type ProjectEnvValuesByScope,
   resolveProjectEnvConfig,
   resolveProjectEnvMetadata,
 } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const roots: string[] = [];
 const originalEnv = {
@@ -95,6 +97,7 @@ function metadataFromRuntime(resolved: ProjectEnvResolvedConfig | null) {
 
 async function git(cwd: string, args: string[]) {
   const child = Bun.spawn(["git", ...args], {
+    env: fixtureGitEnv(),
     cwd,
     stdout: "pipe",
     stderr: "pipe",
@@ -429,8 +432,11 @@ test("metadata refuses unreadable selected layers instead of silently omitting t
     const path = join(f.projectDir, file);
     await mkdir(path);
     await expect(resolveProjectEnvMetadata(f)).rejects.toThrow(message);
-    // Existing runtime lookup behavior remains unchanged by strict planning reads.
-    expect(await resolveProjectEnvConfig(f)).toBeNull();
+    // Runtime lookup refuses too (HACK-1370): a non-file layer never reads
+    // as absent, which would fall back to the legacy .hack/.env format.
+    await expect(resolveProjectEnvConfig(f)).rejects.toBeInstanceOf(
+      ProjectEnvLayerPathConflictError
+    );
     await rm(path, { recursive: true });
   }
   await writeLayer(f.projectDir, "hack.env.default.yaml", {
@@ -438,9 +444,9 @@ test("metadata refuses unreadable selected layers instead of silently omitting t
   });
   await mkdir(join(f.projectDir, "hack.env.qa.yaml"));
   await expect(resolveProjectEnvMetadata(f)).rejects.toThrow(message);
-  expect((await resolveProjectEnvConfig(f))?.globalEnv).toEqual({
-    BASE: plainSentinel,
-  });
+  await expect(resolveProjectEnvConfig(f)).rejects.toBeInstanceOf(
+    ProjectEnvLayerPathConflictError
+  );
   expect(
     (await resolveProjectEnvMetadata({ ...f, envName: null }))
       ?.effectiveMetadata.global
@@ -454,7 +460,9 @@ test("metadata rejects a dangling selected layer and retains readable symlink be
   await expect(resolveProjectEnvMetadata(f)).rejects.toThrow(
     "Cannot resolve project env metadata: selected configuration is invalid or unreadable."
   );
-  expect(await resolveProjectEnvConfig(f)).toBeNull();
+  await expect(resolveProjectEnvConfig(f)).rejects.toBeInstanceOf(
+    ProjectEnvLayerPathConflictError
+  );
   await writeLayer(f.projectDir, "missing.yaml", {
     global: { PRESENT: plainSentinel },
   });

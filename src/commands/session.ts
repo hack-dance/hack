@@ -18,6 +18,7 @@ import {
   resolveHackEnv,
   selectHackEnvValues,
 } from "../lib/hack-env.ts";
+import { readHomeEnv } from "../lib/home-dir.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
 import {
@@ -65,6 +66,7 @@ import {
   buildSessionStreamLogEvent,
   buildSessionStreamStartEvent,
   diffNewLines,
+  formatSessionListTable,
   parseTmuxPanesOutput,
   splitLines,
   writeSessionStreamEvent,
@@ -821,7 +823,7 @@ async function handleSessionPicker(): Promise<number> {
   const options = buildSessionPickerOptions({
     sessions,
     projects,
-    home: process.env.HOME ?? "",
+    home: readHomeEnv() ?? "",
   });
 
   if (options.length === 0) {
@@ -1153,23 +1155,17 @@ const handleList: CommandHandlerFor<
     return 0;
   }
 
-  console.log(
-    `${"Workspace".padEnd(20) + "Project".padEnd(20) + "Backend".padEnd(10)}Status`
-  );
-  console.log("-".repeat(60));
-
-  for (const session of sessions) {
-    const projectName = resolveWorkspaceProjectName({
+  const rows = sessions.map((session) => ({
+    workspace: session.name,
+    project: resolveWorkspaceProjectName({
       workspaceName: session.name,
       projects,
-    });
-    const status = session.attached === true ? "attached" : "detached";
-    console.log(
-      session.name.padEnd(20) +
-        projectName.padEnd(20) +
-        session.backend.padEnd(10) +
-        status
-    );
+    }),
+    backend: session.backend,
+    status: session.attached === true ? "attached" : "detached",
+  }));
+  for (const line of formatSessionListTable(rows)) {
+    console.log(line);
   }
 
   return 0;

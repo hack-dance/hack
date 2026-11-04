@@ -136,7 +136,14 @@ stop recovery can clear it. A retained operation that reaches its caller deadlin
 refuses with its own fixed message ("reached its caller deadline"), not the
 source-or-binding-changed message, which only an observed drift issues
 (HACK-1340). `hack up`, `hack down` and `config adopt --stop` pass the Compose
-startup budget as that deadline. These rechecks do not freeze external editors or
+startup budget as that deadline. Every adopted project command (`up --detach`,
+`restart`, `down`, `ps`, `logs`, `exec`) starts one such deadline before it opens the
+store, and each store inspection phase takes the time it has left, capped at 60
+seconds, instead of a fixed 15-second clock. Publication file moves, rollback
+restoration and scoped routing revalidation retain that live remaining budget;
+copying their operation context cannot restore time already spent. When that deadline expires the command
+returns `E_STARTUP_TIMEOUT` with the "reached its caller deadline" message, not
+`E_CONFIG_INVALID` (HACK-1458). These rechecks do not freeze external editors or
 the engine atomically. Public output remains field/count/status metadata;
 capabilities and authored probe arguments are private. Prior versions 1–4 keep
 their existing execution behavior, and older upgraded owners refuse version 5
@@ -553,7 +560,60 @@ diagnostic; the literal-env message appears only on the first refusal. Plain
 override, so whenever `hack config adopt` refuses as busy over a pending switch
 its message adds the step that state accepts: `--recover --rollback` when the
 bound override holds literal values, otherwise `--recover` to complete or
-`--recover --rollback` to restore (HACK-1414).
+`--recover --rollback` to restore (HACK-1414). Once the switch's rollback is
+journaled (`rolling-back`, an interrupted rollback), plain `--recover` refuses
+whatever the override holds, so the message names only `--recover --rollback`
+to finish restoring the originals (HACK-1427).
+
+#### Rollback releases the generated env override (HACK-1437)
+
+A saved read binds each generated override in `.hack/.internal` by its exact
+bytes and file identity: device, inode, mode, link count, size, owner, mtime
+and ctime. Moving the file aside and back keeps its bytes and inode but
+changes its ctime, so the binding cannot be restored by hand. The binding
+protects two things. Adopted execution and switch completion must run exactly
+the inputs that preparation qualified and whose Compose config hash the
+retained containers carry, so a moved, edited or replaced file is treated as
+tampering and refused. And while an adoption is prepared, active or pending,
+`hack doctor --fix` and the env scrubs leave the bound file in place.
+
+Rollback is different. It restores the two held legacy originals, archives the
+candidate and verifies the original resources. It never reads, runs, rewrites
+or removes the generated env override, which is derived from the managed env
+layers and which the next `hack up` writes again. No data depends on it. So
+rollback (`--rollback` from `active`, and `--recover --rollback` from
+`switching` or `rolling-back`) reads the saved proof with the env override
+released: the override may be missing, moved back or replaced, and rollback
+neither reads it nor requires it. The saved `config_files` path list keeps the
+override's path, so each retained container is still matched against the
+exact label Compose recorded. Every other check stays exact: the managed env
+revision, the runtime override and the `.hack/.internal` directory identity,
+the saved config hashes, the original resource identities and stopped state,
+the held originals and the installed candidate. A change to any of those is
+still refused before anything moves. Execution and completion keep the full
+binding, so they still refuse a moved override.
+
+Before this change, moving the bound override aside left an interrupted
+rollback with no supported way out. `--recover --rollback` journaled
+`rolling-back` and then refused, plain `--recover` refuses a rollback, and the
+busy message named `--recover --rollback` again, so the user looped. Now
+`--recover --rollback` finishes in each pending state, and every step names
+only a command that the state does not refuse for a known reason:
+
+- `rolling-back`: `--recover --rollback`, whatever the override holds.
+- `switching` with a literal override: `--recover --rollback`.
+- `switching` with the bound override moved or changed, while the other
+  generated inputs still match: `--recover --rollback`, with a message that
+  completing refuses.
+- `switching` otherwise: `--recover` to complete it, or `--recover --rollback`
+  to restore the originals.
+
+A refused plain `--recover` adds the same step when the cause is one of these
+known states (`rolling-back`, or a moved or changed override). If rollback
+itself refuses, something it still checks has changed, such as a running
+original container, edited held originals or candidate, changed resources or
+managed env layers, or conflicting bytes at an original path. That refusal
+keeps the journal and recovery evidence for inspection.
 
 `hack doctor` reports the pinned literal override and names the first command the
 pending state accepts, since `hack down` and plain `--rollback` refuse in every
@@ -630,7 +690,10 @@ files, and preserve both legacy originals for rollback. Raw-byte or selection
 drift, unsafe managed-file permissions, generated-file identity changes, and
 original-resource drift refuse before a new
 effect; drift after an effect retains pending evidence. Rechecks do not freeze
-external editors or the engine. Old version 1/2 receipts remain readable; earlier
+external editors or the engine. Rollback is the one exception: it releases the
+generated env override, which it never reads or writes, and rechecks the rest
+(see "Rollback releases the generated env override"). Old version 1/2 receipts
+remain readable; earlier
 upgraded owners refuse version 3 through the existing selector boundary.
 
 The version 3 synthetic publication, saved-readback and raw-drift controls are
@@ -780,3 +843,28 @@ pending receipt and leave both instances unchanged until that same original
 directory is restored. Independent rollbacks and exact owned cleanup retain the
 original resource and volume-birth checks. Registration and synthetic controls
 alone do not qualify live mounts or Docker behavior.
+
+## Saved-generation test layout
+
+The saved-generation regression suite is split by behavior so each file stays
+inside CI's 12-minute file budget, including on runners that are 2–2.5 times
+slower. No case deadline is shortened to make the split fit.
+
+| Test file (`tests/`) | Coverage |
+| --- | --- |
+| `native-compose-adoption-generation-jobs.test.ts` | Public static7 dispatch, completed jobs, freshness and refusal |
+| `native-compose-adoption-generation-retained.test.ts` | Ordered retained effects, aggregate deadlines, cancellation and plain-owner reprepare |
+| `native-compose-adoption-generation-managed.test.ts` | Canonical generated inputs, moved overrides and rollback of earlier literal overrides |
+| `native-compose-adoption-generation-recovery.test.ts` | CLI literal-input refusals, recovery and named rollback guidance |
+| `native-compose-adoption-generation-linked.test.ts` | Typed locals, linked managed inputs, branch selection and receipt compatibility |
+| `native-compose-adoption-generation-topology.test.ts` | Bridge/health ownership, crossed receipts and recovery |
+| `native-compose-adoption-generation.test.ts` | Generation storage, leases, input/resource drift, publication boundaries and stop recovery |
+
+Each file calls `createAdoptionGenerationFixture` from
+`tests/helpers/native-compose-adoption-generation-fixture.ts`. Its closure owns
+that file's mutable state and hooks; each case still creates and removes its own
+temporary checkout. The public-job settlement guard still refuses reuse after an
+unconfirmed owner. Keep these files separate when adding coverage, and update
+`scripts/test-shard-durations.json` with measured durations so the sharder can
+balance their work. Verify both isolated file processes (as CI runs them) and a
+single Bun process containing the family (as the local suite runs them).

@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -81,7 +82,6 @@ test("doctor refuses native input before probing or repairing global runtime", a
             env: {
               HACK_HOME: join(root, "state"),
               HACK_GLOBAL_CONFIG_PATH: join(root, "state", "hack.config.json"),
-              HACK_DAEMON_DISABLE: "1",
               HACK_NO_INTERACTIVE: "1",
               HACK_LOGGER: "console",
               XDG_CACHE_HOME: cache,
@@ -170,6 +170,32 @@ test("doctor rejects mutating repair flags combined with json", () => {
   ).not.toThrow();
 });
 
+for (const form of ["dangling link", "malformed"] as const) {
+  test(`doctor remediation plan says a ${form} contract refuses, and doesn't offer the migration`, async () => {
+    const root = await createDoctorTestProject({ legacy: true });
+    try {
+      const contract = resolve(root, ".hack", "hack.env.json");
+      await rm(contract);
+      if (form === "dangling link") {
+        await symlink(resolve(root, "contract-that-is-gone"), contract);
+      } else {
+        await writeFile(contract, "{not json\n");
+      }
+
+      const lines = await buildDoctorRemediationPlanLines({
+        startDir: root,
+        migrateEnvConfig: true,
+      });
+
+      expect(lines.at(-1)).toBe(
+        "3. Refuse env migration (E_CONFIG_INVALID) because .hack/hack.env.json can't be read or parsed."
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("doctor remediation plan mentions env migration when requested for a legacy project", async () => {
   const root = await createDoctorTestProject({ legacy: true });
   try {
@@ -179,7 +205,7 @@ test("doctor remediation plan mentions env migration when requested for a legacy
     });
 
     expect(lines).toEqual([
-      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.",
+      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, and daemon drift where needed.",
       "2. Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent.",
       "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.",
     ]);
@@ -197,10 +223,25 @@ test("doctor remediation plan skips env migration when modern env files already 
     });
 
     expect(lines).toEqual([
-      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.",
+      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, and daemon drift where needed.",
       "2. Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent.",
       "3. Skip env migration because this project already uses hack.env.*.yaml.",
     ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("doctor plans migration when existing layers leave a legacy key undelivered", async () => {
+  const root = await createDoctorTestProject({ modern: true });
+  try {
+    await writeFile(join(root, ".hack", ".env"), "EXTRA=synthetic\n");
+    const lines = await buildDoctorRemediationPlanLines({
+      startDir: root,
+      migrateEnvConfig: true,
+    });
+    expect(lines.join("\n")).toContain("Prompt to migrate legacy env values");
+    expect(lines.join("\n")).not.toContain("already uses");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -270,10 +311,7 @@ test("doctor guidance keeps global integration recovery read-only", () => {
   });
 
   expect(guidance.configurationRepair).toEqual([]);
-  expect(guidance.followUp[0]).toBe(
-    "Inspect global integration paths: hack setup sync --global --check"
-  );
-  expect(guidance.followUp[1]).toContain("reported global targets");
+  expect(guidance.followUp).toEqual([]);
 });
 
 test("doctor audits global agent guidance without a project", async () => {
@@ -805,8 +843,5 @@ test("doctor does not turn an all-scope inventory into an automatic repair", () 
     ],
   });
   expect(guidance.configurationRepair).toEqual([]);
-  expect(guidance.followUp[0]).toBe(
-    "Inspect integration paths: hack setup sync --all-scopes --check"
-  );
-  expect(guidance.followUp[1]).toContain("authorized project/global scope");
+  expect(guidance.followUp).toEqual([]);
 });

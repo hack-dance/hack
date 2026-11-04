@@ -1,16 +1,19 @@
 import { fileURLToPath } from "node:url";
 import type { ExecResult, RunOptions } from "../lib/shell.ts";
-import { exec, findExecutableInPath } from "../lib/shell.ts";
-import type {
-  MuxBackend,
-  MuxSession,
-  MuxSessionCreateResult,
+import { findExecutableInPath } from "../lib/shell.ts";
+import {
+  type MuxBackend,
+  MuxCommandTimeoutError,
+  type MuxSession,
+  type MuxSessionCreateResult,
+  runMuxCommand,
 } from "./mux-backend.ts";
 import { stageMuxEnvironment } from "./private-environment.ts";
 
 const LIFECYCLE_OWNER_OPTION = "@hack_lifecycle_owner";
 const LIFECYCLE_OWNER_ENV = "HACK_LIFECYCLE_OWNER_TOKEN";
 const NO_TMUX_SERVER = /^no server running on [^\r\n]+$/;
+const NUMERIC_FIELD = /^\d+$/;
 const MISSING_TMUX_SOCKET =
   /^error connecting to [^\r\n]+ \(No such file or directory\)$/;
 
@@ -25,19 +28,40 @@ function tmuxQuote(value: string): string {
     .replaceAll("\r", "\\r")}"`;
 }
 
-/** Send values over stdin; even a pre-existing server receives the new session's env. */
-async function execTmuxSource(args: readonly string[]): Promise<ExecResult> {
+/**
+ * Send values over stdin; even a pre-existing server receives the new
+ * session's env. Runs under {@link runMuxCommand}'s bound with the `-u`
+ * client flag (HACK-1797); a timeout throws MuxCommandTimeoutError, whose
+ * message names only `tmux -u`. No command input ever reaches argv.
+ */
+async function execTmuxSource(
+  args: readonly string[],
+  opts: {
+    /** An exact diagnostic that carries no command input and may be kept. */
+    readonly safeDiagnostic?: string;
+  } = {}
+): Promise<ExecResult> {
   if (args.some((arg) => arg.includes("\0"))) {
     return { exitCode: 1, stdout: "", stderr: "Invalid tmux command input" };
   }
-  const result = await exec(["tmux", "start-server", ";", "source-file", "-"], {
-    stdin: new Blob([`${args.map(tmuxQuote).join(" ")}\n`]),
-    timeoutMs: 5000,
-  });
+  const result = await runMuxCommand(
+    ["tmux", "-u", "start-server", ";", "source-file", "-"],
+    {
+      stdin: new Blob([`${args.map(tmuxQuote).join(" ")}\n`]),
+    }
+  );
+  if (result.exitCode === 0) {
+    return result;
+  }
   // Parser diagnostics may quote command input, including private environment values.
-  return result.exitCode === 0
-    ? result
-    : { ...result, stderr: "tmux command failed" };
+  const diagnostic = result.stderr.trim();
+  return {
+    ...result,
+    stderr:
+      opts.safeDiagnostic !== undefined && diagnostic === opts.safeDiagnostic
+        ? diagnostic
+        : "tmux command failed",
+  };
 }
 
 /** Accept only tmux's explicit absence diagnostics; other failures remain unknown. */
@@ -69,6 +93,48 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+/**
+ * Parse `list-sessions` output in the
+ * `name<TAB>attached<TAB>path<TAB>windows<TAB>created` format.
+ *
+ * tmux rejects tabs in session names, and the attached, windows and created
+ * fields are numeric, so the path is everything between the second field and
+ * the last two. That keeps a path containing tabs, spaces or other delimiter
+ * characters out of the session name (HACK-1798). A line without all five
+ * fields, or with a non-numeric tail, is not a session row: returning its
+ * whole text as a name would print an ID that no session answers to.
+ */
+export function parseTmuxSessionListing(stdout: string): MuxSession[] {
+  const sessions: MuxSession[] = [];
+  for (const line of stdout.split("\n")) {
+    const fields = line.endsWith("\r") ? line.slice(0, -1) : line;
+    const parts = fields.split("\t");
+    if (parts.length < 5) {
+      continue;
+    }
+    const name = parts[0] ?? "";
+    const attached = parts[1] ?? "";
+    const created = parts.at(-1) ?? "";
+    const windows = parts.at(-2) ?? "";
+    const path = parts.slice(2, -2).join("\t");
+    const numeric = [attached, windows, created].every((field) =>
+      NUMERIC_FIELD.test(field)
+    );
+    if (!(name && numeric)) {
+      continue;
+    }
+    sessions.push({
+      backend: "tmux",
+      name,
+      attached: attached === "1",
+      path: path || null,
+      windows: parseIntOrNull(windows),
+      createdAt: new Date(Number.parseInt(created, 10) * 1000).toISOString(),
+    });
+  }
+  return sessions;
+}
+
 export function createTmuxBackend(): MuxBackend {
   const available = Boolean(findExecutableInPath("tmux"));
 
@@ -85,40 +151,22 @@ export function createTmuxBackend(): MuxBackend {
       "#{session_created}",
     ].join("\t");
 
-    const result = await exec(["tmux", "list-sessions", "-F", format], {
-      stdin: "ignore",
-    });
+    // `-u` keeps the tab separators intact. Without a UTF-8 locale (LANG
+    // unset or C), tmux replaces control characters in client output with
+    // `_`, which turns every line into one unmatched name: lifecycle
+    // sessions then look absent to both `up` and `down` (HACK-1797).
+    const result = await runMuxCommand(
+      ["tmux", "-u", "list-sessions", "-F", format],
+      {
+        stdin: "ignore",
+      }
+    );
 
     if (result.exitCode !== 0) {
       return [];
     }
 
-    const sessions: MuxSession[] = [];
-    for (const line of result.stdout.trim().split("\n")) {
-      if (!line) {
-        continue;
-      }
-      const [name, attached, path, windows, created] = line.split("\t");
-      if (!name) {
-        continue;
-      }
-
-      const createdAt =
-        created && created.length > 0
-          ? new Date(Number.parseInt(created, 10) * 1000).toISOString()
-          : null;
-
-      sessions.push({
-        backend: "tmux",
-        name,
-        attached: attached === "1",
-        path: path || null,
-        windows: parseIntOrNull(windows),
-        createdAt,
-      });
-    }
-
-    return sessions;
+    return parseTmuxSessionListing(result.stdout);
   };
 
   const createSession = async (opts: {
@@ -131,6 +179,10 @@ export function createTmuxBackend(): MuxBackend {
       return { ok: false, error: "tmux_unavailable" };
     }
 
+    // These are source-file words sent over stdin, never tmux argv. The
+    // owner token and environment travel with the creating command itself,
+    // so no interrupted create leaves a live session without its token
+    // (createsWithOwnerToken) and no separate set-option/set-environment runs.
     const args = ["new-session", "-d", "-s", opts.name];
     if (opts.cwd) {
       args.push("-c", opts.cwd);
@@ -146,7 +198,11 @@ export function createTmuxBackend(): MuxBackend {
       args.push("-e", `${LIFECYCLE_OWNER_ENV}=${opts.lifecycleOwnerToken}`);
     }
 
-    const result = await execTmuxSource(args);
+    const result = await execTmuxSource(args, {
+      // tmux's duplicate-session refusal names only the session: keep it
+      // visible (describeSessionCreateFailure), scrub everything else.
+      safeDiagnostic: `duplicate session: ${opts.name}`,
+    });
     if (result.exitCode !== 0) {
       return {
         ok: false,
@@ -163,27 +219,44 @@ export function createTmuxBackend(): MuxBackend {
   const killSession = async (opts: {
     readonly name: string;
   }): Promise<ExecResult> => {
-    return await exec(["tmux", "kill-session", "-t", opts.name], {
-      stdin: "ignore",
-    });
+    // `=` makes tmux match the name exactly. A bare target falls back to a
+    // prefix match, so stopping `demo` after it exited could kill
+    // `demo--lifecycle`, a session the caller never verified.
+    return await runMuxCommand(
+      ["tmux", "kill-session", "-t", `=${opts.name}`],
+      {
+        stdin: "ignore",
+      }
+    );
   };
 
   const readSessionPresence = async (opts: { readonly name: string }) => {
     if (!available) {
       return "unknown" as const;
     }
-    const result = await exec(["tmux", "has-session", "-t", `=${opts.name}`], {
-      stdin: "ignore",
+    const result = await runMuxCommand(
+      ["tmux", "has-session", "-t", `=${opts.name}`],
+      {
+        stdin: "ignore",
+      }
+    ).catch((error: unknown) => {
+      if (error instanceof MuxCommandTimeoutError) {
+        return null;
+      }
+      throw error;
     });
-    return classifyTmuxSessionPresence({ result, name: opts.name });
+    // A timed-out query proves nothing about presence.
+    return result === null
+      ? ("unknown" as const)
+      : classifyTmuxSessionPresence({ result, name: opts.name });
   };
 
   const readLifecycleOwnerToken = async (opts: {
     readonly name: string;
   }): Promise<string | null> => {
-    const result = await exec(
+    const result = await runMuxCommand(
       ["tmux", "show-options", "-v", "-t", opts.name, LIFECYCLE_OWNER_OPTION],
-      { stdin: "ignore" }
+      {}
     );
     if (result.exitCode === 0) {
       const token = result.stdout.trim();
@@ -191,9 +264,9 @@ export function createTmuxBackend(): MuxBackend {
         return token;
       }
     }
-    const environment = await exec(
+    const environment = await runMuxCommand(
       ["tmux", "show-environment", "-t", opts.name, LIFECYCLE_OWNER_ENV],
-      { stdin: "ignore" }
+      {}
     );
     if (environment.exitCode !== 0) {
       return null;
@@ -208,9 +281,9 @@ export function createTmuxBackend(): MuxBackend {
   const listSessionWindowNames = async (opts: {
     readonly name: string;
   }): Promise<ReadonlySet<string> | null> => {
-    const result = await exec(
+    const result = await runMuxCommand(
       ["tmux", "list-windows", "-t", opts.name, "-F", "#{window_name}"],
-      { stdin: "ignore" }
+      {}
     );
     if (result.exitCode !== 0) {
       return null;
@@ -270,14 +343,18 @@ export function createTmuxBackend(): MuxBackend {
     readonly name: string;
     readonly keys: string;
   }): Promise<ExecResult> => {
-    return await exec(["tmux", "send-keys", "-t", opts.name, opts.keys], {
-      stdin: "ignore",
-    });
+    return await runMuxCommand(
+      ["tmux", "send-keys", "-t", opts.name, opts.keys],
+      {
+        stdin: "ignore",
+      }
+    );
   };
 
   return {
     name: "tmux",
     available,
+    createsWithOwnerToken: true,
     listSessions,
     createSession,
     killSession,

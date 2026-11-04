@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fixtureGitEnv } from "../helpers/fixture-git.ts";
 import { privateCliEnv } from "../helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -66,6 +67,7 @@ volumes:
   await writeFile(join(primary, "bun.lock"), "lock-one\n");
   const git = (args: string[]) => {
     const result = Bun.spawnSync(["git", "-C", primary, ...args], {
+      env: fixtureGitEnv(),
       stdout: "pipe",
       stderr: "pipe",
     });

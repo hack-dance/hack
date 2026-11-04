@@ -15,6 +15,7 @@ import { resolveHackEnv } from "../src/lib/hack-env.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const savedEnv = new Map<string, string | undefined>();
 let root: string;
@@ -333,6 +334,9 @@ test("legacy get reads only the requested backend key and preserves empty overla
     { key: "OTHER", source: "keychain" },
   ]);
   const calls: string[] = [];
+  // tests/preload.ts keeps this in memory; the gate only has to be open.
+  const keychainFlag = process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK;
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "0";
   const spy = spyOn(secrets, "get").mockImplementation(async (opts) => {
     expect(opts.service).toBe("hack-env-get-fixture");
     calls.push(opts.name);
@@ -352,6 +356,7 @@ test("legacy get reads only the requested backend key and preserves empty overla
     expect(calls).toEqual([]);
   } finally {
     spy.mockRestore();
+    restoreEnv("HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK", keychainFlag);
   }
 });
 
@@ -527,7 +532,12 @@ async function git(cwd: string, args: readonly string[]) {
       "core.hooksPath=/dev/null",
       ...args,
     ],
-    { cwd, stdout: "pipe", stderr: "pipe" }
+    {
+      env: fixtureGitEnv(),
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    }
   );
   const [code, stderr] = await Promise.all([
     child.exited,

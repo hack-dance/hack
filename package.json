@@ -1,7 +1,7 @@
 {
   "name": "hack-cli",
   "version": "4.2.1",
-  "packageManager": "bun@1.4.2",
+  "packageManager": "bun@1.4.4",
   "module": "index.ts",
   "type": "module",
   "workspaces": [
@@ -76,7 +76,13 @@
     "ci:bun-crash-census": "bun scripts/ci-bun-crash-census.ts",
     "docs:cli-reference": "bun run scripts/generate-cli-reference.ts",
     "docs:agent-client-capabilities": "bun run scripts/generate-agent-client-capabilities.ts",
-    "generate:agent-plugins": "bun run scripts/generate-agent-plugins.ts"
+    "generate:agent-plugins": "bun run scripts/generate-agent-plugins.ts",
+    "docs:prepare": "bun scripts/docs/prepare.ts",
+    "docs:check": "bun scripts/docs/check.ts",
+    "docs:dev": "bun run docs:prepare && bun run --cwd site dev",
+    "docs:build": "bun run docs:prepare && bun run --cwd site build",
+    "docs:typecheck": "bun run docs:prepare && tsc --project scripts/docs/tsconfig.json --noEmit && bun run --cwd site typecheck",
+    "docs:smoke": "bun scripts/docs/smoke.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.11",
@@ -112,11 +118,11 @@
     "@charmland/lipgloss": "2.0.0-beta.3-0e280f3",
     "@clack/prompts": "1.0.0-alpha.9",
     "elysia": "^1.4.9",
-    "@modelcontextprotocol/sdk": "1.26.0",
+    "@modelcontextprotocol/sdk": "1.32.0",
     "@opentui/core": "^0.1.74",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "yaml": "2.8.2",
-    "zod": "4.3.5"
+    "zod": "4.6.7"
   }
 }

@@ -6,7 +6,7 @@ projects, or install DNS or trust automatically. Its graph commands support a
 bounded subset;
 this bundle is not application parity or release qualification.
 
-Build with the repository's pinned Bun 1.4.2, Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
+Build with the repository's pinned Bun 1.4.4, Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
 and the Rust `aarch64-unknown-linux-musl` standard library already installed. The
 build requires a clean checkout and refuses missing prerequisites; it does not install toolchains:
 
@@ -911,7 +911,15 @@ the option to inherit. A profile list is empty only when every entry is, so
 `--profile "web,"` asks for `web`. On the native backend the empty check runs
 first, before the project is selected, so an authored `hack.project.json`
 project refuses an empty value with the same `E_USAGE` line rather than its
-`E_NATIVE_PROJECT_UNSUPPORTED` refusal of any `--env` or `--profile`.
+`E_NATIVE_PROJECT_UNSUPPORTED` refusal of any `--env` or `--profile`. An
+authored project on the Compose backend refuses an empty value with the same
+line before any compiler work, so every native `run` agrees; a legacy Compose
+project keeps its meaning, where an empty `--env` selects the base layers.
+Native `exec` uses the running service environment. An empty `--env` or
+`--profile` refuses with one closed `E_USAGE` line before the project is
+selected, for authored and legacy projects alike. A non-empty value also
+refuses: a legacy project with the same line, an authored project with its
+`E_NATIVE_PROJECT_UNSUPPORTED` refusal, as for `run`.
 `run` never restarts the project to change its selection.
 Services with no managed environment values also support `run`; they keep the
 admitted image's environment without creating a private environment mount or
@@ -1760,7 +1768,16 @@ record still resumes, and its bytes are still counted. A digest reviewed before 
 earlier quarantine of the same volume no longer matches; inspect again. If the
 volume changes during the guest effect, the command fails with
 `graph_cache_quarantine_unsettled` and the record stays pending for explicit resume
-or resolution.
+or resolution. A failed recheck inspection or guest directory-identity read instead
+returns `graph_cache_quarantine_unobserved`: the command could not observe the
+volume after a possible effect. It makes no claim that the volume changed. The
+record stays pending, and explicit resolution can settle it once observation is
+available again.
+
+Retained-volume recovery and removal use stable inspection fields plus the guest
+`_data` device/inode, so a quarantine does not invalidate their selection. See the
+[volume identity audit](../reference/volume-identity.md) for covered workflows,
+excluded protocols, and compatibility limits.
 
 A private record under the candidate home's `run/cache-quarantine/` is written
 before the guest effect and marked `quarantined` after the guest syncs the move.

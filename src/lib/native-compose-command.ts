@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { LogOutputFormat } from "../backends/log-backend.ts";
+import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../backends/native-project-one-off.ts";
 import type { RuntimeBaseOptions } from "../backends/runtime-backend.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
@@ -10,9 +11,13 @@ import {
   okResult,
 } from "./cli-result.ts";
 import {
-  createNativeComposeStartDeadline,
+  createNativeComposeWorkloadPhases,
+  DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
+  type NativeComposeWorkloadPhases,
+  resolveComposeImageTimeoutMs,
   resolveComposeStartupTimeoutMs,
   resolveNativeStorageTimeoutMs,
+  runNativeComposeWorkloadPhases,
 } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
 import { tryNativeAuthoredCommand } from "./native-authored-command.ts";
@@ -103,6 +108,9 @@ import {
   NativeComposeOwnershipError,
   type NativeComposeOwnershipObservation,
   type NativeComposeOwnershipOptions,
+  nativeComposePreSpawnOwnershipTimeoutMs,
+  nativeComposeStopChildReserveMs,
+  nativeComposeStopOwnershipTimeoutMs,
   observeSavedNativeComposeOwned,
   waitNativeComposeStartupOwned,
 } from "./native-compose-ownership.ts";
@@ -431,6 +439,13 @@ async function ownershipSelection(opts: {
     expectedWorkloadNetworks,
     ...(opts.operation === "down" && opts.recover
       ? { recovery: "down" as const }
+      : {}),
+    ...(opts.operation === "down"
+      ? {
+          timeoutMs: nativeComposeStopOwnershipTimeoutMs(
+            resolveComposeStartupTimeoutMs()
+          ),
+        }
       : {}),
     signal: opts.signal,
   };
@@ -805,8 +820,8 @@ async function savedCommand(opts: {
               >;
             } = { files: null };
             try {
-              const stopDeadline =
-                Date.now() + resolveComposeStartupTimeoutMs();
+              const stopBudgetMs = resolveComposeStartupTimeoutMs();
+              const stopDeadline = Date.now() + stopBudgetMs;
               const code = await runNativeComposeOwnedFileChild({
                 command: [
                   ...composeArgs(generation),
@@ -815,6 +830,7 @@ async function savedCommand(opts: {
                 ],
                 signal,
                 deadline: () => stopDeadline,
+                minimumChildMs: nativeComposeStopChildReserveMs(stopBudgetMs),
                 arm: async () => {
                   stopping.files = await prepareNativeComposeSavedFileStop({
                     mutation,
@@ -822,7 +838,19 @@ async function savedCommand(opts: {
                     saved,
                   });
                 },
-                assertOwned,
+                assertOwned: async (admittedMs) => {
+                  await prepared.assertOwned({
+                    timeoutMs: nativeComposePreSpawnOwnershipTimeoutMs({
+                      stopBudgetMs,
+                      admittedMs,
+                    }),
+                  });
+                  await assertNativeComposeSavedFileEngines({
+                    saved,
+                    store,
+                    signal,
+                  });
+                },
                 options: {
                   cwd: base.cwd,
                   env: base.env,
@@ -1043,8 +1071,11 @@ async function prepareSavedStop(opts: {
   const hasDownHooks = Object.hasOwn(document, "x-hack-native-down-hooks");
   let engineStopped = false;
   let storage: readonly NativeComposeRetainedVolume[] | null = null;
-  const assertOwned = async () => {
-    const observed = await assertNativeComposeOwned(selection);
+  const assertOwned = async (bound?: { readonly timeoutMs: number }) => {
+    const observed = await assertNativeComposeOwned({
+      ...selection,
+      ...bound,
+    });
     storage = observed.volumes;
     if (
       engineStopped &&
@@ -1426,34 +1457,34 @@ async function executePreparedNativeWorkloads(opts: {
   readonly observeStorage: (
     observed: NativeComposeOwnershipObservation
   ) => void;
-  /** Start budget whose deadline excludes guard storage proof time. */
-  readonly start: ReturnType<typeof createNativeComposeStartDeadline>;
+  /** Image phase, then start phase; each excludes its own guard proof time. */
+  readonly phases: NativeComposeWorkloadPhases;
 }) {
-  const deadline =
-    opts.options.operation === "run" ? undefined : opts.start.deadline;
-  if (opts.builds.length > 0) {
-    const code = await buildNativeComposeImages({
-      intents: opts.builds,
-      projectRoot: opts.projectRoot,
-      deadline,
-      signal: opts.signal,
-      env: opts.base.env,
-      json: opts.options.json === true,
-      assertFresh: opts.assertFresh,
-      assertOwned: opts.assertOwned,
-    });
-    if (code !== 0) {
-      return { value: code, outcome: "uncertain" as const };
-    }
-    await opts.assertFresh();
-    await opts.assertOwned();
-  }
-  if (opts.options.operation === "run") {
-    return await runOneOff(opts);
-  }
-  return await startNativeComposeWorkloads({
-    ...opts,
-    deadline: opts.start.deadline,
+  return await runNativeComposeWorkloadPhases({
+    phases: opts.phases,
+    boundedBuilds: opts.options.operation !== "run",
+    build:
+      opts.builds.length > 0
+        ? (deadline) =>
+            buildNativeComposeImages({
+              intents: opts.builds,
+              projectRoot: opts.projectRoot,
+              deadline,
+              signal: opts.signal,
+              env: opts.base.env,
+              json: opts.options.json === true,
+              assertFresh: opts.assertFresh,
+              assertOwned: opts.assertOwned,
+            })
+        : null,
+    // No separate post-build guard: the build ends with a full guard after its
+    // last image read, so arming follows a guard directly, and the spawn
+    // (Compose `up` or one-off `run`) still runs its own full guard first.
+    start: (deadline) =>
+      opts.options.operation === "run"
+        ? runOneOff(opts)
+        : startNativeComposeWorkloads({ ...opts, deadline }),
+    failed: (code) => ({ value: code, outcome: "uncertain" as const }),
   });
 }
 
@@ -1613,6 +1644,17 @@ async function executePreparedGeneration(opts: {
   if (operation !== "up" && operation !== "restart" && operation !== "run") {
     return invalid();
   }
+  // Resolve the workload budgets before the journaled effect, so an invalid
+  // value refuses before storage enrollment, builds or container start. A
+  // one-off run never bounds its builds, so it does not read the image budget.
+  const budgets = {
+    imageTimeoutMs:
+      operation === "run"
+        ? DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS
+        : resolveComposeImageTimeoutMs(),
+    startupTimeoutMs: resolveComposeStartupTimeoutMs(),
+    storageTimeoutMs: resolveNativeStorageTimeoutMs(),
+  };
   const after = preparedAfterHookPhase({
     inputs,
     acquire,
@@ -1723,13 +1765,11 @@ async function executePreparedGeneration(opts: {
           storage?.enroll(generation, document)
         );
         stage = "workload-execution";
-        // The start budget begins after enrollment. Guard storage proofs are
-        // bounded by their own storage carriers and do not consume it; their
-        // excluded total is capped by a multiple of the storage budget.
-        const start = createNativeComposeStartDeadline({
-          timeoutMs: resolveComposeStartupTimeoutMs(),
-          storageTimeoutMs: resolveNativeStorageTimeoutMs(),
-        });
+        // The image and start budgets begin after enrollment, one after the
+        // other. Guard storage proofs are bounded by their own storage
+        // carriers and do not consume either; their excluded total is capped
+        // per phase by a multiple of the storage budget.
+        const phases = createNativeComposeWorkloadPhases(budgets);
         return await executePreparedNativeWorkloads({
           options,
           generation,
@@ -1743,7 +1783,7 @@ async function executePreparedGeneration(opts: {
           projectRoot,
           signal,
           assertFresh,
-          start,
+          phases,
           observeStorage: ownership.observeStorage,
           assertOwned: () =>
             assertNativeComposeEffectOwned({
@@ -1753,7 +1793,7 @@ async function executePreparedGeneration(opts: {
                 ? nativeComposeGuardStorageProof({
                     verify: storage.verify,
                     generation,
-                    excludeStorage: start.excludeStorage,
+                    excludeStorage: phases.excludeStorage,
                     takeAdjacentProof: () => {
                       const adjacentProof = adjacentGuardProof;
                       adjacentGuardProof = false;
@@ -2381,6 +2421,31 @@ function validateNativeOptions(options: NativeComposeCommandOptions): boolean {
   return prepare;
 }
 
+/**
+ * An authored project's `run` refuses an empty `--env` or `--profile` with the
+ * same closed E_USAGE line as a native-backend run, so every native run agrees.
+ * Without this, the Compose-backend authored path would read `--env ""` as the
+ * base env and `--profile ""` as no profiles. `input` carries the raw `--env`
+ * text and the parsed `--profile` list, where an all-empty list is `[]`. The
+ * native backend refuses earlier, before any dispatch; legacy Compose
+ * projects never reach this, and there an empty `--env` still means base.
+ */
+function refuseEmptyAuthoredRunSelection(
+  input: NativeComposeCommandOptions
+): void {
+  if (input.operation !== "run") {
+    return;
+  }
+  const emptyEnv =
+    typeof input.overlay === "string" && input.overlay.trim() === "";
+  if (emptyEnv || input.profiles?.length === 0) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
+    });
+  }
+}
+
 /** Dispatch native authored inputs before any legacy context or registry mutation. */
 export async function tryNativeComposeCommand(
   input: NativeComposeCommandOptions
@@ -2410,6 +2475,7 @@ async function dispatchNativeComposeCommand(
   if (!selected) {
     return null;
   }
+  refuseEmptyAuthoredRunSelection(input);
   const native = await tryNativeAuthoredCommand({ options, selected });
   if (native !== null) {
     return native;

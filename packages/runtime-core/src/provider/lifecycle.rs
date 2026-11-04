@@ -1,4 +1,5 @@
 mod admission_pool;
+mod disk_handles;
 pub mod host_filesystem;
 mod interrupted;
 mod operating_guard;
@@ -1997,16 +1998,26 @@ impl Drop for VmLock {
     }
 }
 
-/// How long `down`, `recover` and other stop paths wait for `lsof` over the owned disks.
-const STOP_HANDLE_WAIT: Duration = Duration::from_secs(5);
+/// The bound [`lock_absent_disks`] gives the disk-handle scan: the production stop-path
+/// bound [`disk_handles::STOP_HANDLE_WAIT`].
+#[cfg(not(test))]
+const STOP_SCAN_WAIT: Duration = disk_handles::STOP_HANDLE_WAIT;
+/// The unit-test build of [`STOP_SCAN_WAIT`]. Release-check fixtures prove what the scan
+/// reports (status 1, no output), not how fast it reports it, and they run beside other
+/// tests' work; on a loaded host one scan took longer than 5 s and the fixture failed as
+/// `provider_timeout_uncertain` before its result under test (HACK-1457). The production
+/// bounds themselves are tested on a fake clock in [`disk_handles`].
+#[cfg(test)]
+const STOP_SCAN_WAIT: Duration = super::test_executable::LOADED_HOST_SCAN_WAIT;
 
 /// Keep this guard through alias restoration and the stopped receipt.
 fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<VmLock, CandidateError> {
-    lock_absent_disks_within(candidate, owner, STOP_HANDLE_WAIT)
+    lock_absent_disks_within(candidate, owner, STOP_SCAN_WAIT)
 }
 
-/// [`lock_absent_disks`] with a caller-chosen bound on the `lsof` disk-handle scan. A scan
-/// that does not finish within `handle_wait` fails as `provider_timeout_uncertain`.
+/// [`lock_absent_disks`] with a caller-chosen bound on the disk-handle scan
+/// ([`disk_handles::disks_closed`]). A scan that does not finish within `handle_wait` fails
+/// as `provider_timeout_uncertain`.
 fn lock_absent_disks_within(
     candidate: &Candidate,
     owner: &Owner,
@@ -2033,20 +2044,12 @@ fn lock_absent_disks_within(
         ));
     }
     let vm_lock = VmLock(vm_lock);
-    let handles = process::capture(
-        process::clean_command(Path::new("/usr/sbin/lsof"))
-            .args(["-n", "-P", "-t", "--"])
-            .arg(directory.join("storage.raw"))
-            .arg(directory.join("overlay.raw")),
+    disk_handles::disks_closed(
+        &disk_handles::Lsof::host(),
+        &process::MonotonicClock::new(),
+        &[directory.join("storage.raw"), directory.join("overlay.raw")],
         handle_wait,
     )?;
-    if handles.status.code() != Some(1) || !handles.stdout.is_empty() || !handles.stderr.is_empty()
-    {
-        return Err(CandidateError::new(
-            "stop_uncertain",
-            "Cannot confirm that all handles to owned disks are closed.",
-        ));
-    }
     verify_disks(candidate, owner)?;
     Ok(vm_lock)
 }

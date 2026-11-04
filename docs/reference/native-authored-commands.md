@@ -87,6 +87,20 @@ report installed live acceptance.
 
 Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
 input preparation and native review, with a native maximum of 300000 milliseconds.
+Each startup compiler call is bounded by the time the startup budget has left,
+capped at 60 seconds, rather than by a fixed 10-second clock. Compiler calls outside
+startup (the down hooks' input check after Ctrl-C or a stop request, and checks after
+ready) have no startup budget and take the 60-second cap, so a slow host does not
+fail a graceful stop (HACK-1458). A start that fails or is cancelled after host
+processes began and before its startup intent exists stops those processes, or ends
+the launch it had begun through its own session token, before it returns. A
+teardown it cannot prove keeps the host process records retained. If the graph fails
+before Ready after reserving the startup intent, host teardown additionally requires
+the original producer and readers to settle and the original graph group to be
+absent. Startup reacquires unchanged host inputs under the hard-stop signal, then
+authenticates an exact Removed receipt and absent resource observations before
+stopping the owned host session. A live, foreign, unknown or unreserved receipt,
+changed input, or hard cancellation keeps this attempt retained.
 Startup refusals identify a fixed owning stage and, when available, a closed
 compiler or native error code. They omit arbitrary errors, child output, paths and
 values. If startup fails before publishing a receipt and the later retirement
@@ -109,7 +123,9 @@ reports `not_started`. Any other inspection result keeps the attempt retained.
 Examples include `native_graph_receipt` for damaged or foreign evidence,
 `native_graph_foreground` for a published owner, and a stopped runtime. This
 applies only to attempts without lifecycle hooks, host processes or a live-stop
-owner. A canceled `unreserved` startup exits 130, like confirmed removal.
+owner. A canceled startup that retains nothing (`not-started`, such as Ctrl-C
+during preflight, `unreserved`, or confirmed removal) prints a cancellation note
+and exits 130; a canceled start that retained evidence still fails.
 Readiness requires authenticated current observations and unchanged input before
 publication. The foreground owner remains attached until owned shutdown finishes;
 Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
@@ -222,6 +238,12 @@ changed files and rebooted guests refuse. Env/profile changes, service subsets a
 nor acquires managed values or starts a provider.
 Omit `--profile` to recover the stored generation; explicit empty or named profile
 overrides both refuse.
+
+Repeating `down --recover` after confirmed retirement is a read-only no-op,
+including when authenticated completed recovery history remains. It does not
+contact the native runtime or acquire recovery locks. Incomplete recovery,
+pending writes, retained owner records and changed history still select recovery
+or refuse; they do not qualify for the no-op.
 
 When the selection has a retained startup intent but no Ready mapping and no
 recovery intent, `down --recover` takes a different path. It handles only an

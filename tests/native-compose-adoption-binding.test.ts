@@ -3,6 +3,7 @@ import {
   beforeEach,
   expect,
   setDefaultTimeout,
+  setSystemTime,
   spyOn,
   test,
 } from "bun:test";
@@ -60,13 +61,22 @@ const FIXTURE_PROBE_DEADLINE_MS = 3 * PROBE_DEADLINE_MS;
 const FAKE_DOCKER_TEST_TIMEOUT_MS = 8 * FIXTURE_PROBE_DEADLINE_MS;
 setDefaultTimeout(FAKE_DOCKER_TEST_TIMEOUT_MS);
 /**
- * How long a test waits for the hanging fake Docker child to publish its PID.
- * It covers acquisition work before the first probe and a cold Bun start under
- * load, and stays below {@link FIXTURE_PROBE_DEADLINE_MS}, so the child is
- * still owned by its probe when the test cancels it.
+ * The largest probe deadline `createNativeComposeProbe` admits. The
+ * cancellation tests give their hanging probe this deadline so that only their
+ * abort ends it. They do not wait on their own clock for the child to start:
+ * {@link startedChild} returns when the child publishes its PID, and fails
+ * distinctly if the acquisition settles first (HACK-1319).
  */
-const CHILD_START_WAIT_MS = PROBE_DEADLINE_MS;
+const CANCELLED_CHILD_PROBE_DEADLINE_MS = 60_000;
+/** How often {@link startedChild} checks for the published PID. */
 const CHILD_START_POLL_MS = 10;
+/**
+ * The deadline of the probe the timeout test lets expire. The test pins
+ * `Date.now()` while it acquires, so the probe arms this whole deadline as a
+ * real timer after it spawns its child, however long the host takes to get
+ * there (HACK-1319).
+ */
+const EXPIRING_PROBE_DEADLINE_MS = 150;
 /**
  * How many freshness checks the moving job snapshot case's ordered start makes.
  * Each is one `assertFresh`, one fixture-deadline probe. The V7 job executor
@@ -257,7 +267,7 @@ if (fixture.mode?.startsWith("snapshot-placeholder-") && kind === "network" && a
 if (kind === "info") {console.log(JSON.stringify({id: fixture.engine, os: "linux"}));}
 else if (action === "ls") {for (const row of fixture[kind]) console.log(JSON.stringify({id: row.id, name: kind === 'container' ? row.name.slice(1) : row.name, project: row.project ?? ""}));}
 else {
- const id = args.at(-1);const rows = fixture[kind].filter(row => row.id === id);
+ const selected = args.slice(4);const rows = selected.flatMap(id => fixture[kind].filter(row => row.id === id));
  if (!rows.length) process.exit(1);
  for (const row of rows) console.log(JSON.stringify(row));
 }
@@ -436,17 +446,31 @@ function acquireFixtureBinding(opts: {
   });
 }
 /**
- * Waits, at most {@link CHILD_START_WAIT_MS}, for the hanging fake Docker child
- * to publish its PID, and returns it. The fake publishes by rename, and a PID
- * must be a positive integer above 1: `Number("")` is 0, and
- * `process.kill(0, 0)` signals this test's own process group and succeeds.
+ * Waits for the hanging fake Docker child of `pending` to publish its PID, and
+ * returns it. This is a handshake, not a timed wait: it ends when the child
+ * publishes, or fails when `pending` settles first, since a settled operation
+ * owns no child left to cancel. Under load the acquisition alone took about
+ * 14 s before its first probe, so a fixed start-up wait expired (HACK-1319).
+ * The fake publishes by rename, and a PID must be a positive integer above 1:
+ * `Number("")` is 0, and `process.kill(0, 0)` signals this test's own process
+ * group and succeeds.
  */
-async function startedChild(): Promise<number> {
+async function startedChild(pending: Promise<unknown>): Promise<number> {
   const started = join(root, "started");
-  const deadline = Date.now() + CHILD_START_WAIT_MS;
+  let settled = false;
+  pending.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    }
+  );
   while (!(await Bun.file(started).exists())) {
-    if (Date.now() >= deadline) {
-      throw new Error("Fake Docker child did not start within its budget.");
+    if (settled) {
+      throw new Error(
+        "The operation settled before its fake Docker child published a PID."
+      );
     }
     await Bun.sleep(CHILD_START_POLL_MS);
   }
@@ -753,7 +777,7 @@ test(
           bracketTrace
             .slice(networkOffsets[offset]! + 1, networkOffsets[offset + 1]!)
             .map((args) => args.slice(0, 2))
-        ).toEqual(Array.from({ length: 3 }, () => ["container", "inspect"]));
+        ).toEqual([["container", "inspect"]]);
       }
       const transition: { before: Fixture; after: Fixture; ordinal: number } =
         JSON.parse(
@@ -977,7 +1001,7 @@ test("moving snapshot guard rejects a selected ID on its undeclared bridge befor
     observed.filter(
       ([kind, action]) => kind === "container" && action === "inspect"
     )
-  ).toHaveLength(2);
+  ).toHaveLength(1);
   expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
 });
 
@@ -1490,9 +1514,10 @@ test("cancelled real child is reaped and abort reason stays private", async () =
   const pending = acquireFixtureBinding({
     projectRoot,
     signal: controller.signal,
+    timeoutMs: CANCELLED_CHILD_PROBE_DEADLINE_MS,
   });
   try {
-    const pid = await startedChild();
+    const pid = await startedChild(pending);
     controller.abort(CANARY);
     await refusal(pending, "E_LEGACY_COMPOSE_BINDING_CANCELLED");
     expectReaped(observed.children, pid);
@@ -1510,9 +1535,18 @@ test("timeout reaps real child without authorizing any mutation", async () => {
   // case; observe the actual returned child without changing spawn or the timer.
   await writeFile(binary, `#!${process.execPath}\nawait Bun.sleep(60_000);\n`);
   const observed = observeDockerChildren();
+  // The probe reads its deadline from Date.now() when it is created and arms
+  // the remainder as a real timer when it spawns. A stall between the two once
+  // used up all 150 ms, so the probe refused before it spawned any child.
+  // Pinning the clock arms the whole deadline after the spawn; the timer itself
+  // still runs in real time (HACK-1319).
+  setSystemTime(Date.now());
   try {
     await refusal(
-      acquireFixtureBinding({ projectRoot, timeoutMs: 150 }),
+      acquireFixtureBinding({
+        projectRoot,
+        timeoutMs: EXPIRING_PROBE_DEADLINE_MS,
+      }),
       "E_LEGACY_COMPOSE_BINDING_PROBE"
     );
     expect(observed.children.length).toBeGreaterThan(0);
@@ -1524,6 +1558,7 @@ test("timeout reaps real child without authorizing any mutation", async () => {
     }
     expect(await Bun.file(join(root, "started")).exists()).toBe(false);
   } finally {
+    setSystemTime();
     // Preserve the assertion failure while preventing a broken reaping path from
     // leaving this exact synthetic child alive in the rest of the test suite.
     await observed.release();
@@ -1664,9 +1699,11 @@ test("two independently named checkouts retain separate existing data bindings",
 });
 test("captured cancellation cannot be replaced by a later fresh signal", async () => {
   const controller = new AbortController();
+  // The freshness check below reuses this deadline for its hanging probe.
   const acquired = await acquireFixtureBinding({
     projectRoot,
     signal: controller.signal,
+    timeoutMs: CANCELLED_CHILD_PROBE_DEADLINE_MS,
   });
   fixture.mode = "hang";
   await save();
@@ -1679,7 +1716,7 @@ test("captured cancellation cannot be replaced by a later fresh signal", async (
     // Read the PID before the abort. This test once read it afterwards, from a
     // "started" file a child killed between create and write left empty:
     // Number("") is 0, and process.kill(0, 0) succeeded (HACK-1452).
-    const pid = await startedChild();
+    const pid = await startedChild(pending);
     controller.abort(CANARY);
     await refusal(pending, "E_LEGACY_COMPOSE_BINDING_CANCELLED");
     // The probe joins its child before it refuses, so this holds at once.

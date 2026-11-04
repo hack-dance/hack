@@ -10,6 +10,7 @@ import {
   resolveCliSpawnArgs,
   runCommand,
   type Scenario,
+  type ScenarioContext,
 } from "../harness.ts";
 
 const SESSION_WAIT_TIMEOUT_MS = 10_000;
@@ -474,6 +475,8 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
         });
       }
 
+      await runNonUtf8LocaleCycle({ ctx, cliEnv });
+
       const doctorFixture = await createMonorepoFixture({
         parentDir: ctx.tempRoot,
         withHackConfig: true,
@@ -556,7 +559,120 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
   },
 };
 
-async function writeFakeDocker(opts: {
+/**
+ * HACK-1797: without a UTF-8 locale tmux rewrote the session listing's tab
+ * separators, so `down` missed the owned session (leaving it and its tunnel
+ * running) and the next `up` failed with "Failed to create lifecycle
+ * session". Drive up -> up (live) -> down -> up -> down under LC_ALL=C.
+ */
+async function runNonUtf8LocaleCycle(opts: {
+  readonly ctx: ScenarioContext;
+  readonly cliEnv: Readonly<Record<string, string>>;
+}): Promise<void> {
+  const fixture = await createMonorepoFixture({
+    parentDir: opts.ctx.tempRoot,
+    withHackConfig: true,
+    lifecycle: {
+      persistentUpBefore: true,
+      persistentProcess: true,
+      disableInternal: true,
+    },
+  });
+  const sessionName = `${fixture.name}--lifecycle`;
+  const statePath = join(
+    fixture.hackDir,
+    ".internal",
+    "lifecycle",
+    "state.json"
+  );
+  const env = { ...opts.cliEnv, LC_ALL: "C", LANG: "C" };
+  const up = async (phase: string) => {
+    const result = await opts.ctx.cli({
+      args: ["up", "--detach", "--json"],
+      cwd: fixture.root,
+      env,
+    });
+    expectExit({
+      result,
+      codes: [0],
+      message: `non-UTF-8 locale: ${phase} should start or adopt the lifecycle session`,
+    });
+    await expectSessionPresent({ sessionName, cwd: fixture.root, phase });
+    return result;
+  };
+  const down = async (phase: string) => {
+    const groups = (await readState({ statePath })).entries.flatMap((entry) =>
+      (entry.processes ?? []).flatMap((process) =>
+        process.processGroupId ? [process.processGroupId] : []
+      )
+    );
+    expect({
+      that: groups.length === 2,
+      message: `non-UTF-8 locale: ${phase} expected two recorded lifecycle process groups, got ${groups.length}`,
+    });
+    const result = await opts.ctx.cli({
+      args: ["down", "--json"],
+      cwd: fixture.root,
+      env,
+    });
+    expectExit({
+      result,
+      codes: [0],
+      message: `non-UTF-8 locale: ${phase} should stop the lifecycle session`,
+    });
+    await expectSessionAbsent({ sessionName, cwd: fixture.root, phase });
+    expect({
+      that: (await readState({ statePath })).entries.length === 0,
+      message: `non-UTF-8 locale: ${phase} left lifecycle state behind`,
+      result,
+    });
+    const survivors = groups.filter(isProcessGroupAlive);
+    expect({
+      that: survivors.length === 0,
+      message: `non-UTF-8 locale: ${phase} left lifecycle process groups running: ${survivors.join(", ")}`,
+      result,
+    });
+  };
+
+  try {
+    const first = await up("first up");
+    const firstToken = (await readState({ statePath })).entries[0]
+      ?.ownershipToken;
+    expect({
+      that: Boolean(firstToken),
+      message: "non-UTF-8 locale: first up did not persist lifecycle ownership",
+      result: first,
+    });
+    const live = await up("up over a live session");
+    expect({
+      that:
+        (await readState({ statePath })).entries[0]?.ownershipToken ===
+        firstToken,
+      message:
+        "non-UTF-8 locale: up over a live owned session did not adopt it",
+      result: live,
+    });
+    await down("first down");
+    await up("up after down");
+    await down("second down");
+  } finally {
+    await runCommand({
+      argv: ["tmux", "kill-session", "-t", `=${sessionName}`],
+      cwd: fixture.root,
+    });
+  }
+}
+
+function isProcessGroupAlive(processGroupId: number): boolean {
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function writeFakeDocker(opts: {
   readonly fakeBin: string;
 }): Promise<void> {
   await mkdir(opts.fakeBin, { recursive: true });
@@ -569,16 +685,29 @@ async function writeFakeDocker(opts: {
       'if [ "$1" = "compose" ]; then',
       '  case " $* " in',
       '    *" ps "*)',
+      // A failed up started nothing, unless it failed after starting some
+      // services (E2E_DOCKER_FAIL_UP_PARTIAL).
+      '      if [ "${E2E_DOCKER_FAIL_UP:-}" = "1" ]; then exit 0; fi',
       '      printf \'%s\\n\' \'{"Service":"api","State":"running","ExitCode":0}\'',
       "      exit 0",
       "      ;;",
       '    *" up "*)',
+      // Optional gate: the image phase (`up --no-start`) records that it was
+      // reached, then waits until the gate file exists.
+      '      if [ -n "${E2E_DOCKER_GATE_UP:-}" ]; then',
+      '        case " $* " in *" --no-start "*)',
+      '          : > "${E2E_DOCKER_GATE_UP}.reached"',
+      '          while [ ! -e "$E2E_DOCKER_GATE_UP" ]; do sleep 0.05; done',
+      "          ;;",
+      "        esac",
+      "      fi",
       '      if [ "${E2E_DOCKER_BLOCK_UP:-}" = "1" ]; then',
       '        parent_pid="$PPID"',
       '        while kill -0 "$parent_pid" 2>/dev/null; do sleep 0.1; done',
       "        exit 143",
       "      fi",
       '      if [ "${E2E_DOCKER_FAIL_UP:-}" = "1" ]; then exit 42; fi',
+      '      if [ "${E2E_DOCKER_FAIL_UP_PARTIAL:-}" = "1" ]; then exit 42; fi',
       "      exit 0",
       "      ;;",
       "    *) exit 0 ;;",
@@ -757,6 +886,9 @@ type LifecycleState = {
   readonly entries: ReadonlyArray<{
     readonly composeProject: string;
     readonly ownershipToken?: string;
+    readonly processes?: ReadonlyArray<{
+      readonly processGroupId?: number;
+    }>;
   }>;
 };
 

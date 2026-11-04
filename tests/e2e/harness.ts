@@ -26,6 +26,19 @@ import {
   LAUNCHD_ALLOW_ISOLATED_ENV,
   LAUNCHD_DISABLE_ENV,
 } from "../../src/daemon/launchd.ts";
+import { fixtureGitEnv } from "../helpers/fixture-git.ts";
+
+import {
+  type ComposeResource,
+  type DockerRunner,
+  describeResources,
+  listOwnedNetworks,
+  ownedFixtureNames,
+  runDocker,
+  type SweepResult,
+  sweepComplete,
+  sweepOwnedComposeResources,
+} from "./docker-ownership.ts";
 
 /**
  * Core end-to-end harness for the hack CLI.
@@ -240,6 +253,10 @@ export function buildCliEnv(opts: {
   }
   env.HACK_HOME = opts.hackHome;
   env.HACK_NO_INTERACTIVE = "1";
+  // `doctor --fix` runs `hack daemon start` without a TTY, and nothing stops
+  // that daemon with the scenario (HACK-1696). Unlike the launchd guard below,
+  // a scenario that stops its own daemon may opt in through `extra`.
+  env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
   env.NO_COLOR = "1";
   env.CLICOLOR = "0";
   env.TERM = "dumb";
@@ -544,13 +561,19 @@ async function readCapture(opts: { readonly path: string }): Promise<string> {
 export async function runCommand(opts: {
   readonly argv: readonly string[];
   readonly cwd: string;
+  /** Laid over the harness environment. Ignored when `exactEnv` is set. */
   readonly env?: Readonly<Record<string, string>>;
+  /**
+   * The child's complete environment, with nothing from the harness. Fixture
+   * `git` passes `fixtureGitEnv()` here (tests/helpers/fixture-git.ts).
+   */
+  readonly exactEnv?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
   readonly onStderrChunk?: (chunk: string) => void;
 }): Promise<CliResult> {
   const proc = Bun.spawn([...opts.argv], {
     cwd: opts.cwd,
-    env: { ...process.env, ...(opts.env ?? {}) },
+    env: opts.exactEnv ?? { ...process.env, ...(opts.env ?? {}) },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -839,6 +862,7 @@ async function writeCanaryProject(opts: {
     ["services: {}", ""].join("\n")
   );
   await runCommand({
+    exactEnv: fixtureGitEnv(),
     argv: ["git", "init", "-q", "-b", "main"],
     cwd: opts.projectRoot,
   });
@@ -867,6 +891,8 @@ export type RunScenariosOptions = {
   readonly dockerEnabled: boolean;
   readonly only?: readonly string[];
   readonly keepTempDirs?: boolean;
+  /** Docker CLI used for the network leak check (tests inject a fake). */
+  readonly docker?: DockerRunner;
 };
 
 /** Host ingress qualification requires explicit selection; Docker enablement is insufficient. */
@@ -897,6 +923,83 @@ async function cleanupScenarioRoots(opts: {
       `Owned fixture cleanup incomplete; retained recovery roots: ${opts.tempRoot} and ${opts.hackHome}`
     );
   }
+}
+
+export type ScenarioDockerLeakCheck = {
+  /** Owned networks still present after the scenario's own cleanup. */
+  readonly leaked: readonly ComposeResource[];
+  /** The harness sweep that removed the scenario's owned resources. */
+  readonly sweep: SweepResult;
+  /** Owned networks still present after the sweep (should be empty). */
+  readonly remaining: readonly ComposeResource[];
+};
+
+/**
+ * After a docker scenario's own cleanup: record which owned networks it left
+ * behind, then remove every container, network and volume it owns and
+ * verify the networks are gone. Returns null when docker cannot be queried.
+ */
+export async function checkScenarioDockerLeaks(opts: {
+  readonly docker: DockerRunner;
+  readonly names: ReadonlySet<string>;
+}): Promise<ScenarioDockerLeakCheck | null> {
+  if (opts.names.size === 0) {
+    return {
+      leaked: [],
+      sweep: { removed: [], failed: [], unlisted: [] },
+      remaining: [],
+    };
+  }
+  const leaked = await listOwnedNetworks(opts);
+  if (leaked === null) {
+    return null;
+  }
+  const sweep = await sweepOwnedComposeResources(opts);
+  const remaining = (await listOwnedNetworks(opts)) ?? leaked;
+  return { leaked, sweep, remaining };
+}
+
+/** Failure text for a leak check, or null when the scenario left nothing. */
+export function describeDockerLeak(
+  check: ScenarioDockerLeakCheck
+): string | null {
+  if (check.leaked.length === 0 && sweepComplete(check.sweep)) {
+    return null;
+  }
+  const lines: string[] = [];
+  if (check.leaked.length > 0) {
+    lines.push(
+      `scenario left ${check.leaked.length} Docker network(s) after its cleanup: ${describeResources(check.leaked)}`
+    );
+  }
+  if (check.sweep.removed.length > 0) {
+    lines.push(
+      `harness sweep removed: ${describeResources(check.sweep.removed)}`
+    );
+  }
+  for (const failure of check.sweep.failed) {
+    lines.push(
+      `harness sweep could not remove ${describeResources([failure.resource])}: ${failure.error}`
+    );
+  }
+  if (check.sweep.unlisted.length > 0) {
+    lines.push(
+      `harness sweep could not list: ${check.sweep.unlisted.join(", ")}`
+    );
+  }
+  if (check.remaining.length > 0) {
+    lines.push(
+      `still present after sweep: ${describeResources(check.remaining)}`
+    );
+  }
+  return lines.join("\n");
+}
+
+function newNames(opts: {
+  readonly before: ReadonlySet<string>;
+  readonly after: ReadonlySet<string>;
+}): Set<string> {
+  return new Set([...opts.after].filter((name) => !opts.before.has(name)));
 }
 
 /**
@@ -945,6 +1048,7 @@ export async function runScenarios(
     };
 
     process.stdout.write(`-- ${scenario.name} (${scenario.tier}) --\n`);
+    const namesBefore = ownedFixtureNames();
     let outcome: ScenarioOutcome;
     let preserveFailedFixture = false;
     try {
@@ -995,12 +1099,47 @@ export async function runScenarios(
         log: ctx.log,
       });
     }
+    if (scenario.tier === "docker") {
+      outcome = await applyDockerLeakCheck({
+        outcome,
+        docker: opts.docker ?? runDocker,
+        names: newNames({ before: namesBefore, after: ownedFixtureNames() }),
+        log: ctx.log,
+      });
+    }
     outcomes.push(outcome);
     printOutcome(outcome);
   }
 
   printSummary({ outcomes });
   return outcomes;
+}
+
+async function applyDockerLeakCheck(opts: {
+  readonly outcome: ScenarioOutcome;
+  readonly docker: DockerRunner;
+  readonly names: ReadonlySet<string>;
+  readonly log: (message: string) => void;
+}): Promise<ScenarioOutcome> {
+  const check = await checkScenarioDockerLeaks({
+    docker: opts.docker,
+    names: opts.names,
+  });
+  if (check === null) {
+    opts.log("network leak check skipped: docker network ls failed");
+    return opts.outcome;
+  }
+  const leak = describeDockerLeak(check);
+  if (leak === null) {
+    return opts.outcome;
+  }
+  if (opts.outcome.status === "fail") {
+    return {
+      ...opts.outcome,
+      reason: `${opts.outcome.reason ?? ""}\n${leak}`,
+    };
+  }
+  return { ...opts.outcome, status: "fail", reason: leak };
 }
 
 function printOutcome(outcome: ScenarioOutcome): void {

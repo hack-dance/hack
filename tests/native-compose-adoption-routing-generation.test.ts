@@ -7,9 +7,11 @@ import { isRecord } from "../src/lib/guards.ts";
 import * as admission from "../src/lib/native-compose-adoption-compiler.ts";
 import { LegacyComposeAdoptedGenerationError } from "../src/lib/native-compose-adoption-generation.ts";
 import { legacyComposePublicationRefusal } from "../src/lib/native-compose-adoption-publication-diagnostics.ts";
+import * as retainedRouting from "../src/lib/native-compose-adoption-routing.ts";
 import { runLegacyComposeRetainedRoutingOperation } from "../src/lib/native-compose-adoption-routing-execution.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { assertInvalidRetainedMutationDeadlines } from "./helpers/retained-mutation-deadline.ts";
 import {
   type RetainedRoutingStoreTimeoutMs,
   ROUTING_CANARY,
@@ -128,7 +130,11 @@ const test = (
       | typeof COMPOUND_TEST_BUDGET_MS;
   } = {}
 ) => {
-  const timeoutMs = opts.timeoutMs ?? 30_000;
+  // Every default case cold-starts the same store fixture and must also settle
+  // its cleanup. The former 30 s outer guard interrupted unchanged diagnostics
+  // under native I/O load and left the lifetime gate closed for later cases.
+  // This named hang guard does not extend any product proof/caller deadline.
+  const timeoutMs = opts.timeoutMs ?? SINGLE_OPERATION_TEST_BUDGET_MS;
   return gatedTest(
     name,
     async (restored) => {
@@ -137,7 +143,9 @@ const test = (
       let failed = false;
       let failure: unknown;
       try {
-        h = await retainedRoutingFixture(lifetime);
+        h = await retainedRoutingFixture(lifetime, {
+          lightweightCompiler: true,
+        });
         fixture = h;
         await run();
       } catch (error: unknown) {
@@ -408,12 +416,40 @@ test(
       for (const [index, operation] of (
         ["start", "stop", "start", "stop"] as const
       ).entries()) {
-        expect(
-          await h.operation(store, active, operation, {
-            deadlineMs: COMPOUND_OPERATION_DEADLINE_MS,
-          })
-        ).toBe(0);
+        const unlink = fs.unlink;
+        let cleanupFailures = 0;
+        const failure = spyOn(fs, "unlink").mockImplementation(async (path) => {
+          if (index === 1 && String(path).includes("/retired/")) {
+            cleanupFailures++;
+            throw Object.assign(new Error("synthetic cleanup failure"), {
+              code: "EIO",
+            });
+          }
+          return await unlink(path);
+        });
+        try {
+          expect(
+            await h.operation(store, active, operation, {
+              deadlineMs: COMPOUND_OPERATION_DEADLINE_MS,
+            })
+          ).toBe(0);
+        } finally {
+          failure.mockRestore();
+        }
+        expect((await h.receipt()).pendingOperation).toBeNull();
+        expect(cleanupFailures > 0).toBe(index === 1);
         phase(`lifecycle-${index + 1}-${operation}-return`);
+        const routingRoot = join(h.home, "compose-routing");
+        const attemptRoots = (
+          await fs.readdir(routingRoot, { recursive: true })
+        ).filter((path) => path.endsWith("/attempts"));
+        expect(attemptRoots).toHaveLength(1);
+        for (const path of attemptRoots) {
+          expect(await fs.readdir(join(routingRoot, path))).toHaveLength(2);
+          expect(
+            await fs.readdir(join(routingRoot, path, "..", "retired"))
+          ).toHaveLength(index === 1 ? 1 : 0);
+        }
       }
       await store.withLease({
         generation: active,
@@ -426,7 +462,7 @@ test(
       phase("saved-lease-return");
       expect((await h.receipt()).publication?.phase).toBe("active");
       expectRetainedResourcesOnly();
-      expect(h.commands.length).toBeLessThanOrEqual(7300);
+      expect(h.commands.length).toBeLessThanOrEqual(6500);
       expect(volumeInspections()).toBeLessThanOrEqual(114);
       phase("assertions-complete");
     } catch (error: unknown) {
@@ -876,6 +912,11 @@ test("known nonzero child retains a settled journal and exact explicit stop reco
       disposition: "settled",
       code: 0,
     });
+    // A subsequent cycle compacts with the recovered stopped attempt pinned
+    // and must still reopen it before creating the next lifecycle attempt.
+    expect(
+      await h.operation(store, pending, "stop", { preparation: true })
+    ).toBe(0);
     await store.publish({ generation: pending, binary: h.compiler });
   } finally {
     await store.close();
@@ -1611,6 +1652,142 @@ test("HACK-1391: the callback revocation fence past the caller deadline refuses 
     expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
   } finally {
     clock.mockRestore();
+    await store.close();
+  }
+});
+
+for (const phase of ["publication", "rollback"] as const) {
+  test(
+    `live caller budget reaches the ${phase} transaction after a durable file move`,
+    async () => {
+      let virtualNow = Date.now();
+      const deadline = virtualNow + 45_000;
+      const clock = spyOn(Date, "now").mockImplementation(() => virtualNow);
+      let store: Awaited<ReturnType<typeof h.store>> | undefined;
+      let restoreRename: (() => void) | undefined;
+      let charged = false;
+      let issued: number | undefined;
+      try {
+        store = await h.store({ timeoutMs: 60_000, deadline });
+        const generation = await store.prepare({ binary: h.compiler });
+        if (phase === "rollback") {
+          await store.publish({ generation, binary: h.compiler });
+        }
+        h.hooks.beforeProbeOwner = (opts) => {
+          if (charged && issued === undefined) {
+            issued = opts.timeoutMs;
+          }
+        };
+        const rename = fs.rename;
+        const renameSpy = spyOn(fs, "rename").mockImplementation(
+          async (...args) => {
+            const result = await rename(...args);
+            const target = String(args[1]);
+            if (
+              !charged &&
+              (phase === "publication"
+                ? String(args[0]) === join(h.root, ".hack/hack.config.json") &&
+                  target.includes("/originals/")
+                : target.endsWith("/originals/native.rollback"))
+            ) {
+              charged = true;
+              virtualNow += 5000;
+            }
+            return result;
+          }
+        );
+        restoreRename = () => renameSpy.mockRestore();
+        if (phase === "publication") {
+          await store.publish({ generation, binary: h.compiler });
+        } else {
+          await store.rollback();
+        }
+        expect(charged).toBe(true);
+        expect(issued).toBe(deadline - virtualNow);
+        expect((await h.receipt()).publication?.phase).toBe(
+          phase === "publication" ? "active" : "rolled-back"
+        );
+        expect(h.model.sqlRow).toBe(ROUTING_CANARY);
+        expect(h.effects).toEqual([]);
+      } finally {
+        restoreRename?.();
+        Reflect.deleteProperty(h.hooks, "beforeProbeOwner");
+        clock.mockRestore();
+        await store?.close();
+      }
+    },
+    { timeoutMs: SINGLE_OPERATION_TEST_BUDGET_MS }
+  );
+}
+
+// Publication's sixth saved-manifest read is the scoped routing owner's
+// entry revalidation, after its Context copy and before routing proof issuance.
+// Charge that read, then observe the real proof's admission budget.
+test(
+  "live caller budget reaches the scoped routing proof after entry revalidation",
+  async () => {
+    let virtualNow = Date.now();
+    const deadline = virtualNow + 45_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => virtualNow);
+    let store: Awaited<ReturnType<typeof h.store>> | undefined;
+    const restores: (() => void)[] = [];
+    let reads = 0;
+    let charged = false;
+    let issued: { reads: number; budget: number | undefined } | undefined;
+    try {
+      store = await h.store({ timeoutMs: 60_000, deadline });
+      const generation = await store.prepare({ binary: h.compiler });
+      const read = privateState.readPrivate;
+      const readSpy = spyOn(privateState, "readPrivate").mockImplementation(
+        async (...args) => {
+          const result = await read(...args);
+          if (args[0].endsWith("/manifest.json") && ++reads === 6) {
+            charged = true;
+            virtualNow += 5000;
+          }
+          return result;
+        }
+      );
+      restores.push(() => readSpy.mockRestore());
+      const prove = retainedRouting.assertLegacyComposeRetainedRoutingState;
+      const proofSpy = spyOn(
+        retainedRouting,
+        "assertLegacyComposeRetainedRoutingState"
+      ).mockImplementation(async (opts) => {
+        issued ??= { reads, budget: opts.timeoutMs };
+        return await prove(opts);
+      });
+      restores.push(() => proofSpy.mockRestore());
+      await store.publish({ generation, binary: h.compiler });
+      expect(charged).toBe(true);
+      expect(issued).toEqual({ reads: 6, budget: deadline - virtualNow });
+      expect((await h.receipt()).publication?.phase).toBe("active");
+      expect(h.model.sqlRow).toBe(ROUTING_CANARY);
+      expect(h.effects).toEqual([]);
+    } finally {
+      for (const restore of restores.reverse()) {
+        restore();
+      }
+      clock.mockRestore();
+      await store?.close();
+    }
+  },
+  { timeoutMs: SINGLE_OPERATION_TEST_BUDGET_MS }
+);
+
+test("HACK-1359: version14 rejects missing and non-finite mutation deadlines without effects", async () => {
+  const { store, generation } = await prepare();
+  try {
+    await assertInvalidRetainedMutationDeadlines({
+      store,
+      generation,
+      binary: h.compiler,
+      snapshot: async () => ({
+        commands: h.commands,
+        receipt: await h.receipt(),
+      }),
+    });
+  } finally {
     await store.close();
   }
 });

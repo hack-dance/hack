@@ -1,9 +1,12 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs/promises";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
   readFile,
+  readlink,
   realpath,
   rm,
   symlink,
@@ -11,12 +14,16 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
+  LegacyDotenvMigrationRefusalError,
+  migrateLegacyProjectEnv,
   resolveProjectEnvConfig,
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -33,6 +40,7 @@ afterEach(async () => {
 
 async function git(cwd: string, args: string[]) {
   const child = Bun.spawn(["git", ...args], {
+    env: fixtureGitEnv(),
     cwd,
     stdout: "pipe",
     stderr: "pipe",
@@ -207,6 +215,56 @@ test("inherited local symlinks are refused", async () => {
   await expect(f.resolve()).rejects.toThrow();
 });
 
+test("an inherited local overlay loop gives a closed, value-free refusal", async () => {
+  const f = await fixture();
+  await writeFile(
+    join(f.linked, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.20\n"
+  );
+  const name = "hack.env.qa.local.yaml";
+  const layer = join(f.primary, name);
+  await symlink(name, layer);
+  const before = await readdir(f.primary);
+  const message =
+    "Refused env layer: its path must resolve inside the project and be inspectable (values omitted).";
+
+  await expect(f.resolve()).rejects.toBeInstanceOf(ClosedCliError);
+  await expect(f.resolve()).rejects.toThrow(message);
+
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "index.ts",
+      "env",
+      "list",
+      "--path",
+      f.linkedRoot,
+      "--env",
+      "qa",
+    ],
+    {
+      cwd: process.cwd(),
+      env: privateCliEnv({
+        root: f.root,
+        env: { HACK_LOGGER: "console", NO_COLOR: "1" },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 10_000,
+    }
+  );
+  const [code, out, err] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  expect(code).toBe(1);
+  expect(`${out}${err}`.trim()).toBe(`ERROR: ${message}`);
+  expect(await readlink(layer)).toBe(name);
+  expect(await readdir(f.primary)).toEqual(before);
+});
+
 test("local unset masks inherited-only values idempotently and a later set restores", async () => {
   const f = await fixture();
   await config(f.primary, "hack.env.local.yaml", {
@@ -301,4 +359,128 @@ test("actual CLI masks inherited global secret overriding tracked service plaint
       expect(stdout).toContain("***");
     }
   }
+});
+
+async function legacyLinkedCheckout() {
+  const f = await fixture();
+  await writeFile(
+    join(f.linked, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.20\n    env_file:\n      - path: .env\n        required: false\n"
+  );
+  await writeFile(join(f.linked, ".env"), "SETTING=legacy-value\n");
+  const migrate = () =>
+    migrateLegacyProjectEnv({
+      projectRoot: f.linkedRoot,
+      projectDir: f.linked,
+      projectName: "env-fixture",
+      serviceNames: ["api"],
+      materialize: false,
+      migrateUndeclaredDotenv: true,
+    }).catch((caught: unknown) => caught);
+  const staging = () =>
+    resolveProjectEnvConfig({
+      projectRoot: f.linkedRoot,
+      projectDir: f.linked,
+      envName: "staging",
+      serviceNames: ["api"],
+    });
+  return { ...f, migrate, staging };
+}
+
+for (const [name, values, reason] of [
+  [
+    "service",
+    { global: {}, api: { SETTING: "primary-api" } },
+    '"SETTING" for "api" in "staging"',
+  ],
+  [
+    "global",
+    { global: { SETTING: "primary-staging" } },
+    '"SETTING" for "staging"',
+  ],
+] as const) {
+  test(`a migrated value that would replace an inherited overlay's ${name} value refuses`, async () => {
+    const f = await legacyLinkedCheckout();
+    await config(f.primary, "hack.env.staging.local.yaml", values);
+    const before = await f.staging();
+    const entries = await readdir(f.linked);
+
+    const result = await f.migrate();
+
+    expect((result as Error).message).toContain(reason);
+    expect((result as Error).message).not.toContain("legacy-value");
+    expect((result as Error).message).not.toContain("primary-");
+    expect(await readdir(f.linked)).toEqual(entries);
+    expect((await f.staging())?.serviceEnv).toEqual(before?.serviceEnv);
+  });
+}
+
+test("an inherited overlay that doesn't set the migrated key doesn't stop the migration", async () => {
+  const f = await legacyLinkedCheckout();
+  await config(f.primary, "hack.env.staging.local.yaml", {
+    global: {},
+    api: { OTHER: "primary-api" },
+  });
+
+  const result = await f.migrate();
+
+  expect(result).not.toBeInstanceOf(Error);
+  expect((await f.staging())?.serviceEnv.api).toMatchObject({
+    OTHER: "primary-api",
+    SETTING: "legacy-value",
+  });
+});
+
+test("a reserved overlay name in the primary checkout isn't treated as an overlay", async () => {
+  const f = await legacyLinkedCheckout();
+  await config(f.primary, "hack.env.local.local.yaml", {
+    global: { SETTING: "primary-reserved" },
+  });
+
+  expect(await f.migrate()).not.toBeInstanceOf(Error);
+});
+
+test.skipIf(process.platform !== "linux" || process.geteuid?.() === 0)(
+  "on Linux, a primary checkout whose env layers can't be listed refuses, before any write",
+  async () => {
+    const f = await legacyLinkedCheckout();
+    const entries = await readdir(f.linked);
+    await chmod(f.primary, 0o300);
+
+    const result = await f.migrate();
+    await chmod(f.primary, 0o700);
+
+    expect((result as Error).message).toContain("can't be listed");
+    expect(await readdir(f.linked)).toEqual(entries);
+  }
+);
+
+// Branch coverage only, on every platform: the failure is injected, so this says nothing
+// about when a real permission reaches this code. The test above is the native evidence.
+test("injected: a failed listing of the primary's env layers refuses, before any write", async () => {
+  const f = await legacyLinkedCheckout();
+  const entries = await readdir(f.linked);
+  const original = fs.readdir;
+  const spy = spyOn(fs, "readdir").mockImplementation(((
+    ...args: Parameters<typeof original>
+  ) => {
+    if (String(args[0]) === f.primary) {
+      return Promise.reject(
+        Object.assign(new Error("EACCES"), { code: "EACCES" })
+      );
+    }
+    return original(...args);
+  }) as typeof original);
+
+  let result: unknown;
+  try {
+    result = await f.migrate();
+  } finally {
+    spy.mockRestore();
+  }
+
+  expect(result).toBeInstanceOf(LegacyDotenvMigrationRefusalError);
+  expect((result as Error).message).toContain("can't be listed");
+  expect((result as Error).message).toContain("The legacy files are kept");
+  expect(await readdir(f.linked)).toEqual(entries);
 });

@@ -692,7 +692,7 @@ pub(in crate::provider::graph) fn fixture_wrong_volume_projection(bytes: &[u8]) 
     witness
         .retained_volume_projections
         .get_mut("volume:data")
-        .unwrap()["observed_created_at"] = json!("foreign");
+        .unwrap()["directory"] = json!("1:999");
     encoded(&witness).unwrap()
 }
 

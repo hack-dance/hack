@@ -56,6 +56,7 @@ mod initializer_cache;
 pub use cache_quarantine::{
     CacheQuarantineTarget, inspect_cache_quarantine, quarantine_cache, resolve_cache_quarantine,
 };
+mod volume_identity;
 mod volume_subpaths;
 pub use dependency_hosts::dependency_address;
 #[cfg(target_os = "macos")]

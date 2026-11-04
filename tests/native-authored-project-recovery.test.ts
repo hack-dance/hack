@@ -20,6 +20,7 @@ import * as incarnation from "../src/backends/native-authored-process-incarnatio
 import { recoverNativeAuthoredProject } from "../src/backends/native-authored-project-recovery.ts";
 import {
   loadNativeAuthoredProjectRun,
+  nativeAuthoredProjectNothingToRecover,
   withNativeAuthoredProjectAdmission,
 } from "../src/backends/native-authored-project-run.ts";
 import { createNativeProcessCensusDiagnostics } from "../src/backends/native-process-census-diagnostics.ts";
@@ -348,6 +349,9 @@ test("dead frontend recovery binds the stored run, holds startup, retires only a
   const current = await fixture();
   await current.kill();
   let ordinaryAction = false;
+  expect(await nativeAuthoredProjectNothingToRecover(current.scope)).toBe(
+    false
+  );
   const request: typeof invokeNativeRuntime = async (opts) => {
     await expect(
       withNativeAuthoredProjectAdmission(current.scope, async () => {
@@ -369,6 +373,24 @@ test("dead frontend recovery binds the stored run, holds startup, retires only a
   const saved = JSON.parse(await Bun.file(current.paths.intent).text());
   expect(saved.record.phase).toBe("complete");
   expect(saved.record.lease_releasing).toBe(true);
+  const completedHistory = await Bun.file(current.paths.intent).text();
+  const completedFiles = await readdir(current.paths.dir);
+  const calls = current.calls.length;
+  expect(await nativeAuthoredProjectNothingToRecover(current.scope)).toBe(true);
+  expect(current.calls.length).toBe(calls);
+  expect(await Bun.file(current.paths.intent).text()).toBe(completedHistory);
+  expect(await readdir(current.paths.dir)).toEqual(completedFiles);
+  for (const phase of ["prepared", "admission-retirement"]) {
+    await files.writeFile(
+      current.paths.intent,
+      JSON.stringify({ ...saved, record: { ...saved.record, phase } })
+    );
+    expect(await nativeAuthoredProjectNothingToRecover(current.scope)).toBe(
+      false
+    );
+  }
+  await files.writeFile(current.paths.intent, completedHistory);
+  expect(await nativeAuthoredProjectNothingToRecover(current.scope)).toBe(true);
   await recoverNativeAuthoredProject(current.options);
   expect(current.cleanupCalls()).toBe(1);
   await withNativeAuthoredProjectAdmission(current.scope, async () => {

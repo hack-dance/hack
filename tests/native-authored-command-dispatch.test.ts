@@ -2,8 +2,12 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
+import {
+  NATIVE_EXEC_SELECTION_REFUSAL,
+  NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
+} from "../src/backends/native-project-one-off.ts";
 import { isRecord } from "../src/lib/guards.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
 
 const roots: string[] = [];
@@ -133,20 +137,30 @@ test.each([
  * same closed E_USAGE refusal for an authored project as for a legacy one. It
  * is checked before authored dispatch, which would otherwise refuse it with
  * the broader E_NATIVE_PROJECT_UNSUPPORTED.
+ *
+ * HACK-1360: an authored project on the Compose backend (the default, or an
+ * explicit `compose`) refuses the same way before any compiler work, instead
+ * of reading `--env ""` as the base env and `--profile ""` as no profiles.
  */
-test.each([
-  { args: ["--profile", ""] },
-  { args: ["--profile", " , "] },
-  { args: ["--env", ""] },
-  { args: ["--env=  "] },
-])("source CLI native run %j refuses as an empty selection before authored dispatch", async ({
+const EMPTY_RUN_SELECTIONS = [
+  ["--profile", ""],
+  ["--profile", " , "],
+  ["--env", ""],
+  ["--env=  "],
+] as const;
+test.each(
+  ["native", "compose", undefined].flatMap((backend) =>
+    EMPTY_RUN_SELECTIONS.map((args) => ({ backend, args: [...args] }))
+  )
+)("source CLI run %j refuses as an empty selection before authored dispatch", async ({
+  backend,
   args,
 }) => {
   const selected = await fixture();
   const value = await invoke({
     selected,
     args: ["run", ...args, "web", "--", "true"],
-    backend: "native",
+    backend,
     logger: "console",
   });
   expect(value.code).toBe(1);
@@ -160,6 +174,50 @@ test.each([
   expect(await readdir(join(selected.root, ".hack"))).toEqual([
     "hack.project.json",
   ]);
+});
+
+/**
+ * HACK-1360: on the native backend an authored project's exec refuses an empty
+ * `--env`/`--profile` with the same closed E_USAGE line as a legacy project,
+ * before authored dispatch, compiler or runtime work. A non-empty value still
+ * reaches authored dispatch and its E_NATIVE_PROJECT_UNSUPPORTED refusal.
+ */
+test.each(
+  EMPTY_RUN_SELECTIONS.map((args) => ({ args: [...args] }))
+)("source CLI native exec %j refuses as an empty selection before authored dispatch", async ({
+  args,
+}) => {
+  const selected = await fixture();
+  const value = await invoke({
+    selected,
+    args: ["exec", ...args, "web", "--", "true"],
+    backend: "native",
+    logger: "console",
+  });
+  expect(value.code).toBe(1);
+  expect(value.stdout).toBe("");
+  expect(value.stderr).toBe(
+    `ERROR: E_USAGE: ${NATIVE_EXEC_SELECTION_REFUSAL}\n`
+  );
+  expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
+    false
+  );
+  expect(await readdir(join(selected.root, ".hack"))).toEqual([
+    "hack.project.json",
+  ]);
+});
+
+test("source CLI native exec with a named --env reaches authored dispatch", async () => {
+  const selected = await fixture();
+  const value = await invoke({
+    selected,
+    args: ["exec", "--env", "staging", "web", "--", "true"],
+    backend: "native",
+    logger: "console",
+  });
+  expect(value.code).toBe(1);
+  expect(value.stdout + value.stderr).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+  expect(value.stderr).not.toContain(NATIVE_EXEC_SELECTION_REFUSAL);
 });
 
 test("source CLI native up --detach refuses with one line before compiler or runtime work", async () => {
@@ -255,7 +313,8 @@ macTest(
 );
 
 macTest.each([
-  { name: "omitted", args: [], code: "E_LIFECYCLE_FAILED" },
+  // HACK-1312: with nothing retained, omitted-profile recovery is a no-op.
+  { name: "omitted", args: [], code: null },
   {
     name: "explicit-empty",
     args: ["--profile", ""],
@@ -280,15 +339,17 @@ macTest.each([
       backend: "native",
       logger: "console",
     });
-    expect(value.code).toBe(1);
-    expect(value.stdout + value.stderr).toMatch(
-      new RegExp(`(?:^|\\n)ERROR: ${code}\\b`)
-    );
-    expect(value.stdout + value.stderr).not.toContain(
-      code === "E_LIFECYCLE_FAILED"
-        ? "E_NATIVE_PROJECT_UNSUPPORTED"
-        : "E_LIFECYCLE_FAILED"
-    );
+    if (code === null) {
+      expect(value.code).toBe(0);
+      expect(value.stdout + value.stderr).toContain("Nothing to recover");
+      expect(value.stdout + value.stderr).not.toContain("ERROR:");
+    } else {
+      expect(value.code).toBe(1);
+      expect(value.stdout + value.stderr).toMatch(
+        new RegExp(`(?:^|\\n)ERROR: ${code}\\b`)
+      );
+      expect(value.stdout + value.stderr).not.toContain("E_LIFECYCLE_FAILED");
+    }
     expect(
       await Bun.file(join(selected.root, "compiler-called")).exists()
     ).toBe(false);
@@ -470,4 +531,100 @@ macTest(
     expect(files.filter((file) => file.endsWith(".json"))).toEqual([]);
     expect(files.filter((file) => file.endsWith(".lock"))).toEqual([]);
   }
+);
+
+macTest(
+  "source CLI Ctrl-C during authored preflight reports a cancellation and exits 130",
+  async () => {
+    const selected = await fixture();
+    await Bun.write(
+      join(selected.root, ".hack/hack.project.json"),
+      JSON.stringify({
+        schema_version: 1,
+        name: "cancel-control",
+        worktree: { inherit_local: false, auto_branch: false },
+        services: { web: { image: `sha256:${"a".repeat(64)}` } },
+      })
+    );
+    // The native plan request hangs until the CLI's cancellation kills it, so
+    // SIGINT lands in preflight, before any startup intent is reserved.
+    const planning = join(selected.root, "native-plan-started");
+    await Bun.write(
+      selected.native,
+      `#!${process.execPath}
+const args=process.argv.slice(2);
+if(args[2]!=='graph'||args[3]!=='native'||args[4]!=='plan'){
+ await Bun.write(${JSON.stringify(join(selected.root, "runtime-called"))}, 'unexpected-effect'); process.exit(2);
+}
+await Bun.write(${JSON.stringify(planning)}, 'planning');
+await Bun.sleep(20_000);
+process.exit(2);
+`
+    );
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "../index.ts"),
+        "--path",
+        selected.root,
+        "up",
+      ],
+      {
+        env: privateCliEnv({
+          root: selected.root,
+          env: {
+            CI: "1",
+            HACK_EXECUTION_MODE: "ci",
+            HACK_HOME: join(selected.root, "home"),
+            HACK_LOGGER: "console",
+            HACK_CONFIG_COMPILER_BINARY: realCompiler,
+            HACK_NATIVE_BINARY: selected.native,
+            HACK_NATIVE_HOME: join(selected.root, "candidate"),
+            HACK_RUNTIME_BACKEND: "native",
+          },
+        }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
+    try {
+      const deadline = performance.now() + 15_000;
+      while (!(await Bun.file(planning).exists())) {
+        if (performance.now() > deadline || child.exitCode !== null) {
+          throw new Error("native plan was never requested");
+        }
+        await Bun.sleep(20);
+      }
+      child.kill("SIGINT");
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      const output = stdout + stderr;
+      expect({ code, output }).toMatchObject({ code: 130 });
+      expect(output).toContain(
+        "Native project start was canceled; nothing was started and no startup intent was reserved."
+      );
+      expect(output).not.toContain("E_STARTUP_INCOMPLETE");
+      expect(output).not.toContain("Native authored startup failed");
+      expect(output).not.toMatch(/^\s+at /m);
+      expect(
+        await Bun.file(join(selected.root, "runtime-called")).exists()
+      ).toBe(false);
+      const files = await readdir(
+        join(selected.root, ".hack/.internal/native-authored-runs")
+      );
+      expect(files.filter((file) => file.endsWith(".json"))).toEqual([]);
+    } finally {
+      clearTimeout(timer);
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
+    }
+  },
+  30_000
 );

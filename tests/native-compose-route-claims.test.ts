@@ -10,7 +10,15 @@ import {
   type NativeComposeRouteOwner,
   openNativeComposeRouteClaims,
 } from "../src/lib/native-compose-route-claims.ts";
+import { waitForFileContent } from "./helpers/wait-for-file-content.ts";
 
+const BARRIER_BUDGET_MS = 5000;
+/**
+ * Gap between creating the rollback barrier and writing its reference. It makes
+ * the empty-file window happen on every run, so a case that waits for existence
+ * alone and then kills the writer fails every time.
+ */
+const TORN_BARRIER_GAP_MS = 50;
 const BINDING: NativeComposeRouteBinding = {
   engineId: "fixture-engine:1",
   proxyId: "a".repeat(64),
@@ -91,8 +99,9 @@ async function complete(
   await result.markEffectsPossible(attempt);
   await result.complete({ attempt, assertTransition: async () => {} });
 }
+/** A barrier only: a case that reads the file uses waitForFileContent. */
 async function waitForFile(path: string) {
-  const deadline = performance.now() + 5000;
+  const deadline = performance.now() + BARRIER_BUDGET_MS;
   while (!(await Bun.file(path).exists())) {
     if (performance.now() >= deadline) {
       throw new Error("fixture barrier timed out");
@@ -604,6 +613,7 @@ test("interrupted rollback before deletion-intent publication never hides its ex
   ).href;
   const child = spawn(`
     import {spyOn} from "bun:test";
+    import {writeFileSync} from "node:fs";
     import * as fs from "node:fs/promises";
     import {openNativeComposeRouteClaims} from ${JSON.stringify(module)};
     const root = ${JSON.stringify(root)};
@@ -612,6 +622,8 @@ test("interrupted rollback before deletion-intent publication never hides its ex
     const original = fs.open;
     spyOn(fs, "open").mockImplementation(async (...args) => {
       if (String(args[0]).includes("/releases/") && String(args[0]).endsWith(".tmp")) {
+        writeFileSync(root + "/rollback-barrier", "");
+        await Bun.sleep(${TORN_BARRIER_GAP_MS});
         await Bun.write(root + "/rollback-barrier", JSON.stringify(attempt.reference));
         await Bun.sleep(60_000);
       }
@@ -619,13 +631,22 @@ test("interrupted rollback before deletion-intent publication never hides its ex
     });
     await store.rollback(attempt);
   `);
-  await waitForFile(join(root, "rollback-barrier"));
+  const reference = await waitForFileContent({
+    path: join(root, "rollback-barrier"),
+    budgetMs: BARRIER_BUDGET_MS,
+    what: "rollback barrier",
+    complete: (text) => {
+      try {
+        return JSON.parse(text) as NativeComposeRouteAttempt["reference"];
+      } catch {
+        return undefined;
+      }
+    },
+  });
   child.kill("SIGKILL");
   await child.exited;
   const reopened = await store(root);
-  const saved = await reopened.reopen(
-    await Bun.file(join(root, "rollback-barrier")).json()
-  );
+  const saved = await reopened.reopen(reference);
   expect(["reserved", "aborted"]).toContain(saved.phase);
   let observed: readonly string[] = [];
   await reopened.release({
@@ -941,8 +962,12 @@ for (const change of [
     const path = claimPath(root);
     const text = await Bun.file(path).text();
     if (change === "inode") {
-      await fs.unlink(path);
+      // Retain the original inode so immediate filesystem reuse cannot make
+      // this replacement indistinguishable from the saved file identity.
+      const original = join(root, "original-claim.json");
+      await fs.rename(path, original);
       await fs.writeFile(path, text, { mode: 0o600 });
+      expect((await fs.stat(path)).ino).not.toBe((await fs.stat(original)).ino);
     }
     if (change === "symlink") {
       await fs.rename(path, `${path}.old`);
@@ -1055,8 +1080,12 @@ test("claim replacement in the proof callback cannot authorize deletion of a new
   await expect(
     result.release({
       assertAbsent: async () => {
-        await fs.unlink(claimPath(root));
+        const original = join(root, "original-claim.json");
+        await fs.rename(claimPath(root), original);
         await fs.writeFile(claimPath(root), before, { mode: 0o600 });
+        expect((await fs.stat(claimPath(root))).ino).not.toBe(
+          (await fs.stat(original)).ino
+        );
       },
     })
   ).rejects.toThrow("values omitted");
@@ -1072,8 +1101,10 @@ test("private reference and journal replacement cannot reopen or authorize effec
   ).rejects.toThrow();
   const path = join(attemptPath(root, attempt), "intent.json");
   const text = await Bun.file(path).text();
-  await fs.unlink(path);
+  const original = join(root, "original-intent.json");
+  await fs.rename(path, original);
   await fs.writeFile(path, text, { mode: 0o600 });
+  expect((await fs.stat(path)).ino).not.toBe((await fs.stat(original)).ino);
   await expect(result.markEffectsPossible(attempt)).rejects.toThrow(
     "values omitted"
   );
@@ -1100,3 +1131,172 @@ for (const hostname of [
     expect(await fs.readdir(join(namespace(root), "claims"))).toEqual([]);
   });
 }
+
+test.each([
+  "",
+  "unfinished",
+])("compaction removes interrupted publication temporary %j and empty attempts", async (contents) => {
+  const root = await fixture();
+  const result = await store(root);
+  const obsolete = await acquire(result);
+  await complete(result, obsolete);
+  const current = await acquire(result);
+  await complete(result, current);
+  await fs.writeFile(
+    join(
+      ownerPath(root),
+      "attempts",
+      obsolete.reference.attemptId,
+      `${"a".repeat(32)}.tmp`
+    ),
+    contents,
+    { mode: 0o600 }
+  );
+  await fs.mkdir(join(ownerPath(root), "attempts", "b".repeat(32)), {
+    mode: 0o700,
+  });
+  await fs.mkdir(join(ownerPath(root), "attempts", "d".repeat(32)), {
+    mode: 0o700,
+  });
+  await fs.writeFile(
+    join(ownerPath(root), "attempts", "d".repeat(32), `${"e".repeat(32)}.tmp`),
+    contents,
+    { mode: 0o600 }
+  );
+  await result.compact({ references: [current.reference] });
+  expect(await fs.readdir(join(ownerPath(root), "attempts"))).toEqual([
+    current.reference.attemptId,
+  ]);
+  expect(await fs.readdir(join(ownerPath(root), "retired"))).toEqual([]);
+  await result.assertHeld(current.reference);
+});
+
+test("compaction retires aborted and stopped attempts but preserves a stopped pin", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const aborted = await acquire(result);
+  await result.rollback(aborted);
+  const stopped = await acquire(result);
+  await result.markEffectsPossible(stopped);
+  await result.recoverRetainedStopped({
+    references: [stopped.reference],
+    assertStopped: async () => {},
+  });
+  await result.compact({ references: [stopped.reference] });
+  expect((await result.reopen(stopped.reference)).phase).toBe("stopped");
+  await expect(result.reopen(aborted.reference)).rejects.toThrow();
+  const current = await acquire(result);
+  await complete(result, current);
+  await result.compact({ references: [current.reference] });
+  await expect(result.reopen(stopped.reference)).rejects.toThrow();
+});
+
+test("settled lifecycle attempts have constant directory and Linux descriptor counts", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const original = await acquire(result);
+  const descriptors = async () =>
+    process.platform === "linux"
+      ? (await fs.readdir("/proc/self/fd")).length
+      : null;
+  let previous = await acquire(result);
+  await complete(result, previous);
+  await result.compact({
+    references: [original.reference, previous.reference],
+  });
+  const baseline = await descriptors();
+  for (let index = 0; index < 24; index++) {
+    const current = await acquire(result);
+    await complete(result, current);
+    await result.compact({
+      references: [original.reference, current.reference],
+    });
+    expect(await fs.readdir(join(ownerPath(root), "attempts"))).toHaveLength(2);
+    expect(await fs.readdir(join(ownerPath(root), "retired"))).toHaveLength(0);
+    if (baseline !== null) {
+      expect(await descriptors()).toBe(baseline);
+    }
+    await expect(result.reopen(previous.reference)).rejects.toThrow();
+    await result.assertHeld(original.reference);
+    await result.assertHeld(current.reference);
+    previous = current;
+  }
+}, 120_000);
+
+test("compaction preserves uncertainty, referenced attempts and sole active claim witnesses", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const settled = await acquire(result);
+  await complete(result, settled);
+  await result.compact({ references: [] });
+  expect((await result.reopen(settled.reference)).phase).toBe("complete");
+  const unknown = await acquire(result);
+  await result.markEffectsPossible(unknown);
+  await result.compact({ references: [settled.reference] });
+  expect((await result.reopen(unknown.reference)).phase).toBe("armed");
+  await result.assertHeld(unknown.reference);
+  await result.compact({ references: [] });
+  await expect(result.reopen(settled.reference)).rejects.toThrow();
+});
+
+test("interrupted retired-file cleanup resumes without a partial active journal", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const original = await acquire(result);
+  const obsolete = await acquire(result);
+  await complete(result, obsolete);
+  const current = await acquire(result);
+  await complete(result, current);
+  const references = [original.reference, current.reference];
+  const unlink = fs.unlink;
+  const failure = spyOn(fs, "unlink").mockImplementation(async (path) => {
+    if (String(path).includes("/retired/")) {
+      throw Object.assign(new Error("synthetic interrupted cleanup"), {
+        code: "EIO",
+      });
+    }
+    return await unlink(path);
+  });
+  try {
+    await expect(result.compact({ references })).rejects.toThrow();
+  } finally {
+    failure.mockRestore();
+    await result.close();
+  }
+  expect(await fs.readdir(join(ownerPath(root), "attempts"))).toHaveLength(2);
+  expect(await fs.readdir(join(ownerPath(root), "retired"))).toHaveLength(1);
+  const reopened = await store(root);
+  await reopened.compact({ references });
+  expect(await fs.readdir(join(ownerPath(root), "retired"))).toHaveLength(0);
+  await reopened.assertHeld(original.reference);
+  await reopened.assertHeld(current.reference);
+});
+
+test("retired cleanup can retry on the same open store without leaking a directory handle", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const original = await acquire(result);
+  const obsolete = await acquire(result);
+  await complete(result, obsolete);
+  const current = await acquire(result);
+  await complete(result, current);
+  const references = [original.reference, current.reference];
+  const unlink = fs.unlink;
+  const failure = spyOn(fs, "unlink").mockImplementation(async (path) => {
+    if (String(path).includes("/retired/")) {
+      throw Object.assign(new Error("synthetic interrupted cleanup"), {
+        code: "EIO",
+      });
+    }
+    return await unlink(path);
+  });
+  try {
+    await expect(result.compact({ references })).rejects.toThrow();
+  } finally {
+    failure.mockRestore();
+  }
+  await result.compact({ references });
+  await result.assertHeld(original.reference);
+  await result.assertHeld(current.reference);
+  expect(await fs.readdir(join(ownerPath(root), "retired"))).toHaveLength(0);
+});

@@ -370,6 +370,17 @@ and the source/storage/routing/host contracts remain separate qualification gate
 Run its pure regressions with
 `cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --features native-config-plan project::native::tests`.
 
+The test-only `node-kill-harness` feature adds supervisor pause points after the
+job claim commits but before the fixture spawns, and after the child is reaped but
+before its result is persisted. `tests/node_kill_harness.rs` arms each point, sends
+SIGKILL to the real paused supervisor, and checks quarantine without replay, retry
+identity and node-restart recovery. Run it with
+`cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --features node-kill-harness --test node_kill_harness`.
+An optimized build refuses the feature with `compile_error!`, no release script
+enables it, and CI checks that the release candidate carries no harness marker.
+Source jobs share the claim point; their exit-to-persist window inside the provider
+is not covered by this harness.
+
 The optional `shared-mcp` feature builds `hack-mcp-adapter`, an experimental native
 stdio relay for the explicit shared MCP socket backend. Build it with
 `cargo build --locked --release --manifest-path packages/runtime-core/Cargo.toml --features shared-mcp --bin hack-mcp-adapter`.
@@ -550,6 +561,12 @@ graphs inside a running pool. macOS APFS only: elsewhere `prefer` keeps the stoc
 Protocol version 1 describes this development client. It is not a promised release API. This is
 a bounded experimental application graph executor, not a qualified native Linux container adapter. The checkout-owned `node serve`
 service and independent supervisors implement the WU04 contract (local `_docs/docs/plans/v5/wu04-contract.md`).
+
+Journal connections wait up to two seconds for SQLite contention. SQLITE_BUSY or
+SQLITE_LOCKED refuses with the closed code `journal_busy` and the fixed hint
+"Node journal is busy; retry with the same operation ID." A refused write records
+no mutation; retry the unchanged request with the same operation ID.
+
 Its [versioned schema](node-protocol-v1.schema.json) precedes any TypeScript consumer. The
 Compose subset (local `_docs/docs/plans/v5/compose-subset.md`) defines the importer and refusal boundaries. The
 work-unit ledger (local `_docs/docs/plans/v5/work-units.md`) separates implementation from live qualification.
@@ -1514,7 +1531,12 @@ clean `down` keeps it clean. Pools stopped before this marker existed qualify af
 next clean `down`. Clean also requires a creation receipt, rootfs pin, both disk
 identities and declared sizes, the recorded executable and user, a dead recorded
 provider and no pending owner update; these receipt checks are read-only, take no
-provider lock and run around every sample, including `runtime probe`.
+provider lock and run around every sample, including `runtime probe`. The disk-handle
+scan (`lsof` over both disks) that proves the provider's release is bounded at 30 s on
+the stop paths (`down`, `recover`) and in release checks, well above the slowest scan
+measured on a loaded host. A scan that still does not finish ends the stop as
+`provider_timeout_uncertain`, without the marker. `scripts/measure-lsof-scan.ts`
+re-measures a host.
 
 The reserve is used only when a start needs it. Once the startup lease is held, a
 start whose every qualifying sample, including the lease recheck, also fits the 58 GiB

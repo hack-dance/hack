@@ -340,6 +340,7 @@ export async function runDaemon({
     await removeFileIfExists({ path: gatewayInternalSocketPath });
     await removeFileIfExists({ path: paths.socketPath });
     await removeFileIfExists({ path: paths.pidPath });
+    await logger.flush();
     process.exit(0);
   };
 

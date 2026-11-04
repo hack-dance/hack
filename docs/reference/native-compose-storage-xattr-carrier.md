@@ -412,11 +412,11 @@ Budgets are layered and all finite:
   1,000–600,000 ms). It is never derived from `HACK_COMPOSE_STARTUP_TIMEOUT_MS`,
   so a short start budget cannot starve a helper proof and a long one does not
   lengthen it.
-- In a native `up` or `restart` start phase, guard proof time (each carrier's
-  creation and witness verification, not the guard's surrounding freshness
-  checks and saved-state reads) is excluded from
-  the start deadline but capped in total at 16 × the storage budget or 1 hour,
-  whichever is smaller. A guard proof that would start after the cap is spent is
+- In a native `up` or `restart` image or start phase, guard proof time (each
+  carrier's creation and witness verification, not the guard's surrounding
+  freshness checks and saved-state reads) is excluded from
+  that phase's deadline but capped in total, per phase, at 16 × the storage
+  budget or 1 hour, whichever is smaller. A guard proof that would start after the cap is spent is
   refused before it runs, and one that ends past it refuses as `storage-budget`.
 - Inside a carrier every Docker probe and command is bounded by the carrier's
   remaining budget (`nativeComposeStorageProbeTimeoutMs`), not by a fixed cap:
@@ -437,7 +437,11 @@ Budgets are layered and all finite:
   helpers on loaded hosted runners as `storage-helper-start`/`probe-timeout`
   while most of the 90-second budget remained (HACK-1369). A timeout that ends
   before the carrier's deadline still reports `probe-timeout`; one that reaches
-  it reports `storage-budget`. A recorded command's 15-second settlement budget
+  it reports `storage-budget`. A hung volume create or helper create/start is
+  bounded only by the carrier's remaining budget, so it always reports
+  `storage-budget` (for a start, `storage-helper-start`/`storage-budget`), never
+  `probe-timeout`: the remedy is the storage budget the summary names
+  (HACK-1459). A recorded command's 15-second settlement budget
   follows its exit.
 - An unrecorded command (an identity read or a legacy root/seed command) waits
   at most three seconds for its process group to become absent after exit,

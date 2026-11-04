@@ -23,14 +23,16 @@ import { CliUsageError, defineCommand, defineOption } from "../cli/command.ts";
 import { optJson, optPath } from "../cli/options.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import { readHomeEnv } from "../lib/home-dir.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
 import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
 
 /**
  * `hack setup migrate`: preview (default, read-only), `--apply`, or
- * `--rollback-manifest <manifest>` for moving from standalone Hack skill and rule
- * files to the skills-only `hack` plugin. See `plugin-migration.ts` for the
+ * `--rollback-manifest <manifest>` for moving standalone Hack skills to the
+ * skills-only `hack` plugin. Cursor rules have no replacement and are preserved.
+ * Historical rule backups can still be rolled back. See `plugin-migration.ts` for the
  * ownership, verification and backup contract.
  */
 
@@ -113,7 +115,7 @@ type SetupMigrateArgs = CommandArgs<typeof setupMigrateOptions, readonly []>;
 export const setupMigrateSpec = defineCommand({
   name: "migrate",
   summary:
-    "Preview, apply or roll back moving standalone agent files to the hack plugin",
+    "Migrate standalone skills to the hack plugin; preserve Cursor rules",
   group: "Agents",
   options: setupMigrateOptions,
   positionals: [],
@@ -216,7 +218,7 @@ export async function handleSetupMigrate({
     return await reportRollback({ result, json: options.json === true });
   }
 
-  const home = (process.env.HOME ?? "").trim();
+  const home = readHomeEnv() ?? "";
   const scopes: MigrationScopeRoot[] = [];
   if (!options.global || options.allScopes) {
     const startDir = resolve(ctx.cwd, options.path ?? ".");

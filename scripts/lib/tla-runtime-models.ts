@@ -41,6 +41,43 @@ const laterIncompleteMissingLockStages = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "pre-ready-retirement",
+    module: "Retirement",
+    states: 10_965,
+    invariant: "Safe",
+    action: "RequestHostStop",
+    fields: ["unsafeSettlement = TRUE", "stopRequested = TRUE"],
+    additionalControls: [
+      {
+        name: "unproved-removal",
+        negative: true,
+        fields: ["unsafeRemoval = TRUE", "stopRequested = TRUE"],
+      },
+      {
+        name: "stale-inputs",
+        negative: true,
+        fields: ["unsafeFreshness = TRUE", "stopRequested = TRUE"],
+      },
+      {
+        name: "foreign-session",
+        negative: true,
+        fields: ["unsafeSession = TRUE", "stopRequested = TRUE"],
+      },
+      {
+        name: "stale-claim",
+        negative: true,
+        fields: ["unsafeClaim = TRUE", "stopRequested = TRUE"],
+      },
+      {
+        name: "unconfirmed-host-exit",
+        negative: true,
+        action: "Retire",
+        fields: ["unsafeRetire = TRUE", "retired = TRUE"],
+      },
+      { name: "liveness", negative: false, states: 395 },
+    ],
+  },
+  {
     name: "native-persistent-enrollment",
     module: "Enrollment",
     states: 38,
@@ -1196,6 +1233,212 @@ const contracts: readonly ModelContract[] = [
     invariant: "Safe",
     action: "Discard",
     fields: ['phase = "discarded"', "alive = TRUE"],
+  },
+  {
+    // Shared helper instance lifecycle-session ownership (HACK-1142): the
+    // controller's session decision, the locked creation transaction
+    // (revalidate, publish, create, environment, record) and its failure
+    // outcomes and cleanup, fenced process launches, the locked conditional
+    // finalize, bounded mux calls that settle under the lock (with controls
+    // for abandoned calls and timeouts read as absence), creator cleanup by
+    // session epoch, and a down whose session stop fails; see
+    // tests/models/tla/README.md.
+    name: "shared-helper-instance",
+    module: "Instance",
+    states: 7649,
+    invariant: "SessionSafe",
+    action: "Succeed",
+    fields: [
+      'session = "absent"',
+      'epoch = <<"b", "adopted">>',
+      'pc = [a |-> "done", b |-> "succeeded"]',
+    ],
+    // TLC's two workers may report either up as the adopter, and the kill
+    // may land after the adopter's Succeed (reported at Cleanup).
+    alternativeWitnesses: [
+      {
+        action: "Succeed",
+        fields: [
+          'session = "absent"',
+          'epoch = <<"a", "adopted">>',
+          'pc = [a |-> "succeeded", b |-> "done"]',
+        ],
+      },
+      {
+        action: "Cleanup",
+        fields: [
+          'session = "absent"',
+          'epoch = <<"b", "adopted">>',
+          'pc = [a |-> "done", b |-> "succeeded"]',
+        ],
+      },
+      {
+        action: "Cleanup",
+        fields: [
+          'session = "absent"',
+          'epoch = <<"a", "adopted">>',
+          'pc = [a |-> "succeeded", b |-> "done"]',
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "no-revalidation",
+        negative: true,
+        invariant: "Reclaimable",
+        action: "Publish",
+        fields: ['session = "alive"', 'token = "a"', 'entry = "b"'],
+        alternativeWitnesses: [
+          {
+            action: "Publish",
+            fields: ['session = "alive"', 'token = "b"', 'entry = "a"'],
+          },
+        ],
+      },
+      {
+        name: "epoch-failure-unstopped",
+        negative: true,
+        invariant: "Reclaimable",
+        action: "RecordFailUnstopped",
+        fields: ['session = "alive"', 'token = "a"', 'entry = "none"'],
+        alternativeWitnesses: [
+          {
+            action: "RecordFailUnstopped",
+            fields: ['session = "alive"', 'token = "b"', 'entry = "none"'],
+          },
+        ],
+      },
+      {
+        name: "stale-finalize",
+        negative: true,
+        invariant: "Reclaimable",
+        action: "Finalize",
+        fields: ['session = "alive"', 'token = "b"', 'entry = "a"'],
+        // TLC's two workers may report either up as the displaced one.
+        alternativeWitnesses: [
+          {
+            action: "Finalize",
+            fields: ['session = "alive"', 'token = "a"', 'entry = "b"'],
+          },
+        ],
+      },
+      {
+        name: "abandoned-create",
+        negative: true,
+        invariant: "Reclaimable",
+        action: "LateCreate",
+        fields: ['session = "alive"', 'token = "a"', 'entry = "none"'],
+        alternativeWitnesses: [
+          {
+            action: "LateCreate",
+            fields: ['session = "alive"', 'token = "b"', 'entry = "none"'],
+          },
+        ],
+      },
+      {
+        name: "abandoned-replace",
+        negative: true,
+        invariant: "SessionSafe",
+        action: "LateKill",
+        fields: [
+          'session = "absent"',
+          'pc = [a |-> "succeeded", b |-> "done"]',
+        ],
+        // The stale kill can land before or after the victim's Succeed;
+        // either up can be the victim.
+        alternativeWitnesses: [
+          {
+            action: "LateKill",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "done", b |-> "succeeded"]',
+            ],
+          },
+          {
+            action: "Succeed",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "succeeded", b |-> "done"]',
+            ],
+          },
+          {
+            action: "Succeed",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "done", b |-> "succeeded"]',
+            ],
+          },
+        ],
+      },
+      {
+        name: "unlocked-failure-cleanup",
+        negative: true,
+        invariant: "SessionSafe",
+        action: "LateKill",
+        fields: [
+          'session = "absent"',
+          'pc = [a |-> "done", b |-> "succeeded"]',
+        ],
+        // The stale kill can land before or after the victim's Succeed;
+        // either up can be the victim.
+        alternativeWitnesses: [
+          {
+            action: "LateKill",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "succeeded", b |-> "done"]',
+            ],
+          },
+          {
+            action: "Succeed",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "done", b |-> "succeeded"]',
+            ],
+          },
+          {
+            action: "Succeed",
+            fields: [
+              'session = "absent"',
+              'pc = [a |-> "succeeded", b |-> "done"]',
+            ],
+          },
+        ],
+      },
+      {
+        name: "unfenced-launch",
+        negative: true,
+        invariant: "NoForeignLaunch",
+        action: "StartProcesses",
+        fields: ["foreign = TRUE", 'token = "b"', 'entry = "b"'],
+        alternativeWitnesses: [
+          {
+            action: "StartProcesses",
+            fields: ["foreign = TRUE", 'token = "a"', 'entry = "a"'],
+          },
+        ],
+      },
+      {
+        name: "release-on-failed-stop",
+        negative: true,
+        invariant: "HelpersKeptForSession",
+        action: "DownStopFailed",
+        fields: ['down = "failed"', "released = TRUE", 'session = "alive"'],
+      },
+      {
+        name: "timeout-as-absence",
+        negative: true,
+        invariant: "Reclaimable",
+        action: "Publish",
+        fields: ['session = "alive"', 'token = "a"', 'entry = "b"'],
+        alternativeWitnesses: [
+          {
+            action: "Publish",
+            fields: ['session = "alive"', 'token = "b"', 'entry = "a"'],
+          },
+        ],
+      },
+    ],
   },
   {
     name: "relay-fence",

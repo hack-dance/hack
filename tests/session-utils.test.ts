@@ -6,6 +6,7 @@ import {
   buildSessionStreamLogEvent,
   buildSessionStreamStartEvent,
   diffNewLines,
+  formatSessionListTable,
   parseTmuxPanesOutput,
   splitLines,
 } from "../src/commands/session-utils.ts";
@@ -118,4 +119,32 @@ test("parseTmuxPanesOutput parses tab-delimited pane fields", () => {
     path: "/Users/demo/project",
   });
   expect(secondPane.active).toBe(false);
+});
+
+test("formatSessionListTable keeps long workspace IDs in their own column", () => {
+  const workspace = "a-project-with-a-long-name--lifecycle";
+  const lines = formatSessionListTable([
+    {
+      workspace,
+      project: "owner-of-the-long-workspace",
+      backend: "tmux",
+      status: "detached",
+    },
+    { workspace: "demo", project: "demo", backend: "tmux", status: "attached" },
+  ]);
+
+  expect(lines[0]?.split(/\s+/)).toEqual([
+    "Workspace",
+    "Project",
+    "Backend",
+    "Status",
+  ]);
+  expect(lines[2]?.split(/\s+/)).toEqual([
+    workspace,
+    "owner-of-the-long-workspace",
+    "tmux",
+    "detached",
+  ]);
+  expect(lines[3]?.split(/\s+/)).toEqual(["demo", "demo", "tmux", "attached"]);
+  expect(lines[2]?.indexOf("owner-of")).toBe(lines[0]?.indexOf("Project"));
 });

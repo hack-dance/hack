@@ -73,11 +73,14 @@ test.skipIf(!tmux)(
       });
       expect(created.ok).toBe(true);
       expect(await backend.readLifecycleOwnerToken?.({ name })).toBe(token);
+      // `-u`: without a UTF-8 locale tmux prints control characters in the
+      // value as `_` (HACK-1797); the stored value itself is intact.
       const environment = await privateExec(
         [
           tmux ?? "tmux",
           "-S",
           socket,
+          "-u",
           "show-environment",
           "-t",
           name,

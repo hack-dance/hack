@@ -4036,7 +4036,8 @@ async function ensureMacTrustCaddyLocalCa(input: {
   return true;
 }
 
-async function configureMacHostTlsTrust(input: {
+/** Prepare local trust exports; only permitted homes may update launchd. */
+export async function configureMacHostTlsTrust(input: {
   readonly certPath: string;
 }): Promise<boolean> {
   const eligibility = await inspectMacCaEligibility(input);
@@ -4060,6 +4061,14 @@ async function configureMacHostTlsTrust(input: {
       bundlePath,
     })
   );
+
+  const access = resolveLaunchdAccess();
+  if (!access.allowed) {
+    logger.info({
+      message: `Prepared local host trust exports at ${scriptPath}; skipping launchd registration: ${access.message}`,
+    });
+    return true;
+  }
 
   for (const [key, value] of Object.entries(env)) {
     const exitCode = await run(["launchctl", "setenv", key, value], {

@@ -10,6 +10,7 @@ const execCalls: Array<{
   readonly options: ExecOptions;
 }> = [];
 let presenceResult = { exitCode: 0, stdout: "", stderr: "" };
+let sourceResult = { exitCode: 0, stdout: "", stderr: "" };
 
 const shellMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -19,6 +20,9 @@ const shellMock = await registerScopedModuleMock({
       execCalls.push({ command: [...command], options });
       if (command.includes("has-session")) {
         return presenceResult;
+      }
+      if (command.includes("source-file")) {
+        return sourceResult;
       }
       if (command.includes("list-sessions")) {
         return {
@@ -50,6 +54,7 @@ beforeAll(() => {
 beforeEach(() => {
   execCalls.length = 0;
   presenceResult = { exitCode: 0, stdout: "", stderr: "" };
+  sourceResult = { exitCode: 0, stdout: "", stderr: "" };
 });
 
 afterAll(() => {
@@ -77,11 +82,13 @@ test("tmux creates lifecycle ownership through stdin, never argv", async () => {
   expect(ownerToken).toBe("owner-123");
   expect(execCalls[0]?.command).toEqual([
     "tmux",
+    "-u",
     "start-server",
     ";",
     "source-file",
     "-",
   ]);
+  expect(execCalls[0]?.options.timeoutMs).toBeGreaterThan(0);
   const input = execCalls[0]?.options.stdin;
   expect(input).toBeInstanceOf(Blob);
   if (!(input instanceof Blob)) {
@@ -105,6 +112,37 @@ test("tmux creates lifecycle ownership through stdin, never argv", async () => {
   ]);
 });
 
+test("tmux keeps only the exact duplicate-session diagnostic from a failed create", async () => {
+  const backend = await loadTmuxBackend();
+  const create = () =>
+    backend.createSession({
+      name: "demo",
+      env: { FAKE_API_KEY: "fake-test-key" },
+      lifecycleOwnerToken: "owner-123",
+    });
+  sourceResult = {
+    exitCode: 1,
+    stdout: "",
+    stderr: "duplicate session: demo\n",
+  };
+  expect(await create()).toEqual({
+    ok: false,
+    error: "create_failed",
+    stderr: "duplicate session: demo",
+  });
+  // Parser diagnostics may quote command input: they never surface.
+  sourceResult = {
+    exitCode: 1,
+    stdout: "",
+    stderr: '-:1: invalid environment "FAKE_API_KEY=fake-test-key"',
+  };
+  expect(await create()).toEqual({
+    ok: false,
+    error: "create_failed",
+    stderr: "tmux command failed",
+  });
+});
+
 test("tmux sends command environment values over stdin with tmux quoting", async () => {
   const backend = await loadTmuxBackend();
   const fake = "fake-'\"$value\\line\nnext";
@@ -115,6 +153,7 @@ test("tmux sends command environment values over stdin with tmux quoting", async
   });
   expect(execCalls[0]?.command).toEqual([
     "tmux",
+    "-u",
     "start-server",
     ";",
     "source-file",
@@ -170,4 +209,59 @@ test("tmux presence uses an exact session target and distinguishes unknown failu
     stderr: "can't find session: demo",
   };
   expect(await presence()).toBe("unknown");
+});
+
+test("tmux kills a session by exact name, never by tmux's prefix fallback", async () => {
+  const backend = await loadTmuxBackend();
+  await backend.killSession({ name: "demo" });
+  expect(execCalls[0]?.command).toEqual([
+    "tmux",
+    "kill-session",
+    "-t",
+    "=demo",
+  ]);
+});
+
+test("tmux session listing keeps delimiter-heavy paths out of the session name", async () => {
+  const { parseTmuxSessionListing } = await import(
+    "../src/mux/tmux-backend.ts"
+  );
+  const stdout = [
+    "demo--lifecycle\t0\t/work/my app\t2\t1783569600",
+    "tabbed\t1\t/work/a\tb:c|d_e\t1\t1783569601",
+    "quiet\t0\t\t1\t1783569602",
+    // What tmux prints without a UTF-8 client: separators become `_`. It is
+    // not a session row, and its text must not surface as a stoppable ID.
+    "demo--lifecycle_0_/work/my app_2_1783569600",
+    "short\t0\t/work",
+    "bad-tail\t0\t/work\tmany\t1783569603",
+    "",
+  ].join("\n");
+
+  expect(parseTmuxSessionListing(stdout)).toEqual([
+    {
+      backend: "tmux",
+      name: "demo--lifecycle",
+      attached: false,
+      path: "/work/my app",
+      windows: 2,
+      createdAt: new Date(1_783_569_600_000).toISOString(),
+    },
+    {
+      backend: "tmux",
+      name: "tabbed",
+      attached: true,
+      path: "/work/a\tb:c|d_e",
+      windows: 1,
+      createdAt: new Date(1_783_569_601_000).toISOString(),
+    },
+    {
+      backend: "tmux",
+      name: "quiet",
+      attached: false,
+      path: null,
+      windows: 1,
+      createdAt: new Date(1_783_569_602_000).toISOString(),
+    },
+  ]);
 });

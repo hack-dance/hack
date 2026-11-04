@@ -120,7 +120,7 @@ test("an unquoted single-argument child command refuses with a quoting hint", ()
   expect(() =>
     parsePositionalsForCommand(positionals, ["dev", "npm", "--version"])
   ).toThrow(
-    'Unexpected arguments: --version. <command> is one argument; quote the whole command, as in "npm --version".'
+    'Unexpected arguments: 1 more than this command accepts. <command> is one argument; quote the whole command, as in "npm run test". The arguments are not shown because they may contain values.'
   );
   const quoted: Readonly<Record<string, unknown>> = parsePositionalsForCommand(
     positionals,
@@ -162,6 +162,19 @@ test("Hack's own flags still work before the child command", () => {
   // Commands without a child command keep ordinary parsing.
   expect(parse(["up", "web", "--json"]).values.json).toBe(true);
   expect(findPassthroughStart(CLI_SPEC, ["up", "web", "--json"])).toBeNull();
+});
+
+test("an inline option value never consumes the next token", () => {
+  // `--workdir=/x` carries its value, so `web` is the service and `ls` the child.
+  expect(
+    findPassthroughStart(CLI_SPEC, ["run", "--workdir=/x", "web", "ls"])
+  ).toBe(3);
+  expect(findPassthroughStart(CLI_SPEC, ["run", "-p=dir", "web", "ls"])).toBe(
+    3
+  );
+  expect(
+    findPassthroughStart(CLI_SPEC, ["--path=dir", "exec", "web", "ls"])
+  ).toBe(3);
 });
 
 test("the boundary skips option values, including omitted defaulted values", () => {
@@ -264,14 +277,22 @@ test(
 test(
   "source CLI unquoted session exec command refuses with a quoting hint",
   async () => {
-    const result = await cli(["session", "exec", "ws", "npm", "--version"]);
+    const result = await cli([
+      "session",
+      "exec",
+      "ws",
+      "deploy",
+      "--token=sentinel-argv-value",
+    ]);
     expect(result.code).toBe(1);
     // Not Hack's bare `--version` output (the usage help's banner also names
     // the version, so match the whole line).
     expect(result.stdout).not.toMatch(/^hack v[\d.]+\S*$/m);
-    expect(result.stdout + result.stderr).toContain(
-      'quote the whole command, as in "npm --version"'
-    );
+    const output = result.stdout + result.stderr;
+    expect(output).toContain('quote the whole command, as in "npm run test"');
+    // The hint never echoes the user's argv, which may carry a value.
+    expect(output).not.toContain("sentinel-argv-value");
+    expect(output).not.toContain("deploy");
   },
   SPAWN_TIMEOUT_MS
 );

@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -63,7 +64,7 @@ function cliEnv(): Record<string, string> {
 async function git(args: readonly string[], cwd: string): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
-    env: cliEnv(),
+    env: fixtureGitEnv({ env: cliEnv() }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -181,10 +182,8 @@ test("up, restart, run, exec and down leave git status unchanged", async () => {
 }, 120_000);
 
 test("up and down in a linked worktree leave both checkouts clean", async () => {
-  // Target the base instance from the worktree. With the default
-  // `worktree.auto_branch`, `up` also records the derived branch in the
-  // authored `.hack/hack.branches.json`; that is a separate behavior from the
-  // ignore rules this test covers.
+  // Target the base instance from the worktree, because this test covers the
+  // ignore rules rather than branch instances.
   const configPath = join(repoRoot, ".hack", "hack.config.json");
   const config = JSON.parse(await readFile(configPath, "utf8"));
   await writeFile(
@@ -282,7 +281,7 @@ test("doctor reports a missing .hack/.gitignore in an initialized project", asyn
 async function isIgnored(path: string, cwd: string): Promise<boolean> {
   const proc = Bun.spawn(["git", "check-ignore", "-q", "--no-index", path], {
     cwd,
-    env: cliEnv(),
+    env: fixtureGitEnv({ env: cliEnv() }),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

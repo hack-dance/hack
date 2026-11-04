@@ -217,6 +217,32 @@ impl Relay {
         let stream = UnixStream::connect(&self.socket).unwrap();
         assert_refused_within(&stream, REFUSAL_DEADLINE);
     }
+    /// Releases `reserved`, the listener that kept the relay's target port from other
+    /// processes, then proves the relay refuses a client because that target refuses.
+    ///
+    /// No loopback target both refuses at once and stays reserved on macOS and Linux
+    /// (HACK-1464): XNU silently drops a SYN to a bound socket that never listens, so the
+    /// dial times out; a connected socket does not stop a `SO_REUSEADDR` listener from
+    /// binding its port; the relay rejects port 0; and a multicast or broadcast address
+    /// fails `connect` synchronously, skipping the asynchronous refusal path a closed
+    /// loopback port exercises. So the port is released only here, leaving a race window
+    /// from this `close` to the relay's dial. On macOS 26.5 under 18 CPU hogs and parallel
+    /// suites, release to refusal took a median under 1 ms and at most 22 ms, against a
+    /// median of 31-51 ms and at most 255 ms when the port was released before the relay
+    /// started. A listener that takes the port in that window is dialed instead, and the
+    /// probe below turns that into `E_RELAY_TARGET_PORT_TAKEN` rather than a refusal
+    /// timeout or a silent pass. A listener that both appears and disappears inside the
+    /// window stays undetected.
+    fn connect_refused_by_released_target(&self, reserved: TcpListener) {
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let stream = UnixStream::connect(&self.socket).unwrap();
+        let refusal = refusal_within(&stream, REFUSAL_DEADLINE);
+        assert_target_still_refuses(port);
+        if let Err(message) = refusal {
+            panic!("{message}");
+        }
+    }
     fn stop(&mut self) {
         if self.child.try_wait().unwrap().is_none() {
             unsafe {
@@ -506,10 +532,12 @@ fn read_deadline_preserves_success_and_non_interrupted_errors() {
 }
 #[test]
 fn occupied_socket_is_not_unlinked_and_unavailable_target_fails_connection() {
-    let target = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = target.local_addr().unwrap().port();
-    drop(target);
-    let mut relay = Relay::start(port, 1000);
+    // Keeps the target port from other processes until the refused dial; see
+    // `connect_refused_by_released_target`.
+    let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reserved.local_addr().unwrap().port();
+    // An idle limit beyond `REFUSAL_DEADLINE`, so idle expiry cannot pass for the refusal.
+    let mut relay = Relay::start(port, 30000);
     let status = Command::new(BINARY)
         .arg(&relay.socket)
         .arg("127.0.0.1")
@@ -518,8 +546,24 @@ fn occupied_socket_is_not_unlinked_and_unavailable_target_fails_connection() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(73));
-    relay.connect_refused();
+    relay.connect_refused_by_released_target(reserved);
     assert!(relay.child.try_wait().unwrap().is_none());
+}
+
+#[test]
+#[should_panic(expected = "E_RELAY_TARGET_PORT_TAKEN")]
+fn released_target_taken_by_another_listener_fails_distinctly() {
+    let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = Relay::start(reserved.local_addr().unwrap().port(), 1000);
+    // Simulates the residual race: another listener holds the port when the relay dials
+    // and closes each connection at once, which the refusal check alone would accept.
+    let foreign = reserved.try_clone().unwrap();
+    thread::spawn(move || {
+        for _ in 0..2 {
+            drop(foreign.accept());
+        }
+    });
+    relay.connect_refused_by_released_target(reserved);
 }
 
 #[test]
@@ -548,17 +592,20 @@ fn connection_limit_refuses_excess_without_disrupting_existing_streams() {
     }
 }
 
-fn assert_refused(result: std::io::Result<usize>) {
+fn refused(result: std::io::Result<usize>) -> Result<(), String> {
     match result {
-        Ok(0) => {}
+        Ok(0) => Ok(()),
         Err(error)
             if matches!(
                 error.kind(),
                 std::io::ErrorKind::ConnectionReset
                     | std::io::ErrorKind::ConnectionAborted
                     | std::io::ErrorKind::BrokenPipe
-            ) => {}
-        other => panic!("expected prompt refusal, received {other:?}"),
+            ) =>
+        {
+            Ok(())
+        }
+        other => Err(format!("expected prompt refusal, received {other:?}")),
     }
 }
 
@@ -569,6 +616,13 @@ const REFUSAL_DEADLINE: Duration = Duration::from_secs(10);
 /// readability with `poll`, then requires EOF or a reset. A live peer times out and fails;
 /// a peer that sends data fails the refusal check.
 fn assert_refused_within(stream: &UnixStream, limit: Duration) {
+    if let Err(message) = refusal_within(stream, limit) {
+        panic!("{message}");
+    }
+}
+
+/// The check behind `assert_refused_within`, returning its failure instead of panicking.
+fn refusal_within(stream: &UnixStream, limit: Duration) -> Result<(), String> {
     let deadline = Instant::now() + limit;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -588,15 +642,33 @@ fn assert_refused_within(stream: &UnixStream, limit: Duration) {
         if polled < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
             continue;
         }
-        assert_eq!(
-            polled, 1,
-            "expected prompt refusal, stream stayed open for {limit:?}"
-        );
+        if polled != 1 {
+            return Err(format!(
+                "expected prompt refusal, stream stayed open for {limit:?}"
+            ));
+        }
         break;
     }
     // Readable: EOF, a reset, or data is pending, so this read cannot block.
     let mut reader = stream;
-    assert_refused(reader.read(&mut [0]));
+    refused(reader.read(&mut [0]))
+}
+
+/// Fails with a distinct code unless loopback `port` still refuses connections. A port
+/// that accepts, or swallows the probe, was taken by another socket after the test
+/// released it, so a relay that dialed it never met a refusing target.
+fn assert_target_still_refuses(port: u16) {
+    let target = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    match std::net::TcpStream::connect_timeout(&target, Duration::from_secs(2)) {
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {}
+        Ok(_) => panic!(
+            "E_RELAY_TARGET_PORT_TAKEN: another listener took the released target port before the relay dialed it"
+        ),
+        Err(error) => panic!(
+            "E_RELAY_TARGET_PORT_UNVERIFIED: the released target port did not refuse a probe ({:?})",
+            error.kind()
+        ),
+    }
 }
 
 #[test]

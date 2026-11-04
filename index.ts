@@ -62,3 +62,11 @@ try {
     typeof process.exitCode === "number" ? process.exitCode : undefined
   );
 }
+// A keychain call that missed its deadline cannot be canceled and would keep
+// the process alive after its refusal was reported; exit explicitly instead.
+const { hasAbandonedNativeKeychainCall } = await import(
+  "./src/lib/native-keychain.ts"
+);
+if (hasAbandonedNativeKeychainCall()) {
+  process.exit(typeof process.exitCode === "number" ? process.exitCode : 1);
+}

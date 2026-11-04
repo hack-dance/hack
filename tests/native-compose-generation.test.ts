@@ -34,6 +34,7 @@ import {
   type NativeComposeRouteClaims,
   openNativeComposeRouteClaims,
 } from "../src/lib/native-compose-route-claims.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const REVISION = createHash("sha256").update("synthetic input").digest("hex");
 const fixtures: string[] = [];
@@ -566,100 +567,107 @@ async function routeStore(
   return result;
 }
 
-test.each([
-  "complete",
-  "failed",
-] as const)("dependent route finalizer %s preserves receipt ordering and hostname handoff", async (outcome) => {
-  const root = await fixture();
-  const owner = await store(root);
-  const old = await activate(owner);
-  const claims = await routeStore(root, owner.identity);
-  const foreign = await routeStore(root, {
-    composeProject: "foreign-finalizer-fixture",
-    ownerToken: "e".repeat(32),
-  });
-  const oldHost = "old.fixture.test";
-  const newHost = "new.fixture.test";
-  const oldClaim = await claims.acquire({
-    hostnames: [oldHost],
-    generationIdentity: old.generationId,
-  });
-  await claims.markEffectsPossible(oldClaim);
-  await claims.complete({
-    attempt: oldClaim,
-    assertTransition: async () => {},
-  });
-  let ownershipChecks = 0;
-  await owner.withMutation(async (mutation) => {
-    const generation = await publish(mutation);
-    const attempt = await claims.acquire({
-      hostnames: [oldHost, newHost],
-      generationIdentity: generation.generationId,
+/**
+ * Each case opens three private stores and takes real route claims through
+ * acquire, complete and hostname handoff. Under load the cases went past Bun's
+ * 5 s default in 2 of 10 runs (HACK-1459).
+ */
+const DEPENDENT_ROUTE_FINALIZER_BUDGET_MS = 30_000;
+test.each(["complete", "failed"] as const)(
+  "dependent route finalizer %s preserves receipt ordering and hostname handoff",
+  async (outcome) => {
+    const root = await fixture();
+    const owner = await store(root);
+    const old = await activate(owner);
+    const claims = await routeStore(root, owner.identity);
+    const foreign = await routeStore(root, {
+      composeProject: "foreign-finalizer-fixture",
+      ownerToken: "e".repeat(32),
     });
-    const effect = mutation.runEffect({
-      generation,
-      operation: "up",
-      assertFresh: async () => {},
-      assertOwned: async () => {
-        ownershipChecks += 1;
-      },
-      effect: async () => {
-        await claims.markEffectsPossible(attempt);
-        return { outcome: "complete", value: 0 };
-      },
-      beforeComplete: async () => {
-        const pending = await owner.loadCurrent();
-        expect(pending.generation?.generationId).toBe(old.generationId);
-        expect(pending.pending?.generationId).toBe(generation.generationId);
-        expect(ownershipChecks).toBe(3);
-        await claims.complete({
-          attempt,
-          assertTransition: async () => {
-            if (outcome === "failed") {
-              throw new Error("private-finalizer-canary");
-            }
-          },
-        });
-        await claims.release({
-          keepHostnames: [newHost],
-          assertAbsent: async () => {},
-        });
-        const handoff = await foreign.acquire({
-          hostnames: [oldHost],
-          generationIdentity: "f".repeat(32),
-        });
-        await foreign.rollback(handoff);
-      },
+    const oldHost = "old.fixture.test";
+    const newHost = "new.fixture.test";
+    const oldClaim = await claims.acquire({
+      hostnames: [oldHost],
+      generationIdentity: old.generationId,
     });
-    if (outcome === "failed") {
-      await rejected(effect, "E_NATIVE_COMPOSE_UNCERTAIN");
-      await claims.retain(attempt);
-      expect((await claims.reopen(attempt.reference)).phase).toBe("retained");
-      for (const hostname of [oldHost, newHost]) {
-        await expect(
-          foreign.acquire({
-            hostnames: [hostname],
+    await claims.markEffectsPossible(oldClaim);
+    await claims.complete({
+      attempt: oldClaim,
+      assertTransition: async () => {},
+    });
+    let ownershipChecks = 0;
+    await owner.withMutation(async (mutation) => {
+      const generation = await publish(mutation);
+      const attempt = await claims.acquire({
+        hostnames: [oldHost, newHost],
+        generationIdentity: generation.generationId,
+      });
+      const effect = mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {
+          ownershipChecks += 1;
+        },
+        effect: async () => {
+          await claims.markEffectsPossible(attempt);
+          return { outcome: "complete", value: 0 };
+        },
+        beforeComplete: async () => {
+          const pending = await owner.loadCurrent();
+          expect(pending.generation?.generationId).toBe(old.generationId);
+          expect(pending.pending?.generationId).toBe(generation.generationId);
+          expect(ownershipChecks).toBe(3);
+          await claims.complete({
+            attempt,
+            assertTransition: async () => {
+              if (outcome === "failed") {
+                throw new Error("private-finalizer-canary");
+              }
+            },
+          });
+          await claims.release({
+            keepHostnames: [newHost],
+            assertAbsent: async () => {},
+          });
+          const handoff = await foreign.acquire({
+            hostnames: [oldHost],
             generationIdentity: "f".repeat(32),
-          })
-        ).rejects.toThrow();
+          });
+          await foreign.rollback(handoff);
+        },
+      });
+      if (outcome === "failed") {
+        await rejected(effect, "E_NATIVE_COMPOSE_UNCERTAIN");
+        await claims.retain(attempt);
+        expect((await claims.reopen(attempt.reference)).phase).toBe("retained");
+        for (const hostname of [oldHost, newHost]) {
+          await expect(
+            foreign.acquire({
+              hostnames: [hostname],
+              generationIdentity: "f".repeat(32),
+            })
+          ).rejects.toThrow();
+        }
+        await rejected(publish(mutation), "E_NATIVE_COMPOSE_UNCERTAIN");
+      } else {
+        expect(await effect).toEqual({ outcome: "complete", value: 0 });
       }
-      await rejected(publish(mutation), "E_NATIVE_COMPOSE_UNCERTAIN");
-    } else {
-      expect(await effect).toEqual({ outcome: "complete", value: 0 });
-    }
-    const saved = await owner.loadCurrent();
-    expect(saved.generation?.generationId).toBe(
-      outcome === "complete" ? generation.generationId : old.generationId
-    );
-    expect(saved.pending?.generationId ?? null).toBe(
-      outcome === "complete" ? null : generation.generationId
-    );
-    expect(ownershipChecks).toBe(outcome === "complete" ? 4 : 3);
-    expect(await Bun.file(receiptPath(owner)).text()).not.toContain(
-      "private-finalizer-canary"
-    );
-  });
-});
+      const saved = await owner.loadCurrent();
+      expect(saved.generation?.generationId).toBe(
+        outcome === "complete" ? generation.generationId : old.generationId
+      );
+      expect(saved.pending?.generationId ?? null).toBe(
+        outcome === "complete" ? null : generation.generationId
+      );
+      expect(ownershipChecks).toBe(outcome === "complete" ? 4 : 3);
+      expect(await Bun.file(receiptPath(owner)).text()).not.toContain(
+        "private-finalizer-canary"
+      );
+    });
+  },
+  DEPENDENT_ROUTE_FINALIZER_BUDGET_MS
+);
 
 test.each([
   "incomplete",
@@ -2378,40 +2386,58 @@ for (const unsafe of [
   });
 }
 
-test("real linked worktree verifies shared repository but keeps checkout instance/data namespace separate", async () => {
-  const root = await fixture();
-  const git = async (args: readonly string[]) => {
-    const child = Bun.spawn(["git", "-C", root, ...args], {
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "pipe",
-    });
-    expect(await child.exited).toBe(0);
-  };
-  await git(["init", "-q"]);
-  await git(["add", ".hack/hack.project.json"]);
-  await git([
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "commit",
-    "-qm",
-    "fixture",
-  ]);
-  const linkedRoot = join(dirname(root), "linked");
-  await git(["worktree", "add", "-q", "-b", "feature", linkedRoot]);
-  const primary = await store(root);
-  const linked = await store(linkedRoot, "feature");
-  expect(primary.identity.repositoryRoot).toBe(linked.identity.repositoryRoot);
-  expect(primary.identity.checkoutRoot).not.toBe(linked.identity.checkoutRoot);
-  expect(primary.identity.composeProject).not.toBe(
-    linked.identity.composeProject
-  );
-  const primaryGeneration = await activate(primary);
-  const linkedGeneration = await activate(linked);
-  expect(primaryGeneration.composeFile).not.toBe(linkedGeneration.composeFile);
-});
+/**
+ * Four fixture `git` processes, then two stores whose identity verifies the
+ * linked worktree with the product's own `git` reads, and two activations. It
+ * took 2-4 s on an idle host and more than Bun's 5 s default at load average
+ * above 100 (HACK-1459).
+ */
+const LINKED_WORKTREE_BUDGET_MS = 30_000;
+test(
+  "real linked worktree verifies shared repository but keeps checkout instance/data namespace separate",
+  async () => {
+    const root = await fixture();
+    const git = async (args: readonly string[]) => {
+      const child = Bun.spawn(["git", "-C", root, ...args], {
+        env: fixtureGitEnv(),
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      expect(await child.exited).toBe(0);
+    };
+    await git(["init", "-q"]);
+    await git(["add", ".hack/hack.project.json"]);
+    await git([
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-qm",
+      "fixture",
+    ]);
+    const linkedRoot = join(dirname(root), "linked");
+    await git(["worktree", "add", "-q", "-b", "feature", linkedRoot]);
+    const primary = await store(root);
+    const linked = await store(linkedRoot, "feature");
+    expect(primary.identity.repositoryRoot).toBe(
+      linked.identity.repositoryRoot
+    );
+    expect(primary.identity.checkoutRoot).not.toBe(
+      linked.identity.checkoutRoot
+    );
+    expect(primary.identity.composeProject).not.toBe(
+      linked.identity.composeProject
+    );
+    const primaryGeneration = await activate(primary);
+    const linkedGeneration = await activate(linked);
+    expect(primaryGeneration.composeFile).not.toBe(
+      linkedGeneration.composeFile
+    );
+  },
+  LINKED_WORKTREE_BUDGET_MS
+);
 
 test("orphan recovery guard with absent mutation lock blocks admission and explicit recovery", async () => {
   const root = await fixture();

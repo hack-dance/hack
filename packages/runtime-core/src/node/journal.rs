@@ -7,24 +7,33 @@ use std::path::{Path, PathBuf};
 pub const OUTPUT_LIMIT: usize = 16 * 1024;
 const CAPACITY: i64 = 2048;
 /// How long one connection waits for another's write transaction before failing closed
-/// with `journal_busy` and a value-free retry hint. Every writer (node service, supervisors,
-/// scheduler) holds the write lock only for one in-memory receipt change and its commit,
-/// so a cancel racing a completion waits for that commit; only a commit stalled beyond
-/// this bound refuses, and the refused mutation was never recorded, so a retry with the
-/// same operation ID is safe.
+/// with `journal_busy` and a value-free retry hint. Most writers (node service admission,
+/// supervisors, scheduler) hold the write lock only for one in-memory receipt change and
+/// its commit, so a cancel racing a completion waits for that commit. Explicit
+/// reconciliation is the exception: it holds the write lock across the provider's
+/// container cleanup, so a slow container engine can itself cause this refusal. Only a
+/// write held beyond this bound refuses. A refused transaction is rolled back, so the
+/// journal records nothing and a retry of the unchanged request is safe; reconciliation's
+/// external container cleanup may already have run, and it is idempotent on retry.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Contention hint for paths without an operation ID: open, reads, internal updates.
+const BUSY_HINT: &str = "Node journal is busy; retry the unchanged request.";
+/// Contention hint for mutations, whose operation ID makes the retry exactly-once.
+const MUTATION_BUSY_HINT: &str = "Node journal is busy; retry with the same operation ID.";
 
 /// Keep contention refusals independent of SQLite's diagnostic text and values.
 fn sqlite_error(failure: rusqlite::Error) -> crate::CandidateError {
     match failure.sqlite_error_code() {
         Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
-            crate::CandidateError::new(
-                "journal_busy",
-                "Node journal is busy; retry with the same operation ID.",
-            )
+            crate::CandidateError::new("journal_busy", BUSY_HINT)
         }
         _ => error(failure),
     }
+}
+
+/// Whether a refusal is the retryable journal contention refusal.
+pub(crate) fn is_journal_busy(failure: &crate::CandidateError) -> bool {
+    failure.code == "journal_busy"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -384,7 +393,22 @@ impl Store {
         }
     }
 
+    /// Mutations carry an operation ID, so their contention refusal names it.
     fn mutate(
+        &mut self,
+        request: &Request,
+        candidate: Option<&crate::Candidate>,
+    ) -> Result<serde_json::Value> {
+        self.mutate_once(request, candidate).map_err(|failure| {
+            if is_journal_busy(&failure) {
+                crate::CandidateError::new("journal_busy", MUTATION_BUSY_HINT)
+            } else {
+                failure
+            }
+        })
+    }
+
+    fn mutate_once(
         &mut self,
         request: &Request,
         candidate: Option<&crate::Candidate>,
@@ -980,8 +1004,16 @@ mod tests {
 
     #[test]
     fn busy_commit_rolls_back_writes_and_same_operation_retries_once() {
-        // A held reader permits BEGIN IMMEDIATE and writes, but prevents COMMIT.
+        // In rollback-journal (DELETE) mode a held reader permits BEGIN IMMEDIATE and
+        // writes, but prevents COMMIT. Under WAL the reader would not block the commit.
         assert_busy_timeout_refusal("BEGIN; SELECT generation FROM meta");
+    }
+
+    fn journal_mode(store: &Store) -> String {
+        store
+            .connection
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap()
     }
 
     fn assert_busy_timeout_refusal(lock_sql: &str) {
@@ -989,6 +1021,17 @@ mod tests {
         let root = test_root("busy-timeout");
         let mut node = Store::open(&root, true).unwrap();
         let blocker = Store::open(&root, false).unwrap();
+        // The commit-contention case relies on DELETE mode; fail clearly if it changes.
+        assert_eq!(
+            journal_mode(&node),
+            "delete",
+            "E_TEST_JOURNAL_MODE_NOT_DELETE"
+        );
+        assert_eq!(
+            journal_mode(&blocker),
+            "delete",
+            "E_TEST_JOURNAL_MODE_NOT_DELETE"
+        );
         let request = submit(&node, "busy-submit", 0);
         blocker.connection.execute_batch(lock_sql).unwrap();
 
@@ -1018,6 +1061,69 @@ mod tests {
     }
 
     #[test]
+    fn busy_update_refuses_without_changing_the_receipt() {
+        let root = test_root("busy-update");
+        let mut supervisor = Store::open(&root, true).unwrap();
+        let blocker = Store::open(&root, false).unwrap();
+        let id = "c".repeat(64);
+        super::super::test_support::job(&supervisor, &id, "running", 60_000);
+        let before = snapshot(&supervisor, &id);
+        blocker.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        // The supervisor/scheduler update path has no operation ID: neutral hint.
+        let started = std::time::Instant::now();
+        let failure = supervisor
+            .update(&id, |r| {
+                r.state = "succeeded".into();
+                r.exit_code = Some(0);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(started.elapsed() >= BUSY_TIMEOUT);
+        assert_eq!(
+            serde_json::to_value(&failure).unwrap(),
+            serde_json::json!({"code": "journal_busy", "message": BUSY_HINT})
+        );
+        assert_eq!(snapshot(&supervisor, &id), before);
+
+        blocker.connection.execute_batch("ROLLBACK").unwrap();
+        let published = supervisor
+            .update(&id, |r| {
+                r.state = "succeeded".into();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(published.state, "succeeded");
+        assert_eq!(snapshot(&supervisor, &id)["state"], "succeeded");
+        drop((supervisor, blocker));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn busy_status_read_uses_the_neutral_hint() {
+        let uid = unsafe { libc::geteuid() };
+        let root = test_root("busy-status");
+        let mut node = Store::open(&root, true).unwrap();
+        let blocker = Store::open(&root, false).unwrap();
+        // An EXCLUSIVE lock blocks readers too; Status has no operation ID to name.
+        blocker.connection.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let failure = node
+            .handle(&Request::Status { version: 1 }, uid)
+            .unwrap_err();
+        assert_eq!(
+            serde_json::to_value(&failure).unwrap(),
+            serde_json::json!({"code": "journal_busy", "message": BUSY_HINT})
+        );
+        blocker.connection.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            node.handle(&Request::Status { version: 1 }, uid).unwrap()["generation"],
+            0
+        );
+        drop((node, blocker));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn sqlite_contention_codes_use_closed_diagnostics() {
         for code in [
             rusqlite::ffi::SQLITE_BUSY,
@@ -1032,7 +1138,7 @@ mod tests {
             assert_eq!(failure.code, "journal_busy");
             assert_eq!(
                 failure.message,
-                "Node journal is busy; retry with the same operation ID."
+                "Node journal is busy; retry the unchanged request."
             );
         }
         assert_eq!(

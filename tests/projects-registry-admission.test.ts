@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
 import { readProjectsRegistry } from "../src/lib/projects-registry.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 let fixture = "";
 let registryDir = "";
@@ -102,7 +103,7 @@ afterEach(async () => {
 
 async function git(cwd: string, args: readonly string[]) {
   const child = Bun.spawn(["git", "-C", cwd, ...args], {
-    env,
+    env: fixtureGitEnv({ env }),
     stdout: "pipe",
     stderr: "pipe",
   });

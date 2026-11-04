@@ -7,6 +7,14 @@ therefore the other inspected fields plus the guest-observed `_data` device/inod
 Inspection and directory observation failures must refuse without claiming that
 replacement was observed.
 
+Absence is decided by the first inspection and keeps each caller's contract:
+restore, quiescent-dependency recovery and source-device rebind report
+`graph_data_missing`; host-pin and absent-publication recovery map absence and
+identity refusals to their own closed recovery refusal, while provider and guest
+failures keep their diagnostics; retained-data removal takes its recovery absent
+branch. A volume that disappears during observation is an identity
+failure, not absence.
+
 ## Audit (HACK-1353)
 
 The audit covers `packages/runtime-core/src` and `src`, including whole-inspection

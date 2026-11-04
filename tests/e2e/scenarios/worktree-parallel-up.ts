@@ -1,3 +1,4 @@
+import { fixtureGitEnv } from "../../helpers/fixture-git.ts";
 import { addLinkedWorktree, createMonorepoFixture } from "../fixture.ts";
 import {
   expect,
@@ -227,6 +228,7 @@ async function expectCleanGitStatus(opts: {
   readonly after: string;
 }): Promise<void> {
   const status = await runCommand({
+    exactEnv: fixtureGitEnv(),
     argv: ["git", "status", "--porcelain", "--untracked-files=all"],
     cwd: opts.cwd,
   });

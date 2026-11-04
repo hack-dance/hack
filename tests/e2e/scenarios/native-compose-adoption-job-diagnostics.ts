@@ -19,6 +19,8 @@ const STAGES = [
 type Stage = (typeof STAGES)[number];
 const CODES = [
   "E_CONFIG_INVALID",
+  "E_CANCELLED",
+  "E_STARTUP_TIMEOUT",
   "E_PERMISSION",
   "E_LIFECYCLE_FAILED",
   "E_STATE",

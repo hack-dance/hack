@@ -43,6 +43,7 @@ import {
   createMcpServer,
 } from "../src/mcp/server.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 // ---------------------------------------------------------------------------
@@ -360,22 +361,19 @@ async function writeAlpha(alpha: string, canary: string): Promise<void> {
 
 /**
  * Run git in a fixture project with no global or system config, a private
- * HOME and only PATH/TMPDIR inherited.
+ * HOME and only PATH/TMPDIR inherited. `gitEnv` holds Git variables a test sets
+ * on purpose, such as an alternate `GIT_INDEX_FILE`.
  */
 async function git(
   cwd: string,
   args: readonly string[],
-  env: Readonly<Record<string, string>> = {}
+  gitEnv: Readonly<Record<string, string>> = {}
 ): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
-    env: privateCliEnv({
-      root: dirname(cwd),
-      env: {
-        GIT_CONFIG_GLOBAL: "/dev/null",
-        GIT_CONFIG_NOSYSTEM: "1",
-        ...env,
-      },
+    env: fixtureGitEnv({
+      env: privateCliEnv({ root: dirname(cwd) }),
+      gitEnv,
     }),
     stdin: "ignore",
     stdout: "pipe",

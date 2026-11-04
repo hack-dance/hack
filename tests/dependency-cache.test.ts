@@ -8,6 +8,7 @@ import {
   resolveDependencyCacheOverride,
 } from "../src/lib/dependency-cache.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const tempDirs: string[] = [];
 
@@ -184,6 +185,7 @@ test("compatible linked worktrees share the same declared runtime cache", async 
   const project = await createProject();
   const git = async (args: string[]) => {
     const child = Bun.spawn(["git", ...args], {
+      env: fixtureGitEnv(),
       cwd: project.projectRoot,
       stdout: "ignore",
       stderr: "pipe",

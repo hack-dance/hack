@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { join, relative } from "node:path";
-
+import { fixtureGitEnv } from "../../helpers/fixture-git.ts";
 import {
   createMonorepoFixture,
   diffFileHashes,
@@ -338,6 +338,7 @@ async function gitStatusPaths(opts: {
   readonly root: string;
 }): Promise<readonly StatusLine[]> {
   const status = await runCommand({
+    exactEnv: fixtureGitEnv(),
     argv: [
       "git",
       "-C",

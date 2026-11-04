@@ -259,24 +259,25 @@ test("completed-job CLI diagnostics name a fixed refusal message by closed token
     });
     return messages.at(-1)?.split(" ").at(-1);
   };
-  // The adopted command rewraps a store refusal as E_CONFIG_INVALID with its fixed message.
-  for (const [code, token] of [
-    ["E_LEGACY_ADOPTION_STATE", "legacy-state"],
-    ["E_LEGACY_ADOPTION_BUSY", "legacy-busy"],
-    ["E_LEGACY_ADOPTION_CHANGED", "legacy-changed"],
-    ["E_LEGACY_ADOPTION_UNSUPPORTED", "legacy-unsupported"],
-    ["E_LEGACY_ADOPTION_CANCELLED", "legacy-cancelled"],
-    ["E_LEGACY_ADOPTION_DEADLINE", "legacy-deadline"],
-    ["E_LEGACY_ADOPTION_LITERAL_ENV", "legacy-literal-env"],
+  // Public timeout and cancellation codes retain the store's fixed message.
+  for (const [code, publicCode, token] of [
+    ["E_LEGACY_ADOPTION_STATE", "E_CONFIG_INVALID", "legacy-state"],
+    ["E_LEGACY_ADOPTION_BUSY", "E_CONFIG_INVALID", "legacy-busy"],
+    ["E_LEGACY_ADOPTION_CHANGED", "E_CONFIG_INVALID", "legacy-changed"],
+    ["E_LEGACY_ADOPTION_UNSUPPORTED", "E_CONFIG_INVALID", "legacy-unsupported"],
+    ["E_LEGACY_ADOPTION_CANCELLED", "E_CANCELLED", "legacy-cancelled"],
+    ["E_LEGACY_ADOPTION_DEADLINE", "E_STARTUP_TIMEOUT", "legacy-deadline"],
+    ["E_LEGACY_ADOPTION_LITERAL_ENV", "E_CONFIG_INVALID", "legacy-literal-env"],
   ] as const) {
     expect(
       refusal(
         new HackCliError({
-          code: "E_CONFIG_INVALID",
+          code: publicCode,
           message: new LegacyComposeAdoptedGenerationError(code).message,
         })
       )
     ).toBe(`refusal=${token}`);
+    expect(messages.at(-1)).toContain(`code=${publicCode}`);
   }
   expect(refusal(new LegacyComposeAdoptionSelectionError())).toBe(
     "refusal=marker-adoption"
@@ -313,20 +314,21 @@ test.each([
 ] as const)("completed-job CLI diagnostics name the adopted command's %s message by its own token", (kind, token) => {
   const messages: string[] = [];
   const diagnostic = diagnostics(messages);
+  const code = kind === "cancelled" ? "E_CANCELLED" : "E_CONFIG_INVALID";
   diagnostic.cliOutcome({
     exitCode: 1,
     timedOut: false,
     stdout: renderCliResult({
       result: errorResultFromUnknown({
         error: new HackCliError({
-          code: "E_CONFIG_INVALID",
+          code,
           message: LEGACY_COMPOSE_ADOPTED_COMMAND_MESSAGES[kind],
         }),
       }),
     }),
   });
   expect(messages).toEqual([
-    `start-operation=restart worktree=alpha stage=cli-result exit=nonzero timed-out=no code=E_CONFIG_INVALID ordered-stage=unavailable ordered-reason=unavailable refusal=${token}`,
+    `start-operation=restart worktree=alpha stage=cli-result exit=nonzero timed-out=no code=${code} ordered-stage=unavailable ordered-reason=unavailable refusal=${token}`,
   ]);
   expect(messages.join("\n")).not.toContain("Values omitted");
 });

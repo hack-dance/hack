@@ -25,11 +25,16 @@ pub(super) fn same(
 /// Capture stable inspection and a guest-observed `_data` dev:ino. A second
 /// inspection fences metadata changes during observation; callers retain their
 /// provider lease and re-observe this identity at the effect boundary.
+///
+/// `Ok(None)` means the first inspection found no volume. Each caller maps it
+/// to its own absence contract: missing retained data, a closed recovery
+/// refusal, or the removal-recovery absent branch. A volume that disappears
+/// after the first inspection is an identity failure, not absence.
 pub(super) fn observe(
     engine: &Engine<'_>,
     receipt: &Receipt,
     resource: &Resource,
-) -> Result<Value, CandidateError> {
+) -> Result<Option<Value>, CandidateError> {
     observe_with(
         resource,
         || inspect_resource(engine, receipt, resource),
@@ -43,18 +48,44 @@ pub(super) fn observe_with(
     resource: &Resource,
     mut inspect: impl FnMut() -> Result<Option<Value>, CandidateError>,
     execute: impl FnOnce(&str, &[&str]) -> Result<String, CandidateError>,
-) -> Result<Value, CandidateError> {
-    let unavailable = || error("graph_volume_identity", "Volume identity is unavailable.");
-    let before = inspect()?.ok_or_else(unavailable)?;
+) -> Result<Option<Value>, CandidateError> {
+    let Some(before) = inspect()? else {
+        return Ok(None);
+    };
     let directory = volume_subpaths::directory_identity_with(execute, resource, &before)?;
-    let after = inspect()?.ok_or_else(unavailable)?;
+    let after = inspect()?
+        .ok_or_else(|| error("graph_volume_identity", "Volume identity is unavailable."))?;
     if stable_fields(&before) != stable_fields(&after) {
         return Err(error(
             "graph_volume_identity",
             "Volume changed during observation.",
         ));
     }
-    Ok(projection(&before, &directory))
+    Ok(Some(projection(&before, &directory)))
+}
+
+/// Recovery selections keep their closed refusal, as before the stable
+/// projection: absence and identity refusals from this module or the `_data`
+/// identity check become `refused`, while provider inspection and guest
+/// transport failures propagate unchanged.
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn recovery(
+    observed: Result<Option<Value>, CandidateError>,
+    refused: impl FnOnce() -> CandidateError,
+) -> Result<Value, CandidateError> {
+    match observed {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => Err(refused()),
+        Err(failure)
+            if matches!(
+                failure.code,
+                "graph_volume_identity" | "graph_volume_subpath"
+            ) =>
+        {
+            Err(refused())
+        }
+        Err(failure) => Err(failure),
+    }
 }
 
 pub(super) fn projection(inspected: &Value, directory: &str) -> Value {

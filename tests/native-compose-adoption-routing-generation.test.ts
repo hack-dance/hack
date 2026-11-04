@@ -1239,9 +1239,10 @@ test("publication keeps the fixed deadline when its first full proof already exp
       error = caught;
     }
     expect(reached).toBe(true);
+    expect(error).toHaveProperty("code", "E_LEGACY_ADOPTION_DEADLINE");
     expect(legacyComposePublicationRefusal(error)).toEqual({
       stage: "publication-routing",
-      reason: "legacy-state",
+      reason: "proof-deadline",
     });
     expect((await h.receipt()).publication).toMatchObject({
       phase: "switching",
@@ -1789,5 +1790,90 @@ test("HACK-1359: version14 rejects missing and non-finite mutation deadlines wit
     });
   } finally {
     await store.close();
+  }
+});
+
+for (const phase of ["publication", "rollback"] as const) {
+  test(`HACK-1801: ${phase} closes originals when its context budget getter expires`, async () => {
+    let now = Date.now();
+    const deadline = now + 45_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    let store: Awaited<ReturnType<typeof h.store>> | undefined;
+    const hold = privateState.holdDirectory;
+    let held: Awaited<ReturnType<typeof hold>> | undefined;
+    let closed = false;
+    let closeSpy: { mockRestore: () => void } | undefined;
+    let directorySpy: { mockRestore: () => void } | undefined;
+    try {
+      store = await h.store({ deadline, timeoutMs: 60_000 });
+      const generation = await store.prepare({ binary: h.compiler });
+      if (phase === "rollback") {
+        await store.publish({ generation, binary: h.compiler });
+      }
+      directorySpy = spyOn(privateState, "holdDirectory").mockImplementation(
+        async (...args) => {
+          const result = await hold(...args);
+          if (args[0].endsWith("/originals")) {
+            held = result;
+            const close = result.file.close.bind(result.file);
+            closeSpy = spyOn(result.file, "close").mockImplementation(
+              async () => {
+                closed = true;
+                await close();
+              }
+            );
+            now = deadline + 1;
+          }
+          return result;
+        }
+      );
+      await expect(
+        phase === "publication"
+          ? store.publish({ generation, binary: h.compiler })
+          : store.rollback()
+      ).rejects.toHaveProperty("code", "E_LEGACY_ADOPTION_DEADLINE");
+      expect(held).toBeDefined();
+      expect(closed).toBe(true);
+    } finally {
+      directorySpy?.mockRestore();
+      closeSpy?.mockRestore();
+      if (held && !closed) {
+        await held.file.close();
+      }
+      clock.mockRestore();
+      await store?.close();
+    }
+  });
+}
+
+test("HACK-1801: a routing proof expiring after its route check reports a deadline", async () => {
+  let now = Date.now();
+  const deadline = now + 45_000;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  let store: Awaited<ReturnType<typeof h.store>> | undefined;
+  const prove = retainedRouting.assertLegacyComposeRetainedRoutingState;
+  let proofSpy: { mockRestore: () => void } | undefined;
+  let reached = false;
+  try {
+    store = await h.store({ deadline, timeoutMs: 60_000 });
+    const generation = await store.prepare({ binary: h.compiler });
+    proofSpy = spyOn(
+      retainedRouting,
+      "assertLegacyComposeRetainedRoutingState"
+    ).mockImplementation(async (opts) => {
+      await prove(opts);
+      reached = true;
+      now = deadline + 1;
+      await opts.assertOwner();
+    });
+    await expect(
+      store.publish({ generation, binary: h.compiler })
+    ).rejects.toHaveProperty("code", "E_LEGACY_ADOPTION_DEADLINE");
+    expect(reached).toBe(true);
+    expect(h.effects).toEqual([]);
+  } finally {
+    proofSpy?.mockRestore();
+    clock.mockRestore();
+    await store?.close();
   }
 });

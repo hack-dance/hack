@@ -24,6 +24,7 @@ import {
   targetRefusalEnvelope,
 } from "../src/lib/target-inspect.ts";
 import { buildTargetInspectArgs, createMcpServer } from "../src/mcp/server.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 // ---------------------------------------------------------------------------
@@ -73,7 +74,7 @@ function runGit(opts: {
   readonly args: readonly string[];
 }): string {
   const result = Bun.spawnSync(["git", "-C", opts.cwd, ...opts.args], {
-    env: gitEnv(opts.home),
+    env: fixtureGitEnv({ env: gitEnv(opts.home) }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

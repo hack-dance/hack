@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { encryptSynthetic } from "../../../scripts/portable-bootstrap-smoke.ts";
+import { fixtureGitEnv } from "../../helpers/fixture-git.ts";
 import { commitAll, createMonorepoFixture } from "../fixture.ts";
 import {
   type CliResult,
@@ -196,6 +197,7 @@ export const portableBootstrapNegativesScenario: Scenario = {
 
     const git = async (args: readonly string[]) => {
       const result = await runCommand({
+        exactEnv: fixtureGitEnv(),
         argv: ["git", "-C", fixture.root, ...args],
         cwd: fixture.root,
       });

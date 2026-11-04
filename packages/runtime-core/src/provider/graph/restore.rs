@@ -162,16 +162,20 @@ pub(super) fn observed_volumes(
     })
 }
 
+/// Fresh restore, quiescent-dependency recovery and source-device rebind all
+/// select through this function, so an absent retained volume reports the
+/// documented `graph_data_missing` refusal rather than an identity failure.
 pub(super) fn observed_volumes_with(
     receipt: &Receipt,
-    mut observe: impl FnMut(&Resource) -> Result<Value, CandidateError>,
+    mut observe: impl FnMut(&Resource) -> Result<Option<Value>, CandidateError>,
 ) -> Result<BTreeMap<String, (String, String, String)>, CandidateError> {
     let mut volumes = BTreeMap::new();
     for (key, resource) in &receipt.resources {
         if resource.kind != Kind::Volume {
             continue;
         }
-        let projection = observe(resource)?;
+        let projection = observe(resource)?
+            .ok_or_else(|| error("graph_data_missing", "Retained volume is missing."))?;
         let directory = projection["directory"]
             .as_str()
             .ok_or_else(|| error("graph_receipt", "Volume identity unavailable."))?;

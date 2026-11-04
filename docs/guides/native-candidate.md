@@ -264,7 +264,11 @@ complete bundle to change the candidate.
    frontend `up` validates the retained selection offline, resumes its clean owned
    VM once if stopped, and then repeats live retained-data and restore-generation
    checks. Restore the application and read back a saved data marker before accepting
-   the upgrade.
+   the upgrade. A restore selection (`--expect-generation`) or recovery selection
+   reviewed by an older bundle can use the previous retained-volume encoding (see the
+   [volume identity audit](../reference/volume-identity.md)) and then refuses as
+   changed even when no volume changed: run the review and selection again with the
+   new bundle.
 4. For rollback, retain-stop the new candidate in the same way, select the previous
    verified bundle with the same home, and repeat application/data readback. A prior
    binary refusing newer state is an unsupported downgrade, not a successful rollback.

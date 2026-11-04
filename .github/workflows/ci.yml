@@ -8,12 +8,12 @@ on:
 
 jobs:
   secret-scan:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
       - name: Checkout
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Install Gitleaks
@@ -34,18 +34,18 @@ jobs:
             --report-path "$RUNNER_TEMP/gitleaks.sarif"
 
   runtime-images:
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
       - name: Checkout
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
           bun-version: "1.4.4"
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v1
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Install dependencies
         run: bun install
       - name: Build full runtime image
@@ -71,12 +71,12 @@ jobs:
         run: bash scripts/portable-container-smoke.sh hack-runtime-ci:slim linux/amd64
 
   docker-e2e:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
       - name: Checkout
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
@@ -99,7 +99,7 @@ jobs:
           bun -e 'const r = await Bun.stdin.json(); if (typeof r.container.writableLayerBytes !== "number") throw new Error("Missing writable-layer accounting");' < "$RUNNER_TEMP/resource-probe.json"
 
   test:
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -123,10 +123,10 @@ jobs:
         run: bun run build:release --skip-tests --no-clean --out=dist/release-ci
 
   linux-process-lifetime:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:

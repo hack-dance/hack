@@ -65,6 +65,8 @@ export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
   "native-config-files": 20,
   doctor: 18,
   "lifecycle-host-process": 13,
+  // Estimate until a hosted docker-e2e summary measures it: ~20 CLI ups/downs.
+  "shared-host-helpers": 40,
   "up-down": 12,
   // Estimate until a hosted docker-e2e summary measures it.
   "exec-stale-env": 20,

@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { acquireNativeGlobalDomain } from "../src/lib/native-routing-inputs.ts";
 import { resolveVerifiedNativeBranch } from "../src/lib/worktree-local-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const KEYS = [
   "PATH",
@@ -60,6 +61,7 @@ async function policy(text: string | Uint8Array) {
 }
 async function git(cwd: string, args: readonly string[]) {
   const child = Bun.spawn(["git", "-C", cwd, ...args], {
+    env: fixtureGitEnv(),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

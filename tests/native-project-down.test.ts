@@ -1,6 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +24,10 @@ import {
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
+import {
+  markSharedHelperInstanceStopping,
+  type ProjectSharedHelperConfig,
+} from "../src/lib/project-shared-helpers.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -863,4 +874,124 @@ test("host retirement failure preserves confirmed stopped state and skips after 
     })
   ).rejects.toThrow("host ownership uncertain");
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+/**
+ * Native down marks shared helpers as stopping only once the down is
+ * committed: after its before hook and the ownership/finalization rechecks,
+ * immediately before graph cleanup. A down refused at any of those boundaries
+ * must leave the shared helper shutdown generation and operation record alone,
+ * so a concurrent up is not superseded by a shutdown that never happened.
+ */
+async function sharedHelperInstance(projectRoot: string) {
+  const hackDir = join(projectRoot, "hack-home");
+  const instances = join(hackDir, "shared-helpers", ".instances");
+  await mkdir(instances, { recursive: true, mode: 0o700 });
+  const operationPath = join(instances, "demo--a.operation");
+  await writeFile(operationPath, "current-up-operation\n", { mode: 0o600 });
+  const helper: ProjectSharedHelperConfig = {
+    name: "issuer-bridge",
+    enabled: true,
+    command: ["/bin/true"],
+    port: 4100,
+    identityPath: "/__hack/identity",
+    upstream: "https://issuer.test",
+    env: [],
+    readyTimeoutMs: 1000,
+  };
+  return {
+    mark: async () => {
+      await markSharedHelperInstanceStopping({
+        helpers: [helper],
+        composeProject: "demo--a",
+        hackDir,
+      });
+    },
+    generation: () =>
+      readFile(join(instances, "demo--a.shutdown-generation"), "utf8").catch(
+        () => null
+      ),
+    operation: () => readFile(operationPath, "utf8"),
+  };
+}
+
+test("a native down refused after its before hook leaves the shared helper shutdown state unchanged", async () => {
+  for (const refusal of ["finalization", "ownership", "hook"] as const) {
+    const opts = await fixture();
+    const helpers = await sharedHelperInstance(opts.scope.projectRoot);
+    const calls: string[] = [];
+    let inspections = 0;
+    const result = nativeProjectDown({
+      ...opts,
+      before: async () => {
+        calls.push("before");
+        if (refusal === "finalization") {
+          await beginNativeProjectFinalization({ scope: opts.scope, run });
+        }
+        if (refusal === "hook") {
+          throw new Error("down.before hook failed");
+        }
+      },
+      beforeCleanup: async () => {
+        calls.push("before-cleanup");
+        await helpers.mark();
+      },
+      invoke: async (request) => {
+        calls.push(request.args[1]!);
+        inspections += 1;
+        const value = snapshot();
+        if (refusal === "ownership" && inspections > 1) {
+          value.receipt.owner = "f".repeat(32);
+        }
+        return value;
+      },
+    });
+    if (refusal === "hook") {
+      await expect(result).rejects.toThrow("down.before hook failed");
+    } else {
+      await expectClosedRefusal(
+        result,
+        refusal === "finalization" ? "ownership changed" : "unconfirmed"
+      );
+    }
+    expect(calls).not.toContain("before-cleanup");
+    expect(calls).not.toContain("cleanup");
+    expect(await helpers.generation()).toBeNull();
+    expect(await helpers.operation()).toBe("current-up-operation\n");
+  }
+});
+
+test("a committed native down marks shared helpers as stopping immediately before graph cleanup", async () => {
+  const opts = await fixture();
+  const helpers = await sharedHelperInstance(opts.scope.projectRoot);
+  const calls: string[] = [];
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    before: async () => {
+      calls.push("before");
+    },
+    beforeCleanup: async () => {
+      calls.push("before-cleanup");
+      await helpers.mark();
+    },
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      if (request.args[1] === "cleanup") {
+        cleaned = true;
+        return {};
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(calls.slice(0, 5)).toEqual([
+    "inspect",
+    "before",
+    "inspect",
+    "before-cleanup",
+    "cleanup",
+  ]);
+  expect(await helpers.generation()).not.toBeNull();
+  expect(await helpers.operation()).toStartWith("stopping:");
 });

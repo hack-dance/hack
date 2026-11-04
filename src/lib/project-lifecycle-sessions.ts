@@ -298,7 +298,10 @@ function hasLegacyTmuxOwnershipProof(opts: {
 /** A listing miss is not proof of absence: a session the listing could not
  * parse would otherwise be "created" again (tmux refuses the duplicate) or
  * skipped by down. Ask for the exact session; when it is present, return it
- * without listing metadata so ownership is decided by the token alone.
+ * without listing metadata so ownership is decided by the token alone. An
+ * unknown answer (the query timed out or failed without tmux's explicit
+ * absence diagnostic) is never absence: the inspection fails, so down keeps
+ * the entry and helpers and creation refuses.
  */
 async function confirmUnlistedSession(opts: {
   readonly backend: MuxBackend;
@@ -307,6 +310,9 @@ async function confirmUnlistedSession(opts: {
   const presence = await opts.backend.readSessionPresence?.({
     name: opts.name,
   });
+  if (presence === "unknown") {
+    throw new LifecycleSessionPresenceUnknownError(opts.name);
+  }
   if (presence !== "present") {
     return null;
   }
@@ -338,5 +344,18 @@ async function normalizePath(path: string): Promise<string> {
     return await realpath(path);
   } catch {
     return path;
+  }
+}
+
+/**
+ * The listing omitted the lifecycle session and its exact-presence query had
+ * no definite answer, so the session may still exist.
+ */
+export class LifecycleSessionPresenceUnknownError extends Error {
+  constructor(sessionName: string) {
+    super(
+      `Could not confirm whether lifecycle session "${sessionName}" exists (the mux query timed out or failed); refusing to treat it as absent. Run the command again once tmux responds.`
+    );
+    this.name = "LifecycleSessionPresenceUnknownError";
   }
 }

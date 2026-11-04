@@ -41,6 +41,7 @@ import {
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolveEnvMeta } from "../src/lib/project-meta.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -833,16 +834,7 @@ async function git(opts: {
   readonly args: readonly string[];
 }): Promise<string> {
   const proc = Bun.spawn(["git", "-C", opts.repo.projectRoot, ...opts.args], {
-    env: {
-      PATH: process.env.PATH ?? "/usr/bin:/bin",
-      HOME: opts.repo.root,
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_AUTHOR_NAME: "Synthetic",
-      GIT_AUTHOR_EMAIL: "synthetic@example.invalid",
-      GIT_COMMITTER_NAME: "Synthetic",
-      GIT_COMMITTER_EMAIL: "synthetic@example.invalid",
-    },
+    env: fixtureGitEnv({ env: { HOME: opts.repo.root } }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

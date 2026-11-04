@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /** Contract migration must keep legacy plaintext machine-local (HACK-1712/1713). */
@@ -335,6 +336,7 @@ async function runDoctor(project: Project) {
 async function git(project: Project, args: string[]) {
   const proc = Bun.spawn(["git", ...args], {
     cwd: project.projectRoot,
+    env: fixtureGitEnv(),
     stdout: "pipe",
     stderr: "pipe",
   });

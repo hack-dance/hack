@@ -1,6 +1,8 @@
 import { join } from "node:path";
 import { isRecord } from "../../../src/lib/guards.ts";
 
+const CONTAINER_ID = /^[a-f0-9]{64}$/;
+
 export const adoptionDependencyHealthcheck = {
   test: ["CMD", "pg_isready", "-U", "postgres", "-d", "fixture"],
   interval: "1s",
@@ -166,6 +168,25 @@ function dependencyComposeReadAllowed(opts: DependencyReadScope): boolean {
   );
 }
 
+/** Read-only container projections may select at most 64 distinct captured IDs. */
+export function adoptionFixtureContainerInspectIdsAllowed(opts: {
+  readonly args: readonly string[];
+  readonly containerIds: readonly string[];
+}): boolean {
+  const selected = opts.args.slice(4);
+  return (
+    opts.args[0] === "container" &&
+    opts.args[1] === "inspect" &&
+    opts.args[2] === "--format" &&
+    selected.length > 0 &&
+    selected.length <= 64 &&
+    new Set(selected).size === selected.length &&
+    selected.every(
+      (id) => CONTAINER_ID.test(id) && opts.containerIds.includes(id)
+    )
+  );
+}
+
 /** Closed read-only passthrough for dependency fixture shims; every mutation is handled separately. */
 export function adoptionDependencyReadAllowed(
   opts: DependencyReadScope
@@ -210,10 +231,11 @@ export function adoptionDependencyReadAllowed(
         ? [opts.volumeName]
         : [opts.networkId];
   return (
-    args.length === 5 &&
+    (kind === "container"
+      ? adoptionFixtureContainerInspectIdsAllowed(opts)
+      : args.length === 5 && ids.includes(args[4] ?? "")) &&
     args[1] === "inspect" &&
     args[2] === "--format" &&
-    ids.includes(args[4] ?? "") &&
     formats.inspect.some((format) => format === digest(args[3] ?? ""))
   );
 }

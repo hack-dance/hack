@@ -18,6 +18,7 @@ import {
 } from "./helpers/checkout-write-guard.ts";
 import { expectClosedThrow } from "./helpers/closed-refusal.ts";
 import { fixtureChildren } from "./helpers/fixture-children.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { requireFixtureRoot } from "./helpers/fixture-root.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -63,14 +64,12 @@ const fixture = (): string =>
 async function run(opts: {
   readonly argv: readonly string[];
   readonly cwd: string;
-  readonly env?: Readonly<Record<string, string>>;
+  /** The complete child environment; defaults to the private CLI env. */
+  readonly env?: Record<string, string>;
 }): Promise<{ readonly exitCode: number; readonly output: string }> {
   const child = Bun.spawn([...opts.argv], {
     cwd: opts.cwd,
-    env: privateCliEnv({
-      root: fixture(),
-      env: { NO_COLOR: "1", ...opts.env },
-    }),
+    env: opts.env ?? privateCliEnv({ root: fixture(), env: { NO_COLOR: "1" } }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -93,7 +92,11 @@ async function gitCheckout(
 ): Promise<string> {
   const checkout = join(fixture(), name);
   await mkdir(checkout);
-  const init = await run({ argv: ["git", "init", "-q"], cwd: checkout });
+  const init = await run({
+    env: fixtureGitEnv(),
+    argv: ["git", "init", "-q"],
+    cwd: checkout,
+  });
   expect(init.exitCode).toBe(0);
   const files = Object.keys(committed);
   if (files.length === 0) {
@@ -103,11 +106,13 @@ async function gitCheckout(
     await writeFile(join(checkout, file), committed[file] ?? "");
   }
   const add = await run({
+    env: fixtureGitEnv(),
     argv: ["git", "add", "--", ...files],
     cwd: checkout,
   });
   expect(add.exitCode).toBe(0);
   const commit = await run({
+    env: fixtureGitEnv(),
     argv: [
       "git",
       "-c",
@@ -451,7 +456,10 @@ test(
     const result = await run({
       argv: [process.execPath, "test"],
       cwd: checkout,
-      env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
+      env: privateCliEnv({
+        root: fixture(),
+        env: { NO_COLOR: "1", PATH: `${bin}:${process.env.PATH ?? ""}` },
+      }),
     });
     expect(result.output).not.toContain("checkout write guard");
     expect(result.output).not.toContain("dangling process");

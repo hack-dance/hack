@@ -33,6 +33,7 @@ import {
   resolveProjectEnvLocalConfigPath,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -207,9 +208,11 @@ async function lockExists(repo: Repo): Promise<boolean> {
 async function git(repo: Repo, args: readonly string[]): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
     cwd: repo.projectRoot,
-    env: privateCliEnv({
-      root: repo.root,
-      env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+    env: fixtureGitEnv({
+      env: privateCliEnv({
+        root: repo.root,
+        env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      }),
     }),
     stdout: "pipe",
     stderr: "pipe",

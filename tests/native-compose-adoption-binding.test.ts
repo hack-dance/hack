@@ -267,7 +267,7 @@ if (fixture.mode?.startsWith("snapshot-placeholder-") && kind === "network" && a
 if (kind === "info") {console.log(JSON.stringify({id: fixture.engine, os: "linux"}));}
 else if (action === "ls") {for (const row of fixture[kind]) console.log(JSON.stringify({id: row.id, name: kind === 'container' ? row.name.slice(1) : row.name, project: row.project ?? ""}));}
 else {
- const id = args.at(-1);const rows = fixture[kind].filter(row => row.id === id);
+ const selected = args.slice(4);const rows = selected.flatMap(id => fixture[kind].filter(row => row.id === id));
  if (!rows.length) process.exit(1);
  for (const row of rows) console.log(JSON.stringify(row));
 }
@@ -777,7 +777,7 @@ test(
           bracketTrace
             .slice(networkOffsets[offset]! + 1, networkOffsets[offset + 1]!)
             .map((args) => args.slice(0, 2))
-        ).toEqual(Array.from({ length: 3 }, () => ["container", "inspect"]));
+        ).toEqual([["container", "inspect"]]);
       }
       const transition: { before: Fixture; after: Fixture; ordinal: number } =
         JSON.parse(
@@ -1001,7 +1001,7 @@ test("moving snapshot guard rejects a selected ID on its undeclared bridge befor
     observed.filter(
       ([kind, action]) => kind === "container" && action === "inspect"
     )
-  ).toHaveLength(2);
+  ).toHaveLength(1);
   expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
 });
 

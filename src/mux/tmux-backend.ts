@@ -1,10 +1,12 @@
 import type { ExecResult, RunOptions } from "../lib/shell.ts";
-import { exec, findExecutableInPath } from "../lib/shell.ts";
+import { findExecutableInPath } from "../lib/shell.ts";
 
-import type {
-  MuxBackend,
-  MuxSession,
-  MuxSessionCreateResult,
+import {
+  type MuxBackend,
+  MuxCommandTimeoutError,
+  type MuxSession,
+  type MuxSessionCreateResult,
+  runMuxCommand,
 } from "./mux-backend.ts";
 
 const LIFECYCLE_OWNER_OPTION = "@hack_lifecycle_owner";
@@ -120,9 +122,12 @@ export function createTmuxBackend(): MuxBackend {
     // unset or C), tmux replaces control characters in client output with
     // `_`, which turns every line into one unmatched name: lifecycle
     // sessions then look absent to both `up` and `down` (HACK-1797).
-    const result = await exec(["tmux", "-u", "list-sessions", "-F", format], {
-      stdin: "ignore",
-    });
+    const result = await runMuxCommand(
+      ["tmux", "-u", "list-sessions", "-F", format],
+      {
+        stdin: "ignore",
+      }
+    );
 
     if (result.exitCode !== 0) {
       return [];
@@ -156,7 +161,9 @@ export function createTmuxBackend(): MuxBackend {
       args.push("-e", `${LIFECYCLE_OWNER_ENV}=${opts.lifecycleOwnerToken}`);
     }
 
-    const result = await exec(args, { stdin: "ignore" });
+    const result = await runMuxCommand(args, {
+      stdin: "ignore",
+    });
     if (result.exitCode !== 0) {
       return {
         ok: false,
@@ -166,7 +173,7 @@ export function createTmuxBackend(): MuxBackend {
     }
 
     if (opts.lifecycleOwnerToken) {
-      const ownerResult = await exec(
+      const ownerResult = await runMuxCommand(
         [
           "tmux",
           "set-option",
@@ -175,10 +182,10 @@ export function createTmuxBackend(): MuxBackend {
           LIFECYCLE_OWNER_OPTION,
           opts.lifecycleOwnerToken,
         ],
-        { stdin: "ignore" }
+        {}
       );
       if (ownerResult.exitCode !== 0) {
-        await exec(["tmux", "kill-session", "-t", `=${opts.name}`], {
+        await runMuxCommand(["tmux", "kill-session", "-t", `=${opts.name}`], {
           stdin: "ignore",
         });
         return {
@@ -200,27 +207,41 @@ export function createTmuxBackend(): MuxBackend {
     // `=` makes tmux match the name exactly. A bare target falls back to a
     // prefix match, so stopping `demo` after it exited could kill
     // `demo--lifecycle`, a session the caller never verified.
-    return await exec(["tmux", "kill-session", "-t", `=${opts.name}`], {
-      stdin: "ignore",
-    });
+    return await runMuxCommand(
+      ["tmux", "kill-session", "-t", `=${opts.name}`],
+      {
+        stdin: "ignore",
+      }
+    );
   };
 
   const readSessionPresence = async (opts: { readonly name: string }) => {
     if (!available) {
       return "unknown" as const;
     }
-    const result = await exec(["tmux", "has-session", "-t", `=${opts.name}`], {
-      stdin: "ignore",
+    const result = await runMuxCommand(
+      ["tmux", "has-session", "-t", `=${opts.name}`],
+      {
+        stdin: "ignore",
+      }
+    ).catch((error: unknown) => {
+      if (error instanceof MuxCommandTimeoutError) {
+        return null;
+      }
+      throw error;
     });
-    return classifyTmuxSessionPresence({ result, name: opts.name });
+    // A timed-out query proves nothing about presence.
+    return result === null
+      ? ("unknown" as const)
+      : classifyTmuxSessionPresence({ result, name: opts.name });
   };
 
   const readLifecycleOwnerToken = async (opts: {
     readonly name: string;
   }): Promise<string | null> => {
-    const result = await exec(
+    const result = await runMuxCommand(
       ["tmux", "show-options", "-v", "-t", opts.name, LIFECYCLE_OWNER_OPTION],
-      { stdin: "ignore" }
+      {}
     );
     if (result.exitCode === 0) {
       const token = result.stdout.trim();
@@ -228,9 +249,9 @@ export function createTmuxBackend(): MuxBackend {
         return token;
       }
     }
-    const environment = await exec(
+    const environment = await runMuxCommand(
       ["tmux", "show-environment", "-t", opts.name, LIFECYCLE_OWNER_ENV],
-      { stdin: "ignore" }
+      {}
     );
     if (environment.exitCode !== 0) {
       return null;
@@ -245,9 +266,9 @@ export function createTmuxBackend(): MuxBackend {
   const listSessionWindowNames = async (opts: {
     readonly name: string;
   }): Promise<ReadonlySet<string> | null> => {
-    const result = await exec(
+    const result = await runMuxCommand(
       ["tmux", "list-windows", "-t", opts.name, "-F", "#{window_name}"],
-      { stdin: "ignore" }
+      {}
     );
     if (result.exitCode !== 0) {
       return null;
@@ -265,7 +286,7 @@ export function createTmuxBackend(): MuxBackend {
     readonly command: string;
     readonly env?: Readonly<Record<string, string>>;
   }): Promise<ExecResult> => {
-    return await exec(
+    return await runMuxCommand(
       [
         "tmux",
         "send-keys",
@@ -287,14 +308,18 @@ export function createTmuxBackend(): MuxBackend {
     readonly name: string;
     readonly keys: string;
   }): Promise<ExecResult> => {
-    return await exec(["tmux", "send-keys", "-t", opts.name, opts.keys], {
-      stdin: "ignore",
-    });
+    return await runMuxCommand(
+      ["tmux", "send-keys", "-t", opts.name, opts.keys],
+      {
+        stdin: "ignore",
+      }
+    );
   };
 
   return {
     name: "tmux",
     available,
+    createsWithOwnerToken: true,
     listSessions,
     createSession,
     killSession,

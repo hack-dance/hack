@@ -8,12 +8,15 @@ import {
   open,
   readdir,
   realpath,
+  rename,
+  rmdir,
   unlink,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isRecord } from "./guards.ts";
 
 const TOKEN = /^[a-f0-9]{32}$/;
+const TEMPORARY = /^[a-f0-9]{32}\.tmp$/;
 const HASH = /^[a-f0-9]{64}$/;
 const PROJECT = /^[a-z0-9][a-z0-9_-]*$/;
 const ENGINE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/;
@@ -450,6 +453,12 @@ async function readPrivate(path: string): Promise<Read> {
 }
 
 export type NativeComposeRouteClaims = {
+  /** After committing saved references under the instance lock, retire settled
+   * unreferenced attempts only when surviving journals prove every active claim.
+   * Reserved and uncertain attempts are always preserved. */
+  compact(opts: {
+    readonly references: readonly NativeComposeRouteReference[];
+  }): Promise<void>;
   /** The caller's instance mutation lock must cover the complete operation. */
   acquire(opts: {
     readonly hostnames: readonly string[];
@@ -612,13 +621,15 @@ export async function openNativeComposeRouteClaims(opts: {
     const namespace = join(root, hash(binding.engineId));
     await make(namespace);
     const claimsRoot = join(namespace, "claims");
-    const claimsDirectory = await make(claimsRoot);
+    await make(claimsRoot);
     const ownersRoot = join(namespace, "owners");
     await make(ownersRoot);
     const ownerRoot = join(ownersRoot, hash(JSON.stringify(owner)));
     await make(ownerRoot);
     const attemptsRoot = join(ownerRoot, "attempts");
     await make(attemptsRoot);
+    const retiredRoot = join(ownerRoot, "retired");
+    await make(retiredRoot);
     const releasesRoot = join(ownerRoot, "releases");
     await make(releasesRoot);
     const claimPath = (hostname: string) =>
@@ -654,7 +665,38 @@ export async function openNativeComposeRouteClaims(opts: {
       }
       await check();
       await unlink(path);
-      await claimsDirectory.handle.sync();
+      await directories
+        .find((directory) => directory.path === dirname(path))
+        ?.handle.sync();
+    };
+    const unlinkTemporary = async (path: string) => {
+      await check();
+      const initial = await lstat(path);
+      const safe = (info: Stats) =>
+        info.isFile() &&
+        info.uid === process.getuid?.() &&
+        (info.mode & 0o777) === 0o600 &&
+        info.nlink === 1 &&
+        info.size >= 0 &&
+        info.size <= RECORD_LIMIT;
+      if (!safe(initial)) {
+        refuse();
+      }
+      await check();
+      const current = await lstat(path);
+      if (
+        !safe(current) ||
+        current.dev !== initial.dev ||
+        current.ino !== initial.ino ||
+        current.size !== initial.size ||
+        current.ctimeMs !== initial.ctimeMs
+      ) {
+        refuse();
+      }
+      await unlink(path);
+      await directories
+        .find((directory) => directory.path === dirname(path))
+        ?.handle.sync();
     };
     const publish = async (path: string, value: unknown): Promise<Read> => {
       const text = JSON.stringify(value);
@@ -671,17 +713,23 @@ export async function openNativeComposeRouteClaims(opts: {
           constants.O_NOFOLLOW,
         0o600
       );
+      let staged: Read;
       try {
-        await handle.writeFile(text);
-        await handle.sync();
-      } finally {
-        await handle.close();
+        try {
+          await handle.writeFile(text);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        staged = await readPrivate(temporary);
+        if (staged.text !== text) {
+          refuse();
+        }
+        await check();
+      } catch (error) {
+        await unlinkTemporary(temporary);
+        throw error;
       }
-      const staged = await readPrivate(temporary);
-      if (staged.text !== text) {
-        refuse();
-      }
-      await check();
       try {
         await link(temporary, path);
       } finally {
@@ -746,7 +794,7 @@ export async function openNativeComposeRouteClaims(opts: {
       const intentRead = await bounded(join(path, "intent.json"));
       // Empty directories precede intent publication and cannot own effects.
       if (!intentRead) {
-        if ((await readdir(path)).length !== 0) {
+        if ((await readdir(path)).some((file) => !TEMPORARY.test(file))) {
           refuse();
         }
         return null;
@@ -817,7 +865,8 @@ export async function openNativeComposeRouteClaims(opts: {
         return result;
       };
       const result: Journal[] = [];
-      for (const name of (await readdir(attemptsRoot)).sort()) {
+      const names = (await readdir(attemptsRoot)).sort();
+      for (const name of names) {
         const record = await journalAt({ name, bounded });
         if (record) {
           result.push(record);
@@ -1153,7 +1202,129 @@ export async function openNativeComposeRouteClaims(opts: {
       });
       await removeEntries(entries);
     };
+    const forgetDirectory = async (path: string) => {
+      const index = directories.findIndex(
+        (directory) => directory.path === path
+      );
+      if (index < 0) {
+        refuse();
+      }
+      const [held] = directories.splice(index, 1);
+      await held?.handle.close();
+      for (const key of immutable.keys()) {
+        if (key.startsWith(`${path}/`)) {
+          immutable.delete(key);
+        }
+      }
+    };
+    const cleanRetired = async () => {
+      const names = await readdir(retiredRoot);
+      for (const name of names) {
+        if (!TOKEN.test(name)) {
+          refuse();
+        }
+        const path = join(retiredRoot, name);
+        if (!directories.some((directory) => directory.path === path)) {
+          directories.push(await holdDirectory(path, true));
+        }
+        // Retirement is already durable. A crash during cleanup may leave any
+        // subset of these files; none grants claim or completion authority.
+        for (const file of await readdir(path)) {
+          if (TEMPORARY.test(file)) {
+            await unlinkTemporary(join(path, file));
+            continue;
+          }
+          if (
+            ![
+              "intent",
+              "reserved",
+              "armed",
+              "complete",
+              "retained",
+              "stopped",
+              "aborted",
+            ].some((kind) => file === `${kind}.json`)
+          ) {
+            refuse();
+          }
+          const selected = join(path, file);
+          await exactUnlink(selected, await read(selected));
+        }
+        await check();
+        await rmdir(path);
+        await forgetDirectory(path);
+      }
+      await directories
+        .find((directory) => directory.path === retiredRoot)
+        ?.handle.sync();
+    };
     return {
+      compact: (options) =>
+        guard(async () => {
+          const references = options.references.map(snapshotReference);
+          await cleanRetired();
+          const records = await journals();
+          for (const name of await readdir(attemptsRoot)) {
+            if (records.some((record) => record.intent.attemptId === name)) {
+              continue;
+            }
+            const path = join(attemptsRoot, name);
+            await check();
+            for (const file of await readdir(path)) {
+              if (!TEMPORARY.test(file)) {
+                refuse();
+              }
+              await unlinkTemporary(join(path, file));
+            }
+            // journals validated this intent-less directory as empty. rmdir
+            // refuses if anything appeared; no journal authority is discarded.
+            await rmdir(path);
+            await forgetDirectory(path);
+            await directories
+              .find((directory) => directory.path === attemptsRoot)
+              ?.handle.sync();
+          }
+          const pinned = new Set(
+            references.map((reference) => find(records, reference))
+          );
+          const survivors = records.filter(
+            (record) =>
+              pinned.has(record) ||
+              !(
+                record.aborted ||
+                record.stopped ||
+                (record.complete && !record.retained)
+              )
+          );
+          const current = await activeEntries(records);
+          const surviving = await activeEntries(survivors);
+          if (
+            [...current.entries].some(
+              ([name, entry]) => !equal(surviving.entries.get(name), entry)
+            )
+          ) {
+            // An old attempt is still the sole witness for a live claim.
+            return;
+          }
+          for (const record of records) {
+            if (survivors.includes(record)) {
+              continue;
+            }
+            const path = join(attemptsRoot, record.intent.attemptId);
+            await check();
+            // Atomic namespace removal precedes file deletion. Interrupted cleanup
+            // never exposes a partial journal to the authoritative attempts scan.
+            await rename(path, join(retiredRoot, record.intent.attemptId));
+            await forgetDirectory(path);
+            await directories
+              .find((directory) => directory.path === attemptsRoot)
+              ?.handle.sync();
+            await directories
+              .find((directory) => directory.path === retiredRoot)
+              ?.handle.sync();
+          }
+          await cleanRetired();
+        }),
       acquire: (options) =>
         guard(async () => {
           const generationIdentity = options.generationIdentity;

@@ -49,7 +49,7 @@ endpoint) and fails when it does not match.
 The [shared host helper lifecycle contract](./reference/shared-host-lifecycle.md) defines the
 identity-verified alternative: adoption only after the listener names the expected helper and upstream,
 exact PID-plus-start-time claims, serialized starters, and release that never signals a foreign
-process. It is a library contract today; `singleton` does not use it yet.
+process. Projects use it through [`lifecycle.sharedHelpers`](#shared-helpers); `singleton` is unchanged.
 
 ## Config
 
@@ -181,6 +181,150 @@ Long-running processes live under `lifecycle.processes` and are objects with:
 - `singleton` (optional): listener-ownership policy with `ports` and `onConflict`
 
 Processes receive the resolved env contract (see `env.md`) as their environment.
+
+### Shared helpers
+
+`lifecycle.sharedHelpers` declares host helpers that several branches (or projects) share
+through one fixed loopback port, under the
+[shared host helper contract](./reference/shared-host-lifecycle.md). Unlike `singleton`, a
+listener is adopted only after it proves its identity, and Hack stops a helper only when it
+started it and the last branch using it is released.
+
+```json
+{
+  "lifecycle": {
+    "sharedHelpers": [
+      {
+        "name": "issuer-bridge",
+        "command": ["bun", "run", "bridge"],
+        "cwd": "tools/issuer-bridge",
+        "port": 4100,
+        "upstreamEnv": "ISSUER_UPSTREAM",
+        "env": ["ISSUER_TOKEN"]
+      }
+    ]
+  }
+}
+```
+
+- `name` (required): helper kind. The helper must answer `GET http://127.0.0.1:<port><identityPath>`
+  with JSON `{"helper": "<name>", "upstream": "<upstream>"}` (an optional `pid` must be its own).
+- `command` (required): argv array, executed directly, never through a shell string.
+- `port` (required): the loopback port. `name` and `port` must be unique in the list.
+- `upstream` or `upstreamEnv` (exactly one): the upstream this instance needs, literally or
+  from a variable in the resolved lifecycle env (then the CLI environment). Use
+  `upstreamEnv` with an env overlay when branches need different upstreams.
+- `identityPath` (default `/__hack/identity`), `cwd` (repo-root relative),
+  `enabled` (default `true`), `readyTimeoutMs` (default 30000, at most 600000).
+- `env`: variable names passed to the helper. It also gets `PATH`; nothing else from the
+  CLI environment is inherited. A listed name that is not set fails `hack up`.
+
+An invalid `sharedHelpers` entry is refused, not skipped: `hack up`, `hack down` and
+`hack restart` fail with `E_LIFECYCLE_FAILED` before any hook, helper, lifecycle process or
+Compose command runs. This is stricter than other config parse errors, which these commands
+only warn about. Fix the entry and run the command again.
+
+Behavior:
+- `hack up` and `hack restart` ensure each helper after `lifecycle.up.before` hooks and before
+  `lifecycle.processes`. Each instance (`<project>` or `<project>--<branch>`) is one holder.
+  A healthy helper is reused; an identity-matching helper someone else started is adopted;
+  otherwise Hack starts it and waits until its identity endpoint answers.
+- A port held by anything else (another helper, the wrong upstream, a silent listener) fails
+  `hack up` with `E_LIFECYCLE_FAILED` and a closed reason; that process is left running.
+  Messages never include upstreams, argv or environment values.
+- If `hack up` fails later, or receives SIGINT/SIGTERM at any point while helpers or
+  lifecycle processes start, Hack releases only the holders that run added and stops a
+  helper it had just started. Overlapping `hack up` runs of the same instance are ordered by
+  an instance lock; an earlier run's rollback never releases a holder after a later run of
+  that instance has started (the holder stays recorded until `hack down`). Holders of
+  containers that may still be running are kept instead (see below).
+- A disabled helper (`enabled: false`) needs none of its `env` or `upstreamEnv` values.
+- A project with `sharedHelpers` and a lifecycle session (lifecycle processes or a
+  persistent `up.before` hook) needs tmux for that session. With zellij selected,
+  `hack up` and `hack restart` fail with `E_LIFECYCLE_FAILED` before any hook,
+  helper or process runs: zellij records the session's ownership after creating
+  it, so an interrupted start could leave a session `hack down` cannot reclaim.
+  Install tmux or set `sessions.mux` to `tmux`. If the selection changes to zellij
+  while hooks run, the start fails when it chooses the session's backend, before
+  creating the session, and rolls back the helper holders it added. zellij
+  support is tracked in HACK-1849.
+- `hack down` releases the instance's holder. A helper still used by another branch keeps
+  running; the last release stops a helper Hack started and never signals an adopted one.
+  Down releases every helper the instance acquired, recorded at start, so removing or
+  renaming an entry (or switching to a revision without it) does not strand its holder.
+- A release that fails or cannot confirm the stop keeps the claim and fails `hack down` and
+  `hack restart` with `E_LIFECYCLE_FAILED` (non-zero exit, the helper names in `detail`).
+  Fix the claim and run `hack down` again.
+- Holders are released only after the instance's containers and lifecycle session
+  stopped. `hack restart` keeps the containers running, so it keeps their holders and
+  reuses the helpers. Once a detached `hack up` or `hack restart` started the
+  containers, a later failure (such as a failing `up.after` hook) stops the lifecycle
+  processes but keeps the holders for `hack down`. If Compose fails or times out while
+  starting containers (including a failed restart repair), the holders are kept unless
+  `docker compose ps` confirms that no container of the instance may still run.
+  SIGINT/SIGTERM once a container start has begun keeps the holders too (the start may
+  still be starting services). If `docker compose down` fails, times out or is interrupted, the holders are
+  kept (with a warning) and the command fails with Compose's error; run `hack down`
+  again. If the session stop fails or cannot be confirmed (including when tmux cannot
+  say whether the session exists), the session's processes may still use the helpers: `hack
+  down`, `hack restart` and native retirement keep every holder, warn, and fail the same
+  way. Run `hack down` again once the session can be stopped. Likewise, an up whose failed
+  start kept its lifecycle session (its stop could not be confirmed) keeps the holders it
+  added.
+- A `hack down` that overlaps a `hack up` of the same instance (same branch):
+  - `hack down` marks the instance as stopping once the down is committed: after its
+    `lifecycle.down.before` hooks succeed (and, on the native path, after the ownership and
+    finalization rechecks that follow them), right before Compose or graph shutdown. A down
+    refused before that point supersedes nothing. Its release
+    removes the instance's operation record. Both advance the instance's shutdown
+    generation.
+  - A down supersedes every `hack up` of the instance whose lifecycle preparation began
+    before it, even after a later `hack up` succeeds. Preparation begins just before the
+    `lifecycle.up.before` hooks run, so a down that completes while those hooks run also
+    supersedes that up: it fails with `E_LIFECYCLE_FAILED` before starting any helper. The
+    later up's helpers need not be the earlier up's (an entry may have been disabled or
+    changed), so the earlier up never counts as current again.
+  - **Prevented during preparation.** A `hack up` checks the instance right before its
+    containers start (after detached image preparation, before an attached `up`, and at the
+    end of native preparation). If a down marked or released it by then, that up fails with
+    `E_LIFECYCLE_FAILED` and starts no container.
+  - **Detected after launch, not prevented.** The check takes the instance lock only
+    briefly, so a down can still complete between the check and container start, or while
+    containers start. The up checks again after Compose returns: a detached up then fails
+    with `E_LIFECYCLE_FAILED` (its containers may already run); an attached up only checks
+    after Compose exits. In that case run `hack down` for the branch (`--branch <name>`) to
+    stop the containers, then `hack up` again.
+- Two overlapping `hack up` runs of the same instance, with no down in between:
+  - The newer up does not supersede the earlier one: an earlier, slower up still starts,
+    because the newer up holds the same helpers.
+  - The up that created the lifecycle session stops it on failure (or SIGINT/SIGTERM) only
+    if no other up adopted it since. Hack records each session adoption and creation under
+    the shared helper instance lock, so this holds whichever up ensured its helpers first.
+    An up that only adopted the session never stops it.
+  - An up whose lifecycle session another up replaced while it was still starting (its
+    entry was still pending) fails with an error saying so. It does not publish over the
+    replacement, start processes or set environment in it, or stop it; the replacement
+    stays owned and `hack down` can stop it.
+  - These guarantees hold for tmux commands that finish within their time limit
+    (15 s). Hack stops waiting for a command that does not, and treats its outcome
+    as unknown, but a stalled tmux server can still apply it later. A late kill
+    or window command from an earlier up can then stop or change a newer up's
+    session of the same branch; `hack down` and `hack up` recover it. A late
+    session creation leaves an empty session that the next `hack up` refuses;
+    stop it with tmux. Closing this gap is tracked in HACK-1849.
+  - A failed up releases only the helper holders it added, and only while it is the latest
+    up of the instance to have its helpers ready and no `hack down` has started since
+    (including one that was interrupted); otherwise the next `hack down` releases them.
+  - The failed up's other failure handling is unchanged (for example, it still clears the
+    instance's runtime-state entry), so check `hack ps --branch <name>` after such an
+    overlap.
+  - This applies to projects with `sharedHelpers`. If the shared helper instance lock stays
+    busy for 10 s (for example, a third up is still waiting for a slow helper), ownership
+    cannot be decided: the failed up keeps the lifecycle session and its helper holders,
+    warns, and leaves them for `hack down` to stop.
+- Claims live under `~/.hack/shared-helpers/<name>-<port>/` (or `$HACK_HOME`), shared by
+  every project and branch that uses that helper name and port.
+- Helpers are not part of the lifecycle mux session and do not appear in `hack logs`.
 
 ## Visibility
 

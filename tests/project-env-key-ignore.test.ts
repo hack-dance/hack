@@ -20,6 +20,7 @@ import {
 import { ensureGitignoreEntry } from "../src/lib/fs.ts";
 import { resolveProjectEnvConfigPath } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -90,7 +91,7 @@ async function git(
   args: readonly string[]
 ): Promise<{ readonly exitCode: number; readonly stdout: string }> {
   const proc = Bun.spawn(["git", "-C", repo.projectRoot, ...args], {
-    env: gitEnv(repo.root),
+    env: fixtureGitEnv({ env: gitEnv(repo.root) }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "ignore",

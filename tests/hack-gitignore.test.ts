@@ -28,6 +28,7 @@ import {
   HACK_DIR_GITIGNORE_END_MARKER,
   HACK_DIR_GITIGNORE_ENTRIES,
 } from "../src/templates.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const tempDirs = new Set<string>();
@@ -47,6 +48,7 @@ async function createTempDir(): Promise<string> {
 
 async function runGit(args: readonly string[], cwd: string): Promise<string> {
   const proc = Bun.spawn({
+    env: fixtureGitEnv(),
     cmd: ["git", ...args],
     cwd,
     stdout: "pipe",
@@ -74,6 +76,7 @@ async function gitCheckIgnore(opts: {
   readonly path: string;
 }): Promise<boolean> {
   const proc = Bun.spawn({
+    env: fixtureGitEnv(),
     cmd: ["git", "check-ignore", "-q", "--", opts.path],
     cwd: opts.repoRoot,
     stdout: "ignore",

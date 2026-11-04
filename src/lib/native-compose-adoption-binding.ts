@@ -46,6 +46,7 @@ import {
   acquireLegacyComposeSourceBind,
   type LegacyComposeSourceBindProof,
 } from "./native-compose-adoption-source-bind.ts";
+import { inspectNativeComposeContainers } from "./native-compose-batch-inspect.ts";
 import {
   type NativeComposeIngressBinding,
   observeNativeComposeIngress,
@@ -291,22 +292,42 @@ async function inspect(opts: {
   } else if (opts.kind === "container" && opts.ownedNetwork) {
     format = CUSTOM_CONTAINER_NETWORK_FORMAT;
   }
-  // One name/ID per request gives a fixed argv bound; cumulative I/O/time is shared.
-  for (const resource of opts.resources) {
-    const output = lines(
-      await opts.probe([opts.kind, "inspect", "--format", format, resource.id])
-    );
-    requireValue(output.length === 1);
-    const row = output[0];
-    requireValue(
-      row &&
-        row.id === resource.id &&
-        row.name ===
-          (opts.kind === "container" ? `/${resource.name}` : resource.name) &&
-        row.project === opts.project &&
-        emptyNative(row.native)
-    );
-    rows.push(row);
+  if (opts.kind === "container") {
+    for (const { resource, row } of await inspectNativeComposeContainers({
+      resources: opts.resources,
+      format,
+      probe: opts.probe,
+      refuse,
+    })) {
+      requireValue(
+        row.name === `/${resource.name}` &&
+          row.project === opts.project &&
+          emptyNative(row.native)
+      );
+      rows.push(row);
+    }
+  } else {
+    for (const resource of opts.resources) {
+      const output = lines(
+        await opts.probe([
+          opts.kind,
+          "inspect",
+          "--format",
+          format,
+          resource.id,
+        ])
+      );
+      requireValue(output.length === 1);
+      const row = output[0];
+      requireValue(
+        row &&
+          row.id === resource.id &&
+          row.name === resource.name &&
+          row.project === opts.project &&
+          emptyNative(row.native)
+      );
+      rows.push(row);
+    }
   }
   return rows;
 }

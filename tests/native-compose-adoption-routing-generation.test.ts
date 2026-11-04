@@ -416,12 +416,40 @@ test(
       for (const [index, operation] of (
         ["start", "stop", "start", "stop"] as const
       ).entries()) {
-        expect(
-          await h.operation(store, active, operation, {
-            deadlineMs: COMPOUND_OPERATION_DEADLINE_MS,
-          })
-        ).toBe(0);
+        const unlink = fs.unlink;
+        let cleanupFailures = 0;
+        const failure = spyOn(fs, "unlink").mockImplementation(async (path) => {
+          if (index === 1 && String(path).includes("/retired/")) {
+            cleanupFailures++;
+            throw Object.assign(new Error("synthetic cleanup failure"), {
+              code: "EIO",
+            });
+          }
+          return await unlink(path);
+        });
+        try {
+          expect(
+            await h.operation(store, active, operation, {
+              deadlineMs: COMPOUND_OPERATION_DEADLINE_MS,
+            })
+          ).toBe(0);
+        } finally {
+          failure.mockRestore();
+        }
+        expect((await h.receipt()).pendingOperation).toBeNull();
+        expect(cleanupFailures > 0).toBe(index === 1);
         phase(`lifecycle-${index + 1}-${operation}-return`);
+        const routingRoot = join(h.home, "compose-routing");
+        const attemptRoots = (
+          await fs.readdir(routingRoot, { recursive: true })
+        ).filter((path) => path.endsWith("/attempts"));
+        expect(attemptRoots).toHaveLength(1);
+        for (const path of attemptRoots) {
+          expect(await fs.readdir(join(routingRoot, path))).toHaveLength(2);
+          expect(
+            await fs.readdir(join(routingRoot, path, "..", "retired"))
+          ).toHaveLength(index === 1 ? 1 : 0);
+        }
       }
       await store.withLease({
         generation: active,
@@ -434,7 +462,7 @@ test(
       phase("saved-lease-return");
       expect((await h.receipt()).publication?.phase).toBe("active");
       expectRetainedResourcesOnly();
-      expect(h.commands.length).toBeLessThanOrEqual(7300);
+      expect(h.commands.length).toBeLessThanOrEqual(6500);
       expect(volumeInspections()).toBeLessThanOrEqual(114);
       phase("assertions-complete");
     } catch (error: unknown) {
@@ -884,6 +912,11 @@ test("known nonzero child retains a settled journal and exact explicit stop reco
       disposition: "settled",
       code: 0,
     });
+    // A subsequent cycle compacts with the recovered stopped attempt pinned
+    // and must still reopen it before creating the next lifecycle attempt.
+    expect(
+      await h.operation(store, pending, "stop", { preparation: true })
+    ).toBe(0);
     await store.publish({ generation: pending, binary: h.compiler });
   } finally {
     await store.close();

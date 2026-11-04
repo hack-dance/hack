@@ -2973,6 +2973,14 @@ async function mutateRetainedContainersWithinBudget(
     : undefined;
   let routeAttempt: NativeComposeRouteAttempt | undefined;
   try {
+    if (routeClaims && loaded.manifest.routingClaims) {
+      await routeClaims.compact({
+        references: [
+          loaded.manifest.routingClaims,
+          ...(state.routingOperation ? [state.routingOperation.reference] : []),
+        ],
+      });
+    }
     await admitCandidate(ctx, loaded.inputs, captured.binary);
     const services = loaded.inputs.binding.containers.map(
       (container) => container.service
@@ -3329,6 +3337,16 @@ async function mutateRetainedContainersWithinBudget(
       state,
       beforeCommit ? { beforeCommit } : undefined
     );
+    if (routeClaims && routeAttempt && loaded.manifest.routingClaims) {
+      try {
+        await routeClaims.compact({
+          references: [loaded.manifest.routingClaims, routeAttempt.reference],
+        });
+      } catch {
+        // The receipt is settled. Cleanup retries on the next operation and
+        // cannot change the outcome of the already committed lifecycle effect.
+      }
+    }
     return 0;
   } finally {
     await routeClaims?.close();

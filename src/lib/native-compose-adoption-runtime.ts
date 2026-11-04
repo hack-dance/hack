@@ -9,6 +9,7 @@ import {
   legacyComposeJobStates,
 } from "./native-compose-adoption-jobs.ts";
 import type { LegacyComposeReadinessState } from "./native-compose-adoption-readiness.ts";
+import { inspectNativeComposeContainers } from "./native-compose-batch-inspect.ts";
 import {
   createNativeComposeProbe,
   nativeComposeProbeFailure,
@@ -31,13 +32,6 @@ function refuse(): never {
   throw new Error(
     "Legacy adoption runtime inspection refused; values omitted."
   );
-}
-function row(text: string) {
-  const parsed: unknown = JSON.parse(text);
-  if (!isRecord(parsed)) {
-    refuse();
-  }
-  return parsed;
 }
 
 const ENV_OVERRIDE_SUFFIX = "/.hack/.internal/compose.env.override.yml";
@@ -113,19 +107,15 @@ export async function inspectLegacyComposeRuntimeConfig(opts: {
         files: expectedFiles,
       });
   const result: RuntimeConfig[] = [];
-  for (const container of opts.binding.containers) {
-    if (!ID.test(container.id)) {
-      refuse();
-    }
-    const inspected = row(
-      await probe([
-        "container",
-        "inspect",
-        "--format",
-        '{"id":{{json .Id}},"hash":{{json (index .Config.Labels "com.docker.compose.config-hash")}}}',
-        container.id,
-      ])
-    );
+  for (const {
+    resource: container,
+    row: inspected,
+  } of await inspectNativeComposeContainers({
+    resources: opts.binding.containers,
+    format:
+      '{"id":{{json .Id}},"hash":{{json (index .Config.Labels "com.docker.compose.config-hash")}}}',
+    probe,
+  })) {
     const hash = hashes.get(container.service);
     if (
       !hash ||
@@ -230,19 +220,15 @@ export async function inspectLegacyComposeContainerStates(opts: {
 > {
   const probe = createNativeComposeProbe(opts);
   const result: LegacyComposeContainerState[] = [];
-  for (const container of opts.binding.containers) {
-    if (!ID.test(container.id)) {
-      refuse();
-    }
-    const value = row(
-      await probe([
-        "container",
-        "inspect",
-        "--format",
-        '{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}}}',
-        container.id,
-      ])
-    );
+  for (const {
+    resource: container,
+    row: value,
+  } of await inspectNativeComposeContainers({
+    resources: opts.binding.containers,
+    format:
+      '{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}}}',
+    probe,
+  })) {
     if (
       Object.keys(value).sort().join() !== "id,paused,running,status" ||
       value.id !== container.id ||
@@ -285,19 +271,15 @@ export async function inspectLegacyComposeReadiness(opts: {
 }): Promise<readonly LegacyComposeReadinessState[]> {
   const probe = createNativeComposeProbe(opts);
   const result: LegacyComposeReadinessState[] = [];
-  for (const container of opts.binding.containers) {
-    if (!ID.test(container.id)) {
-      refuse();
-    }
-    const value = row(
-      await probe([
-        "container",
-        "inspect",
-        "--format",
-        '{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}""{{end}}}',
-        container.id,
-      ])
-    );
+  for (const {
+    resource: container,
+    row: value,
+  } of await inspectNativeComposeContainers({
+    resources: opts.binding.containers,
+    format:
+      '{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}""{{end}}}',
+    probe,
+  })) {
     if (
       Object.keys(value).sort().join() !== "health,id,paused,running,status" ||
       value.id !== container.id ||

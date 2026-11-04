@@ -800,7 +800,7 @@ describe("hosted test CI fan-in", () => {
     expect(matrix).toEqual(Array.from({ length: count }, (_, i) => i + 1));
     expect(shardJob?.strategy?.["fail-fast"]).toBe(false);
     expect(shardJob?.name).toBe(`test shard \${{ matrix.shard }}/${count}`);
-    expect(shardJob?.["runs-on"]).toBe("blacksmith-6vcpu-macos-15");
+    expect(shardJob?.["runs-on"]).toBe("macos-15");
     expect(shardJob?.["timeout-minutes"]).toBeLessThan(60);
     const steps = shardJob?.steps ?? [];
     const run = steps.find((step) => step.name === "Tests (shard)");

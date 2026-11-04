@@ -131,7 +131,7 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.runs) }}
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-15
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
     permissions:
       contents: read

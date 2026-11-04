@@ -44,6 +44,7 @@ struct Provider {
     containers: RefCell<Value>,
     observe_reply: RefCell<Option<String>>,
     fault: Cell<Fault>,
+    move_reply: RefCell<Option<String>>,
     calls: RefCell<Vec<&'static str>>,
     inspect_failure: Cell<bool>,
     identity_failure: Cell<bool>,
@@ -85,6 +86,7 @@ impl Provider {
             ])),
             observe_reply: RefCell::new(None),
             fault: Cell::new(Fault::None),
+            move_reply: RefCell::new(None),
             calls: RefCell::new(Vec::new()),
             inspect_failure: Cell::new(false),
             identity_failure: Cell::new(false),
@@ -271,6 +273,11 @@ impl Port for Provider {
         }
         if call == "move" && self.fault.get() == Fault::After {
             return Err(lost());
+        }
+        if call == "move"
+            && let Some(reply) = self.move_reply.borrow().clone()
+        {
+            return Ok(reply);
         }
         Ok(String::from_utf8(output.stdout).unwrap())
     }
@@ -640,6 +647,45 @@ fn a_record_stuck_by_the_created_at_recheck_resumes_or_resolves_with_retained_by
         let absent = provider.inspect().unwrap();
         assert_eq!(absent["phase"], "target_absent");
         assert_eq!(absent["retained_quarantine_bytes"], 1016);
+        provider.untouched_application_data();
+    }
+}
+
+#[test]
+fn unexpected_successful_move_replies_leave_pending_records_for_resolution() {
+    for reply in [
+        "",
+        "cache-quarantine-v1 mov",
+        "unexpected\n",
+        "cache-quarantine-v1 moved\nextra\n",
+    ] {
+        let provider = Provider::new();
+        let sha = selection_sha(&provider.inspect().unwrap());
+        let original = identity(&provider.root().join(PATH));
+        *provider.move_reply.borrow_mut() = Some(reply.to_owned());
+        let error = provider.quarantine(&sha).unwrap_err();
+        assert_eq!(error.code, "graph_cache_quarantine_unsettled");
+        assert!(error.message.contains("may have moved"));
+        assert!(error.message.contains("resume or resolution"));
+        assert!(!error.message.contains("no cache bytes were moved"));
+        assert_eq!(provider.records()[0].outcome, Outcome::Pending);
+        assert!(!provider.root().join(PATH).exists());
+        assert_eq!(identity(&provider.destination(&sha)), original);
+        assert_eq!(provider.inspect().unwrap()["phase"], "resume_required");
+        // The resumed script succeeds too; an unrecognized reply still cannot
+        // settle the record or move another directory.
+        assert_eq!(
+            provider.quarantine(&sha).unwrap_err().code,
+            "graph_cache_quarantine_unsettled"
+        );
+        assert_eq!(provider.records()[0].outcome, Outcome::Pending);
+        assert_eq!(identity(&provider.destination(&sha)), original);
+        provider.calls.borrow_mut().clear();
+        let resolved = provider.resolve(&sha).unwrap();
+        assert_eq!(resolved["phase"], "quarantined");
+        assert_eq!(resolved["mutation"], false);
+        assert_eq!(provider.guest_calls(), ["locate"]);
+        assert_eq!(provider.records()[0].outcome, Outcome::Quarantined);
         provider.untouched_application_data();
     }
 }

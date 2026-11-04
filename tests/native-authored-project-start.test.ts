@@ -41,6 +41,7 @@ import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
+import * as executionInputs from "../src/lib/native-execution-inputs.ts";
 import {
   endLifecycleMuxFixtureGroups,
   writeLifecycleMuxFixture,
@@ -2395,6 +2396,17 @@ for (const proof of [
       const signal = new AbortController();
       const force = new AbortController();
       let ready = false;
+      const acquired = executionInputs.acquireNativeExecutionInputs;
+      const teardownSignals: AbortSignal[] = [];
+      const acquireSpy = spyOn(
+        executionInputs,
+        "acquireNativeExecutionInputs"
+      ).mockImplementation((opts) => {
+        if (signal.signal.aborted && opts.signal) {
+          teardownSignals.push(opts.signal);
+        }
+        return acquired(opts);
+      });
       const originalKill = process.kill.bind(process);
       let group: number | undefined;
       let killSpy: ReturnType<typeof spyOn<typeof process, "kill">> | undefined;
@@ -2437,6 +2449,15 @@ for (const proof of [
         );
         expect(error).toHaveProperty("canceled", true);
         expect(ready).toBe(false);
+        // Retention alone is weak evidence: stale canceled startup inputs also
+        // retain everything. Each case must reach the fresh teardown admission.
+        expect(teardownSignals.length).toBe(
+          proof === "unconfirmed-group" ? 0 : 1
+        );
+        if (proof !== "unconfirmed-group") {
+          expect(teardownSignals[0]?.aborted).toBe(proof === "hard-canceled");
+          expect(teardownSignals[0]).not.toBe(signal.signal);
+        }
         expect(
           await Bun.file(
             join(selected.scope.projectRoot, "process-order")
@@ -2450,6 +2471,7 @@ for (const proof of [
           files.some((name) => name.endsWith(".host-process-owner.json"))
         ).toBe(proof !== "removed");
       } finally {
+        acquireSpy.mockRestore();
         if (killSpy) {
           confirmTestGroupAbsent(group, originalKill);
           killSpy.mockRestore();
@@ -2504,6 +2526,7 @@ bunTest.skipIf(process.platform !== "darwin")(
       }
       expect(await groupEnded(group)).toBe(true);
     } finally {
+      await cases.drain();
       if (root !== undefined) {
         await rm(root, { recursive: true, force: true });
       }

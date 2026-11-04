@@ -234,3 +234,86 @@ test("the stand-in mux cleanup signals only its own groups and gets past one tha
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);
+
+test("an overrun retains mux state until its late body and second cleanup settle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "late-fixture-mux-"));
+  const noise = spyOn(console, "error").mockImplementation(() => undefined);
+  const release = Promise.withResolvers<void>();
+  const cleaned = Promise.withResolvers<void>();
+  let cleanupRuns = 0;
+  try {
+    const mux = await writeLifecycleMuxFixture(root);
+    const state = join(root, "mux.json");
+    await expect(
+      cases.run(async () => {
+        const owner = cases.current();
+        owner.root(root);
+        owner.onFailure(async () => {
+          await endLifecycleMuxFixtureGroups(state);
+          cleanupRuns += 1;
+          if (cleanupRuns === 2) {
+            cleaned.resolve();
+          }
+        });
+        await release.promise;
+        for (const args of [
+          ["new-session", "-s", "late", "-c", root],
+          ["new-window", "-n", "late", "-c", root, "sleep 300"],
+        ]) {
+          const child = Bun.spawn([mux, ...args], {
+            env: { ...process.env, HACK_TEST_MUX_STATE: state },
+            stdout: "ignore",
+            stderr: "ignore",
+          });
+          expect(await child.exited).toBe(0);
+        }
+        const saved = JSON.parse(await readFile(state, "utf8"));
+        started.push(saved.windows.late.pid);
+      }, 20)
+    ).rejects.toThrow("exceeded its 20 ms budget");
+    expect(cleanupRuns).toBe(1);
+    // A rejected case retains its roots. The caller must await late cleanup
+    // before disposing those roots, even though run() already rejected.
+    expect(await Bun.file(mux).exists()).toBe(true);
+    let drained = false;
+    const draining = cases.drain().then(() => {
+      drained = true;
+    });
+    await Bun.sleep(1);
+    expect(drained).toBe(false);
+    release.resolve();
+    await draining;
+    await cleaned.promise;
+    expect(cleanupRuns).toBe(2);
+    expect(await Bun.file(state).exists()).toBe(true);
+    expect(await groupEnded(started.at(-1) ?? 0)).toBe(true);
+  } finally {
+    release.resolve();
+    await cleaned.promise;
+    noise.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("a body ending during the first failure cleanup still gets a second cleanup", async () => {
+  const release = Promise.withResolvers<void>();
+  const ended = Promise.withResolvers<void>();
+  let cleanups = 0;
+  await expect(
+    cases.run(async () => {
+      cases.current().onFailure(async () => {
+        cleanups += 1;
+        if (cleanups === 1) {
+          release.resolve();
+          await ended.promise;
+          // Let the running body's finally mark it ended before cleanup returns.
+          await Bun.sleep(1);
+        }
+      });
+      await release.promise;
+      ended.resolve();
+    }, 20)
+  ).rejects.toThrow("exceeded its 20 ms budget");
+  await cases.drain();
+  expect(cleanups).toBe(2);
+});

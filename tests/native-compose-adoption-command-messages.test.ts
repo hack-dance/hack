@@ -107,7 +107,7 @@ function token(error: HackCliError): string {
     stdout: renderCliResult({ result: errorResultFromUnknown({ error }) }),
   });
   expect(messages).toHaveLength(1);
-  expect(messages[0]).toContain("code=E_CONFIG_INVALID");
+  expect(messages[0]).toContain(`code=${error.code}`);
   return messages[0]?.match(/ refusal=(\S+)$/)?.[1] ?? "missing";
 }
 
@@ -141,7 +141,7 @@ test("cancellation before an observed lease runs ends in the adopted-cancelled t
     tryLegacyComposeAdoptedCommand({ cwd: root, operation: "ps" })
   );
   expect(ran).toBe(true);
-  expect(error.code).toBe("E_CONFIG_INVALID");
+  expect(error.code).toBe("E_CANCELLED");
   expect(token(error)).toBe("adopted-cancelled");
   expect(closed.count).toBe(1);
   expect(process.listeners("SIGTERM")).toEqual(before);
@@ -168,8 +168,25 @@ test("cancellation before a journaled mutation runs ends in the adopted-cancelle
     })
   );
   expect(ran).toBe(true);
-  expect(error.code).toBe("E_CONFIG_INVALID");
+  expect(error.code).toBe("E_CANCELLED");
   expect(token(error)).toBe("adopted-cancelled");
   expect(closed.count).toBe(1);
   expect(process.listeners("SIGTERM")).toEqual(before);
 });
+
+for (const [internal, expected] of [
+  ["E_LEGACY_ADOPTION_DEADLINE", "E_STARTUP_TIMEOUT"],
+  ["E_LEGACY_ADOPTION_CANCELLED", "E_CANCELLED"],
+] as const) {
+  test(`generation refusal ${internal} retains its public classification`, async () => {
+    useStore({
+      loadActive: async () => {
+        throw new generation.LegacyComposeAdoptedGenerationError(internal);
+      },
+    });
+    const error = await rejection(
+      tryLegacyComposeAdoptedCommand({ cwd: root, operation: "ps" })
+    );
+    expect(error.code).toBe(expected);
+  });
+}

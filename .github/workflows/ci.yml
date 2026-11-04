@@ -412,15 +412,15 @@ jobs:
     # (scripts/test-shard-plan.ts, HACK-1381). The serial job took 37-42 min and
     # reached the 60 min limit on slow runners; each file now runs in its own
     # `bun test` process with a start/result line, so a hang names its file.
-    name: test shard ${{ matrix.shard }}/4
+    name: test shard ${{ matrix.shard }}/8
     strategy:
       # Let every shard finish so one failure still reports the other files.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     runs-on: macos-15
-    # A shard plans about 10.5 min of tests. The runner's own 30 min deadline
-    # stops first and names the running file; this bounds a hung runner.
+    # Eight shards keep the slower GitHub-hosted macOS jobs below the existing
+    # 30 min file-runner deadline; the 40 min job limit bounds a hung runner.
     timeout-minutes: 40
     steps:
       - name: Checkout
@@ -445,10 +445,10 @@ jobs:
       - name: Prepare matching compiler for private file owner tests
         run: bun run build:config-compiler
       # Runs check:bun-version and test:preflight as `bun run test` does, then
-      # verifies that the four shards cover the full test file set exactly once.
+      # verifies that all eight shards cover the full test file set exactly once.
       - name: Tests (shard)
         env:
-          HACK_TEST_SHARD: ${{ matrix.shard }}/4
+          HACK_TEST_SHARD: ${{ matrix.shard }}/8
         run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
       - name: Preserve measured file durations
         # Per-file seconds only; refresh scripts/test-shard-durations.json with

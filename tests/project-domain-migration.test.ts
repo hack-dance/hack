@@ -18,6 +18,7 @@ import {
   previewProjectDomainMigration as preview,
   rollbackProjectDomainMigration as rollback,
 } from "../src/lib/project-domain-migration.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const roots: string[] = [];
 const config = '{"dev_host":"demo.hack", "custom":"preserve"}\n';
@@ -248,6 +249,7 @@ test("journal and interrupted staging remain Git ignored without parent rules", 
   const projectDir = await fixture();
   const git = async (args: string[]) => {
     const child = Bun.spawn(["git", "-C", projectDir, ...args], {
+      env: fixtureGitEnv(),
       stdout: "pipe",
       stderr: "ignore",
     });

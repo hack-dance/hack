@@ -18,6 +18,7 @@ import {
   renderBootstrapLock,
   sha256Hex,
 } from "./e2e/portable-bootstrap-controls.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const cli = resolve(import.meta.dir, "../index.ts");
@@ -91,6 +92,7 @@ async function fixture() {
   }
   const git = (args: string[]) => {
     const result = Bun.spawnSync(["git", "-C", project, ...args], {
+      env: fixtureGitEnv(),
       stdout: "pipe",
       stderr: "pipe",
     });

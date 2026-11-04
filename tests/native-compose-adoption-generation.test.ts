@@ -46,9 +46,9 @@ const {
   artifactPath,
   refusal,
   linkedCheckout,
+  mutationCommands,
   readReceipt,
   writeReceipt,
-  mutationCommands,
   originalSnapshots,
   expectOriginals,
 } = context;

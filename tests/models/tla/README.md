@@ -942,3 +942,110 @@ compatibility, resource improvements or release readiness. The model also omits 
 implementation's graph-receipt/coordinator acknowledgement gap and startup release
 gate; those require their own implementation tests rather than an expanded claim
 about this unchanged specification.
+
+## Shared helper instance
+
+`shared-helper-instance/Instance.tla` models lifecycle-session ownership for one
+shared-helper instance (one branch, HACK-1142): two overlapping `hack up` runs
+(`a`, `b`) and one `hack down`, with the shared helper instance lock (`lock`), the
+live session and its ownership token (`session`, `token`) and the persisted
+lifecycle entry (`entry`, `healthy`) as explicit state.
+
+- `SessionSafe`: an up that succeeded with no down since it captured the shutdown
+  generation still has a live session, so an overlapping up's cleanup never kills a
+  session a successful up adopted.
+- `Reclaimable`: a live session always has a persisted entry naming its token, so
+  the normal stop controller (`hack down`) can reclaim it.
+- `NoForeignLaunch`: a start never launches a process into a session that carries
+  another start's token.
+- `HelpersKeptForSession`: a down that could not confirm the session stopped keeps
+  the instance's helper holders while that session lives.
+
+| Model operation | Source boundary and regression |
+| --- | --- |
+| `Capture` / `Superseded` | `captureSharedHelperShutdownGeneration` before `up.before`; `startProjectSharedHelpers` refuses a changed generation before ensuring helpers. |
+| `Decide` | The controller's session decision under the instance lock (`resolveSessionDisposition`): adopt an owned healthy session and record the adoption epoch, replace an owned stale (pending) one, refuse one without matching state, or decide to create. |
+| `CreateBegin` | Start of the creation transaction (`ensureSession` → `createOwnedSession` under one `withLock`): `assertSessionStillAbsent` re-inspects and refuses unless the session is still absent. `tests/project-lifecycle-controller-ownership.test.ts` interleaving regression. |
+| `Publish` / `CreateSession` | Pending entry published, then `createSession`; a failed creation removes only this start's pending entry (`removeLifecycleStateEntryIfOwned`). |
+| `Record` / `RecordFail*` | tmux environment setup and `record("created")`, then the lock is released with the entry still pending. On failure the cleanup (`releaseFailedSessionCreation`: token read, name-based kill, entry removal) runs inside the same lock: the created session is stopped with its token before the entry is removed (`RecordFailStopped`); an unconfirmed (or timed-out) stop keeps the entry and token (`RecordFailUnconfirmed`). Controller regressions for both, including a hung `createSession`, a replacement overlapping the cleanup, and a replacement overlapping environment setup. |
+| `StartProcesses` | Each launch (`startLifecycleProcess`) runs under the lock and only while the persisted entry and the live session still carry this start's token; otherwise the start is displaced (`LifecycleSessionDisplacedError`) and launches nothing. The pending entry is not adoptable, so another start may replace the session between launches. Controller regression: a displaced start's later process never reaches the replacement. |
+| `Finalize` | `finalize()` under the lock (`publishFinalEntryIfStillOwned`): publish the final, adoptable entry only while the persisted entry and the live session still carry this start's created or adopted token; otherwise the start is displaced, gives up its authority and fails (`LifecycleSessionDisplacedError`). Controller regression: replacement after creation but before finalization, reclaimed by `stopLifecycleProcessController`. |
+| `CreateTimeoutCreated` / `CreateTimeoutNotCreated` | A `createSession` that exceeds `muxCommandTimeoutMs()` is killed by `runMuxCommand`, so the call settles under the lock and throws `MuxCommandTimeoutError`: either the server created the session first (outcome unknown: entry and token kept for reclaim) or it did not (proven absent: entry retired). Controller regressions for both. |
+| `InspectTimeout` | A timed-out listing, ownership-token read or window listing throws instead of returning an empty or absent result, and a listing that omits the session followed by an exact-presence query without a definite answer fails the inspection (`LifecycleSessionPresenceUnknownError`) instead of reading absence; the decision fails closed. Real tmux backend regressions with a hanging `tmux`, including that listing-omits-then-presence-times-out path; controller regression over a healthy owned session. |
+| `CreateAbandon` / `LateCreate`, `ReplaceAbandon` / `LateKill`, `RecordFailReadUnlocked`, `MisreadDecide` / `MisreadCreateBegin` | Broken designs only (each enabled by one control): a deadline that stops waiting without cancelling the call, a failure cleanup whose kill lands after the lock was released, and a timeout read as absence. |
+| `Launch` / `Succeed` / `Fail` | `assertCurrent` before and after containers start; Compose failure, SIGINT/SIGTERM or a failed check. |
+| `Cleanup` / `CleanupUndecidable` | `SharedHelperSessionOwnership.runIfOwned`, which the combined operation cleanup and the controller's `abort()` / signal cleanup both go through: under the lock, a creator with a recorded epoch kills only while the epoch is its own; a creator whose record failed kills by token; the kill always checks the token. An unavailable lock keeps the session (and the helper holders: `LIFECYCLE_SESSION_RETAINED`). Controller regressions (abort overlapping a replacement; a signal callback already waiting on the lock while another up adopts; a startup whose second process fails with an unconfirmed stop, through `startLifecycleProcesses`), module tests and e2e overlap variants. |
+| `DownMark` / `DownStop` / `DownStopFailed` | `markSharedHelperInstanceStopping` once the down is committed; the stop controller reclaims the session through the persisted entry; `releaseProjectSharedHelpers` advances the generation again. When the session stop failed or is unknown (including an inspection that could not tell whether the session exists), `stopSessionBeforeReleasingHelpers` keeps every holder, configured or recorded, and down, restart and native retirement fail (`DownStopFailed`). Unit regressions for both outcomes. |
+
+The positive configuration checks all four invariants and exhausts 7,649 distinct states
+(TLC 1.7.4, Java 17, no fairness, `CHECK_DEADLOCK FALSE`). Each control disables one
+fix through a constant and must fail with a named same-state witness:
+
+| Control | Fix disabled | Fails | Witness |
+| --- | --- | --- | --- |
+| `negative` | `CheckEpoch` (creator kills by token alone) | `SessionSafe` at `Succeed` | `a` created, `b` adopted, `a` failed and killed it, `b` succeeded: `session = "absent"`, `epoch = <<"b", "adopted">>` |
+| `no-revalidation` | `Revalidate` | `Reclaimable` at `Publish` | `a` created and finalized meanwhile; `b`'s stale create decision overwrites the entry: `token = "a"`, `entry = "b"` |
+| `epoch-failure-unstopped` | `StopOnEpochFailure` | `Reclaimable` at `RecordFailUnstopped` | the entry is removed while the created session lives: `token = "a"`, `entry = "none"` |
+| `stale-finalize` | `FinalizeRecheck` | `Reclaimable` at `Finalize` | `b` replaced `a`'s pending session (token `b`); `a`'s stale finalize publishes its own token: `token = "b"`, `entry = "a"` |
+| `abandoned-create` | `AbandonCreate` (call not settled before the lock is released) | `Reclaimable` at `LateCreate` | a down retires the pending entry while `a`'s creation is still running; it then creates the session: `token = "a"`, `entry = "none"` |
+| `abandoned-replace` | `AbandonReplace` | `SessionSafe` at `LateKill` | `b`'s replacement released the lock with its stale read pending; `a` created and succeeded; `b`'s name-based kill stops `a`'s session |
+| `timeout-as-absence` | `MisreadTimeout` | `Reclaimable` at `Publish` | a timed-out listing reads `a`'s live session as absent; `b` publishes over it: `token = "a"`, `entry = "b"` |
+| `unlocked-failure-cleanup` | `UnlockedFailureCleanup` (cleanup kill after the lock is released) | `SessionSafe` at `LateKill` | `a`'s epoch record failed and its cleanup read the token; `b` replaced the pending session, created and succeeded; `a`'s name-based kill stops `b`'s session |
+| `unfenced-launch` | `UnfencedLaunch` (launch by name without lock and token check) | `NoForeignLaunch` at `StartProcesses` | `b` replaced `a`'s pending session; `a`'s next launch lands in `b`'s session: `foreign = TRUE`, `token = "b"` |
+| `release-on-failed-stop` | `ReleaseOnFailedStop` | `HelpersKeptForSession` at `DownStopFailed` | the down's session stop failed with `a`'s session alive; the holders are released anyway: `released = TRUE` |
+
+Bounds and assumptions: two ups, each running once; one down. `Decide`, the three
+creation steps (with environment setup), `Record`, its failure cleanup,
+`StartProcesses` and `Finalize` are lock-held steps; the container launch steps are
+not. Environment setup has no step of its own because it runs inside the creation
+transaction. `Decide` is one step because the source holds the lock
+across inspect and record. Every mux call made by the lifecycle controller and the
+tmux/zellij backends is bounded by `runMuxCommand`: the caller stops waiting
+within the bound (a timed-out client is killed), and a timed-out call is unknown,
+never absence. That does not prove the server will not still apply the command;
+see the timeout residual below. The model covers tmux only: projects with shared
+helpers refuse zellij for their lifecycle session, both before any hook runs
+(`assertSharedHelperSessionMuxSupported`) and again at the backend the controller
+actually selects (`MuxBackend.createsWithOwnerToken`), so a selection that changes
+while hooks run is refused too, because zellij records the ownership
+token with a separate `rename-tab` after creation, so an interrupted start could
+leave a live session without a token that neither `hack up` nor `hack down` can
+reclaim. tmux sets the token as part of `new-session` (`-e`), which is what
+`CreateSession` and `CreateTimeoutCreated` assume. Helper ensure/holder counts, helper rollback
+ownership (the operation record), the acquired-helper record and claim-level stop
+confirmation are not modeled; the shared-host claim protocol has its own fixtures in
+`tests/shared-host-lifecycle.test.ts`. `DownStop` joins the down's session stop and
+its release into one step. In the implementation an up that captured after the
+down's stopping mark can still succeed between the down's session stop and its
+release; that is the documented first-slice limitation (launch prevention across a
+concurrent down is detected after launch, not prevented). Real mux sessions,
+process groups, lock-file durability and Compose behavior are outside this model.
+
+Timeout settlement is an assumption of the positive model, not a guarantee of the
+code. `CreateTimeout*` treat a call as settled once `runMuxCommand` killed its
+client. Killing the client does not prove that the tmux server will not still apply
+the command: commands queue per client, so a command a stalled server already
+received may run after it answered a later client. The `abandoned-create` and
+`abandoned-replace` controls are that residual, and they fail. It needs a tmux
+server that stalled past the deadline and then ran the dead client's command after
+answering a later client; every call made while the server stays stalled also
+times out and fails closed. What the code guarantees is weaker than the positive
+model in that case. Consequences per late command, all for the same instance (one
+project and branch):
+
+- create (`new-session`): a session that carries the failed start's token, possibly
+  without an entry. No lifecycle process runs in it, because launches only follow a
+  confirmed create. The next `hack up` refuses it ("already exists without matching
+  Hack lifecycle state"); stop it by hand. Helper holders are not affected.
+- name-based kill (replacement, cleanup, down): it may stop a newer, successful
+  session of the instance, so `SessionSafe` does not hold for that start. Its entry
+  remains, so `hack down` and the next `hack up` reclaim or recreate it: recovery,
+  not prevention.
+- environment, window or pane commands: they may reach a newer session of the
+  instance after its ownership check, so `NoForeignLaunch` does not hold for that
+  start; its `hack down` stops the whole session.
+
+Closing the residual needs a mutation fence rather than a timeout: target tmux
+mutations by session ID (`#{session_id}`, never reused by a server) captured with
+the token read. That fence, and full zellij support for shared-helper lifecycle
+sessions, are tracked in HACK-1849 and are not in this slice.

@@ -45,6 +45,7 @@ import {
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -603,9 +604,11 @@ const SECOND_SECRET = ["synthetic", "second", "secret", "e07c"].join("-");
 async function runGit(repo: Repo, args: readonly string[]): Promise<void> {
   const proc = Bun.spawn(["git", ...args], {
     cwd: repo.projectRoot,
-    env: privateCliEnv({
-      root: repo.root,
-      env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+    env: fixtureGitEnv({
+      env: privateCliEnv({
+        root: repo.root,
+        env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      }),
     }),
     stdout: "ignore",
     stderr: "pipe",

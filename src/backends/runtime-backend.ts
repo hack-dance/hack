@@ -50,6 +50,13 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
    * non-zero exit (including the 124 deadline) to the phase that produced it.
    */
   readonly onStartupPhase?: (phase: ComposeStartupPhase) => void;
+  /**
+   * Awaited right before containers start: after detached image preparation
+   * (`up --no-start`) and before `up -d`, or before an attached `up`. A throw
+   * rejects `up` without starting anything, so a caller can refuse to launch
+   * services whose prerequisites were withdrawn while images were prepared.
+   */
+  readonly beforeStart?: () => Promise<void>;
   readonly services?: readonly string[];
   readonly noDeps?: boolean;
   readonly forceRecreate?: boolean;
@@ -136,6 +143,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
           return prepared;
         }
         opts.onStartupPhase?.("start");
+        await opts.beforeStart?.();
         return await runPhase(
           [...buildComposeArgs(opts), "up", "-d", "--no-build", ...scope],
           startupTimeoutMs
@@ -165,6 +173,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
       });
     }
 
+    await opts.beforeStart?.();
     const cmd = [
       ...buildComposeArgs(opts),
       "up",

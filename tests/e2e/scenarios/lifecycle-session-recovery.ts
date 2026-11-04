@@ -672,7 +672,7 @@ function isProcessGroupAlive(processGroupId: number): boolean {
   }
 }
 
-async function writeFakeDocker(opts: {
+export async function writeFakeDocker(opts: {
   readonly fakeBin: string;
 }): Promise<void> {
   await mkdir(opts.fakeBin, { recursive: true });
@@ -685,16 +685,29 @@ async function writeFakeDocker(opts: {
       'if [ "$1" = "compose" ]; then',
       '  case " $* " in',
       '    *" ps "*)',
+      // A failed up started nothing, unless it failed after starting some
+      // services (E2E_DOCKER_FAIL_UP_PARTIAL).
+      '      if [ "${E2E_DOCKER_FAIL_UP:-}" = "1" ]; then exit 0; fi',
       '      printf \'%s\\n\' \'{"Service":"api","State":"running","ExitCode":0}\'',
       "      exit 0",
       "      ;;",
       '    *" up "*)',
+      // Optional gate: the image phase (`up --no-start`) records that it was
+      // reached, then waits until the gate file exists.
+      '      if [ -n "${E2E_DOCKER_GATE_UP:-}" ]; then',
+      '        case " $* " in *" --no-start "*)',
+      '          : > "${E2E_DOCKER_GATE_UP}.reached"',
+      '          while [ ! -e "$E2E_DOCKER_GATE_UP" ]; do sleep 0.05; done',
+      "          ;;",
+      "        esac",
+      "      fi",
       '      if [ "${E2E_DOCKER_BLOCK_UP:-}" = "1" ]; then',
       '        parent_pid="$PPID"',
       '        while kill -0 "$parent_pid" 2>/dev/null; do sleep 0.1; done',
       "        exit 143",
       "      fi",
       '      if [ "${E2E_DOCKER_FAIL_UP:-}" = "1" ]; then exit 42; fi',
+      '      if [ "${E2E_DOCKER_FAIL_UP_PARTIAL:-}" = "1" ]; then exit 42; fi',
       "      exit 0",
       "      ;;",
       "    *) exit 0 ;;",

@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, copyFile, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 /**
  * The repository pre-commit hook formats staged files with Biome (HACK-1665).
@@ -22,26 +23,13 @@ afterEach(async () => {
   );
 });
 
-/** Git environment without inherited repository, hook or user configuration. */
-function gitEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && !key.startsWith("GIT_")) {
-      env[key] = value;
-    }
-  }
-  env.GIT_CONFIG_GLOBAL = "/dev/null";
-  env.GIT_CONFIG_NOSYSTEM = "1";
-  return env;
-}
-
 function git(
   cwd: string,
   args: readonly string[]
 ): { exitCode: number; output: string } {
   const result = Bun.spawnSync(["git", ...args], {
     cwd,
-    env: gitEnv(),
+    env: fixtureGitEnv(),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

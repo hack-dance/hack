@@ -382,6 +382,7 @@ test(
       state: "ready",
       ownership: "owned",
       spawned: true,
+      holderAdded: true,
       pid: owned.pid,
       endpoint: `http://127.0.0.1:${spec.port}`,
     });
@@ -407,6 +408,35 @@ test(
 );
 
 test(
+  "holderAdded reports whether this call recorded the holder, so a rollback releases only its own",
+  async () => {
+    const root = await scratch();
+    const spec = specFor({ root, port: freePort() });
+    expect(
+      await ensureSharedHostHelper({ spec, holder: "branch-a" })
+    ).toMatchObject({ state: "ready", spawned: true, holderAdded: true });
+    const owned = await trackClaimedHelper(spec);
+    expect(
+      await ensureSharedHostHelper({ spec, holder: "branch-a" })
+    ).toMatchObject({ state: "ready", spawned: false, holderAdded: false });
+    expect(
+      await ensureSharedHostHelper({ spec, holder: "branch-b" })
+    ).toMatchObject({ state: "ready", spawned: false, holderAdded: true });
+    expect(await readClaim(spec)).toMatchObject({
+      holders: ["branch-a", "branch-b"],
+    });
+    expect(await releaseSharedHostHelper({ spec, holder: "branch-b" })).toEqual(
+      { state: "retained" }
+    );
+    expect(await releaseSharedHostHelper({ spec, holder: "branch-a" })).toEqual(
+      { state: "stopped" }
+    );
+    expect(await isAlive(owned)).toBe(false);
+  },
+  TIMEOUT
+);
+
+test(
   "a healthy shared helper started elsewhere is adopted and never signalled on release",
   async () => {
     const root = await scratch();
@@ -427,6 +457,7 @@ test(
       ownership: "adopted",
       endpoint: `http://127.0.0.1:${spec.port}`,
       spawned: false,
+      holderAdded: true,
     });
     expect(seen.events).not.toContain("spawned");
     expect(await (await fetch(`http://127.0.0.1:${spec.port}/`)).text()).toBe(

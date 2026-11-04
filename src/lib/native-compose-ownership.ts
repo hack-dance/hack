@@ -16,6 +16,8 @@ const OUTPUT_LIMIT = 8 * 1024 * 1024;
 const STDERR_LIMIT = 16 * 1024;
 const ARGUMENT_LIMIT = 16 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
+/** The most {@link createNativeComposeProbe} accepts for one acquisition. */
+const MAX_PROBE_TIMEOUT_MS = 60_000;
 const PROJECT_LABEL = "com.docker.compose.project";
 const PREFIX = "io.hack.native-config";
 
@@ -1377,6 +1379,60 @@ function batches(resources: readonly Inventory[]): Inventory[][] {
 }
 
 /**
+ * Aggregate bound of one ownership query inside a native `down`, from the stop's
+ * budget (`HACK_COMPOSE_STARTUP_TIMEOUT_MS`). A fixed 15 s bound refused a healthy
+ * but slow engine as `probe-timeout` while most of that budget remained
+ * (HACK-1459). A shorter budget never shortens the query below the 15 s default,
+ * and a hung engine is still refused within the probe's 60 s ceiling.
+ */
+export function nativeComposeStopOwnershipTimeoutMs(
+  stopBudgetMs: number
+): number {
+  return Math.min(
+    MAX_PROBE_TIMEOUT_MS,
+    Math.max(DEFAULT_TIMEOUT_MS, stopBudgetMs)
+  );
+}
+
+/** The most stop time {@link nativeComposeStopChildReserveMs} keeps for the child. */
+const MAX_STOP_CHILD_RESERVE_MS = 5000;
+
+/** The shortest budget accepted, which has no stop time to set aside. */
+const MIN_STOP_BUDGET_MS = 1000;
+
+/**
+ * Stop time kept for `compose down` itself: a fifth of the stop's budget above its
+ * 1 s minimum, at most 5 s. An engine that answers the last ownership check just
+ * before the deadline would otherwise start a child that is killed partway, with an
+ * incomplete stop. A short budget keeps nearly all of its time for that check.
+ */
+export function nativeComposeStopChildReserveMs(stopBudgetMs: number): number {
+  return Math.min(
+    MAX_STOP_CHILD_RESERVE_MS,
+    Math.floor(Math.max(0, stopBudgetMs - MIN_STOP_BUDGET_MS) / 5)
+  );
+}
+
+/**
+ * Bound of the ownership query just before `compose down` starts: the smaller of
+ * the probe timeout and the time admitted before the stop deadline, less the
+ * child's reserve. With no time left it is the probe's 1 ms minimum, which refuses
+ * as `probe-timeout` before any child runs.
+ */
+export function nativeComposePreSpawnOwnershipTimeoutMs(opts: {
+  readonly stopBudgetMs: number;
+  readonly admittedMs: number;
+}): number {
+  return Math.max(
+    1,
+    Math.min(
+      nativeComposeStopOwnershipTimeoutMs(opts.stopBudgetMs),
+      Math.floor(opts.admittedMs)
+    )
+  );
+}
+
+/**
  * One bounded aggregate Docker acquisition; callers supply only fixed read commands.
  * Lifecycle polling must issue a fresh owner for each capture, rather than reuse
  * an acquisition whose aggregate deadline or output allowance has expired.
@@ -1393,7 +1449,11 @@ export function createNativeComposeProbe(
 ): (args: readonly string[]) => Promise<string> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (
-    !(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60_000)
+    !(
+      Number.isSafeInteger(timeoutMs) &&
+      timeoutMs >= 1 &&
+      timeoutMs <= MAX_PROBE_TIMEOUT_MS
+    )
   ) {
     probeRefused("E_NATIVE_COMPOSE_OWNERSHIP", "operation");
   }

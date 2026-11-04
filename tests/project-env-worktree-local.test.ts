@@ -22,6 +22,7 @@ import {
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolvePrimaryLocalProjectDir } from "../src/lib/worktree-local-config.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const tempDirs = new Set<string>();
@@ -77,7 +78,7 @@ async function git(cwd: string, args: string[]): Promise<void> {
     "init.templateDir=",
   ];
   const result = Bun.spawnSync(["git", "-C", cwd, ...isolation, ...args], {
-    env: { PATH: process.env.PATH ?? "", ...gitIsolationEnv },
+    env: fixtureGitEnv(),
     stdout: "pipe",
     stderr: "pipe",
   });

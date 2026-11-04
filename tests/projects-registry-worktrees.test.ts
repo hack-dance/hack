@@ -14,6 +14,7 @@ import {
   upsertProjectRegistration,
 } from "../src/lib/projects-registry.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -37,6 +38,7 @@ function runGit(opts: {
   readonly args: readonly string[];
 }): void {
   const result = Bun.spawnSync(["git", "-C", opts.cwd, ...opts.args], {
+    env: fixtureGitEnv(),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

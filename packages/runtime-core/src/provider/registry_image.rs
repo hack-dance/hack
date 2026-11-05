@@ -14,9 +14,11 @@
 //!   of it (Docker Hub: `auth.docker.io`).
 //! - **Addresses.** Local and private destinations are refused by the address actually
 //!   connected to, not only by host name: a custom resolver refuses names that resolve
-//!   to loopback, private, link-local, CGNAT, multicast or unspecified addresses
-//!   (including IPv4-mapped forms), and IP literals are checked before each request.
-//!   Only an explicitly allowed local registry's own origin may reach such addresses.
+//!   to any address that is not globally reachable unicast (loopback, private,
+//!   link-local, CGNAT, benchmarking, documentation, multicast, reserved and every other
+//!   special-purpose block, including embedded IPv4 forms), and IP literals are checked
+//!   before each request. Only an explicitly allowed local registry's own origin may
+//!   reach such addresses.
 //! - **Content.** OCI and Docker v2 indexes and manifests; gzip, zstd and uncompressed
 //!   layers. Every manifest, config and layer is checked against its descriptor digest
 //!   and size while streaming, and the assembled archive is validated again before it is
@@ -104,51 +106,58 @@ fn ipv4(host: &str) -> Option<[u8; 4]> {
     parts.next().is_none().then_some(octets)
 }
 
+/// Whether `ip` is a globally reachable IPv4 unicast address. This is an allowlist in
+/// spirit: every IANA special-purpose block is refused, including blocks with globally
+/// reachable members (such as `192.0.0.9`), so classification fails closed.
 fn public_ipv4(ip: Ipv4Addr) -> bool {
-    let [a, b, ..] = ip.octets();
-    !(a == 0
-        || a == 10
-        || a == 127
-        || (a == 100 && (64..128).contains(&b))
-        || (a == 169 && b == 254)
-        || (a == 172 && (16..32).contains(&b))
-        || (a == 192 && b == 168)
-        || a >= 224)
+    let [a, b, c, _] = ip.octets();
+    !(a == 0 // 0.0.0.0/8 "this network"
+        || a == 10 // 10.0.0.0/8 private
+        || (a == 100 && (64..128).contains(&b)) // 100.64.0.0/10 shared (CGNAT)
+        || a == 127 // 127.0.0.0/8 loopback
+        || (a == 169 && b == 254) // 169.254.0.0/16 link-local
+        || (a == 172 && (16..32).contains(&b)) // 172.16.0.0/12 private
+        || (a == 192 && b == 0 && c == 0) // 192.0.0.0/24 IETF protocol assignments
+        || (a == 192 && b == 0 && c == 2) // 192.0.2.0/24 documentation
+        || (a == 192 && b == 88 && c == 99) // 192.88.99.0/24 deprecated 6to4 relay
+        || (a == 192 && b == 168) // 192.168.0.0/16 private
+        || (a == 198 && (18..20).contains(&b)) // 198.18.0.0/15 benchmarking
+        || (a == 198 && b == 51 && c == 100) // 198.51.100.0/24 documentation
+        || (a == 203 && b == 0 && c == 113) // 203.0.113.0/24 documentation
+        || a >= 224) // 224.0.0.0/4 multicast, 240.0.0.0/4 reserved, broadcast
 }
 
-/// Whether `ip` is a public unicast address. Loopback, unspecified, private (RFC 1918 and
-/// IPv6 ULA `fc00::/7`), link-local (`169.254.0.0/16`, `fe80::/10`), deprecated
-/// site-local (`fec0::/10`), CGNAT (`100.64.0.0/10`), multicast, broadcast and reserved
-/// addresses are not, nor are IPv6 forms that embed such an IPv4 address (mapped,
-/// compatible, NAT64 `64:ff9b::/96` and 6to4 `2002::/16`).
+/// Whether `ip` is a globally reachable unicast address. IPv6 must be in global unicast
+/// `2000::/3`, outside IETF protocol assignments `2001::/23` (Teredo, benchmarking,
+/// ORCHID and others, all refused), documentation `2001:db8::/32` and `3fff::/20`.
+/// Forms that embed an IPv4 address (mapped `::ffff:0:0/96`, NAT64 `64:ff9b::/96`,
+/// 6to4 `2002::/16`) are public only when the embedded address is. Everything else is
+/// refused, including `::`, `::1`, IPv4-compatible `::/96`, discard `100::/64`, local-use
+/// NAT64 `64:ff9b:1::/48`, ULA `fc00::/7`, link-local `fe80::/10` and multicast `ff00::/8`.
 pub(super) fn public_ip(ip: IpAddr) -> bool {
     let ip = match ip {
         IpAddr::V4(ip) => return public_ipv4(ip),
         IpAddr::V6(ip) => ip,
     };
-    let segments = ip.segments();
+    let s = ip.segments();
     let embedded = |high: u16, low: u16| {
-        Ipv4Addr::new((high >> 8) as u8, high as u8, (low >> 8) as u8, low as u8)
+        let [a, b] = high.to_be_bytes();
+        let [c, d] = low.to_be_bytes();
+        public_ipv4(Ipv4Addr::new(a, b, c, d))
     };
     if let Some(v4) = ip.to_ipv4_mapped() {
         return public_ipv4(v4);
     }
-    if segments[..6] == [0; 6] {
-        // `::`, `::1` and the deprecated IPv4-compatible `::a.b.c.d`.
-        return !ip.is_unspecified()
-            && !ip.is_loopback()
-            && public_ipv4(embedded(segments[6], segments[7]));
+    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return embedded(s[6], s[7]);
     }
-    if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-        return public_ipv4(embedded(segments[6], segments[7]));
+    if s[0] == 0x2002 {
+        return embedded(s[1], s[2]);
     }
-    if segments[0] == 0x2002 {
-        return public_ipv4(embedded(segments[1], segments[2]));
-    }
-    !(ip.is_multicast()
-        || (segments[0] & 0xfe00) == 0xfc00
-        || (segments[0] & 0xffc0) == 0xfe80
-        || (segments[0] & 0xffc0) == 0xfec0)
+    (s[0] & 0xe000) == 0x2000
+        && !(s[0] == 0x2001 && s[1] < 0x0200)
+        && !(s[0] == 0x2001 && s[1] == 0x0db8)
+        && !(s[0] == 0x3fff && s[1] < 0x1000)
 }
 
 /// Hosts that are not public registries: loopback names, non-public IPv4 literals,

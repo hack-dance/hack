@@ -668,9 +668,12 @@ exactly: `localhost` and `*.localhost`, loopback, private, link-local, CGNAT and
 multicast IPv4 literals (including numeric spellings such as `0x7f.0.0.1`),
 single-label hosts such as `registry:5000`, and mDNS `.local` names. The same
 rule applies to the address a connection actually uses: a public-looking name
-that resolves to a loopback, private (including IPv6 `fc00::/7`), link-local,
-CGNAT, multicast or unspecified address, or an IPv4-mapped form of one, is
-refused with `registry_local_address`. This covers the registry, its redirects
+that resolves to any address that is not globally reachable unicast is refused
+with `registry_local_address`. That includes loopback, private (including IPv6
+`fc00::/7`), link-local, CGNAT, benchmarking (`198.18.0.0/15`), documentation,
+multicast, reserved and other special-purpose blocks, local-use NAT64
+(`64:ff9b:1::/48`), and IPv6 forms that embed such an IPv4 address. IP literals
+follow the same rule. This covers the registry, its redirects
 and its token endpoint. A private registry on an internal network therefore
 also needs an explicit opt-in. Allow one
 with `--allow-local-registry [http://]host[:port]` (repeatable) on `admit-image`,

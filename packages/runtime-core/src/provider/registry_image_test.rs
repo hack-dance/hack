@@ -679,6 +679,8 @@ fn local_hosts_are_classified_before_any_request() {
         "172.31.255.255",
         "192.168.1.1",
         "224.0.0.1",
+        "198.18.0.1",
+        "203.0.113.5",
         "2130706433",
     ] {
         assert!(local_host(host), "{host}");
@@ -739,7 +741,7 @@ fn redirects_and_token_realms_cannot_downgrade_or_reach_local_origins() {
     for value in [
         "https://ghcr.io/v2/org/app/blobs/x",
         "https://pkg-storage.example.com/blob?signature=opaque",
-        "https://203.0.113.5/blob",
+        "https://8.8.8.8/blob",
     ] {
         assert!(redirect_allowed(&other, &url(value)), "{value}");
     }
@@ -750,6 +752,8 @@ fn redirects_and_token_realms_cannot_downgrade_or_reach_local_origins() {
         "https://10.0.0.5/blob",
         "https://169.254.169.254/latest",
         "https://0x7f.0.0.1/blob",
+        "https://198.18.0.1/blob",
+        "https://203.0.113.5/blob",
         "https://[::1]/blob",
         "https://user:secret@pkg-storage.example.com/blob",
         "https://metadata/blob",
@@ -962,6 +966,9 @@ fn public_names_resolving_to_local_addresses_refuse_unless_the_registry_is_allow
         ("private.example.test", "10.0.0.7"),
         ("mapped.example.test", "::ffff:127.0.0.1"),
         ("ula.example.test", "fd00::1"),
+        ("bench.example.test", "198.18.0.1"),
+        ("nat64.example.test", "64:ff9b:1::a00:1"),
+        ("docs.example.test", "2001:db8::1"),
     ]
     .into_iter()
     .map(|(name, ip)| (name, ip.parse().unwrap()))
@@ -989,6 +996,9 @@ fn public_names_resolving_to_local_addresses_refuse_unless_the_registry_is_allow
         "private.example.test",
         "mapped.example.test",
         "ula.example.test",
+        "bench.example.test",
+        "nat64.example.test",
+        "docs.example.test",
     ] {
         let reference = format!("{host}:{}/{REPOSITORY}:v1", registry.port);
         // The name looks public, so admission (which does no resolution) accepts it.
@@ -1038,14 +1048,42 @@ fn ip_literals_are_checked_by_address_before_any_request() {
         "fe80::1",
         "fec0::1",
         "ff02::1",
+        // Special-purpose blocks that are not private but not globally reachable.
+        "0.1.2.3",
+        "192.0.0.9",
+        "192.0.2.1",
+        "192.88.99.1",
+        "198.18.0.1",
+        "198.19.255.255",
+        "198.51.100.1",
+        "203.0.113.5",
+        "240.0.0.1",
+        "::8.8.8.8",
+        "64:ff9b:1::808:808",
+        "64:ff9b::c612:1",
+        "100::1",
+        "2001::1",
+        "2001:2::1",
+        "2001:1ff::1",
+        "2001:db8::1",
+        "2002:c612:1::",
+        "3fff::1",
+        "4000::1",
+        "::ffff:198.18.0.1",
     ] {
         assert!(!public_ip(ip.parse().unwrap()), "{ip}");
     }
     for ip in [
         "8.8.8.8",
-        "203.0.113.5",
+        "1.1.1.1",
+        "198.17.255.255",
+        "198.20.0.1",
         "2606:4700::1111",
+        "2a00:1450::1",
+        "2001:200::1",
+        "3ffe::1",
         "::ffff:8.8.8.8",
+        "64:ff9b::808:808",
         "2002:808:808::",
     ] {
         assert!(public_ip(ip.parse().unwrap()), "{ip}");
@@ -1061,10 +1099,13 @@ fn ip_literals_are_checked_by_address_before_any_request() {
         "https://[::ffff:127.0.0.1]/blob",
         "https://[fd00::1]/blob",
         "https://10.0.0.1/token",
+        "https://198.18.0.1/blob",
+        "https://[64:ff9b:1::a00:1]/blob",
+        "https://[2001:db8::1]/blob",
     ] {
         assert!(!fetch.destination_allowed(&url(value)), "{value}");
     }
-    for value in ["https://ghcr.io/v2/", "https://203.0.113.5/blob"] {
+    for value in ["https://ghcr.io/v2/", "https://8.8.8.8/blob"] {
         assert!(fetch.destination_allowed(&url(value)), "{value}");
     }
     // A local opt-in allows its own origin only, not its host on another port.

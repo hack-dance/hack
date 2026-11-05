@@ -181,6 +181,9 @@ struct Policy {
     connect_window: Duration,
     backoff_start: Duration,
     backoff_max: Duration,
+    /// Waits between connect attempts. Tests substitute a scheduler that
+    /// oversleeps, as a loaded host does.
+    pause: fn(Duration),
 }
 
 const POLICY: Policy = Policy {
@@ -188,6 +191,7 @@ const POLICY: Policy = Policy {
     connect_window: CONNECT_RETRY_WINDOW,
     backoff_start: CONNECT_BACKOFF_START,
     backoff_max: CONNECT_BACKOFF_MAX,
+    pause: std::thread::sleep,
 };
 
 type Attempt = Result<(), (CandidateError, StopFailureStage)>;
@@ -322,6 +326,8 @@ where
 /// Sends one stop, retrying only connect-stage failures with capped backoff.
 /// Once any stop exhausts its connect window, the engine is treated as
 /// unreachable for this batch and later connect failures return at once.
+/// When the deadline passes during a backoff, the stop keeps its last connect
+/// stage: no attempt sent request bytes, so its effect is known, not uncertain.
 fn attempt<S>(
     index: usize,
     deadline: Instant,
@@ -334,16 +340,19 @@ where
 {
     let mut window = None;
     let mut backoff = policy.backoff_start;
+    let mut last_connect = None;
     loop {
-        let remaining = deadline
+        let Some(remaining) = deadline
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(|| {
+        else {
+            return Err(last_connect.unwrap_or_else(|| {
                 (
                     failure("Container stop batch deadline expired; effects may be uncertain."),
                     StopFailureStage::Deadline,
                 )
-            })?;
+            }));
+        };
         match send(index, remaining) {
             Err((error, stage))
                 if matches!(
@@ -357,7 +366,8 @@ where
                     unreachable.store(true, Ordering::SeqCst);
                     return Err((error, stage));
                 }
-                std::thread::sleep(backoff);
+                last_connect = Some((error, stage));
+                (policy.pause)(backoff);
                 backoff = backoff.saturating_mul(2).min(policy.backoff_max);
             }
             outcome => return outcome,
@@ -454,6 +464,7 @@ mod tests {
             connect_window: window,
             backoff_start: Duration::from_millis(1),
             backoff_max: Duration::from_millis(4),
+            pause: std::thread::sleep,
         }
     }
 
@@ -669,6 +680,33 @@ mod tests {
                 assert_eq!(count, 1, "stop {index} was replayed");
             }
         }
+    }
+
+    #[test]
+    fn deadline_passing_during_connect_backoff_keeps_the_connect_stage() {
+        fn oversleep(backoff: Duration) {
+            std::thread::sleep(backoff + Duration::from_millis(80));
+        }
+        let stops = ids(1);
+        let attempts = AtomicUsize::new(0);
+        let failure = dispatch(
+            &stops,
+            Instant::now() + Duration::from_millis(40),
+            Policy {
+                pause: oversleep,
+                ..quick(Duration::from_secs(5))
+            },
+            |_, _| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                connect_failure(StopFailureStage::ConnectTimeout)
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(failure.error.code, "engine_protocol");
+        assert_eq!(failure.failures.len(), 1);
+        assert_eq!(failure.failures[0].stage, StopFailureStage::ConnectTimeout);
     }
 
     #[test]

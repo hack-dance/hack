@@ -57,6 +57,9 @@ pub(super) fn validate(
                     &field,
                     "An optional dependency is disabled by the selected profiles; the edge is skipped, as with Compose.",
                 ));
+                // The execution graph drops this edge, so its target is never
+                // started or awaited: its condition requirements do not apply.
+                continue;
             } else if service.active && !condition.required {
                 diagnostics.push(Diagnostic::warning(
                     "optional_dependency_enforced",

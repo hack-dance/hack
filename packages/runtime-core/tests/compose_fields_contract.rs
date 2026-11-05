@@ -139,6 +139,44 @@ fn optional_dependency_on_an_active_service_is_enforced_fail_closed() {
 }
 
 #[test]
+fn inactive_optional_dependencies_skip_condition_requirements_that_active_ones_keep() {
+    // A healthy dependency without a healthcheck, and a completion dependency
+    // that always restarts: both refuse when the target runs, and neither
+    // applies when an optional edge to a profile-disabled target is dropped.
+    let healthy = "services:\n  app:\n    image: alpine:3.21\n    depends_on:\n      db:\n        condition: service_healthy\n        required: false\n  db:\n    image: alpine:3.21\n    profiles: [database]\n";
+    let completed = "services:\n  app:\n    image: alpine:3.21\n    depends_on:\n      migrate:\n        condition: service_completed_successfully\n        required: false\n  migrate:\n    image: alpine:3.21\n    restart: always\n    profiles: [database]\n";
+    for (compose, code) in [
+        (healthy, "missing_healthcheck"),
+        (completed, "nonterminating_completion_dependency"),
+    ] {
+        let fixture = Fixture::new(compose);
+        let inactive = fixture.plan();
+        assert!(inactive.plan.enrollment_compatible, "{code}");
+        let found = codes(&inactive.plan);
+        assert!(
+            found.contains(&("optional_dependency_inactive", "warning")),
+            "{code}"
+        );
+        assert!(!found.contains(&(code, "error")), "{code}");
+        let graph = Graph::from_plan(
+            &inactive.plan,
+            &BTreeMap::from([("app".into(), Condition::Started)]),
+        )
+        .unwrap();
+        assert!(graph.services["app"].dependencies.is_empty(), "{code}");
+        let active = fixture.plan_with(&["database".into()]);
+        assert!(!active.plan.enrollment_compatible, "{code}");
+        assert!(codes(&active.plan).contains(&(code, "error")), "{code}");
+        // A required edge to the same disabled target still refuses.
+        let required = Fixture::new(&compose.replace("        required: false\n", ""));
+        assert!(
+            codes(&required.plan().plan).contains(&("inactive_dependency", "error")),
+            "{code}"
+        );
+    }
+}
+
+#[test]
 fn required_and_restart_dependency_rules_are_unchanged() {
     let required = Fixture::new(&OPTIONAL.replace("        required: false\n", ""));
     let report = required.plan();

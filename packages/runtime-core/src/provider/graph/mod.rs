@@ -749,10 +749,11 @@ impl Session<'_, '_> {
                         "Owned network identity changed.",
                     ));
                 }
-                if !inspected["NetworkSettings"]["Networks"][network]["Aliases"]
-                    .as_array()
-                    .is_some_and(|a| a.iter().any(|v| v == service))
-                {
+                if !config::endpoint_aliases_present(
+                    service,
+                    &networks[network],
+                    &inspected["NetworkSettings"]["Networks"][network],
+                ) {
                     return Err(error(
                         "graph_config_mismatch",
                         "Owned network alias is missing.",

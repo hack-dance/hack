@@ -236,6 +236,10 @@ pub struct RoutingPlan {
     pub port: u16,
 }
 
+/// Most extra DNS names one service may own on one network, including the
+/// Compose container name when the project name is bound.
+pub const MAX_NETWORK_ALIASES: usize = 8;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ServicePlan {
@@ -256,6 +260,11 @@ pub struct ServicePlan {
     pub ports: Vec<PortPlan>,
     pub exposed_ports: Vec<String>,
     pub networks: Vec<String>,
+    /// Extra DNS names per attached network, normalized and sorted. The service
+    /// name is always an alias and is never listed here. Absent when empty so
+    /// plans without aliases keep their identity.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub network_aliases: BTreeMap<String, Vec<String>>,
     pub network_mode: String,
     pub limits: LimitsPlan,
     pub read_only: bool,
@@ -314,6 +323,12 @@ pub struct PlanData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname_change_sha256: Option<String>,
     pub active_profiles: Vec<String>,
+    /// Compose project name bound to `COMPOSE_PROJECT_NAME` interpolation and to
+    /// `<name>-<service>-1` container DNS aliases. Recorded only when a service
+    /// references the variable and the document declares a top-level `name`,
+    /// so other plans keep their identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_project_name: Option<String>,
     pub services: BTreeMap<String, ServicePlan>,
     pub networks: BTreeMap<String, NetworkPlan>,
     pub volumes: BTreeMap<String, VolumePlan>,

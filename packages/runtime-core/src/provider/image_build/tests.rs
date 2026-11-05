@@ -116,18 +116,26 @@ fn identity(incarnation: &str) -> PoolIdentity {
 
 /// A fake pool: identities returned per lease in order (the last repeats), images by ID.
 struct FakePool {
+    removable: RefCell<BTreeMap<String, bool>>,
+    removed: RefCell<Vec<String>>,
     identities: RefCell<Vec<PoolIdentity>>,
     images: RefCell<BTreeMap<String, Value>>,
     leases: RefCell<u32>,
     resolve_error: bool,
+    available: RefCell<u64>,
+    prunes: RefCell<Vec<u64>>,
 }
 impl FakePool {
     fn new(incarnation: &str) -> Self {
         Self {
+            removable: RefCell::new(BTreeMap::new()),
+            removed: RefCell::new(Vec::new()),
             identities: RefCell::new(vec![identity(incarnation)]),
             images: RefCell::new(BTreeMap::new()),
             leases: RefCell::new(0),
             resolve_error: false,
+            available: RefCell::new(64 * GIB),
+            prunes: RefCell::new(Vec::new()),
         }
     }
     /// Register the image the fake client "builds", with the labels the build expects.
@@ -139,7 +147,7 @@ impl FakePool {
         self.images.borrow_mut().insert(
             IMAGE.into(),
             serde_json::json!({"Id": IMAGE, "Architecture": "arm64", "Os": "linux",
-                "Config": {"Labels": labels, "Volumes": null}}),
+                "Size": 5 * GIB, "Config": {"Labels": labels, "Volumes": null}}),
         );
     }
 }
@@ -170,6 +178,13 @@ impl BuildPool for FakePool {
     }
     fn builder(&self) -> Result<PathBuf, CandidateError> {
         Ok(PathBuf::from("/bin/sh"))
+    }
+    fn storage_available(&self, _: &()) -> Result<u64, CandidateError> {
+        Ok(*self.available.borrow())
+    }
+    fn prune_cache(&self, _: &(), max_used: u64) -> Result<u64, CandidateError> {
+        self.prunes.borrow_mut().push(max_used);
+        Ok(7)
     }
 }
 
@@ -417,6 +432,7 @@ fn a_dead_attempt_is_recorded_indeterminate_and_built_again() {
         engine_id: "engine-1".into(),
         phase: Phase::Building,
         image_id: None,
+        image_bytes: None,
         base_pins: BTreeMap::new(),
     };
     state::write(&path, &leftover).unwrap();
@@ -744,4 +760,119 @@ fn build_network_script_parses_and_ignores_isolated_pools() {
     assert_eq!(run(&["bridge", "boot"]), Some(64));
     assert_eq!(run(&[]), Some(64));
     assert!(script.contains(BUILD_NETWORK_MARKER));
+}
+
+#[test]
+fn cold_builds_need_free_storage_and_successful_builds_prune_the_cache() {
+    assert_eq!(storage_required(None), 6 * GIB);
+    assert_eq!(storage_required(Some(GIB)), 6 * GIB);
+    assert_eq!(storage_required(Some(5 * GIB)), 10 * GIB);
+    assert_eq!(storage_required(Some(u64::MAX)), u64::MAX);
+
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    fixture.client(&inputs, "ok");
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    *pool.available.borrow_mut() = 6 * GIB - 1;
+    let error = run(&fixture.candidate, &pool, &inputs, &never).unwrap_err();
+    assert_eq!(error.code, "native_build_storage");
+    assert_eq!(fixture.calls(&inputs), 0);
+
+    *pool.available.borrow_mut() = 6 * GIB;
+    let outcome = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    assert_eq!(outcome.cache_reclaimed_bytes, Some(7));
+    assert_eq!(*pool.prunes.borrow(), vec![CACHE_BUDGET]);
+    assert_eq!(fixture.receipt(&inputs).image_bytes, Some(5 * GIB));
+
+    // The next cold build of this key needs twice the last verified image.
+    let rebuild = fixture.inputs(Policy::Rebuild);
+    let error = run(&fixture.candidate, &pool, &rebuild, &never).unwrap_err();
+    assert_eq!(error.code, "native_build_storage");
+    // A warm reuse needs no free-space headroom.
+    let reused = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    assert!(reused.reused);
+    assert_eq!(pool.prunes.borrow().len(), 1);
+}
+
+impl reclaim::ReclaimPool for FakePool {
+    fn build_images(&self, _: &()) -> Result<Vec<Value>, CandidateError> {
+        Ok(self
+            .images
+            .borrow()
+            .values()
+            .map(
+                |image| serde_json::json!({"Id": image["Id"], "Labels": image["Config"]["Labels"]}),
+            )
+            .collect())
+    }
+    fn remove(&self, _: &(), image: &str) -> Result<bool, CandidateError> {
+        let allowed = self.removable.borrow().get(image).copied().unwrap_or(true);
+        if allowed {
+            self.removed.borrow_mut().push(image.to_owned());
+            self.images.borrow_mut().remove(image);
+        }
+        Ok(allowed)
+    }
+}
+
+#[test]
+fn reclamation_keeps_current_referenced_in_use_and_foreign_images() {
+    const OLD: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const KEPT: &str = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    const BUSY: &str = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    fixture.client(&inputs, "ok");
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    let current = pool.images.borrow()[IMAGE].clone();
+    for id in [OLD, KEPT, BUSY] {
+        let mut superseded = current.clone();
+        superseded["Id"] = id.into();
+        pool.images.borrow_mut().insert(id.into(), superseded);
+    }
+    pool.removable.borrow_mut().insert(BUSY.into(), false);
+    let graphs = fixture.candidate.state_root.join("run/graphs/0123");
+    state::private_directory(&graphs).unwrap();
+    fs::write(
+        graphs.join("receipt.json"),
+        format!("{{\"image\":\"{KEPT}\"}}"),
+    )
+    .unwrap();
+
+    // Nothing is removed while a build is admitted.
+    let build = Flock::try_lock(
+        Flock::open(&builds_root(&fixture.candidate).join("active.lock")).unwrap(),
+        libc::LOCK_SH,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        reclaim::run(&fixture.candidate, &pool).unwrap_err().code,
+        "provider_busy"
+    );
+    drop(build);
+
+    let report = reclaim::run(&fixture.candidate, &pool).unwrap();
+    assert_eq!(report.removed, vec![OLD.to_owned()]);
+    assert_eq!(report.retained[IMAGE], reclaim::Retained::Current);
+    assert_eq!(report.retained[KEPT], reclaim::Retained::Referenced);
+    assert_eq!(report.retained[BUSY], reclaim::Retained::EngineRefused);
+    assert_eq!(report.cache_reclaimed_bytes, Some(7));
+    // Another pool's images are never this pool's to remove.
+    let other = FakePool::new("pool-2");
+    other
+        .images
+        .borrow_mut()
+        .extend(pool.images.borrow().clone());
+    let report = reclaim::run(&fixture.candidate, &other).unwrap();
+    assert!(report.removed.is_empty());
+    assert!(
+        report
+            .retained
+            .values()
+            .all(|r| *r == reclaim::Retained::NotOwned)
+    );
 }

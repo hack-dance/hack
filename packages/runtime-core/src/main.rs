@@ -103,6 +103,7 @@ Usage:
   hack-local runtime prepared-base remove --base-id <id> [--store <absolute-private-store>] [--json]
   hack-local runtime admit-image --reference <[namespace/]repository[:tag][@sha256:digest]|sha256:image-id> --json
   hack-local runtime build-image --request <private-0600-request.json> --json
+  hack-local runtime reclaim-build-images --json
   hack-local runtime ensure-image --reference <[namespace/]repository[:tag]|[namespace/]repository@sha256:digest> --json
   hack-local runtime resolve-image --reference <[namespace/]repository[:tag]> --json
   hack-local runtime fetch-image --reference <[namespace/]repository@sha256:digest> --archive <new-flat-image.tar> [--json]
@@ -955,6 +956,13 @@ fn run() -> Result<(), CandidateError> {
                 &discover_candidate(&requested)?,
                 Path::new(request),
             )?)?;
+        }
+        ["runtime", "reclaim-build-images", "--json"] => {
+            print_json(
+                &hack_runtime_core::provider::image_build::reclaim::reclaim_build_images(
+                    &discover_candidate(&requested)?,
+                )?,
+            )?;
         }
         ["runtime", "admit-image", "--reference", reference, "--json"] => {
             // Pure: no candidate discovery, network, credentials or runtime effects.

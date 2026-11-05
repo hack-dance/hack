@@ -485,7 +485,11 @@ build fence, cancellation and timeout rules are documented in that module. Egres
 pools give dockerd a fixed default bridge (`10.213.255.0/24`, `icc=false`) that only
 BuildKit `RUN` steps use; `guest-build-network.sh` isolates it from the guest, the host
 gateway and link-local metadata, and the engine client refuses any container create
-that does not name an owned network or `none`. Native `up` does not call the build
+that does not name an owned network or `none`. Cold builds need free guest storage
+(at least 6 GiB, or twice the key's last image), successful builds prune BuildKit
+cache to 8 GiB, and `runtime reclaim-build-images` removes only owned, superseded,
+unreferenced images (`provider/image_build/reclaim.rs`; model
+`tests/models/tla/native-build-retention`). Native `up` does not call the build
 operation yet.
 
 Source binaries embed their build checkout. If a copied Cargo target directory

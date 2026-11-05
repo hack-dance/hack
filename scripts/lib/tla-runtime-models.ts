@@ -1441,6 +1441,42 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-build-retention",
+    module: "BuildRetention",
+    states: 6181,
+    invariant: "NoReclaimReferenced",
+    action: "Reclaim",
+    fields: ["refs = {1}", "removed = 1", "fence = FALSE"],
+    additionalControls: [
+      {
+        name: "foreign-adoption",
+        negative: true,
+        invariant: "NoForeignAdoption",
+        action: "CompleteBuild",
+        fields: [
+          'receipt = [phase |-> "verified", image |-> 2, inc |-> 1]',
+          "owner = <<1, 0, 0>>",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "CompleteBuild",
+            fields: [
+              'receipt = [phase |-> "verified", image |-> 1, inc |-> 1]',
+              "owner = <<0, 1, 0>>",
+            ],
+          },
+        ],
+      },
+      {
+        name: "down-under-build",
+        negative: true,
+        invariant: "DownNotUnderBuild",
+        action: "Down",
+        fields: ['build = "running"', "engineUp = FALSE", "fence = TRUE"],
+      },
+    ],
+  },
+  {
     name: "relay-fence",
     module: "RelayFence",
     negativeModule: "RelayFenceBroken",

@@ -53,6 +53,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod reclaim;
 #[cfg(test)]
 mod tests;
 
@@ -73,6 +74,13 @@ const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_IGNORE_BYTES: u64 = 1024 * 1024;
 const MAX_ARGS: usize = 64;
 const MAX_ARG_BYTES: usize = 64 * 1024;
+const GIB: u64 = 1024 * 1024 * 1024;
+/// A cold build needs this much free guest storage, or twice the key's last verified
+/// image size when that is larger. Admission refuses; it never deletes to make room.
+const STORAGE_FLOOR: u64 = 6 * GIB;
+/// BuildKit cache kept after each successful build. The cache in this engine is created
+/// only by Hack builds and is regenerable; pruning never touches images or volumes.
+pub(super) const CACHE_BUDGET: u64 = 8 * GIB;
 /// Labels a Dockerfile (or a base image) must not set on an image Hack runs: the same
 /// reserved ownership namespaces the frontend refuses on authored services.
 const RESERVED_LABEL_PREFIXES: [&str; 5] = [
@@ -150,6 +158,10 @@ pub struct BuildOutcome {
     pub reused: bool,
     /// Named build context to the pinned reference it resolved to, for this image.
     pub base_pins: BTreeMap<String, String>,
+    /// Build cache bytes the post-build prune reclaimed; `None` when no prune ran or
+    /// it failed (the build result stands either way).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_reclaimed_bytes: Option<u64>,
 }
 
 /// Receipt phases. `building` with no live holder of the key lock is a dead attempt.
@@ -176,6 +188,9 @@ pub(super) struct Receipt {
     phase: Phase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_id: Option<String>,
+    /// Engine-reported size of the verified image, for the next cold build's admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_bytes: Option<u64>,
     base_pins: BTreeMap<String, String>,
 }
 
@@ -201,6 +216,17 @@ pub(super) trait BuildPool {
     fn resolve(&self, base: &BaseImage) -> Result<BuildBase, CandidateError>;
     /// The verified builder executable.
     fn builder(&self) -> Result<PathBuf, CandidateError>;
+    /// Free bytes on the guest storage disk that holds images and build cache.
+    fn storage_available(&self, lease: &Self::Lease) -> Result<u64, CandidateError>;
+    /// Prune BuildKit cache down to `max_used` bytes; returns the bytes reclaimed.
+    fn prune_cache(&self, lease: &Self::Lease, max_used: u64) -> Result<u64, CandidateError>;
+}
+
+/// Free storage a cold build of a key requires.
+pub(super) fn storage_required(previous_image_bytes: Option<u64>) -> u64 {
+    previous_image_bytes
+        .map_or(0, |bytes| bytes.saturating_mul(2))
+        .max(STORAGE_FLOOR)
 }
 
 /// Validated local inputs and the build key derived from them.
@@ -683,6 +709,7 @@ pub(super) fn run<P: BuildPool>(
                             tag: inputs.tag(),
                             reused: true,
                             base_pins: previous.base_pins.clone(),
+                            cache_reclaimed_bytes: None,
                         });
                     }
                 }
@@ -695,6 +722,7 @@ pub(super) fn run<P: BuildPool>(
             state::write(&receipt_path, &dead)?;
         }
     }
+    let previous_bytes = previous.as_ref().and_then(|receipt| receipt.image_bytes);
     drop(lease);
 
     // Step 2, unleased: resolve every base image to a pinned manifest.
@@ -729,6 +757,12 @@ pub(super) fn run<P: BuildPool>(
             "The runtime changed before the build started; no build was run.",
         ));
     }
+    if pool.storage_available(&lease)? < storage_required(previous_bytes) {
+        return Err(refusal(
+            "native_build_storage",
+            "The native runtime's storage disk has too little free space for this build (at least 6 GiB, or twice the last image of this build). Inspect it with `runtime guest-disk-usage` and remove unused images or data; nothing was deleted.",
+        ));
+    }
     let mut receipt = Receipt {
         version: 1,
         checkout: candidate.checkout.clone(),
@@ -739,6 +773,7 @@ pub(super) fn run<P: BuildPool>(
         engine_id: identity.engine_id.clone(),
         phase: Phase::Building,
         image_id: None,
+        image_bytes: None,
         base_pins: pins.clone(),
     };
     state::write(&receipt_path, &receipt)?;
@@ -814,10 +849,10 @@ pub(super) fn run<P: BuildPool>(
             )
         })?;
         owned_image(&inspected, &id, &expected)?;
-        Ok(id)
+        Ok((id, inspected["Size"].as_u64()))
     });
-    let id = match adopted {
-        Ok(id) => id,
+    let (id, image_bytes) = match adopted {
+        Ok(adopted) => adopted,
         Err(error) => {
             // A refused or missing result is a failed build; an engine or transport
             // error leaves the outcome unknown.
@@ -832,7 +867,10 @@ pub(super) fn run<P: BuildPool>(
     };
     receipt.phase = Phase::ContentIdVerified;
     receipt.image_id = Some(id.clone());
+    receipt.image_bytes = image_bytes;
     state::write(&receipt_path, &receipt)?;
+    // The verified image is recorded first; a failed prune leaves only extra cache.
+    let cache_reclaimed_bytes = pool.prune_cache(&lease, CACHE_BUDGET).ok();
     drop(lease);
     Ok(BuildOutcome {
         image_id: id,
@@ -840,6 +878,7 @@ pub(super) fn run<P: BuildPool>(
         tag: inputs.tag(),
         reused: false,
         base_pins: pins,
+        cache_reclaimed_bytes,
     })
 }
 
@@ -1128,6 +1167,53 @@ impl<'a> BuildPool for LivePool<'a> {
         artifact::verify_builder(self.candidate)?;
         Ok(artifact::builder_executable(self.candidate))
     }
+    fn storage_available(&self, lease: &Self::Lease) -> Result<u64, CandidateError> {
+        guest_storage_available(lease)
+    }
+    fn prune_cache(&self, lease: &Self::Lease, max_used: u64) -> Result<u64, CandidateError> {
+        prune_build_cache(lease, max_used)
+    }
+}
+
+/// Free bytes on the guest `/storage` ext4 disk, which holds `/var/lib/docker`.
+pub(super) fn guest_storage_available(
+    engine: &super::engine::Engine<'_>,
+) -> Result<u64, CandidateError> {
+    let output =
+        engine
+            .guest()
+            .execute("df -Pk /storage | awk 'NR == 2 { print $4 }'", &[], None)?;
+    output
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|kib| kib.checked_mul(1024))
+        .ok_or_else(|| {
+            refusal(
+                "guest_protocol",
+                "The guest reported no usable free-space value.",
+            )
+        })
+}
+
+/// Prune the engine's BuildKit cache to at most `max_used` bytes. Cache records only:
+/// the build-prune endpoint never removes images, containers or volumes, and BuildKit
+/// keeps records an active build uses.
+pub(super) fn prune_build_cache(
+    engine: &super::engine::Engine<'_>,
+    max_used: u64,
+) -> Result<u64, CandidateError> {
+    let value = engine.request(
+        reqwest::Method::POST,
+        &format!("/v1.53/build/prune?max-used-space={max_used}"),
+        None,
+    )?;
+    value["SpaceReclaimed"].as_u64().ok_or_else(|| {
+        refusal(
+            "engine_protocol",
+            "The engine reported no reclaimed build-cache size.",
+        )
+    })
 }
 
 /// `runtime build-image --request <private-file>`: build or reuse one native image.

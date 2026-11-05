@@ -1049,3 +1049,27 @@ Closing the residual needs a mutation fence rather than a timeout: target tmux
 mutations by session ID (`#{session_id}`, never reused by a server) captured with
 the token read. That fence, and full zellij support for shared-helper lifecycle
 sessions, are tracked in HACK-1849 and are not in this slice.
+
+## Native image build retention
+
+`native-build-retention/BuildRetention.tla` follows `provider::image_build` and its
+`reclaim` module for one build key in one namespace, with three content IDs and two
+storage incarnations. The positive configuration exhausts **6,181 distinct states**.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `BeginBuild` | Under the provider lease: shared build fence, per-key lock, `building` receipt. |
+| `RunBuild` / `ForeignImage` | Unleased BuildKit run writing an image with this pool's labels; a forged or foreign image may appear at any time. |
+| `CompleteBuild` | Under the lease: the reported ID is adopted only with this incarnation's labels and the admitted incarnation; otherwise `failed`. |
+| `Cancel` / `CrashHost` / `RecordDeadAttempt` | Cancellation and host death release the fence; a `building` receipt under the key lock is recorded `indeterminate`. |
+| `Down` / `RecreateStorage` | `runtime down` refuses while the fence is held; recreated storage is a new incarnation with an empty engine. |
+| `StartGraph` / `RemoveContainers` / `Restore` | Graphs use only a verified image of this incarnation and keep a reference to it; data-retaining cleanup removes containers but not the reference; restore never builds. |
+| `Reclaim` / `PruneCache` | Owned, non-current, unreferenced, unused images only, with no build admitted; cache pruning never touches images. |
+
+Three controls each remove one guard and must fail at the named action:
+`negative` (reclaim ignores retained references) fails `NoReclaimReferenced` at
+`Reclaim`; `foreign-adoption` (adoption without the label/incarnation check) fails
+`NoForeignAdoption` at `CompleteBuild`; `down-under-build` (down ignores the fence)
+fails `DownNotUnderBuild` at `Down`. The model does not cover an orphaned build client
+that outlives a crashed host process, real BuildKit or engine behavior, receipt
+durability, or more than one key and namespace.

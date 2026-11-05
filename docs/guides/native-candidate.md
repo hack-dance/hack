@@ -485,6 +485,18 @@ linked, mode-`0600` file owned by you), because build-argument values are in it:
 - `runtime down` refuses while a build runs. Ctrl-C or SIGTERM cancels the build and
   stops the client's whole process group; so does the time budget (default 30 minutes,
   at most 2 hours).
+- A cold build needs at least 6 GiB free on the runtime's storage disk, or twice the
+  last image of the same build if that is larger; otherwise it refuses with
+  `native_build_storage` and deletes nothing. After each successful build, BuildKit's
+  cache is pruned to 8 GiB. The cache holds only build steps; pruning never removes
+  images, containers or volumes.
+
+`runtime reclaim-build-images --json` removes build images that a newer build of the
+same key replaced. It keeps every image a build receipt names as current, every image
+that any retained run's saved state mentions, every image a container still uses (the
+engine refuses those), and every image whose ownership labels are not exactly this
+runtime's. It refuses while a build runs, and removes nothing if it cannot read all
+saved run state. The report lists removed images and why each other one was kept.
 
 Before startup, network-tool preparation additionally requires all four pinned
 Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), with

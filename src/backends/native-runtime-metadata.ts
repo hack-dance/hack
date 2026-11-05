@@ -55,6 +55,25 @@ function routeHosts(labels: unknown): string[] {
   return hosts;
 }
 
+/**
+ * True when the labels name an upstream (`caddy.reverse_proxy`). Hostnames
+ * declared without one are inert in native review, as with the Compose router:
+ * they still feed runtime host metadata but never become a reviewed route.
+ */
+function proxiesUpstream(labels: unknown): boolean {
+  if (isRecord(labels)) {
+    return Object.hasOwn(labels, "caddy.reverse_proxy");
+  }
+  return (
+    Array.isArray(labels) &&
+    labels.some(
+      (entry) =>
+        typeof entry === "string" &&
+        (entry.split("=", 1)[0] ?? "").trim() === "caddy.reverse_proxy"
+    )
+  );
+}
+
 /** Compose interpolation treats `$` specially; `$$` is its literal escape. */
 function literal(value: string): string {
   return value.replaceAll("$", () => "$$");
@@ -91,7 +110,7 @@ export function applyNativeRuntimeMetadata(opts: {
       throw refused();
     }
     const hosts = routeHosts(service.labels);
-    if (hosts.length > 0) {
+    if (hosts.length > 0 && proxiesUpstream(service.labels)) {
       routes.set(name, hosts);
     }
     records.set(name, service);

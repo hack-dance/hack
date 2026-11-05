@@ -136,6 +136,8 @@ function addHostnames(
       !(
         isRecord(spec.labels) &&
         typeof spec.labels.caddy === "string" &&
+        // Hostnames without an upstream are inert: adding more would publish nothing.
+        typeof spec.labels["caddy.reverse_proxy"] === "string" &&
         Array.isArray(value) &&
         value.length > 0 &&
         value.length <= 8 &&

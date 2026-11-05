@@ -125,6 +125,16 @@ impl Graph {
             }
             let mut dependencies = BTreeMap::new();
             for (dependency, condition) in &service.dependencies {
+                // Review admits only optional edges to inactive targets; an
+                // active optional target is enforced like a required one.
+                if !condition.required
+                    && !plan
+                        .services
+                        .get(dependency)
+                        .is_some_and(|target| target.active)
+                {
+                    continue;
+                }
                 dependencies.insert(
                     dependency.clone(),
                     match condition.condition.as_str() {

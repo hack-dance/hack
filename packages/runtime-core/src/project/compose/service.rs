@@ -347,6 +347,7 @@ fn dependencies(
                         name.into(),
                         DependencyPlan {
                             condition: "service_started".into(),
+                            required: true,
                         },
                     )
                     .is_some()
@@ -363,8 +364,13 @@ fn dependencies(
                 identifier(name)?;
                 let m = object(value)?;
                 keys(m, &["condition", "required", "restart"], field, diagnostics);
-                if !boolean(m.get("required"), true)? || boolean(m.get("restart"), false)? {
-                    diagnostics.push(Diagnostic::error("unsupported_dependency_option",field,"Optional or restart-propagating dependencies are not supported by this subset."));
+                let required = boolean(m.get("required"), true)?;
+                if boolean(m.get("restart"), false)? {
+                    diagnostics.push(Diagnostic::error(
+                        "unsupported_dependency_option",
+                        field,
+                        "Restart-propagating dependencies are not supported by this subset.",
+                    ));
                 }
                 let condition = m
                     .get("condition")
@@ -387,6 +393,7 @@ fn dependencies(
                     name.clone(),
                     DependencyPlan {
                         condition: condition.into(),
+                        required,
                     },
                 );
             }
@@ -704,6 +711,8 @@ pub(super) fn compile(
                 "stop_grace_period",
                 "stop_signal",
                 "privileged",
+                "stdin_open",
+                "tty",
             ],
             &field,
             diagnostics,
@@ -776,9 +785,20 @@ pub(super) fn compile(
             return Err(problem("invalid_restart", "Unsupported restart policy."));
         }
         let labels = redacted_map(m.get("labels"), false)?;
-        let parsed_routing = super::routing::parse(m.get("labels"));
+        let parsed_routing = super::routing::declaration(m.get("labels"));
         let routing_invalid = parsed_routing.is_err();
-        let routing = parsed_routing.ok().flatten();
+        let (routing, inert_route_labels) = match parsed_routing.ok().flatten() {
+            Some(super::routing::Declaration::Route(route)) => (Some(route), false),
+            Some(super::routing::Declaration::Inert) => (None, true),
+            None => (None, false),
+        };
+        if inert_route_labels {
+            diagnostics.push(Diagnostic::warning(
+                "inert_route_declaration",
+                &format!("{field}.labels"),
+                "Route hostnames without caddy.reverse_proxy carry no traffic; no route, hostname claim or relay is created, as with the Compose router.",
+            ));
+        }
         if routing.is_some() {
             diagnostics.push(Diagnostic::warning(
                 "route_binding_required",
@@ -810,6 +830,7 @@ pub(super) fn compile(
                 super::ownership_labels::is_hack_ownership_label(key)
                     || (!(dependency_cache.is_some() && super::dependency_cache::recognized(key))
                         && !(routing.is_some() && super::routing::recognized(key))
+                        && !(inert_route_labels && super::routing::recognized_inert(key))
                         && ["caddy", "traefik", "hack", "com.docker.compose"]
                             .iter()
                             .any(|prefix| key == prefix || key.starts_with(&format!("{prefix}."))))
@@ -861,6 +882,16 @@ pub(super) fn compile(
                 "Only Linux arm64/amd64 image platform declarations are modeled.",
             ));
         }
+        let stdin_open = boolean(m.get("stdin_open"), false)?;
+        let tty = boolean(m.get("tty"), false)?;
+        if tty {
+            diagnostics.push(Diagnostic::warning(
+                "terminal_not_allocated",
+                &format!("{field}.tty"),
+                "Native services run without a pseudo-terminal; stdout and stderr stay separate and no host input is attached.",
+            ));
+        }
+        let interactive = (stdin_open || tty).then_some(InteractivePlan { stdin_open, tty });
         let exposed_ports = strings(m.get("expose"))?;
         for value in &exposed_ports {
             let (port, protocol) = value.split_once('/').unwrap_or((value, "tcp"));
@@ -927,7 +958,7 @@ pub(super) fn compile(
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,
-            platform,labels,routing,dependency_cache,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
+            platform,labels,routing,dependency_cache,inert_route_labels,interactive,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
         });
     }
     Ok(result)

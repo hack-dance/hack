@@ -1825,7 +1825,9 @@ fn scoped_environment_cannot_interpolate_into_any_executable_field() {
         )
         .err()
         .unwrap();
-        assert_eq!(failure.code, "execution_environment_missing", "{field}");
+        // A reference to a managed name is refused as an ownership conflict
+        // (it is never looked up in the public map or replaced by a default).
+        assert_eq!(failure.code, "execution_environment_owner", "{field}");
         assert!(
             !serde_json::to_string(&failure)
                 .unwrap()
@@ -2093,7 +2095,9 @@ fn extra_hosts_conditional_prefix_and_environment_default_use_only_explicit_inpu
     }
     for expression in [
         "${INPUT:?required}",
-        "${INPUT:+${OTHER}}",
+        // Nested braced defaults are supported (see compose_fields_contract.rs);
+        // nested operators outside :- and :+ stay refused.
+        "${INPUT:+${OTHER:?required}}",
         "${INPUT:-$OTHER}",
         "${INPUT-fallback}",
     ] {

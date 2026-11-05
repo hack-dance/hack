@@ -620,6 +620,43 @@ selectors. Credentials are not written to Compose or the project snapshot, and
 are not automatically renewed after expiry. Normal native foreground `hack up`
 uses these adapters within the capability limits described below.
 
+### Compose fields with a native meaning
+
+Native review accepts these Compose fields. Where the native result differs from
+Compose, review reports a warning; nothing is dropped silently. A plan that does not
+use a field keeps its earlier plan ID. A plan or receipt that does use one is refused
+by an older bundle, so clean up such a graph with the bundle that started it.
+
+- `depends_on.<service>.required: false`. When the selected profiles disable the
+  target, the edge is skipped with the warning `optional_dependency_inactive`, as in
+  Compose. When the target is active, native waits for its `condition` exactly as for
+  a required dependency and fails startup if the condition is never met. Compose may
+  only warn there, so review reports `optional_dependency_enforced`. A target that
+  does not exist is still `missing_dependency`, and `restart: true` is still refused.
+- `stdin_open: true` keeps the container's stdin open, so it never reaches EOF.
+  No host input is attached, as with `hack up` on Compose. `tty: true` is accepted
+  but no pseudo-terminal is allocated: stdout and stderr stay separate, and review
+  reports `terminal_not_allocated`. Programs that need a real terminal (colors,
+  prompts) stay on the Compose backend.
+- A `caddy` hostname label with `caddy.tls: internal` and no `caddy.reverse_proxy`
+  proxies nothing, so native treats it as inert: no route, hostname claim or relay is
+  created, and review reports `inert_route_declaration`. The hostnames still appear
+  in [runtime host metadata](../cli.md#runtime-host-metadata), as on Compose. Any
+  other partial or extra `caddy*` label set is still refused. Inert hostnames are
+  ordinary literals for a retaining hostname change, and
+  `HACK_NATIVE_ADAPTATION` `additionalHostnames` refuses an inert service.
+- Nested interpolation defaults such as `${A:-${B:-fallback}}` resolve inner
+  expressions first, as Compose does, up to four levels and within the shared 1 MiB
+  expanded budget. Only the `:-` and `:+` operators are supported at every level;
+  `?`, unbraced `$NAME` and `$(...)` inside a default word are refused. A word that
+  is not selected is still checked, but its inputs are not required.
+- A reference to a Hack-managed value of the same service, for example
+  `${TOKEN:-fallback}` when Hack delivers `TOKEN` to that service, refuses with
+  `execution_environment_owner`. Managed values are delivered privately and are
+  never interpolated into commands, users, health checks or other values, and a
+  default is never used in their place. Declare the key bare (`TOKEN:` or `- TOKEN`)
+  to receive the managed value.
+
 ## Public image acquisition without Docker
 
 The candidate can fetch a **digest-pinned public Docker Hub image** without Docker,

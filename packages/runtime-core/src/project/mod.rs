@@ -122,6 +122,25 @@ pub struct PortPlan {
 #[serde(deny_unknown_fields)]
 pub struct DependencyPlan {
     pub condition: String,
+    /// Compose `required: false`: an optional edge whose inactive target is
+    /// dropped before execution. An active target is still waited for and its
+    /// condition enforced (fail closed). Omitted when true so existing plan IDs hold.
+    #[serde(default = "required_dependency", skip_serializing_if = "is_required")]
+    pub required: bool,
+}
+fn required_dependency() -> bool {
+    true
+}
+fn is_required(required: &bool) -> bool {
+    *required
+}
+/// Compose `stdin_open`/`tty` intent. Native services never attach host input
+/// and never allocate a pseudo-terminal; only an open, unattached stdin is kept.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InteractivePlan {
+    pub stdin_open: bool,
+    pub tty: bool,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -269,6 +288,12 @@ pub struct ServicePlan {
     pub routing: Option<RoutingPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_cache: Option<DependencyCachePlan>,
+    /// Exactly `caddy` hostnames plus `caddy.tls: internal`, with no upstream:
+    /// a declaration that carries no traffic, so no route, hostname claim or relay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inert_route_labels: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<InteractivePlan>,
     pub logging: Option<LoggingPlan>,
     pub stop_grace_period_nanos: Option<u64>,
     pub stop_signal: Option<String>,

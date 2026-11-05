@@ -72,6 +72,20 @@ test("explicit native adaptation preserves original identity, private env and ex
     original
   );
 });
+function expectRefused(original: NativeProjectInput, selection: unknown): void {
+  const bytes = original.normalizedComposeJson;
+  let refusal: unknown;
+  try {
+    adaptNativeProject({ input: original, selection });
+  } catch (error: unknown) {
+    refusal = error;
+  }
+  expect(refusal).toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message: expect.stringContaining("values omitted"),
+  });
+  expect(original.normalizedComposeJson).toBe(bytes);
+}
 test("unsupported changes and conflicts refuse without mutating input", () => {
   const original = input();
   const bytes = original.normalizedComposeJson;
@@ -104,18 +118,19 @@ test("unsupported changes and conflicts refuse without mutating input", () => {
     { version: 1, additionalHostnames: { web: ["web.hack.gy"] } },
     { version: 1, additionalHostnames: { web: ["*.hack.local"] } },
   ]) {
-    let refusal: unknown;
-    try {
-      adaptNativeProject({ input: original, selection });
-    } catch (error: unknown) {
-      refusal = error;
-    }
-    expect(refusal).toMatchObject({
-      code: "E_CONFIG_INVALID",
-      message: expect.stringContaining("values omitted"),
-    });
-    expect(original.normalizedComposeJson).toBe(bytes);
+    expectRefused(original, selection);
   }
+  // Hostnames without an upstream are inert; adding more would publish nothing.
+  const inert = JSON.parse(bytes);
+  inert.services.web.labels = { caddy: "web.hack.gy", "caddy.tls": "internal" };
+  const inertInput = {
+    ...original,
+    normalizedComposeJson: JSON.stringify(inert),
+  };
+  expectRefused(inertInput, {
+    version: 1,
+    additionalHostnames: { web: ["web.hack.local"] },
+  });
   const compose = JSON.parse(bytes);
   compose.services.web.healthcheck = { test: ["CMD", "true"] };
   expect(() =>

@@ -90,13 +90,50 @@ fn registry_environment(
 struct Resolver<'a> {
     values: &'a BTreeMap<String, String>,
     remaining: usize,
+    /// Names Hack delivers privately to the service being compiled. A reference
+    /// to one must never silently resolve to its default or to an empty value.
+    managed: std::collections::BTreeSet<String>,
 }
+/// Compose nesting such as `${A:-${B:-${C:-${D:-word}}}}` is bounded at four levels.
+const MAX_INTERPOLATION_DEPTH: usize = 4;
 fn variable(name: &str) -> bool {
     let mut bytes = name.bytes();
     bytes
         .next()
         .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+fn unsupported_interpolation() -> CandidateError {
+    error(
+        "execution_interpolation",
+        "Only braced :+ and :- operators on explicit inputs, nested at most four levels, are supported.",
+    )
+}
+/// Length of a braced expression body: `text` follows `${`; the body ends at the
+/// `}` that closes it, counting nested `${` and skipping `$$` as review does.
+fn braced_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 1usize;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"$$") {
+            index += 2;
+            continue;
+        }
+        if bytes[index..].starts_with(b"${") {
+            depth += 1;
+            index += 2;
+            continue;
+        }
+        if bytes[index] == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
 }
 impl Resolver<'_> {
     fn charge(&mut self, text: &str) -> Result<(), CandidateError> {
@@ -109,6 +146,15 @@ impl Resolver<'_> {
         self.remaining -= text.len();
         Ok(())
     }
+    fn owned(&self, name: &str) -> Result<(), CandidateError> {
+        if self.managed.contains(name) {
+            return Err(error(
+                "execution_environment_owner",
+                "A Compose reference names a Hack-managed service input; managed values are delivered privately and never interpolated or replaced by defaults. Values omitted.",
+            ));
+        }
+        Ok(())
+    }
     fn lookup(&self, name: &str) -> Result<&str, CandidateError> {
         if !variable(name) {
             return Err(error(
@@ -116,6 +162,7 @@ impl Resolver<'_> {
                 "Unsupported environment reference; use a valid variable name or supported braced literal-word operator.",
             ));
         }
+        self.owned(name)?;
         let value = self.values.get(name).ok_or_else(|| error("execution_environment_missing", "An explicitly required runtime input was not supplied; ambient environment is not consulted."))?;
         if value.len() > self.remaining || value.contains('\0') {
             return Err(error(
@@ -125,39 +172,84 @@ impl Resolver<'_> {
         }
         Ok(value)
     }
-    fn expression(&self, expression: &str) -> Result<String, CandidateError> {
+    /// Evaluate one braced body. `live` is false for a default/alternative word
+    /// Compose would not select: it is still validated and checked for managed
+    /// names, but missing inputs inside it are not required.
+    fn expression(
+        &mut self,
+        expression: &str,
+        depth: usize,
+        live: bool,
+    ) -> Result<String, CandidateError> {
         let Some((name, suffix)) = expression.split_once(':') else {
+            if !live {
+                if !variable(expression) {
+                    return Err(unsupported_interpolation());
+                }
+                return self.owned(expression).map(|()| String::new());
+            }
             return self.lookup(expression).map(str::to_owned);
         };
-        let invalid = || {
-            error(
-                "execution_interpolation",
-                "Only literal-word :+ and :- operators on explicit inputs are supported; nested interpolation is refused.",
-            )
-        };
         if !variable(name) || suffix.is_empty() {
-            return Err(invalid());
+            return Err(unsupported_interpolation());
         }
+        self.owned(name)?;
         let (operator, word) = if let Some(word) = suffix.strip_prefix('+') {
             ("+", word)
         } else if let Some(word) = suffix.strip_prefix('-') {
             ("-", word)
         } else {
-            return Err(invalid());
+            return Err(unsupported_interpolation());
         };
-        if word.contains(['$', '{', '}']) {
-            return Err(invalid());
-        }
-        let value = if self.values.contains_key(name) {
-            self.lookup(name)?
+        let value = if live && self.values.contains_key(name) {
+            self.lookup(name)?.to_owned()
         } else {
-            ""
+            String::new()
         };
+        let selected = matches!((operator, value.is_empty()), ("+", false) | ("-", true));
+        let word = self.word(word, depth, live && selected)?;
         Ok(match (operator, value.is_empty()) {
-            ("+", false) | ("-", true) => word.to_owned(),
+            ("+", false) | ("-", true) => word,
             ("+", true) => String::new(),
-            _ => value.to_owned(),
+            _ => value,
         })
+    }
+    /// A default/alternative word: literal text, `$$` escapes and nested braced
+    /// expressions only. Unbraced references and command substitution are refused.
+    fn word(&mut self, text: &str, depth: usize, live: bool) -> Result<String, CandidateError> {
+        let mut result = String::new();
+        let mut rest = text;
+        loop {
+            let index = rest.find('$').unwrap_or(rest.len());
+            let literal = &rest[..index];
+            if literal.contains(['{', '}']) {
+                return Err(unsupported_interpolation());
+            }
+            if live {
+                result.push_str(literal);
+            }
+            if index == rest.len() {
+                return Ok(result);
+            }
+            rest = &rest[index + 1..];
+            if let Some(tail) = rest.strip_prefix('$') {
+                if live {
+                    result.push('$');
+                }
+                rest = tail;
+                continue;
+            }
+            let braced = rest
+                .strip_prefix('{')
+                .ok_or_else(unsupported_interpolation)?;
+            if depth >= MAX_INTERPOLATION_DEPTH {
+                return Err(unsupported_interpolation());
+            }
+            let end = braced_end(braced).ok_or_else(unsupported_interpolation)?;
+            let value = self.expression(&braced[..end], depth + 1, live)?;
+            result.push_str(&value);
+            rest = &braced[end + 1..];
+        }
     }
     fn resolve(&mut self, text: &str) -> Result<String, CandidateError> {
         let mut result = String::new();
@@ -172,22 +264,23 @@ impl Resolver<'_> {
                 rest = tail;
                 continue;
             }
-            let (name, tail) = if let Some(braced) = rest.strip_prefix('{') {
-                let end = braced.find('}').ok_or_else(|| {
+            let value = if let Some(braced) = rest.strip_prefix('{') {
+                let end = braced_end(braced).ok_or_else(|| {
                     error("execution_interpolation", "Unclosed environment reference.")
                 })?;
-                (&braced[..end], &braced[end + 1..])
+                rest = &braced[end + 1..];
+                self.expression(&braced[..end], 1, true)?
             } else {
                 let end = rest
                     .bytes()
                     .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
                     .count();
-                (&rest[..end], &rest[end..])
+                let name = &rest[..end];
+                rest = &rest[end..];
+                self.lookup(name)?.to_owned()
             };
-            let value = self.expression(name)?;
             self.charge(&value)?;
             result.push_str(&value);
-            rest = tail;
         }
         self.charge(rest)?;
         result.push_str(rest);
@@ -500,6 +593,7 @@ fn compile_inner(
     let mut resolver = Resolver {
         values: supplied,
         remaining: MAX_EXPANDED,
+        managed: Default::default(),
     };
     if let Some(managed) = managed {
         for (name, values) in managed {
@@ -536,6 +630,10 @@ fn compile_inner(
             .get(name)
             .and_then(Value::as_object)
             .ok_or_else(|| error("execution_services", "Reviewed service is missing."))?;
+        let private = managed.map(|values| values.get(name).unwrap_or(&empty));
+        resolver.managed = private
+            .map(|values| values.keys().cloned().collect())
+            .unwrap_or_default();
         let health_test = if service.healthcheck.as_ref().is_some_and(|h| h.disabled) {
             Some(vec!["NONE".into()])
         } else {
@@ -551,7 +649,6 @@ fn compile_inner(
             Some(Value::Number(n)) => Some(resolver.resolve(&n.to_string())?),
             _ => return Err(error("execution_user", "Unsupported service user.")),
         };
-        let private = managed.map(|values| values.get(name).unwrap_or(&empty));
         let environment = registry_environment(
             raw.get("environment"),
             review

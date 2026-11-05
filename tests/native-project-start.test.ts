@@ -1348,6 +1348,44 @@ test("readiness goals cover only services the reviewed plan marks active", () =>
   ).toEqual([]);
 });
 
+test("an optional dependency on an inactive service adds no readiness goal", () => {
+  const image = `sha256:${"e".repeat(64)}`;
+  const specs = {
+    app: {
+      image,
+      depends_on: { db: { condition: "service_healthy", required: false } },
+    },
+    db: {
+      image,
+      profiles: ["database"],
+      healthcheck: { test: ["CMD", "true"] },
+    },
+  };
+  const plan = (database: boolean) => ({
+    enrollment_compatible: true,
+    services: { app: { active: true }, db: { active: database } },
+  });
+  expect(
+    nativeReadinessArgs({
+      specs,
+      plan: plan(false),
+      initializers: new Set(),
+      routed: new Set(),
+    })
+  ).toEqual(["--ready", "app=started"]);
+  // An active optional target is waited for like a required one.
+  expect(
+    readyGoals(
+      nativeReadinessArgs({
+        specs,
+        plan: plan(true),
+        initializers: new Set(),
+        routed: new Set(),
+      })
+    ).sort()
+  ).toEqual(["app=started", "db=healthy"]);
+});
+
 async function profileStartup(profiles: readonly string[] | undefined) {
   const { opts } = await fixture(false);
   const prepare = opts.dependencies.prepare!;

@@ -7,6 +7,22 @@ pub(super) fn recognized(key: &str) -> bool {
     matches!(key, "caddy" | "caddy.reverse_proxy" | "caddy.tls")
 }
 
+/// Keys of an inert declaration: hostnames and internal TLS, with no upstream.
+pub(crate) fn recognized_inert(key: &str) -> bool {
+    matches!(key, "caddy" | "caddy.tls")
+}
+
+/// A reviewed Caddy label declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Declaration {
+    /// Hostnames proxied to one service port.
+    Route(RoutingPlan),
+    /// Exactly `caddy` hostnames plus `caddy.tls: internal` and no
+    /// `caddy.reverse_proxy`. The Compose router serves such a site without
+    /// proxying anything to the service, so it carries no traffic to it.
+    Inert,
+}
+
 fn refused() -> CandidateError {
     problem(
         "invalid_routing_labels",
@@ -17,7 +33,17 @@ fn refused() -> CandidateError {
 /// Reads only routing labels and leaves unrelated declarations untouched. Indexed
 /// Caddy sites/directives are deliberately outside this subset. No filesystem,
 /// environment interpolation, Caddy configuration or network effects occur here.
+/// An inert declaration yields no route here; see [`declaration`].
 pub(crate) fn parse(value: Option<&Value>) -> Result<Option<RoutingPlan>, CandidateError> {
+    Ok(match declaration(value)? {
+        Some(Declaration::Route(route)) => Some(route),
+        Some(Declaration::Inert) | None => None,
+    })
+}
+
+/// Like [`parse`], but distinguishes an inert hostname declaration from no
+/// declaration. Every other partial, extra or indexed form is still refused.
+pub(crate) fn declaration(value: Option<&Value>) -> Result<Option<Declaration>, CandidateError> {
     let mut routing = BTreeMap::new();
     let mut take = |key: &str, value: &Value| -> Result<(), CandidateError> {
         if !key.starts_with("caddy") {
@@ -54,7 +80,10 @@ pub(crate) fn parse(value: Option<&Value>) -> Result<Option<RoutingPlan>, Candid
     if routing.is_empty() {
         return Ok(None);
     }
-    if routing.len() != 3 || routing.get("caddy.tls").map(String::as_str) != Some("internal") {
+    let inert = !routing.contains_key("caddy.reverse_proxy");
+    if routing.len() != if inert { 2 } else { 3 }
+        || routing.get("caddy.tls").map(String::as_str) != Some("internal")
+    {
         return Err(refused());
     }
     let mut hosts = BTreeSet::new();
@@ -65,6 +94,9 @@ pub(crate) fn parse(value: Option<&Value>) -> Result<Option<RoutingPlan>, Candid
             return Err(refused());
         }
     }
+    if inert {
+        return Ok(Some(Declaration::Inert));
+    }
     let port = routing
         .get("caddy.reverse_proxy")
         .and_then(|value| value.strip_prefix("{{upstreams "))
@@ -73,10 +105,10 @@ pub(crate) fn parse(value: Option<&Value>) -> Result<Option<RoutingPlan>, Candid
         .and_then(|value| value.parse::<u16>().ok())
         .filter(|port| *port != 0)
         .ok_or_else(refused)?;
-    Ok(Some(RoutingPlan {
+    Ok(Some(Declaration::Route(RoutingPlan {
         hostnames: hosts.into_iter().collect(),
         port,
-    }))
+    })))
 }
 
 #[cfg(test)]
@@ -146,10 +178,19 @@ mod tests {
 
     #[test]
     fn refuses_partial_extra_indexed_and_duplicate_labels() {
-        for key in ["caddy", "caddy.reverse_proxy", "caddy.tls"] {
+        for key in ["caddy", "caddy.tls"] {
             let mut value = labels("search.example", "6980");
             value.as_object_mut().unwrap().remove(key);
             assert!(parse(Some(&value)).is_err());
+        }
+        for value in [
+            json!({"caddy.reverse_proxy":"{{upstreams 6980}}"}),
+            json!({"caddy.tls":"internal"}),
+            json!({"caddy":"search.example"}),
+            json!({"caddy":"search.example","caddy.tls":"external"}),
+            json!({"caddy":"search.example","caddy.tls":"internal","caddy.header":"x"}),
+        ] {
+            assert!(declaration(Some(&value)).is_err(), "{value}");
         }
         for key in [
             "caddy.header",
@@ -171,6 +212,37 @@ mod tests {
             ])))
             .is_err()
         );
+    }
+
+    #[test]
+    fn hostnames_with_internal_tls_and_no_upstream_are_inert() {
+        let mut value = labels("Web.Example., web.example.localhost", "6980");
+        value.as_object_mut().unwrap().remove("caddy.reverse_proxy");
+        assert_eq!(declaration(Some(&value)).unwrap(), Some(Declaration::Inert));
+        assert_eq!(parse(Some(&value)).unwrap(), None);
+        let list = json!(["caddy=web.example", "caddy.tls=internal", "other=value"]);
+        assert_eq!(declaration(Some(&list)).unwrap(), Some(Declaration::Inert));
+        for hosts in [
+            "",
+            "*.example",
+            "${HOST}",
+            "x.example,X.EXAMPLE.",
+            "127.0.0.1",
+        ] {
+            let value = json!({"caddy":hosts,"caddy.tls":"internal"});
+            assert!(declaration(Some(&value)).is_err(), "{hosts}");
+        }
+        let hosts = (0..9).map(|i| format!("h{i}.example")).collect::<Vec<_>>();
+        assert!(
+            declaration(Some(
+                &json!({"caddy":hosts.join(","),"caddy.tls":"internal"})
+            ))
+            .is_err()
+        );
+        assert!(matches!(
+            declaration(Some(&labels("web.example", "6980"))).unwrap(),
+            Some(Declaration::Route(_))
+        ));
     }
 
     #[test]

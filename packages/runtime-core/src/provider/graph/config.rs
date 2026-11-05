@@ -188,6 +188,11 @@ pub(super) fn prepare_delivery(
             || !service.ports.is_empty()
             || service.labels.keys().any(|key| {
                 !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
+                    // Inert hostname declarations carry no traffic; they never
+                    // reach the engine (graph labels are ownership-only).
+                    && !(service.inert_route_labels
+                        && service.routing.is_none()
+                        && matches!(key.as_str(), "caddy" | "caddy.tls"))
                     && !(service.dependency_cache.is_some()
                         && matches!(
                             key.as_str(),
@@ -461,6 +466,19 @@ pub(super) fn prepare_delivery(
         if let Some(dir) = &service.working_dir {
             config["WorkingDir"] = json!(dir);
         }
+        // Compose `stdin_open` keeps stdin open so it never reaches EOF. Host
+        // input is never attached and no pseudo-terminal is allocated, even for
+        // `tty: true` (reviewed with a warning), so logs stay multiplexed.
+        if service
+            .interactive
+            .as_ref()
+            .is_some_and(|interactive| interactive.stdin_open)
+        {
+            config["OpenStdin"] = json!(true);
+            config["StdinOnce"] = json!(false);
+            config["AttachStdin"] = json!(false);
+            config["Tty"] = json!(false);
+        }
         if let Some(signal) = &service.stop_signal {
             config["StopSignal"] = json!(signal);
         }
@@ -617,5 +635,88 @@ mod network_tests {
                 .len(),
             MAX_NETWORKS
         );
+    }
+}
+
+#[cfg(test)]
+mod compose_field_tests {
+    use super::*;
+    use crate::{Candidate, project::PlanOptions};
+    use std::path::Path;
+
+    fn prepared(document: &Value) -> Result<Prepared, CandidateError> {
+        let fixture = super::super::tests::Fixture::new();
+        let candidate_root = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&candidate_root.0).unwrap();
+        state::write(&fixture.0.join("compose.yaml"), document).unwrap();
+        let options = || PlanOptions {
+            branch: None,
+            project: &fixture.0,
+            compose_file: Path::new("compose.yaml"),
+            profiles: &[],
+        };
+        let review = project::plan(&candidate, options())?;
+        let inputs =
+            project::inputs::compile(&candidate, options(), &review.plan_id, &BTreeMap::new())?;
+        prepare(
+            inputs,
+            &BTreeMap::from([("web".into(), Condition::Started)]),
+            &"a".repeat(32),
+            &"b".repeat(32),
+            None,
+        )
+    }
+
+    fn document(web: Value) -> Value {
+        let mut service = json!({"image":format!("sha256:{}","a".repeat(64)),"command":["/bin/app"],"networks":["private"]});
+        for (key, value) in web.as_object().unwrap() {
+            service[key] = value.clone();
+        }
+        json!({"services":{"web":service},"networks":{"private":{"internal":true}}})
+    }
+
+    #[test]
+    fn stdin_open_keeps_unattached_stdin_and_never_allocates_a_terminal() {
+        for (fields, open) in [
+            (json!({"stdin_open":true}), true),
+            (json!({"stdin_open":true,"tty":true}), true),
+            (json!({"tty":true}), false),
+            (json!({}), false),
+        ] {
+            let prepared = prepared(&document(fields.clone())).unwrap();
+            let config = &prepared.configs["web"];
+            if open {
+                assert_eq!(config["OpenStdin"], true, "{fields}");
+                assert_eq!(config["StdinOnce"], false);
+                assert_eq!(config["AttachStdin"], false);
+                assert_eq!(config["Tty"], false);
+            } else {
+                for key in ["OpenStdin", "StdinOnce", "AttachStdin", "Tty"] {
+                    assert!(config.get(key).is_none(), "{fields} {key}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inert_route_labels_are_admitted_without_a_route_and_partial_forms_refuse() {
+        let inert = prepared(&document(
+            json!({"labels":{"caddy":"web.example","caddy.tls":"internal"}}),
+        ))
+        .unwrap();
+        assert!(inert.resources["container:web"].routing.is_none());
+        let labels = inert.configs["web"]["Labels"].as_object().unwrap();
+        assert!(labels.keys().all(|key| !key.starts_with("caddy")));
+        for labels in [
+            json!({"caddy":"web.example"}),
+            json!({"caddy.tls":"internal"}),
+            json!({"caddy":"web.example","caddy.tls":"internal","caddy.header":"x"}),
+            json!({"caddy":"web.example","caddy.tls":"internal","hack.owner":"x"}),
+        ] {
+            let error = prepared(&document(json!({ "labels": labels })))
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "execution_incompatible", "{labels}");
+        }
     }
 }

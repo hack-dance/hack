@@ -128,6 +128,25 @@ mod tests {
     }
 
     #[test]
+    fn inert_hostname_declarations_are_not_masked_as_reviewed_routes() {
+        let inert = |host: &str| {
+            format!(
+                "{BASE}  worker:\n    image: example:one\n    labels: {{caddy: {host}, caddy.tls: internal}}\n"
+            )
+        };
+        let before = inert("worker.hack");
+        assert!(fingerprint(before.as_bytes(), before.as_bytes()).is_some());
+        let after = inert("worker.v5.hack.gy");
+        // Only routed hostnames may change in place; an inert value stays literal.
+        assert_ne!(
+            fingerprint(before.as_bytes(), before.as_bytes()),
+            fingerprint(after.as_bytes(), after.as_bytes())
+        );
+        let only_inert = b"services: {worker: {labels: {caddy: worker.hack, caddy.tls: internal}}}";
+        assert!(fingerprint(only_inert, only_inert).is_none());
+    }
+
+    #[test]
     fn runtime_metadata_follows_hostnames_but_other_environment_still_counts() {
         let expected = fingerprint(BASE.as_bytes(), BASE.as_bytes()).unwrap();
         let metadata = |host: &str, port: &str| {

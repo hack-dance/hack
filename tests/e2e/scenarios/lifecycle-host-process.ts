@@ -116,14 +116,14 @@ export const lifecycleHostProcessScenario: Scenario = {
         result: groupLeader,
       });
 
+      // New sessions keep ownership in the session environment, populated over stdin.
       const owner = await runCommand({
         argv: [
           "tmux",
-          "show-options",
-          "-v",
+          "show-environment",
           "-t",
           `${fixture.name}--lifecycle`,
-          "@hack_lifecycle_owner",
+          "HACK_LIFECYCLE_OWNER_TOKEN",
         ],
         cwd: fixture.root,
       });
@@ -133,7 +133,9 @@ export const lifecycleHostProcessScenario: Scenario = {
         message: "tmux lifecycle session should expose ownership metadata",
       });
       expect({
-        that: owner.stdout.trim() === firstEntry?.ownershipToken,
+        that:
+          owner.stdout.trim() ===
+          `HACK_LIFECYCLE_OWNER_TOKEN=${firstEntry?.ownershipToken}`,
         message: "tmux and lifecycle state ownership tokens should match",
         result: owner,
       });
@@ -171,11 +173,11 @@ export const lifecycleHostProcessScenario: Scenario = {
       const clearOwner = await runCommand({
         argv: [
           "tmux",
-          "set-option",
+          "set-environment",
           "-u",
           "-t",
           `${fixture.name}--lifecycle`,
-          "@hack_lifecycle_owner",
+          "HACK_LIFECYCLE_OWNER_TOKEN",
         ],
         cwd: fixture.root,
       });
@@ -183,6 +185,21 @@ export const lifecycleHostProcessScenario: Scenario = {
         result: clearOwner,
         codes: [0],
         message: "failed to simulate a pre-ownership lifecycle session",
+      });
+      const clearedOwner = await runCommand({
+        argv: [
+          "tmux",
+          "show-environment",
+          "-t",
+          `${fixture.name}--lifecycle`,
+          "HACK_LIFECYCLE_OWNER_TOKEN",
+        ],
+        cwd: fixture.root,
+      });
+      expectExit({
+        result: clearedOwner,
+        codes: [1],
+        message: "legacy fixture should have no session ownership token",
       });
 
       const recoveredUp = await ctx.cli({

@@ -75,6 +75,8 @@ type FakeMux = Omit<MuxBackend, "createsWithOwnerToken"> & {
   inFlight: number;
   /** When set, session creations and kills are appended here (one per line). */
   eventsPath: string | null;
+  /** The environment each createSession call carried, in call order. */
+  readonly createdEnv: Array<Readonly<Record<string, string>> | null>;
 };
 
 const TIMEOUT_DELAY_MS = 50;
@@ -114,6 +116,7 @@ function fakeMux(backendName: "zellij" | "tmux" = "zellij"): FakeMux {
     killed: [],
     inFlight: 0,
     eventsPath: null,
+    createdEnv: [],
     listSessions: () =>
       track(async () => {
         if (fake.timeoutList) {
@@ -124,6 +127,7 @@ function fakeMux(backendName: "zellij" | "tmux" = "zellij"): FakeMux {
       }),
     createSession: (opts): Promise<MuxSessionCreateResult> =>
       track(async () => {
+        fake.createdEnv.push(opts.env ? { ...opts.env } : null);
         if (fake.timeoutCreate) {
           if (fake.timeoutCreate === "created") {
             sessions.set(opts.name, opts.lifecycleOwnerToken ?? "");
@@ -188,10 +192,12 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
   const bin = join(root, "bin");
   await mkdir(bin, { recursive: true });
   await writeFile(join(bin, "zellij"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  // A stand-in tmux whose set-environment hangs (a stuck tmux server).
+  // A stand-in tmux for the controller's own commands. It logs each call
+  // and hangs on set-environment (a stuck tmux server), which the controller
+  // must never issue: tmux receives the session environment with creation.
   await writeFile(
     join(bin, "tmux"),
-    '#!/bin/sh\ncase "$1" in set-environment) sleep 30 ;; esac\nexit 0\n',
+    `#!/bin/sh\necho "$*" >> '${join(bin, "tmux.log")}'\ncase "$1" in set-environment) sleep 30 ;; esac\nexit 0\n`,
     { mode: 0o755 }
   );
   const resolvedMux = () =>
@@ -560,20 +566,23 @@ test("a timed-out session listing is unknown, never absence: up and down leave a
   expect(mux.sessions.has(SESSION)).toBe(false);
 });
 
-test("SIGTERM during tmux environment setup settles within the mux bound", async () => {
+test("SIGTERM during a stalled tmux session creation settles within the mux bound", async () => {
   const { bin, mux, controller, entries } = await fixture("tmux");
   const originalPath = process.env.PATH;
   process.env.PATH = `${bin}:${originalPath ?? ""}`;
   try {
+    // The create (carrying the session environment) times out after the
+    // server created the session.
+    mux.timeoutCreate = "created";
     const a = controller({
       sessionOwnership: undefined,
       muxCommandTimeoutMs: 300,
+      env: { A_MARK: "a" },
     });
     const start = a.startMany({ processes: [PROCESS] }).then(
       () => "started",
       (error: unknown) => error
     );
-    // Wait until the session exists and set-environment is hanging.
     while (!mux.sessions.has(SESSION)) {
       await Bun.sleep(10);
     }
@@ -589,6 +598,10 @@ test("SIGTERM during tmux environment setup settles within the mux bound", async
     expect(await start).toBeInstanceOf(MuxCommandTimeoutError);
     expect(mux.sessions.has(SESSION)).toBe(false);
     expect(await entries()).toEqual([]);
+    expect(mux.createdEnv.at(-1)?.A_MARK).toBe("a");
+    expect(await readLines(join(bin, "tmux.log"))).not.toContainEqual(
+      expect.stringContaining("set-environment")
+    );
   } finally {
     process.env.PATH = originalPath;
   }
@@ -725,17 +738,17 @@ test("a displaced start never launches a process into its replacement's session"
   expect(a.getOperationCleanup()).toBeNull();
 });
 
-test("tmux environment setup finishes under the creation lock: a replacement never receives a displaced start's environment", async () => {
+test("tmux session environment travels with the locked creating call: a replacement never receives a displaced start's environment", async () => {
   const { bin, mux, controller, newOwnership } = await fixture("tmux");
   const events = join(bin, "events");
   mux.eventsPath = events;
-  // set-environment is slow; new-window fails so no launch waits on a pane.
+  // new-window fails so no launch waits on a pane.
   await writeFile(
     join(bin, "tmux"),
     [
       "#!/bin/sh",
+      `echo "$*" >> '${join(bin, "tmux.log")}'`,
       'case "$1" in',
-      `  set-environment) echo "env-start $4" >> '${events}'; sleep 0.4; echo "env-end $4" >> '${events}' ;;`,
       "  new-window) exit 1 ;;",
       "esac",
       "exit 0",
@@ -753,9 +766,9 @@ test("tmux environment setup finishes under the creation lock: a replacement nev
     const aRun = a
       .startMany({ processes: [PROCESS] })
       .catch((error: unknown) => error);
-    // B starts while A's environment setup is in flight; it would replace
-    // A's pending session.
-    while (!(await readLines(events)).some((line) => line.startsWith("env-"))) {
+    while (
+      !(await readLines(events)).some((line) => line.startsWith("create"))
+    ) {
       await Bun.sleep(10);
     }
     const b = controller({ sessionOwnership: newOwnership() });
@@ -763,14 +776,19 @@ test("tmux environment setup finishes under the creation lock: a replacement nev
       .startMany({ processes: [] })
       .catch((error: unknown) => error);
     await Promise.all([aRun, bRun]);
+    // A's environment arrived only with A's own create, which ran under the
+    // creation lock; B's create carried only B's environment.
+    expect(mux.createdEnv[0]?.A_MARK).toBe("a");
+    expect(mux.createdEnv[0]?.PATH).toContain(bin);
+    for (const env of mux.createdEnv.slice(1)) {
+      expect(env?.A_MARK).toBeUndefined();
+    }
     const lines = await readLines(events);
-    const aEnv = lines.flatMap((line, index) =>
-      line.includes("A_MARK") || line.includes("PATH") ? [index] : []
+    expect(lines[0]?.startsWith("create ")).toBe(true);
+    // No separate environment step exists that could land on a replacement.
+    expect(await readLines(join(bin, "tmux.log"))).not.toContainEqual(
+      expect.stringContaining("set-environment")
     );
-    const kill = lines.findIndex((line) => line.startsWith("kill "));
-    // A's session was replaced only after all of A's environment setup.
-    expect(kill).toBeGreaterThan(-1);
-    expect(aEnv.every((index) => index < kill)).toBe(true);
     expect(mux.inFlight).toBe(0);
   } finally {
     process.env.PATH = originalPath;

@@ -8,12 +8,62 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
+    os::fd::{AsRawFd, FromRawFd},
     os::unix::{
         fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt},
         process::CommandExt,
     },
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
+
+/// The relay does not consume interactive stdin: fd 0 is its one-shot control pipe.
+/// Both ends are owned here, and the writer closes before exec so the reader sees EOF.
+fn control_command(executable: &Path, token: &str) -> Result<Command, CandidateError> {
+    if !hex(token, 32) {
+        return Err(error());
+    }
+    let mut fds = [-1; 2];
+    // SAFETY: fds holds two writable descriptors; successful pipe transfers ownership.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(state::io(std::io::Error::last_os_error()));
+    }
+    // SAFETY: these are distinct, newly opened pipe ends, each adopted exactly once.
+    let (reader, mut writer) = unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) };
+    for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
+        // SAFETY: both owned pipe ends are live; only the child stdin mapping survives exec.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(state::io(std::io::Error::last_os_error()));
+        }
+    }
+    writer.write_all(token.as_bytes()).map_err(state::io)?;
+    drop(writer);
+    let mut command = Command::new(executable);
+    command.env_clear().stdin(Stdio::from(reader));
+    Ok(command)
+}
+
+fn publication_command(e: &Entry, upstream: &Path) -> Result<Command, CandidateError> {
+    let dir = directory(e);
+    let endpoint = if e.unix {
+        dir.join("frontend").into_os_string()
+    } else {
+        e.port.to_string().into()
+    };
+    let mut command = control_command(&e.process.executable, &e.token)?;
+    command
+        .arg(if e.unix {
+            "--publish-unix"
+        } else {
+            "--publish"
+        })
+        .arg(endpoint)
+        .arg(upstream)
+        .args([&e.reservation, "60000", "--control"])
+        .arg(dir.join("control"))
+        .args(["--control-fd", "0"]);
+    Ok(command)
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -719,30 +769,13 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
     e.binary.as_mut().expect("recorded staged file").ready = true;
     entries.insert(e.reservation.clone(), e.clone());
     save(c, &entries)?;
-    let endpoint = if e.unix {
-        dir.join("frontend").into_os_string()
-    } else {
-        e.port.to_string().into()
-    };
     if e.unix {
         eprintln!(
             "Unix publication endpoint (await ready): {}",
             dir.join("frontend").display()
         );
     }
-    let failure = std::process::Command::new(&e.process.executable)
-        .env_clear()
-        .arg(if e.unix {
-            "--publish-unix"
-        } else {
-            "--publish"
-        })
-        .arg(endpoint)
-        .arg(options.upstream)
-        .args([&e.reservation, "60000", "--control"])
-        .arg(dir.join("control"))
-        .arg(&e.token)
-        .exec();
+    let failure = publication_command(&e, options.upstream)?.exec();
     Err(state::io(failure))
 }
 
@@ -754,6 +787,22 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    #[test]
+    fn control_token_is_only_delivered_on_the_pipe() {
+        let token = "a1".repeat(16);
+        let mut command = control_command(Path::new("/bin/cat"), &token).unwrap();
+        assert!(
+            command
+                .get_args()
+                .all(|arg| !arg.to_string_lossy().contains(&token))
+        );
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, token.as_bytes());
+        for invalid in ["", "short", &"g".repeat(32), &"a".repeat(33)] {
+            assert!(control_command(Path::new("/bin/cat"), invalid).is_err());
+        }
+    }
     fn fixture() -> (Candidate, Entry) {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let base = PathBuf::from(format!(
@@ -785,6 +834,21 @@ mod tests {
         };
         e.process.executable = directory(&e).join("publisher");
         (candidate, e)
+    }
+    #[test]
+    fn publication_argv_never_contains_control_token() {
+        let (candidate, mut entry) = fixture();
+        for unix in [false, true] {
+            entry.unix = unix;
+            let command = publication_command(&entry, Path::new("/upstream")).unwrap();
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy())
+                .collect();
+            assert!(!args.iter().any(|arg| arg.contains(&entry.token)));
+            assert_eq!(&args[args.len() - 2..], &["--control-fd", "0"]);
+        }
+        fs::remove_dir_all(&candidate.checkout).unwrap();
     }
     #[test]
     fn hostname_transition_preflight_keeps_foreign_and_pending_claims_intact() {

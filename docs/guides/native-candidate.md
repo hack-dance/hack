@@ -239,6 +239,24 @@ lists the closed names `external_network`, `external_volume`, `reserved_label`,
 is a warning; on the Compose backend it is informational. Native doctor applies
 the same `HACK_NATIVE_ADAPTATION` selection before it reports.
 
+Publication control tokens are delivered to the relay through a one-shot inherited
+pipe (`--control-fd 0`), never through process arguments. The relay reads exactly
+32 lowercase hexadecimal bytes, requires EOF, and closes the descriptor before
+binding its listeners. Missing, malformed, or stalled input refuses startup; the
+old token argument form is not accepted. Rebuild the runtime and relay together.
+
+Tmux lifecycle sessions receive their owner token and environment through
+`source-file -` on stdin. The owner token stays in the session environment;
+existing sessions with the older owner option remain readable.
+Commands sent to an existing tmux pane receive selected environment values through
+a one-shot mode-0600 file inside a private mode-0700 temporary directory. The CLI's
+internal launcher reads and removes that payload before starting the command,
+preserving keys such as `UID` without value-bearing arguments. Leading command-local
+assignments override selected values; the existing pane shell still parses multiline
+commands and pipelines. The command keeps the pane's terminal stdin. Failed sends
+remove their staged payload; if the pane never executes a successfully sent command,
+the private payload remains until it is consumed or explicitly cleaned up.
+
 Native `up` and `restart` also stay in the foreground in every project:
 `--detach` refuses with one `E_USAGE` line. Run `hack up` in its own terminal and
 keep it open, use `hack ps` and `hack logs` from another terminal, and press

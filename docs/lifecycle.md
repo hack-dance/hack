@@ -265,7 +265,17 @@ Behavior:
   SIGINT/SIGTERM once a container start has begun keeps the holders too (the start may
   still be starting services). If `docker compose down` fails, times out or is interrupted, the holders are
   kept (with a warning) and the command fails with Compose's error; run `hack down`
-  again. If the session stop fails or cannot be confirmed (including when tmux cannot
+  again. A successful `docker compose down` is not enough on its own: it uses the current
+  Compose file without `--remove-orphans`, so a container of a service the file no longer
+  declares (an orphan) can keep running while Compose exits 0. Before releasing the
+  holders, Hack therefore lists every container labelled with the instance's Compose
+  project (`com.docker.compose.project=<project>`, orphans included). It releases them
+  only when none is running, restarting, paused or in another state that may run
+  (created, exited and dead containers do not count). If one may still run, or the
+  listing fails or times out, the holders are kept, the warning names the containers (or
+  the failed check), and the down fails with `E_LIFECYCLE_FAILED`. Stop the remaining
+  containers (for example with `docker compose -p <project> down --remove-orphans`), then
+  run `hack down` again to release the holders. If the session stop fails or cannot be confirmed (including when tmux cannot
   say whether the session exists), the session's processes may still use the helpers: `hack
   down`, `hack restart` and native retirement keep every holder, warn, and fail the same
   way. Run `hack down` again once the session can be stopped. Likewise, an up whose failed

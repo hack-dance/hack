@@ -41,6 +41,7 @@ import {
 } from "../agents/onboarding-handoff.ts";
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
+import { parseNativeGcloudSelection } from "../backends/native-gcloud-environment.ts";
 import { parseNativePreparedBase } from "../backends/native-prepared-base.ts";
 import {
   nativeDownEnvironment,
@@ -5779,6 +5780,7 @@ async function handleNativeUp({
           region: process.env.HACK_NATIVE_AWS_REGION,
         }
       : undefined,
+    gcloud: parseNativeGcloudSelection(process.env.HACK_NATIVE_GCLOUD_ADC),
     runtimeMetadata: {
       devHost,
       aliasHost: resolveBranchAliasHost({ devHost, cfg }),

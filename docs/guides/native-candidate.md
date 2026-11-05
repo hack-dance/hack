@@ -968,7 +968,58 @@ service-scoped AWS adapter after the normal login hook. It removes only recogniz
 AWS mounts/selectors and supplies temporary credentials through private stdin.
 Expired or unsupported profiles fail startup; credentials are not persisted or
 refreshed automatically. Unrecognized mounts and other unsupported bindings still
-refuse admission.
+refuse admission. Because the exported credentials are a startup snapshot, the
+foreground prints one value-free line to stderr ten minutes before they expire and
+another at expiry: `AWS credentials delivered to N services expire at HH:MM; run
+hack restart to renew.` `hack exec` keeps exporting fresh values for each request.
+
+### gcloud Application Default Credentials (file mode)
+
+For a project whose services bind the gcloud ADC file read-only, for example
+`~/.config/gcloud/application_default_credentials.json:/config/adc.json:ro`,
+explicit `HACK_NATIVE_GCLOUD_ADC=file` applies the gcloud adapter after the normal
+login hook, beside the AWS adapter. Accepted sources are that path written with
+`~`, `${HOME}`, `$HOME` or the absolute home directory, in short syntax with `:ro`
+or long syntax `{type: bind, source, target, read_only: true}` with no other keys.
+The target must be an absolute container file path outside `/proc`, `/sys`, `/dev`,
+`/run` and `/var/run` that no other mount or tmpfs of the service equals, contains
+or sits under. Writable or directory mounts, other gcloud paths and two matches in
+one service refuse; so does selecting the adapter when no service matches.
+`GOOGLE_APPLICATION_CREDENTIALS`, when declared, must equal the mount target and
+stays public. `CLOUDSDK_CONFIG`, `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`,
+`CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, `GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES`,
+`GCE_METADATA_HOST` and `GCE_METADATA_IP` in a selected service refuse. Ambient
+`GOOGLE_APPLICATION_CREDENTIALS` and `CLOUDSDK_CONFIG` on the host are not consulted.
+
+The adapter reads only `<home>/.config/gcloud/application_default_credentials.json`:
+a regular file (not a symlink) owned by you, not group- or world-writable, 1 to 16 KiB
+of UTF-8 JSON, unchanged during the read. It admits `authorized_user` credentials and
+`impersonated_service_account` credentials whose source is `authorized_user`.
+`service_account` key files are refused, as are `external_account` types and any
+`credential_source`, whose host files, URLs or executables do not exist in the guest.
+It then runs `gcloud auth application-default print-access-token` once with prompts
+disabled, a clean environment and a 30-second limit, and discards the token unread.
+A missing `gcloud` refuses with a message naming the CLI; a failed mint or an ADC
+file that changed during startup refuses. Other refusals use one closed line with
+values omitted.
+
+Each selected service then loses the bind mount from public Compose and receives
+the same bytes as a private file member through the version 2 private envelope. The
+runtime stages it mode 0400 for the container's numeric user in that container's
+environment allocation and binds it read-only at the authored target. A service
+with no other private values keeps its own entrypoint and health check; only a
+numeric image or Compose user is required.
+
+File mode places the ADC refresh token inside the VM for the container's lifetime.
+That is no wider than the Compose bind mount it replaces: only the selected services
+receive it, as a read-only snapshot owned by the container user, retired with the
+container. Google client libraries refresh access tokens from it over normal
+egress. Host re-login or revocation is not propagated; run `hack restart` to deliver
+a fresh snapshot. The run mapping records only `gcloud: {"mode": "file"}`; restart
+and retained restore keep that selection and deliver a fresh copy into new
+allocations. `hack exec` delivers nothing new: the file is already in the
+container, and exec only rechecks the mount and selectors. One-off `run` does not
+apply the adapter. A mapping with a gcloud selection refuses on earlier candidates.
 
 New immutable source captures use manifest schema 2: the revision binds both
 selected content and its selection receipt. This prevents an ignored mountpoint

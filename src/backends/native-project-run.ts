@@ -43,6 +43,8 @@ export type NativeProjectRun = {
   readonly profiles?: readonly string[];
   /** Public startup selector only; null means no AWS adaptation. Never credentials. */
   readonly aws?: { readonly profile: string; readonly region?: string } | null;
+  /** Public gcloud ADC adapter selector; absent means none. Never credential data. */
+  readonly gcloud?: { readonly mode: "file" };
   /**
    * Present when startup reviewed public runtime host metadata into this graph.
    * Retained restores must add it again; absent legacy graphs never gain it.
@@ -59,6 +61,13 @@ export type NativeProjectRunScope = {
 function refused(): Error {
   return new ClosedCliError(
     "Native project run mapping is unsafe, changed, or owned by another run; inspect native state before recovery."
+  );
+}
+function validGcloud(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Object.keys(value).join() === "mode" &&
+    value.mode === "file"
   );
 }
 function validAws(value: unknown): boolean {
@@ -118,7 +127,10 @@ function valid(value: unknown): value is NativeProjectRun {
       "aws,effectiveEnvName,namespace,owner,planId,run",
       "aws,effectiveEnvName,namespace,owner,planId,profiles,run",
       "aws,effectiveEnvName,namespace,owner,planId,profiles,run,runtimeMetadata",
+      "aws,effectiveEnvName,gcloud,namespace,owner,planId,profiles,run",
+      "aws,effectiveEnvName,gcloud,namespace,owner,planId,profiles,run,runtimeMetadata",
     ].includes(Object.keys(value).sort().join()) &&
+    (!Object.hasOwn(value, "gcloud") || validGcloud(value.gcloud)) &&
     (!Object.hasOwn(value, "runtimeMetadata") ||
       value.runtimeMetadata === true) &&
     (!Object.hasOwn(value, "aws") || validAws(value.aws)) &&

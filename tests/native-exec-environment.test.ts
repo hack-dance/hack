@@ -167,3 +167,39 @@ test("fresh exec uses only saved AWS selection and omits adapter failure details
     })
   ).rejects.toThrow("Values omitted");
 });
+test("fresh exec with a gcloud selection rechecks selectors only and delivers no files", async () => {
+  const opts = await fixture();
+  const run: NativeProjectRun = { ...opts.run, gcloud: { mode: "file" } };
+  let calls = 0;
+  const values = await prepareNativeExecEnvironment({
+    ...opts,
+    run,
+    adaptGcloud: async (request) => {
+      calls += 1;
+      expect(request.mode).toBe("file");
+      expect(request.deliver).toBe(false);
+      return {
+        input: request.input,
+        receipt: { mode: "file", types: [], services: ["web"] },
+      };
+    },
+  });
+  expect(calls).toBe(1);
+  expect(values).toEqual({ VALUE: "selected" });
+  // Without a saved selection the adapter is never consulted.
+  await prepareNativeExecEnvironment({
+    ...opts,
+    adaptGcloud: async () => {
+      throw new Error("must not run");
+    },
+  });
+  await expect(
+    prepareNativeExecEnvironment({
+      ...opts,
+      run,
+      adaptGcloud: async () => {
+        throw new Error("synthetic-private-detail");
+      },
+    })
+  ).rejects.toThrow("Values omitted");
+});

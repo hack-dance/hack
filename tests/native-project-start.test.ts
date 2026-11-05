@@ -785,6 +785,99 @@ test("AWS profile export follows native login hooks and precedes runtime effects
   expect(events).toEqual(["before", "cleanup"]);
 });
 
+test("gcloud ADC delivery follows hooks, sends file members privately and persists only the mode", async () => {
+  const { opts, events } = await fixture();
+  opts.dependencies.adaptGcloud = async ({ input, mode }) => {
+    expect(mode).toBe("file");
+    events.push("gcloud");
+    return {
+      input: {
+        ...input,
+        managedFiles: {
+          web: [
+            {
+              name: "gcloud-adc.json",
+              target: "/config/adc.json",
+              content: Buffer.from("synthetic-adc-bytes"),
+            },
+          ],
+        },
+      },
+      receipt: { mode, types: ["authorized_user"], services: ["web"] },
+    };
+  };
+  const serve = opts.dependencies.serve;
+  let envelope: Record<string, unknown> | undefined;
+  opts.dependencies.serve = async (call) => {
+    envelope = JSON.parse(new TextDecoder().decode(call.privateInput));
+    expect(call.args.join(" ")).not.toContain("synthetic-adc-bytes");
+    return await serve!(call);
+  };
+  let saved: NativeProjectRun | undefined;
+  opts.dependencies.save = async ({ run }) => {
+    saved = run;
+  };
+  opts.dependencies.remove = async ({ expected }) => {
+    expect(saved).toBe(expected);
+  };
+  expect(await startNativeProject({ ...opts, gcloud: { mode: "file" } })).toBe(
+    0
+  );
+  expect(events.indexOf("gcloud")).toBeGreaterThan(events.indexOf("before"));
+  expect(events.indexOf("gcloud")).toBeLessThan(events.indexOf("runtime up"));
+  expect(envelope?.version).toBe(2);
+  expect(envelope?.files).toEqual({
+    web: [
+      {
+        name: "gcloud-adc.json",
+        target: "/config/adc.json",
+        mode: "0400",
+        content_b64: Buffer.from("synthetic-adc-bytes").toString("base64"),
+      },
+    ],
+  });
+  expect(saved?.gcloud).toEqual({ mode: "file" });
+  expect(JSON.stringify(saved)).not.toContain("synthetic");
+  // A retained graph without a gcloud selection cannot gain one.
+  events.length = 0;
+  opts.dependencies.load = async () => ({
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+  });
+  await expect(
+    startNativeProject({ ...opts, gcloud: { mode: "file" } })
+  ).rejects.toThrow("cannot change the retained run");
+  expect(events).toEqual([]);
+});
+
+test("AWS delivery warns value-free before expiry and clears its timers on exit", async () => {
+  const { opts } = await fixture();
+  const lines: string[] = [];
+  opts.dependencies.warn = (line) => lines.push(line);
+  opts.dependencies.adaptAws = async ({ input, profile }) => ({
+    input,
+    receipt: {
+      profile,
+      // Already inside the warning window, so the notice is immediate.
+      expiry: new Date(Date.now() + 5 * 60_000).toISOString(),
+      services: ["web", "worker"],
+    },
+  });
+  expect(
+    await startNativeProject({ ...opts, aws: { profile: "qa-test" } })
+  ).toBe(0);
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toMatch(
+    /^AWS credentials delivered to 2 services expire at \d\d:\d\d; run hack restart to renew\.$/
+  );
+  expect(lines[0]).not.toContain("qa-test");
+});
+
 test("reviewed dependency caches bind published source and successful completion readiness", async () => {
   const { opts } = await fixture(false);
   const review = opts.dependencies.review,

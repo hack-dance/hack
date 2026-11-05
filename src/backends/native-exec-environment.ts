@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import { adaptNativeGcloudEnvironment } from "./native-gcloud-environment.ts";
 import { prepareNativeProjectInput } from "./native-project-input.ts";
 import type {
   NativeProjectRun,
@@ -28,6 +29,7 @@ export async function prepareNativeExecEnvironment(opts: {
   readonly service: string;
   readonly prepare?: typeof prepareNativeProjectInput;
   readonly adaptAws?: typeof adaptNativeAwsEnvironment;
+  readonly adaptGcloud?: typeof adaptNativeGcloudEnvironment;
 }): Promise<Readonly<Record<string, string>>> {
   if (
     !(
@@ -71,6 +73,17 @@ export async function prepareNativeExecEnvironment(opts: {
         await (opts.adaptAws ?? adaptNativeAwsEnvironment)({
           input,
           ...opts.run.aws,
+        })
+      ).input;
+    }
+    if (opts.run.gcloud) {
+      // Files already live in the running container; exec only rechecks the
+      // mount and selectors so its values match startup. Nothing is re-delivered.
+      input = (
+        await (opts.adaptGcloud ?? adaptNativeGcloudEnvironment)({
+          input,
+          mode: opts.run.gcloud.mode,
+          deliver: false,
         })
       ).input;
     }

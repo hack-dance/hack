@@ -351,6 +351,7 @@ fn lowered_named_volume_covers_image_volume_and_subpath_or_missing_cover_refuses
     for (mounts, admitted) in [
         (json!(["state:/var/lib/data/"]), true),
         (json!(["state:/var/lib/other"]), false),
+        (json!(["state:/var/lib/data:ro"]), false),
         (
             json!([{"type":"volume","source":"state","target":"/var/lib/data","volume":{"subpath":"db"}}]),
             false,

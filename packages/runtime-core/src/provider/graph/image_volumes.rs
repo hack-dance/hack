@@ -3,7 +3,9 @@
 //! An image `VOLUME` makes the engine allocate an anonymous volume unless an explicit
 //! mount already occupies that target. Graphs never create anonymous storage, so each
 //! declared target must be covered by exactly one explicit mount, and that mount must be
-//! a whole (no subpath) graph-owned named volume of this receipt. Dependency-cache
+//! a whole (no subpath), writable, graph-owned named volume of this receipt. A read-only
+//! cover would still be seeded from image contents by engine copy-up before the read-only
+//! mount applies, so it refuses rather than give the image an undeclared write. Dependency-cache
 //! volumes have consumers outside the graph and never cover an image volume: copy-up
 //! into a shared cache would let one image's files reach other consumers.
 //!
@@ -37,8 +39,9 @@ fn uncovered() -> CandidateError {
 /// Admit `image_volumes` (the image `Config.Volumes` value) for one compiled container
 /// configuration. Null or an empty object passes. Otherwise every declared target needs
 /// an empty options object and exactly one mount at the same normalized target; that
-/// mount must be a writable-or-read-only `volume` mount without a subpath whose source
-/// is a non-cache volume resource of this graph.
+/// mount must be a writable `volume` mount without a subpath whose source is a non-cache
+/// volume resource of this graph. A read-only cover refuses: copy-up would still write
+/// image contents into an empty volume before the read-only mount takes effect.
 pub(super) fn admit(
     image_volumes: &Value,
     config: &Value,
@@ -74,7 +77,12 @@ pub(super) fn admit(
                 && resource.cache.is_none()
                 && Some(resource.name.as_str()) == source
         });
-        if mount["Type"] != "volume" || !mount["VolumeOptions"]["Subpath"].is_null() || !owned {
+        let writable = matches!(mount["ReadOnly"], Value::Null | Value::Bool(false));
+        if mount["Type"] != "volume"
+            || !mount["VolumeOptions"]["Subpath"].is_null()
+            || !writable
+            || !owned
+        {
             return Err(uncovered());
         }
     }
@@ -163,14 +171,22 @@ mod tests {
             {"Type":"bind","Source":"/source","Target":"/app","ReadOnly":true}
         ]);
         admit(&declared, &config(mounts), &resources()).unwrap();
-        let mut read_only = mount(&owned(0), "/var/lib/data");
-        read_only["ReadOnly"] = json!(true);
-        admit(
-            &json!({"/var/lib/data":{}}),
-            &config(json!([read_only])),
-            &resources(),
-        )
-        .unwrap();
+    }
+
+    #[test]
+    fn read_only_or_malformed_read_only_covers_refuse() {
+        // Copy-up seeds an empty volume from the image before a read-only mount
+        // applies, so a read-only owned cover is not admitted.
+        let declared = json!({"/var/lib/data":{}});
+        let mut writable = mount(&owned(0), "/var/lib/data");
+        admit(&declared, &config(json!([writable.clone()])), &resources()).unwrap();
+        writable.as_object_mut().unwrap().remove("ReadOnly");
+        admit(&declared, &config(json!([writable])), &resources()).unwrap();
+        for read_only in [json!(true), json!("false"), json!(0)] {
+            let mut cover = mount(&owned(0), "/var/lib/data");
+            cover["ReadOnly"] = read_only;
+            refused(admit(&declared, &config(json!([cover])), &resources()));
+        }
     }
 
     #[test]

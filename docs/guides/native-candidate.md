@@ -615,8 +615,8 @@ An image that declares `VOLUME` (for example a database image) runs natively onl
 when the service mounts a named volume at each declared path, as in
 `db-data:/var/lib/postgresql/data`. Hack never creates an anonymous volume: a declared
 path without exactly one whole named volume of the project refuses with
-`graph_image_volume_uncovered`, and a bind mount, a `volume.subpath` mount or a
-dependency-cache volume at that path does not count. On first use the engine copies
+`graph_image_volume_uncovered`, and a read-only (`:ro`) mount, a bind mount, a
+`volume.subpath` mount or a dependency-cache volume at that path does not count. On first use the engine copies
 the image directory's contents, owner and mode into the new, empty volume; later runs
 mount the retained data unchanged. Native containers drop all capabilities, so an
 image entrypoint that starts as root and hands the data directory to another user

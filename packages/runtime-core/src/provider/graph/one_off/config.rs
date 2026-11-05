@@ -155,5 +155,13 @@ mod tests {
             .code,
             UNCOVERED
         );
+        // A read-only parent cover refuses for the job as it does for the service.
+        let mut read_only = template.clone();
+        read_only["HostConfig"]["Mounts"][0]["ReadOnly"] = json!(true);
+        let config = prepare(&read_only, &receipt, &resource, &[], None).unwrap();
+        assert_eq!(
+            admit(&declared, &config, &resources).unwrap_err().code,
+            UNCOVERED
+        );
     }
 }

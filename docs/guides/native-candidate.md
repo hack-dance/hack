@@ -666,7 +666,13 @@ not change existing plan identities.
 A registry on this host or its local network is refused unless it is named
 exactly: `localhost` and `*.localhost`, loopback, private, link-local, CGNAT and
 multicast IPv4 literals (including numeric spellings such as `0x7f.0.0.1`),
-single-label hosts such as `registry:5000`, and mDNS `.local` names. Allow one
+single-label hosts such as `registry:5000`, and mDNS `.local` names. The same
+rule applies to the address a connection actually uses: a public-looking name
+that resolves to a loopback, private (including IPv6 `fc00::/7`), link-local,
+CGNAT, multicast or unspecified address, or an IPv4-mapped form of one, is
+refused with `registry_local_address`. This covers the registry, its redirects
+and its token endpoint. A private registry on an internal network therefore
+also needs an explicit opt-in. Allow one
 with `--allow-local-registry [http://]host[:port]` (repeatable) on `admit-image`,
 `resolve-image`, `fetch-image` and `ensure-image`. Without `http://` the registry
 must serve HTTPS; with it, plain HTTP is used for that registry only. Native
@@ -681,16 +687,23 @@ credentials, in the Docker CLI's order: a `credHelpers` entry for the registry,
 then `credsStore`, then an `auths` entry (`auth`, `username`/`password` or
 `identitytoken`). Helpers run as `docker-credential-NAME get` from `PATH`; a
 helper may show its own approval prompt, such as a keychain prompt, and is
-stopped after 60 seconds. The configuration is `~/.docker/config.json`, or
+stopped with its process group after 60 seconds. Processes a helper leaves
+running cannot extend that wait. The configuration is `~/.docker/config.json`, or
 `--docker-config DIR` (native `hack up` passes `DOCKER_CONFIG` when set).
 
 Credential lookup is read-only: nothing is logged in, stored, erased or rewritten.
 Credentials and tokens stay in memory for one acquisition, are sent only to the
 registry's own origin or its token endpoint, never to a redirected blob host,
-and never appear in output, receipts or errors. Docker Hub tokens come only from
-`auth.docker.io`. Other token endpoints must be the registry origin or a public
-HTTPS host. Run `docker login` (or your registry's helper setup) yourself before
-acquiring a private image.
+and never appear in output, receipts or errors. Only a `401` from the registry
+origin itself is answered; a redirected blob host that refuses access fails with
+`registry_redirect_refused` and no token or credential request. Docker Hub
+tokens come only from `auth.docker.io`. For other registries, an anonymous token
+may come from the registry origin or a public HTTPS host, but Docker credentials
+are sent only to a token endpoint on the registry origin, or over HTTPS on port
+443 at the registry's own host name or a parent domain of it (for example
+`gitlab.com` for `registry.gitlab.com`). Any other token endpoint refuses with
+`registry_realm_refused` before credentials are read. Run `docker login` (or
+your registry's helper setup) yourself before acquiring a private image.
 
 ### Content, budgets and limits
 
@@ -733,7 +746,8 @@ Docker Hub's known blob hosts, or (for other registries) public HTTPS hosts on
 port 443; local destinations and embedded credentials refuse. Proxy settings are
 not used. TLS uses the bundled public root certificates, so a registry signed by
 a private certificate authority is not reachable yet. Host names are classified
-before connecting, not after DNS resolution.
+before connecting, and resolved addresses are checked again before each
+connection (see [Local registries](#local-registries)).
 
 No implicit image refresh occurs. Keep the archive only as long as needed for owned
 imports; fetch does not install a background cache or cleanup daemon. The complete

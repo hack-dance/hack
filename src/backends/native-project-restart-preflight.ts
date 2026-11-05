@@ -5,6 +5,10 @@ import { dirname, join } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import {
+  NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+  nativeImagePolicyArgs,
+} from "./native-image-policy.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   discoverNativeHostDependency,
@@ -296,7 +300,15 @@ async function pinRestartImages(opts: {
     const pinned = await opts.invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
-      args: ["runtime", "ensure-image", "--reference", image, "--json"],
+      args: [
+        "runtime",
+        "ensure-image",
+        "--reference",
+        image,
+        "--json",
+        ...nativeImagePolicyArgs(),
+      ],
+      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
     });
     if (
       !isRecord(pinned) ||

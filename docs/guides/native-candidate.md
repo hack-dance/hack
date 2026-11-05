@@ -620,14 +620,16 @@ selectors. Credentials are not written to Compose or the project snapshot, and
 are not automatically renewed after expiry. Normal native foreground `hack up`
 uses these adapters within the capability limits described below.
 
-## Public image acquisition without Docker
+## Registry image acquisition without Docker
 
-The candidate can fetch a **digest-pinned public Docker Hub image** without Docker,
-OrbStack, registry credentials, or a running guest:
+The candidate can fetch a **digest-pinned image from any OCI distribution registry**
+without Docker, OrbStack or a running guest: Docker Hub, GitHub Container Registry,
+Google Artifact Registry and Container Registry, Quay, Amazon ECR, and private
+registries on their own host names.
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime fetch-image \
-  --reference '[namespace/]repository@sha256:REVIEWED_MANIFEST_DIGEST' \
+  --reference '[registry/]repository@sha256:REVIEWED_MANIFEST_DIGEST' \
   --archive /absolute/private/new-image.tar
 ```
 
@@ -635,15 +637,15 @@ For an existing mutable image declaration, resolve it explicitly first:
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime resolve-image \
-  --reference '[namespace/]repository:tag' --json
+  --reference '[registry/]repository:tag' --json
 ```
 
 Image references are normalized as the Docker CLI does before any request:
 `alpine` is `docker.io/library/alpine:latest`, `alpine:3.21` is
 `docker.io/library/alpine:3.21`, and `user/img` is `docker.io/user/img:latest`.
-`index.docker.io` becomes `docker.io`. Tags, digests, other registries and
-ports are kept as written; only public Docker Hub `namespace/repository`
-references are acquired. Repository names must be lowercase, and a normalized
+`index.docker.io` becomes `docker.io`. Tags, digests, registries, ports and
+nested repository paths are kept as written; Docker Hub references must name a
+`namespace/repository`. Repository names must be lowercase, and a normalized
 name is limited to 255 bytes. Uppercase digests and malformed registry ports are
 refused. Check a reference without network, credentials or candidate state:
 
@@ -652,38 +654,93 @@ refused. Check a reference without network, credentials or candidate state:
   --reference 'alpine:3.21' --json
 ```
 
-It returns the canonical `reference` and a `kind` of `docker_hub` or
-`image_id`; any other registry refuses with `registry_image`. Native foreground
-`hack up` runs this admission for every authored service image before startup
-hooks, the VM or any provider starts. Compose plan review applies the same
-syntax rules, keeps the authored image text in the reviewed plan, and does not
-change existing plan identities.
+It returns the canonical `reference` and a `kind` of `docker_hub`, `registry` or
+`image_id`; an unacquirable reference refuses with `registry_image`. Native
+foreground `hack up` runs this admission for every authored service image before
+startup hooks, the VM or any provider starts. Compose plan review applies the
+same syntax rules, keeps the authored image text in the reviewed plan, and does
+not change existing plan identities.
+
+### Local registries
+
+A registry on this host or its local network is refused unless it is named
+exactly: `localhost` and `*.localhost`, loopback, private, link-local, CGNAT and
+multicast IPv4 literals (including numeric spellings such as `0x7f.0.0.1`),
+single-label hosts such as `registry:5000`, and mDNS `.local` names. Allow one
+with `--allow-local-registry [http://]host[:port]` (repeatable) on `admit-image`,
+`resolve-image`, `fetch-image` and `ensure-image`. Without `http://` the registry
+must serve HTTPS; with it, plain HTTP is used for that registry only. Native
+`hack up` reads a comma-separated list from `HACK_NATIVE_LOCAL_REGISTRIES`, for
+example `HACK_NATIVE_LOCAL_REGISTRIES=http://localhost:5000`.
+
+### Registry credentials
+
+Requests start anonymous. When a registry answers `401`, the candidate first
+requests an anonymous Bearer token, then uses the host user's existing Docker
+credentials, in the Docker CLI's order: a `credHelpers` entry for the registry,
+then `credsStore`, then an `auths` entry (`auth`, `username`/`password` or
+`identitytoken`). Helpers run as `docker-credential-NAME get` from `PATH`; a
+helper may show its own approval prompt, such as a keychain prompt, and is
+stopped after 60 seconds. The configuration is `~/.docker/config.json`, or
+`--docker-config DIR` (native `hack up` passes `DOCKER_CONFIG` when set).
+
+Credential lookup is read-only: nothing is logged in, stored, erased or rewritten.
+Credentials and tokens stay in memory for one acquisition, are sent only to the
+registry's own origin or its token endpoint, never to a redirected blob host,
+and never appear in output, receipts or errors. Docker Hub tokens come only from
+`auth.docker.io`. Other token endpoints must be the registry origin or a public
+HTTPS host. Run `docker login` (or your registry's helper setup) yourself before
+acquiring a private image.
+
+### Content, budgets and limits
 
 Omitting the tag selects `latest`. Resolution returns `pinned_reference`,
 `source_digest`, `manifest_digest`, `image_id` and `platform`; it downloads only
 bounded metadata and verifies one unambiguous Linux ARM64 image configuration.
 Pass the returned **pinned reference** to `fetch-image`, not the original tag.
 Resolution creates no archive or runtime state and does not prove that all image
-layers fit the importer limits or that the application starts. A missing public
-tag/object reports `registry_image_not_found`; no replacement image is selected.
+layers fit the budget or that the application starts. A missing tag or object
+reports `registry_image_not_found`; no replacement image is selected.
 
 The archive must not already exist. The result reports `source_digest`, the selected
 Linux ARM64 `manifest_digest`, config `image_id`, `archive_sha256`, and archive size.
 Pass that exact archive, hash and image ID to `runtime load-image` after preparing
 the candidate guest. Fetching and importing remain separate operations.
 
-The fetch verifies the pinned index/manifest, the selected ARM64 manifest, every
-compressed blob and config digest, and the expanded layer identities. It supports
-only gzip layers, at most 128 layers, 256 MiB archived and 2 GiB expanded. HTTPS
-requests have a 60-second limit within a 300-second acquisition deadline; redirects
-are restricted to known Docker Hub HTTPS blob origins, with no bearer forwarding to
-CDNs. It never reads Docker credentials or proxy settings. Mutable tags passed directly to fetch, private
-registries, other registries and unsupported platforms fail closed. No implicit
-image refresh occurs. Keep the archive only as long as needed for owned imports;
-fetch does not install a background cache or cleanup daemon. The complete archive is synced and published without replacing an existing path.
-A failed write leaves no final archive; process interruption may retain a hidden
-temporary file beside the requested output. A directory-sync failure reports that
-a complete archive was published but durability could not be confirmed.
+The fetch accepts OCI and Docker v2 indexes and manifests. It verifies the pinned
+index or manifest, the selected ARM64 manifest, the config and every layer against
+its descriptor digest and size while streaming them to disk, then validates the
+assembled archive again before publishing it. Layers may be gzip, zstd (including
+multiple and skippable frames) or uncompressed tar, at most 128 per image; foreign,
+non-distributable and external-URL layers refuse. The importer checks each decoded
+layer against the config's `diff_ids`.
+
+Sizes are bounded by an explicit, configurable budget instead of a fixed cap:
+
+| Budget | Default | Range | Flag | `hack up` setting |
+| --- | --- | --- | --- | --- |
+| Compressed archive per image | 2 GiB | 16 MiB to 8 GiB | `--image-budget-mib N` | `HACK_NATIVE_IMAGE_BUDGET_MIB` |
+| Decoded content per image | 5 times the archive budget | follows the archive budget | none | none |
+| Image cache total | 16 GiB | 16 MiB to 256 GiB, at least one image budget | `--image-cache-mib N` | `HACK_NATIVE_IMAGE_CACHE_MIB` |
+
+The manifest states every layer size, so an image larger than the archive budget
+or the cache's remaining budget refuses before any layer transfer or disk write.
+`load-image` applies the same flags. The whole acquisition has a 360-second
+deadline; each layer request allows at least 1 MiB/s. Native `hack up` gives one
+`ensure-image` request 10 minutes for acquisition and import, and a completed
+archive is reused on the next attempt. Redirects stay on the registry origin,
+Docker Hub's known blob hosts, or (for other registries) public HTTPS hosts on
+port 443; local destinations and embedded credentials refuse. Proxy settings are
+not used. TLS uses the bundled public root certificates, so a registry signed by
+a private certificate authority is not reachable yet. Host names are classified
+before connecting, not after DNS resolution.
+
+No implicit image refresh occurs. Keep the archive only as long as needed for owned
+imports; fetch does not install a background cache or cleanup daemon. The complete
+archive is synced, validated and published without replacing an existing path.
+A failed write or verification leaves no final archive; process interruption may
+retain a hidden temporary file beside the requested output. A directory-sync failure
+reports that a complete archive was published but durability could not be confirmed.
 
 ### Explicit writable development source
 
@@ -946,12 +1003,15 @@ restored one-off remain open. An uncertain shutdown retains its mapping and evid
 for recovery; do not delete managed state to retry.
 
 After starting an owned native pool, `runtime ensure-image --reference REF --json`
-resolves a public Docker Hub tag (including shorthand such as `alpine:3.21`) or
+resolves a registry tag (including Docker Hub shorthand such as `alpine:3.21`) or
 accepts an explicit digest, reuses the verified
 archive cache, and imports through the existing content-ID-checked loader. Tags
 are resolved on each call; a warm explicit digest needs no registry request.
-The cache is limited to 16 archives and 2 GiB; an incomplete or conflicting entry
-requires inspection, and the command never prunes existing data. This command
+It accepts the [image policy flags](#registry-image-acquisition-without-docker).
+The cache holds at most 64 archives within its configured budget (16 GiB by
+default); an incomplete or conflicting entry requires inspection, and the command
+never prunes existing data. Lowering a budget keeps existing entries readable, but
+the loader refuses an archive larger than the current per-image budget. This command
 is a startup building block, not evidence of complete normal `hack up` support.
 
 Explicit Compose `shm_size` supports positive sizes up to 1 GiB, including

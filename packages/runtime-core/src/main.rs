@@ -100,11 +100,12 @@ Usage:
   hack-local runtime prepared-base verify --base-id <id> [--store <absolute-private-store>] [--json]
   hack-local runtime prepared-base status --profile research|development [--store <absolute-private-store>] [--json]
   hack-local runtime prepared-base remove --base-id <id> [--store <absolute-private-store>] [--json]
-  hack-local runtime admit-image --reference <[namespace/]repository[:tag][@sha256:digest]|sha256:image-id> --json
-  hack-local runtime ensure-image --reference <[namespace/]repository[:tag]|[namespace/]repository@sha256:digest> --json
-  hack-local runtime resolve-image --reference <[namespace/]repository[:tag]> --json
-  hack-local runtime fetch-image --reference <[namespace/]repository@sha256:digest> --archive <new-flat-image.tar> [--json]
-  hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash>
+  hack-local runtime admit-image --reference <[registry/]repository[:tag][@sha256:digest]|sha256:image-id> --json [IMAGE-POLICY]
+  hack-local runtime ensure-image --reference <[registry/]repository[:tag]|[registry/]repository@sha256:digest> --json [IMAGE-POLICY]
+  hack-local runtime resolve-image --reference <[registry/]repository[:tag]> --json [IMAGE-POLICY]
+  hack-local runtime fetch-image --reference <[registry/]repository@sha256:digest> --archive <new-flat-image.tar> [--json] [IMAGE-POLICY]
+  hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash> [IMAGE-POLICY]
+    IMAGE-POLICY: [--image-budget-mib N] [--image-cache-mib N] [--allow-local-registry [http://]host[:port]]... [--docker-config <absolute-dir>]
   hack-local runtime network internet --json
   hack-local runtime up --profile development --internet --json
   hack-local runtime network extend --allow-host <hostname> [--allow-host <hostname>] --json
@@ -935,16 +936,26 @@ fn run() -> Result<(), CandidateError> {
             "--reference",
             reference,
             "--json",
+            policy @ ..,
         ] => {
             print_json(&hack_runtime_core::provider::image_ensure::ensure(
                 &discover_candidate(&requested)?,
                 reference,
+                &image_policy(policy)?,
             )?)?;
         }
-        ["runtime", "admit-image", "--reference", reference, "--json"] => {
+        [
+            "runtime",
+            "admit-image",
+            "--reference",
+            reference,
+            "--json",
+            policy @ ..,
+        ] => {
             // Pure: no candidate discovery, network, credentials or runtime effects.
             print_json(&hack_runtime_core::provider::registry_image::admit(
                 reference,
+                &image_policy(policy)?,
             )?)?;
         }
         [
@@ -953,9 +964,11 @@ fn run() -> Result<(), CandidateError> {
             "--reference",
             reference,
             "--json",
+            policy @ ..,
         ] => {
             print_json(&hack_runtime_core::provider::registry_image::resolve(
                 reference,
+                &image_policy(policy)?,
             )?)?;
         }
         [
@@ -965,19 +978,14 @@ fn run() -> Result<(), CandidateError> {
             reference,
             "--archive",
             archive,
-        ]
-        | [
-            "runtime",
-            "fetch-image",
-            "--reference",
-            reference,
-            "--archive",
-            archive,
-            "--json",
+            rest @ ..,
         ] => {
+            let policy = image_policy(rest.strip_prefix(&["--json"]).unwrap_or(rest))?;
             print_json(&hack_runtime_core::provider::registry_image::acquire(
                 reference,
                 Path::new(archive),
+                &policy,
+                policy.archive_limit,
             )?)?;
         }
         [
@@ -989,12 +997,14 @@ fn run() -> Result<(), CandidateError> {
             digest,
             "--image-id",
             image,
+            policy @ ..,
         ] => {
-            print_json(&hack_runtime_core::provider::load_image(
+            print_json(&hack_runtime_core::provider::load_image_with(
                 &discover_candidate(&requested)?,
                 Path::new(archive),
                 digest,
                 image,
+                &image_policy(policy)?,
             )?)?;
         }
         ["runtime", "host-filesystem-recovery"]
@@ -1496,6 +1506,12 @@ fn print_sync_event(
     println!("{}", serde_json::to_string(&serde_json::json!({ "sync": receipt, "watching": watching, "total_millis": total_millis, "native_rescan": native_rescan }))
         .map_err(|_| CandidateError::new("serialization_failed", "Cannot encode source acknowledgement."))?);
     Ok(())
+}
+
+fn image_policy(
+    flags: &[&str],
+) -> Result<hack_runtime_core::provider::image_policy::ImagePolicy, CandidateError> {
+    hack_runtime_core::provider::image_policy::ImagePolicy::from_flags(flags)
 }
 
 fn print_json(value: &impl Serialize) -> Result<(), CandidateError> {

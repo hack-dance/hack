@@ -1,8 +1,31 @@
-//! Anonymous, digest-pinned Docker Hub acquisition. No daemon, credential store or VM effects.
+//! Digest-pinned image acquisition from any OCI distribution registry, without a Docker
+//! daemon or VM effects.
+//!
+//! - **Registries.** Docker Hub, any public or private registry host reached over HTTPS,
+//!   and local registries (loopback names, non-public IPv4 literals, single-label and
+//!   `.local` hosts) only when the policy names them exactly. A `http://` opt-in is the
+//!   only way to use plain HTTP.
+//! - **Authentication.** Requests start anonymous. A `401` challenge is answered with an
+//!   anonymous Bearer token first, and only then with the host user's existing Docker
+//!   credentials (read-only; see `registry_credentials`). Credentials and tokens stay in
+//!   zeroizing memory for one acquisition, are sent only to the registry origin or its
+//!   token realm, and never appear in output or errors.
+//! - **Content.** OCI and Docker v2 indexes and manifests; gzip, zstd and uncompressed
+//!   layers. Every manifest, config and layer is checked against its descriptor digest
+//!   and size while streaming, and the assembled archive is validated again before it is
+//!   published. Archive and expansion sizes stay within the policy's budgets.
+//! - **Platform.** One unambiguous Linux ARM64 image.
 use super::image_load;
+use super::image_policy::ImagePolicy;
 use super::image_reference::{ImageReference, NamedReference, normalize};
+use super::registry_credentials::{self, Credential};
 use crate::CandidateError;
-use reqwest::{Url, blocking::Client, header::ACCEPT, redirect::Policy};
+use reqwest::{
+    StatusCode, Url,
+    blocking::{Client, Response},
+    header::{ACCEPT, AUTHORIZATION, HeaderValue, LOCATION, WWW_AUTHENTICATE},
+    redirect::Policy,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -15,9 +38,33 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-const MAX_ARCHIVE: usize = 256 * 1024 * 1024;
 const MAX_METADATA: usize = 1024 * 1024;
+const MAX_TOKEN_RESPONSE: usize = 64 * 1024;
+const MAX_TOKEN: usize = 32 * 1024;
+const MAX_LAYERS: usize = 128;
+/// Whole-acquisition deadline. It stays below the CLI's ten-minute bound for
+/// `ensure-image` with room for the import that follows.
+const ACQUISITION_DEADLINE: Duration = Duration::from_secs(360);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Slowest blob transfer rate a request timeout allows for before the deadline applies.
+const MIN_BLOB_BYTES_PER_SECOND: u64 = 1024 * 1024;
+const DOCKER_HUB: &str = "docker.io";
+const DOCKER_HUB_ORIGIN: &str = "https://registry-1.docker.io";
+const DOCKER_HUB_REALM: &str = "https://auth.docker.io/token";
 const ACCEPT_MANIFEST: &str = "application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json";
+const INDEX_TYPES: [&str; 2] = [
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+];
+const MANIFEST_TYPES: [&str; 2] = [
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+];
+const CONFIG_TYPES: [&str; 2] = [
+    "application/vnd.oci.image.config.v1+json",
+    "application/vnd.docker.container.image.v1+json",
+];
+
 fn error(message: &str) -> CandidateError {
     CandidateError::new("registry_image", message)
 }
@@ -31,33 +78,176 @@ fn valid_digest(value: &str) -> bool {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
 }
-/// Normalize to a Docker Hub reference; other registries and image IDs refuse.
-fn docker_hub(value: &str) -> Result<NamedReference, CandidateError> {
-    match normalize(value) {
-        Ok(ImageReference::Named(named)) if named.docker_hub_repository().is_some() => Ok(named),
-        _ => Err(error(
-            "Only public Docker Hub [namespace/]repository[:tag][@sha256] references are supported.",
-        )),
+
+fn ipv4(host: &str) -> Option<[u8; 4]> {
+    let mut octets = [0_u8; 4];
+    let mut parts = host.split('.');
+    for octet in &mut octets {
+        let part = parts.next()?;
+        if part.is_empty() || part.len() > 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *octet = part.parse().ok()?;
+    }
+    parts.next().is_none().then_some(octets)
+}
+
+/// Hosts that are not public registries: loopback names, non-public IPv4 literals,
+/// single-label names and mDNS `.local` names. They resolve on this host or its network,
+/// so acquisition refuses them unless the policy names the registry explicitly.
+pub(super) fn local_host(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+        return true;
+    }
+    if let Some([a, b, ..]) = ipv4(host) {
+        return a == 0
+            || a == 10
+            || a == 127
+            || (a == 100 && (64..128).contains(&b))
+            || (a == 169 && b == 254)
+            || (a == 172 && (16..32).contains(&b))
+            || (a == 192 && b == 168)
+            || a >= 224;
+    }
+    !host.contains('.')
+}
+
+/// The reference grammar's `host[:port]` syntax, for local registry opt-ins.
+pub(super) fn local_domain_syntax(domain: &str) -> Result<(), ()> {
+    super::image_reference::domain(domain).map_err(|_| ())
+}
+
+/// Where one registry is reached.
+#[derive(Clone, Debug)]
+pub(super) struct Registry {
+    /// Normalized reference domain, for example `docker.io` or `registry.test:5000`.
+    domain: String,
+    /// `scheme://host[:port]` of the distribution API.
+    origin: Url,
+}
+
+impl Registry {
+    fn docker_hub(&self) -> bool {
+        self.domain == DOCKER_HUB
     }
 }
-/// Normalized Docker Hub `namespace/repository` and its required sha256 pin.
-/// Docker shorthand such as `alpine@sha256:...` expands to `library/alpine`.
-pub(super) fn reference(value: &str) -> Result<(String, String), CandidateError> {
-    let pinned = || error("A public Docker Hub reference pinned with @sha256 is required.");
+
+fn registry(named: &NamedReference, policy: &ImagePolicy) -> Result<Registry, CandidateError> {
+    if named.domain == DOCKER_HUB {
+        if named.docker_hub_repository().is_none() {
+            return Err(error(
+                "Docker Hub references must name a [namespace/]repository.",
+            ));
+        }
+        return Ok(Registry {
+            domain: DOCKER_HUB.into(),
+            origin: Url::parse(DOCKER_HUB_ORIGIN).map_err(|_| error("Invalid registry origin."))?,
+        });
+    }
+    let host = named.domain.split(':').next().unwrap_or_default();
+    let opt_in = policy.local_registry(&named.domain);
+    if local_host(host) && opt_in.is_none() {
+        return Err(error(
+            "Local registries are refused unless explicitly allowed for native image acquisition.",
+        ));
+    }
+    let scheme = if opt_in.is_some_and(|r| r.plain_http) {
+        "http"
+    } else {
+        "https"
+    };
+    let origin = Url::parse(&format!("{scheme}://{}", named.domain))
+        .map_err(|_| error("Invalid registry origin."))?;
+    // URL parsing normalizes numeric host forms (for example hexadecimal IPv4), so the
+    // parsed host is classified too.
+    if origin.host_str().is_none_or(local_host) && opt_in.is_none() {
+        return Err(error(
+            "Local registries are refused unless explicitly allowed for native image acquisition.",
+        ));
+    }
+    Ok(Registry {
+        domain: named.domain.clone(),
+        origin,
+    })
+}
+
+fn named(value: &str) -> Result<NamedReference, CandidateError> {
+    match normalize(value) {
+        Ok(ImageReference::Named(named)) => Ok(named),
+        Ok(ImageReference::ImageId(_)) => Err(error(
+            "A registry repository reference is required, not an image ID.",
+        )),
+        Err(reason) => Err(error(reason.message())),
+    }
+}
+
+/// A digest-pinned registry reference ready for acquisition.
+pub(super) struct Pinned {
+    registry: Registry,
+    path: String,
+    digest: String,
+}
+
+impl Pinned {
+    /// Canonical `domain/path@sha256:...`; any tag beside the digest is dropped.
+    pub(super) fn canonical(&self) -> String {
+        format!("{}/{}@{}", self.registry.domain, self.path, self.digest)
+    }
+}
+
+/// Canonical `domain/path@digest` for a pinned reference, by syntax alone. It does not
+/// admit the registry, so recorded cache entries stay readable under any policy.
+pub(super) fn pinned_syntax(value: &str) -> Result<(String, String), CandidateError> {
+    let pinned = || error("A registry reference pinned with @sha256 is required.");
     if !value.contains('@') {
         return Err(pinned());
     }
-    let named = docker_hub(value)?;
-    let pin = named.digest.ok_or_else(pinned)?;
-    Ok((named.path, pin))
+    let named = named(value)?;
+    let digest = named.digest.ok_or_else(pinned)?;
+    Ok((format!("{}/{}@{digest}", named.domain, named.path), digest))
 }
+
+/// A pinned reference whose registry the policy admits. Docker shorthand such as
+/// `alpine@sha256:...` expands to `docker.io/library/alpine`.
+pub(super) fn pinned(value: &str, policy: &ImagePolicy) -> Result<Pinned, CandidateError> {
+    pinned_syntax(value)?;
+    let named = named(value)?;
+    Ok(Pinned {
+        registry: registry(&named, policy)?,
+        path: named.path,
+        digest: named.digest.unwrap_or_default(),
+    })
+}
+
+/// Registry, repository path and tag for mutable resolution. `alpine` is
+/// `docker.io/library/alpine:latest`.
+pub(super) fn tagged(
+    value: &str,
+    policy: &ImagePolicy,
+) -> Result<(Registry, String, String), CandidateError> {
+    if value.contains('@') {
+        return Err(error(
+            "Tag resolution requires a repository and optional tag, not a digest.",
+        ));
+    }
+    let named = named(value)?;
+    let registry = registry(&named, policy)?;
+    Ok((
+        registry,
+        named.path,
+        named.tag.unwrap_or_else(|| "latest".into()),
+    ))
+}
+
 #[derive(Clone, Deserialize)]
 struct Descriptor {
     digest: String,
     size: u64,
-    #[serde(rename = "mediaType")]
+    #[serde(rename = "mediaType", default)]
     media_type: String,
     platform: Option<Platform>,
+    #[serde(default)]
+    urls: Vec<String>,
 }
 #[derive(Clone, Deserialize)]
 struct Platform {
@@ -69,6 +259,8 @@ struct Platform {
 struct Manifest {
     #[serde(rename = "schemaVersion")]
     schema_version: u32,
+    #[serde(rename = "mediaType")]
+    media_type: Option<String>,
     #[serde(default)]
     manifests: Vec<Descriptor>,
     config: Option<Descriptor>,
@@ -83,6 +275,16 @@ fn parse_manifest(bytes: &[u8], expected: &str) -> Result<Manifest, CandidateErr
         serde_json::from_slice(bytes).map_err(|_| error("Invalid registry manifest."))?;
     if m.schema_version != 2 {
         return Err(error("Unsupported registry manifest schema."));
+    }
+    let index = !m.manifests.is_empty();
+    if m.media_type.as_deref().is_some_and(|t| {
+        !(if index {
+            INDEX_TYPES.contains(&t)
+        } else {
+            MANIFEST_TYPES.contains(&t)
+        })
+    }) {
+        return Err(error("Unsupported registry manifest media type."));
     }
     Ok(m)
 }
@@ -100,6 +302,11 @@ fn arm64(m: &Manifest) -> Result<&Descriptor, CandidateError> {
     if selected.next().is_some() {
         return Err(error("Pinned index has ambiguous Linux ARM64 images."));
     }
+    if !first.media_type.is_empty() && !MANIFEST_TYPES.contains(&first.media_type.as_str()) {
+        return Err(error(
+            "The Linux ARM64 index entry is not an image manifest.",
+        ));
+    }
     Ok(first)
 }
 fn bounded(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, CandidateError> {
@@ -114,7 +321,8 @@ fn bounded(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, CandidateErro
     }
     Ok(bytes)
 }
-fn redirect_allowed(url: &Url) -> bool {
+/// Docker Hub serves blobs only from these HTTPS origins.
+fn docker_hub_redirect_allowed(url: &Url) -> bool {
     url.scheme() == "https"
         && url.port_or_known_default() == Some(443)
         && url.username().is_empty()
@@ -126,93 +334,415 @@ fn redirect_allowed(url: &Url) -> bool {
                 || h.ends_with(".r2.cloudflarestorage.com")
         })
 }
-struct Fetch {
+fn same_origin(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+/// Redirect policy: the registry's own origin, Docker Hub's known blob origins, or for
+/// other registries any public HTTPS origin on port 443 (registries commonly serve blobs
+/// from object storage). Local destinations and embedded credentials always refuse.
+fn redirect_allowed(registry: &Registry, url: &Url) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    if same_origin(&registry.origin, url) {
+        return true;
+    }
+    if registry.docker_hub() {
+        return docker_hub_redirect_allowed(url);
+    }
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url
+            .host_str()
+            .is_some_and(|host| !host.starts_with('[') && !local_host(host))
+}
+
+/// A token realm must be the registry origin itself, or a public HTTPS endpoint; Docker
+/// Hub's realm is fixed.
+fn realm_allowed(registry: &Registry, realm: &Url) -> bool {
+    if !realm.username().is_empty() || realm.password().is_some() {
+        return false;
+    }
+    if registry.docker_hub() {
+        return realm.as_str() == DOCKER_HUB_REALM;
+    }
+    same_origin(&registry.origin, realm)
+        || (realm.scheme() == "https"
+            && realm
+                .host_str()
+                .is_some_and(|h| !local_host(h) && !h.starts_with('[')))
+}
+
+/// One `WWW-Authenticate` challenge: scheme and parameters.
+struct Challenge {
+    bearer: bool,
+    realm: Option<String>,
+    service: Option<String>,
+}
+
+fn parse_challenge(header: &str) -> Result<Challenge, CandidateError> {
+    let invalid = || error("Unsupported registry authentication challenge.");
+    let (scheme, rest) = header.trim().split_once(' ').unwrap_or((header.trim(), ""));
+    let bearer = if scheme.eq_ignore_ascii_case("bearer") {
+        true
+    } else if scheme.eq_ignore_ascii_case("basic") {
+        false
+    } else {
+        return Err(invalid());
+    };
+    let (mut realm, mut service) = (None, None);
+    let mut chars = rest.chars().peekable();
+    loop {
+        while chars.peek().is_some_and(|c| *c == ',' || c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+        let key: String = chars.by_ref().take_while(|c| *c != '=').collect();
+        let mut value = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            loop {
+                match chars.next().ok_or_else(invalid)? {
+                    '"' => break,
+                    '\\' => value.push(chars.next().ok_or_else(invalid)?),
+                    c => value.push(c),
+                }
+            }
+        } else {
+            while let Some(c) = chars.peek().copied().filter(|c| *c != ',') {
+                value.push(c);
+                chars.next();
+            }
+        }
+        if value.len() > 2048 {
+            return Err(invalid());
+        }
+        match key.trim().to_ascii_lowercase().as_str() {
+            "realm" => realm = Some(value),
+            "service" => service = Some(value),
+            _ => {}
+        }
+    }
+    Ok(Challenge {
+        bearer,
+        realm,
+        service,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Anonymous,
+    AnonymousToken,
+    Credentialed,
+}
+
+struct Fetch<'a> {
     client: Client,
-    token: Zeroizing<String>,
+    registry: Registry,
+    path: String,
+    policy: &'a ImagePolicy,
+    /// Complete `Authorization` value sent to the registry origin only.
+    authorization: Option<Zeroizing<String>>,
+    stage: Stage,
     deadline: Instant,
 }
-impl Fetch {
-    fn bytes(
-        &self,
-        mut url: Url,
-        limit: usize,
-        authenticated: bool,
-    ) -> Result<Vec<u8>, CandidateError> {
+
+impl<'a> Fetch<'a> {
+    fn new(
+        registry: &Registry,
+        path: &str,
+        policy: &'a ImagePolicy,
+    ) -> Result<Self, CandidateError> {
+        let client = Client::builder()
+            .https_only(registry.origin.scheme() == "https")
+            .no_proxy()
+            .redirect(Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|_| error("Cannot initialize registry TLS client."))?;
+        Ok(Self {
+            client,
+            registry: registry.clone(),
+            path: path.to_owned(),
+            policy,
+            authorization: None,
+            stage: Stage::Anonymous,
+            deadline: Instant::now() + ACQUISITION_DEADLINE,
+        })
+    }
+
+    fn remaining(&self) -> Result<Duration, CandidateError> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| error("Registry acquisition deadline exceeded."))
+    }
+
+    fn url(&self, kind: &str, reference: &str) -> Result<Url, CandidateError> {
+        self.registry
+            .origin
+            .join(&format!("/v2/{}/{kind}/{reference}", self.path))
+            .map_err(|_| error("Invalid registry object address."))
+    }
+
+    /// One request with redirects followed under [`redirect_allowed`]. Authorization is
+    /// attached only while the request targets the registry origin.
+    fn send(&self, mut url: Url, timeout: Duration) -> Result<Response, CandidateError> {
         for hop in 0..=4 {
-            let remaining = self
-                .deadline
-                .checked_duration_since(Instant::now())
-                .ok_or_else(|| error("Registry acquisition deadline exceeded."))?;
             let mut request = self
                 .client
                 .get(url.clone())
-                .timeout(remaining.min(Duration::from_secs(60)))
+                .timeout(self.remaining()?.min(timeout))
                 .header(ACCEPT, ACCEPT_MANIFEST);
-            // Never forward even anonymous bearer credentials to a blob CDN.
-            if authenticated && url.host_str() == Some("registry-1.docker.io") {
-                request = request.bearer_auth(self.token.as_str());
+            if let Some(value) = self
+                .authorization
+                .as_ref()
+                .filter(|_| same_origin(&self.registry.origin, &url))
+            {
+                let mut header = HeaderValue::from_str(value)
+                    .map_err(|_| error("Invalid registry authorization."))?;
+                header.set_sensitive(true);
+                request = request.header(AUTHORIZATION, header);
             }
             let response = request
                 .send()
-                .map_err(|_| error("Registry HTTPS request failed."))?;
-            if response.status().is_redirection() {
-                if hop == 4 {
-                    return Err(error("Registry redirect limit exceeded."));
-                }
-                let location = response
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| error("Invalid registry redirect."))?;
-                let next = url
-                    .join(location)
-                    .map_err(|_| error("Invalid registry redirect."))?;
-                if !redirect_allowed(&next) {
-                    return Err(error("Registry redirect destination is not supported."));
-                }
-                url = next;
-                continue;
+                .map_err(|_| error("Registry request failed or timed out."))?;
+            if !response.status().is_redirection() {
+                return Ok(response);
             }
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Err(CandidateError::new(
-                    "registry_image_not_found",
-                    "The public registry image or requested tag was not found.",
-                ));
+            if hop == 4 {
+                break;
             }
-            if !response.status().is_success() {
-                return Err(error(
-                    "Public registry request was refused; no local credentials were used.",
-                ));
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| error("Invalid registry redirect."))?;
+            let next = url
+                .join(location)
+                .map_err(|_| error("Invalid registry redirect."))?;
+            if !redirect_allowed(&self.registry, &next) {
+                return Err(error("Registry redirect destination is not supported."));
             }
-            if response.content_length().is_some_and(|n| n > limit as u64) {
-                return Err(error("Registry response exceeds its byte limit."));
-            }
-            return bounded(response, limit);
+            url = next;
         }
         Err(error("Registry redirect limit exceeded."))
     }
-    fn object(
+
+    /// A successful response for `url`, answering at most two authentication challenges:
+    /// anonymously first, then with the host user's Docker credentials.
+    fn get(&mut self, url: Url, timeout: Duration) -> Result<Response, CandidateError> {
+        loop {
+            let response = self.send(url.clone(), timeout)?;
+            let status = response.status();
+            if status == StatusCode::UNAUTHORIZED && self.stage != Stage::Credentialed {
+                let challenge = response
+                    .headers()
+                    .get(WWW_AUTHENTICATE)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| error("Registry requires authentication without a challenge."))
+                    .and_then(parse_challenge)?;
+                self.authorize(&challenge)?;
+                continue;
+            }
+            return match status {
+                s if s.is_success() => Ok(response),
+                StatusCode::NOT_FOUND => Err(CandidateError::new(
+                    "registry_image_not_found",
+                    "The registry image or requested tag was not found.",
+                )),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(error(
+                    "The registry refused access with the Docker credentials configured for it.",
+                )),
+                StatusCode::TOO_MANY_REQUESTS => Err(error(
+                    "The registry rate-limited this request; retry later or configure credentials.",
+                )),
+                _ => Err(error("The registry request was refused.")),
+            };
+        }
+    }
+
+    /// Advance one authentication stage for `challenge`.
+    fn authorize(&mut self, challenge: &Challenge) -> Result<(), CandidateError> {
+        let credentialed = self.stage == Stage::AnonymousToken || !challenge.bearer;
+        let credential = if credentialed {
+            self.stage = Stage::Credentialed;
+            Some(
+                registry_credentials::lookup(self.policy, &self.registry.domain)?.ok_or_else(
+                    || {
+                        error(
+                            "The registry requires credentials; none are configured for it in the Docker configuration.",
+                        )
+                    },
+                )?,
+            )
+        } else {
+            self.stage = Stage::AnonymousToken;
+            None
+        };
+        if !challenge.bearer {
+            let basic = credential
+                .as_ref()
+                .and_then(Credential::basic_header)
+                .ok_or_else(|| error("The registry requires username and password credentials."))?;
+            self.authorization = Some(basic);
+            return Ok(());
+        }
+        let realm = challenge
+            .realm
+            .as_deref()
+            .and_then(|r| Url::parse(r).ok())
+            .filter(|r| realm_allowed(&self.registry, r))
+            .ok_or_else(|| error("The registry token endpoint is not supported."))?;
+        let token = match self.token(&realm, challenge.service.as_deref(), credential.as_ref()) {
+            Err(failure) if credential.is_none() && failure.code == "registry_token_refused" => {
+                // An endpoint that refuses anonymous tokens needs credentials.
+                return self.authorize(challenge);
+            }
+            other => other?,
+        };
+        self.authorization = Some(Zeroizing::new(format!("Bearer {}", token.as_str())));
+        Ok(())
+    }
+
+    fn token(
         &self,
-        repo: &str,
-        kind: &str,
-        d: &Descriptor,
-        limit: usize,
-    ) -> Result<Vec<u8>, CandidateError> {
-        if !valid_digest(&d.digest) || d.size == 0 || d.size > limit as u64 {
+        realm: &Url,
+        service: Option<&str>,
+        credential: Option<&Credential>,
+    ) -> Result<Zeroizing<String>, CandidateError> {
+        let scope = format!("repository:{}:pull", self.path);
+        let request = match credential {
+            Some(Credential::IdentityToken(refresh)) => {
+                let mut form = vec![
+                    ("grant_type", "refresh_token"),
+                    ("client_id", "hack"),
+                    ("scope", scope.as_str()),
+                    ("refresh_token", refresh.as_str()),
+                ];
+                if let Some(service) = service {
+                    form.push(("service", service));
+                }
+                self.client.post(realm.clone()).form(&form)
+            }
+            basic => {
+                let mut url = realm.clone();
+                {
+                    let mut query = url.query_pairs_mut();
+                    if let Some(service) = service {
+                        query.append_pair("service", service);
+                    }
+                    query.append_pair("scope", &scope);
+                }
+                let mut request = self.client.get(url);
+                if let Some(value) = basic.and_then(Credential::basic_header) {
+                    let mut header = HeaderValue::from_str(&value)
+                        .map_err(|_| error("Invalid registry credentials."))?;
+                    header.set_sensitive(true);
+                    request = request.header(AUTHORIZATION, header);
+                }
+                request
+            }
+        };
+        let response = request
+            .timeout(self.remaining()?.min(REQUEST_TIMEOUT))
+            .send()
+            .map_err(|_| error("Registry token request failed or timed out."))?;
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            return Err(CandidateError::new(
+                if credential.is_some() {
+                    "registry_image"
+                } else {
+                    "registry_token_refused"
+                },
+                "The registry token endpoint refused the Docker credentials configured for it.",
+            ));
+        }
+        if !response.status().is_success() {
+            return Err(error("The registry token endpoint refused the request."));
+        }
+        #[derive(Deserialize)]
+        struct Token {
+            token: Option<String>,
+            access_token: Option<String>,
+        }
+        let bytes = Zeroizing::new(bounded(response, MAX_TOKEN_RESPONSE)?);
+        let mut parsed: Token = serde_json::from_slice(&bytes)
+            .map_err(|_| error("Invalid registry token response."))?;
+        let token = Zeroizing::new(
+            parsed
+                .token
+                .take()
+                .filter(|t| !t.is_empty())
+                .or_else(|| parsed.access_token.take())
+                .unwrap_or_default(),
+        );
+        if let Some(mut other) = parsed.access_token.take() {
+            zeroize::Zeroize::zeroize(&mut other);
+        }
+        if token.is_empty()
+            || token.len() > MAX_TOKEN
+            || token.bytes().any(|b| b.is_ascii_control() || b == b' ')
+        {
+            return Err(error("Invalid registry token."));
+        }
+        Ok(token)
+    }
+
+    fn manifest(&mut self, reference: &str) -> Result<Vec<u8>, CandidateError> {
+        let url = self.url("manifests", reference)?;
+        let response = self.get(url, REQUEST_TIMEOUT)?;
+        if response
+            .content_length()
+            .is_some_and(|n| n > MAX_METADATA as u64)
+        {
+            return Err(error("Registry response exceeds its byte limit."));
+        }
+        bounded(response, MAX_METADATA)
+    }
+
+    fn checked(d: &Descriptor, limit: u64) -> Result<(), CandidateError> {
+        if !valid_digest(&d.digest) || d.size == 0 || d.size > limit || !d.urls.is_empty() {
             return Err(error(
                 "Registry descriptor exceeds its identity or size limits.",
             ));
         }
-        let url = Url::parse(&format!(
-            "https://registry-1.docker.io/v2/{repo}/{kind}/{}",
-            d.digest
-        ))
-        .map_err(|_| error("Invalid registry object address."))?;
-        let bytes = self.bytes(url, d.size as usize, true)?;
+        Ok(())
+    }
+
+    /// One small object (manifest or config) verified against its descriptor.
+    fn object(&mut self, kind: &str, d: &Descriptor) -> Result<Vec<u8>, CandidateError> {
+        Self::checked(d, MAX_METADATA as u64)?;
+        let response = self.get(self.url(kind, &d.digest)?, REQUEST_TIMEOUT)?;
+        let bytes = bounded(response, d.size as usize)?;
         verify_object(d, &bytes)?;
         Ok(bytes)
     }
+
+    /// A layer blob as a reader that enforces its descriptor's exact size and digest.
+    fn blob(&mut self, d: &Descriptor) -> Result<Verified<Response>, CandidateError> {
+        let timeout = REQUEST_TIMEOUT + Duration::from_secs(d.size / MIN_BLOB_BYTES_PER_SECOND);
+        let response = self.get(self.url("blobs", &d.digest)?, timeout)?;
+        if response.content_length().is_some_and(|n| n != d.size) {
+            return Err(error("Registry object digest or size mismatch."));
+        }
+        Ok(Verified {
+            inner: response,
+            digest: Sha256::new(),
+            total: 0,
+            size: d.size,
+            expected: d.digest.clone(),
+        })
+    }
 }
+
 fn verify_object(descriptor: &Descriptor, bytes: &[u8]) -> Result<(), CandidateError> {
     if bytes.len() as u64 != descriptor.size || digest(bytes) != descriptor.digest {
         return Err(error("Registry object digest or size mismatch."));
@@ -220,23 +750,69 @@ fn verify_object(descriptor: &Descriptor, bytes: &[u8]) -> Result<(), CandidateE
     Ok(())
 }
 
-fn append(
-    builder: &mut tar::Builder<Vec<u8>>,
-    name: &str,
-    bytes: &[u8],
-) -> Result<(), CandidateError> {
+/// Streams exactly `size` bytes and fails at their end unless they hash to `expected`;
+/// a short, long or altered blob therefore cannot complete its archive member.
+struct Verified<R> {
+    inner: R,
+    digest: Sha256,
+    total: u64,
+    size: u64,
+    expected: String,
+}
+impl<R: Read> Read for Verified<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buffer)?;
+        self.total += n as u64;
+        if self.total > self.size {
+            return Err(std::io::Error::other("blob exceeds its descriptor size"));
+        }
+        if n == 0 {
+            let actual = format!("sha256:{:x}", std::mem::take(&mut self.digest).finalize());
+            if self.total != self.size || actual != self.expected {
+                return Err(std::io::Error::other("blob digest or size mismatch"));
+            }
+            return Ok(0);
+        }
+        self.digest.update(&buffer[..n]);
+        Ok(n)
+    }
+}
+
+/// Hashes and counts the archive as it is written.
+struct HashingWriter<W> {
+    inner: W,
+    digest: Sha256,
+    total: u64,
+    limit: u64,
+}
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buffer)?;
+        self.total += n as u64;
+        if self.total > self.limit {
+            return Err(std::io::Error::other("archive exceeds its budget"));
+        }
+        self.digest.update(&buffer[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn header(size: u64) -> tar::Header {
     let mut h = tar::Header::new_gnu();
-    h.set_size(bytes.len() as u64);
+    h.set_size(size);
     h.set_mode(0o600);
     h.set_cksum();
-    builder
-        .append_data(&mut h, name, bytes)
-        .map_err(|_| error("Cannot assemble image archive."))?;
-    if builder.get_ref().len() > MAX_ARCHIVE {
-        return Err(error("Image archive exceeds 256 MiB."));
-    }
-    Ok(())
+    h
 }
+
+/// Tar bytes for one member of `size`: header plus data padded to 512.
+fn member_bytes(size: u64) -> u64 {
+    512 + size.div_ceil(512) * 512
+}
+
 #[derive(Debug, Serialize)]
 pub struct AcquiredImage {
     pub source_digest: String,
@@ -245,79 +821,39 @@ pub struct AcquiredImage {
     pub archive_sha256: String,
     pub archive_bytes: u64,
 }
-fn authenticated_fetch(repo: &str) -> Result<Fetch, CandidateError> {
-    let mut fetch = Fetch {
-        client: Client::builder()
-            .https_only(true)
-            .no_proxy()
-            .redirect(Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|_| error("Cannot initialize registry TLS client."))?,
-        token: Zeroizing::new(String::new()),
-        deadline: Instant::now() + Duration::from_secs(300),
-    };
-    let mut token_url =
-        Url::parse("https://auth.docker.io/token").map_err(|_| error("Invalid token endpoint."))?;
-    token_url
-        .query_pairs_mut()
-        .append_pair("service", "registry.docker.io")
-        .append_pair("scope", &format!("repository:{repo}:pull"));
-    #[derive(Deserialize)]
-    struct Token {
-        token: String,
-    }
-    let token_bytes = Zeroizing::new(fetch.bytes(token_url, 64 * 1024, false)?);
-    let token: Token = serde_json::from_slice(&token_bytes)
-        .map_err(|_| error("Invalid anonymous registry token response."))?;
-    if token.token.len() > 32 * 1024 || token.token.bytes().any(|b| b.is_ascii_control()) {
-        return Err(error("Invalid anonymous registry token."));
-    }
-    fetch.token = Zeroizing::new(token.token);
-    Ok(fetch)
-}
-
-/// Normalized Docker Hub `namespace/repository` and tag for mutable resolution.
-/// Shorthand expands as Docker does: `alpine` is `library/alpine:latest`.
-pub(super) fn tagged_reference(value: &str) -> Result<(String, String), CandidateError> {
-    if value.contains('@') {
-        return Err(error(
-            "Tag resolution requires a repository and optional tag, not a digest.",
-        ));
-    }
-    let named = docker_hub(value)?;
-    let tag = named.tag.unwrap_or_else(|| "latest".into());
-    Ok((named.path, tag))
-}
 
 /// The admitted form of one authored image reference.
 #[derive(Debug, Serialize)]
 pub struct AdmittedImage {
     /// Canonical normalized reference, for example `docker.io/library/alpine:3.21`.
     pub reference: String,
-    /// `image_id` for an already-local content ID, `docker_hub` for an acquirable reference.
+    /// `image_id` for a local content ID, `docker_hub` for Docker Hub, `registry` for any
+    /// other admitted registry.
     pub kind: &'static str,
 }
 
-/// Pure admission for one authored image reference. It normalizes Docker shorthand
-/// and refuses anything the provider could not later acquire. No network, credential,
-/// candidate state or runtime effect occurs, so a caller can refuse before any VM or
-/// provider starts. Acquisition re-normalizes with the same function.
-pub fn admit(value: &str) -> Result<AdmittedImage, CandidateError> {
+/// Pure admission for one authored image reference. It normalizes Docker shorthand and
+/// refuses anything the provider could not later acquire under `policy`, such as a local
+/// registry that is not explicitly allowed. No network, credential, candidate state or
+/// runtime effect occurs, so a caller can refuse before any VM or provider starts.
+/// Acquisition re-normalizes with the same rules.
+pub fn admit(value: &str, policy: &ImagePolicy) -> Result<AdmittedImage, CandidateError> {
     match normalize(value) {
         Ok(ImageReference::ImageId(id)) => Ok(AdmittedImage {
             reference: id,
             kind: "image_id",
         }),
-        Ok(ImageReference::Named(named)) if named.docker_hub_repository().is_some() => {
+        Ok(ImageReference::Named(named)) => {
+            let registry = registry(&named, policy)?;
             Ok(AdmittedImage {
                 reference: named.canonical(),
-                kind: "docker_hub",
+                kind: if registry.docker_hub() {
+                    "docker_hub"
+                } else {
+                    "registry"
+                },
             })
         }
-        Ok(ImageReference::Named(_)) => Err(error(
-            "Only public Docker Hub references or sha256 image IDs are supported; other registries are not acquired.",
-        )),
         Err(reason) => Err(error(reason.message())),
     }
 }
@@ -331,37 +867,55 @@ pub struct ResolvedImage {
     pub platform: &'static str,
 }
 
-/// Resolve public mutable metadata once and return an explicit immutable identity.
-/// No image layers, archive, runtime state or local credentials are accessed. A later
-/// fetch must use pinned_reference: reusing the original tag would discard this review.
-pub fn resolve(reference_text: &str) -> Result<ResolvedImage, CandidateError> {
-    let (repo, tag) = tagged_reference(reference_text)?;
-    let (repo, tag) = (repo.as_str(), tag.as_str());
-    let fetch = authenticated_fetch(repo)?;
-    let url = Url::parse(&format!(
-        "https://registry-1.docker.io/v2/{repo}/manifests/{tag}"
-    ))
-    .map_err(|_| error("Invalid manifest address."))?;
-    let initial = fetch.bytes(url, MAX_METADATA, true)?;
-    let source_digest = digest(&initial);
-    let mut manifest = parse_manifest(&initial, &source_digest)?;
-    let mut manifest_digest = source_digest.clone();
+/// The selected single-image manifest and its digest, from an index or a manifest.
+fn select(
+    fetch: &mut Fetch<'_>,
+    initial: &[u8],
+    source_digest: &str,
+) -> Result<(Manifest, String), CandidateError> {
+    let mut manifest = parse_manifest(initial, source_digest)?;
+    let mut manifest_digest = source_digest.to_owned();
     if !manifest.manifests.is_empty() {
-        let selected = arm64(&manifest)?;
+        let selected = arm64(&manifest)?.clone();
         manifest_digest = selected.digest.clone();
-        let bytes = fetch.object(repo, "manifests", selected, MAX_METADATA)?;
+        let bytes = fetch.object("manifests", &selected)?;
         manifest = parse_manifest(&bytes, &manifest_digest)?;
     }
-    if !manifest.manifests.is_empty() || manifest.layers.is_empty() || manifest.layers.len() > 128 {
+    if !manifest.manifests.is_empty()
+        || manifest.layers.is_empty()
+        || manifest.layers.len() > MAX_LAYERS
+    {
         return Err(error("Only a bounded single-image manifest is supported."));
     }
     let config = manifest
         .config
+        .as_ref()
         .ok_or_else(|| error("Image config descriptor is missing."))?;
-    let config_bytes = fetch.object(repo, "blobs", &config, MAX_METADATA)?;
+    if !config.media_type.is_empty() && !CONFIG_TYPES.contains(&config.media_type.as_str()) {
+        return Err(error("The manifest does not describe a container image."));
+    }
+    Ok((manifest, manifest_digest))
+}
+
+/// Resolve mutable metadata once and return an explicit immutable identity. No image
+/// layers, archive or runtime state are accessed; credentials are read only if the
+/// registry challenges. A later fetch must use `pinned_reference`.
+pub fn resolve(
+    reference_text: &str,
+    policy: &ImagePolicy,
+) -> Result<ResolvedImage, CandidateError> {
+    let (registry, path, tag) = tagged(reference_text, policy)?;
+    let mut fetch = Fetch::new(&registry, &path, policy)?;
+    let initial = fetch.manifest(&tag)?;
+    let source_digest = digest(&initial);
+    let (manifest, manifest_digest) = select(&mut fetch, &initial, &source_digest)?;
+    let config = manifest
+        .config
+        .ok_or_else(|| error("Image config descriptor is missing."))?;
+    let config_bytes = fetch.object("blobs", &config)?;
     verify_platform(&config_bytes)?;
     Ok(ResolvedImage {
-        pinned_reference: format!("docker.io/{repo}@{source_digest}"),
+        pinned_reference: format!("{}/{path}@{source_digest}", registry.domain),
         source_digest,
         manifest_digest,
         image_id: config.digest,
@@ -382,85 +936,126 @@ fn verify_platform(config_bytes: &[u8]) -> Result<(), CandidateError> {
     Ok(())
 }
 
-/// Acquire one public pinned Linux ARM64 image into a new explicit archive. The output
-/// must not exist. A failure never imports an image or changes candidate runtime state.
-/// HTTPS requests have a 60s bound and the complete acquisition a 300s deadline.
-/// SIGINT/process cancellation stops acquisition; no child transfer outlives the caller.
-pub fn acquire(reference_text: &str, output: &Path) -> Result<AcquiredImage, CandidateError> {
-    let (repo, pin) = reference(reference_text)?;
-    let (repo, pin) = (repo.as_str(), pin.as_str());
+fn layer_extension(media_type: &str) -> Result<&'static str, CandidateError> {
+    match media_type {
+        "application/vnd.oci.image.layer.v1.tar+gzip"
+        | "application/vnd.docker.image.rootfs.diff.tar.gzip" => Ok("tar.gz"),
+        "application/vnd.oci.image.layer.v1.tar+zstd" => Ok("tar.zst"),
+        "application/vnd.oci.image.layer.v1.tar"
+        | "application/vnd.docker.image.rootfs.diff.tar" => Ok("tar"),
+        _ => Err(error(
+            "Only distributable gzip, zstd or uncompressed image layers are supported.",
+        )),
+    }
+}
+
+/// Acquire one pinned Linux ARM64 image into a new explicit archive of at most `limit`
+/// bytes (and the policy's per-image budget). The output must not exist. A failure never
+/// imports an image or changes candidate runtime state, and leaves no final archive.
+/// The complete acquisition has a 360-second deadline; process cancellation stops it.
+pub fn acquire(
+    reference_text: &str,
+    output: &Path,
+    policy: &ImagePolicy,
+    limit: u64,
+) -> Result<AcquiredImage, CandidateError> {
+    let pinned = pinned(reference_text, policy)?;
+    let limit = limit.min(policy.archive_limit);
     if output.exists() {
         return Err(error("Image archive output already exists."));
     }
-    let fetch = authenticated_fetch(repo)?;
-    let url = Url::parse(&format!(
-        "https://registry-1.docker.io/v2/{repo}/manifests/{pin}"
-    ))
-    .map_err(|_| error("Invalid manifest address."))?;
-    let initial = fetch.bytes(url, MAX_METADATA, true)?;
-    let mut manifest = parse_manifest(&initial, pin)?;
-    let mut manifest_digest = pin.to_owned();
-    if !manifest.manifests.is_empty() {
-        let selected = arm64(&manifest)?;
-        manifest_digest = selected.digest.clone();
-        let bytes = fetch.object(repo, "manifests", selected, MAX_METADATA)?;
-        manifest = parse_manifest(&bytes, &manifest_digest)?;
-    }
-    if !manifest.manifests.is_empty() || manifest.layers.is_empty() || manifest.layers.len() > 128 {
-        return Err(error("Only a bounded single-image manifest is supported."));
-    }
+    let mut fetch = Fetch::new(&pinned.registry, &pinned.path, policy)?;
+    let initial = fetch.manifest(&pinned.digest)?;
+    let (manifest, manifest_digest) = select(&mut fetch, &initial, &pinned.digest)?;
     let config = manifest
         .config
+        .clone()
         .ok_or_else(|| error("Image config descriptor is missing."))?;
-    let config_bytes = fetch.object(repo, "blobs", &config, MAX_METADATA)?;
-    let mut builder = tar::Builder::new(Vec::new());
-    let config_name = format!("{}.json", config.digest.trim_start_matches("sha256:"));
-    append(&mut builder, &config_name, &config_bytes)?;
+    let config_bytes = fetch.object("blobs", &config)?;
+    verify_platform(&config_bytes)?;
     let mut names = Vec::new();
+    let mut planned = member_bytes(config.size) + member_bytes(64 * 1024) + 1024;
     for (i, layer) in manifest.layers.iter().enumerate() {
-        if !matches!(
-            layer.media_type.as_str(),
-            "application/vnd.oci.image.layer.v1.tar+gzip"
-                | "application/vnd.docker.image.rootfs.diff.tar.gzip"
-        ) {
-            return Err(error("Only distributable gzip image layers are supported."));
-        }
-        let remaining = MAX_ARCHIVE
-            .saturating_sub(builder.get_ref().len())
-            .saturating_sub(4096);
-        let bytes = fetch.object(repo, "blobs", layer, remaining)?;
-        let name = format!("layer-{i}.tar.gz");
-        append(&mut builder, &name, &bytes)?;
-        names.push(name);
+        names.push(format!("layer-{i}.{}", layer_extension(&layer.media_type)?));
+        Fetch::checked(layer, super::image_policy::ARCHIVE_CEILING)?;
+        planned = planned.saturating_add(member_bytes(layer.size));
     }
+    // The manifest states every size, so an image beyond the budget refuses before any
+    // layer transfer or disk write.
+    if planned > limit {
+        return Err(error(
+            "The image exceeds the configured image budget or the remaining image cache budget.",
+        ));
+    }
+    let config_name = format!("{}.json", config.digest.trim_start_matches("sha256:"));
+    let deadline = fetch.deadline;
     let manifest_bytes = serde_json::to_vec(
         &serde_json::json!([{"Config":config_name,"Layers":names,"RepoTags":[]}]),
     )
     .map_err(|_| error("Cannot encode image archive metadata."))?;
-    append(&mut builder, "manifest.json", &manifest_bytes)?;
-    let bytes = builder
-        .into_inner()
-        .map_err(|_| error("Cannot finish image archive."))?;
-    image_load::validate_download(&bytes, &config.digest)?;
-    if Instant::now() >= fetch.deadline {
-        return Err(error("Registry acquisition deadline exceeded."));
-    }
-    let result = AcquiredImage {
-        source_digest: pin.into(),
+    let written = publish(
+        output,
+        |file| {
+            let mut builder = tar::Builder::new(HashingWriter {
+                inner: file,
+                digest: Sha256::new(),
+                total: 0,
+                limit,
+            });
+            let assemble = || error("Cannot assemble the image archive within its budget.");
+            builder
+                .append_data(
+                    &mut header(config.size),
+                    &config_name,
+                    config_bytes.as_slice(),
+                )
+                .map_err(|_| assemble())?;
+            for (layer, name) in manifest.layers.iter().zip(&names) {
+                let mut blob = fetch.blob(layer)?;
+                builder
+                    .append_data(&mut header(layer.size), name, &mut blob)
+                    .map_err(|_| {
+                        error("A registry layer transfer failed or did not match its digest and size.")
+                    })?;
+            }
+            builder
+                .append_data(
+                    &mut header(manifest_bytes.len() as u64),
+                    "manifest.json",
+                    manifest_bytes.as_slice(),
+                )
+                .map_err(|_| assemble())?;
+            let writer = builder.into_inner().map_err(|_| assemble())?;
+            Ok((format!("{:x}", writer.digest.finalize()), writer.total))
+        },
+        |temporary, (sha, total)| {
+            if Instant::now() >= deadline {
+                return Err(error("Registry acquisition deadline exceeded."));
+            }
+            if image_load::validate_file(temporary, sha, &config.digest, policy)? != *total {
+                return Err(error(
+                    "The assembled image archive changed before publication.",
+                ));
+            }
+            Ok(())
+        },
+    )?;
+    Ok(AcquiredImage {
+        source_digest: pinned.digest,
         manifest_digest,
         image_id: config.digest,
-        archive_sha256: format!("{:x}", Sha256::digest(&bytes)),
-        archive_bytes: bytes.len() as u64,
-    };
-    publish(output, |file| file.write_all(&bytes))?;
-    Ok(result)
+        archive_sha256: written.0,
+        archive_bytes: written.1,
+    })
 }
 
-/// A complete synced inode is linked into place without replacing a competing output.
-fn publish(
+/// Write a new exclusive temporary file, sync and verify it, then link it into place
+/// without replacing a competing output.
+fn publish<T>(
     output: &Path,
-    write: impl FnOnce(&mut File) -> std::io::Result<()>,
-) -> Result<(), CandidateError> {
+    write: impl FnOnce(&mut File) -> Result<T, CandidateError>,
+    verify: impl FnOnce(&Path, &T) -> Result<(), CandidateError>,
+) -> Result<T, CandidateError> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let parent = output
         .parent()
@@ -479,9 +1074,10 @@ fn publish(
         .open(&temporary)
         .map_err(|_| error("Cannot exclusively create the temporary image archive."))?;
     let result = (|| {
-        write(&mut file)
-            .and_then(|_| file.sync_all())
+        let value = write(&mut file)?;
+        file.sync_all()
             .map_err(|_| error("Image archive write failed before publication."))?;
+        verify(&temporary, &value)?;
         fs::hard_link(&temporary, output).map_err(|_| {
             error("Cannot publish the image archive without replacing an existing output.")
         })?;
@@ -491,7 +1087,7 @@ fn publish(
         File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|_| error("Complete image archive published; directory sync failed."))?;
-        Ok(())
+        Ok(value)
     })();
     // Only the exclusive temporary path created by this call is ever removed.
     if result.is_err() {
@@ -501,252 +1097,5 @@ fn publish(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn publication_preserves_existing_output_and_failed_writes_leave_no_final_file() {
-        static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "hack-image-publish-{}-{}",
-            std::process::id(),
-            NEXT_TEST.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&root).unwrap();
-        let output = root.join("image.tar");
-        fs::write(&output, b"existing").unwrap();
-        assert!(publish(&output, |file| file.write_all(b"replacement")).is_err());
-        assert_eq!(fs::read(&output).unwrap(), b"existing");
-        fs::remove_file(&output).unwrap();
-        assert!(
-            publish(&output, |file| {
-                file.write_all(b"partial")?;
-                Err(std::io::Error::other("injected write failure"))
-            })
-            .is_err()
-        );
-        assert!(!output.exists());
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
-        publish(&output, |file| file.write_all(b"complete")).unwrap();
-        assert_eq!(fs::read(&output).unwrap(), b"complete");
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
-        fs::remove_dir_all(root).unwrap();
-    }
-    #[test]
-    fn mutable_resolution_is_explicit_and_rejects_non_repository_inputs() {
-        let owned = |repo: &str, tag: &str| (repo.to_owned(), tag.to_owned());
-        assert_eq!(
-            tagged_reference("bitnami/redis").unwrap(),
-            owned("bitnami/redis", "latest")
-        );
-        assert_eq!(
-            tagged_reference("docker.io/chromedp/headless-shell:stable").unwrap(),
-            owned("chromedp/headless-shell", "stable")
-        );
-        // Ordinary Docker Hub shorthand expands to the official library namespace.
-        assert_eq!(
-            tagged_reference("alpine:3.21").unwrap(),
-            owned("library/alpine", "3.21")
-        );
-        assert_eq!(
-            tagged_reference("redis").unwrap(),
-            owned("library/redis", "latest")
-        );
-        for value in [
-            "Redis",
-            "ghcr.io/a/b:tag",
-            "localhost:5000/a:tag",
-            "a/b/c:tag",
-            format!("sha256:{}", "e".repeat(64)).as_str(),
-            "host.test/a/b:tag",
-            "https://docker.io/a/b:tag",
-            "a/b@sha256:bad",
-            "a/b:",
-            "a/b:-bad",
-            "a/b:foo?bar",
-            "a/b:foo/bar",
-            "a/..:tag",
-            "a/b:PRIVATE CANARY",
-        ] {
-            assert!(tagged_reference(value).is_err(), "{value}");
-        }
-        assert!(reference("bitnami/redis:latest").is_err());
-    }
-    #[test]
-    fn resolution_requires_unambiguous_linux_arm64_and_actual_config_architecture() {
-        let bytes=br#"{"schemaVersion":2,"manifests":[{"digest":"sha256:unused","size":10,"mediaType":"manifest","platform":{"os":"linux","architecture":"amd64"}}]}"#;
-        assert!(arm64(&parse_manifest(bytes, &digest(bytes)).unwrap()).is_err());
-        for bytes in [
-            br#"{"os":"linux","architecture":"arm64"}"#.as_slice(),
-            br#"{"os":"linux","architecture":"arm64","variant":"v8"}"#.as_slice(),
-        ] {
-            assert!(verify_platform(bytes).is_ok());
-        }
-        for bytes in [
-            br#"{"os":"linux","architecture":"amd64"}"#.as_slice(),
-            br#"{"os":"linux","architecture":"arm64","variant":"v9"}"#.as_slice(),
-            br#"{"os":"darwin","architecture":"arm64"}"#.as_slice(),
-        ] {
-            assert!(verify_platform(bytes).is_err());
-        }
-        // Duplicate supported entries remain ambiguous, even when their digests agree.
-        let descriptor = serde_json::json!({"digest":"sha256:unused","size":10,"mediaType":"manifest","platform":{"os":"linux","architecture":"arm64"}});
-        let bytes = serde_json::to_vec(
-            &serde_json::json!({"schemaVersion":2,"manifests":[descriptor.clone(),descriptor]}),
-        )
-        .unwrap();
-        assert!(arm64(&parse_manifest(&bytes, &digest(&bytes)).unwrap()).is_err());
-    }
-    #[test]
-    fn only_public_digest_pinned_repository_references_are_accepted() {
-        let pin = format!("sha256:{}", "a".repeat(64));
-        for prefix in [
-            "imbios/bun-node",
-            "imbios/bun-node:1.3.14-24-alpine",
-            "docker.io/imbios/bun-node",
-        ] {
-            assert_eq!(
-                reference(&format!("{prefix}@{pin}")).unwrap(),
-                ("imbios/bun-node".to_owned(), pin.clone())
-            );
-        }
-        for prefix in ["alpine", "alpine:3.21", "docker.io/alpine"] {
-            assert_eq!(
-                reference(&format!("{prefix}@{pin}")).unwrap(),
-                ("library/alpine".to_owned(), pin.clone())
-            );
-        }
-        for value in [
-            format!("ghcr.io/a/b@{pin}").as_str(),
-            format!("localhost:5000/a@{pin}").as_str(),
-            format!("Imbios/bun-node@{pin}").as_str(),
-            "imbios/bun-node:latest",
-            "https://docker.io/a/b",
-            "user:secret@docker.io/a/b",
-            "example.com/a/b@sha256:bad",
-            "../bad@sha256:bad",
-        ] {
-            assert!(reference(value).is_err());
-        }
-    }
-    #[test]
-    fn admission_normalizes_hub_shorthand_and_refuses_unacquirable_references() {
-        let pin = format!("sha256:{}", "a".repeat(64));
-        let id = format!("sha256:{}", "e".repeat(64));
-        for (input, reference, kind) in [
-            (
-                "alpine",
-                "docker.io/library/alpine:latest".to_owned(),
-                "docker_hub",
-            ),
-            (
-                "alpine:3.21",
-                "docker.io/library/alpine:3.21".to_owned(),
-                "docker_hub",
-            ),
-            (
-                "user/img",
-                "docker.io/user/img:latest".to_owned(),
-                "docker_hub",
-            ),
-            (
-                &*format!("alpine@{pin}"),
-                format!("docker.io/library/alpine@{pin}"),
-                "docker_hub",
-            ),
-            (id.as_str(), id.clone(), "image_id"),
-        ] {
-            let admitted = admit(input).unwrap();
-            assert_eq!(
-                (admitted.reference.as_str(), admitted.kind),
-                (reference.as_str(), kind)
-            );
-        }
-        for input in [
-            "",
-            "PRIVATE_CANARY",
-            "ghcr.io/private-canary/app:v1",
-            "localhost:5000/private-canary",
-            "private-canary/nested/app",
-            "private-canary@sha256:bad",
-        ] {
-            let failure = admit(input).unwrap_err();
-            assert_eq!(failure.code, "registry_image");
-            assert!(!failure.message.to_ascii_lowercase().contains("canary"));
-        }
-    }
-    #[test]
-    fn redirects_cannot_downgrade_or_reach_unrelated_or_local_origins() {
-        for url in [
-            "https://registry-1.docker.io/v2/",
-            "https://production.cloudflare.docker.com/blob?opaque=private",
-            "https://docker-images-prod.abc.r2.cloudflarestorage.com/blob",
-        ] {
-            assert!(redirect_allowed(&Url::parse(url).unwrap()));
-        }
-        for url in [
-            "http://production.cloudflare.docker.com/blob",
-            "https://127.0.0.1/blob",
-            "https://registry-1.docker.io:444/blob",
-            "https://registry-1.docker.io.evil.test/blob",
-            "https://user:secret@registry-1.docker.io/blob",
-        ] {
-            assert!(!redirect_allowed(&Url::parse(url).unwrap()));
-        }
-    }
-    #[test]
-    fn manifests_bind_exact_bytes_and_select_one_arm64_variant() {
-        let descriptor = serde_json::json!({"mediaType":"application/vnd.oci.image.manifest.v1+json","size":12,"digest":format!("sha256:{}","a".repeat(64)),"platform":{"os":"linux","architecture":"arm64","variant":"v8"}});
-        let bytes =
-            serde_json::to_vec(&serde_json::json!({"schemaVersion":2,"manifests":[descriptor]}))
-                .unwrap();
-        let mut m = parse_manifest(&bytes, &digest(&bytes)).unwrap();
-        assert!(arm64(&m).is_ok());
-        assert!(parse_manifest(&bytes, &format!("sha256:{}", "0".repeat(64))).is_err());
-        m.manifests.push(m.manifests[0].clone());
-        assert!(arm64(&m).is_err());
-        m.manifests.clear();
-        assert!(arm64(&m).is_err());
-        assert!(bounded(&b"12345"[..], 4).is_err());
-        assert_eq!(bounded(&b"1234"[..], 4).unwrap(), b"1234");
-    }
-    #[test]
-    fn compressed_objects_require_both_exact_size_and_digest() {
-        let mut descriptor = Descriptor {
-            digest: digest(b"compressed fixture"),
-            size: 18,
-            media_type: String::new(),
-            platform: None,
-        };
-        assert!(verify_object(&descriptor, b"compressed fixture").is_ok());
-        assert!(verify_object(&descriptor, b"compressed fixturE").is_err());
-        descriptor.size = 17;
-        assert!(verify_object(&descriptor, b"compressed fixture").is_err());
-    }
-    #[test]
-    fn invalid_reference_refuses_without_creating_archive() {
-        let output =
-            std::env::temp_dir().join(format!("hack-registry-invalid-{}.tar", std::process::id()));
-        assert!(acquire("PRIVATE_CANARY", &output).is_err());
-        assert!(!output.exists());
-        assert!(
-            !acquire("PRIVATE_CANARY", &output)
-                .unwrap_err()
-                .message
-                .contains("PRIVATE_CANARY")
-        );
-    }
-    #[test]
-    #[ignore = "Explicit public Docker Hub acquisition; no runtime import"]
-    fn pinned_event_agent_image_downloads_without_docker() {
-        let path = std::env::var("HACK_REGISTRY_TEST_ARCHIVE").expect("explicit new archive path");
-        let receipt=acquire("imbios/bun-node:1.3.14-24-alpine@sha256:744fb75f37bbe5cca4ba5e9645c7e4454adb58e17752caf53dd61924123297dc",Path::new(&path)).unwrap();
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes.len() as u64, receipt.archive_bytes);
-        assert_eq!(
-            format!("{:x}", Sha256::digest(&bytes)),
-            receipt.archive_sha256
-        );
-        image_load::validate_download(&bytes, &receipt.image_id).unwrap();
-        println!("{}", serde_json::to_string(&receipt).unwrap());
-    }
-}
+#[path = "registry_image_test.rs"]
+mod tests;

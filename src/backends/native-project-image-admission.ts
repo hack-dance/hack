@@ -1,5 +1,6 @@
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { nativeImagePolicyArgs } from "./native-image-policy.ts";
 import {
   invokeNativeRuntime,
   NativeRuntimeRequestError,
@@ -7,7 +8,7 @@ import {
 } from "./native-runtime-client.ts";
 
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
-const KINDS = new Set(["docker_hub", "image_id"]);
+const KINDS = new Set(["docker_hub", "registry", "image_id"]);
 
 /** Admission is pure in the runtime, so each request is short and bounded. */
 const ADMISSION_TIMEOUT_MS = 10_000;
@@ -17,7 +18,7 @@ function refused(): HackCliError {
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native project image reference refused before runtime startup: use a public Docker Hub reference (shorthand such as alpine:3.21 is accepted) or a sha256 image ID; no VM, provider or image acquisition was started.",
+      "Native project image reference refused before runtime startup: use a Docker Hub or OCI registry reference (shorthand such as alpine:3.21 is accepted; local registries need HACK_NATIVE_LOCAL_REGISTRIES) or a sha256 image ID; no VM, provider or image acquisition was started.",
   });
 }
 
@@ -40,7 +41,8 @@ function canceled(): ClosedCliError {
  * The native runtime owns reference normalization (`runtime admit-image`), so
  * this adapter only collects distinct references and checks the closed response.
  * Content IDs need no registry and are not sent. Admission does not pin or
- * rewrite images: acquisition later re-normalizes with the same runtime rule.
+ * rewrite images: acquisition later re-normalizes with the same runtime rule and
+ * the same image policy flags (local registry opt-ins and budgets).
  * An unsupported reference throws a value-free `E_NATIVE_PROJECT_UNSUPPORTED`
  * refusal; a malformed reply or cancellation throws a value-free closed error.
  * Other runtime request failures propagate unchanged.
@@ -51,8 +53,11 @@ export async function admitNativeProjectImages(opts: {
   readonly specs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   readonly signal?: AbortSignal;
   readonly invoke?: typeof invokeNativeRuntime;
+  /** Source of image policy settings; defaults to the process environment. */
+  readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<void> {
   const invoke = opts.invoke ?? invokeNativeRuntime;
+  const policy = nativeImagePolicyArgs(opts.env);
   const references = new Set<string>();
   for (const spec of Object.values(opts.specs)) {
     if (typeof spec.image !== "string") {
@@ -71,7 +76,14 @@ export async function admitNativeProjectImages(opts: {
       admitted = await invoke({
         runtime: opts.runtime,
         cwd: opts.projectRoot,
-        args: ["runtime", "admit-image", "--reference", reference, "--json"],
+        args: [
+          "runtime",
+          "admit-image",
+          "--reference",
+          reference,
+          "--json",
+          ...policy,
+        ],
         timeoutMs: ADMISSION_TIMEOUT_MS,
         signal: opts.signal,
       });

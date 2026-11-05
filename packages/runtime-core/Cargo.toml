@@ -53,6 +53,7 @@ caseless = "=0.2.2"
 unicode-normalization = "=0.1.25"
 notify = "=8.2.0"
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+ruzstd = "=0.8.2"
 
 [profile.release]
 lto = "thin"

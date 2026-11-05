@@ -14,6 +14,7 @@ import {
   NativeHttpsLeaseAcquisitionError,
 } from "../src/backends/native-https-owner.ts";
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
+import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-policy.ts";
 import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
@@ -2968,6 +2969,15 @@ test("Docker Hub shorthand is admitted once per distinct reference before the ru
     }
     if (request.args[1] === "ensure-image") {
       order.push(`ensure ${request.args[3]}`);
+      // Acquisition plus import gets the runtime's whole bounded request budget.
+      expect(request.timeoutMs).toBe(NATIVE_IMAGE_ENSURE_TIMEOUT_MS);
+      expect(request.args.slice(0, 5)).toEqual([
+        "runtime",
+        "ensure-image",
+        "--reference",
+        String(request.args[3]),
+        "--json",
+      ]);
       return { image_id: id };
     }
     return await invoke(request);

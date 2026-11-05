@@ -1,5 +1,9 @@
 //! Candidate-owned bounded image acquisition cache; import remains image_load's operation.
-use super::{engine, image_load, registry_image, state};
+use super::{
+    engine, image_load,
+    image_policy::{ARCHIVE_CEILING, CACHE_CEILING, ImagePolicy},
+    registry_image, state,
+};
 use crate::{Candidate, CandidateError, reject_aliased_state};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,9 +13,10 @@ use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
-const MAX_ARCHIVES: usize = 16;
-const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
-const MAX_CACHE: u64 = 2 * 1024 * 1024 * 1024;
+/// Content-addressed archives one candidate's cache may hold.
+const MAX_ARCHIVES: usize = 64;
+/// A new slot needs at least this much remaining cache budget.
+const MIN_SLOT: u64 = 1024 * 1024;
 fn refused(message: &str) -> CandidateError {
     CandidateError::new("image_cache", message)
 }
@@ -28,9 +33,10 @@ fn hex(value: &str) -> bool {
 fn key(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
+/// Canonical pinned form by syntax alone, so recorded entries stay readable when the
+/// policy that admitted their registry changes; new acquisition admits under the policy.
 fn canonical(value: &str) -> Result<String, CandidateError> {
-    let (repo, pin) = registry_image::reference(value)?;
-    Ok(format!("docker.io/{repo}@{pin}"))
+    registry_image::pinned_syntax(value).map(|(canonical, _)| canonical)
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,7 +57,7 @@ impl CacheReceipt {
             || !hex(&self.archive_sha256)
             || !self.image_id.strip_prefix("sha256:").is_some_and(hex)
             || self.archive_bytes == 0
-            || self.archive_bytes > MAX_ARCHIVE
+            || self.archive_bytes > ARCHIVE_CEILING
         {
             return Err(refused(
                 "Conflicting image cache receipt; no entry was adopted or removed.",
@@ -93,7 +99,7 @@ fn archive_size(path: &Path) -> Result<u64, CandidateError> {
         || m.uid() != current_uid()
         || m.mode() & 0o077 != 0
         || m.len() == 0
-        || m.len() > MAX_ARCHIVE
+        || m.len() > ARCHIVE_CEILING
     {
         return Err(refused(
             "Unsafe image archive cache entry; no files were removed.",
@@ -146,7 +152,7 @@ fn usage(candidate: &Candidate, root: &Path) -> Result<(usize, u64), CandidateEr
         count += 1;
         if count > MAX_ARCHIVES || !name.to_str().is_some_and(hex) {
             return Err(refused(
-                "Image cache permits 16 content-addressed archives and 2 GiB total; unexpected entries refuse admission.",
+                "Image cache permits 64 content-addressed archives; unexpected entries refuse admission.",
             ));
         }
         let dir = entry.path();
@@ -158,9 +164,9 @@ fn usage(candidate: &Candidate, root: &Path) -> Result<(usize, u64), CandidateEr
         bytes = bytes
             .checked_add(inspect_entry(candidate, &dir, &receipt.reference)?.archive_bytes)
             .ok_or_else(|| refused("Image cache size overflow."))?;
-        if bytes > MAX_CACHE {
+        if bytes > CACHE_CEILING {
             return Err(refused(
-                "Image cache exceeds its 2 GiB budget; no files were removed.",
+                "Image cache exceeds its fixed ceiling; no files were removed.",
             ));
         }
     }
@@ -176,34 +182,45 @@ pub struct EnsuredImage {
 }
 /// Resolve tags on every call, reuse their exact immutable archive when available,
 /// and validate/import via the owned guest's existing loader. The engine must already
-/// be running before acquisition. A cache miss reserves one 256 MiB slot within a
-/// 16-archive/2 GiB budget; this operation never prunes or adopts conflicting files.
-/// Runtime ownership is checked again by load_image after network work.
-pub fn ensure(candidate: &Candidate, reference: &str) -> Result<EnsuredImage, CandidateError> {
-    // Validate input before touching runtime state; tags are checked by resolve after
-    // the engine preflight, and pinned references never make a mutable resolution call.
+/// be running before acquisition. A cache miss acquires at most the policy's per-image
+/// budget and the cache's remaining budget (at most 64 archives); an image whose
+/// manifest exceeds that refuses before any layer transfer. This operation never prunes
+/// or adopts conflicting files. Runtime ownership is checked again by the loader after
+/// network work.
+pub fn ensure(
+    candidate: &Candidate,
+    reference: &str,
+    policy: &ImagePolicy,
+) -> Result<EnsuredImage, CandidateError> {
+    // Validate input, including registry admission, before touching runtime state; tags
+    // are resolved after the engine preflight, and pinned references never make a
+    // mutable resolution call.
     if reference.contains('@') {
-        canonical(reference)?;
+        registry_image::pinned(reference, policy)?;
     } else {
-        registry_image::tagged_reference(reference)?;
+        registry_image::tagged(reference, policy)?;
     }
     engine::info(candidate)?;
     let pinned = if reference.contains('@') {
-        canonical(reference)?
+        registry_image::pinned(reference, policy)?.canonical()
     } else {
-        registry_image::resolve(reference)?.pinned_reference
+        registry_image::resolve(reference, policy)?.pinned_reference
     };
     ensure_pinned(
         candidate,
         &pinned,
-        registry_image::acquire,
-        |candidate, path, sha, image| image_load::load(candidate, path, sha, image).map(|_| ()),
+        policy,
+        |reference, path, limit| registry_image::acquire(reference, path, policy, limit),
+        |candidate, path, sha, image| {
+            image_load::load_with(candidate, path, sha, image, policy).map(|_| ())
+        },
     )
 }
 fn ensure_pinned(
     candidate: &Candidate,
     reference: &str,
-    acquire: impl FnOnce(&str, &Path) -> Result<registry_image::AcquiredImage, CandidateError>,
+    policy: &ImagePolicy,
+    acquire: impl FnOnce(&str, &Path, u64) -> Result<registry_image::AcquiredImage, CandidateError>,
     load: impl FnOnce(&Candidate, &Path, &str, &str) -> Result<(), CandidateError>,
 ) -> Result<EnsuredImage, CandidateError> {
     let reference = canonical(reference)?;
@@ -215,21 +232,24 @@ fn ensure_pinned(
     let receipt = if reused {
         inspect_entry(candidate, &dir, &reference)?
     } else {
-        if count >= MAX_ARCHIVES || bytes > MAX_CACHE - MAX_ARCHIVE {
+        let limit = policy
+            .archive_limit
+            .min(policy.cache_limit.saturating_sub(bytes));
+        if count >= MAX_ARCHIVES || limit < MIN_SLOT {
             return Err(refused(
-                "Image cache admission requires a free 256 MiB slot within 16 archives and 2 GiB total; no automatic deletion.",
+                "Image cache admission requires a free slot within 64 archives and the configured cache budget; no automatic deletion.",
             ));
         }
         state::private_directory(&dir)?;
-        let acquired = match acquire(&reference, &dir.join("image.tar")) {
+        let acquired = match acquire(&reference, &dir.join("image.tar"), limit) {
             Ok(value) => value,
             Err(error) => {
                 let _ = fs::remove_dir(&dir);
                 return Err(error);
             }
         };
-        let (_, pin) = registry_image::reference(&reference)?;
-        if acquired.source_digest != pin.as_str() {
+        let (_, pin) = registry_image::pinned_syntax(&reference)?;
+        if acquired.source_digest != pin.as_str() || acquired.archive_bytes > limit {
             return Err(refused(
                 "Acquired image does not match the requested immutable reference.",
             ));
@@ -299,11 +319,12 @@ mod tests {
     fn acquire(
         reference: &str,
         path: &Path,
+        _limit: u64,
     ) -> Result<registry_image::AcquiredImage, CandidateError> {
         fs::write(path, b"fixture").unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         Ok(registry_image::AcquiredImage {
-            source_digest: registry_image::reference(reference)?.1,
+            source_digest: registry_image::pinned_syntax(reference)?.1,
             manifest_digest: format!("sha256:{}", "b".repeat(64)),
             image_id: format!("sha256:{}", "c".repeat(64)),
             archive_sha256: key("fixture"),
@@ -319,9 +340,10 @@ mod tests {
             let result = ensure_pinned(
                 &f.1,
                 &pin(1),
-                |reference, path| {
+                &ImagePolicy::default(),
+                |reference, path, limit| {
                     acquired.set(acquired.get() + 1);
-                    acquire(reference, path)
+                    acquire(reference, path, limit)
                 },
                 |_, path, sha, image| {
                     loaded.set(loaded.get() + 1);
@@ -341,27 +363,52 @@ mod tests {
     fn cache_count_budget_refuses_without_deleting_existing_archives() {
         let f = Fixture::new();
         for n in 0..MAX_ARCHIVES {
-            ensure_pinned(&f.1, &pin(n), acquire, |_, _, _, _| Ok(())).unwrap();
+            ensure_pinned(
+                &f.1,
+                &pin(n),
+                &ImagePolicy::default(),
+                acquire,
+                |_, _, _, _| Ok(()),
+            )
+            .unwrap();
         }
         let error = ensure_pinned(
             &f.1,
             &pin(99),
-            |_, _| panic!("must not acquire"),
+            &ImagePolicy::default(),
+            |_, _, _| panic!("must not acquire"),
             |_, _, _, _| panic!("must not load"),
         )
         .unwrap_err();
-        assert!(error.message.contains("16 archives"));
+        assert!(error.message.contains("64 archives"));
         assert_eq!(
             usage(&f.1, &f.1.state_root.join("artifacts/images")).unwrap(),
-            (16, 112)
+            (64, 448)
         );
     }
     #[test]
-    fn aggregate_byte_budget_refuses_a_new_slot_without_pruning() {
+    fn aggregate_byte_budget_bounds_each_acquisition_and_refuses_a_full_cache_without_pruning() {
         let f = Fixture::new();
-        for n in 0..8 {
+        let slot = 4 * MIN_SLOT;
+        let policy = ImagePolicy {
+            archive_limit: slot,
+            cache_limit: 2 * slot + MIN_SLOT / 2,
+            ..ImagePolicy::default()
+        };
+        let mut limits = Vec::new();
+        for n in 0..2 {
             let reference = pin(n);
-            ensure_pinned(&f.1, &reference, acquire, |_, _, _, _| Ok(())).unwrap();
+            ensure_pinned(
+                &f.1,
+                &reference,
+                &policy,
+                |reference, path, limit| {
+                    limits.push(limit);
+                    acquire(reference, path, limit)
+                },
+                |_, _, _, _| Ok(()),
+            )
+            .unwrap();
             let dir =
                 f.1.state_root
                     .join("artifacts/images")
@@ -370,31 +417,80 @@ mod tests {
                 .write(true)
                 .open(dir.join("image.tar"))
                 .unwrap()
-                .set_len(MAX_ARCHIVE)
+                .set_len(slot)
                 .unwrap();
             let mut receipt = read_receipt(&dir.join("receipt.json")).unwrap();
-            receipt.archive_bytes = MAX_ARCHIVE;
+            receipt.archive_bytes = slot;
             state::write(&dir.join("receipt.json"), &receipt).unwrap();
         }
+        // Each acquisition is offered the per-image budget or the cache's remainder.
+        assert_eq!(limits, [slot, slot]);
         assert_eq!(
             usage(&f.1, &f.1.state_root.join("artifacts/images")).unwrap(),
-            (8, MAX_CACHE)
+            (2, 2 * slot)
         );
         assert!(
             ensure_pinned(
                 &f.1,
                 &pin(99),
-                |_, _| panic!("budget refuses fetch"),
+                &policy,
+                |_, _, _| panic!("budget refuses fetch"),
                 |_, _, _, _| panic!("no load")
             )
             .is_err()
         );
+        // Budgets below the recorded entries keep them readable: cache admission does not
+        // reject them, and the loader applies its own per-image budget on import.
+        let lowered = ImagePolicy {
+            archive_limit: 2 * MIN_SLOT,
+            cache_limit: 2 * MIN_SLOT,
+            ..ImagePolicy::default()
+        };
+        assert!(
+            ensure_pinned(
+                &f.1,
+                &pin(0),
+                &lowered,
+                |_, _, _| panic!("reuse"),
+                |_, _, _, _| Ok(())
+            )
+            .unwrap()
+            .archive_reused
+        );
+        // A larger cache budget offers only its remainder, and an acquisition that
+        // reports more than it was offered is refused rather than recorded;
+        // its unreceipted slot is left for explicit inspection.
+        let wider = ImagePolicy {
+            cache_limit: 2 * slot + 2 * MIN_SLOT,
+            ..policy.clone()
+        };
+        let error = ensure_pinned(
+            &f.1,
+            &pin(98),
+            &wider,
+            |reference, path, limit| {
+                assert_eq!(limit, 2 * MIN_SLOT);
+                let mut acquired = acquire(reference, path, limit)?;
+                acquired.archive_bytes = limit + 1;
+                Ok(acquired)
+            },
+            |_, _, _, _| panic!("no load"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "image_cache");
     }
     #[test]
     fn conflicting_and_unreceipted_cache_entries_refuse_before_load() {
         let f = Fixture::new();
         let reference = pin(1);
-        ensure_pinned(&f.1, &reference, acquire, |_, _, _, _| Ok(())).unwrap();
+        ensure_pinned(
+            &f.1,
+            &reference,
+            &ImagePolicy::default(),
+            acquire,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
         let dir =
             f.1.state_root
                 .join("artifacts/images")
@@ -404,7 +500,8 @@ mod tests {
             ensure_pinned(
                 &f.1,
                 &reference,
-                |_, _| panic!("no acquire"),
+                &ImagePolicy::default(),
+                |_, _, _| panic!("no acquire"),
                 |_, _, _, _| panic!("no load")
             )
             .is_err()
@@ -414,7 +511,8 @@ mod tests {
             ensure_pinned(
                 &f.1,
                 &reference,
-                |_, _| panic!("no acquire"),
+                &ImagePolicy::default(),
+                |_, _, _| panic!("no acquire"),
                 |_, _, _, _| panic!("no load")
             )
             .is_err()
@@ -429,7 +527,8 @@ mod tests {
             ensure_pinned(
                 &f.1,
                 &reference,
-                |_, _| Err(refused("synthetic fetch failure")),
+                &ImagePolicy::default(),
+                |_, _, _| Err(refused("synthetic fetch failure")),
                 |_, _, _, _| panic!("no load")
             )
             .is_err()
@@ -441,15 +540,20 @@ mod tests {
                 .exists()
         );
         assert!(
-            ensure_pinned(&f.1, &reference, acquire, |_, _, _, _| Err(refused(
-                "synthetic import failure"
-            )))
+            ensure_pinned(
+                &f.1,
+                &reference,
+                &ImagePolicy::default(),
+                acquire,
+                |_, _, _, _| Err(refused("synthetic import failure"))
+            )
             .is_err()
         );
         let receipt = ensure_pinned(
             &f.1,
             &reference,
-            |_, _| panic!("reuse complete archive"),
+            &ImagePolicy::default(),
+            |_, _, _| panic!("reuse complete archive"),
             |_, _, _, _| Ok(()),
         )
         .unwrap();
@@ -458,19 +562,35 @@ mod tests {
     #[test]
     fn invalid_input_or_absent_runtime_never_allocates_archive_cache() {
         let f = Fixture::new();
-        assert!(ensure(&f.1, "untrusted/thing:bad tag").is_err());
-        assert!(ensure(&f.1, &pin(1)).is_err());
-        assert!(ensure(&f.1, "fixture/image:latest").is_err());
-        // Docker Hub shorthand passes reference admission and stops at the absent
-        // runtime; an unacquirable registry refuses before any runtime check.
-        assert_ne!(
-            ensure(&f.1, "alpine:3.21").unwrap_err().code,
-            "registry_image"
-        );
-        assert_eq!(
-            ensure(&f.1, "ghcr.io/fixture/image:1").unwrap_err().code,
-            "registry_image"
-        );
+        let policy = ImagePolicy::default();
+        assert!(ensure(&f.1, "untrusted/thing:bad tag", &policy).is_err());
+        assert!(ensure(&f.1, &pin(1), &policy).is_err());
+        assert!(ensure(&f.1, "fixture/image:latest", &policy).is_err());
+        // Docker Hub shorthand and other registries pass reference admission and stop at
+        // the absent runtime; a local registry that is not allowed refuses before any
+        // runtime check.
+        for admitted in [
+            "alpine:3.21",
+            "ghcr.io/fixture/image:1",
+            "registry.test:5000/a/b/c:1",
+        ] {
+            assert_ne!(
+                ensure(&f.1, admitted, &policy).unwrap_err().code,
+                "registry_image",
+                "{admitted}"
+            );
+        }
+        for local in [
+            "localhost:5000/fixture:1",
+            "127.0.0.1:5000/fixture:1",
+            "registry:5000/fixture:1",
+        ] {
+            assert_eq!(
+                ensure(&f.1, local, &policy).unwrap_err().code,
+                "registry_image",
+                "{local}"
+            );
+        }
         assert!(!f.1.state_root.join("artifacts/images").exists());
     }
     #[test]

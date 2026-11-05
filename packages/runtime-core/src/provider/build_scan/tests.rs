@@ -295,6 +295,33 @@ fn platform_flags_must_name_arm64_or_the_build_platforms() {
 }
 
 #[test]
+fn overridden_platform_arguments_must_resolve_to_arm64() {
+    // A global default replaces the frontend's platform value, so the spelling
+    // alone no longer selects linux/arm64.
+    for dockerfile in [
+        "ARG BUILDPLATFORM=linux/amd64\nFROM --platform=$BUILDPLATFORM alpine:3.22\n",
+        "ARG TARGETPLATFORM=linux/amd64\nFROM --platform=${TARGETPLATFORM} alpine:3.22\n",
+        "ARG P=linux/amd64\nARG BUILDPLATFORM=$P\nFROM --platform=${BUILDPLATFORM} alpine:3.22\n",
+        "ARG BUILDPLATFORM=${OTHER:-linux/arm64}\nFROM --platform=$BUILDPLATFORM alpine:3.22\n",
+        "ARG TARGETARCH=amd64\nFROM --platform=linux/$TARGETARCH alpine:3.22\n",
+    ] {
+        assert_eq!(code(dockerfile), "native_build_dockerfile", "{dockerfile}");
+    }
+    // An override that resolves to linux/arm64 still selects it.
+    assert_eq!(
+        images("ARG TARGETPLATFORM=linux/arm64\nFROM --platform=$TARGETPLATFORM alpine:3.22\n"),
+        ["alpine:3.22"]
+    );
+    // A bare global ARG keeps the frontend's value.
+    assert_eq!(
+        images(
+            "ARG BUILDPLATFORM\nARG TARGETPLATFORM\nFROM --platform=$BUILDPLATFORM alpine:3.22 AS a\nFROM --platform=${TARGETPLATFORM} a\n"
+        ),
+        ["alpine:3.22"]
+    );
+}
+
+#[test]
 fn frontend_selection_directives_refuse() {
     for dockerfile in [
         "# syntax=docker/dockerfile:1\nFROM alpine:3.22\n",

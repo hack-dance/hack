@@ -56,11 +56,12 @@ const UNCERTAIN_FRONTEND_ARGS: [&str; 8] = [
     "TARGETSTAGE",
     "SOURCE_DATE_EPOCH",
 ];
-const PLATFORM_VARIABLES: [&str; 4] = [
-    "$BUILDPLATFORM",
-    "${BUILDPLATFORM}",
-    "$TARGETPLATFORM",
-    "${TARGETPLATFORM}",
+/// `--platform` spellings that name a frontend platform argument, with its name.
+const PLATFORM_VARIABLES: [(&str, &str); 4] = [
+    ("$BUILDPLATFORM", "BUILDPLATFORM"),
+    ("${BUILDPLATFORM}", "BUILDPLATFORM"),
+    ("$TARGETPLATFORM", "TARGETPLATFORM"),
+    ("${TARGETPLATFORM}", "TARGETPLATFORM"),
 ];
 const KNOWN_INSTRUCTIONS: [&str; 18] = [
     "add",
@@ -976,8 +977,23 @@ enum Source {
     Image(String),
 }
 
-fn platform_supported(raw: &str, env: &Env) -> bool {
-    PLATFORM_VARIABLES.contains(&raw)
+/// Whether a reachable stage's `--platform` selects `linux/arm64`.
+///
+/// `$BUILDPLATFORM` and `$TARGETPLATFORM` select it only while they keep the
+/// frontend's value. A global `ARG` default replaces that value (the frontend
+/// expands `--platform` against the global arguments), so an overridden one must
+/// itself expand to `linux/arm64`. A bare global `ARG` keeps the frontend's value.
+fn platform_supported(raw: &str, env: &Env, parsed: &Parsed) -> bool {
+    let frontend_value = PLATFORM_VARIABLES
+        .iter()
+        .find(|(spelling, _)| *spelling == raw)
+        .is_some_and(|(_, name)| {
+            !parsed
+                .meta_args
+                .iter()
+                .any(|(declared, default)| declared == name && default.is_some())
+        });
+    frontend_value
         || expand(raw, env)
             .is_some_and(|value| matches!(value.as_str(), "linux/arm64" | "linux/arm64/v8"))
 }
@@ -1082,7 +1098,7 @@ fn resolve(parsed: &Parsed, request: &ScanRequest<'_>) -> Result<DockerfileScan,
         }
         let stage = &parsed.stages[index];
         if let Some(platform) = &stage.platform {
-            if !platform_supported(platform, &env) {
+            if !platform_supported(platform, &env, parsed) {
                 return Err(refusal(
                     Some(stage.line),
                     "native builds support only the linux/arm64 platform.",

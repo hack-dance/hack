@@ -832,13 +832,13 @@ mod tests {
         );
         let largest = ManagedFile::new(
             "a.json",
-            "/home/app/.config/tool/credential file.json",
+            "/srv/app/.config/tool/credential file.json",
             zeroize::Zeroizing::new(vec![b'x'; MAX_ENVIRONMENT_FILE_BYTES]),
         )
         .unwrap();
         assert_eq!(
             largest.target(),
-            "/home/app/.config/tool/credential file.json"
+            "/srv/app/.config/tool/credential file.json"
         );
         assert!(ManagedFile::new("a", "/runner/a", content()).is_ok());
         assert!(ManagedFile::new("a", "/varrun/a", content()).is_ok());

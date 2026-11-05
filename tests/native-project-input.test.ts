@@ -141,6 +141,26 @@ test("legacy dotenv refuses and unmanaged public projects preserve original fiel
   });
 });
 
+test("the effective env is the requested or default env even without managed env files", async () => {
+  const opts = await fixture({ services: { api: { image: "bun:1" } } });
+  const effective = async (envName?: string | null) => {
+    const input = await prepareNativeProjectInput({ ...opts, envName });
+    expect(input.environmentFiles).toEqual([]);
+    expect(input.managedEnvironment).toEqual({});
+    return input.effectiveEnvName;
+  };
+  expect(await effective()).toBeNull();
+  expect(await effective("qa")).toBe("qa");
+  await writeFile(
+    join(opts.projectDir, "hack.config.json"),
+    JSON.stringify({ name: "fixture", env: { defaultOverlay: "qa" } })
+  );
+  expect(await effective()).toBe("qa");
+  expect(await effective("stage")).toBe("stage");
+  // An explicit base selection still overrides the project default.
+  expect(await effective(null)).toBeNull();
+});
+
 test("linked worktree inherits primary local environment and observes checkout overrides", async () => {
   const oldCI = process.env.CI;
   const oldMode = process.env.HACK_EXECUTION_MODE;

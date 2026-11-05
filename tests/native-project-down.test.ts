@@ -592,6 +592,19 @@ test("down environment preserves explicit base and named overlay while legacy re
     "legacy"
   );
 });
+test("down environment of a run started without managed env files is empty", async () => {
+  const opts = await fixture(false);
+  // The recorded env selected only the per-env native files at startup.
+  for (const effectiveEnvName of ["qa", null]) {
+    expect(
+      await nativeDownEnvironment({
+        scope: opts.scope,
+        run: { ...run, effectiveEnvName },
+        serviceNames: ["web"],
+      })
+    ).toEqual({});
+  }
+});
 test("before failure prevents cleanup; after failure retains the stopped mapping", async () => {
   for (const phase of ["before", "after"] as const) {
     const opts = await fixture();

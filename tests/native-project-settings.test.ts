@@ -18,7 +18,9 @@ import {
   resolveNativeAdaptationSelection,
   resolveNativeHostSettings,
 } from "../src/backends/native-project-settings.ts";
+import { checkNativeSettings } from "../src/lib/doctor-native-settings.ts";
 import { readComposeBackendFeatures } from "../src/lib/native-compose-backend-features.ts";
+import { defaultProjectOwnership } from "../src/lib/project.ts";
 import { expectCodedRefusal } from "./helpers/closed-refusal.ts";
 
 /**
@@ -468,4 +470,69 @@ test("a machine preparedBase of off is a machine choice that selects nothing", a
   const host = await f.host();
   expect(host.preparedBase).toBeUndefined();
   expect(host.origins.preparedBase).toBe("machine");
+});
+
+test("doctor validates every adaptation as native up does before counting probes", async () => {
+  const f = await fixture();
+  const composeFile = join(f.projectDir, "docker-compose.yml");
+  await writeFile(
+    composeFile,
+    JSON.stringify({
+      services: {
+        web: {
+          image: `sha256:${SHA}`,
+          labels: { caddy: "web.example.test" },
+        },
+      },
+    })
+  );
+  await f.machine({ version: 1, sharedSource: true });
+  const doctor = () =>
+    checkNativeSettings({
+      project: {
+        projectRoot: f.projectRoot,
+        projectDirName: ".hack",
+        projectDir: f.projectDir,
+        composeFile,
+        envFile: join(f.projectDir, ".env"),
+        configFile: join(f.projectDir, "hack.config.json"),
+      },
+      cfg: {
+        name: "settings-fixture",
+        internal: { dns: false, tls: false },
+        ownership: defaultProjectOwnership(),
+      },
+      env: f.env,
+      uid: UID,
+    });
+  const refusal =
+    "E_CONFIG_INVALID: Native project adaptation is invalid or conflicts with declared configuration; values omitted.";
+  await f.committed("adaptation.json", {
+    version: 1,
+    httpProbes: { web: { port: 3000, path: "/health" } },
+  });
+  expect(await doctor()).toMatchObject({ status: "ok" });
+  expect((await doctor()).nativeSettings?.routesWithoutProbes).toBeUndefined();
+  for (const invalid of [
+    { version: 2, httpProbes: { web: { port: 3000, path: "/health" } } },
+    { version: 1, httpProbes: { web: { port: 0, path: "/" } } },
+    { version: 1, httpProbes: { missing: { port: 3000, path: "/health" } } },
+  ]) {
+    await f.committed("adaptation.json", invalid);
+    expect(await doctor()).toEqual({
+      name: "native settings",
+      status: "error",
+      message: refusal,
+    });
+  }
+  // A per-env file is validated too, though only the default env's file is counted.
+  await f.committed("adaptation.json", {
+    version: 1,
+    httpProbes: { web: { port: 3000, path: "/health" } },
+  });
+  await f.committed("adaptation.qa.json", {
+    version: 1,
+    httpProbes: { web: { port: 0, path: "/" } },
+  });
+  expect(await doctor()).toMatchObject({ status: "error", message: refusal });
 });

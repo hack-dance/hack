@@ -19,7 +19,10 @@ import {
   captureNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
-import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
+import {
+  type NativeProjectInput,
+  prepareNativeProjectInput,
+} from "../src/backends/native-project-input.ts";
 import { preflightNativeRestart } from "../src/backends/native-project-restart-preflight.ts";
 import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
 import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
@@ -2799,6 +2802,73 @@ test("startup applies the per-env adaptation for the run's effective env, else t
       })
     ).toBe(0);
     expect(caddy).toBe(expected);
+  }
+});
+
+test("startup without managed env files selects and records the requested or default env", async () => {
+  for (const [envName, defaultOverlay] of [
+    ["qa", undefined],
+    [undefined, "qa"],
+  ] as const) {
+    const { opts } = await fixture(false);
+    const base = join(opts.scope.projectRoot, "adaptation.json");
+    const qa = join(opts.scope.projectRoot, "adaptation.qa.json");
+    await writeFile(
+      opts.composeFile,
+      JSON.stringify({
+        services: {
+          web: {
+            image: `sha256:${"e".repeat(64)}`,
+            labels: {
+              caddy: "app.hack.local",
+              "caddy.tls": "internal",
+              "caddy.reverse_proxy": "{{upstreams 3000}}",
+            },
+          },
+        },
+      })
+    );
+    await writeFile(
+      join(opts.scope.projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "fixture",
+        ...(defaultOverlay === undefined ? {} : { env: { defaultOverlay } }),
+      })
+    );
+    for (const [file, host] of [
+      [base, "base.example.test"],
+      [qa, "qa.example.test"],
+    ] as const) {
+      await writeFile(
+        file,
+        JSON.stringify({ version: 1, additionalHostnames: { web: [host] } })
+      );
+    }
+    // The real input preparation, so the project has no hack.env.* file at all.
+    opts.dependencies.prepare = prepareNativeProjectInput;
+    const save = opts.dependencies.save!;
+    const recorded: (string | null | undefined)[] = [];
+    opts.dependencies.save = async (request) => {
+      recorded.push(request.run.effectiveEnvName);
+      return await save(request);
+    };
+    let caddy: unknown;
+    const before = async (input: NativeProjectInput) => {
+      caddy = JSON.parse(input.normalizedComposeJson).services.web.labels.caddy;
+      return await opts.before();
+    };
+    expect(
+      await startNativeProject({
+        ...opts,
+        ...(envName === undefined ? {} : { envName }),
+        adaptationFile: base,
+        adaptationFileByEnv: { qa },
+        before,
+      })
+    ).toBe(0);
+    expect(caddy).toBe("app.hack.local, qa.example.test");
+    expect(recorded.length).toBeGreaterThan(0);
+    expect(new Set(recorded)).toEqual(new Set(["qa"]));
   }
 });
 

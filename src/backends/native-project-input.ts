@@ -6,6 +6,7 @@ import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   resolveProjectEnvConfig,
+  resolveProjectEnvSelection,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
 
@@ -21,6 +22,10 @@ export type NativeProjectInput = {
   >;
   /** Private lifecycle environment; not container environment. */
   readonly lifecycleHostEnvironment: Readonly<Record<string, string>>;
+  /**
+   * The requested env, else the project default env, else `null`. It is set even when
+   * no managed env file exists, because it also selects the per-env native files.
+   */
   readonly effectiveEnvName: string | null;
   readonly environmentFiles: readonly string[];
   readonly serviceNames: readonly string[];
@@ -172,6 +177,15 @@ export async function prepareNativeProjectInput(opts: {
     if (Buffer.byteLength(normalizedComposeJson) > LIMIT) {
       throw refused();
     }
+    // Without managed env files there are no values, but the selection still names
+    // the env that picks `adaptation.<env>.json` and per-env dependencies.
+    const selection =
+      resolved?.selection ??
+      (await resolveProjectEnvSelection({
+        projectRoot: opts.projectRoot,
+        projectDir: opts.projectDir,
+        envName: opts.envName,
+      }));
     return {
       originalSha256: createHash("sha256").update(bytes).digest("hex"),
       normalizedComposeJson,
@@ -183,7 +197,7 @@ export async function prepareNativeProjectInput(opts: {
             target: "host",
           })
         : {},
-      effectiveEnvName: resolved?.selection.effectiveEnv ?? null,
+      effectiveEnvName: selection.effectiveEnv,
       environmentFiles: resolved?.files ?? [],
       serviceNames,
     };

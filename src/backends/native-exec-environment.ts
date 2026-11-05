@@ -55,8 +55,11 @@ export async function prepareNativeExecEnvironment(opts: {
       throw new SelectionChanged();
     }
     const selected = opts.run.effectiveEnvName;
+    // A run started without any managed env file records its env only to select the
+    // per-env native files; with still no file there are no values to deliver.
     if (
       selected !== null &&
+      input.environmentFiles.length > 0 &&
       !input.environmentFiles.some((path) =>
         [
           `hack.env.${selected}.yaml`,

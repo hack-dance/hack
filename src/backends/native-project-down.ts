@@ -221,9 +221,7 @@ export async function nativeDownEnvironment(opts: {
       serviceNames: opts.serviceNames,
     });
     if (!resolved) {
-      if (opts.run.effectiveEnvName !== null) {
-        throw refused();
-      }
+      // No managed env file at all: a recorded env only selected per-env native files.
       return {};
     }
     const selected = opts.run.effectiveEnvName;

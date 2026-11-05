@@ -1440,9 +1440,9 @@ their exact behavior.
 
 **Per-env files.** `adaptation.<env>.json` and `dependenciesByEnv.<env>` replace the
 base file for runs whose effective env is `<env>`: the `--env` you pass, the env a
-retained run recorded, or the project's default env. Otherwise the base file applies.
-A fresh start, a retained start and a restart of one run therefore always select the
-same files.
+retained run recorded, or the project's default env. This holds even when the project
+has no `hack.env.*` files. Otherwise the base file applies. A fresh start, a retained
+start and a restart of one run therefore always select the same files.
 
 **Identity and recovery.** Settings resolution only reads files. It writes no state,
 so Ctrl-C needs no cleanup, and `down`, `ps`, `logs`, `exec` and `run` keep using the
@@ -1467,7 +1467,8 @@ the machine settings path with your home shown as `~`. With `--json`, the check'
 | `unread_project_settings_files` | `.hack/native/` holds files other than `adaptation*.json`; Hack does not read them. |
 
 An invalid settings file makes the check an error with the same closed line native
-`up` prints. The check runs no runtime request, credential export or network call.
+`up` prints. Each adaptation file (the base and every `adaptation.<env>.json`) is
+checked against the Compose file with the validator native `up` uses. The check runs no runtime request, credential export or network call.
 
 ### Optional prepared base for a fresh pool
 

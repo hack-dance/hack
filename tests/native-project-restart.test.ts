@@ -455,6 +455,70 @@ test("preflight selects the per-env adaptation and dependency files by the retai
   });
 });
 
+test("preflight keeps the retained env's per-env files without managed env files", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-restart-env-"))
+  );
+  try {
+    const projectDir = join(root, ".hack");
+    await mkdir(projectDir);
+    const composeFile = join(projectDir, "docker-compose.yml");
+    await writeFile(
+      composeFile,
+      JSON.stringify({
+        services: { app: { image: `sha256:${"9".repeat(64)}` } },
+      })
+    );
+    const selected: Record<string, string | undefined> = {};
+    const preflight = (effectiveEnvName: string | null) =>
+      preflightNativeRestart({
+        runtime: { binary: "/unused", home: "/candidate" },
+        scope: { ...scope, projectRoot: root, projectDir },
+        composeFile,
+        run: { ...run, effectiveEnvName },
+        adaptationFile: "/fixture/.hack/native/adaptation.json",
+        adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
+        dependencyFile: "/machine/dependencies.json",
+        dependencyFileByEnv: { qa: "/machine/dependencies.qa.json" },
+        dependencies: {
+          activeImages: async () => activeImageFixture(),
+          adapt: async ({ input: prepared, path }) => {
+            selected.adaptation = path;
+            selected.env = prepared.effectiveEnvName ?? undefined;
+            return prepared;
+          },
+          dependencies: async ({ path }) => {
+            selected.dependencies = path;
+            throw new ClosedCliError("stop after dependency selection");
+          },
+          invoke: async ({ args }) =>
+            args[1] === "probe" ? { admitted: true } : { network: "internet" },
+        },
+      });
+    // The project has no hack.env.* file, so the recorded env names only the files.
+    await expectClosedRefusal(
+      preflight("qa"),
+      "stop after dependency selection"
+    );
+    expect(selected).toEqual({
+      adaptation: "/fixture/.hack/native/adaptation.qa.json",
+      env: "qa",
+      dependencies: "/machine/dependencies.qa.json",
+    });
+    await expectClosedRefusal(
+      preflight(null),
+      "stop after dependency selection"
+    );
+    expect(selected).toEqual({
+      adaptation: "/fixture/.hack/native/adaptation.json",
+      env: undefined,
+      dependencies: "/machine/dependencies.json",
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("preflight refuses a stale host listener before restart cleanup", async () => {
   const { preflightNativeRestart } = await import(
     "../src/backends/native-project-restart-preflight.ts"

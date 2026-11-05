@@ -99,6 +99,20 @@ test("fresh exec refuses missing selectors or deleted overlays before AWS export
   });
   expect(calls).toBe(0);
 });
+test("fresh exec of a run started without managed env files delivers no values", async () => {
+  const opts = await fixture();
+  for (const name of ["default", "qa", "other"]) {
+    await rm(join(opts.scope.projectDir, `hack.env.${name}.yaml`));
+  }
+  // The recorded env selected only the per-env native files at startup.
+  expect(await prepareNativeExecEnvironment(opts)).toEqual({});
+  expect(
+    await prepareNativeExecEnvironment({
+      ...opts,
+      run: { ...opts.run, effectiveEnvName: null },
+    })
+  ).toEqual({});
+});
 test("fresh exec names a changed selection apart from an unresolvable environment", async () => {
   const opts = await fixture();
   // The service this exec selects is no longer in the configuration.

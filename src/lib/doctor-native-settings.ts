@@ -2,6 +2,8 @@ import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { YAML } from "bun";
+import { adaptNativeProject } from "../backends/native-project-adaptation.ts";
+import type { NativeProjectInput } from "../backends/native-project-input.ts";
 import {
   readNativeSelection,
   selectNativeEnvFile,
@@ -12,6 +14,7 @@ import {
   type NativeAdaptationSelection,
   type NativeSettingKey,
   type NativeSettingOrigin,
+  nativeAdaptationCandidates,
   nativeMachineSettingsDirectory,
   resolveNativeAdaptationSelection,
   resolveNativeHostSettings,
@@ -91,33 +94,56 @@ function labelKeys(labels: unknown): string[] {
   return [];
 }
 
-/** Routed services in the raw Compose file that have no native probe after adaptation. */
-async function countRoutesWithoutProbes(opts: {
-  readonly composeFile: string;
-  readonly adaptationFile: string | undefined;
-}): Promise<number> {
-  const text = await readTextFile(opts.composeFile);
+async function readRawCompose(
+  composeFile: string
+): Promise<Record<string, unknown> | undefined> {
+  const text = await readTextFile(composeFile);
   if (text === null) {
-    return 0;
+    return undefined;
   }
   let compose: unknown;
   try {
     compose = YAML.parse(text);
   } catch {
-    return 0;
+    return undefined;
   }
-  if (!(isRecord(compose) && isRecord(compose.services))) {
+  return isRecord(compose) && isRecord(compose.services) ? compose : undefined;
+}
+
+/**
+ * Apply one adaptation file with the validator native `up` uses, to the raw Compose
+ * file. It refuses with the same closed `E_CONFIG_INVALID` line as `up`. Only the
+ * public Compose shape is adapted; managed env values are never resolved here.
+ */
+async function adaptRawCompose(opts: {
+  readonly compose: Readonly<Record<string, unknown>>;
+  readonly adaptationFile: string;
+}): Promise<Record<string, unknown>> {
+  const input: NativeProjectInput = {
+    originalSha256: "",
+    normalizedComposeJson: JSON.stringify(opts.compose),
+    managedEnvironment: {},
+    lifecycleHostEnvironment: {},
+    effectiveEnvName: null,
+    environmentFiles: [],
+    serviceNames: isRecord(opts.compose.services)
+      ? Object.keys(opts.compose.services)
+      : [],
+  };
+  const adapted = adaptNativeProject({
+    input,
+    selection: await readNativeSelection(opts.adaptationFile),
+  });
+  return JSON.parse(adapted.normalizedComposeJson);
+}
+
+/** Routed services that have no native HTTP probe in an adapted Compose file. */
+function countRoutesWithoutProbes(compose: Record<string, unknown>): number {
+  if (!isRecord(compose.services)) {
     return 0;
-  }
-  let probes: Readonly<Record<string, unknown>> = {};
-  if (opts.adaptationFile !== undefined) {
-    const selection = await readNativeSelection(opts.adaptationFile);
-    if (isRecord(selection) && isRecord(selection.httpProbes)) {
-      probes = selection.httpProbes;
-    }
   }
   let count = 0;
-  for (const [name, service] of Object.entries(compose.services)) {
+  for (const service of Object.values(compose.services)) {
     if (!isRecord(service)) {
       continue;
     }
@@ -125,14 +151,47 @@ async function countRoutesWithoutProbes(opts: {
       continue;
     }
     const probed =
-      (isRecord(service.healthcheck) &&
-        service.healthcheck["x-hack-http"] !== undefined) ||
-      Object.hasOwn(probes, name);
+      isRecord(service.healthcheck) &&
+      service.healthcheck["x-hack-http"] !== undefined;
     if (!probed) {
       count += 1;
     }
   }
   return count;
+}
+
+/**
+ * Validate every adaptation file `up` could apply (the base and each per-env file),
+ * then count routed services without a probe after the default-env adaptation.
+ * An unreadable Compose file counts nothing; the Compose checks report it.
+ */
+async function adaptedRoutesWithoutProbes(opts: {
+  readonly composeFile: string;
+  readonly adaptation: NativeAdaptationSelection;
+  readonly defaultEnv: string | null;
+}): Promise<number> {
+  const compose = await readRawCompose(opts.composeFile);
+  if (compose === undefined) {
+    return 0;
+  }
+  const defaultFile = selectNativeEnvFile({
+    selection: opts.adaptation,
+    envName: opts.defaultEnv,
+  });
+  let adapted = compose;
+  for (const adaptationFile of nativeAdaptationCandidates({
+    selection: opts.adaptation,
+    requestedEnvName: undefined,
+  })) {
+    if (adaptationFile === undefined) {
+      continue;
+    }
+    const result = await adaptRawCompose({ compose, adaptationFile });
+    if (adaptationFile === defaultFile) {
+      adapted = result;
+    }
+  }
+  return countRoutesWithoutProbes(adapted);
 }
 
 async function unreadProjectSettingsFiles(
@@ -230,12 +289,10 @@ export async function checkNativeSettings(opts: {
     const defaultEnv = await readProjectDefaultEnvConfig({
       projectDir: project.projectDir,
     });
-    const routesWithoutProbes = await countRoutesWithoutProbes({
+    const routesWithoutProbes = await adaptedRoutesWithoutProbes({
       composeFile: project.composeFile,
-      adaptationFile: selectNativeEnvFile({
-        selection: adaptation,
-        envName: defaultEnv,
-      }),
+      adaptation,
+      defaultEnv,
     });
     const warnings: NativeSettingsWarning[] = [];
     if (!host.sharedSource) {

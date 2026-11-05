@@ -9,6 +9,20 @@ const MAX_OUTPUT = 64 * 1024;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PROFILE = /^[A-Za-z0-9_+=,.@-]{1,128}$/;
 const REGION = /^[a-z]{2}(?:-[a-z]+)+-\d+$/;
+
+/**
+ * Whether an AWS profile and optional region are selectors native AWS adaptation
+ * accepts. Settings resolution uses it so an invalid selector refuses before startup.
+ */
+export function isNativeAwsSelector(opts: {
+  readonly profile: string;
+  readonly region?: string;
+}): boolean {
+  return (
+    PROFILE.test(opts.profile) &&
+    (opts.region === undefined || REGION.test(opts.region))
+  );
+}
 const SELECTORS = ["AWS_PROFILE", "AWS_DEFAULT_PROFILE"];
 const CREDENTIAL_KEYS = [
   "AWS_ACCESS_KEY_ID",
@@ -327,10 +341,7 @@ export async function adaptNativeAwsEnvironment(opts: {
   };
 }> {
   try {
-    if (
-      !PROFILE.test(opts.profile) ||
-      (opts.region !== undefined && !REGION.test(opts.region))
-    ) {
+    if (!isNativeAwsSelector(opts)) {
       throw refused();
     }
     const compose: unknown = JSON.parse(opts.input.normalizedComposeJson);

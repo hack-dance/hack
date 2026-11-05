@@ -59,11 +59,19 @@ async function fixture() {
     "native",
     "settings-fixture"
   );
+  /** Writes a machine record, granted to this project root unless it says otherwise. */
   async function machine(value: unknown, mode = 0o600): Promise<string> {
     await mkdir(machineDir, { recursive: true, mode: 0o700 });
     await chmod(machineDir, 0o700);
     const file = join(machineDir, "settings.json");
-    await writeFile(file, JSON.stringify(value), { mode });
+    const bound =
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      !Object.hasOwn(value, "projectRoots")
+        ? { ...value, projectRoots: [projectRoot] }
+        : value;
+    await writeFile(file, JSON.stringify(bound), { mode });
     await chmod(file, mode);
     return file;
   }
@@ -449,6 +457,105 @@ test("machine settings inside the project root refuse, so no project share can r
   );
 });
 
+test("machine settings apply only to a canonical project root they list", async () => {
+  const f = await fixture();
+  // Another checkout that claims the same project name.
+  const other = join(f.root, "other-checkout");
+  await mkdir(join(other, ".hack"), { recursive: true });
+  const linked = join(f.root, "linked-project");
+  await symlink(f.projectRoot, linked);
+  const hostAt = (projectRoot: string) =>
+    resolveNativeHostSettings({
+      env: f.env,
+      projectName: "settings-fixture",
+      projectRoot,
+      uid: UID,
+    });
+  const notGranted =
+    'Native machine settings do not grant this project root. To grant this checkout, add its absolute path to "projectRoots" in ${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/<project>/settings.json; values omitted.';
+  await f.machine({ version: 1, sharedSource: true });
+  expect((await hostAt(f.projectRoot)).sharedSource).toBe(true);
+  // A symbolic link to the granted root resolves to it.
+  expect((await hostAt(linked)).sharedSource).toBe(true);
+  await expectCodedRefusal(hostAt(other), "E_PERMISSION", notGranted);
+  // A listed link is canonicalized too, and a listed root that is gone is skipped.
+  await f.machine({
+    version: 1,
+    sharedSource: true,
+    projectRoots: [join(f.root, "removed-worktree"), linked],
+  });
+  expect((await hostAt(f.projectRoot)).sharedSource).toBe(true);
+  await expectCodedRefusal(hostAt(other), "E_PERMISSION", notGranted);
+  // An explicitly listed second checkout is granted.
+  await f.machine({
+    version: 1,
+    sharedSource: true,
+    projectRoots: [f.projectRoot, other],
+  });
+  expect((await hostAt(other)).sharedSource).toBe(true);
+  // A record without a binding grants nothing, even where variables override it.
+  await f.machine({ version: 1, sharedSource: true, projectRoots: undefined });
+  await expectCodedRefusal(
+    hostAt(f.projectRoot),
+    "E_PERMISSION",
+    "Native machine settings are not bound to a project root."
+  );
+  await expectCodedRefusal(
+    f.host({ HACK_NATIVE_SHARED_SOURCE: "1" }),
+    "E_PERMISSION",
+    "not bound to a project root"
+  );
+  for (const projectRoots of [[], ["relative/root"], "/not/a/list"]) {
+    await f.machine({ version: 1, sharedSource: true, projectRoots });
+    await expectCodedRefusal(
+      f.host(),
+      "E_CONFIG_INVALID",
+      "Native machine settings field projectRoots is invalid; values omitted."
+    );
+  }
+});
+
+test("AWS selectors refuse at settings resolution as native AWS adaptation would", async () => {
+  const f = await fixture();
+  for (const aws of [
+    { profile: "dev profile" },
+    { profile: "dev", region: "invalid" },
+    { profile: "dev", region: "" },
+    { profile: "" },
+  ]) {
+    await f.machine({ version: 1, aws });
+    await expectCodedRefusal(
+      f.host(),
+      "E_CONFIG_INVALID",
+      "Native machine settings field aws is invalid; values omitted."
+    );
+    // A variable override does not excuse the invalid machine value.
+    await expectCodedRefusal(
+      f.host({ HACK_NATIVE_AWS_PROFILE: "env-profile" }),
+      "E_CONFIG_INVALID",
+      "field aws is invalid"
+    );
+  }
+  await f.machine({ version: 1, aws: { profile: "dev", region: "eu-west-1" } });
+  expect((await f.host()).aws).toEqual({ profile: "dev", region: "eu-west-1" });
+  const envRefusal =
+    "HACK_NATIVE_AWS_PROFILE or HACK_NATIVE_AWS_REGION is not a valid AWS selector; values omitted.";
+  for (const env of [
+    { HACK_NATIVE_AWS_PROFILE: "dev profile" },
+    { HACK_NATIVE_AWS_PROFILE: "dev", HACK_NATIVE_AWS_REGION: "invalid" },
+  ]) {
+    await expectCodedRefusal(f.host(env), "E_CONFIG_INVALID", envRefusal);
+  }
+  expect(
+    (
+      await f.host({
+        HACK_NATIVE_AWS_PROFILE: "env-profile",
+        HACK_NATIVE_AWS_REGION: "us-west-2",
+      })
+    ).aws
+  ).toEqual({ profile: "env-profile", region: "us-west-2" });
+});
+
 test("the machine directory follows XDG_CONFIG_HOME, then HOME, and a sanitized project name", () => {
   expect(
     nativeMachineSettingsDirectory({
@@ -535,4 +642,20 @@ test("doctor validates every adaptation as native up does before counting probes
     httpProbes: { web: { port: 0, path: "/" } },
   });
   expect(await doctor()).toMatchObject({ status: "error", message: refusal });
+  await rm(join(f.nativeDir, "adaptation.qa.json"));
+  expect(await doctor()).toMatchObject({ status: "ok" });
+  // Machine settings refusals are reported the same way.
+  await f.machine({ version: 1, sharedSource: true, aws: { profile: "a b" } });
+  expect(await doctor()).toMatchObject({
+    status: "error",
+    message:
+      "E_CONFIG_INVALID: Native machine settings field aws is invalid; values omitted.",
+  });
+  await f.machine({ version: 1, sharedSource: true, projectRoots: ["/"] });
+  expect(await doctor()).toMatchObject({
+    status: "error",
+    message: expect.stringMatching(
+      /^E_PERMISSION: Native machine settings do not grant this project root\./
+    ),
+  });
 });

@@ -41,7 +41,8 @@ selection comes from (`env`, `machine`, `project` or `unset`) without its value,
 project configuration that native `up` refuses or does not apply. The committed
 `.hack/native/adaptation.json` and the per-machine
 `${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/<project>/settings.json` replace exported
-`HACK_NATIVE_*` variables; a variable that is set still wins. See
+`HACK_NATIVE_*` variables; a variable that is set still wins. The machine file applies
+only to the project roots listed in its `projectRoots`. See
 [Native settings files](guides/native-candidate.md#native-settings-files).
 
 Project names in the registry and `--project`/MCP selectors use the same lowercase,

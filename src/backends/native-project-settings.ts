@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { sanitizeProjectSlug } from "../lib/project.ts";
+import { isNativeAwsSelector } from "./native-aws-environment.ts";
 import {
   type NativePreparedBase,
   parseNativePreparedBase,
@@ -31,7 +32,9 @@ import {
  * - **Machine settings** live outside every project share, in
  *   `${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/<project>/settings.json`. They hold
  *   grants and host authority: the source-share grant, the AWS profile, host dependency
- *   files, HTTPS, prepared base and approved hosts.
+ *   files, HTTPS, prepared base and approved hosts. Because any checkout can claim a
+ *   project name, a record applies only to the canonical project roots it lists in
+ *   `projectRoots`; any other checkout is refused with `E_PERMISSION`.
  * - **Environment variables** (`HACK_NATIVE_*`) override either, per setting.
  *
  * Precedence is per setting and whole-value: a variable that is set wins entirely, then
@@ -59,6 +62,7 @@ const ADAPTATION_FILE = /^adaptation(?:\.([a-z0-9]+(?:-[a-z0-9]+)*))?\.json$/;
 const MACHINE_FILENAME = "settings.json";
 const MACHINE_KEYS = new Set([
   "version",
+  "projectRoots",
   "sharedSource",
   "dependencies",
   "dependenciesByEnv",
@@ -70,6 +74,8 @@ const MACHINE_KEYS = new Set([
 const ENV_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SIBLING_FILE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
 const PROJECT_ENTRY_LIMIT = 64;
+const PROJECT_ROOT_LIMIT = 16;
+const CONTROL = /[\x00-\x1f\x7f]/;
 const ENV_OVERLAY_LIMIT = 32;
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -105,6 +111,60 @@ function machineRefused(detail: string): HackCliError {
 
 function fieldRefused(key: string): HackCliError {
   return machineRefused(`field ${key} is invalid`);
+}
+
+function machineNotGranted(detail: string): HackCliError {
+  return new HackCliError({
+    code: "E_PERMISSION",
+    message: `Native machine settings ${detail}. To grant this checkout, add its absolute path to "projectRoots" in \${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/<project>/settings.json; values omitted.`,
+  });
+}
+
+/**
+ * The machine record is keyed by project name, which any checkout can claim. Refuse it,
+ * before any other field is read, unless `projectRoots` lists this canonical project
+ * root. Listed roots are canonicalized too, so a symbolic link to a granted root (or a
+ * granted path that is itself a link) matches; a root that no longer exists is skipped.
+ */
+async function requireMachineProjectRoot(opts: {
+  readonly value: unknown;
+  readonly projectRoot: string;
+}): Promise<void> {
+  if (!(isRecord(opts.value) && opts.value.version === 1)) {
+    throw machineRefused("require version 1");
+  }
+  const roots = opts.value.projectRoots;
+  if (roots === undefined) {
+    throw machineNotGranted("are not bound to a project root");
+  }
+  if (
+    !(
+      Array.isArray(roots) &&
+      roots.length > 0 &&
+      roots.length <= PROJECT_ROOT_LIMIT &&
+      roots.every(
+        (root) =>
+          typeof root === "string" &&
+          root.length <= 4096 &&
+          isAbsolute(root) &&
+          !CONTROL.test(root)
+      )
+    )
+  ) {
+    throw fieldRefused("projectRoots");
+  }
+  for (const root of roots as readonly string[]) {
+    let canonical: string;
+    try {
+      canonical = await realpath(root);
+    } catch {
+      continue;
+    }
+    if (canonical === opts.projectRoot) {
+      return;
+    }
+  }
+  throw machineNotGranted("do not grant this project root");
 }
 
 /** The adaptation native start applies: one explicit file, or the committed files. */
@@ -258,7 +318,8 @@ function inside(parent: string, child: string): boolean {
  * Locate and read the machine settings file. Absent directory or file means no machine
  * settings. A present file requires a real, current-user-owned directory without group
  * or other bits, outside the project root (so no project share can reach it), and an
- * owner-only regular file; anything else refuses.
+ * owner-only regular file whose `projectRoots` grants this project root; anything else
+ * refuses.
  */
 async function readMachineSettings(opts: {
   readonly env: Environment;
@@ -325,6 +386,7 @@ async function readMachineSettings(opts: {
       "file must be a bounded owner-only (mode 0600) regular JSON file"
     );
   }
+  await requireMachineProjectRoot({ value, projectRoot: root });
   return { directory: canonical, file, value };
 }
 
@@ -437,12 +499,11 @@ function machineAws(value: unknown): {
         (key) => key === "profile" || key === "region"
       ) &&
       typeof value.profile === "string" &&
-      value.profile.length > 0 &&
-      value.profile.length <= 128 &&
-      (value.region === undefined ||
-        (typeof value.region === "string" &&
-          value.region.length > 0 &&
-          value.region.length <= 64))
+      (value.region === undefined || typeof value.region === "string") &&
+      isNativeAwsSelector({
+        profile: value.profile,
+        ...(value.region === undefined ? {} : { region: value.region }),
+      })
     )
   ) {
     throw fieldRefused("aws");
@@ -508,6 +569,25 @@ function machineValues(
       : { https: machineHttps(settings.https) }),
     ...(settings.aws === undefined ? {} : { aws: machineAws(settings.aws) }),
   };
+}
+
+/** The AWS variables, refused here when native AWS adaptation would refuse them. */
+function envAws(env: Environment): {
+  readonly profile: string;
+  readonly region?: string;
+} {
+  const selected = {
+    profile: env.HACK_NATIVE_AWS_PROFILE ?? "",
+    region: env.HACK_NATIVE_AWS_REGION,
+  };
+  if (!isNativeAwsSelector(selected)) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "HACK_NATIVE_AWS_PROFILE or HACK_NATIVE_AWS_REGION is not a valid AWS selector; values omitted.",
+    });
+  }
+  return selected;
 }
 
 /** Whole-value precedence for one setting: a set variable, else the machine value. */
@@ -588,10 +668,7 @@ export async function resolveNativeHostSettings(opts: {
   });
   const aws = pick<NativeHostSettings["aws"]>({
     envSet: nonEmpty(env, "HACK_NATIVE_AWS_PROFILE"),
-    fromEnv: () => ({
-      profile: env.HACK_NATIVE_AWS_PROFILE ?? "",
-      region: env.HACK_NATIVE_AWS_REGION,
-    }),
+    fromEnv: () => envAws(env),
     machineSet: values.aws !== undefined,
     machine: values.aws,
   });

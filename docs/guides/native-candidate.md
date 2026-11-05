@@ -1381,7 +1381,14 @@ shared read/write with the native VM: a container could rewrite a grant stored i
 tree before the next `up`. `<project>` is the project name Hack uses (the Compose
 `name:`, else `name` in `hack.config.json`, else the directory name), lowercased with
 other characters replaced by `-`. Linked worktrees and branch instances of one project
-therefore share one machine file. Create it once per machine:
+therefore find the same machine file.
+
+Any checkout can claim a project name, so the file grants only the checkouts it lists
+in `projectRoots`: absolute paths of project roots (at most 16). Hack compares the
+canonical path of the current project root with the canonical path of each entry, so a
+symbolic link to a listed root works. An entry that no longer exists is skipped. Branch
+instances share their checkout's root; list each linked worktree you want to grant.
+Create the file once per machine:
 
 ```sh
 dir="${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/my-app"
@@ -1393,6 +1400,7 @@ touch "$dir/settings.json" && chmod 600 "$dir/settings.json"
 ```json
 {
   "version": 1,
+  "projectRoots": ["/absolute/path/to/my-app"],
   "sharedSource": true,
   "aws": {"profile": "dev-sso", "region": "us-east-1"},
   "dependencies": "dependencies.json",
@@ -1403,7 +1411,8 @@ touch "$dir/settings.json" && chmod 600 "$dir/settings.json"
 }
 ```
 
-Every field except `version` is optional. The fields match the variables:
+Every field except `version` and `projectRoots` is optional. The other fields match
+the variables:
 
 | Field | Variable it stands for |
 | --- | --- |
@@ -1426,7 +1435,15 @@ storage or runtime work unless all of these hold:
 - the directory is outside the project root, and the project root is not inside it;
 - `settings.json` is a regular file owned by you with mode `0600`, not a symbolic or
   hard link, at most 64 KiB, and unchanged while it is read;
-- every field is valid, including a field that a variable overrides.
+- every field is valid, including a field that a variable overrides. `aws.profile`
+  and `aws.region` must be selectors that native AWS adaptation accepts, and so must
+  `HACK_NATIVE_AWS_PROFILE` and `HACK_NATIVE_AWS_REGION`.
+
+Before it reads any other field, Hack refuses the file with `E_PERMISSION` when
+`projectRoots` is missing or does not list the current project root. The refusal
+happens before any lifecycle hook runs, even when variables override every setting.
+A file written before `projectRoots` existed therefore grants nothing: add the
+project root to it to grant that checkout again.
 
 A missing directory or file means no machine settings.
 

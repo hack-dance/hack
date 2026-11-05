@@ -6,6 +6,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -116,7 +117,15 @@ exit 1
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
     const file = join(directory, "settings.json");
-    await writeFile(file, JSON.stringify(value), { mode });
+    // Granted to this checkout's root unless the record names its own roots.
+    const bound =
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      !Object.hasOwn(value, "projectRoots")
+        ? { ...value, projectRoots: [project] }
+        : value;
+    await writeFile(file, JSON.stringify(bound), { mode });
     await chmod(file, mode);
   };
   return { root, project, calls, env, committed, machine };
@@ -244,6 +253,54 @@ test(
     const revoked = await cli(f, ["up"], { HACK_NATIVE_SHARED_SOURCE: "0" });
     expect(errorLines(revoked.output)).toEqual([
       `ERROR: E_PERMISSION: ${NATIVE_SHARED_SOURCE_REFUSAL}`,
+    ]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "a machine grant applies only to its project root; another checkout of the same name runs no hook",
+  async () => {
+    const f = await fixture({ services: { web: { image: IMAGE } } });
+    await f.machine({ version: 1, sharedSource: true });
+    // A second checkout claims the same project name and authors an up hook.
+    const other = join(f.root, "other-checkout");
+    const marker = join(f.root, "hook-ran");
+    await mkdir(join(other, ".hack"), { recursive: true });
+    await writeFile(
+      join(other, ".hack", "docker-compose.yml"),
+      JSON.stringify({ services: { web: { image: IMAGE } } })
+    );
+    await writeFile(
+      join(other, ".hack", "hack.config.json"),
+      JSON.stringify({
+        name: PROJECT,
+        lifecycle: { up: { before: [`touch '${marker}'`] } },
+      })
+    );
+    const refused = await cli({ ...f, project: other }, ["up"]);
+    expect(errorLines(refused.output)).toEqual([
+      'ERROR: E_PERMISSION: Native machine settings do not grant this project root. To grant this checkout, add its absolute path to "projectRoots" in ${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/<project>/settings.json; values omitted.',
+    ]);
+    expect(await Bun.file(marker).exists()).toBe(false);
+    expect(await f.calls()).toEqual([]);
+    // The granted root, also through a symbolic link, still reaches the runtime.
+    const linked = join(f.root, "linked-project");
+    await symlink(f.project, linked);
+    const granted = await cli({ ...f, project: linked }, ["up"]);
+    expect(granted.output).not.toContain("E_PERMISSION");
+    expect(granted.output).toMatch(RUNTIME_REQUEST_LINE);
+    // A record without a binding grants nothing.
+    await f.machine({
+      version: 1,
+      sharedSource: true,
+      projectRoots: undefined,
+    });
+    const unbound = await cli(f, ["up"]);
+    expect(errorLines(unbound.output)).toEqual([
+      expect.stringMatching(
+        /^ERROR: E_PERMISSION: Native machine settings are not bound to a project root\./
+      ),
     ]);
   },
   SPAWN_TIMEOUT_MS

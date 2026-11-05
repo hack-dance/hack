@@ -1091,6 +1091,37 @@ That migrates the repo into:
 
 Tracked layers receive secret-backed ciphertext, not legacy plaintext.
 
+The migration runs the same way on the Compose and native backends: it changes project
+files only, so native `hack doctor --migrate-env-config` needs no Docker and no native
+runtime.
+
+`hack.env.json` and the Compose file are shared, git-tracked configuration, so the
+migration never deletes or edits a git-tracked file without your consent. Interactively,
+doctor lists the git-tracked files that may change before it migrates, and asks before it
+removes `env_file` entries from a tracked Compose file and, separately, before it removes
+git-tracked legacy files such as `hack.env.json`. A file whose git status can't be read
+inside a git checkout counts as tracked. A run that can't prompt (no TTY,
+`HACK_NO_INTERACTIVE`, or `--no-interactive`) refuses with `E_INTERACTIVE_REQUIRED` before
+any doctor step writes, naming each tracked file it would delete or edit, unless you pass
+`--accept-tracked-env-changes`:
+
+```bash
+hack doctor --migrate-env-config --no-interactive --accept-tracked-env-changes
+```
+
+The list is conservative; with a contract it can include `hack.config.json`, which the
+migration rewrites when it still holds legacy keys such as `defaultEnvConfig`, and a legacy
+dotenv file the migration ends up keeping. Commit the changes so teammates get them.
+
+Commands that need env values, such as `hack env exec`, also migrate a
+project that has `hack.env.json` and no env layers, without asking. That migration reports
+each moved key, never its value, and removes a legacy `.hack/.env` or `.hack/.env.<overlay>`
+file only when every entry now lives in an env layer, Compose no longer names it as
+`env_file`, and git doesn't track it, so no second plaintext copy stays behind. It keeps
+`hack.env.json`, never edits the Compose file and never deletes a git-tracked file; it names
+a kept file that Compose still lists. Run `hack doctor --migrate-env-config` for those
+changes. Like doctor, it rewrites legacy keys in `hack.config.json`.
+
 A repo that has no `.hack/hack.env.json` is migrated as well. Its values live only in
 `.hack/.env` and `.hack/.env.<overlay>`, which are gitignored and may hold passwords or
 API keys, so the migration keeps them out of tracked files: each `.hack/.env` entry
@@ -1300,7 +1331,8 @@ any secret backend it configures, is left unchanged. The migration changes proje
 only, so it runs even when Docker is not reachable; the other `--migrate-env-config`
 repairs still need Docker. As with any migration, `hack doctor` then offers to remove the
 legacy `.hack/.env*` files that Compose no longer references (a non-interactive run
-accepts). Files Compose still names as `env_file` are offered only when the Compose repair
+accepts for untracked files, and for git-tracked ones only with `--accept-tracked-env-changes`).
+Files Compose still names as `env_file` are offered only when the Compose repair
 removed those references. Without `hack.env.json`, a legacy file that git tracks, or one
 whose status git cannot report in a git checkout, is never offered, because the migrated
 values now live only in this machine's local layers.

@@ -14,7 +14,14 @@ import {
   stat,
   unlink,
 } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { YAML } from "bun";
 import {
   HACK_PROJECT_DIR_PRIMARY,
@@ -5481,7 +5488,7 @@ export class LegacyDotenvMigrationRefusalError extends HackCliError {
   }) {
     super({
       code: opts.code,
-      message: `Refusing to migrate the legacy .hack/.env files: ${opts.reason} ${opts.closing ?? "The legacy files are kept. Earlier migration writes may remain; check the layers and ignore rules before retrying."}`,
+      message: `Refusing to migrate the legacy env config: ${opts.reason} ${opts.closing ?? "The legacy files are kept. Earlier migration writes may remain; check the layers and ignore rules before retrying."}`,
     });
     this.name = "LegacyDotenvMigrationRefusalError";
   }
@@ -5511,19 +5518,225 @@ async function filterUntrackedLegacyCleanupCandidates(opts: {
 }): Promise<string[]> {
   const kept: string[] = [];
   for (const path of opts.paths) {
-    const tracked = await isGitTrackedProjectEnvPath({
-      projectRoot: opts.projectRoot,
-      path,
-    });
-    const untracked =
-      tracked === null
-        ? !(await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
-        : !tracked;
-    if (untracked) {
+    if (
+      !(await isGitTrackedOrUnknownProjectPath({
+        projectRoot: opts.projectRoot,
+        path,
+      }))
+    ) {
       kept.push(path);
     }
   }
   return kept;
+}
+
+/**
+ * Whether git tracks `path`, failing closed: a path whose status git cannot
+ * report counts as tracked when the project or the path is inside a git
+ * checkout, because it may be. A path outside every checkout, such as an
+ * encrypted backend file in the user's home, is not tracked.
+ */
+export async function isGitTrackedOrUnknownProjectPath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<boolean> {
+  const tracked = await isGitTrackedProjectEnvPath(opts);
+  if (tracked !== null) {
+    return tracked;
+  }
+  const inside = relative(opts.projectRoot, opts.path);
+  const withinProject = !(
+    inside === ".." ||
+    inside.startsWith(`..${sep}`) ||
+    isAbsolute(inside)
+  );
+  return await isInsideGitCheckoutMarker({
+    startDir: withinProject ? opts.projectRoot : dirname(opts.path),
+  });
+}
+
+/** A git-tracked file the explicit env migration may change. */
+export type TrackedEnvMigrationChange = {
+  readonly path: string;
+  readonly change: "delete" | "edit";
+};
+
+/**
+ * The git-tracked files `hack doctor --migrate-env-config` may delete or edit,
+ * found before it writes anything so a run that can't ask may refuse instead.
+ *
+ * With a contract and no env layers, the migration offers the contract and the
+ * legacy dotenv files it delivered for deletion, rewrites legacy keys in
+ * `hack.config.json`, and offers an encrypted backend file it no longer uses
+ * for deletion. In every case it offers to drop legacy `.hack/.env*`
+ * `env_file` entries from the Compose file. The list is conservative: a file
+ * the migration would keep, for example a dotenv file with an undelivered
+ * value, can still be listed. Without a contract, tracked legacy dotenv files
+ * are never offered for deletion, so none are listed. A state the migration
+ * itself refuses (an unusable layer entry or contract) lists nothing more;
+ * the migration reports it.
+ *
+ * Teammates share these files, so a change to one reaches them on the next
+ * commit. Paths are absolute and sorted; no file content is returned.
+ */
+export async function planTrackedEnvMigrationChanges(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly composeFile: string;
+}): Promise<readonly TrackedEnvMigrationChange[]> {
+  const candidates = new Map<string, TrackedEnvMigrationChange["change"]>();
+  const references = await inspectLegacyComposeEnvFileReferences({
+    composeFile: opts.composeFile,
+    projectDir: opts.projectDir,
+  }).catch(() => []);
+  if (references.length > 0) {
+    candidates.set(opts.composeFile, "edit");
+  }
+  const contract = await readHackEnvContract({ projectDir: opts.projectDir });
+  const layersExist = await projectEnvConfigExistsForMutation({
+    projectDir: opts.projectDir,
+  }).catch(() => true);
+  if (contract.exists && contract.parseError === undefined && !layersExist) {
+    candidates.set(contract.path, "delete");
+    const overlayNames = await discoverLegacyOverlayNames({
+      projectDir: opts.projectDir,
+      includeSymlinks: false,
+    }).catch(() => []);
+    for (const name of [
+      PROJECT_ENV_FILENAME,
+      ...overlayNames.map((overlay) => `${PROJECT_ENV_FILENAME}.${overlay}`),
+    ]) {
+      candidates.set(resolve(opts.projectDir, name), "delete");
+    }
+    const config = await planLegacyProjectConfigChanges({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+    });
+    if (config.changed) {
+      candidates.set(config.path, "edit");
+    }
+    for (const path of config.cleanupCandidates) {
+      candidates.set(path, "delete");
+    }
+  }
+  const changes: TrackedEnvMigrationChange[] = [];
+  for (const [path, change] of candidates) {
+    if (
+      (await pathExists(path)) &&
+      (await isGitTrackedOrUnknownProjectPath({
+        projectRoot: opts.projectRoot,
+        path,
+      }))
+    ) {
+      changes.push({ path, change });
+    }
+  }
+  return changes.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+/**
+ * What {@link migrateLegacyProjectConfig} would change in `hack.config.json`,
+ * without writing it.
+ */
+async function planLegacyProjectConfigChanges(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<{
+  readonly path: string;
+  readonly changed: boolean;
+  readonly cleanupCandidates: readonly string[];
+}> {
+  const path = resolve(opts.projectDir, PROJECT_CONFIG_FILENAME);
+  const text = await readTextFile(path).catch(() => null);
+  let parsed: unknown = null;
+  try {
+    parsed = text === null ? null : JSON.parse(text);
+  } catch {
+    parsed = null;
+  }
+  if (!isRecord(parsed)) {
+    return { path, changed: false, cleanupCandidates: [] };
+  }
+  const planned = normalizeLegacyProjectTopLevelConfig({
+    parsed,
+    projectRoot: opts.projectRoot,
+  });
+  return {
+    path,
+    changed: planned.changed,
+    cleanupCandidates: planned.cleanupCandidates,
+  };
+}
+
+/** Outcome of {@link finishImplicitLegacyEnvMigration}. */
+export type ImplicitLegacyEnvMigrationReport = {
+  /** Legacy dotenv files removed because env layers now hold every entry. */
+  readonly removed: readonly string[];
+  /** Value-free report lines: written layers, moved keys, kept and removed files. */
+  readonly lines: readonly string[];
+};
+
+/**
+ * Finishes a contract migration that another command ran implicitly (such as
+ * `hack env exec`), the way doctor's cleanup does for untracked files. It
+ * removes a legacy `.hack/.env` or `.hack/.env.<overlay>` file only when every
+ * entry in it now lives in an env layer, Compose no longer names it as
+ * `env_file`, and git does not track it (or, inside a checkout, cannot say),
+ * so no second plaintext copy stays behind. This step never removes or edits
+ * `hack.env.json`, the Compose file, an encrypted backend file or any other
+ * tracked file; `hack doctor --migrate-env-config` offers those. (The
+ * migration itself still rewrites legacy keys in `hack.config.json`.)
+ *
+ * The report names written paths and moved keys, never values.
+ */
+export async function finishImplicitLegacyEnvMigration(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly migrated: LegacyProjectEnvMigration;
+}): Promise<ImplicitLegacyEnvMigrationReport> {
+  const { migrated } = opts;
+  if (!migrated.legacyDetected || migrated.wroteFiles.length === 0) {
+    return { removed: [], lines: [] };
+  }
+  const shown = (path: string) => relative(opts.projectRoot, path);
+  const lines = [
+    `Migrated legacy env config to ${migrated.wroteFiles.map(shown).join(", ")}`,
+    ...migrated.movedPlainValues.map(
+      (moved) => `Moved ${moved.key} to ${shown(moved.path)} (values omitted).`
+    ),
+  ];
+  const dotenvFiles = new Set([
+    resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+    ...migrated.migratedOverlays.map((overlay) =>
+      resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlay}`)
+    ),
+  ]);
+  const removable = await filterUntrackedLegacyCleanupCandidates({
+    projectRoot: opts.projectRoot,
+    paths: migrated.cleanupCandidates.filter((path) => dotenvFiles.has(path)),
+  });
+  const removed = await removeLegacyProjectEnvArtifacts({
+    projectRoot: opts.projectRoot,
+    paths: removable,
+  });
+  if (removed.length > 0) {
+    lines.push(
+      `Removed ${removed.map(shown).join(", ")}: env layers now hold every value ${removed.length === 1 ? "it" : "they"} set.`
+    );
+  }
+  for (const retained of migrated.retainedEnvFiles) {
+    lines.push(
+      `Kept ${shown(retained.path)}: keys not preserved in env layers: ${retained.keys.join(", ")} (values omitted).`
+    );
+  }
+  for (const path of migrated.blockedCleanupCandidates) {
+    if (dotenvFiles.has(path)) {
+      lines.push(
+        `Kept ${shown(path)}: Compose still names it as env_file. Run \`hack doctor --migrate-env-config\` to remove that reference.`
+      );
+    }
+  }
+  return { removed, lines };
 }
 
 /**

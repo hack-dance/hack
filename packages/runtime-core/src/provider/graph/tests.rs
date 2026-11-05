@@ -138,6 +138,11 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
                     json!({"/tmp":"rw,noexec,nosuid,size=16777216"})
                 );
                 assert_eq!(host["CapDrop"], json!(["ALL"]));
+                // Compose-file services receive Docker's default set explicitly.
+                assert_eq!(
+                    host["CapAdd"],
+                    json!(project::capabilities::effective(None).unwrap())
+                );
                 assert_eq!(host["SecurityOpt"], json!(["no-new-privileges"]));
                 assert!(host.get("Privileged").is_none());
                 let mut changed = host.clone();
@@ -156,6 +161,117 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     }
     assert!(!candidate.state_root.exists());
 }
+#[test]
+fn compose_capabilities_lower_the_docker_default_profile_with_adjustments() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let defaults = project::capabilities::effective(None).unwrap();
+    let without = |names: &[&str]| -> Vec<String> {
+        defaults
+            .iter()
+            .filter(|name| !names.contains(&name.as_str()))
+            .cloned()
+            .collect()
+    };
+    let mut with_admin = without(&["CAP_NET_RAW"]);
+    with_admin.push("CAP_NET_ADMIN".into());
+    with_admin.sort();
+    for (add, drop, expected) in [
+        (None, None, Some(defaults.clone())),
+        (Some(json!([])), Some(json!([])), Some(defaults.clone())),
+        (
+            Some(json!(["net_admin"])),
+            Some(json!(["NET_RAW"])),
+            Some(with_admin),
+        ),
+        (
+            Some(json!(["CHOWN", "SETUID", "SETGID"])),
+            Some(json!(["ALL"])),
+            Some(vec![
+                "CAP_CHOWN".to_owned(),
+                "CAP_SETGID".into(),
+                "CAP_SETUID".into(),
+            ]),
+        ),
+        (Some(json!(["SYS_ADMIN"])), None, None),
+        (Some(json!(["SYS_PTRACE"])), None, None),
+        (Some(json!(["ALL"])), None, None),
+        (None, Some(json!(["NOT_A_CAPABILITY"])), None),
+    ] {
+        let mut document = compose(&format!("sha256:{}", "a".repeat(64)), "marker", false);
+        if let Some(add) = &add {
+            document["services"]["web"]["cap_add"] = add.clone();
+        }
+        if let Some(drop) = &drop {
+            document["services"]["web"]["cap_drop"] = drop.clone();
+        }
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        // Omitted and empty adjustments add nothing to the reviewed plan, so plans
+        // without capability fields keep their existing identity.
+        let declared = add.as_ref().is_some_and(|v| v != &json!([]))
+            || drop.as_ref().is_some_and(|v| v != &json!([]));
+        assert_eq!(
+            serde_json::to_value(&review.plan.services["web"])
+                .unwrap()
+                .get("capabilities")
+                .is_some(),
+            declared && expected.is_some()
+        );
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        );
+        let Some(expected) = expected else {
+            // Refused capabilities block the reviewed plan before any lowering.
+            assert!(!review.plan.enrollment_compatible, "{add:?} {drop:?}");
+            assert!(review.plan.diagnostics.iter().any(|d| {
+                d.severity == "error"
+                    && ["capability_refused", "unknown_capability"].contains(&d.code.as_str())
+            }));
+            assert!(inputs.is_err());
+            continue;
+        };
+        let prepared = config::prepare(
+            inputs.unwrap(),
+            &goals(),
+            &"a".repeat(32),
+            &"b".repeat(32),
+            None,
+        )
+        .unwrap();
+        let host = &prepared.configs["web"]["HostConfig"];
+        assert_eq!(host["CapDrop"], json!(["ALL"]));
+        assert_eq!(host["CapAdd"], json!(expected));
+        assert_eq!(host["SecurityOpt"], json!(["no-new-privileges"]));
+        assert!(host.get("Privileged").is_none());
+        // Services without adjustments keep the default profile in the same graph.
+        assert_eq!(
+            prepared.configs["init"]["HostConfig"]["CapAdd"],
+            json!(defaults)
+        );
+        // Inspection that lost a capability, or gained one, is a config mismatch.
+        let mut observed = host.clone();
+        observed["CapAdd"] = json!(defaults[1..]);
+        if expected.len() == defaults.len() {
+            assert_eq!(
+                mismatch(host, &observed, "HostConfig").as_deref(),
+                Some("HostConfig.CapAdd")
+            );
+        }
+        observed["CapAdd"] = Value::Null;
+        if !expected.is_empty() {
+            assert_eq!(
+                mismatch(host, &observed, "HostConfig").as_deref(),
+                Some("HostConfig.CapAdd")
+            );
+        }
+    }
+}
+
 #[test]
 fn compose_pid_limit_is_opt_in_and_explicit_limits_remain_verified() {
     let fixture = Fixture::new();
@@ -2205,6 +2321,12 @@ fn cleanup_identity_is_independent_of_declared_root_mode() {
 
 #[test]
 fn shared_source_preserves_app_writes_but_freezes_cache_installer_inputs() {
+    for drop_all in [false, true] {
+        shared_source_case(drop_all);
+    }
+}
+
+fn shared_source_case(drop_all: bool) {
     let fixture = Fixture::new();
     let home = Fixture::new();
     let candidate = Candidate::discover(&home.0).unwrap();
@@ -2220,6 +2342,12 @@ fn shared_source_preserves_app_writes_but_freezes_cache_installer_inputs() {
             "depends_on":{"deps":{"condition":"service_completed_successfully"}}},
         "reader":{"image":image,"network_mode":"none","entrypoint":["/bin/true"],"command":[],"volumes":[".:/app:ro"]}
     },"volumes":{"deps":{}}});
+    let mut document = document;
+    if drop_all {
+        for name in ["deps", "app", "reader"] {
+            document["services"][name]["cap_drop"] = json!(["ALL"]);
+        }
+    }
     fs::write(fixture.0.join("compose.yaml"), document.to_string()).unwrap();
     let review = project::plan(&candidate, fixture.options()).unwrap();
     let snapshot = project::snapshot::capture_plan(&review.plan).unwrap();
@@ -2267,15 +2395,22 @@ fn shared_source_preserves_app_writes_but_freezes_cache_installer_inputs() {
     assert_eq!(mounts("app")["Source"], path);
     assert_eq!(mounts("app")["ReadOnly"], false);
     assert_eq!(mounts("reader")["ReadOnly"], true);
-    assert_eq!(
-        prepared.configs["app"]["HostConfig"]["CapAdd"],
-        json!(["DAC_OVERRIDE"])
-    );
-    assert_eq!(
-        prepared.configs["reader"]["HostConfig"]["CapAdd"],
-        json!(["DAC_OVERRIDE"])
-    );
-    assert!(prepared.configs["deps"]["HostConfig"]["CapAdd"].is_null());
+    // Shared-source services and the frozen installer all receive the Compose
+    // default profile, which already includes DAC_OVERRIDE. With cap_drop: ALL, only
+    // services writing through the shared host tree keep DAC_OVERRIDE.
+    let defaults = json!(project::capabilities::effective(None).unwrap());
+    for name in ["app", "reader", "deps"] {
+        let expected = match (drop_all, name) {
+            (false, _) => defaults.clone(),
+            (true, "deps") => json!([]),
+            (true, _) => json!(["CAP_DAC_OVERRIDE"]),
+        };
+        assert_eq!(prepared.configs[name]["HostConfig"]["CapAdd"], expected);
+        assert_eq!(
+            prepared.configs[name]["HostConfig"]["CapDrop"],
+            json!(["ALL"])
+        );
+    }
     assert_eq!(mounts("deps")["ReadOnly"], true);
     assert_eq!(
         mounts("deps")["Source"],

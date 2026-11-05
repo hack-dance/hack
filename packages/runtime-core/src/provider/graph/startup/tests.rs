@@ -563,3 +563,35 @@ fn shared_listener_receipt_retains_72_grants_on_six_exact_transports() {
     }
     assert!(!excessive.valid(&receipt));
 }
+
+#[test]
+fn low_port_binding_requires_the_explicit_lowered_capability_profile() {
+    let mut selected = service();
+    selected.bindings.get_mut("default").unwrap().port = 443;
+    let profile = json!(crate::project::capabilities::effective(None).unwrap());
+    let mut value = config();
+    value["HostConfig"]["NetworkMode"] = json!("none");
+    value["HostConfig"]["CapDrop"] = json!(["ALL"]);
+    value["HostConfig"]["CapAdd"] = profile.clone();
+    attach(&mut value, &selected, "/storage/start", "/storage/helper").unwrap();
+    // The sysctl is the only change; the reviewed capability profile is untouched.
+    assert_eq!(value["HostConfig"]["CapAdd"], profile);
+    assert_eq!(value["HostConfig"]["CapDrop"], json!(["ALL"]));
+    assert_eq!(
+        value["HostConfig"]["Sysctls"],
+        json!({"net.ipv4.ip_unprivileged_port_start":"0"})
+    );
+    // An implicit engine default (no CapDrop) is not the lowered profile.
+    let mut implicit = config();
+    implicit["HostConfig"]["NetworkMode"] = json!("none");
+    implicit["HostConfig"]["CapAdd"] = profile;
+    assert!(
+        attach(
+            &mut implicit,
+            &selected,
+            "/storage/start",
+            "/storage/helper"
+        )
+        .is_err()
+    );
+}

@@ -4,6 +4,9 @@ use std::collections::BTreeSet;
 
 /// Common bounded container isolation. Input-family lowering owns all overrides;
 /// this does not select an image, grant ownership or authorize engine effects.
+/// Every capability is dropped here; only Compose-file lowering adds the explicit
+/// Docker default profile (`project::capabilities`). Authored native services and
+/// their persistent-data policy keep this empty set.
 pub(super) fn container_base(image: &str, labels: Value) -> Value {
     json!({"Image":image,"Labels":labels,"HostConfig":{
         "NetworkMode":"none","Memory":0,"NanoCpus":0,
@@ -402,15 +405,22 @@ pub(super) fn prepare_delivery(
         if service.read_only {
             config["HostConfig"]["Tmpfs"] = json!({"/tmp":"rw,noexec,nosuid,size=16777216"});
         }
+        // Compose-file services get Docker's default capability set adjusted by the
+        // reviewed cap_add/cap_drop, emitted explicitly after CapDrop ALL so the request
+        // never depends on the engine's implicit default. no-new-privileges stays set.
+        let mut capabilities = project::capabilities::effective(service.capabilities.as_ref())?;
         // Virtiofs preserves the host uid. Root services need DAC_OVERRIDE to
-        // traverse/write an explicitly shared tree owned by that uid. Read-only
-        // mounts still enforce read-only access; no other capabilities are added.
+        // traverse/write an explicitly shared tree owned by that uid, so it is kept
+        // even when cap_drop removes it. Read-only mounts still enforce read-only access.
         if source.is_some_and(|s| s.binding.shared.is_some())
             && service.dependency_cache.is_none()
             && service.mounts.iter().any(|m| m.kind == "bind")
+            && !capabilities.iter().any(|name| name == "CAP_DAC_OVERRIDE")
         {
-            config["HostConfig"]["CapAdd"] = json!(["DAC_OVERRIDE"]);
+            capabilities.push("CAP_DAC_OVERRIDE".into());
+            capabilities.sort();
         }
+        config["HostConfig"]["CapAdd"] = json!(capabilities);
         // Only explicitly compiled public values enter engine metadata. Bare/null
         // managed inputs are delivered separately by the private launcher.
         // Omit Env when empty so image defaults remain the engine's responsibility.

@@ -704,6 +704,8 @@ pub(super) fn compile(
                 "stop_grace_period",
                 "stop_signal",
                 "privileged",
+                "cap_add",
+                "cap_drop",
             ],
             &field,
             diagnostics,
@@ -715,6 +717,12 @@ pub(super) fn compile(
                 "Privileged containers cannot be enrolled.",
             ));
         }
+        let capabilities = super::super::capabilities::review(
+            m.get("cap_add"),
+            m.get("cap_drop"),
+            &field,
+            diagnostics,
+        )?;
         let image = image(m.get("image"), diagnostics, &format!("{field}.image"))?;
         let build = build(
             project,
@@ -927,7 +935,7 @@ pub(super) fn compile(
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,
-            platform,labels,routing,dependency_cache,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
+            platform,labels,routing,dependency_cache,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,capabilities,
         });
     }
     Ok(result)

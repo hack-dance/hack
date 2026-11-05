@@ -1083,8 +1083,9 @@ Aliasless bindings retain `127.0.0.1`. Named bindings use `127.0.0.(slot+2)` and
 publish those exact addresses through container extra hosts. Applications keep the
 original hostname and selected port; the relay does not terminate TLS or rewrite
 Host/SNI. Separate bindings can therefore use the same destination port. Ports below
-1024 require an isolated graph network namespace, dropped capabilities and the
-container-only `net.ipv4.ip_unprivileged_port_start=0` setting. An isolated native
+1024 require an isolated graph network namespace, the explicitly lowered capability
+profile (`CapDrop: ALL` plus the reviewed `CapAdd` set, never an implicit engine
+default) and the container-only `net.ipv4.ip_unprivileged_port_start=0` setting. An isolated native
 fixture verifies nonroot port 443, original Host/SNI, certificate rejection and
 cleanup. Actual application hostname/TLS acceptance remains open.
 

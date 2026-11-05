@@ -491,6 +491,9 @@ fn wrong_stale_and_wu01_preview_ids_are_rejected_before_enrollment() {
 fn unsupported_privileged_external_and_unknown_fields_block_enrollment() {
     for (extra, code) in [
         ("    privileged: true\n", "privileged_service"),
+        ("    cap_add: [SYS_ADMIN]\n", "capability_refused"),
+        ("    cap_add: [ALL]\n", "capability_refused"),
+        ("    cap_drop: [NOT_A_CAPABILITY]\n", "unknown_capability"),
         ("    devices: [/dev/null]\n", "unsupported_field"),
         ("    network_mode: host\n", "unsupported_network_mode"),
         (
@@ -521,6 +524,30 @@ fn unsupported_privileged_external_and_unknown_fields_block_enrollment() {
     ));
     assert!(fixture.codes().contains(&"external_volume".into()));
     assert!(fixture.codes().contains(&"external_network".into()));
+}
+
+#[test]
+fn compose_capability_adjustments_are_reviewed_into_the_plan() {
+    let fixture = Fixture::new(&format!(
+        "{BASIC}    cap_add: [net_admin, CAP_SYS_NICE]\n    cap_drop: [ALL]\n    privileged: false\n"
+    ));
+    let plan = fixture.plan();
+    assert!(
+        plan.plan.diagnostics.iter().all(|d| d.severity != "error"),
+        "{:?}",
+        plan.plan.diagnostics
+    );
+    let capabilities = plan.plan.services["web"].capabilities.as_ref().unwrap();
+    assert_eq!(capabilities.add, ["CAP_NET_ADMIN", "CAP_SYS_NICE"]);
+    assert_eq!(capabilities.drop, ["ALL"]);
+    // Plans without capability fields carry no capability entry.
+    let basic = Fixture::new(BASIC).plan();
+    assert!(basic.plan.services["web"].capabilities.is_none());
+    assert!(
+        !serde_json::to_string(&basic.plan)
+            .unwrap()
+            .contains("capabilities")
+    );
 }
 
 /// The candidate's own label review rejects Hack's ownership namespaces (the

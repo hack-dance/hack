@@ -611,6 +611,63 @@ layer. Removing the owned container discards that layer; use named volumes for
 durable data. Source bind mounts still require read-only publication. Writable
 container layers do not imply writable source synchronization.
 
+### Container capabilities and the security model
+
+On the native backend, the development VM is the isolation boundary between
+project code and your Mac. Containers inside the VM are a compatibility layer: they
+give each service the process environment it would have under Docker, not a second
+security sandbox. This matches how the Compose backend runs on Docker.
+
+Compose-file services therefore get Docker's default Linux capability set for
+the pinned engine (Docker 29.5.2): `CHOWN`, `DAC_OVERRIDE`, `FSETID`, `FOWNER`,
+`MKNOD`, `NET_RAW`, `SETGID`, `SETUID`, `SETFCAP`, `SETPCAP`, `NET_BIND_SERVICE`,
+`SYS_CHROOT`, `KILL` and `AUDIT_WRITE`. Stock images that start as root, change the
+owner of their data directory and then switch to an unprivileged user (most
+database images do this) work without a `user:` override. `no-new-privileges`
+stays on, so a process cannot gain capabilities through setuid or file-capability
+binaries. `privileged: true` is refused.
+
+`cap_add` and `cap_drop` follow Docker's rules. Names are case-insensitive, and the
+`CAP_` prefix is optional. `cap_drop` removes names from the default set, and
+`cap_add` is applied after it, so a name in both lists is kept. `cap_drop: [ALL]`
+keeps only the names in `cap_add`. `cap_drop` accepts any capability the engine
+knows. Unknown names are refused, as Docker refuses them. Interpolated names are
+not resolved and are refused as unknown.
+
+`cap_add` accepts the default names plus a closed set whose effect stays inside
+the container's own namespaces or cgroup limits: `NET_ADMIN` and `NET_BROADCAST`
+(the container's own network namespace), `SYS_NICE` (scheduling and NUMA policy,
+often declared for database images), `IPC_LOCK` (memory locking, still charged to
+the memory limit) and `IPC_OWNER` (the container's own IPC namespace). Plan review
+refuses every other addition with `capability_refused`, including `cap_add: [ALL]`.
+One VM can host several projects and worktrees, and Hack runs its own helpers
+inside service containers. These refused capabilities would act on that shared
+kernel or on those helpers:
+
+- `SYS_ADMIN`, `SYS_MODULE`, `SYS_RAWIO`, `DAC_READ_SEARCH` and `BPF` are known
+  container escape or kernel attack primitives.
+- `SYS_TIME`, `SYS_PACCT`, `SYSLOG`, `PERFMON`, `AUDIT_CONTROL`, `AUDIT_READ`,
+  `MAC_ADMIN`, `MAC_OVERRIDE`, `WAKE_ALARM` and `BLOCK_SUSPEND` act on the VM as a
+  whole: its clock, accounting, kernel log, performance events, audit or security
+  modules, or power management.
+- `SYS_PTRACE` would let an application trace Hack's in-container helpers (the
+  dependency relay and the HTTP probe), bypassing the kernel's ptrace restrictions.
+- `LINUX_IMMUTABLE` could make files in Hack-owned volumes impossible to remove
+  during cleanup.
+- `SYS_RESOURCE`, `SYS_BOOT`, `SYS_TTY_CONFIG`, `LEASE` and `CHECKPOINT_RESTORE`
+  have no reviewed development use case yet.
+
+Hack always writes the effective set explicitly (`CapDrop: ["ALL"]` plus `CapAdd`),
+rather than relying on the engine's implicit default. Startup compares that exact
+set against the inspected container. Authored native services, persistent-data
+initializers and Hack's helper containers keep every capability dropped.
+
+A stopped graph whose containers were created by an earlier candidate (with every
+capability dropped) differs from this profile. `graph restart` on such a graph
+refuses with `graph_config_mismatch`; it never adopts the old containers. Normal
+`hack restart` and `hack up` recreate the containers around the retained volumes,
+so they use the new profile.
+
 The normal-CLI integration helpers prepare modern environment overlays and
 worktree inheritance in memory, with null declarations in public normalized
 configuration. An explicit AWS profile adapter can replace the recognized
@@ -701,9 +758,10 @@ source revision. Cache initializer services read that immutable publication thro
 read-only source mounts; their named cache volumes remain writable. This prevents
 concurrent host edits from changing the inputs halfway through installation.
 Other services use the direct host mount with their declared read/write mode.
-Because virtiofs preserves host ownership, those services receive `DAC_OVERRIDE`
-in addition to the otherwise empty capability set. This allows root processes to
-access the explicitly shared tree; it does not bypass a read-only mount.
+Because virtiofs preserves host ownership, those services keep `DAC_OVERRIDE`
+(part of the default capability set) even when `cap_drop` removes it. This allows
+root processes to access the explicitly shared tree; it does not bypass a read-only
+mount.
 An installer that needs to modify source files is not supported in this mode yet.
 Restart after dependency-input changes with a new review and publication.
 Moving or deleting a project prevents further activation, but does not prevent

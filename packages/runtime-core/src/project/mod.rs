@@ -1,5 +1,6 @@
 //! WU03 Compose review and metadata-only enrollment. These plans cannot execute services.
 mod adapter;
+pub mod capabilities;
 pub use adapter::{NormalizedComposeOptions, plan_normalized};
 mod compose;
 mod enrollment;
@@ -272,6 +273,18 @@ pub struct ServicePlan {
     pub logging: Option<LoggingPlan>,
     pub stop_grace_period_nanos: Option<u64>,
     pub stop_signal: Option<String>,
+    /// Reviewed `cap_add`/`cap_drop` adjustments to the engine default capability set.
+    /// Omitted when the service declares neither, so existing plan identities hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<CapabilityPlan>,
+}
+/// Normalized Compose capability adjustments (`CAP_` names, or `ALL` in `drop`).
+/// Lowering applies Docker's precedence; see [`capabilities::effective`].
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityPlan {
+    pub add: Vec<String>,
+    pub drop: Vec<String>,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]

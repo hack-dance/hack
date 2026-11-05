@@ -1117,9 +1117,10 @@ Commands that need env values, such as `hack env exec`, also migrate a
 project that has `hack.env.json` and no env layers, without asking. That migration reports
 each moved key, never its value, and removes a legacy `.hack/.env` or `.hack/.env.<overlay>`
 file only when every entry now lives in an env layer, Compose no longer names it as
-`env_file`, and git doesn't track it, so no second plaintext copy stays behind. It keeps
+`env_file`, Compose doesn't interpolate a key from it that the env layers now set only for a
+service, and git doesn't track it, so no second plaintext copy stays behind. It keeps
 `hack.env.json`, never edits the Compose file and never deletes a git-tracked file; it names
-a kept file that Compose still lists. Run `hack doctor --migrate-env-config` for those
+a kept file and says why. Run `hack doctor --migrate-env-config` for those
 changes. Like doctor, it rewrites legacy keys in `hack.config.json`.
 
 A repo that has no `.hack/hack.env.json` is migrated as well. Its values live only in
@@ -1341,6 +1342,11 @@ Doctor offers legacy dotenv files for cleanup only when every parsed entry was
 delivered to an env layer. Files containing undeclared or undelivered entries stay
 on disk; the cleanup report lists their key names and omits their values. This
 also applies to untracked overlays such as `.env.bak` and `.env.example`.
+Doctor also keeps `.hack/.env` when the contract scopes a key in it to services
+(`services: [...]`) and the Compose file or another `env_file` it lists names that key,
+for example in `${KEY}`. Compose reads `.hack/.env` for interpolation on its own, and
+service values don't reach interpolation, so removing the file would drop that value.
+To remove the file, set the key without `--service` or export it in your shell.
 Migration refuses a legacy `.env.default` overlay before writing env layers,
 because it would overwrite the base `hack.env.default.yaml` layer. Rename that
 legacy overlay and update its project references before retrying.

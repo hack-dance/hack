@@ -170,6 +170,7 @@ import {
 import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
   canMigrateCheckoutLegacyDotenv,
+  describeRetainedLegacyEnvFile,
   discoverComposeServiceNames,
   ensureHackDirGitignore,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
@@ -4014,7 +4015,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
 
   for (const retained of migrated.retainedEnvFiles) {
     note(
-      `Kept ${retained.path}: keys not preserved in env layers: ${retained.keys.join(", ")} (values omitted).`,
+      describeRetainedLegacyEnvFile({ shownPath: retained.path, retained }),
       "env cleanup"
     );
   }

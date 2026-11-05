@@ -29,6 +29,12 @@ const CONTRACT = `${JSON.stringify({
 const COMPOSE_WITH_ENV_FILE =
   "services:\n  api:\n    image: alpine:3.20\n    env_file: .env\n";
 const COMPOSE_PLAIN = "services:\n  api:\n    image: alpine:3.20\n";
+// Compose interpolates the key from `.hack/.env`, which it reads on its own.
+const COMPOSE_INTERPOLATES_KEY = `services:\n  api:\n    image: "alpine:\${${KEY}:-3.20}"\n`;
+const SERVICE_SCOPED_CONTRACT = `${JSON.stringify({
+  version: 1,
+  vars: [{ key: KEY, source: "plain_env", required: false, services: ["api"] }],
+})}\n`;
 const CONFIG = `${JSON.stringify({ name: "hack-1904", dev_host: "hack-1904.hack" })}\n`;
 const CLI_TEST_TIMEOUT_MS = 60_000;
 
@@ -62,6 +68,7 @@ async function git(project: Project, args: readonly string[]) {
 /** A committed contract, config and Compose file, plus an untracked `.hack/.env`. */
 async function createProject(opts: {
   readonly compose: string;
+  readonly contract?: string;
 }): Promise<Project> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "hack-1904-")));
   roots.push(root);
@@ -70,7 +77,10 @@ async function createProject(opts: {
   await mkdir(projectDir, { recursive: true });
   await writeFile(resolve(projectDir, "docker-compose.yml"), opts.compose);
   await writeFile(resolve(projectDir, "hack.config.json"), CONFIG);
-  await writeFile(resolve(projectDir, "hack.env.json"), CONTRACT);
+  await writeFile(
+    resolve(projectDir, "hack.env.json"),
+    opts.contract ?? CONTRACT
+  );
   const project = { root, projectRoot, projectDir };
   await git(project, ["init", "--quiet"]);
   await git(project, ["add", ".hack"]);
@@ -303,6 +313,69 @@ test(
     expect(
       await readFile(join(project.projectDir, "docker-compose.yml"), "utf8")
     ).toBe(COMPOSE_WITH_ENV_FILE);
+  },
+  CLI_TEST_TIMEOUT_MS
+);
+
+for (const route of ["implicit", "doctor"] as const) {
+  test(
+    `${route} migration keeps a .env whose service-scoped key Compose interpolates`,
+    async () => {
+      const project = await createProject({
+        compose: COMPOSE_INTERPOLATES_KEY,
+        contract: SERVICE_SCOPED_CONTRACT,
+      });
+
+      const run =
+        route === "implicit"
+          ? await runImplicit(project)
+          : await runDoctor({ project, backend: "native", accept: true });
+
+      expect(run.exitCode, run.output).toBe(0);
+      expect(run.output).not.toContain(VALUE);
+      expect(run.output).toContain(
+        `Moved ${KEY} to .hack/hack.env.local.yaml (values omitted).`
+      );
+      // Doctor wraps notes in a box and names absolute paths, so compare words.
+      const words = run.output.replace(/[\s\u2502]+/g, " ");
+      expect(words).toContain(
+        `Compose interpolates ${KEY}, which the env layers now set only for a service, and service values don't reach interpolation (values omitted).`
+      );
+      if (route === "implicit") {
+        expect(run.output).toContain(
+          `Kept .hack/.env: Compose interpolates ${KEY}`
+        );
+      }
+      expect(words).not.toContain("Removed .hack/.env");
+      expect(words).not.toContain("can now be removed: - ");
+      // Service values don't reach interpolation, so Compose still needs this copy.
+      expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
+        `${KEY}=${VALUE}\n`
+      );
+      expect(
+        await readFile(join(project.projectDir, "hack.env.local.yaml"), "utf8")
+      ).toContain(VALUE);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+}
+
+test(
+  "a service-scoped key Compose doesn't interpolate still drops the plaintext copy",
+  async () => {
+    const project = await createProject({
+      compose: COMPOSE_PLAIN,
+      contract: SERVICE_SCOPED_CONTRACT,
+    });
+
+    const run = await runImplicit(project);
+
+    expect(run.exitCode, run.output).toBe(0);
+    expect(run.output).not.toContain(VALUE);
+    expect(run.output).toContain("Removed .hack/.env");
+    await expect(
+      readFile(join(project.projectDir, ".env"), "utf8")
+    ).rejects.toMatchObject({ code: "ENOENT" });
   },
   CLI_TEST_TIMEOUT_MS
 );

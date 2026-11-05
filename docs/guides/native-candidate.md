@@ -777,7 +777,12 @@ exit, and the command reports `E_LIFECYCLE_FAILED`; a failed `down.after` report
 the same after cleanup was confirmed. Ctrl-C while `up.after` is still running stops
 the graph without any down hook. With down hooks declared, the graph owner runs in
 its own process group, so the terminal's interrupt reaches only the `hack` frontend,
-which decides when the owner stops.
+which decides when the owner stops. Each down hook run by Ctrl-C also runs in its own
+process group with stdin closed. Canceling it signals the whole group (SIGTERM, then
+SIGKILL once the hook's shell exits or after a two-second grace), and output from a
+canceled hook is drained for at most that grace, so a child such as `sleep` in
+`sleep 600; echo finished` cannot keep the stop waiting. The frontend keeps handling
+interrupts until `down.after` and its finalization acknowledgement are settled.
 
 A private, value-free journal beside the run mapping records an intent before each
 down hook starts and its known completion after the hook's process exits. It holds

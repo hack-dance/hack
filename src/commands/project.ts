@@ -214,6 +214,7 @@ import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
+import { runLifecycleCommandChild } from "../lib/lifecycle-command-child.ts";
 import {
   appendLifecycleLogRecord,
   readLifecycleState,
@@ -1747,8 +1748,11 @@ async function maybePromptToFixMissingEnv(opts: {
   return true;
 }
 
-/** One finite lifecycle command; the signal sends SIGTERM to its shell. */
-async function runLifecycleChild(opts: {
+/**
+ * One finite lifecycle command with its output logged. The signal cancels the
+ * command's whole owned process group (see {@link runLifecycleCommandChild}).
+ */
+function runLifecycleChild(opts: {
   readonly command: string;
   readonly cwd: string;
   readonly env: Record<string, string>;
@@ -1758,39 +1762,20 @@ async function runLifecycleChild(opts: {
   readonly service: string;
   readonly signal?: AbortSignal;
 }): Promise<number> {
-  if (opts.signal?.aborted) {
-    return 130;
-  }
-  const proc = Bun.spawn(["sh", "-c", opts.command], {
+  return runLifecycleCommandChild({
+    command: opts.command,
     cwd: opts.cwd,
     env: opts.env,
-    stdin: "inherit",
-    stdout: "pipe",
-    stderr: "pipe",
+    signal: opts.signal,
+    drain: (stream, source) =>
+      streamLifecycleCommandOutput({
+        stream,
+        output: source === "stdout" ? opts.output : "stderr",
+        projectDir: opts.projectDir,
+        composeProject: opts.composeProject,
+        service: opts.service,
+      }),
   });
-  const cancel = () => proc.kill("SIGTERM");
-  opts.signal?.addEventListener("abort", cancel, { once: true });
-  const stdoutTask = streamLifecycleCommandOutput({
-    stream: proc.stdout,
-    output: opts.output,
-    projectDir: opts.projectDir,
-    composeProject: opts.composeProject,
-    service: opts.service,
-  });
-  const stderrTask = streamLifecycleCommandOutput({
-    stream: proc.stderr,
-    output: "stderr",
-    projectDir: opts.projectDir,
-    composeProject: opts.composeProject,
-    service: opts.service,
-  });
-  try {
-    const code = await proc.exited;
-    return opts.signal?.aborted ? 130 : code;
-  } finally {
-    opts.signal?.removeEventListener("abort", cancel);
-    await Promise.all([stdoutTask, stderrTask]);
-  }
 }
 
 async function runLifecycleCommands(opts: {
@@ -1806,7 +1791,10 @@ async function runLifecycleCommands(opts: {
     readonly index: number;
     readonly serviceName: string;
   }) => Promise<void>;
-  /** Cancels the running command (SIGTERM) and the rest; the result is then 130. */
+  /**
+   * Cancels the running command's owned process group and the rest; the
+   * result is then 130.
+   */
   readonly signal?: AbortSignal;
 }): Promise<number> {
   const commands = opts.commands ?? [];

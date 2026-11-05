@@ -9,6 +9,8 @@ import {
 } from "../src/backends/native-project-down-hooks.ts";
 import { startNativeProject } from "../src/backends/native-project-start.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import { runLifecycleCommandChild } from "../src/lib/lifecycle-command-child.ts";
+import { readLinesFromStream } from "../src/ui/lines.ts";
 
 // Foreground Ctrl-C runs the project's down hooks around graph cleanup, as
 // `hack down` does on Compose. The fake graph owner below follows the serve
@@ -16,7 +18,16 @@ import { HackCliError } from "../src/lib/cli-result.ts";
 // observed before readiness publication takes the forced path without it.
 
 const roots: string[] = [];
+/** Hook process groups started by real-process tests; killed even on failure. */
+const groups: number[] = [];
 afterEach(async () => {
+  for (const group of groups.splice(0)) {
+    try {
+      process.kill(-group, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
   );
@@ -183,6 +194,20 @@ async function fixture(opts: {
   return { startup, events, scope };
 }
 
+async function groupGone(group: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    try {
+      process.kill(-group, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+        return true;
+      }
+    }
+    await Bun.sleep(25);
+  }
+  return false;
+}
+
 /** Deliver a real process signal event to the frontend's own listener only. */
 function interrupt(): void {
   expect(process.listenerCount("SIGINT")).toBe(1);
@@ -231,6 +256,51 @@ test("a second Ctrl-C cancels a running down.before, still stops and never runs 
   expect(events).not.toContain("down.after");
   expect((await loadNativeDownHookRecord(scope))?.state).toBe("before-failed");
 });
+
+test(
+  "a second Ctrl-C during a real down.after hook cancels its process group and settles the journal",
+  async () => {
+    const lines: string[] = [];
+    let group = 0;
+    let result = -1;
+    const { startup, events, scope } = await fixture({
+      whenServing: () => queueMicrotask(interrupt),
+      downAfter: async (signal) => {
+        events.push("down.after");
+        result = await runLifecycleCommandChild({
+          command: 'echo "group $$"; sleep 30; echo finished',
+          cwd: tmpdir(),
+          env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+          signal,
+          drain: async (stream) => {
+            for await (const line of readLinesFromStream(stream)) {
+              lines.push(line);
+              if (line.startsWith("group ")) {
+                group = Number(line.split(" ")[1]);
+                groups.push(group);
+                // The frontend still owns the stop listeners here.
+                interrupt();
+              }
+            }
+          },
+        });
+        return result;
+      },
+    });
+    const started = performance.now();
+    expect(await startNativeProject(startup)).toBe(130);
+    expect(performance.now() - started).toBeLessThan(5000);
+    expect(result).toBe(130);
+    expect(group).toBeGreaterThan(1);
+    expect(await groupGone(group)).toBe(true);
+    expect(lines).not.toContain("finished");
+    expect(events.at(-1)).toBe("down.after");
+    expect((await loadNativeDownHookRecord(scope))?.state).toBe("complete");
+    expect(process.listenerCount("SIGINT")).toBe(0);
+    expect(process.listenerCount("SIGTERM")).toBe(0);
+  },
+  { timeout: 15_000 }
+);
 
 test("a failed down.before still stops the graph and reports a lifecycle failure", async () => {
   const { startup, events, scope } = await fixture({

@@ -1496,21 +1496,28 @@ export async function startNativeProject(opts: {
     failed = true;
     throw httpsCleanupFailure(httpsAcquisitionFailure, error);
   } finally {
-    stopSignals.dispose();
-    await hooks?.cleanup().catch((error: unknown) => {
-      throw httpsCleanupFailure(httpsAcquisitionFailure, error);
-    });
-    // down.after follows confirmed cleanup and lifecycle-process retirement,
-    // and precedes the finalization acknowledgement `down` waits for.
-    const stopFailure = await foregroundStop?.finish(graphCleanupConfirmed);
-    await acknowledgeFinalization(
-      finalization,
-      graphCleanupConfirmed,
-      httpsCleanupConfirmed
-    ).catch((error: unknown) => {
-      throw httpsCleanupFailure(httpsAcquisitionFailure, error);
-    });
-    reportForegroundStopFailure(stopFailure, failed);
+    // The stop listeners stay installed until down.after and the finalization
+    // acknowledgement settle: a further interrupt then cancels the running
+    // hook through the force signal instead of terminating this frontend
+    // with the hook's journal record or the acknowledgement unsettled.
+    try {
+      await hooks?.cleanup().catch((error: unknown) => {
+        throw httpsCleanupFailure(httpsAcquisitionFailure, error);
+      });
+      // down.after follows confirmed cleanup and lifecycle-process retirement,
+      // and precedes the finalization acknowledgement `down` waits for.
+      const stopFailure = await foregroundStop?.finish(graphCleanupConfirmed);
+      await acknowledgeFinalization(
+        finalization,
+        graphCleanupConfirmed,
+        httpsCleanupConfirmed
+      ).catch((error: unknown) => {
+        throw httpsCleanupFailure(httpsAcquisitionFailure, error);
+      });
+      reportForegroundStopFailure(stopFailure, failed);
+    } finally {
+      stopSignals.dispose();
+    }
   }
 }
 /** A failed stop hook replaces the interrupted status, never a startup error. */

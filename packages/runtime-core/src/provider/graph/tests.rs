@@ -157,6 +157,61 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     assert!(!candidate.state_root.exists());
 }
 #[test]
+fn declared_amd64_requires_the_explicit_emulation_opt_in() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    for (platform, opted, admitted) in [
+        (None, false, true),
+        (Some("linux/arm64"), false, true),
+        (Some("linux/amd64"), false, false),
+        (Some("linux/amd64"), true, true),
+        (None, true, true),
+    ] {
+        let mut document = compose(&format!("sha256:{}", "a".repeat(64)), "marker", false);
+        if let Some(platform) = platform {
+            document["services"]["web"]["platform"] = json!(platform);
+        }
+        if opted {
+            document["services"]["web"]["x-hack-amd64-emulation"] = json!(true);
+        }
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        match config::prepare(inputs, &goals(), &"a".repeat(32), &"b".repeat(32), None) {
+            Ok(prepared) => {
+                assert!(admitted, "{platform:?} {opted}");
+                let web = prepared
+                    .resources
+                    .values()
+                    .find(|resource| resource.key == "web" && resource.kind == Kind::Container)
+                    .unwrap();
+                // Only the opted-in service may later admit an amd64 image; the others stay
+                // arm64-only regardless of what the engine holds.
+                assert_eq!(web.amd64_emulation, opted);
+                assert!(
+                    prepared
+                        .resources
+                        .values()
+                        .filter(|resource| resource.key != "web")
+                        .all(|resource| !resource.amd64_emulation)
+                );
+            }
+            Err(error) => {
+                assert!(!admitted, "{platform:?} {opted}");
+                assert_eq!(error.code, "graph_subset");
+            }
+        }
+    }
+    assert!(!candidate.state_root.exists());
+}
+#[test]
 fn compose_pid_limit_is_opt_in_and_explicit_limits_remain_verified() {
     let fixture = Fixture::new();
     let home = Fixture::new();
@@ -1889,6 +1944,7 @@ fn outbound_network_is_pinned_and_requires_explicit_pool_capability() {
         id: None,
         image: None,
         phase: "reserved".into(),
+        amd64_emulation: false,
     };
     let resources = BTreeMap::from([("network:default".into(), resource)]);
     assert!(check_network_request(&super::super::NetworkIntent::Isolated, &resources).is_err());
@@ -2031,6 +2087,7 @@ fn endpoint_selects_service_primary_not_unrelated_first_graph_network() {
                 id: Some(id.clone()),
                 image: None,
                 phase: "created".into(),
+                amd64_emulation: false,
             },
         );
         networks.insert(format!("network:{key}"), Some(json!({"Id":id,"Name":name,"Containers":{"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee":{"EndpointID":"f".repeat(64),"IPv4Address":"172.20.0.2/16"}}})));

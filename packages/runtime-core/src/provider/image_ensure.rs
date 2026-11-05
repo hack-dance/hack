@@ -1,4 +1,5 @@
 //! Candidate-owned bounded image acquisition cache; import remains image_load's operation.
+use super::image_platform::{ImagePlatform, PlatformPolicy};
 use super::{engine, image_load, registry_image, state};
 use crate::{Candidate, CandidateError, reject_aliased_state};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,17 @@ fn hex(value: &str) -> bool {
 fn key(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
+/// Cache address of one pinned reference for one platform. An arm64 entry keeps its original
+/// address; an emulated platform of the same index is a separate entry, never a reuse.
+fn entry_key(reference: &str, platform: ImagePlatform) -> String {
+    match platform {
+        ImagePlatform::LinuxArm64 => key(reference),
+        ImagePlatform::LinuxAmd64 => key(&format!("{reference}\n{}", platform.name())),
+    }
+}
+fn native(platform: &ImagePlatform) -> bool {
+    *platform == ImagePlatform::LinuxArm64
+}
 fn canonical(value: &str) -> Result<String, CandidateError> {
     let (repo, pin) = registry_image::reference(value)?;
     Ok(format!("docker.io/{repo}@{pin}"))
@@ -41,6 +53,8 @@ struct CacheReceipt {
     archive_sha256: String,
     image_id: String,
     archive_bytes: u64,
+    #[serde(default, skip_serializing_if = "native")]
+    platform: ImagePlatform,
 }
 impl CacheReceipt {
     fn validate(&self, candidate: &Candidate, reference: &str) -> Result<(), CandidateError> {
@@ -105,6 +119,7 @@ fn inspect_entry(
     candidate: &Candidate,
     dir: &Path,
     reference: &str,
+    platform: ImagePlatform,
 ) -> Result<CacheReceipt, CandidateError> {
     state::check_private_directory(dir)?;
     let mut count = 0;
@@ -129,6 +144,11 @@ fn inspect_entry(
     }
     let receipt: CacheReceipt = read_receipt(&dir.join("receipt.json"))?;
     receipt.validate(candidate, reference)?;
+    if receipt.platform != platform {
+        return Err(refused(
+            "Image cache entry platform differs from its address.",
+        ));
+    }
     if archive_size(&dir.join("image.tar"))? != receipt.archive_bytes {
         return Err(refused("Cached archive size differs from its receipt."));
     }
@@ -152,11 +172,13 @@ fn usage(candidate: &Candidate, root: &Path) -> Result<(usize, u64), CandidateEr
         let dir = entry.path();
         state::check_private_directory(&dir)?;
         let receipt: CacheReceipt = read_receipt(&dir.join("receipt.json"))?;
-        if key(&receipt.reference) != name.to_string_lossy() {
+        if entry_key(&receipt.reference, receipt.platform) != name.to_string_lossy() {
             return Err(refused("Image cache address conflicts with its receipt."));
         }
         bytes = bytes
-            .checked_add(inspect_entry(candidate, &dir, &receipt.reference)?.archive_bytes)
+            .checked_add(
+                inspect_entry(candidate, &dir, &receipt.reference, receipt.platform)?.archive_bytes,
+            )
             .ok_or_else(|| refused("Image cache size overflow."))?;
         if bytes > MAX_CACHE {
             return Err(refused(
@@ -173,6 +195,8 @@ pub struct EnsuredImage {
     pub archive_sha256: String,
     pub archive_reused: bool,
     pub phase: &'static str,
+    /// The platform loaded; `linux/amd64` runs only under the pool's x86_64 translation.
+    pub platform: ImagePlatform,
 }
 /// Resolve tags on every call, reuse their exact immutable archive when available,
 /// and validate/import via the owned guest's existing loader. The engine must already
@@ -180,6 +204,17 @@ pub struct EnsuredImage {
 /// 16-archive/2 GiB budget; this operation never prunes or adopts conflicting files.
 /// Runtime ownership is checked again by load_image after network work.
 pub fn ensure(candidate: &Candidate, reference: &str) -> Result<EnsuredImage, CandidateError> {
+    ensure_with(candidate, reference, PlatformPolicy::Native)
+}
+
+/// [`ensure`] under an explicit platform policy. `Native` is the default and admits only
+/// Linux arm64. An opted-in policy may select Linux amd64, which is cached separately and
+/// imported only into a pool booted with x86_64 translation (`image_load::load_for`).
+pub fn ensure_with(
+    candidate: &Candidate,
+    reference: &str,
+    policy: PlatformPolicy,
+) -> Result<EnsuredImage, CandidateError> {
     // Validate input before touching runtime state; tags are checked by resolve after
     // the engine preflight, and pinned references never make a mutable resolution call.
     if reference.contains('@') {
@@ -188,46 +223,79 @@ pub fn ensure(candidate: &Candidate, reference: &str) -> Result<EnsuredImage, Ca
         registry_image::tagged_reference(reference)?;
     }
     engine::info(candidate)?;
-    let pinned = if reference.contains('@') {
-        canonical(reference)?
+    let (pinned, policy) = if reference.contains('@') {
+        (canonical(reference)?, policy)
     } else {
-        registry_image::resolve(reference)?.pinned_reference
+        // A tag resolves to one platform; the pinned entry is then that exact platform.
+        let resolved = registry_image::resolve_with(reference, policy)?;
+        let exact = match resolved.platform {
+            "linux/amd64" => PlatformPolicy::Amd64,
+            _ => PlatformPolicy::Native,
+        };
+        (resolved.pinned_reference, exact)
     };
     ensure_pinned(
         candidate,
         &pinned,
-        registry_image::acquire,
-        |candidate, path, sha, image| image_load::load(candidate, path, sha, image).map(|_| ()),
+        policy,
+        registry_image::acquire_with,
+        |candidate, path, sha, image, platform| {
+            image_load::load_for(candidate, path, sha, image, platform).map(|_| ())
+        },
     )
 }
 fn ensure_pinned(
     candidate: &Candidate,
     reference: &str,
-    acquire: impl FnOnce(&str, &Path) -> Result<registry_image::AcquiredImage, CandidateError>,
-    load: impl FnOnce(&Candidate, &Path, &str, &str) -> Result<(), CandidateError>,
+    policy: PlatformPolicy,
+    acquire: impl FnOnce(
+        &str,
+        &Path,
+        PlatformPolicy,
+    ) -> Result<registry_image::AcquiredImage, CandidateError>,
+    load: impl FnOnce(&Candidate, &Path, &str, &str, ImagePlatform) -> Result<(), CandidateError>,
 ) -> Result<EnsuredImage, CandidateError> {
     let reference = canonical(reference)?;
     let root = candidate.state_root.join("artifacts/images");
     let _lock = state::Lock::acquire(&root)?;
     let (count, bytes) = usage(candidate, &root)?;
-    let dir = root.join(key(&reference));
-    let reused = dir.try_exists().map_err(state::io)?;
-    let receipt = if reused {
-        inspect_entry(candidate, &dir, &reference)?
+    // The first complete entry in policy order is reused: a published arm64 entry always
+    // wins over an emulated one under `PreferNative`.
+    let mut existing = None;
+    for platform in policy.candidates() {
+        let dir = root.join(entry_key(&reference, *platform));
+        if dir.try_exists().map_err(state::io)? {
+            existing = Some((dir, *platform));
+            break;
+        }
+    }
+    let reused = existing.is_some();
+    let (dir, receipt) = if let Some((dir, platform)) = existing {
+        let receipt = inspect_entry(candidate, &dir, &reference, platform)?;
+        (dir, receipt)
     } else {
         if count >= MAX_ARCHIVES || bytes > MAX_CACHE - MAX_ARCHIVE {
             return Err(refused(
                 "Image cache admission requires a free 256 MiB slot within 16 archives and 2 GiB total; no automatic deletion.",
             ));
         }
+        // Acquire into the first candidate's slot; a different confirmed platform moves the
+        // complete entry to its own address below, still under the cache lock.
+        let first = policy.candidates()[0];
+        let mut dir = root.join(entry_key(&reference, first));
         state::private_directory(&dir)?;
-        let acquired = match acquire(&reference, &dir.join("image.tar")) {
+        let acquired = match acquire(&reference, &dir.join("image.tar"), policy) {
             Ok(value) => value,
             Err(error) => {
                 let _ = fs::remove_dir(&dir);
                 return Err(error);
             }
         };
+        if !policy.candidates().contains(&acquired.platform) {
+            return Err(refused(
+                "Acquired image platform is outside the requested platform policy.",
+            ));
+        }
         let (_, pin) = registry_image::reference(&reference)?;
         if acquired.source_digest != pin.as_str() {
             return Err(refused(
@@ -241,13 +309,24 @@ fn ensure_pinned(
             archive_sha256: acquired.archive_sha256,
             image_id: acquired.image_id,
             archive_bytes: acquired.archive_bytes,
+            platform: acquired.platform,
         };
         receipt.validate(candidate, &reference)?;
         if archive_size(&dir.join("image.tar"))? != receipt.archive_bytes {
             return Err(refused("New archive differs from its acquisition receipt."));
         }
         state::write(&dir.join("receipt.json"), &receipt)?;
-        receipt
+        if acquired.platform != first {
+            let target = root.join(entry_key(&reference, acquired.platform));
+            if target.try_exists().map_err(state::io)? {
+                return Err(refused(
+                    "Conflicting image cache entry; no entry was adopted or removed.",
+                ));
+            }
+            fs::rename(&dir, &target).map_err(state::io)?;
+            dir = target;
+        }
+        (dir, receipt)
     };
     // Even a warm cache goes through the loader's hash, ownership, validation receipt,
     // and content-ID/architecture readback; cached metadata alone never proves import.
@@ -256,6 +335,7 @@ fn ensure_pinned(
         &dir.join("image.tar"),
         &receipt.archive_sha256,
         &receipt.image_id,
+        receipt.platform,
     )?;
     Ok(EnsuredImage {
         pinned_reference: reference,
@@ -263,6 +343,7 @@ fn ensure_pinned(
         archive_sha256: receipt.archive_sha256,
         archive_reused: reused,
         phase: "content-id-verified",
+        platform: receipt.platform,
     })
 }
 
@@ -299,6 +380,7 @@ mod tests {
     fn acquire(
         reference: &str,
         path: &Path,
+        policy: PlatformPolicy,
     ) -> Result<registry_image::AcquiredImage, CandidateError> {
         fs::write(path, b"fixture").unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -308,6 +390,7 @@ mod tests {
             image_id: format!("sha256:{}", "c".repeat(64)),
             archive_sha256: key("fixture"),
             archive_bytes: 7,
+            platform: policy.candidates()[0],
         })
     }
     #[test]
@@ -319,11 +402,12 @@ mod tests {
             let result = ensure_pinned(
                 &f.1,
                 &pin(1),
-                |reference, path| {
+                PlatformPolicy::Native,
+                |reference, path, policy| {
                     acquired.set(acquired.get() + 1);
-                    acquire(reference, path)
+                    acquire(reference, path, policy)
                 },
-                |_, path, sha, image| {
+                |_, path, sha, image, _| {
                     loaded.set(loaded.get() + 1);
                     assert_eq!(fs::read(path).unwrap(), b"fixture");
                     assert_eq!(sha, key("fixture"));
@@ -341,13 +425,21 @@ mod tests {
     fn cache_count_budget_refuses_without_deleting_existing_archives() {
         let f = Fixture::new();
         for n in 0..MAX_ARCHIVES {
-            ensure_pinned(&f.1, &pin(n), acquire, |_, _, _, _| Ok(())).unwrap();
+            ensure_pinned(
+                &f.1,
+                &pin(n),
+                PlatformPolicy::Native,
+                acquire,
+                |_, _, _, _, _| Ok(()),
+            )
+            .unwrap();
         }
         let error = ensure_pinned(
             &f.1,
             &pin(99),
-            |_, _| panic!("must not acquire"),
-            |_, _, _, _| panic!("must not load"),
+            PlatformPolicy::Native,
+            |_, _, _| panic!("must not acquire"),
+            |_, _, _, _, _| panic!("must not load"),
         )
         .unwrap_err();
         assert!(error.message.contains("16 archives"));
@@ -361,7 +453,14 @@ mod tests {
         let f = Fixture::new();
         for n in 0..8 {
             let reference = pin(n);
-            ensure_pinned(&f.1, &reference, acquire, |_, _, _, _| Ok(())).unwrap();
+            ensure_pinned(
+                &f.1,
+                &reference,
+                PlatformPolicy::Native,
+                acquire,
+                |_, _, _, _, _| Ok(()),
+            )
+            .unwrap();
             let dir =
                 f.1.state_root
                     .join("artifacts/images")
@@ -384,8 +483,9 @@ mod tests {
             ensure_pinned(
                 &f.1,
                 &pin(99),
-                |_, _| panic!("budget refuses fetch"),
-                |_, _, _, _| panic!("no load")
+                PlatformPolicy::Native,
+                |_, _, _| panic!("budget refuses fetch"),
+                |_, _, _, _, _| panic!("no load")
             )
             .is_err()
         );
@@ -394,7 +494,14 @@ mod tests {
     fn conflicting_and_unreceipted_cache_entries_refuse_before_load() {
         let f = Fixture::new();
         let reference = pin(1);
-        ensure_pinned(&f.1, &reference, acquire, |_, _, _, _| Ok(())).unwrap();
+        ensure_pinned(
+            &f.1,
+            &reference,
+            PlatformPolicy::Native,
+            acquire,
+            |_, _, _, _, _| Ok(()),
+        )
+        .unwrap();
         let dir =
             f.1.state_root
                 .join("artifacts/images")
@@ -404,8 +511,9 @@ mod tests {
             ensure_pinned(
                 &f.1,
                 &reference,
-                |_, _| panic!("no acquire"),
-                |_, _, _, _| panic!("no load")
+                PlatformPolicy::Native,
+                |_, _, _| panic!("no acquire"),
+                |_, _, _, _, _| panic!("no load")
             )
             .is_err()
         );
@@ -414,8 +522,9 @@ mod tests {
             ensure_pinned(
                 &f.1,
                 &reference,
-                |_, _| panic!("no acquire"),
-                |_, _, _, _| panic!("no load")
+                PlatformPolicy::Native,
+                |_, _, _| panic!("no acquire"),
+                |_, _, _, _, _| panic!("no load")
             )
             .is_err()
         );
@@ -429,8 +538,9 @@ mod tests {
             ensure_pinned(
                 &f.1,
                 &reference,
-                |_, _| Err(refused("synthetic fetch failure")),
-                |_, _, _, _| panic!("no load")
+                PlatformPolicy::Native,
+                |_, _, _| Err(refused("synthetic fetch failure")),
+                |_, _, _, _, _| panic!("no load")
             )
             .is_err()
         );
@@ -441,19 +551,91 @@ mod tests {
                 .exists()
         );
         assert!(
-            ensure_pinned(&f.1, &reference, acquire, |_, _, _, _| Err(refused(
-                "synthetic import failure"
-            )))
+            ensure_pinned(
+                &f.1,
+                &reference,
+                PlatformPolicy::Native,
+                acquire,
+                |_, _, _, _, _| Err(refused("synthetic import failure"))
+            )
             .is_err()
         );
         let receipt = ensure_pinned(
             &f.1,
             &reference,
-            |_, _| panic!("reuse complete archive"),
-            |_, _, _, _| Ok(()),
+            PlatformPolicy::Native,
+            |_, _, _| panic!("reuse complete archive"),
+            |_, _, _, _, _| Ok(()),
         )
         .unwrap();
         assert!(receipt.archive_reused);
+    }
+    #[test]
+    fn emulated_platform_entries_are_separate_and_prefer_native_reuses_arm64_first() {
+        let f = Fixture::new();
+        let root = f.1.state_root.join("artifacts/images");
+        let amd64_only = |reference: &str, path: &Path, policy: PlatformPolicy| {
+            let mut acquired = acquire(reference, path, policy)?;
+            acquired.platform = ImagePlatform::LinuxAmd64;
+            Ok(acquired)
+        };
+        // An amd64-only index acquired under PreferNative moves to its own amd64 address
+        // and loads as amd64.
+        let loaded = Cell::new(None);
+        let result = ensure_pinned(
+            &f.1,
+            &pin(1),
+            PlatformPolicy::PreferNative,
+            amd64_only,
+            |_, _, _, _, platform| {
+                loaded.set(Some(platform));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(result.platform, ImagePlatform::LinuxAmd64);
+        assert_eq!(loaded.get(), Some(ImagePlatform::LinuxAmd64));
+        assert!(!root.join(key(&pin(1))).exists());
+        assert!(
+            root.join(entry_key(&pin(1), ImagePlatform::LinuxAmd64))
+                .exists()
+        );
+        // The native default never reuses or loads the emulated entry.
+        let native = ensure_pinned(
+            &f.1,
+            &pin(1),
+            PlatformPolicy::Native,
+            acquire,
+            |_, _, _, _, platform| {
+                assert_eq!(platform, ImagePlatform::LinuxArm64);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(!native.archive_reused);
+        // With both entries present, PreferNative reuses arm64.
+        let preferred = ensure_pinned(
+            &f.1,
+            &pin(1),
+            PlatformPolicy::PreferNative,
+            |_, _, _| panic!("reuse complete archive"),
+            |_, _, _, _, _| Ok(()),
+        )
+        .unwrap();
+        assert!(preferred.archive_reused);
+        assert_eq!(preferred.platform, ImagePlatform::LinuxArm64);
+        assert_eq!(usage(&f.1, &root).unwrap().0, 2);
+        // An acquisition outside the policy is refused.
+        assert!(
+            ensure_pinned(
+                &f.1,
+                &pin(2),
+                PlatformPolicy::Native,
+                amd64_only,
+                |_, _, _, _, _| panic!("no load")
+            )
+            .is_err()
+        );
     }
     #[test]
     fn invalid_input_or_absent_runtime_never_allocates_archive_cache() {

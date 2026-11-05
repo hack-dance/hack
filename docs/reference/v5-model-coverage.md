@@ -86,6 +86,7 @@ liveness/reachability controls have their own documented assumptions.
 | [fence-pending](../../tests/models/tla/fence-pending/Fence.tla) | 7 | 2 |
 | [relay-staging](../../tests/models/tla/relay-staging/Stage.tla) | 9 | 2 |
 | [relay-fence](../../tests/models/tla/relay-fence/RelayFence.tla) | 16 | 2 |
+| [pool-emulation](../../tests/models/tla/pool-emulation/Emulation.tla) | 13 | 3 |
 | [shared-helper-instance](../../tests/models/tla/shared-helper-instance/Instance.tla) | 7,649 | 11 |
 | [restore-history](../../tests/models/tla/restore-history/RestoreHistory.tla) | See named result contract | 2 |
 | [graph-admission](../../tests/models/tla/graph-admission/Admission.tla) | See named result contract | 2 |

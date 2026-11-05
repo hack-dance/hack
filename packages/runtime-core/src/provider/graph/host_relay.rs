@@ -1017,6 +1017,7 @@ mod tests {
             id: Some("e".repeat(64)),
             image: Some(format!("sha256:{}", "f".repeat(64))),
             phase: "started".into(),
+            amd64_emulation: false,
         };
         let value = json!({"Id":resource.id,"Image":resource.image,"State":{"Running":true,"StartedAt":"2026-09-17T00:00:00Z"}});
         (receipt, resource, value)

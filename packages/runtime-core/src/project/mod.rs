@@ -264,6 +264,11 @@ pub struct ServicePlan {
     pub working_dir: Option<String>,
     pub user: Option<RedactedText>,
     pub platform: Option<String>,
+    /// Explicit `x-hack-amd64-emulation: true` opt-in: this service may run a `linux/amd64`
+    /// image under the pool's Rosetta 2 translation, and may declare `platform: linux/amd64`.
+    /// Without it only Linux arm64 is admitted. It never applies to a declared arm64 platform.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub amd64_emulation: bool,
     pub labels: BTreeMap<String, RedactedText>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingPlan>,

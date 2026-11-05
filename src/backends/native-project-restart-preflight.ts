@@ -17,6 +17,11 @@ import { prepareNativeProjectInput } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import {
+  ensuredPlatformAccepted,
+  type NativeEmulationPolicy,
+  nativeEnsureImageArgs,
+} from "./native-project-platform.ts";
+import {
   nativeReviewNeedsCompatibility,
   verifyNativeSourceCompatibility,
 } from "./native-project-restore.ts";
@@ -280,6 +285,7 @@ async function pinRestartImages(opts: {
   readonly projectRoot: string;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
+  readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
   for (const [name, spec] of Object.entries(opts.specs)) {
@@ -293,15 +299,20 @@ async function pinRestartImages(opts: {
       continue;
     }
     // Owned cache acquisition grants no authority to stop the current graph.
+    const policy =
+      opts.amd64Emulation && Object.hasOwn(opts.amd64Emulation, name)
+        ? opts.amd64Emulation[name]
+        : undefined;
     const pinned = await opts.invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
-      args: ["runtime", "ensure-image", "--reference", image, "--json"],
+      args: nativeEnsureImageArgs(image, policy),
     });
     if (
       !isRecord(pinned) ||
       typeof pinned.image_id !== "string" ||
-      !IMAGE.test(pinned.image_id)
+      !IMAGE.test(pinned.image_id) ||
+      !ensuredPlatformAccepted(pinned.platform, policy)
     ) {
       throw new ClosedCliError(
         "Native restart image selection failed before cleanup."
@@ -435,6 +446,7 @@ export async function preflightNativeRestart(opts: {
     projectRoot: opts.scope.projectRoot,
     specs,
     retainedImages,
+    amd64Emulation: input.amd64Emulation,
     invoke: deps.invoke,
   });
   const compose = JSON.parse(input.normalizedComposeJson);

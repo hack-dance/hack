@@ -523,6 +523,47 @@ fn unsupported_privileged_external_and_unknown_fields_block_enrollment() {
     assert!(fixture.codes().contains(&"external_network".into()));
 }
 
+/// `x-hack-amd64-emulation` is a reviewed opt-in, not unexecuted extension metadata. It is
+/// recorded in the plan only when true, and it can never override a declared arm64 platform.
+#[test]
+fn amd64_emulation_opt_in_is_reviewed_and_never_overrides_declared_arm64() {
+    let plain = Fixture::new(BASIC).plan();
+    assert!(!plain.plan.services["web"].amd64_emulation);
+    let opted = Fixture::new(&format!(
+        "{BASIC}    platform: linux/amd64\n    x-hack-amd64-emulation: true\n"
+    ));
+    let report = opted.plan();
+    let service = &report.plan.services["web"];
+    assert!(service.amd64_emulation);
+    assert_eq!(service.platform.as_deref(), Some("linux/amd64"));
+    assert!(
+        !report
+            .plan
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "compose_extension_metadata")
+    );
+    // Absent and false serialize identically, so existing plan identities are unchanged.
+    let off = Fixture::new(&format!("{BASIC}    x-hack-amd64-emulation: false\n")).plan();
+    for report in [&plain, &off] {
+        let service = serde_json::to_value(&report.plan.services["web"]).unwrap();
+        assert!(service.get("amd64_emulation").is_none());
+    }
+    for platform in ["linux/arm64", "linux/arm64/v8"] {
+        let conflicting = Fixture::new(&format!(
+            "{BASIC}    platform: {platform}\n    x-hack-amd64-emulation: true\n"
+        ));
+        assert_eq!(
+            project::plan(&conflicting.candidate, conflicting.options())
+                .unwrap_err()
+                .code,
+            "unsupported_platform"
+        );
+    }
+    let invalid = Fixture::new(&format!("{BASIC}    x-hack-amd64-emulation: yes\n"));
+    assert!(project::plan(&invalid.candidate, invalid.options()).is_err());
+}
+
 /// The candidate's own label review rejects Hack's ownership namespaces (the
 /// list `HACK_OWNERSHIP_LABEL_NAMESPACES` declares in TypeScript), so a
 /// project cannot carry ownership evidence even when the TypeScript classifier

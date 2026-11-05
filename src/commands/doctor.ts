@@ -12,6 +12,7 @@ import {
   parseNativeRunMappingRecoveryOptions,
   runNativeProjectMappingCommand,
 } from "../backends/native-project-mapping-command.ts";
+import { hostRosettaAvailable } from "../backends/native-project-platform.ts";
 import {
   type NativeRuntimeSelection,
   resolveNativeRuntimeSelection,
@@ -104,6 +105,11 @@ import {
 } from "../lib/doctor-generated-files.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
 import {
+  AMD64_EMULATION_CHECK,
+  type Amd64EmulationReport,
+  amd64EmulationCheckResult,
+} from "../lib/doctor-native-emulation.ts";
+import {
   findCrossCheckoutInstances,
   inspectWorktreeSecretKeys,
 } from "../lib/doctor-worktree.ts";
@@ -144,7 +150,10 @@ import {
   repairNativeCaTrust,
 } from "../lib/native-ca-doctor.ts";
 import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
-import { readComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
+import {
+  readComposeBackendFeatures,
+  readNativePlatformModes,
+} from "../lib/native-compose-backend-features.ts";
 import {
   describeHackLocalRoute,
   HACK_LOCAL_ROLLBACK_COMMAND,
@@ -235,6 +244,8 @@ interface CheckResult {
   readonly envKey?: EnvKeyInspection;
   /** Closed Compose-backend feature names only; never authored values. */
   readonly composeBackend?: ComposeBackendReport;
+  /** Counts of services opted in to amd64 emulation; never service names. */
+  readonly amd64Emulation?: Amd64EmulationReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -1116,6 +1127,14 @@ async function handleNativeDoctor(opts: {
         })
       )
     );
+    results.push(
+      await runCheck(progress, AMD64_EMULATION_CHECK, () =>
+        checkNativeAmd64Emulation({
+          startDir: opts.startDir,
+          adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
+        })
+      )
+    );
   }
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
   const hasError = results.some((result) => result.status === "error");
@@ -1282,6 +1301,8 @@ export type DoctorJsonCheck = {
   readonly envKey?: EnvKeyInspection;
   /** Present only on the Compose-backend feature check: closed feature names. */
   readonly composeBackend?: ComposeBackendReport;
+  /** Present only on the native amd64 emulation check: counts only. */
+  readonly amd64Emulation?: Amd64EmulationReport;
 };
 
 export type DoctorJsonData = {
@@ -1319,6 +1340,9 @@ export function buildDoctorJsonData(opts: {
       ...(result.envKey ? { envKey: result.envKey } : {}),
       ...(result.composeBackend
         ? { composeBackend: result.composeBackend }
+        : {}),
+      ...(result.amd64Emulation
+        ? { amd64Emulation: result.amd64Emulation }
         : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
@@ -2950,6 +2974,32 @@ async function checkComposeBackendFeatures(opts: {
     features: await readComposeBackendFeatures(ctx.composeFile, {
       adaptationFile: opts.adaptationFile,
     }),
+  });
+}
+
+/**
+ * Reports native services opted in to `linux/amd64` emulation and whether this
+ * host provides Rosetta 2. Reads only the Compose file and the
+ * `HACK_NATIVE_ADAPTATION` selection; counts only, no service names.
+ */
+async function checkNativeAmd64Emulation(opts: {
+  readonly startDir: string;
+  readonly adaptationFile?: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(opts.startDir);
+  if (!ctx) {
+    return {
+      name: AMD64_EMULATION_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  return amd64EmulationCheckResult({
+    modes: await readNativePlatformModes({
+      composeFile: ctx.composeFile,
+      adaptationFile: opts.adaptationFile,
+    }),
+    hostRosetta: await hostRosettaAvailable(),
   });
 }
 

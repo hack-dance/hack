@@ -199,10 +199,10 @@ pub(super) fn prepare_delivery(
             })
             || service.logging.is_some()
             || service.image.as_deref().is_none_or(|v| !image_id(v))
-            || service
-                .platform
-                .as_deref()
-                .is_some_and(|p| !["linux/arm64", "linux/arm64/v8"].contains(&p))
+            || service.platform.as_deref().is_some_and(|p| {
+                !(["linux/arm64", "linux/arm64/v8"].contains(&p)
+                    || (p == "linux/amd64" && service.amd64_emulation))
+            })
         {
             return Err(unsupported());
         }
@@ -319,6 +319,7 @@ pub(super) fn prepare_delivery(
                 id: None,
                 image: None,
                 phase: "reserved".into(),
+                amd64_emulation: false,
             };
             resources.insert(format!("{}:{key}", kind.word()), resource);
         }
@@ -341,6 +342,7 @@ pub(super) fn prepare_delivery(
             id: None,
             image: Some(image.clone()),
             phase: "reserved".into(),
+            amd64_emulation: service.amd64_emulation,
         };
         let labels = labels(
             owner,

@@ -1449,6 +1449,34 @@ const contracts: readonly ModelContract[] = [
     action: "Launch",
     fields: ["retired = <<1>>", "alive = 1"],
   },
+  {
+    name: "pool-emulation",
+    module: "Emulation",
+    states: 13,
+    invariant: "NoUntranslatedAmd64",
+    action: "StartAmd64",
+    fields: [
+      "amd64 = TRUE",
+      "intent = TRUE",
+      "config = FALSE",
+      "registered = FALSE",
+      "engine = TRUE",
+    ],
+    additionalControls: [
+      {
+        name: "running-upgrade",
+        negative: true,
+        invariant: "EngineMatchesIntent",
+        action: "RequestRunning",
+        fields: [
+          'phase = "running"',
+          "intent = TRUE",
+          "config = FALSE",
+          "engine = TRUE",
+        ],
+      },
+    ],
+  },
 ];
 
 export const runtimeModels = contracts.map((contract) => ({

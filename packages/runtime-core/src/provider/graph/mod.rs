@@ -235,6 +235,10 @@ pub struct Resource {
     pub id: Option<String>,
     pub image: Option<String>,
     pub phase: String,
+    /// The service opted in to running a `linux/amd64` image under Rosetta translation.
+    /// Admission still requires an amd64 image to come from a translation-enabled pool.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub amd64_emulation: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2146,6 +2150,20 @@ fn check_cache_capacity(engine: &Engine<'_>, owner: &str) -> Result<(), Candidat
     Ok(())
 }
 
+/// An image is admitted for exactly the platform its service may run: Linux arm64, or Linux
+/// amd64 only for an opted-in service in a pool whose audited boot enabled x86_64 translation.
+pub(super) fn admitted_architecture(
+    engine: &Engine<'_>,
+    resource: &Resource,
+    image: &Value,
+) -> bool {
+    image["Os"] == "linux"
+        && (image["Architecture"] == "arm64"
+            || (image["Architecture"] == "amd64"
+                && resource.amd64_emulation
+                && engine.guest().amd64_emulation()))
+}
+
 fn verify_images(
     engine: &Engine<'_>,
     resources: &BTreeMap<String, Resource>,
@@ -2163,8 +2181,7 @@ fn verify_images(
             None,
         )?;
         if image["Id"].as_str() != resource.image.as_deref()
-            || image["Os"] != "linux"
-            || image["Architecture"] != "arm64"
+            || !admitted_architecture(engine, resource, &image)
             || image["Config"]["Volumes"]
                 .as_object()
                 .is_some_and(|v| !v.is_empty())

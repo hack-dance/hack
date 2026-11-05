@@ -235,6 +235,7 @@ pub(super) mod tests {
             id: None,
             image: None,
             phase: "absent".into(),
+            amd64_emulation: false,
         };
         let mut volume = resource("data", Kind::Volume, None);
         volume.id = Some("retained-volume-id".into());

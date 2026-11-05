@@ -416,6 +416,7 @@ mod tests {
             id: Some("a".repeat(64)),
             image: Some(format!("sha256:{}", "b".repeat(64))),
             phase: "started".into(),
+            amd64_emulation: false,
         };
         let value = json!({"Id":resource.id,"Config":{"StopTimeout":10,"StopSignal":"SIGTERM"},
             "State":{"Running":true,"Status":"running","Pid":42,"Paused":false,

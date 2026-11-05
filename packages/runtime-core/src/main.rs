@@ -101,7 +101,8 @@ Usage:
   hack-local runtime prepared-base status --profile research|development [--store <absolute-private-store>] [--json]
   hack-local runtime prepared-base remove --base-id <id> [--store <absolute-private-store>] [--json]
   hack-local runtime admit-image --reference <[namespace/]repository[:tag][@sha256:digest]|sha256:image-id> --json
-  hack-local runtime ensure-image --reference <[namespace/]repository[:tag]|[namespace/]repository@sha256:digest> --json
+  hack-local runtime ensure-image --reference <[namespace/]repository[:tag]|[namespace/]repository@sha256:digest> [--emulation native|prefer-native|amd64] --json
+  hack-local runtime up ... --amd64-emulation [--json]
   hack-local runtime resolve-image --reference <[namespace/]repository[:tag]> --json
   hack-local runtime fetch-image --reference <[namespace/]repository@sha256:digest> --archive <new-flat-image.tar> [--json]
   hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash>
@@ -413,7 +414,8 @@ fn run() -> Result<(), CandidateError> {
                 || arguments.contains(&"--internet")
                 || arguments.contains(&"--project-share")
                 || arguments.contains(&"--unfiltered-source")
-                || arguments.contains(&"--prepared-base") =>
+                || arguments.contains(&"--prepared-base")
+                || arguments.contains(&"--amd64-emulation") =>
         {
             let options = runtime_up_cli::parse(arguments)?;
             let share = options
@@ -434,8 +436,12 @@ fn run() -> Result<(), CandidateError> {
                 dependencies: options.dependencies,
                 minimum_dependencies: options.minimum_dependencies,
             };
-            let started = if let Some((mode, store)) = &options.prepared {
-                let request = prepared_base_request(&candidate, *mode, store.as_deref())?;
+            let request = options
+                .prepared
+                .as_ref()
+                .map(|(mode, store)| prepared_base_request(&candidate, *mode, store.as_deref()))
+                .transpose()?;
+            let started = if request.is_some() || options.amd64_emulation {
                 hack_runtime_core::provider::up_with_prepared_base(
                     &candidate,
                     options.profile,
@@ -444,7 +450,8 @@ fn run() -> Result<(), CandidateError> {
                     share,
                     hack_runtime_core::provider::prepared_start::Start {
                         retained,
-                        prepared: Some(&request),
+                        prepared: request.as_ref(),
+                        amd64_emulation: options.amd64_emulation,
                     },
                 )
             } else {
@@ -939,6 +946,28 @@ fn run() -> Result<(), CandidateError> {
             print_json(&hack_runtime_core::provider::image_ensure::ensure(
                 &discover_candidate(&requested)?,
                 reference,
+            )?)?;
+        }
+        [
+            "runtime",
+            "ensure-image",
+            "--reference",
+            reference,
+            "--emulation",
+            policy,
+            "--json",
+        ] => {
+            let policy = hack_runtime_core::provider::image_platform::PlatformPolicy::parse(policy)
+                .ok_or_else(|| {
+                    CandidateError::new(
+                        "invalid_arguments",
+                        "Use runtime ensure-image --reference REF [--emulation native|prefer-native|amd64] --json.",
+                    )
+                })?;
+            print_json(&hack_runtime_core::provider::image_ensure::ensure_with(
+                &discover_candidate(&requested)?,
+                reference,
+                policy,
             )?)?;
         }
         ["runtime", "admit-image", "--reference", reference, "--json"] => {

@@ -151,6 +151,7 @@ fn container_attachment_records_ownership_before_create_and_omits_values_from_me
             id: None,
             image: Some(image.clone()),
             phase: "reserved".into(),
+            amd64_emulation: false,
         };
         let mut receipt = Receipt {
             normalized_input: None,

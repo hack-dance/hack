@@ -288,6 +288,7 @@ mod tests {
             id: Some("a".repeat(64)),
             image: Some(format!("sha256:{}", "b".repeat(64))),
             phase: "started".into(),
+            amd64_emulation: false,
         }
     }
     fn terminal() -> Value {
@@ -380,6 +381,7 @@ mod tests {
             id: None,
             image: None,
             phase: "created".into(),
+            amd64_emulation: false,
         };
         let mut receipt = Receipt {
             normalized_input: None,

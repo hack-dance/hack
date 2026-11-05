@@ -1742,8 +1742,7 @@ fn verify_native_images(
         )?;
         let config = configs.get_mut(&resource.key).ok_or_else(refused)?;
         if image["Id"].as_str() != resource.image.as_deref()
-            || image["Os"] != "linux"
-            || image["Architecture"] != "arm64"
+            || !crate::provider::graph::admitted_architecture(engine, resource, &image)
         {
             return Err(refused());
         }

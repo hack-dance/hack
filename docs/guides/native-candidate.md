@@ -193,7 +193,7 @@ Compose backend. Native support for them is planned after v5.
 | External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
 | Reserved ownership label | A service, network or volume label key starts with `com.docker.compose.`, `io.hack-local.`, `io.hack.native-config.`, `io.hack.native-file.` or `io.hack.storage-witness.`. Compose, the native runtime and native-config Compose use these labels to prove which resources they own. |
 | Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. |
-| Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64 only. A missing or `null` `platform` is unset and passes. |
+| Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64. A missing or `null` `platform` is unset and passes. `linux/amd64` passes only for a service that the `HACK_NATIVE_ADAPTATION` selection opts in to [amd64 emulation](#amd64-emulation-with-rosetta-2); every other platform value stays on the Compose backend. |
 
 Native `hack up` and `hack restart` check for these features after selecting the
 project and before branch, environment, lifecycle, storage or runtime work. They
@@ -211,11 +211,12 @@ sets its `platform` field. The native runtime's own review reports `extends` and
 The check applies the explicit `HACK_NATIVE_ADAPTATION` selection first, as native
 start does. An unchanged Compose file whose external network is listed in
 `isolatedNetworks` therefore stays on native, and native start replaces that
-network with an owned isolated one. The selection is read only when the Compose
-file has an external network. If it cannot be read, is not version 1, or its
-`isolatedNetworks` is not a list of unique names, the command refuses with the
-same one-line `E_CONFIG_INVALID` message native start gives, before any runtime
-request.
+network with an owned isolated one. A `linux/amd64` service that `amd64Emulation`
+opts in stays on native the same way. The selection is read only when the Compose
+file has an external network or a non-native platform. If it cannot be read, is not
+version 1, its `isolatedNetworks` is not a list of unique names, or its
+`amd64Emulation` is invalid, the command refuses with the same one-line
+`E_CONFIG_INVALID` message native start gives, before any runtime request.
 
 To run such a project, select the Compose backend:
 
@@ -684,6 +685,15 @@ fetch does not install a background cache or cleanup daemon. The complete archiv
 A failed write leaves no final archive; process interruption may retain a hidden
 temporary file beside the requested output. A directory-sync failure reports that
 a complete archive was published but durability could not be confirmed.
+
+`runtime ensure-image --reference REF [--emulation native|prefer-native|amd64] --json`
+resolves, caches and imports one image into the running pool. Without `--emulation`
+(or with `native`) it admits Linux arm64 only. `prefer-native` selects arm64 when the
+index publishes it and otherwise the exact `linux/amd64` image; `amd64` selects only
+`linux/amd64`. The result's `platform` names the imported platform, which the image
+configuration must confirm. An amd64 archive is cached under its own address, never
+reused for arm64, and imports only into a pool booted with translation; see
+[amd64 emulation with Rosetta 2](#amd64-emulation-with-rosetta-2).
 
 ### Explicit writable development source
 
@@ -1329,6 +1339,10 @@ adaptations are accepted:
     "volume": "node_modules",
     "root": "/app",
     "workspaces": ["apps/web", "packages/db"]
+  },
+  "amd64Emulation": {
+    "default": "prefer-native",
+    "services": {"legacy-worker": "amd64", "db": "native"}
   }
 }
 ```
@@ -1352,6 +1366,48 @@ including the root mount's read-only setting. Unrelated services are unchanged.
 The layout participates in native dependency-cache identity. This shares compatible
 workspace installations; it does not implement a cross-project package store or
 claim deduplication across different lockfiles.
+
+### amd64 emulation with Rosetta 2
+
+The native VM is Linux arm64. On an Apple silicon Mac with Rosetta 2 installed
+(`softwareupdate --install-rosetta`), `amd64Emulation` lets selected services run
+`linux/amd64` images under Rosetta 2 x86_64 translation inside the VM. It is off unless
+the selection opts a service in, and each service takes one mode:
+
+| Mode | Image platform |
+| --- | --- |
+| `native` (default) | Linux arm64 only. A declared `platform: linux/amd64` keeps the project on the Compose backend. |
+| `prefer-native` | The arm64 variant when the image publishes one, so multi-arch images stay native even when the service declares `linux/amd64`. An image that publishes only `linux/amd64` runs under emulation. |
+| `amd64` | The `linux/amd64` variant under emulation, even when the image also publishes arm64. Use it when the workload needs x86_64 binaries, for example prebuilt native modules. |
+
+`default` sets the mode for every service without its own entry in `services`; omit it
+to keep `native`. A named service must exist, a service that declares a Linux arm64
+`platform` cannot opt in, and an unknown mode refuses with `E_CONFIG_INVALID`. Only the
+exact `linux/amd64` platform is emulated; microarchitecture variants such as `v3` and
+other platforms are never selected.
+
+When any service opts in, native `up` requests a pool with translation
+(`runtime up --amd64-emulation`). A fresh pool is created with SmolVM's `--rosetta`;
+a stopped pool is updated with `machine update --rosetta` before it starts; a running
+pool without translation refuses with `amd64_emulation_restart_required` and nothing is
+stopped. Stop every native project that uses the pool, then start again. A pool keeps
+translation once it has it, so other projects sharing it are unaffected: their services
+still resolve arm64 images. Without Rosetta 2 the start refuses with
+`amd64_emulation_unavailable` before any VM effect.
+
+Every boot audits translation against the pool's recorded intent: the provider's
+stored machine setting, its running configuration, and the guest's `binfmt_misc`
+`rosetta` registration (the x86_64 ELF match with the fixed `rosetta-wrapper`
+interpreter). A pool without translation must have no such registration. The image
+cache keeps amd64 archives separate from arm64 ones, and the runtime admits an amd64
+image only for an opted-in service (`x-hack-amd64-emulation: true` in the reviewed
+Compose service, which the adaptation writes) in a pool booted with translation. A
+service that is not opted in still refuses a declared `linux/amd64` in native review.
+
+Emulated services are slower than native ones and can behave differently from arm64
+builds. `hack doctor` on the native backend reports an `amd64 emulation` warning with
+the number of opted-in services in each mode (counts only, no service names), and
+names the Rosetta 2 install command when it is missing.
 
 ### Optional prepared base for a fresh pool
 

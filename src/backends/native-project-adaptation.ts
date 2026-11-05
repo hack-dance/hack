@@ -2,6 +2,7 @@ import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { addNativeHostAliases } from "./native-project-host-aliases.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
+import { applyNativeAmd64Emulation } from "./native-project-platform.ts";
 import { readNativeSelection } from "./native-project-selection.ts";
 import { applyNativeWorkspaceCache } from "./native-workspace-cache.ts";
 
@@ -12,6 +13,7 @@ const SELECTION_KEYS = new Set([
   "additionalHostnames",
   "additionalHostAliases",
   "workspaceCache",
+  "amd64Emulation",
 ]);
 const PROBE_KEYS = new Set([
   "port",
@@ -194,11 +196,17 @@ export function adaptNativeProject(opts: {
     services: compose.services,
     selection: selection.additionalHostAliases,
   });
+  const amd64Emulation = applyNativeAmd64Emulation({
+    services: compose.services,
+    selection: selection.amd64Emulation,
+  });
   const normalizedComposeJson = JSON.stringify(compose);
   if (Buffer.byteLength(normalizedComposeJson) > 256 * 1024) {
     throw refused();
   }
-  return { ...opts.input, normalizedComposeJson };
+  return Object.keys(amd64Emulation).length > 0
+    ? { ...opts.input, normalizedComposeJson, amd64Emulation }
+    : { ...opts.input, normalizedComposeJson };
 }
 
 export async function prepareNativeProjectAdaptation(opts: {

@@ -8,6 +8,7 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import type { NativeEmulationPolicy } from "./native-project-platform.ts";
 
 const LIMIT = 256 * 1024;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -24,6 +25,11 @@ export type NativeProjectInput = {
   readonly effectiveEnvName: string | null;
   readonly environmentFiles: readonly string[];
   readonly serviceNames: readonly string[];
+  /**
+   * Emulation policy of each service the native adaptation opted in to `linux/amd64`
+   * (`amd64Emulation`); absent when none did. See `native-project-platform.ts`.
+   */
+  readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
 };
 
 function refused(): Error {

@@ -595,6 +595,40 @@ behavior, repeated jobs, multiple slots and real one-off traffic remain separate
 implementation and runtime gates. The existing Rebind model covers original-target
 drain/revocation; this model checks the later commit-before-new-grant boundary.
 
+## Pool amd64 emulation
+
+`pool-emulation/Emulation.tla` checks the Rosetta 2 translation intent of one shared
+native VM pool. The positive control explores 13 states. A start that needs
+translation records `Owner.amd64_emulation` before any provider effect; `machine
+create` passes `--rosetta` exactly when it is recorded, and a stopped pool whose
+stored setting lacks it is updated (`machine update --rosetta`). An interrupted update
+is the absence of that step and is repeated by the next start. A foreign actor may
+flip the stored setting while the pool is stopped. Each boot runs the stored setting;
+the engine starts only when the stored setting, running configuration and guest
+`binfmt_misc` registration all equal the recorded intent, otherwise the boot is
+refused. An amd64 container needs the audited pool's intent, and a running pool
+without translation refuses a request for it instead of changing intent.
+
+Removing the boot audit must fail `NoUntranslatedAmd64` in one `StartAmd64` state
+with `amd64 = TRUE`, `intent = TRUE`, `config = FALSE`, `registered = FALSE` and
+`engine = TRUE`. Allowing a running pool to gain intent must fail
+`EngineMatchesIntent` in one `RequestRunning` state with `phase = "running"`,
+`intent = TRUE`, `config = FALSE` and `engine = TRUE`. Both controls require TLC
+exit 12, the named action and same-state witness.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `RecordIntent` | `provider/lifecycle.rs::enable_amd64_emulation` saves `Owner.amd64_emulation` before any provider command |
+| `Create` / `Update` | `start_pool` adds `--rosetta` to `machine create`; `enable_amd64_emulation` runs `machine update --rosetta` when `config_audit::recorded_amd64_emulation` is false |
+| `ForeignRecord` | A stopped machine changed outside Hack; `config_audit::verify_value` compares the stored `rosetta` setting with the owner |
+| `Boot` / `StartEngine` / `RefuseBoot` | `audit_boot` (running config `resources.rosetta`), then `guest-translation.sh` in `finish_boot` before the engine starts |
+| `RequestRunning` | `check_amd64_emulation_request` refuses `amd64_emulation_restart_required` |
+| `StartAmd64` | `graph::admitted_architecture` (opted-in service and `OwnedGuest::amd64_emulation`), and `image_load::load_for` for amd64 archives |
+
+The model omits image selection, the registry and Docker's own platform handling;
+those are covered by `registry_image`, `image_ensure` and graph admission unit tests.
+Actual Rosetta execution in the guest needs host evidence.
+
 ## Stopped retained-pool startup
 
 `stopped-pool-startup/Resume.tla` checks one explicit startup from shape-valid

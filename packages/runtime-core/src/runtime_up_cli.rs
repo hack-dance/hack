@@ -18,12 +18,14 @@ pub struct Options {
     pub retained: Option<(String, String)>,
     /// `--prepared-base MODE` and optional `--prepared-base-store ABS` for a fresh pool.
     pub prepared: Option<(Mode, Option<PathBuf>)>,
+    /// `--amd64-emulation`: require Rosetta 2 x86_64 translation in the pool's VM.
+    pub amd64_emulation: bool,
 }
 
 fn invalid() -> CandidateError {
     CandidateError::new(
         "invalid_arguments",
-        "Use runtime up --profile research|development with --bridge-sockets or --minimum-bridge-sockets, and/or --dependency-sockets or --minimum-dependency-sockets, each once, repeatable --allow-host HOST, plus optional --json. Direct project sharing requires --profile development --project-share PATH --unfiltered-source together; it exposes the exact project tree without snapshot exclusions. A fresh pool may request a prepared base with --prepared-base prefer|require and optional absolute --prepared-base-store PATH.",
+        "Use runtime up --profile research|development with --bridge-sockets or --minimum-bridge-sockets, and/or --dependency-sockets or --minimum-dependency-sockets, each once, repeatable --allow-host HOST, plus optional --json. Direct project sharing requires --profile development --project-share PATH --unfiltered-source together; it exposes the exact project tree without snapshot exclusions. A fresh pool may request a prepared base with --prepared-base prefer|require and optional absolute --prepared-base-store PATH. --amd64-emulation requires Rosetta 2 x86_64 translation for opted-in linux/amd64 services.",
     )
 }
 
@@ -42,6 +44,7 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
     let mut retained_selection = None;
     let mut prepared = None;
     let mut prepared_store = None;
+    let mut amd64_emulation = false;
     let mut args = args.iter();
     while let Some(key) = args.next() {
         match *key {
@@ -73,6 +76,7 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
                 prepared_store = Some(path);
             }
             "--unfiltered-source" if !unfiltered_source => unfiltered_source = true,
+            "--amd64-emulation" if !amd64_emulation => amd64_emulation = true,
             "--internet" if !internet => internet = true,
             "--allow-host" => hosts.push(args.next().ok_or_else(invalid)?.to_string()),
             "--json" if !json => json = true,
@@ -136,7 +140,8 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
             && hosts.is_empty()
             && !internet
             && project_share.is_none()
-            && prepared.is_none())
+            && prepared.is_none()
+            && !amd64_emulation)
     {
         return Err(invalid());
     }
@@ -157,6 +162,7 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
         project_share,
         retained,
         prepared: prepared.map(|mode| (mode, prepared_store)),
+        amd64_emulation,
     })
 }
 
@@ -178,6 +184,37 @@ mod tests {
         assert_eq!(options.minimum_dependencies.unwrap().slots, 2);
         assert_eq!(options.dependencies, None);
         assert_eq!(options.prepared, Some((Mode::Require, None)));
+    }
+
+    #[test]
+    fn amd64_emulation_is_an_explicit_once_only_flag() {
+        let options = parse(&[
+            "--profile",
+            "development",
+            "--internet",
+            "--amd64-emulation",
+        ])
+        .unwrap();
+        assert!(options.amd64_emulation);
+        assert!(
+            parse(&["--profile", "development", "--amd64-emulation"])
+                .unwrap()
+                .amd64_emulation
+        );
+        assert!(
+            !parse(&["--profile", "development", "--internet"])
+                .unwrap()
+                .amd64_emulation
+        );
+        assert!(
+            parse(&[
+                "--profile",
+                "development",
+                "--amd64-emulation",
+                "--amd64-emulation"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

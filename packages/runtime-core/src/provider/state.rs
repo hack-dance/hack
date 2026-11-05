@@ -221,6 +221,13 @@ pub struct Owner {
     pub application_bridge: Option<super::BridgeIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_sockets: Option<super::DependencySocketIntent>,
+    /// Rosetta 2 x86_64 translation for this pool's VM, so opted-in `linux/amd64` services
+    /// can run. Recorded before the provider effect that enables it (`machine create
+    /// --rosetta`, or `machine update --rosetta` on a stopped pool) and never cleared
+    /// implicitly; every boot audits the provider record, running config and guest
+    /// registration against it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub amd64_emulation: bool,
     pub version: u32,
     pub checkout: PathBuf,
     pub token: String,
@@ -474,6 +481,7 @@ impl Owner {
             profile,
             application_bridge,
             dependency_sockets,
+            amd64_emulation: false,
             version: 1,
             checkout: candidate.checkout.clone(),
             machine: format!("hack-{}", &token[..12]),

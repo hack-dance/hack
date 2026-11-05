@@ -3002,6 +3002,105 @@ test("a runtime failure during image admission keeps its own diagnostic and star
   expect(events).toEqual([]);
 });
 
+test("opted-in amd64 services boot a translation pool and pin with their own platform policy", async () => {
+  const { opts } = await fixture(false);
+  const id = `sha256:${"e".repeat(64)}`;
+  withImages(opts, {
+    legacy: "example/amd64-only:1",
+    tool: "example/multi-arch:2",
+    cache: "redis",
+  });
+  const adaptationFile = join(opts.scope.projectRoot, "adaptation.json");
+  await writeFile(
+    adaptationFile,
+    JSON.stringify({
+      version: 1,
+      amd64Emulation: {
+        default: "prefer-native",
+        services: { legacy: "amd64", cache: "native" },
+      },
+    })
+  );
+  let reviewed: Record<string, Record<string, unknown>> = {};
+  opts.dependencies.review = async (request) => {
+    reviewed = JSON.parse(request.input.normalizedComposeJson).services;
+    return await request.run({
+      planId: "a".repeat(64),
+      namespace: "b".repeat(64),
+      projectArgs: ["--project", request.projectRoot],
+      report: { plan: { enrollment_compatible: true, services: {} } },
+    });
+  };
+  const invoke = opts.dependencies.invoke!;
+  const up: string[][] = [];
+  const ensured: string[][] = [];
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      up.push([...request.args]);
+    }
+    if (request.args[1] === "ensure-image") {
+      ensured.push([...request.args]);
+      return {
+        image_id: id,
+        platform: request.args.includes("amd64")
+          ? "linux/amd64"
+          : "linux/arm64",
+      };
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject({ ...opts, adaptationFile })).toBe(0);
+  expect(up).toHaveLength(1);
+  expect(up[0]).toContain("--amd64-emulation");
+  expect(ensured).toEqual([
+    [
+      "runtime",
+      "ensure-image",
+      "--reference",
+      "example/amd64-only:1",
+      "--emulation",
+      "amd64",
+      "--json",
+    ],
+    [
+      "runtime",
+      "ensure-image",
+      "--reference",
+      "example/multi-arch:2",
+      "--emulation",
+      "prefer-native",
+      "--json",
+    ],
+    ["runtime", "ensure-image", "--reference", "redis", "--json"],
+  ]);
+  // Only opted-in services carry the reviewed runtime opt-in.
+  expect(reviewed.legacy?.["x-hack-amd64-emulation"]).toBe(true);
+  expect(reviewed.tool?.["x-hack-amd64-emulation"]).toBe(true);
+  expect(reviewed.cache?.["x-hack-amd64-emulation"]).toBeUndefined();
+});
+
+test("without an emulation selection the runtime pool and image pins stay arm64-only", async () => {
+  const { opts } = await fixture(false);
+  withImages(opts, { web: "alpine:3.21" });
+  const invoke = opts.dependencies.invoke!;
+  const calls: string[][] = [];
+  opts.dependencies.invoke = async (request) => {
+    if (
+      request.args[0] === "runtime" &&
+      (request.args[1] === "up" || request.args[1] === "ensure-image")
+    ) {
+      calls.push([...request.args]);
+    }
+    if (request.args[1] === "ensure-image") {
+      return { image_id: `sha256:${"e".repeat(64)}` };
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(calls.flat()).not.toContain("--amd64-emulation");
+  expect(calls.flat()).not.toContain("--emulation");
+});
+
 test("retained startup reviews the saved content ID instead of a newly resolved mutable tag", async () => {
   const { opts, events } = await fixture(false);
   const saved = {

@@ -699,6 +699,7 @@ pub(super) fn compile(
                 "working_dir",
                 "user",
                 "platform",
+                "x-hack-amd64-emulation",
                 "labels",
                 "logging",
                 "stop_grace_period",
@@ -861,6 +862,17 @@ pub(super) fn compile(
                 "Only Linux arm64/amd64 image platform declarations are modeled.",
             ));
         }
+        let amd64_emulation = boolean(m.get("x-hack-amd64-emulation"), false)?;
+        if amd64_emulation
+            && platform
+                .as_deref()
+                .is_some_and(|v| ["linux/arm64", "linux/arm64/v8"].contains(&v))
+        {
+            return Err(problem(
+                "unsupported_platform",
+                "x-hack-amd64-emulation cannot apply to a service that declares a Linux arm64 platform.",
+            ));
+        }
         let exposed_ports = strings(m.get("expose"))?;
         for value in &exposed_ports {
             let (port, protocol) = value.split_once('/').unwrap_or((value, "tcp"));
@@ -927,7 +939,7 @@ pub(super) fn compile(
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,
-            platform,labels,routing,dependency_cache,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
+            platform,amd64_emulation,labels,routing,dependency_cache,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
         });
     }
     Ok(result)

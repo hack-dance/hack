@@ -1,5 +1,6 @@
 //! Anonymous, digest-pinned Docker Hub acquisition. No daemon, credential store or VM effects.
 use super::image_load;
+use super::image_platform::{ImagePlatform, PlatformPolicy};
 use super::image_reference::{ImageReference, NamedReference, normalize};
 use crate::CandidateError;
 use reqwest::{Url, blocking::Client, header::ACCEPT, redirect::Policy};
@@ -86,21 +87,41 @@ fn parse_manifest(bytes: &[u8], expected: &str) -> Result<Manifest, CandidateErr
     }
     Ok(m)
 }
-fn arm64(m: &Manifest) -> Result<&Descriptor, CandidateError> {
-    let mut selected = m.manifests.iter().filter(|d| {
-        d.platform.as_ref().is_some_and(|p| {
-            p.os == "linux"
-                && p.architecture == "arm64"
-                && p.variant.as_deref().is_none_or(|v| v == "v8")
-        })
-    });
-    let first = selected
-        .next()
-        .ok_or_else(|| error("Pinned index has no Linux ARM64 image."))?;
-    if selected.next().is_some() {
-        return Err(error("Pinned index has ambiguous Linux ARM64 images."));
+/// The index entry for the first platform of `policy` that the index publishes exactly once.
+/// A platform listed twice is ambiguous and refuses rather than falling through to the next.
+fn select(
+    m: &Manifest,
+    policy: PlatformPolicy,
+) -> Result<(&Descriptor, ImagePlatform), CandidateError> {
+    for platform in policy.candidates() {
+        let mut selected = m.manifests.iter().filter(|d| {
+            d.platform
+                .as_ref()
+                .is_some_and(|p| platform.matches(&p.os, &p.architecture, p.variant.as_deref()))
+        });
+        let Some(first) = selected.next() else {
+            continue;
+        };
+        if selected.next().is_some() {
+            return Err(match platform {
+                ImagePlatform::LinuxArm64 => {
+                    error("Pinned index has ambiguous Linux ARM64 images.")
+                }
+                ImagePlatform::LinuxAmd64 => {
+                    error("Pinned index has ambiguous Linux AMD64 images.")
+                }
+            });
+        }
+        return Ok((first, *platform));
     }
-    Ok(first)
+    Err(unavailable(policy))
+}
+fn unavailable(policy: PlatformPolicy) -> CandidateError {
+    match policy {
+        PlatformPolicy::Native => error("Pinned index has no Linux ARM64 image."),
+        PlatformPolicy::PreferNative => error("Pinned index has no Linux ARM64 or AMD64 image."),
+        PlatformPolicy::Amd64 => error("Pinned index has no Linux AMD64 image."),
+    }
 }
 fn bounded(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, CandidateError> {
     let mut bytes = Vec::new();
@@ -244,6 +265,8 @@ pub struct AcquiredImage {
     pub image_id: String,
     pub archive_sha256: String,
     pub archive_bytes: u64,
+    /// The platform selected by policy and confirmed by the image configuration.
+    pub platform: ImagePlatform,
 }
 fn authenticated_fetch(repo: &str) -> Result<Fetch, CandidateError> {
     let mut fetch = Fetch {
@@ -335,6 +358,15 @@ pub struct ResolvedImage {
 /// No image layers, archive, runtime state or local credentials are accessed. A later
 /// fetch must use pinned_reference: reusing the original tag would discard this review.
 pub fn resolve(reference_text: &str) -> Result<ResolvedImage, CandidateError> {
+    resolve_with(reference_text, PlatformPolicy::Native)
+}
+
+/// [`resolve`] under an explicit platform policy. Only an opted-in policy can select
+/// `linux/amd64`; the selected platform is part of the returned identity.
+pub fn resolve_with(
+    reference_text: &str,
+    policy: PlatformPolicy,
+) -> Result<ResolvedImage, CandidateError> {
     let (repo, tag) = tagged_reference(reference_text)?;
     let (repo, tag) = (repo.as_str(), tag.as_str());
     let fetch = authenticated_fetch(repo)?;
@@ -346,8 +378,10 @@ pub fn resolve(reference_text: &str) -> Result<ResolvedImage, CandidateError> {
     let source_digest = digest(&initial);
     let mut manifest = parse_manifest(&initial, &source_digest)?;
     let mut manifest_digest = source_digest.clone();
+    let mut indexed = None;
     if !manifest.manifests.is_empty() {
-        let selected = arm64(&manifest)?;
+        let (selected, platform) = select(&manifest, policy)?;
+        indexed = Some(platform);
         manifest_digest = selected.digest.clone();
         let bytes = fetch.object(repo, "manifests", selected, MAX_METADATA)?;
         manifest = parse_manifest(&bytes, &manifest_digest)?;
@@ -359,27 +393,39 @@ pub fn resolve(reference_text: &str) -> Result<ResolvedImage, CandidateError> {
         .config
         .ok_or_else(|| error("Image config descriptor is missing."))?;
     let config_bytes = fetch.object(repo, "blobs", &config, MAX_METADATA)?;
-    verify_platform(&config_bytes)?;
+    let platform = config_platform(&config_bytes, policy, indexed)?;
     Ok(ResolvedImage {
         pinned_reference: format!("docker.io/{repo}@{source_digest}"),
         source_digest,
         manifest_digest,
         image_id: config.digest,
-        platform: "linux/arm64",
+        platform: platform.name(),
     })
 }
-fn verify_platform(config_bytes: &[u8]) -> Result<(), CandidateError> {
+/// The platform the actual image configuration targets. An index selection must be
+/// confirmed by the configuration; a single manifest is admitted only for a platform the
+/// policy allows.
+fn config_platform(
+    config_bytes: &[u8],
+    policy: PlatformPolicy,
+    indexed: Option<ImagePlatform>,
+) -> Result<ImagePlatform, CandidateError> {
     let config: serde_json::Value =
         serde_json::from_slice(config_bytes).map_err(|_| error("Invalid image configuration."))?;
-    if config["os"] != "linux"
-        || config["architecture"] != "arm64"
-        || config.get("variant").is_some_and(|v| v != "v8")
-    {
-        return Err(error(
-            "Image configuration does not target supported Linux ARM64.",
-        ));
-    }
-    Ok(())
+    let allowed: &[ImagePlatform] = match &indexed {
+        Some(platform) => std::slice::from_ref(platform),
+        None => policy.candidates(),
+    };
+    allowed
+        .iter()
+        .copied()
+        .find(|platform| platform.matches_config(&config))
+        .ok_or_else(|| match policy {
+            PlatformPolicy::Native => {
+                error("Image configuration does not target supported Linux ARM64.")
+            }
+            _ => error("Image configuration does not target the selected Linux platform."),
+        })
 }
 
 /// Acquire one public pinned Linux ARM64 image into a new explicit archive. The output
@@ -387,6 +433,16 @@ fn verify_platform(config_bytes: &[u8]) -> Result<(), CandidateError> {
 /// HTTPS requests have a 60s bound and the complete acquisition a 300s deadline.
 /// SIGINT/process cancellation stops acquisition; no child transfer outlives the caller.
 pub fn acquire(reference_text: &str, output: &Path) -> Result<AcquiredImage, CandidateError> {
+    acquire_with(reference_text, output, PlatformPolicy::Native)
+}
+
+/// [`acquire`] under an explicit platform policy; the archive is validated for the platform
+/// that was selected and confirmed by the image configuration.
+pub fn acquire_with(
+    reference_text: &str,
+    output: &Path,
+    policy: PlatformPolicy,
+) -> Result<AcquiredImage, CandidateError> {
     let (repo, pin) = reference(reference_text)?;
     let (repo, pin) = (repo.as_str(), pin.as_str());
     if output.exists() {
@@ -400,8 +456,10 @@ pub fn acquire(reference_text: &str, output: &Path) -> Result<AcquiredImage, Can
     let initial = fetch.bytes(url, MAX_METADATA, true)?;
     let mut manifest = parse_manifest(&initial, pin)?;
     let mut manifest_digest = pin.to_owned();
+    let mut indexed = None;
     if !manifest.manifests.is_empty() {
-        let selected = arm64(&manifest)?;
+        let (selected, platform) = select(&manifest, policy)?;
+        indexed = Some(platform);
         manifest_digest = selected.digest.clone();
         let bytes = fetch.object(repo, "manifests", selected, MAX_METADATA)?;
         manifest = parse_manifest(&bytes, &manifest_digest)?;
@@ -413,6 +471,7 @@ pub fn acquire(reference_text: &str, output: &Path) -> Result<AcquiredImage, Can
         .config
         .ok_or_else(|| error("Image config descriptor is missing."))?;
     let config_bytes = fetch.object(repo, "blobs", &config, MAX_METADATA)?;
+    let platform = config_platform(&config_bytes, policy, indexed)?;
     let mut builder = tar::Builder::new(Vec::new());
     let config_name = format!("{}.json", config.digest.trim_start_matches("sha256:"));
     append(&mut builder, &config_name, &config_bytes)?;
@@ -441,7 +500,7 @@ pub fn acquire(reference_text: &str, output: &Path) -> Result<AcquiredImage, Can
     let bytes = builder
         .into_inner()
         .map_err(|_| error("Cannot finish image archive."))?;
-    image_load::validate_download(&bytes, &config.digest)?;
+    image_load::validate_download_for(&bytes, &config.digest, platform)?;
     if Instant::now() >= fetch.deadline {
         return Err(error("Registry acquisition deadline exceeded."));
     }
@@ -451,6 +510,7 @@ pub fn acquire(reference_text: &str, output: &Path) -> Result<AcquiredImage, Can
         image_id: config.digest,
         archive_sha256: format!("{:x}", Sha256::digest(&bytes)),
         archive_bytes: bytes.len() as u64,
+        platform,
     };
     publish(output, |file| file.write_all(&bytes))?;
     Ok(result)
@@ -574,19 +634,20 @@ mod tests {
     #[test]
     fn resolution_requires_unambiguous_linux_arm64_and_actual_config_architecture() {
         let bytes=br#"{"schemaVersion":2,"manifests":[{"digest":"sha256:unused","size":10,"mediaType":"manifest","platform":{"os":"linux","architecture":"amd64"}}]}"#;
-        assert!(arm64(&parse_manifest(bytes, &digest(bytes)).unwrap()).is_err());
+        let native = PlatformPolicy::Native;
+        assert!(select(&parse_manifest(bytes, &digest(bytes)).unwrap(), native).is_err());
         for bytes in [
             br#"{"os":"linux","architecture":"arm64"}"#.as_slice(),
             br#"{"os":"linux","architecture":"arm64","variant":"v8"}"#.as_slice(),
         ] {
-            assert!(verify_platform(bytes).is_ok());
+            assert!(config_platform(bytes, native, None).is_ok());
         }
         for bytes in [
             br#"{"os":"linux","architecture":"amd64"}"#.as_slice(),
             br#"{"os":"linux","architecture":"arm64","variant":"v9"}"#.as_slice(),
             br#"{"os":"darwin","architecture":"arm64"}"#.as_slice(),
         ] {
-            assert!(verify_platform(bytes).is_err());
+            assert!(config_platform(bytes, native, None).is_err());
         }
         // Duplicate supported entries remain ambiguous, even when their digests agree.
         let descriptor = serde_json::json!({"digest":"sha256:unused","size":10,"mediaType":"manifest","platform":{"os":"linux","architecture":"arm64"}});
@@ -594,7 +655,90 @@ mod tests {
             &serde_json::json!({"schemaVersion":2,"manifests":[descriptor.clone(),descriptor]}),
         )
         .unwrap();
-        assert!(arm64(&parse_manifest(&bytes, &digest(&bytes)).unwrap()).is_err());
+        assert!(select(&parse_manifest(&bytes, &digest(&bytes)).unwrap(), native).is_err());
+    }
+    #[test]
+    fn opted_in_policies_keep_published_arm64_and_select_amd64_only_when_allowed() {
+        let entry = |architecture: &str, digit: char, variant: Option<&str>| {
+            let mut platform = serde_json::json!({"os":"linux","architecture":architecture});
+            if let Some(variant) = variant {
+                platform["variant"] = serde_json::json!(variant);
+            }
+            serde_json::json!({"mediaType":"manifest","size":10,"digest":format!("sha256:{}", digit.to_string().repeat(64)),"platform":platform})
+        };
+        let index = |entries: Vec<serde_json::Value>| {
+            let bytes =
+                serde_json::to_vec(&serde_json::json!({"schemaVersion":2,"manifests":entries}))
+                    .unwrap();
+            parse_manifest(&bytes, &digest(&bytes)).unwrap()
+        };
+        let multi = index(vec![
+            entry("amd64", 'a', None),
+            entry("arm64", 'b', Some("v8")),
+        ]);
+        let amd64_only = index(vec![
+            entry("amd64", 'a', None),
+            entry("amd64", 'c', Some("v3")),
+        ]);
+        // A multi-architecture image stays native under every policy except an explicit amd64.
+        for policy in [PlatformPolicy::Native, PlatformPolicy::PreferNative] {
+            let (selected, platform) = select(&multi, policy).unwrap();
+            assert_eq!(
+                (selected.digest.as_bytes()[7], platform),
+                (b'b', ImagePlatform::LinuxArm64)
+            );
+        }
+        let (selected, platform) = select(&multi, PlatformPolicy::Amd64).unwrap();
+        assert_eq!(
+            (selected.digest.as_bytes()[7], platform),
+            (b'a', ImagePlatform::LinuxAmd64)
+        );
+        // An amd64-only image needs an opt-in; microarchitecture variants are never chosen.
+        assert_eq!(
+            select(&amd64_only, PlatformPolicy::Native)
+                .map(drop)
+                .unwrap_err()
+                .message,
+            "Pinned index has no Linux ARM64 image."
+        );
+        for policy in [PlatformPolicy::PreferNative, PlatformPolicy::Amd64] {
+            let (selected, platform) = select(&amd64_only, policy).unwrap();
+            assert_eq!(
+                (selected.digest.as_bytes()[7], platform),
+                (b'a', ImagePlatform::LinuxAmd64)
+            );
+        }
+        let duplicate = index(vec![entry("amd64", 'a', None), entry("amd64", 'c', None)]);
+        assert!(select(&duplicate, PlatformPolicy::PreferNative).is_err());
+        assert!(
+            select(
+                &index(vec![entry("arm64", 'b', None)]),
+                PlatformPolicy::Amd64
+            )
+            .is_err()
+        );
+        // The configuration must confirm the index selection, and a single manifest is
+        // admitted only for a platform the policy allows.
+        let amd = br#"{"os":"linux","architecture":"amd64"}"#.as_slice();
+        let arm = br#"{"os":"linux","architecture":"arm64"}"#.as_slice();
+        assert_eq!(
+            config_platform(amd, PlatformPolicy::PreferNative, None).unwrap(),
+            ImagePlatform::LinuxAmd64
+        );
+        assert_eq!(
+            config_platform(arm, PlatformPolicy::PreferNative, None).unwrap(),
+            ImagePlatform::LinuxArm64
+        );
+        assert!(config_platform(amd, PlatformPolicy::Native, None).is_err());
+        assert!(config_platform(arm, PlatformPolicy::Amd64, None).is_err());
+        assert!(
+            config_platform(
+                arm,
+                PlatformPolicy::PreferNative,
+                Some(ImagePlatform::LinuxAmd64)
+            )
+            .is_err()
+        );
     }
     #[test]
     fn only_public_digest_pinned_repository_references_are_accepted() {
@@ -700,12 +844,13 @@ mod tests {
             serde_json::to_vec(&serde_json::json!({"schemaVersion":2,"manifests":[descriptor]}))
                 .unwrap();
         let mut m = parse_manifest(&bytes, &digest(&bytes)).unwrap();
-        assert!(arm64(&m).is_ok());
+        let native = PlatformPolicy::Native;
+        assert!(select(&m, native).is_ok());
         assert!(parse_manifest(&bytes, &format!("sha256:{}", "0".repeat(64))).is_err());
         m.manifests.push(m.manifests[0].clone());
-        assert!(arm64(&m).is_err());
+        assert!(select(&m, native).is_err());
         m.manifests.clear();
-        assert!(arm64(&m).is_err());
+        assert!(select(&m, native).is_err());
         assert!(bounded(&b"12345"[..], 4).is_err());
         assert_eq!(bounded(&b"1234"[..], 4).unwrap(), b"1234");
     }

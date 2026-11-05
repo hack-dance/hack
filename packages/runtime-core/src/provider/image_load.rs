@@ -1,5 +1,5 @@
 //! Explicit, bounded local image archives; no registry credentials or Docker contexts.
-use super::{engine::Engine, state};
+use super::{engine::Engine, image_platform::ImagePlatform, state};
 use crate::{Candidate, CandidateError};
 use flate2::read::MultiGzDecoder;
 use reqwest::Method;
@@ -114,7 +114,18 @@ fn archive_member(bytes: &[u8], name: &str, limit: u64) -> Result<Vec<u8>, Candi
     Err(error("Image archive member is missing."))
 }
 
+#[cfg(test)]
 fn validate_archive(bytes: &[u8], image: &str, max_expanded: u64) -> Result<(), CandidateError> {
+    validate_archive_for(bytes, image, max_expanded, ImagePlatform::LinuxArm64)
+}
+
+/// Validates one flat image archive whose configuration targets exactly `platform`.
+fn validate_archive_for(
+    bytes: &[u8],
+    image: &str,
+    max_expanded: u64,
+    platform: ImagePlatform,
+) -> Result<(), CandidateError> {
     if !image.strip_prefix("sha256:").is_some_and(hex) || bytes.len() as u64 > MAX_ARCHIVE {
         return Err(error("Invalid image identity or archive size."));
     }
@@ -174,7 +185,7 @@ fn validate_archive(bytes: &[u8], image: &str, max_expanded: u64) -> Result<(), 
     }
     let config: Value =
         serde_json::from_slice(&config_bytes).map_err(|_| error("Invalid image configuration."))?;
-    if config["architecture"] != "arm64" || config["os"] != "linux" {
+    if config["architecture"] != platform.architecture() || config["os"] != "linux" {
         return Err(error(
             "Image architecture is incompatible with this provider.",
         ));
@@ -227,8 +238,17 @@ fn validate_archive(bytes: &[u8], image: &str, max_expanded: u64) -> Result<(), 
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn validate_download(bytes: &[u8], image: &str) -> Result<(), CandidateError> {
-    validate_archive(bytes, image, MAX_EXPANDED)
+    validate_download_for(bytes, image, ImagePlatform::LinuxArm64)
+}
+
+pub(super) fn validate_download_for(
+    bytes: &[u8],
+    image: &str,
+    platform: ImagePlatform,
+) -> Result<(), CandidateError> {
+    validate_archive_for(bytes, image, MAX_EXPANDED, platform)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -253,11 +273,15 @@ fn reusable_validation(previous: &ImageReceipt, requested: &ImageReceipt) -> boo
         && previous.image_id == requested.image_id
 }
 
-fn inspect(engine: &Engine<'_>, image: &str) -> Result<bool, CandidateError> {
+fn inspect(
+    engine: &Engine<'_>,
+    image: &str,
+    platform: ImagePlatform,
+) -> Result<bool, CandidateError> {
     match engine.request(Method::GET, &format!("/v1.53/images/{image}/json"), None) {
         Ok(value)
             if value["Id"] == image
-                && value["Architecture"] == "arm64"
+                && value["Architecture"] == platform.architecture()
                 && value["Os"] == "linux" =>
         {
             Ok(true)
@@ -298,7 +322,33 @@ pub fn load(
     expected_sha: &str,
     image: &str,
 ) -> Result<ImageReceipt, CandidateError> {
-    load_waiting(candidate, path, expected_sha, image, IMPORT_LEASE_WAIT)
+    load_for(
+        candidate,
+        path,
+        expected_sha,
+        image,
+        ImagePlatform::LinuxArm64,
+    )
+}
+
+/// [`load`] for an archive of `platform`. An emulated platform imports only into a pool
+/// whose audited boot enabled x86_64 translation; the archive and readback are both bound to
+/// that platform.
+pub(super) fn load_for(
+    candidate: &Candidate,
+    path: &Path,
+    expected_sha: &str,
+    image: &str,
+    platform: ImagePlatform,
+) -> Result<ImageReceipt, CandidateError> {
+    load_waiting(
+        candidate,
+        path,
+        expected_sha,
+        image,
+        IMPORT_LEASE_WAIT,
+        platform,
+    )
 }
 
 fn load_waiting(
@@ -307,6 +357,7 @@ fn load_waiting(
     expected_sha: &str,
     image: &str,
     lease_wait: Duration,
+    platform: ImagePlatform,
 ) -> Result<ImageReceipt, CandidateError> {
     if !hex(expected_sha) || !image.strip_prefix("sha256:").is_some_and(hex) {
         return Err(error("Expected archive and image hashes are required."));
@@ -328,6 +379,9 @@ fn load_waiting(
         return Err(error("Image archive size changed during verification."));
     }
     let engine = connect_for_import(candidate, lease_wait)?;
+    if platform.emulated() && !engine.guest().amd64_emulation() {
+        return Err(super::lifecycle::amd64_emulation_not_enabled());
+    }
     let directory = candidate.state_root.join("run/image-loads");
     state::private_directory(&directory)?;
     let path = directory.join(format!("{expected_sha}.json"));
@@ -353,7 +407,7 @@ fn load_waiting(
         // The complete archive hash was checked above. Only this validator's completed,
         // identity-bound receipt can avoid expanding the same layers again; engine presence
         // and architecture are still checked on every invocation, including after reboot.
-        if reusable_validation(&old, &receipt) && inspect(&engine, image)? {
+        if reusable_validation(&old, &receipt) && inspect(&engine, image, platform)? {
             if old.provider_boot_id == receipt.provider_boot_id {
                 return Ok(old);
             }
@@ -363,7 +417,7 @@ fn load_waiting(
         }
         if old.phase == "loading"
             && old.provider_boot_id == receipt.provider_boot_id
-            && !inspect(&engine, image)?
+            && !inspect(&engine, image, platform)?
         {
             return Err(CandidateError::new(
                 "image_load_indeterminate",
@@ -372,12 +426,12 @@ fn load_waiting(
         }
     }
     let bytes = read_verified_archive(&mut file, expected_sha)?;
-    validate_archive(&bytes, image, MAX_EXPANDED)?;
-    if !inspect(&engine, image)? {
+    validate_archive_for(&bytes, image, MAX_EXPANDED, platform)?;
+    if !inspect(&engine, image, platform)? {
         state::write(&path, &receipt)?;
         let result = engine.load_image_archive(bytes);
         // A lost response is reconciled only by independent content-ID readback.
-        if !inspect(&engine, image)? {
+        if !inspect(&engine, image, platform)? {
             result?;
             return Err(error("The expected image is absent after load."));
         }
@@ -530,6 +584,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_amd64_archive_validates_only_for_the_selected_amd64_platform() {
+        let amd64 = ImagePlatform::LinuxAmd64;
+        let (bytes, image) = fixture("amd64", false, false);
+        assert!(validate_archive_for(&bytes, &image, 4096, amd64).is_ok());
+        assert!(validate_download_for(&bytes, &image, ImagePlatform::LinuxArm64).is_err());
+        let (bytes, image) = fixture("arm64", false, false);
+        assert!(validate_archive_for(&bytes, &image, 4096, amd64).is_err());
+        let (bytes, image) = fixture("amd64", false, true);
+        assert!(validate_archive_for(&bytes, &image, 4096, amd64).is_err());
+    }
+
     /// A candidate whose provider looks running to every check before the lease. Its recorded
     /// process is synthetic, so identity verification under an acquired lease always fails:
     /// an attempt that got past the lease is visible without any engine being reached.
@@ -606,6 +672,7 @@ mod tests {
             &sha,
             &image,
             Duration::from_millis(300),
+            ImagePlatform::LinuxArm64,
         )
         .err()
         .unwrap();
@@ -622,9 +689,16 @@ mod tests {
             drop(held);
         });
         let started = Instant::now();
-        let admitted = load_waiting(&pool.candidate, &path, &sha, &image, Duration::from_secs(5))
-            .err()
-            .unwrap();
+        let admitted = load_waiting(
+            &pool.candidate,
+            &path,
+            &sha,
+            &image,
+            Duration::from_secs(5),
+            ImagePlatform::LinuxArm64,
+        )
+        .err()
+        .unwrap();
         release.join().unwrap();
         assert_ne!(admitted.code, "provider_busy", "{admitted:?}");
         assert!(started.elapsed() >= Duration::from_millis(200));

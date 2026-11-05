@@ -214,6 +214,7 @@ mod tests {
             id: None,
             image: None,
             phase: "created".into(),
+            amd64_emulation: false,
         };
         let volume = json!({"name":resource.name,"resource":"deps","observed_state":"present","classification":"referenced_by_graph"});
         let mut references = BTreeMap::new();

@@ -144,7 +144,7 @@ import {
   repairNativeCaTrust,
 } from "../lib/native-ca-doctor.ts";
 import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
-import { readComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
+import { readComposeBackendReading } from "../lib/native-compose-backend-features.ts";
 import {
   describeHackLocalRoute,
   HACK_LOCAL_ROLLBACK_COMMAND,
@@ -2945,11 +2945,13 @@ async function checkComposeBackendFeatures(opts: {
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
     };
   }
+  const reading = await readComposeBackendReading(ctx.composeFile, {
+    adaptationFile: opts.adaptationFile,
+  });
   return composeBackendCheckResult({
     backend: opts.backend,
-    features: await readComposeBackendFeatures(ctx.composeFile, {
-      adaptationFile: opts.adaptationFile,
-    }),
+    features: reading.features,
+    basicBuild: reading.basicBuild,
   });
 }
 

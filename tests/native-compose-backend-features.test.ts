@@ -12,6 +12,7 @@ import { HACK_OWNERSHIP_LABEL_NAMESPACES } from "../src/lib/hack-ownership-label
 import {
   composeBackendRefusal,
   findComposeBackendFeatures,
+  hasBasicComposeBuild,
   RESERVED_OWNERSHIP_LABEL_PREFIXES,
   readComposeBackendFeatures,
   refuseNativeComposeBackendFeatures,
@@ -300,6 +301,73 @@ test("doctor reports the same features value-free for each backend", () => {
       composeBackend: { features: [] },
     });
   }
+});
+
+test("doctor names the isolatedNetworks adaptation for an external network", () => {
+  for (const backend of ["native", "compose"] as const) {
+    const result = composeBackendCheckResult({
+      backend,
+      features: ["external_network"],
+    });
+    expect(result.message).toContain("`isolatedNetworks`");
+    expect(result.message).toContain("`HACK_NATIVE_ADAPTATION`");
+    expect(result.composeBackend).toEqual({ features: ["external_network"] });
+  }
+  // Features with no native replacement do not suggest the adaptation.
+  expect(
+    composeBackendCheckResult({
+      backend: "native",
+      features: ["external_volume"],
+    }).message
+  ).not.toContain("isolatedNetworks");
+});
+
+test("doctor warns for a basic build that native image-project up refuses", () => {
+  const native = composeBackendCheckResult({
+    backend: "native",
+    features: [],
+    basicBuild: true,
+  });
+  expect(native).toMatchObject({
+    status: "warn",
+    composeBackend: { features: [], nativeUpRefusals: ["basic_build"] },
+  });
+  expect(native.message).toContain("general configuration refusal");
+  expect(native.message).toContain("hack config import --dry-run");
+  expect(native.message).toContain("HACK_RUNTIME_BACKEND=compose");
+  const compose = composeBackendCheckResult({
+    backend: "compose",
+    features: [],
+    basicBuild: true,
+  });
+  expect(compose.status).toBe("ok");
+  expect(compose.message).toContain("hack config import --dry-run");
+  const both = composeBackendCheckResult({
+    backend: "native",
+    features: ["external_volume"],
+    basicBuild: true,
+  });
+  expect(both.status).toBe("warn");
+  expect(both.message).toContain("basic Compose build");
+  expect(both.composeBackend.nativeUpRefusals).toEqual(["basic_build"]);
+  expect(
+    composeBackendCheckResult({ backend: "native", features: [] })
+      .composeBackend
+  ).toEqual({ features: [] });
+});
+
+test("basic build detection matches the import preview's basic form", () => {
+  for (const build of ["..", ".", { context: "../app" }, {}]) {
+    expect(hasBasicComposeBuild(services({ build }))).toBe(true);
+  }
+  for (const service of [
+    { image: IMAGE },
+    { build: { context: "..", args: { A: "1" } } },
+    { build: "..", image: IMAGE },
+  ]) {
+    expect(hasBasicComposeBuild(services(service))).toBe(false);
+  }
+  expect(hasBasicComposeBuild(null)).toBe(false);
 });
 
 const ADAPTATION_REFUSAL =

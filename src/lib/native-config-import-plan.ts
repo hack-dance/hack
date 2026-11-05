@@ -1067,34 +1067,69 @@ function restartPolicy(value: unknown): Record<string, unknown> | undefined {
   };
 }
 
-function staticEnvironment(
-  value: unknown
-): Record<string, unknown> | undefined {
-  const entries: [string, unknown][] = [];
+type EnvironmentReview = {
+  /** Static literal entries in authored order, keyed by their import pointer segment. */
+  readonly accepted: readonly (readonly [
+    segment: string | number,
+    key: string,
+    value: string,
+  ])[];
+  /** Pointer segments of entries that cannot be represented as static literals. */
+  readonly refused: readonly (string | number)[];
+};
+
+/**
+ * Review each Compose environment entry on its own so one interpolated or
+ * ambiguous entry is refused by its pointer while literal siblings stay mapped.
+ * Returns undefined only when the container itself is not a map or list.
+ */
+function reviewEnvironment(value: unknown): EnvironmentReview | undefined {
+  const entries: [string | number, string, unknown][] = [];
   if (isRecord(value)) {
-    entries.push(...Object.entries(value));
+    for (const [key, entry] of Object.entries(value)) {
+      entries.push([key, key, entry]);
+    }
   } else if (Array.isArray(value)) {
-    for (const item of value) {
+    for (const [index, item] of value.entries()) {
       if (typeof item !== "string" || !item.includes("=")) {
-        return undefined;
+        entries.push([index, "", undefined]);
+        continue;
       }
       const equal = item.indexOf("=");
-      entries.push([item.slice(0, equal), item.slice(equal + 1)]);
+      entries.push([index, item.slice(0, equal), item.slice(equal + 1)]);
     }
   } else {
     return undefined;
   }
-  const result: Record<string, unknown> = Object.create(null);
-  for (const [key, entry] of entries) {
+  const accepted: [string | number, string, string][] = [];
+  const refused: (string | number)[] = [];
+  const seen = new Set<string>();
+  for (const [segment, key, entry] of entries) {
     if (
       !KEY.test(key) ||
-      Object.hasOwn(result, key) ||
+      seen.has(key) ||
       typeof entry !== "string" ||
       entry.includes("$") ||
       entry.includes("\0")
     ) {
-      return undefined;
+      refused.push(segment);
+    } else {
+      accepted.push([segment, key, entry]);
     }
+    seen.add(key);
+  }
+  return { accepted, refused };
+}
+
+function staticEnvironment(
+  value: unknown
+): Record<string, unknown> | undefined {
+  const review = reviewEnvironment(value);
+  if (!review || review.refused.length > 0) {
+    return undefined;
+  }
+  const result: Record<string, unknown> = Object.create(null);
+  for (const [, key, entry] of review.accepted) {
     result[key] = { default: entry };
   }
   return result;
@@ -1406,6 +1441,43 @@ type WorkloadMappingContext = Pick<MappingContext, "mark" | "refuse"> & {
   readonly buildPreview: boolean;
 };
 
+/**
+ * When a Compose environment container is well formed but some entries are
+ * not static literals, refuse exactly those entries by pointer and keep the
+ * literal siblings mapped. The import stays incomplete; no candidate is exposed.
+ * Returns false when no per-entry refusal applies.
+ */
+function refuseEnvironmentEntries(
+  opts: Pick<WorkloadMappingContext, "mark" | "refuse" | "targetPointer"> & {
+    readonly raw: unknown;
+    readonly pointer: string;
+  }
+): boolean {
+  const review = reviewEnvironment(opts.raw);
+  if (!review || review.refused.length === 0) {
+    return false;
+  }
+  const target = `${opts.targetPointer}/environment`;
+  opts.mark("compose", opts.pointer, target, "managed_fallback");
+  for (const [segment] of review.accepted) {
+    opts.mark(
+      "compose",
+      importPointer(opts.pointer, segment),
+      target,
+      "managed_fallback",
+      true
+    );
+  }
+  for (const segment of review.refused) {
+    opts.refuse(
+      "compose",
+      importPointer(opts.pointer, segment),
+      "invalid_or_ambiguous_value"
+    );
+  }
+  return true;
+}
+
 function mapServiceRule(
   opts: WorkloadMappingContext & {
     readonly service: Record<string, unknown>;
@@ -1426,6 +1498,9 @@ function mapServiceRule(
   }
   if (presence === "empty_command_unrepresentable") {
     opts.refuse("compose", pointer, "empty_command_unrepresentable");
+    return;
+  }
+  if (key === "environment" && refuseEnvironmentEntries({ ...opts, pointer })) {
     return;
   }
   let value = SERVICE_RULES[key]?.(raw);

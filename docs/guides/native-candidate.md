@@ -830,7 +830,17 @@ resume, live inspection must still prove absent compute and present owned volume
 the existing restore selection pins the current boot and volume identities. Cancellation
 or timeout has an uncertain outcome and never replays runtime up or graph restore.
 It refuses an active, changed
-or uncertain mapping rather than allocating a new data volume. Down hooks resolve
+or uncertain mapping rather than allocating a new data volume. When a Compose edit changes
+the graph's images, volumes or other resources, the retained data cannot be adopted and
+`up` says so. Either revert the edit, or discard the data explicitly with
+`hack down --remove-data` (Compose parity: `docker compose down --volumes`). It works only
+on a stopped project: run `hack down` first. It asks for confirmation (`--yes` skips the
+question; `--json` requires `--yes`), runs no lifecycle hooks, and asks the graph owner to
+delete only the volumes that this run created. Shared dependency caches are released, not
+deleted. The run mapping is retired only after every owned volume is confirmed absent, so
+the next `up` starts a new run with new empty volumes. If removal is interrupted or
+cannot be confirmed, the mapping is kept and running the same command again resumes from
+the owner's durable cleanup intent. Output names no volumes or paths. Down hooks resolve
 fresh managed host values using the environment selection saved by `up`; hook output goes to stderr with `--json`. A before-hook failure
 prevents cleanup; an after-hook failure reports that graph cleanup already completed.
 Environment/profile/target changes and cache pruning remain unsupported.

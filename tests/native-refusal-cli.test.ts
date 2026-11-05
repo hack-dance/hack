@@ -385,7 +385,7 @@ test(
     const result = await cli({ fixture: f, args: ["up"], env: SHARED });
     expectOneClosedLine(
       result,
-      "Native restore selection changed; retained data was not adopted."
+      "Native restore selection changed; retained data was not adopted. Revert the change to keep that data, or run `hack down --remove-data` to discard it and start fresh."
     );
     expect((await f.calls()).at(-1)).toBe("graph restore-selection");
   },

@@ -354,6 +354,7 @@ import {
   reconcileImplicitDownBranch,
 } from "./project-down-safety.ts";
 import { runNativeProjectExec } from "./project-exec-native.ts";
+import { runNativeDownRemoveData } from "./project-native-remove-data.ts";
 
 /** Regex for valid TLD/service/subdomain labels (lowercase alphanumeric with hyphens). */
 const SLUG_LABEL_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
@@ -455,7 +456,7 @@ const optYes = defineOption({
   name: "yes",
   type: "boolean",
   long: "--yes",
-  description: "Confirm --prune-caches without prompting",
+  description: "Confirm --prune-caches or --remove-data without prompting",
 } as const);
 const optRecoverFrontend = defineOption({
   name: "recoverFrontend",
@@ -509,6 +510,13 @@ const downOptions = [
   optProfile,
   optTarget,
   optPruneCaches,
+  defineOption({
+    name: "removeData",
+    type: "boolean",
+    long: "--remove-data",
+    description:
+      "Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first)",
+  } as const),
   optYes,
   optJson,
   defineOption({
@@ -5971,6 +5979,7 @@ async function restartNativeImageProject({
             target: undefined,
             json: false,
             pruneCaches: false,
+            removeData: false,
             yes: false,
             recoverNativeCompose: false,
           },
@@ -6616,6 +6625,26 @@ function refuseLegacyNativeRecovery(recover: boolean): void {
   }
 }
 
+/** Native down accepts --yes only to confirm --remove-data. */
+function refuseNativeDownOptions(options: DownArgs["options"]): void {
+  const removeData = options.removeData === true;
+  if (
+    [
+      options.env,
+      options.profile,
+      options.target,
+      options.pruneCaches,
+      !removeData && options.yes,
+    ].some(Boolean)
+  ) {
+    throw new CliUsageError(
+      removeData
+        ? "Native down --remove-data does not support --env, --profile, --target or --prune-caches."
+        : "Native down preserves data and does not support --env, --profile, --target, --prune-caches or --yes (--yes confirms --remove-data)."
+    );
+  }
+}
+
 async function handleDown({
   ctx,
   args,
@@ -6643,6 +6672,7 @@ async function handleDown({
     unsupportedOptions: [
       args.options.target,
       args.options.pruneCaches,
+      args.options.removeData,
       args.options.yes,
     ].some(Boolean),
   });
@@ -6655,19 +6685,7 @@ async function handleDown({
     if (args.options.json) {
       setLoggerBackendOverride({ backend: "console" });
     }
-    if (
-      [
-        args.options.env,
-        args.options.profile,
-        args.options.target,
-        args.options.pruneCaches,
-        args.options.yes,
-      ].some(Boolean)
-    ) {
-      throw new CliUsageError(
-        "Native down preserves data and does not support --env, --profile, --target, --prune-caches or --yes."
-      );
-    }
+    refuseNativeDownOptions(args.options);
     const project = await resolveProjectForArgs({
       ctx,
       pathOpt: args.options.path,
@@ -6679,18 +6697,27 @@ async function handleDown({
       branchOption: args.options.branch,
       noticeToStderr: args.options.json === true,
     });
-    const cfg = await readProjectConfig(project);
-    if (cfg.parseError) {
-      throw new CliUsageError(
-        "Native down requires valid lifecycle configuration; values omitted."
-      );
-    }
     const scope = {
       projectRoot: project.projectRoot,
       projectDir: project.projectDir,
       nativeHome: native.home,
       branch,
     };
+    if (args.options.removeData) {
+      // Removal never stops compute or runs hooks; a running project refuses.
+      return await runNativeDownRemoveData({
+        runtime: native,
+        scope,
+        yes: args.options.yes === true,
+        json: args.options.json === true,
+      });
+    }
+    const cfg = await readProjectConfig(project);
+    if (cfg.parseError) {
+      throw new CliUsageError(
+        "Native down requires valid lifecycle configuration; values omitted."
+      );
+    }
     let lifecycleEnv: Readonly<Record<string, string>> = {};
     const hasHooks = Boolean(
       cfg.lifecycle?.down?.before?.length || cfg.lifecycle?.down?.after?.length
@@ -6817,6 +6844,11 @@ async function runDownCommand({
     noticeToStderr: json,
   });
   const profiles = parseCsvList(args.options.profile);
+  if (args.options.removeData) {
+    throw new CliUsageError(
+      "--remove-data applies to the native backend only; Compose-backend down keeps named volumes."
+    );
+  }
   const pruneCaches = args.options.pruneCaches === true;
   const confirmCachePrune = args.options.yes === true;
   if (confirmCachePrune && !pruneCaches) {

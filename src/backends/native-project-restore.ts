@@ -10,6 +10,9 @@ import {
 } from "./native-runtime-client.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
+/** Value-free refusal tail naming the two explicit remedies for a changed plan. */
+const NOT_ADOPTED =
+  "retained data was not adopted. Revert the change to keep that data, or run `hack down --remove-data` to discard it and start fresh.";
 /** Recheck native authority without deriving or translating any ownership identity. */
 export function validateNativeRestoreSelection(opts: {
   readonly selected: unknown;
@@ -28,7 +31,7 @@ export function validateNativeRestoreSelection(opts: {
     !SHA.test(selected.generation)
   ) {
     throw new ClosedCliError(
-      "Native restore selection changed; retained data was not adopted."
+      `Native restore selection changed; ${NOT_ADOPTED}`
     );
   }
   return { generation: selected.generation };
@@ -82,13 +85,13 @@ export async function verifyNativeSourceCompatibility(opts: {
     )
   ) {
     throw new ClosedCliError(
-      "Native shared-source compatibility changed; retained data was not adopted."
+      `Native shared-source compatibility changed; ${NOT_ADOPTED}`
     );
   }
   const cached = nativeCacheInitializers(opts.review.report.plan).size > 0;
   if ((result.source_revision === null) !== !cached) {
     throw new ClosedCliError(
-      "Native shared-source compatibility changed; retained data was not adopted."
+      `Native shared-source compatibility changed; ${NOT_ADOPTED}`
     );
   }
   return result.source_revision;
@@ -129,7 +132,7 @@ export async function selectNativeProjectRestore(opts: {
     opts.review.retainedGeneration !== selection.generation
   ) {
     throw new ClosedCliError(
-      "Native restore selection changed; retained data was not adopted."
+      `Native restore selection changed; ${NOT_ADOPTED}`
     );
   }
   const sourceRevision = nativeReviewNeedsCompatibility({

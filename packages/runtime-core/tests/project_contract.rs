@@ -894,9 +894,13 @@ fn unsupported_ports_are_located_diagnostics_collected_with_the_rest_of_the_revi
     assert_eq!(plan.services["web"].ports[0].published, Some(8080));
     assert_eq!(plan.services["web"].exposed_ports, vec!["3000"]);
     let serialized = serde_json::to_string(&report).unwrap();
-    for authored in ["10.9.8.7", "OTHER_BIND", "EXPOSED", "4000"] {
+    for authored in ["10.9.8.7", "OTHER_BIND", "EXPOSED", "${EXPOSED:-4000}"] {
         assert!(!serialized.contains(authored), "{authored}");
     }
+    // Report paths and hashes may contain numeric substrings by coincidence.
+    // The authored default must stay out of diagnostic text specifically.
+    let diagnostics = serde_json::to_string(&plan.diagnostics).unwrap();
+    assert!(!diagnostics.contains("4000"));
     assert_eq!(
         project::enroll(&fixture.candidate, fixture.options(), &report.plan_id)
             .unwrap_err()

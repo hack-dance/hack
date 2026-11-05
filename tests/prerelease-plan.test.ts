@@ -108,10 +108,14 @@ const jobNames = [
   "docker-e2e shard 3/4",
   "docker-e2e shard 4/4",
   "docker-e2e",
-  "test shard 1/4",
-  "test shard 2/4",
-  "test shard 3/4",
-  "test shard 4/4",
+  "test shard 1/8",
+  "test shard 2/8",
+  "test shard 3/8",
+  "test shard 4/8",
+  "test shard 5/8",
+  "test shard 6/8",
+  "test shard 7/8",
+  "test shard 8/8",
   "test",
   "linux-process-lifetime",
 ];
@@ -335,6 +339,16 @@ describe("prerelease decision boundary", () => {
         sourceRevision: sha,
       })
     ).toThrow();
+    for (let shard = 1; shard <= 8; shard += 1) {
+      const name = `test shard ${shard}/8`;
+      expect(() =>
+        requireExactHeadCi({
+          run: ciRun,
+          jobs: jobs.filter((job) => job.name !== name),
+          sourceRevision: sha,
+        })
+      ).toThrow(`Exact-head CI job did not succeed: ${name}`);
+    }
     // The docker-e2e fan-in alone is not enough: every shard must have succeeded.
     expect(() =>
       requireExactHeadCi({

@@ -232,13 +232,13 @@ jobs:
           fi
 
   secret-scan:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
     steps:
       - name: Checkout
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Install Gitleaks
@@ -259,19 +259,19 @@ jobs:
             --report-path "$RUNNER_TEMP/gitleaks.sarif"
 
   runtime-images:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
     steps:
       - name: Checkout
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
           bun-version: "1.4.4"
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v1
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Build full runtime image
@@ -304,7 +304,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     # The serial job measured 85-125 min on the shared Blacksmith engine. Each shard
     # keeps that whole budget, so it bounds a hung engine, not a slow pass.
     timeout-minutes: 150
@@ -312,7 +312,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
@@ -412,15 +412,15 @@ jobs:
     # (scripts/test-shard-plan.ts, HACK-1381). The serial job took 37-42 min and
     # reached the 60 min limit on slow runners; each file now runs in its own
     # `bun test` process with a start/result line, so a hang names its file.
-    name: test shard ${{ matrix.shard }}/4
+    name: test shard ${{ matrix.shard }}/8
     strategy:
       # Let every shard finish so one failure still reports the other files.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
-    runs-on: blacksmith-6vcpu-macos-15
-    # A shard plans about 10.5 min of tests. The runner's own 30 min deadline
-    # stops first and names the running file; this bounds a hung runner.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: macos-15
+    # Eight shards keep the slower GitHub-hosted macOS jobs below the existing
+    # 30 min file-runner deadline; the 40 min job limit bounds a hung runner.
     timeout-minutes: 40
     steps:
       - name: Checkout
@@ -445,10 +445,10 @@ jobs:
       - name: Prepare matching compiler for private file owner tests
         run: bun run build:config-compiler
       # Runs check:bun-version and test:preflight as `bun run test` does, then
-      # verifies that the four shards cover the full test file set exactly once.
+      # verifies that all eight shards cover the full test file set exactly once.
       - name: Tests (shard)
         env:
-          HACK_TEST_SHARD: ${{ matrix.shard }}/4
+          HACK_TEST_SHARD: ${{ matrix.shard }}/8
         run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
       - name: Preserve measured file durations
         # Per-file seconds only; refresh scripts/test-shard-durations.json with
@@ -487,11 +487,11 @@ jobs:
           fi
 
   linux-process-lifetime:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:

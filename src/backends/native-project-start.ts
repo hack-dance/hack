@@ -21,6 +21,14 @@ import {
 } from "./native-prepared-base.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
+  admitNativeProjectBuilds,
+  buildNativeProjectImages,
+  invokeNativeBuild,
+  type NativeBuildRequest,
+  nativeBuildsEnabled,
+  nativeRebuildRequested,
+} from "./native-project-builds.ts";
+import {
   nativeSharedSourceFlags,
   nativeStartCacheSource,
 } from "./native-project-cache.ts";
@@ -258,6 +266,7 @@ type Dependencies = {
   recoverHttps: typeof recoverNativeHttpsLease;
   cleanupTemporary: (directory: string) => Promise<void>;
   invoke: typeof invokeNativeRuntime;
+  build: typeof invokeNativeBuild;
   load: typeof loadNativeProjectRun;
   loadRestart: typeof loadNativeRestartIntent;
   save: typeof saveNativeProjectRun;
@@ -279,6 +288,7 @@ const DEFAULTS: Dependencies = {
   cleanupTemporary: (directory) =>
     rm(directory, { recursive: true, force: true }),
   invoke: invokeNativeRuntime,
+  build: invokeNativeBuild,
   load: loadNativeProjectRun,
   loadRestart: loadNativeRestartIntent,
   save: saveNativeProjectRun,
@@ -328,9 +338,59 @@ function requireActiveStartup(signal: AbortSignal | undefined): void {
     throw canceled();
   }
 }
+function admitStartBuilds(
+  input: NativeProjectInput,
+  opts: {
+    readonly scope: { readonly projectRoot: string };
+    readonly composeFile: string;
+  }
+): ReadonlyMap<string, NativeBuildRequest> {
+  return admitNativeProjectBuilds({
+    services: composeServices(input),
+    projectRoot: opts.scope.projectRoot,
+    composeFile: opts.composeFile,
+    enabled: nativeBuildsEnabled(),
+  });
+}
+
+/** A service names an image, or is an admitted build that names none yet. */
+function imageOrAdmittedBuild(
+  name: string,
+  value: Readonly<Record<string, unknown>>,
+  builds: ReadonlySet<string>
+): boolean {
+  if (value.build === undefined) {
+    return typeof value.image === "string";
+  }
+  return builds.has(name) && value.image === undefined;
+}
+
+/** The normalized Compose services, or the closed configuration refusal. */
+function composeServices(
+  input: NativeProjectInput
+): Record<string, Record<string, unknown>> {
+  const compose: unknown = JSON.parse(input.normalizedComposeJson);
+  if (!(isRecord(compose) && isRecord(compose.services))) {
+    throw refused();
+  }
+  const services: Record<string, Record<string, unknown>> = {};
+  for (const [name, value] of Object.entries(compose.services)) {
+    if (!isRecord(value)) {
+      throw refused();
+    }
+    services[name] = value;
+  }
+  return services;
+}
+
+/**
+ * `builds` names the services whose Compose `build` was admitted
+ * (`admitNativeProjectBuilds`); only those may omit `image` until they are built.
+ */
 export function prepareNativeProjectServices(
   input: NativeProjectInput,
-  hasHostDependencies = false
+  hasHostDependencies = false,
+  builds: ReadonlySet<string> = new Set()
 ): Record<string, Record<string, unknown>> {
   const compose: unknown = JSON.parse(input.normalizedComposeJson);
   if (!(isRecord(compose) && isRecord(compose.services))) {
@@ -339,9 +399,7 @@ export function prepareNativeProjectServices(
   const result: Record<string, Record<string, unknown>> = {};
   for (const [name, value] of Object.entries(compose.services)) {
     if (
-      !isRecord(value) ||
-      typeof value.image !== "string" ||
-      value.build !== undefined ||
+      !(isRecord(value) && imageOrAdmittedBuild(name, value, builds)) ||
       (value.extra_hosts !== undefined && !hasHostDependencies) ||
       value.ports !== undefined ||
       value.logging !== undefined ||
@@ -1010,9 +1068,13 @@ export async function startNativeProject(opts: {
       phase: "before-runtime",
     })
   ).input;
+  // Pure build admission before hooks, VM or provider start; refuses when disabled.
+  const builds = admitStartBuilds(input, opts);
+  const buildServices = new Set(builds.keys());
   let specs = prepareNativeProjectServices(
     input,
-    opts.dependencyFile !== undefined
+    opts.dependencyFile !== undefined,
+    buildServices
   );
   // Refuse malformed or unacquirable references before hooks, VM or provider start.
   await admitNativeProjectImages({
@@ -1065,7 +1127,8 @@ export async function startNativeProject(opts: {
       input = (await deps.adaptAws({ input, ...selection.aws })).input;
       specs = prepareNativeProjectServices(
         input,
-        opts.dependencyFile !== undefined
+        opts.dependencyFile !== undefined,
+        buildServices
       );
     }
     const dependencyDiscoveryDeadline = performance.now() + 60_000;
@@ -1159,7 +1222,8 @@ export async function startNativeProject(opts: {
     requireActiveStartup(controller.signal);
     specs = prepareNativeProjectServices(
       input,
-      opts.dependencyFile !== undefined
+      opts.dependencyFile !== undefined,
+      buildServices
     );
     prepareNativeDependencyServices({
       dependencies: hostDependencies,
@@ -1171,6 +1235,18 @@ export async function startNativeProject(opts: {
       originalSha256: input.originalSha256,
       restore,
       invoke: deps.invoke,
+    });
+    await buildNativeProjectImages({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      branch: opts.scope.branch,
+      builds,
+      specs,
+      retainedImages,
+      restore: Boolean(restore),
+      rebuild: nativeRebuildRequested(),
+      signal: controller.signal,
+      invoke: deps.build,
     });
     await pinNativeProjectImages({
       runtime: opts.runtime,

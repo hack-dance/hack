@@ -7,6 +7,10 @@ import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
+  admitNativeProjectBuilds,
+  nativeBuildsEnabled,
+} from "./native-project-builds.ts";
+import {
   discoverNativeHostDependency,
   type NativeHostDependency,
   parseNativeHostDependencies,
@@ -288,6 +292,11 @@ async function pinRestartImages(opts: {
       spec.image = retainedImage;
       continue;
     }
+    if (spec.image === undefined && spec.build !== undefined) {
+      throw new ClosedCliError(
+        `Native restart reuses built images and never builds; no running or retained image was found for ${name}. Run hack up to build it; nothing was stopped.`
+      );
+    }
     const image = String(spec.image);
     if (IMAGE.test(image)) {
       continue;
@@ -390,9 +399,25 @@ export async function preflightNativeRestart(opts: {
       })
     : undefined;
   input = metadata?.input ?? input;
+  // Restart never builds: an admitted build service must resolve to the image the
+  // current or retained graph already runs (see pinRestartImages).
   const specs = prepareNativeProjectServices(
     input,
-    opts.dependencyFile !== undefined
+    opts.dependencyFile !== undefined,
+    new Set(
+      admitNativeProjectBuilds({
+        services: Object.fromEntries(
+          Object.entries(
+            JSON.parse(input.normalizedComposeJson).services ?? {}
+          ).filter((entry): entry is [string, Record<string, unknown>] =>
+            isRecord(entry[1])
+          )
+        ),
+        projectRoot: opts.scope.projectRoot,
+        composeFile: opts.composeFile,
+        enabled: nativeBuildsEnabled(),
+      }).keys()
+    )
   );
   const dependencies = stoppedRetry
     ? await readNativeRestartDependencyIntent({

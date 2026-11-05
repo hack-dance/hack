@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { NATIVE_BUILDS_DISABLED_REFUSAL } from "../src/backends/native-project-builds.ts";
 import { NATIVE_CONFIGURATION_REFUSAL } from "../src/backends/native-project-start.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -325,16 +326,17 @@ test(
 test(
   "control: ordinary labels and a basic build keep today's native refusal",
   async () => {
-    for (const service of [
-      { image: IMAGE, labels: { "com.example.team": "web" } },
-      { build: ".." },
-    ]) {
+    for (const [service, refusal] of [
+      [
+        { image: IMAGE, labels: { "com.example.team": "web" } },
+        NATIVE_CONFIGURATION_REFUSAL,
+      ],
+      // A basic build stays refused unless native builds are explicitly enabled.
+      [{ build: ".." }, NATIVE_BUILDS_DISABLED_REFUSAL],
+    ] as const) {
       const f = await fixture({ services: { web: service } });
       const result = await cli(f, ["up"]);
-      expectOneClosedLine(
-        result,
-        `E_NATIVE_PROJECT_UNSUPPORTED: ${NATIVE_CONFIGURATION_REFUSAL}`
-      );
+      expectOneClosedLine(result, `E_NATIVE_PROJECT_UNSUPPORTED: ${refusal}`);
       expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
       // The check passed: native up went on to its own source preflight.
       expect(await f.calls()).toEqual(["runtime check-project-share"]);

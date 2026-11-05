@@ -34,6 +34,27 @@ function canceled(): ClosedCliError {
   );
 }
 
+/** Distinct registry references to admit; content IDs and admitted builds need none. */
+function imageReferences(
+  specs: Readonly<Record<string, Readonly<Record<string, unknown>>>>
+): Set<string> {
+  const references = new Set<string>();
+  for (const spec of Object.values(specs)) {
+    // An admitted build service has no image yet; its base images are pinned
+    // by the runtime build itself.
+    if (spec.image === undefined && spec.build !== undefined) {
+      continue;
+    }
+    if (typeof spec.image !== "string") {
+      throw refused();
+    }
+    if (!IMAGE_ID.test(spec.image)) {
+      references.add(spec.image);
+    }
+  }
+  return references;
+}
+
 /**
  * Admit every authored service image before any VM, provider or image effect.
  *
@@ -53,15 +74,7 @@ export async function admitNativeProjectImages(opts: {
   readonly invoke?: typeof invokeNativeRuntime;
 }): Promise<void> {
   const invoke = opts.invoke ?? invokeNativeRuntime;
-  const references = new Set<string>();
-  for (const spec of Object.values(opts.specs)) {
-    if (typeof spec.image !== "string") {
-      throw refused();
-    }
-    if (!IMAGE_ID.test(spec.image)) {
-      references.add(spec.image);
-    }
-  }
+  const references = imageReferences(opts.specs);
   for (const reference of references) {
     if (opts.signal?.aborted) {
       throw canceled();

@@ -228,9 +228,33 @@ selection; see [Test both backends](https://github.com/hack-dance/hack/blob/next
 
 Other labels keep their native behavior. Routing (`caddy*`) and dependency cache
 (`hack.dependencies.*`) labels are reviewed as before, and other ordinary labels
-are refused with the general native configuration refusal. A basic build is also
-refused by native image-project `up`, with the general refusal: it needs the
-authored native format.
+are refused with the general native configuration refusal.
+
+Native image-project `up` builds Compose `build:` services only when you opt in
+with `HACK_NATIVE_BUILDS=1` (and the usual `HACK_NATIVE_SHARED_SOURCE=1`). Without
+it, a `build:` service refuses before any hook or VM effect and names the variable.
+With it:
+
+- Accepted forms are `build: <context>` and a mapping of `context`, `dockerfile`,
+  `target` and `args`. Paths follow Compose (the context is relative to the Compose
+  file, the Dockerfile to the context) and must stay inside the project. `args` may be
+  a mapping of literal strings or numbers, or a list of `KEY=VALUE` literals. Any `$`
+  interpolation, a list item without `=` (host variable inheritance), `null`, other
+  build keys (`secrets`, `ssh`, `cache_from`, `platforms`, `network` and the rest),
+  remote contexts and `image` together with `build` refuse. Values are never shown.
+- After the runtime is up, each distinct build runs once with
+  `runtime build-image` (below), and its output streams to your terminal. Every
+  service with that build is then pinned to the built content ID, so review, readiness
+  and restore treat it like an image service.
+- An existing image for the same build inputs is reused without building. Set
+  `HACK_NATIVE_REBUILD=1` to build again; base-image tags then resolve again too.
+  Edits to other files in the context do not trigger a rebuild, as with Compose.
+- Restoring an unchanged retained run uses the retained images and never builds; if
+  one is missing, `up` refuses and asks you to start fresh. `hack restart` also never
+  builds: it reuses the running or retained image, or refuses before stopping anything.
+- Services in profiles you did not select are built too, because the native review
+  pins every declared service. Native builds are `linux/arm64` only;
+  `platform: linux/amd64` is still refused.
 
 `hack doctor` reports the same features for the current project in its
 `compose backend features` check. With `--json`, the check's `composeBackend.features`
@@ -443,9 +467,8 @@ Provider setup is separate and explicit. Obtain the exact archives identified in
 ./hack-native --candidate-root /absolute/private/candidate-home runtime probe --json
 ```
 
-The pins also name a BuildKit client (`buildx`, `darwin-arm64`) for future native image
-builds. Native `up` still refuses `build:` services and nothing runs this client yet.
-Preparing it is optional:
+The pins also name a BuildKit client (`buildx`, `darwin-arm64`) for native image
+builds. Prepare it before using `HACK_NATIVE_BUILDS=1`; it is optional otherwise:
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-builder --archive /absolute/docker-buildx
@@ -458,8 +481,8 @@ it again and does not replace it. If the prepared tree changes, `runtime probe`
 refuses; it reports `builder_prepared` when the client is present and unchanged.
 
 `runtime build-image --request <file> --json` builds one image in the running
-runtime's engine with that client. It is a building block: native `up` still refuses
-`build:` services and does not call it. The request is a private JSON file (a singly
+runtime's engine with that client. Native `up` calls it for `build:` services when
+`HACK_NATIVE_BUILDS=1` is set; you can also run it directly. The request is a private JSON file (a singly
 linked, mode-`0600` file owned by you), because build-argument values are in it:
 
 ```json

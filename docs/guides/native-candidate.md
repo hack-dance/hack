@@ -795,7 +795,11 @@ completion is unknown; inspect before retrying." and nothing is replayed. That
 refusal also blocks the next `up` before any hook. After checking what the
 interrupted hook did, remove `.hack/.internal/native-runs/*.down-hooks.json` to
 clear it. A `hack down` from another terminal and the frontend's Ctrl-C claim the
-same journal record, so concurrent stops run each hook at most once. A new `up`
+same journal record, so concurrent stops run each hook at most once. If that `hack
+down` is still running `down.before` when you press Ctrl-C, the frontend says so and
+waits for the hook to finish before it stops the graph; it runs `down.before` itself
+only if the other attempt failed and handed the record back. Press Ctrl-C again to
+stop without waiting. A new `up`
 supersedes any other leftover record; it does not run an earlier generation's owed
 hooks. Projects without down hooks keep the previous stop behavior and write no
 journal.

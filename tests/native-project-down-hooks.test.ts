@@ -22,6 +22,10 @@ import {
   replaceNativeDownHookRecord,
 } from "../src/backends/native-project-down-hooks.ts";
 import {
+  createNativeForegroundStop,
+  NATIVE_DOWN_BEFORE_WAIT,
+} from "../src/backends/native-project-foreground-stop.ts";
+import {
   type NativeProjectRun,
   type NativeProjectRunScope,
   nativeProjectDownHookPaths,
@@ -347,12 +351,18 @@ test("down on a live graph claims the frontend's owed hooks, and the frontend's 
     calls.push("down.before");
   });
   const p = phases();
+  let waited = false;
+  // A settled phase is skipped at once, without waiting.
   expect(
     await frontend.before(
       () => p.before(),
-      () => false
+      () => false,
+      () => {
+        waited = true;
+      }
     )
   ).toBe("skipped");
+  expect(waited).toBe(false);
   await session.after(async () => {
     calls.push("down.after");
   });
@@ -364,6 +374,113 @@ test("down on a live graph claims the frontend's owed hooks, and the frontend's 
   ).toBe("skipped");
   expect(calls).toEqual(["down.before", "down.after"]);
   expect(p.calls).toEqual([]);
+});
+
+/** A live `hack down` whose down.before is held running until released. */
+async function runningDownBefore(scope: NativeProjectRunScope) {
+  const session = await openNativeDownHookSession({
+    scope,
+    run,
+    graphStopped: false,
+    configured: true,
+  });
+  let release: (failure?: Error) => void = () => undefined;
+  const held = new Promise<void>((resolve, reject) => {
+    release = (failure) => (failure ? reject(failure) : resolve());
+  });
+  const done = session
+    .before(() => held)
+    .then(
+      () => "succeeded",
+      (error: unknown) => error
+    );
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if ((await loadNativeDownHookRecord(scope))?.state === "before-started") {
+      return { release, done };
+    }
+    await Bun.sleep(10);
+  }
+  throw new Error("the concurrent down never claimed down.before");
+}
+function pending<T>(promise: Promise<T>): Promise<boolean> {
+  const marker = Symbol("pending");
+  return Promise.race([promise, Bun.sleep(300).then(() => marker)]).then(
+    (value) => value === marker
+  );
+}
+
+test("the first Ctrl-C waits for a concurrent down's running down.before, then skips it", async () => {
+  const scope = await fixture();
+  const frontend = createNativeForegroundDownHooks({ scope, run: run.run });
+  await frontend.owe(() => false);
+  const other = await runningDownBefore(scope);
+  const p = phases();
+  let waits = 0;
+  const stop = frontend.before(
+    () => p.before(),
+    () => false,
+    () => {
+      waits++;
+    }
+  );
+  // Graph cleanup must not overtake the other terminal's running hook.
+  expect(await pending(stop)).toBe(true);
+  expect(waits).toBe(1);
+  other.release();
+  expect(await other.done).toBe("succeeded");
+  expect(await stop).toBe("skipped");
+  expect(p.calls).toEqual([]);
+  expect((await loadNativeDownHookRecord(scope))?.state).toBe("after-owed");
+});
+
+test("a second Ctrl-C while waiting for a concurrent down.before forces the stop", async () => {
+  const scope = await fixture();
+  const frontend = createNativeForegroundDownHooks({ scope, run: run.run });
+  await frontend.owe(() => false);
+  const other = await runningDownBefore(scope);
+  const force = new AbortController();
+  const notices: string[] = [];
+  const p = phases();
+  const stop = createNativeForegroundStop({
+    scope,
+    run: run.run,
+    commands: { before: () => p.before(), after: () => p.after() },
+    force: force.signal,
+    journal: () => frontend,
+    notice: (message) => notices.push(message),
+  });
+  const beforeStop = stop.serve.beforeStop();
+  expect(await pending(beforeStop)).toBe(true);
+  expect(notices).toEqual([NATIVE_DOWN_BEFORE_WAIT]);
+  const forced = performance.now();
+  force.abort();
+  expect(await beforeStop).toBe(true);
+  expect(performance.now() - forced).toBeLessThan(1000);
+  expect(p.calls).toEqual([]);
+  // The other terminal's hook still owns its own settlement.
+  expect((await loadNativeDownHookRecord(scope))?.state).toBe("before-started");
+  other.release();
+  expect(await other.done).toBe("succeeded");
+  expect(await stop.finish(true)).toBeUndefined();
+  expect(p.calls).toEqual([]);
+});
+
+test("a waiting frontend runs down.before once after a concurrent down's known failure restored it", async () => {
+  const scope = await fixture();
+  const frontend = createNativeForegroundDownHooks({ scope, run: run.run });
+  await frontend.owe(() => false);
+  const other = await runningDownBefore(scope);
+  const p = phases();
+  const stop = frontend.before(
+    () => p.before(),
+    () => false
+  );
+  expect(await pending(stop)).toBe(true);
+  other.release(new Error("synthetic hook failure"));
+  expect(String(await other.done)).toContain("synthetic hook failure");
+  expect(await stop).toBe("succeeded");
+  expect(p.calls).toEqual(["down.before"]);
+  expect((await loadNativeDownHookRecord(scope))?.state).toBe("after-owed");
 });
 
 test("down during up.after owns the hooks; the frontend's later owe does not", async () => {

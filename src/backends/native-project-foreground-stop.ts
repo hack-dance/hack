@@ -53,6 +53,10 @@ export function nativeForegroundStopSignals(opts: {
   };
 }
 
+/** Shown while the first stop waits for a concurrent `hack down`'s hook. */
+export const NATIVE_DOWN_BEFORE_WAIT =
+  "Another hack down is running down.before; waiting for it before stopping the graph. Press Ctrl-C again to force the stop.";
+
 export type NativeForegroundStopCommands = {
   readonly before: (signal: AbortSignal) => Promise<number>;
   readonly after: (signal: AbortSignal) => Promise<number>;
@@ -70,7 +74,11 @@ export function createNativeForegroundStop(opts: {
   readonly commands: NativeForegroundStopCommands;
   readonly force: AbortSignal;
   readonly journal?: typeof createNativeForegroundDownHooks;
+  /** Where the wait for another stop's `down.before` is announced. */
+  readonly notice?: (message: string) => void;
 }) {
+  const notice =
+    opts.notice ?? ((message: string) => process.stderr.write(`${message}\n`));
   const journal = (opts.journal ?? createNativeForegroundDownHooks)({
     scope: opts.scope,
     run: opts.run,
@@ -80,7 +88,8 @@ export function createNativeForegroundStop(opts: {
   let refusal: unknown;
   return {
     /**
-     * Graph-owner options: run `down.before` before the owner is asked to stop.
+     * Graph-owner options: run `down.before` (or await a concurrent
+     * `hack down`'s running one) before the owner is asked to stop.
      * The owner runs in its own process group so the terminal's interrupt
      * reaches only this frontend. A failed hook still stops the graph because
      * the user asked to exit; final graph inspection stays the cleanup
@@ -93,7 +102,8 @@ export function createNativeForegroundStop(opts: {
         try {
           before = await journal.before(
             () => opts.commands.before(opts.force),
-            canceled
+            canceled,
+            () => notice(NATIVE_DOWN_BEFORE_WAIT)
           );
         } catch (error) {
           refusal = error;

@@ -41,6 +41,8 @@ const HEX32 = /^[a-f0-9]{32}$/;
 const LIMIT = 1024;
 const LOCK_ATTEMPTS = 80;
 const LOCK_DELAY_MS = 25;
+/** Poll interval while another stop's `down.before` claim is in progress. */
+const CLAIM_POLL_MS = 100;
 const STATES: readonly NativeDownHookState[] = [
   "owed",
   "before-started",
@@ -306,10 +308,18 @@ export type NativeForegroundDownHooks = {
    * runs down hooks.
    */
   readonly owe: (interrupted: () => boolean) => Promise<void>;
-  /** First stop request on a ready graph, before graph cleanup. */
+  /**
+   * First stop request on a ready graph, before graph cleanup. While another
+   * stop (a concurrent `hack down`) holds this run's `down.before` claim, it
+   * waits for that hook's settlement, so graph cleanup never overtakes it,
+   * calling `waiting` once; a second interrupt (`canceled`) ends the wait and
+   * forces the stop. It then claims the phase if the other stop restored it
+   * after a known failure, and otherwise skips it.
+   */
   readonly before: (
     commands: NativeDownHookCommands,
-    canceled: () => boolean
+    canceled: () => boolean,
+    waiting?: () => void
   ) => Promise<NativeDownHookOutcome>;
   /** After confirmed graph cleanup and lifecycle-process retirement. */
   readonly after: (
@@ -351,7 +361,8 @@ async function journaled(opts: {
 /**
  * The foreground frontend's journal for one generation. Each transition is a
  * compare-and-swap on this generation's own record, so a concurrent
- * `hack down` that claimed the record wins and this frontend skips the phase.
+ * `hack down` that claimed the record wins and this frontend skips the phase
+ * (after awaiting a `down.before` that is still running there).
  */
 export function createNativeForegroundDownHooks(opts: {
   readonly scope: NativeProjectRunScope;
@@ -375,16 +386,33 @@ export function createNativeForegroundDownHooks(opts: {
         await replaceNativeDownHookRecord(opts.scope, record("owed"), null);
       }
     },
-    async before(commands, canceled) {
+    async before(commands, canceled, waiting) {
       const claimed = record("before-started");
-      if (
+      let notified = false;
+      while (
         !(await replaceNativeDownHookRecord(
           opts.scope,
           record("owed"),
           claimed
         ))
       ) {
-        return "skipped";
+        const current = await loadNativeDownHookRecord(opts.scope);
+        if (
+          current?.run !== opts.run ||
+          current.generation === own ||
+          current.state !== "before-started"
+        ) {
+          // Settled (or superseded) elsewhere: never run it twice.
+          return "skipped";
+        }
+        if (canceled()) {
+          return "canceled";
+        }
+        if (!notified) {
+          notified = true;
+          waiting?.();
+        }
+        await Bun.sleep(CLAIM_POLL_MS);
       }
       return await journaled({
         scope: opts.scope,

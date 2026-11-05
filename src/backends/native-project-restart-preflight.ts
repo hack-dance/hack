@@ -8,6 +8,7 @@ import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   discoverNativeHostDependency,
+  expandNativeHostDependencySelection,
   type NativeHostDependency,
   parseNativeHostDependencies,
   prepareNativeDependencyServices,
@@ -148,7 +149,9 @@ async function readNativeRestartDependencyIntent(opts: {
     return [];
   }
   try {
-    const value = await readNativeSelection(opts.path);
+    const value = expandNativeHostDependencySelection(
+      await readNativeSelection(opts.path)
+    );
     if (!(isRecord(value) && Array.isArray(value.dependencies))) {
       throw new ClosedCliError("Invalid dependency intent");
     }

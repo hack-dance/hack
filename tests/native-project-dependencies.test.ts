@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   discoverNativeHostDependency,
+  expandNativeHostDependencySelection,
   parseNativeHostDependencies,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
@@ -316,7 +317,8 @@ test("ambiguous, undeclared, wildcard or credential-bearing dependencies refuse 
   }
   for (const value of [
     null,
-    { version: 2, dependencies: [binding()] },
+    // Version 2 is the compact services form (below); other versions refuse.
+    { version: 3, dependencies: [binding()] },
     {
       version: 1,
       dependencies: [binding()],
@@ -483,4 +485,139 @@ test("logical grant bounds and endpoint identity remain independent of transport
       { ...binding("service-1"), host_pid: 124 },
     ]).map((entry) => entry.slot)
   ).toEqual([0, 1]);
+});
+
+test("a version 2 entry with services expands to the same plan as version 1 entries", () => {
+  const { service: _web, ...shared } = binding();
+  const services = ["web", "worker", "api"];
+  const v1 = parseNativeHostDependencies({
+    value: {
+      version: 1,
+      dependencies: [
+        ...services.map((service) => binding(service)),
+        binding("web", "content"),
+      ],
+    },
+    services,
+  });
+  const v2 = parseNativeHostDependencies({
+    value: {
+      version: 2,
+      dependencies: [{ ...shared, services }, binding("web", "content")],
+    },
+    services,
+  });
+  expect(v2).toEqual(v1);
+  // Shared listeners still get one transport per service, as in version 1.
+  expect(v2.map((entry) => [entry.service, entry.slot])).toEqual([
+    ["web", 0],
+    ["worker", 0],
+    ["api", 0],
+    ["web", 1],
+  ]);
+  // Version 1 values pass through unchanged.
+  const value = { version: 1, dependencies: [binding()] };
+  expect(expandNativeHostDependencySelection(value)).toBe(value);
+});
+
+test("version 2 limits and duplicate checks apply after expansion", () => {
+  const { service: _web, ...shared } = binding();
+  const many = Array.from({ length: 65 }, (_, index) => `svc-${index}`);
+  const refusals: unknown[] = [
+    // 130 expanded bindings exceed the 128-binding limit.
+    {
+      version: 2,
+      dependencies: [
+        { ...shared, services: many },
+        {
+          ...shared,
+          binding: "other",
+          aliases: ["other.example.com"],
+          services: many,
+        },
+      ],
+    },
+    // A service listed twice for one binding is a duplicate binding.
+    { version: 2, dependencies: [{ ...shared, services: ["web", "web"] }] },
+    // The same binding from a services list and a single entry is a duplicate.
+    {
+      version: 2,
+      dependencies: [{ ...shared, services: ["web", "worker"] }, binding()],
+    },
+    // Exactly one of service and services.
+    {
+      version: 2,
+      dependencies: [{ ...shared, service: "web", services: ["worker"] }],
+    },
+    { version: 2, dependencies: [shared] },
+    { version: 2, dependencies: [{ ...shared, services: [] }] },
+    { version: 2, dependencies: [{ ...shared, services: "web" }] },
+    { version: 2, dependencies: [{ ...shared, services: ["web"], extra: 1 }] },
+    { version: 2, dependencies: [] },
+    {
+      version: 2,
+      dependencies: [binding()],
+      password: "synthetic-do-not-print",
+    },
+    { version: 3, dependencies: [binding()] },
+  ];
+  for (const value of refusals) {
+    expectCodedThrow(
+      () =>
+        parseNativeHostDependencies({
+          value,
+          services: ["web", "worker", ...many],
+        }),
+      "E_CONFIG_INVALID",
+      "values omitted"
+    );
+  }
+  expect(
+    parseNativeHostDependencies({
+      value: {
+        version: 2,
+        dependencies: [
+          { ...shared, services: many.slice(0, 64) },
+          {
+            ...shared,
+            binding: "other",
+            aliases: ["other.example.com"],
+            services: many.slice(0, 64),
+          },
+        ],
+      },
+      services: many,
+    })
+  ).toHaveLength(128);
+});
+
+test("a version 2 file discovers one PID per shared executable listener", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-dependencies-v2-"));
+  roots.push(root);
+  const path = join(root, "selection.json");
+  const executable = "/usr/local/bin/synthetic-tunnel";
+  const { service: _web, host_pid: _pid, ...shared } = binding();
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 2,
+      dependencies: [
+        { ...shared, host_executable: executable, services: ["web", "worker"] },
+      ],
+    })
+  );
+  const calls: unknown[] = [];
+  const result = await readNativeHostDependencies({
+    path,
+    services: ["web", "worker"],
+    discover: async (request) => {
+      calls.push(request);
+      return { host_pid: 456, endpoint_fingerprint: "a".repeat(64) };
+    },
+  });
+  expect(calls).toEqual([{ hostPort: 8443, executable }]);
+  expect(result.map((entry) => [entry.service, entry.host_pid])).toEqual([
+    ["web", 456],
+    ["worker", 456],
+  ]);
 });

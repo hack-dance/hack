@@ -1144,6 +1144,31 @@ prepare current listeners before selection. For example:
 
 Replace the example PID with the actual listener process. Up to 128 service-specific
 bindings and eight exact aliases per binding are supported, within 32 listening transports shared with the pool's route bridges.
+
+When several services need the same binding, version 2 lets one entry list them
+with `services` instead of repeating the entry for each `service`:
+
+```json
+{
+  "version": 2,
+  "dependencies": [{
+    "services": ["web", "worker", "api"],
+    "binding": "search",
+    "guest_port": 443,
+    "aliases": ["search.example.com"],
+    "host_executable": "/usr/local/bin/tunnel",
+    "host_port": 8443
+  }]
+}
+```
+
+Hack expands each such entry into one version 1 entry per listed service, in order,
+with the same binding, ports, aliases and host authority, and then validates the
+result exactly as version 1. The limits count expanded entries: at most 128 bindings
+in all. An entry sets exactly one of `service` and `services`; a service listed twice,
+or a binding that another entry already grants to the same service, refuses as a
+duplicate. Version 1 files keep working unchanged, and both forms of the same
+bindings produce the same dependency plan.
 For a listener started or rotated by a lifecycle hook, replace `host_pid` with
 `"host_executable": "/absolute/path/to/the/listener-binary"`. Hack discovers
 the current PID after the hooks and again before restart cleanup, requiring one

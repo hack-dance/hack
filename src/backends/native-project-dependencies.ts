@@ -26,6 +26,9 @@ const FIELDS = new Set([
   "host_supervisor_depth",
 ]);
 
+const LIMIT = 128;
+const V2_FIELDS = new Set([...FIELDS, "services"]);
+
 export type NativeHostDependency = {
   readonly service: string;
   readonly binding: string;
@@ -127,12 +130,79 @@ function requireSameEndpointPolicy(opts: {
   opts.policies.set(opts.endpoint, policy);
 }
 
+function expandedEntries(entry: unknown): Record<string, unknown>[] {
+  if (
+    !(isRecord(entry) && Object.keys(entry).every((key) => V2_FIELDS.has(key)))
+  ) {
+    throw refused();
+  }
+  const hasService = Object.hasOwn(entry, "service");
+  if (hasService === Object.hasOwn(entry, "services")) {
+    throw refused();
+  }
+  if (hasService) {
+    return [entry];
+  }
+  const services = entry.services;
+  if (
+    !(
+      Array.isArray(services) &&
+      services.length > 0 &&
+      services.length <= LIMIT &&
+      services.every((service) => typeof service === "string") &&
+      new Set(services).size === services.length
+    )
+  ) {
+    throw refused();
+  }
+  const shared = Object.fromEntries(
+    Object.entries(entry).filter(([key]) => key !== "services")
+  );
+  return services.map((service: string) => ({ ...shared, service }));
+}
+
+/**
+ * Expand a version 2 selection into the version 1 form; other values pass unchanged.
+ *
+ * Version 2 lets one entry name `services: [...]` instead of one `service`. Each
+ * listed service becomes its own version 1 entry with the same binding, ports, aliases
+ * and host authority, in entry and list order. Version 1 validation then applies to the
+ * expanded entries, so its limits (at most 128 bindings) count expanded entries, and a
+ * service listed twice for one binding refuses as a duplicate. An entry may set exactly
+ * one of `service` and `services`.
+ */
+export function expandNativeHostDependencySelection(value: unknown): unknown {
+  if (!(isRecord(value) && value.version === 2)) {
+    return value;
+  }
+  if (
+    !(
+      Object.keys(value).every((key) =>
+        ["version", "dependencies"].includes(key)
+      ) &&
+      Array.isArray(value.dependencies) &&
+      value.dependencies.length > 0 &&
+      value.dependencies.length <= LIMIT
+    )
+  ) {
+    throw refused();
+  }
+  const dependencies: Record<string, unknown>[] = [];
+  for (const entry of value.dependencies) {
+    dependencies.push(...expandedEntries(entry));
+    if (dependencies.length > LIMIT) {
+      throw refused();
+    }
+  }
+  return { version: 1, dependencies };
+}
+
 /** Native dependency-plan pins the live process/listener identity after this structural check. */
 export function parseNativeHostDependencies(opts: {
   readonly value: unknown;
   readonly services: readonly string[];
 }): NativeHostDependency[] {
-  const value = opts.value;
+  const value = expandNativeHostDependencySelection(opts.value);
   if (
     !(
       isRecord(value) &&
@@ -142,7 +212,7 @@ export function parseNativeHostDependencies(opts: {
       ) &&
       Array.isArray(value.dependencies) &&
       value.dependencies.length > 0 &&
-      value.dependencies.length <= 128
+      value.dependencies.length <= LIMIT
     )
   ) {
     throw refused();
@@ -249,7 +319,9 @@ export async function readNativeHostDependencies(opts: {
     return [];
   }
   try {
-    const value = await readNativeSelection(opts.path);
+    const value = expandNativeHostDependencySelection(
+      await readNativeSelection(opts.path)
+    );
     if (!(isRecord(value) && Array.isArray(value.dependencies))) {
       throw refused();
     }

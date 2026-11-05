@@ -511,6 +511,47 @@ test.each([
   });
 });
 
+test.each([
+  { labels: { "hack.service.one-shot": "true" } },
+  { labels: ["hack.service.one-shot=true"] },
+])("native admission accepts Hack's exact one-shot marker %j", ({ labels }) => {
+  const specs = prepareNativeProjectServices({
+    normalizedComposeJson: JSON.stringify({
+      services: { init: { image: "busybox", command: ["true"], labels } },
+    }),
+  } as NativeProjectInput);
+  // The label is preserved for the native review; it is not rewritten here.
+  expect(specs.init?.labels).toEqual(labels);
+});
+
+test.each([
+  { labels: { "hack.service.one-shot": "false" } },
+  { labels: { "hack.service.one-shot": true } },
+  { labels: { "hack.service.one-shot.extra": "true" } },
+  { labels: { "hack.service.other": "true" } },
+  { labels: ["hack.service.one-shot"] },
+  { labels: ["hack.service.one-shot=yes"] },
+])("a near-miss one-shot label %j is a coded configuration refusal", ({
+  labels,
+}) => {
+  const refusal = (() => {
+    try {
+      prepareNativeProjectServices({
+        normalizedComposeJson: JSON.stringify({
+          services: { init: { image: "busybox", labels } },
+        }),
+      } as NativeProjectInput);
+    } catch (error: unknown) {
+      return error;
+    }
+  })();
+  expect(refusal).toBeInstanceOf(HackCliError);
+  expect(refusal).toMatchObject({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: NATIVE_CONFIGURATION_REFUSAL,
+  });
+});
+
 test("a canceled start reports cancellation, not the configuration refusal", async () => {
   const { opts, events } = await fixture();
   const refusal = await startNativeProject({
@@ -1437,6 +1478,56 @@ async function profileStartup(profiles: readonly string[] | undefined) {
     bridges,
   };
 }
+
+test.each([
+  { labels: { "hack.service.one-shot": "true" } },
+  { labels: ["hack.service.one-shot=true"] },
+])("native up admits a labeled one-shot and waits for its completion %j", async ({
+  labels,
+}) => {
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  const review = opts.dependencies.review!;
+  const serve = opts.dependencies.serve!;
+  const image = `sha256:${"e".repeat(64)}`;
+  let serveArgs: readonly string[] = [];
+  opts.dependencies.prepare = async (call) => ({
+    ...(await prepare(call)),
+    normalizedComposeJson: JSON.stringify({
+      services: {
+        init: { image, command: ["true"], labels },
+        web: { image },
+      },
+    }),
+    serviceNames: ["init", "web"],
+  });
+  opts.dependencies.review = async (call) =>
+    await review({
+      ...call,
+      run: async (checked) =>
+        call.run({
+          ...checked,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: {
+                init: { active: true, one_shot: true },
+                web: { active: true },
+              },
+            },
+          },
+        }),
+    });
+  opts.dependencies.serve = async (call) => {
+    serveArgs = call.args;
+    return await serve(call);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(readyGoals(serveArgs).sort()).toEqual([
+    "init=completed",
+    "web=started",
+  ]);
+});
 
 test("native up omits routed and unrouted inactive-profile services from readiness", async () => {
   const started = await profileStartup(undefined);

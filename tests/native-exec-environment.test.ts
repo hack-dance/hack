@@ -99,13 +99,21 @@ test("fresh exec refuses missing selectors or deleted overlays before AWS export
   });
   expect(calls).toBe(0);
 });
-test("fresh exec of a run started without managed env files delivers no values", async () => {
+test("fresh exec delivers no values only for a run recorded without managed env files", async () => {
   const opts = await fixture();
   for (const name of ["default", "qa", "other"]) {
     await rm(join(opts.scope.projectDir, `hack.env.${name}.yaml`));
   }
-  // The recorded env selected only the per-env native files at startup.
-  expect(await prepareNativeExecEnvironment(opts)).toEqual({});
+  // Started with hack.env.qa.yaml (or a legacy mapping): every file deleted since.
+  await expect(prepareNativeExecEnvironment(opts)).rejects.toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message: expect.stringContaining("selection changed since startup"),
+  });
+  // Recorded as started without any managed env file: the env selected only files.
+  const unmanaged = { ...opts.run, unmanagedEnvironment: true as const };
+  expect(
+    await prepareNativeExecEnvironment({ ...opts, run: unmanaged })
+  ).toEqual({});
   expect(
     await prepareNativeExecEnvironment({
       ...opts,

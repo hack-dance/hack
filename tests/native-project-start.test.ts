@@ -2805,12 +2805,27 @@ test("startup applies the per-env adaptation for the run's effective env, else t
   }
 });
 
-test("startup without managed env files selects and records the requested or default env", async () => {
-  for (const [envName, defaultOverlay] of [
-    ["qa", undefined],
-    [undefined, "qa"],
+test("startup records the requested or default env and marks runs without managed env files", async () => {
+  for (const [envName, defaultOverlay, managed] of [
+    ["qa", undefined, false],
+    [undefined, "qa", false],
+    ["qa", undefined, true],
   ] as const) {
     const { opts } = await fixture(false);
+    if (managed) {
+      // Value-free managed env files: the run is recorded as managed.
+      for (const name of ["default", "qa"]) {
+        await writeFile(
+          join(opts.scope.projectDir, `hack.env.${name}.yaml`),
+          JSON.stringify({
+            version: 1,
+            environment: name,
+            secretsprovider: "project_key",
+            values: { global: {} },
+          })
+        );
+      }
+    }
     const base = join(opts.scope.projectRoot, "adaptation.json");
     const qa = join(opts.scope.projectRoot, "adaptation.qa.json");
     await writeFile(
@@ -2844,12 +2859,15 @@ test("startup without managed env files selects and records the requested or def
         JSON.stringify({ version: 1, additionalHostnames: { web: [host] } })
       );
     }
-    // The real input preparation, so the project has no hack.env.* file at all.
+    // The real input preparation, so the unmanaged runs have no hack.env.* file.
     opts.dependencies.prepare = prepareNativeProjectInput;
     const save = opts.dependencies.save!;
-    const recorded: (string | null | undefined)[] = [];
+    const recorded: unknown[] = [];
     opts.dependencies.save = async (request) => {
-      recorded.push(request.run.effectiveEnvName);
+      recorded.push({
+        effectiveEnvName: request.run.effectiveEnvName,
+        unmanagedEnvironment: request.run.unmanagedEnvironment,
+      });
       return await save(request);
     };
     let caddy: unknown;
@@ -2868,7 +2886,12 @@ test("startup without managed env files selects and records the requested or def
     ).toBe(0);
     expect(caddy).toBe("app.hack.local, qa.example.test");
     expect(recorded.length).toBeGreaterThan(0);
-    expect(new Set(recorded)).toEqual(new Set(["qa"]));
+    for (const mapping of recorded) {
+      expect(mapping).toEqual({
+        effectiveEnvName: "qa",
+        unmanagedEnvironment: managed ? undefined : true,
+      });
+    }
   }
 });
 

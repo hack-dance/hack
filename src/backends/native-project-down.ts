@@ -221,7 +221,14 @@ export async function nativeDownEnvironment(opts: {
       serviceNames: opts.serviceNames,
     });
     if (!resolved) {
-      // No managed env file at all: a recorded env only selected per-env native files.
+      // Only a run recorded as started without managed env files may find none now;
+      // for any other named selection the overlay disappeared.
+      if (
+        opts.run.effectiveEnvName !== null &&
+        opts.run.unmanagedEnvironment !== true
+      ) {
+        throw refused();
+      }
       return {};
     }
     const selected = opts.run.effectiveEnvName;

@@ -48,6 +48,12 @@ export type NativeProjectRun = {
    * Retained restores must add it again; absent legacy graphs never gain it.
    */
   readonly runtimeMetadata?: true;
+  /**
+   * Present only when startup selected a named env while the project had no managed
+   * env file, so that env selected only the per-env native files. Absent mappings
+   * started with managed env files (or are legacy): a later missing file refuses.
+   */
+  readonly unmanagedEnvironment?: true;
 };
 export type NativeProjectRunScope = {
   readonly projectRoot: string;
@@ -118,9 +124,14 @@ function valid(value: unknown): value is NativeProjectRun {
       "aws,effectiveEnvName,namespace,owner,planId,run",
       "aws,effectiveEnvName,namespace,owner,planId,profiles,run",
       "aws,effectiveEnvName,namespace,owner,planId,profiles,run,runtimeMetadata",
+      "aws,effectiveEnvName,namespace,owner,planId,profiles,run,unmanagedEnvironment",
+      "aws,effectiveEnvName,namespace,owner,planId,profiles,run,runtimeMetadata,unmanagedEnvironment",
     ].includes(Object.keys(value).sort().join()) &&
     (!Object.hasOwn(value, "runtimeMetadata") ||
       value.runtimeMetadata === true) &&
+    (!Object.hasOwn(value, "unmanagedEnvironment") ||
+      (value.unmanagedEnvironment === true &&
+        typeof value.effectiveEnvName === "string")) &&
     (!Object.hasOwn(value, "aws") || validAws(value.aws)) &&
     (!Object.hasOwn(value, "profiles") || validProfiles(value.profiles)) &&
     (!Object.hasOwn(value, "effectiveEnvName") ||

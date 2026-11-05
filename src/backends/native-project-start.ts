@@ -791,6 +791,8 @@ function selectedMapping(opts: {
   readonly profiles: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly runtimeMetadata: boolean;
+  /** Startup found no managed env file at all. */
+  readonly unmanagedEnvironment: boolean;
 }): NativeProjectRun {
   return {
     ...opts.ready,
@@ -803,6 +805,10 @@ function selectedMapping(opts: {
         }
       : null,
     ...(opts.runtimeMetadata ? { runtimeMetadata: true as const } : {}),
+    // Only a named env needs the distinction; a base selection delivers no values either way.
+    ...(opts.unmanagedEnvironment && opts.effectiveEnvName !== null
+      ? { unmanagedEnvironment: true as const }
+      : {}),
   };
 }
 /**
@@ -1345,6 +1351,7 @@ export async function startNativeProject(opts: {
                   profiles,
                   aws: selection.aws,
                   runtimeMetadata: metadata !== undefined,
+                  unmanagedEnvironment: input.environmentFiles.length === 0,
                 });
                 // Enrollment must exist before taking a shared lease: release
                 // requires independent proof of this exact graph's cleanup.

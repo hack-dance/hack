@@ -247,6 +247,28 @@ test("profile selectors roundtrip canonically while legacy absence stays unknown
   expect((await load(opts))?.profiles).toBeUndefined();
 });
 
+test("the unmanaged environment marker roundtrips only beside a named env", async () => {
+  const opts = await fixture();
+  const selected = {
+    ...run,
+    effectiveEnvName: "qa",
+    aws: null,
+    profiles: [],
+    unmanagedEnvironment: true as const,
+  };
+  await save({ ...opts, run: selected });
+  expect(await load(opts)).toEqual(selected);
+  await remove({ ...opts, expected: selected });
+  for (const invalid of [
+    { ...selected, unmanagedEnvironment: false },
+    { ...selected, effectiveEnvName: null },
+    { ...run, effectiveEnvName: "qa", unmanagedEnvironment: true },
+  ]) {
+    await expect(save({ ...opts, run: invalid as never })).rejects.toThrow();
+    expect(await load(opts)).toBeNull();
+  }
+});
+
 test("restart intent survives mapping retirement and refuses mismatched removal", async () => {
   const {
     loadNativeRestartIntent,

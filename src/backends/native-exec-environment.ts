@@ -55,11 +55,15 @@ export async function prepareNativeExecEnvironment(opts: {
       throw new SelectionChanged();
     }
     const selected = opts.run.effectiveEnvName;
-    // A run started without any managed env file records its env only to select the
-    // per-env native files; with still no file there are no values to deliver.
+    // A run recorded as started without any managed env file used its env only to
+    // select the per-env native files; with still no file there are no values. Any
+    // other run whose selected overlay is gone has a changed selection.
+    const unmanaged =
+      opts.run.unmanagedEnvironment === true &&
+      input.environmentFiles.length === 0;
     if (
       selected !== null &&
-      input.environmentFiles.length > 0 &&
+      !unmanaged &&
       !input.environmentFiles.some((path) =>
         [
           `hack.env.${selected}.yaml`,

@@ -183,10 +183,13 @@ fn decode_member(
     let head = member
         .fill_buf()
         .map_err(|_| error("Cannot read an image archive member."))?;
-    let (gzip, zstd) = (
-        head.starts_with(&[0x1f, 0x8b]),
-        head.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
-    );
+    let gzip = head.starts_with(&[0x1f, 0x8b]);
+    // A zstd stream starts with a frame or a skippable frame (magic 0x184D2A50 through
+    // 0x184D2A5F); both are little-endian.
+    let zstd = head.first_chunk::<4>().is_some_and(|magic| {
+        let magic = u32::from_le_bytes(*magic);
+        magic == 0xFD2F_B528 || (0x184D_2A50..=0x184D_2A5F).contains(&magic)
+    });
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut pump = |mut reader: Box<dyn Read + '_>| -> Result<(), CandidateError> {
         loop {
@@ -634,6 +637,8 @@ pub(super) mod tests {
         Zstd,
         /// Two zstd frames with a skippable frame between them.
         ZstdFrames,
+        /// A skippable frame before the first zstd frame.
+        ZstdLeadingSkippable,
         Uncompressed,
     }
 
@@ -654,6 +659,13 @@ pub(super) mod tests {
                 bytes.extend_from_slice(&3_u32.to_le_bytes());
                 bytes.extend_from_slice(b"pad");
                 bytes.extend(compress_to_vec(second, CompressionLevel::Uncompressed));
+                bytes
+            }
+            Layer::ZstdLeadingSkippable => {
+                let mut bytes = 0x184D_2A5F_u32.to_le_bytes().to_vec();
+                bytes.extend_from_slice(&4_u32.to_le_bytes());
+                bytes.extend_from_slice(b"meta");
+                bytes.extend(compress_to_vec(payload, CompressionLevel::Fastest));
                 bytes
             }
             Layer::Uncompressed => payload.to_vec(),
@@ -820,6 +832,7 @@ pub(super) mod tests {
             Layer::Gzip,
             Layer::Zstd,
             Layer::ZstdFrames,
+            Layer::ZstdLeadingSkippable,
             Layer::Uncompressed,
         ] {
             let (bytes, image) = archive(kind, &payload, "arm64", false, false);
@@ -827,6 +840,19 @@ pub(super) mod tests {
             let (bytes, image) = archive(kind, &payload, "arm64", false, true);
             assert!(validate(&bytes, &image, 1 << 20).is_err());
         }
+        // A leading skippable frame marks the member as zstd: it decodes to the payload
+        // instead of being hashed as raw bytes.
+        let mut decoded = Vec::new();
+        let uncompressed = decode_member(
+            Cursor::new(compress(Layer::ZstdLeadingSkippable, &payload)),
+            |bytes| {
+                decoded.extend_from_slice(bytes);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(!uncompressed);
+        assert_eq!(decoded, payload);
         // A corrupt zstd frame refuses instead of being treated as raw content.
         let mut corrupt = compress(Layer::Zstd, &payload);
         let last = corrupt.len() - 2;

@@ -16,9 +16,10 @@ use std::{
     collections::BTreeMap,
     fs::File,
     io::{Read, Write},
-    os::unix::fs::PermissionsExt,
+    os::unix::{fs::PermissionsExt, process::CommandExt},
     path::PathBuf,
     process::{Command, Stdio},
+    sync::mpsc,
     time::{Duration, Instant},
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -27,6 +28,9 @@ const MAX_CONFIG: u64 = 1024 * 1024;
 const MAX_HELPER_OUTPUT: u64 = 64 * 1024;
 /// Helpers may wait on a native approval such as a keychain prompt; that wait is bounded.
 const HELPER_TIMEOUT: Duration = Duration::from_secs(60);
+/// After the helper exits, how long its stdout may take to close. A descendant that keeps
+/// the pipe open cannot extend the wait beyond this.
+const HELPER_DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// The server address the Docker CLI uses for Docker Hub credentials.
 const DOCKER_HUB_SERVER: &str = "https://index.docker.io/v1/";
 
@@ -204,51 +208,111 @@ fn helper_executable(policy: &ImagePolicy, name: &str) -> Result<PathBuf, Candid
         .ok_or_else(|| error("The configured Docker credential helper was not found on PATH."))
 }
 
+/// Collect reader chunks into `output` until the pipe closes (true) or `until` passes
+/// (false). Collection stops once more than the output limit has arrived.
+fn drain(
+    chunks: &mpsc::Receiver<Zeroizing<Vec<u8>>>,
+    output: &mut Zeroizing<Vec<u8>>,
+    until: Instant,
+) -> bool {
+    loop {
+        let wait = until.saturating_duration_since(Instant::now());
+        match chunks.recv_timeout(wait) {
+            Ok(chunk) => {
+                let room = (MAX_HELPER_OUTPUT as usize + 1).saturating_sub(output.len());
+                output.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                if output.len() as u64 > MAX_HELPER_OUTPUT {
+                    return true;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => return false,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return true,
+        }
+    }
+}
+
 /// Run `docker-credential-<name> get` for one server address. Helper output is bounded and
-/// its stderr discarded; a helper that does not finish within the bound is killed.
+/// its stderr discarded.
+///
+/// Every wait is bounded by `timeout`, independently of the helper's descendants: the
+/// helper runs in its own process group, and stdout is drained by a detached reader whose
+/// chunks are collected with deadlines. A helper that does not exit in time has its whole
+/// process group killed. A helper that exits while a descendant still holds stdout gets a
+/// short drain grace; its reply is whatever it wrote before exiting, and the reader is
+/// abandoned until the descendant closes the pipe.
 fn run_helper(
     policy: &ImagePolicy,
     name: &str,
     server: &str,
+    timeout: Duration,
 ) -> Result<Option<Credential>, CandidateError> {
     let executable = helper_executable(policy, helper_name(name)?)?;
+    let deadline = Instant::now() + timeout;
     let mut child = Command::new(executable)
         .arg("get")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .map_err(|_| error("Cannot start the Docker credential helper."))?;
     let written = child
         .stdin
         .take()
         .map(|mut stdin| stdin.write_all(server.as_bytes()));
-    let stdout = child.stdout.take();
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Zeroizing::new(Vec::new());
-        if let Some(stdout) = stdout {
-            let _ = stdout.take(MAX_HELPER_OUTPUT + 1).read_to_end(&mut bytes);
-        }
-        bytes
-    });
-    let deadline = Instant::now() + HELPER_TIMEOUT;
+    let (sender, chunks) = mpsc::channel();
+    if let Some(mut stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut buffer = Zeroizing::new([0_u8; 8192]);
+            let mut total = 0_u64;
+            while total <= MAX_HELPER_OUTPUT {
+                match stdout.read(buffer.as_mut()) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        total += n as u64;
+                        if sender.send(Zeroizing::new(buffer[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    // Reserved up front so collection never reallocates and leaves unzeroized copies.
+    let mut output = Zeroizing::new(Vec::with_capacity(MAX_HELPER_OUTPUT as usize + 1));
+    let mut closed = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) if Instant::now() < deadline => {
+                let poll = Instant::now() + Duration::from_millis(20);
+                if closed {
+                    std::thread::sleep(poll.saturating_duration_since(Instant::now()));
+                } else {
+                    closed = drain(&chunks, &mut output, poll);
+                }
+            }
             _ => {
+                // The child is not reaped yet, so its pid still names its process group.
+                if let Ok(group) = i32::try_from(child.id()) {
+                    // SAFETY: killpg only sends a signal to the helper's own group.
+                    unsafe { libc::killpg(group, libc::SIGKILL) };
+                }
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = reader.join();
                 return Err(error(
                     "The Docker credential helper did not finish in time.",
                 ));
             }
         }
     };
-    let output = reader
-        .join()
-        .map_err(|_| error("Cannot read the Docker credential helper reply."))?;
+    if !closed {
+        drain(
+            &chunks,
+            &mut output,
+            deadline.min(Instant::now() + HELPER_DRAIN_GRACE),
+        );
+    }
     if output.len() as u64 > MAX_HELPER_OUTPUT {
         return Err(error(
             "The Docker credential helper reply exceeds its limit.",
@@ -331,10 +395,10 @@ pub(super) fn lookup(
         .iter()
         .find(|(key, _)| matches(key, domain))
     {
-        return run_helper(policy, helper, server_address(domain));
+        return run_helper(policy, helper, server_address(domain), HELPER_TIMEOUT);
     }
     if let Some(store) = config.creds_store.as_deref().filter(|s| !s.is_empty()) {
-        return run_helper(policy, store, server_address(domain));
+        return run_helper(policy, store, server_address(domain), HELPER_TIMEOUT);
     }
     // Prefer an exact key; otherwise the first converted key that names the registry.
     let entry = config
@@ -475,6 +539,79 @@ pub(super) mod tests {
             lookup(&policy, "bad.test").err().unwrap().code,
             "registry_credentials"
         );
+    }
+
+    /// The pid a fixture helper recorded for its background descendant.
+    fn descendant(f: &DockerFixture, name: &str) -> i32 {
+        let path = f.root.join(format!("docker-credential-{name}.pid"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(pid) = fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "helper recorded no descendant");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the fixture process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[test]
+    fn helper_descendants_holding_stdout_cannot_extend_the_bounded_wait() {
+        // The helper replies and exits while a background descendant keeps stdout open.
+        let f = DockerFixture::new(&serde_json::json!({"credsStore": "lingers"}));
+        f.helper(
+            "lingers",
+            r#"read -r server || true; printf '{"Username":"u","Secret":"s"}'; sleep 30 & echo $! > "$0.pid""#,
+        );
+        let started = Instant::now();
+        let credential = lookup(&f.policy(), "registry.test").unwrap();
+        let elapsed = started.elapsed();
+        let pid = descendant(&f, "lingers");
+        let still_holding = alive(pid);
+        // SAFETY: the fixture's own background sleep is stopped.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert_eq!(basic(credential), format!("Basic {}", encoded("u:s")));
+        assert!(still_holding, "the descendant must still hold stdout");
+        assert!(
+            elapsed < HELPER_DRAIN_GRACE + Duration::from_secs(3),
+            "{elapsed:?}"
+        );
+
+        // A helper that never exits is stopped at its bound with its whole process group,
+        // even while a descendant holds stdout.
+        let f = DockerFixture::new(&serde_json::json!({"credsStore": "hangs"}));
+        f.helper("hangs", r#"sleep 30 & echo $! > "$0.pid"; sleep 30"#);
+        let started = Instant::now();
+        let failure = run_helper(
+            &f.policy(),
+            "hangs",
+            "registry.test",
+            Duration::from_secs(1),
+        )
+        .err()
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            failure.message.contains("did not finish in time"),
+            "{failure:?}"
+        );
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        let pid = descendant(&f, "hangs");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let survived = alive(pid);
+        // SAFETY: cleanup of the fixture's own background sleep if the group kill missed it.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert!(!survived, "the helper's process group must be killed");
     }
 
     #[test]

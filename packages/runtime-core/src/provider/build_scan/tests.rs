@@ -502,6 +502,29 @@ COPY --from=0 / /
 }
 
 #[test]
+fn whitespace_after_the_heredoc_operator_keeps_the_heredoc() {
+    // The frontend lexes `<< CMD` as one heredoc word, so the body is not a stage.
+    for dockerfile in [
+        "FROM alpine:3.22\nRUN true << CMD\nFROM scratch\nCMD\n",
+        "FROM alpine:3.22\nRUN cat <<\t\"EOF\" > /x\nFROM scratch\nEOF\n",
+        "FROM alpine:3.22\nCOPY <<  'FILE' /etc/x\nFROM scratch\nFILE\n",
+        "FROM alpine:3.22\nRUN true <<CMD\nFROM scratch\nCMD\n",
+    ] {
+        assert_eq!(images(dockerfile), ["alpine:3.22"], "{dockerfile}");
+    }
+    assert_eq!(
+        code("FROM alpine:3.22\nRUN true << CMD\nFROM scratch\n"),
+        "native_build_dockerfile"
+    );
+    // A `-` stops the whitespace, so `<<- CMD` is two words and no heredoc: the
+    // following lines are instructions.
+    assert_eq!(
+        images("FROM alpine:3.22\nRUN true <<- CMD\nFROM busybox:1.37\n"),
+        ["busybox:1.37"]
+    );
+}
+
+#[test]
 fn unknown_instructions_flags_and_preamble_refuse() {
     for dockerfile in [
         "FROM alpine:3.22\nBOGUS value\n",

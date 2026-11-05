@@ -564,13 +564,29 @@ fn json_form(args: &str, line: usize) -> Result<bool, CandidateError> {
 }
 
 /// Shell words with quotes and escapes kept raw, as the heredoc detector lexes a line.
+///
+/// Like the frontend's lexer, an unquoted `<<` keeps the tabs, carriage returns and
+/// spaces after it in the same word, so `<< EOF` is one heredoc word. A `-` stops
+/// that, so `<<- EOF` is two words and not a heredoc.
 fn raw_words(line: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut in_word = false;
-    let mut chars = line.chars();
+    let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
+            '<' if chars.peek() == Some(&'<') => {
+                chars.next();
+                word.push_str("<<");
+                while let Some(&space) = chars.peek() {
+                    if !matches!(space, '\t' | '\r' | ' ') {
+                        break;
+                    }
+                    word.push(space);
+                    chars.next();
+                }
+                in_word = true;
+            }
             c if c.is_whitespace() => {
                 if in_word {
                     words.push(std::mem::take(&mut word));

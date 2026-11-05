@@ -391,6 +391,25 @@ fn doubling_argument_defaults_stay_bounded() {
 }
 
 #[test]
+fn a_stage_may_not_be_named_scratch() {
+    // The frontend links `FROM scratch` to an earlier stage of that name, so the
+    // stage's image and platform would apply.
+    for dockerfile in [
+        "FROM alpine:3.22 AS scratch\nFROM scratch\n",
+        "FROM --platform=linux/amd64 alpine:3.22 AS Scratch\nFROM scratch\n",
+        "FROM alpine:3.22 AS SCRATCH\nFROM busybox:1.37\nCOPY --from=scratch / /\n",
+    ] {
+        assert_eq!(code(dockerfile), "native_build_dockerfile", "{dockerfile}");
+    }
+    // Plain `scratch` is still the empty image.
+    assert!(images("FROM scratch\n").is_empty());
+    assert_eq!(
+        images("FROM alpine:3.22 AS build\nFROM scratch\nCOPY --from=build / /\n"),
+        ["alpine:3.22"]
+    );
+}
+
+#[test]
 fn frontend_selection_directives_refuse() {
     for dockerfile in [
         "# syntax=docker/dockerfile:1\nFROM alpine:3.22\n",

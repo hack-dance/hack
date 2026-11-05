@@ -769,6 +769,14 @@ fn dispatch(
                     if !valid {
                         return Err(refusal(Some(line), "invalid build stage name."));
                     }
+                    // The frontend links a later `FROM scratch` (or `--from=scratch`) to
+                    // a stage of that name instead of the empty image.
+                    if name == "scratch" {
+                        return Err(refusal(
+                            Some(line),
+                            "a build stage may not be named scratch.",
+                        ));
+                    }
                     Some(name)
                 }
                 _ => return Err(refusal(Some(line), "FROM must name one image or stage.")),

@@ -696,12 +696,15 @@ unfiltered mode for a checkout whose local files must remain hidden from its ser
 Only the exact canonical project root is accepted; home/credential directories,
 aliased roots, and changes to a running pool's mount intent are refused.
 
-One development pool can host several project roots and linked worktrees. The
-first root is the pool's primary share. Add another root to a **stopped** pool with
-`runtime project-share add --project-share /absolute/other-project --unfiltered-source --json`;
-the share is mounted at the next boot. A running pool's mounts never change, so
-`up` for a root outside the set refuses with `project_share_extension_required`
-until the pool is stopped and the root is added. Remove an additional root (for
+One development pool can host several project roots and linked worktrees, so one
+installed native home serves every project on the machine. The first root is the
+pool's primary share. Native `up` in another root adds that root itself when the
+pool is **stopped**, before any lifecycle hook runs, with the same unfiltered-source
+consent the first root gave; the share is mounted at the next boot. The explicit
+form is `runtime project-share add --project-share /absolute/other-project --unfiltered-source --json`.
+A running pool's mounts never change: `up` in a root outside the set refuses before
+hooks and says to stop the projects using the pool (`down` in each), stop the pool
+(`runtime down --json` on the native home), and run `up` again. Remove an additional root (for
 example a deleted worktree) from a stopped pool with
 `runtime project-share remove --project-share /absolute/old-worktree --json`; removal
 refuses with `project_share_in_use` while any retained graph still names that

@@ -10,7 +10,7 @@ const writeRows=async(path,rows)=>await Bun.write(path,JSON.stringify(rows));
 const argument=key=>storageArgs[storageArgs.indexOf(key)+1];
 const emit=value=>console.log(JSON.stringify(value));
 const engineId="fixture-engine";
-const imageId="sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61";
+const imageId="sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4";
 const imageReference="oven/bun@"+imageId;
 const labels=()=>Object.fromEntries(storageArgs.flatMap((value,index)=>value==="--label"?[storageArgs[index+1].split(/=(.*)/s).slice(0,2)]:[]));
 const volumeMount=volume=>({Type:"volume",Name:volume.name,Source:"/var/lib/docker/volumes/"+volume.name+"/_data",Destination:"/storage/"+volume.storage,Driver:"local",RW:true,Propagation:""});

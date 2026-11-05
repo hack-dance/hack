@@ -9,7 +9,7 @@ before hooks, intent or volume effects. PostgreSQL data roots, filesystem crash
 durability and fresh-install acquisition of the pinned image remain unqualified
 gates; synthetic controls do not qualify that runtime behavior.
 
-Storage startup requires the exact cached Linux arm64 or amd64 Bun 1.4.2 helper
+Storage startup requires the exact cached Linux arm64 or amd64 Bun 1.4.4 helper
 image selected by the daemon architecture before any authored hook, enrollment
 intent or volume effect. The command never pulls a dependency or falls back to
 emulation. Uncached first-install dependency acquisition remains unsupported; the
@@ -49,7 +49,7 @@ is part of this source.
 fixed bundled artifact. Qualification must bind this entry with its strict
 codec and kernel adapter; an exact declared local Linux image, Bun executable,
 libc and program digest must be checked before any carrier effect. The
-dependency is an explicitly selected local `oven/bun:1.4.2-slim` image. A tag
+dependency is an explicitly selected local `oven/bun:1.4.4-slim` image. A tag
 alone is not an artifact pin. Bun FFI remains experimental; source inspection and
 mocked ports do not qualify its behavior.
 
@@ -276,12 +276,12 @@ on the admitted shell platforms; acceptance is at most 4096 bytes per stream.
 Unknown child disposition retains descriptors and the pending journal rather than
 starting competing cleanup. No child redirects through a reopened named path.
 
-The declared dependencies use the fixed Linux arm64 and amd64 Bun 1.4.2 image index
-`sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61`.
+The declared dependencies use the fixed Linux arm64 and amd64 Bun 1.4.4 image index
+`sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4`.
 The packaged helper pins its bytes and the qualified Bun/libc bytes separately.
 Dependency/platform checks precede volume effects; every helper uses `--pull never`.
 Each architecture has separate manifest/config identities and Bun/libc byte pins.
-Inspection and create use the immutable `oven/bun@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61`
+Inspection and create use the immutable `oven/bun@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4`
 repository reference. Classic Engine stores resolve this reference to the selected
 config ID; containerd stores may expose the index or manifest ID. The response
 must retain one of the three qualified IDs and the exact selected platform.
@@ -289,6 +289,17 @@ The carrier policy requires that same configured reference and `--pull never`;
 it never retries another image, tag or platform.
 There is no image download, emulation fallback or platform substitution. Uncached
 first installation remains outside this qualification.
+The pins were derived from registry bytes, without a local engine: the OCI index,
+each platform manifest and config, and every layer blob were checked against their
+digests, then `/usr/local/bin/bun` and the architecture's `libc.so.6` were hashed
+from the extracted layers. Matching pins do not qualify the helper's runtime
+behavior on a daemon.
+
+Saved receipts, intents, references and carrier journals written under the earlier
+Bun 1.4.2 artifact still parse, so saved stop, inspection and explicit recovery stay
+available. That artifact is no longer cataloged: storage enrolled under it refuses
+verification as artifact drift. It is never relabeled, re-seeded or adopted by the
+new helper; succession for such storage needs its own qualified contract.
 Maintain the packaged source with
 `bun scripts/generate-native-storage-witness-helper.ts --check` or `--write`;
 the generator refuses a changed artifact pin rather than approving new bytes.

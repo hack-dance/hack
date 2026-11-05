@@ -514,7 +514,7 @@ test(
         version: 1,
         imageId: `sha256:${"a".repeat(64)}`,
         platform: "linux/arm64",
-        bunVersion: "1.4.2",
+        bunVersion: "1.4.4",
         bunHash: "a".repeat(64),
         libcHash: "b".repeat(64),
         helperHash: "c".repeat(64),

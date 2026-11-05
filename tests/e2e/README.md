@@ -136,7 +136,7 @@ define those two spellings.
 
 The explicitly selected `native-config-vm-files` scenario exercises ordinary new
 containers with protected VM-native material; it does not adopt existing binds.
-It uses only the cached helper image `oven/bun:1.4.2-slim`, two linked worktrees, no published ports
+It uses only the cached helper image `oven/bun:1.4.4-slim`, two linked worktrees, no published ports
 and no image build or pull. Application-side checks independently require exact
 0400/default-root and 0600/explicit-numeric owner identity, actual owner reads,
 distinct-UID `EACCES`, privileged write-open `EROFS`, exact single-file mounts and
@@ -398,9 +398,8 @@ HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tes
 ## Native file qualification
 
 `native-config-files` requires the current compiled CLI, its matching compiler and
-cached `oven/bun:1.4.4-slim` (the workload image) plus `oven/bun:1.4.2-slim` (the qualified
-native file and storage helper image, which stays on Bun 1.4.2 until its catalog
-pins are requalified). It pins the existing image, uses no builds or published
+cached `oven/bun:1.4.4-slim`, which is both the workload image and the cataloged
+native file and storage helper image. It pins the existing image, uses no builds or published
 ports, and does not pull or activate DNS/trust. The primary and two linked worktrees
 deliver distinct binary configs, encrypted managed secrets and empty files through
 literal dollar-containing targets and a private runtime home outside the checkout.

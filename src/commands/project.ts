@@ -160,6 +160,11 @@ import {
   okResult,
 } from "../lib/cli-result.ts";
 import {
+  confirmComposeDownStopped,
+  describeUnconfirmedComposeDown,
+  listComposeProjectContainers,
+} from "../lib/compose-down-confirmation.ts";
+import {
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
 } from "../lib/compose-env-at-rest.ts";
@@ -2198,18 +2203,38 @@ async function probeComposeContainers(opts: {
 }
 
 /**
- * The restart down phase's container outcome. A preserved Compose runtime
- * was never shut down: its containers are kept, so their helpers stay held.
- * Exported for tests.
+ * The container outcome of a `docker compose down` for the shared helper
+ * holders: "stopped" only when the down succeeded and no container labelled
+ * with the Compose project (orphans of services the current file no longer
+ * declares included) may still run. Warns with the remaining containers or
+ * the failed check. See compose-down-confirmation.ts. Never throws.
  */
-export function restartContainerShutdown(opts: {
-  readonly preserveComposeRuntime: boolean;
+async function confirmComposeDownForHelpers(opts: {
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  /** The holder instance (`<project>` or `<project>--<branch>`). */
+  readonly lifecycleComposeProject: string;
+  /** The Compose project label value of the instance's containers. */
+  readonly composeProject: string;
   readonly downCode: number;
-}): ContainerShutdown {
-  if (opts.preserveComposeRuntime) {
-    return "kept";
+}): Promise<ContainerShutdown> {
+  const confirmation = await confirmComposeDownStopped({
+    downCode: opts.downCode,
+    heldHelperNames: () =>
+      heldSharedHelperNames({
+        cfg: opts.cfg,
+        composeProject: opts.lifecycleComposeProject,
+      }),
+    listContainers: () =>
+      listComposeProjectContainers({ composeProject: opts.composeProject }),
+  });
+  const message = describeUnconfirmedComposeDown({
+    composeProject: opts.composeProject,
+    confirmation,
+  });
+  if (message !== null) {
+    logger.warn({ message });
   }
-  return opts.downCode === 0 ? "stopped" : "unconfirmed";
+  return confirmation.containers;
 }
 
 /**
@@ -6991,7 +7016,12 @@ async function runDownCommand({
       routeStdoutToStderr: json,
     });
     helperReleaseFailures = await lifecycleDownCleanup(
-      code === 0 ? "stopped" : "unconfirmed"
+      await confirmComposeDownForHelpers({
+        cfg,
+        lifecycleComposeProject,
+        composeProject: composeProjectName ?? baseProjectName,
+        downCode: code,
+      })
     );
   } finally {
     signalCleanup.dispose();
@@ -7103,6 +7133,8 @@ async function runRestartDownPhase(opts: {
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly projectName: string;
   readonly composeProjectName: string | null;
+  /** The Compose project label value: `composeProjectName` or the base name. */
+  readonly composeProjectLabel: string;
   readonly lifecycleComposeProject: string;
   readonly profiles: readonly string[];
   readonly branch: string | null;
@@ -7162,11 +7194,17 @@ async function runRestartDownPhase(opts: {
           cwd: dirname(opts.project.composeFile),
           routeStdoutToStderr: opts.routeStdoutToStderr === true,
         });
+    // A preserved Compose runtime was never shut down: its containers are
+    // kept, so their helpers stay held.
     helperReleaseFailures = await lifecycleDownCleanup(
-      restartContainerShutdown({
-        preserveComposeRuntime: opts.preserveComposeRuntime === true,
-        downCode,
-      })
+      opts.preserveComposeRuntime
+        ? "kept"
+        : await confirmComposeDownForHelpers({
+            cfg: opts.cfg,
+            lifecycleComposeProject: opts.lifecycleComposeProject,
+            composeProject: opts.composeProjectLabel,
+            downCode,
+          })
     );
   } finally {
     signalCleanup.dispose();
@@ -8063,6 +8101,7 @@ async function runRestartCommand({
     cfg,
     projectName,
     composeProjectName,
+    composeProjectLabel: composeProjectName ?? baseProjectName,
     lifecycleComposeProject,
     profiles,
     branch,

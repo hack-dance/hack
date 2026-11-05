@@ -322,6 +322,75 @@ fn overridden_platform_arguments_must_resolve_to_arm64() {
 }
 
 #[test]
+fn arg_names_must_be_plain_identifiers() {
+    // The frontend would unquote, unescape or expand these names, so a literal
+    // compare could miss an override of BUILDPLATFORM or TARGETPLATFORM.
+    for dockerfile in [
+        "ARG \"BUILDPLATFORM\"=linux/amd64\nFROM --platform=$BUILDPLATFORM alpine:3.22\n",
+        "ARG 'TARGETPLATFORM'=linux/amd64\nFROM --platform=$TARGETPLATFORM alpine:3.22\n",
+        "ARG BUILD\\PLATFORM=linux/amd64\nFROM --platform=$BUILDPLATFORM alpine:3.22\n",
+        "ARG X=BUILDPLATFORM\nARG $X=linux/amd64\nFROM --platform=$BUILDPLATFORM alpine:3.22\n",
+        "ARG ${X}\nFROM alpine:3.22\n",
+        "ARG 1V=1\nFROM alpine:3.22\n",
+        "ARG my-arg\nFROM alpine:3.22\n",
+        // Stage arguments too.
+        "FROM alpine:3.22\nARG \"V\"=1\n",
+    ] {
+        assert_eq!(code(dockerfile), "native_build_dockerfile", "{dockerfile}");
+    }
+    assert_eq!(
+        images("ARG _V2=3.22 v_3\nFROM alpine:$_V2\nARG STAGE_ARG=1\n"),
+        ["alpine:3.22"]
+    );
+}
+
+#[test]
+fn expanded_argument_values_are_bounded() {
+    // 13 doublings make 8 KiB, past the 4 KiB value cap: unresolved, so a reference
+    // using it refuses as a variable the scanner cannot resolve.
+    let doubled = |times: usize, from: &str| {
+        let mut dockerfile = "ARG A=x\n".to_string();
+        dockerfile.push_str(&"ARG A=$A$A\n".repeat(times));
+        dockerfile.push_str(from);
+        dockerfile
+    };
+    assert_eq!(
+        code(&doubled(13, "FROM alpine:$A\n")),
+        "native_build_dockerfile"
+    );
+    // Under the cap the value still resolves.
+    let scan = scan_with(&doubled(6, "FROM example/tool:$A\n"), None, &[]).unwrap();
+    assert_eq!(names(&scan), [format!("example/tool:{}", "x".repeat(64))]);
+    // An overridden platform argument past the cap is unresolved and still refuses.
+    assert_eq!(
+        code(&doubled(
+            13,
+            "ARG BUILDPLATFORM=$A\nFROM --platform=$BUILDPLATFORM alpine:3.22\n"
+        )),
+        "native_build_dockerfile"
+    );
+}
+
+#[test]
+fn doubling_argument_defaults_stay_bounded() {
+    // Without a cap, 40 doublings would need a 1 TiB value.
+    let mut dockerfile = "ARG A=x\n".to_string();
+    dockerfile.push_str(&"ARG A=$A$A\n".repeat(40));
+    dockerfile.push_str("FROM alpine:3.22\n");
+    assert_eq!(images(&dockerfile), ["alpine:3.22"]);
+    // Distinct copies of a capped value share one 256 KiB budget: the first copies
+    // resolve (and fail as over-long references), later ones are unresolved.
+    let mut dockerfile = format!("ARG A={}\n", "x".repeat(4000));
+    for index in 0..100 {
+        dockerfile.push_str(&format!("ARG B{index}=$A\n"));
+    }
+    let with = |from: &str| format!("{dockerfile}{from}");
+    assert_eq!(code(&with("FROM alpine:$B0\n")), "native_build_base_image");
+    assert_eq!(code(&with("FROM alpine:$B99\n")), "native_build_dockerfile");
+    assert_eq!(images(&with("FROM alpine:3.22\n")), ["alpine:3.22"]);
+}
+
+#[test]
 fn frontend_selection_directives_refuse() {
     for dockerfile in [
         "# syntax=docker/dockerfile:1\nFROM alpine:3.22\n",

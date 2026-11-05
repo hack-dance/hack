@@ -37,6 +37,10 @@ pub const MAX_DOCKERFILE_BYTES: usize = 1024 * 1024;
 pub const MAX_IMAGE_REFERENCES: usize = 32;
 /// Most build stages one Dockerfile may declare.
 pub const MAX_STAGES: usize = 256;
+/// Largest expanded global argument value, `FROM` name or `--platform` value.
+const MAX_ARGUMENT_BYTES: usize = 4096;
+/// Most bytes of expanded global argument values held at once.
+const MAX_GLOBAL_ARGUMENT_BYTES: usize = 256 * 1024;
 
 /// Platform arguments whose values the scanner knows for a `linux/arm64` build.
 const KNOWN_PLATFORM_ARGS: [(&str, &str); 4] = [
@@ -800,6 +804,14 @@ fn dispatch(
                 if name.is_empty() {
                     return Err(refusal(Some(line), "ARG requires a name."));
                 }
+                // The frontend would unquote, unescape or expand any other name, so a
+                // literal compare could miss an override of a platform argument.
+                if !is_identifier(&name) {
+                    return Err(refusal(
+                        Some(line),
+                        "ARG names must be plain [A-Za-z_][A-Za-z0-9_]* identifiers.",
+                    ));
+                }
                 if parsed.stages.is_empty() {
                     parsed.meta_args.push((name, value));
                 }
@@ -881,12 +893,27 @@ fn argument_words(text: &str, escape: char) -> Vec<String> {
     words
 }
 
+fn is_identifier(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// A global argument value: known text, or present with text the scanner cannot know.
 type Env = BTreeMap<String, Option<String>>;
 
-/// Expand `$NAME` and `${NAME}`. Any other `$` form, quote, escape, unknown or
-/// uncertain variable yields `None`.
-fn expand(word: &str, env: &Env) -> Option<String> {
+/// Append `piece` to `out` unless that would pass `cap` bytes. Checked before the
+/// append, so an oversized value never allocates past the cap.
+fn push_bounded(out: &mut String, piece: &str, cap: usize) -> Option<()> {
+    if out.len().checked_add(piece.len())? > cap {
+        return None;
+    }
+    out.push_str(piece);
+    Some(())
+}
+
+/// Expand `$NAME` and `${NAME}` into at most `cap` bytes. Any other `$` form, quote,
+/// escape, unknown or uncertain variable, or a result over `cap` yields `None`.
+fn expand(word: &str, env: &Env, cap: usize) -> Option<String> {
     let mut out = String::new();
     let mut chars = word.chars().peekable();
     while let Some(c) = chars.next() {
@@ -911,37 +938,39 @@ fn expand(word: &str, env: &Env) -> Option<String> {
                 if !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
                     return None;
                 }
-                out.push_str(env.get(&name)?.as_deref()?);
+                push_bounded(&mut out, env.get(&name)?.as_deref()?, cap)?;
             }
             '\'' | '"' | '\\' | '`' => return None,
-            _ => out.push(c),
+            _ => push_bounded(&mut out, c.encode_utf8(&mut [0; 4]), cap)?,
         }
     }
     Some(out)
 }
 
-/// The value of a global `ARG` default: quotes removed, `$NAME`/`${NAME}` expanded.
-/// Anything else is recorded as uncertain and refuses only when a reference uses it.
-fn argument_value(raw: &str, env: &Env) -> Option<String> {
+/// The value of a global `ARG` default, in at most `cap` bytes: quotes removed,
+/// `$NAME`/`${NAME}` expanded. Anything else, including a value over `cap`, is
+/// recorded as uncertain and refuses only when a reference uses it.
+fn argument_value(raw: &str, env: &Env, cap: usize) -> Option<String> {
     let mut out = String::new();
     let mut rest = raw;
     while let Some(c) = rest.chars().next() {
+        let remaining = cap - out.len();
         match c {
             '\'' => {
                 let body = &rest[1..];
                 let end = body.find('\'')?;
-                out.push_str(&body[..end]);
+                push_bounded(&mut out, &body[..end], cap)?;
                 rest = &body[end + 1..];
             }
             '"' => {
                 let body = &rest[1..];
                 let end = body.find('"')?;
-                out.push_str(&expand(&body[..end], env)?);
+                out.push_str(&expand(&body[..end], env, remaining)?);
                 rest = &body[end + 1..];
             }
             _ => {
                 let end = rest.find(['\'', '"']).unwrap_or(rest.len());
-                out.push_str(&expand(&rest[..end], env)?);
+                out.push_str(&expand(&rest[..end], env, remaining)?);
                 rest = &rest[end..];
             }
         }
@@ -949,6 +978,11 @@ fn argument_value(raw: &str, env: &Env) -> Option<String> {
     Some(out)
 }
 
+/// The global arguments `FROM` names and `--platform` values expand against.
+///
+/// Defaults expand eagerly, so `ARG A=$A$A` repeated would double without bound.
+/// Each expanded default is capped at [`MAX_ARGUMENT_BYTES`] and all held values at
+/// [`MAX_GLOBAL_ARGUMENT_BYTES`]; a default past either cap is uncertain.
 fn global_env(parsed: &Parsed, args: &BTreeMap<String, String>) -> Env {
     let mut env: Env = KNOWN_PLATFORM_ARGS
         .iter()
@@ -957,12 +991,19 @@ fn global_env(parsed: &Parsed, args: &BTreeMap<String, String>) -> Env {
     for name in UNCERTAIN_FRONTEND_ARGS {
         env.insert(name.to_string(), None);
     }
+    let mut held: usize = KNOWN_PLATFORM_ARGS.iter().map(|(_, v)| v.len()).sum();
     for (name, default) in &parsed.meta_args {
-        if let Some(value) = args.get(name) {
-            env.insert(name.clone(), Some(value.clone()));
+        let value = if let Some(value) = args.get(name) {
+            Some(value.clone())
         } else if let Some(default) = default {
-            let value = argument_value(default, &env);
-            env.insert(name.clone(), value);
+            let cap = MAX_ARGUMENT_BYTES.min(MAX_GLOBAL_ARGUMENT_BYTES.saturating_sub(held));
+            argument_value(default, &env, cap)
+        } else {
+            continue;
+        };
+        held += value.as_ref().map_or(0, String::len);
+        if let Some(Some(old)) = env.insert(name.clone(), value) {
+            held -= old.len();
         }
     }
     // The frontend rewrites this one from the resolved build epoch.
@@ -994,7 +1035,7 @@ fn platform_supported(raw: &str, env: &Env, parsed: &Parsed) -> bool {
                 .any(|(declared, default)| declared == name && default.is_some())
         });
     frontend_value
-        || expand(raw, env)
+        || expand(raw, env, MAX_ARGUMENT_BYTES)
             .is_some_and(|value| matches!(value.as_str(), "linux/arm64" | "linux/arm64/v8"))
 }
 
@@ -1067,7 +1108,7 @@ fn resolve(parsed: &Parsed, request: &ScanRequest<'_>) -> Result<DockerfileScan,
     // `scratch`, or an image. `None` marks a name the scanner cannot expand.
     let mut bases: Vec<Option<Source>> = Vec::with_capacity(parsed.stages.len());
     for (index, stage) in parsed.stages.iter().enumerate() {
-        let base = expand(&stage.base, &env)
+        let base = expand(&stage.base, &env, MAX_ARGUMENT_BYTES)
             .filter(|name| !name.is_empty())
             .map(|name| {
                 if name == "scratch" {

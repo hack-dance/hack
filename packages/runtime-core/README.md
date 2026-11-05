@@ -628,14 +628,16 @@ compatibility window beyond what follows.
   whether it understands a receipt.
 - **Some fields are always written.** `previous_guest_boot_id`, `reclamation`,
   `profile` and `network` are written on every save, as `null` or their default
-  value when unset. `clean_stop`, `project_share`, `application_bridge` and
-  `dependency_sockets` are written only when set.
+  value when unset. `clean_stop`, `project_share`, `application_bridge`,
+  `dependency_sockets` and `amd64_emulation` are written only when set
+  (`amd64_emulation` only when `true`).
 
 Schema history: every current field except `clean_stop` was present in
 `v5.0.0-next.1`. `clean_stop` was added by
 [#344](https://github.com/hack-dance/hack/pull/344) and first shipped in
 `v5.0.0-next.6`. The owner schema is unchanged from `v5.0.0-next.6` through
-`v5.0.0-next.8` and the current `next` branch. What this means in practice:
+`v5.0.0-next.8`. `amd64_emulation` (Rosetta 2 x86_64 translation for the pool's VM)
+was added after `v5.0.0-next.8`. What this means in practice:
 
 - **Upgrade works.** A `next.6` or later binary reads receipts written by `next.1`
   through `next.5`. Those receipts have no clean-stop marker, so their stopped pools
@@ -652,6 +654,11 @@ Schema history: every current field except `clean_stop` was present in
   whose last stop was not a completed clean `down`. The [candidate guide](../../docs/guides/native-candidate.md#manual-candidate-upgrade-and-rollback)
   treats a prior binary refusing newer state as an unsupported downgrade. Keep that
   state as it is and do not edit the receipt.
+- **A translation pool cannot be downgraded.** A pool started with
+  `runtime up --amd64-emulation` records `amd64_emulation: true` before any provider
+  effect and keeps it. Binaries from before that field refuse its receipt with
+  `invalid_receipt`; they would also refuse its provider configuration, which now
+  enables Rosetta. Pools that never opted in write no new field and stay readable.
 - **Future fields follow the same rule.** Under this code, adding an always-written
   field means every earlier binary refuses every receipt the new binary saves. Adding
   a field that is written only when set means earlier binaries refuse only the

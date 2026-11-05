@@ -59,7 +59,7 @@ pub fn begin(
     };
     let expected_environment = verify_images(
         &engine,
-        &BTreeMap::from([(key.clone(), resource.clone())]),
+        &config::verification_resources(&original, &key, &resource),
         &mut configs,
         &private,
     )?;

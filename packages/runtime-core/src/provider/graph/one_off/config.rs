@@ -61,6 +61,23 @@ pub(super) fn prepare(
     Ok(config)
 }
 
+/// Resources against which one-off images are verified: the parent receipt's volumes
+/// (the storage `prepare` keeps) plus the new job container. Parent containers are
+/// left out, so `verify_images` still inspects only the job's own image.
+pub(super) fn verification_resources(
+    receipt: &Receipt,
+    key: &str,
+    resource: &Resource,
+) -> BTreeMap<String, Resource> {
+    receipt
+        .resources
+        .iter()
+        .filter(|(_, owned)| owned.kind == Kind::Volume)
+        .map(|(name, owned)| (name.clone(), owned.clone()))
+        .chain([(key.to_owned(), resource.clone())])
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +113,47 @@ mod tests {
         let mut wrapped = template.clone();
         wrapped["HostConfig"]["Mounts"][0]["Target"] = json!("/run/hack-environment.json");
         assert!(prepare(&wrapped, &receipt, &resource, &[], None).is_err());
+    }
+
+    #[test]
+    fn job_image_volume_is_covered_by_the_parent_owned_named_volume() {
+        use crate::provider::graph::image_volumes::{UNCOVERED, admit};
+        let run = "a".repeat(32);
+        let volume = format!("hkg-{run}-volume-0");
+        let receipt: Receipt = serde_json::from_value(json!({"version":1,"run":run,"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready-observed","readiness":{},"resources":{
+            "volume:data":{"kind":"volume","key":"data","name":volume,"id":"vol-id","image":null,"phase":"observed"},
+            "container:db":{"kind":"container","key":"db","name":format!("hkg-{run}-container-0"),"id":"ctr-id","image":"sha256:pin","phase":"observed"}
+        }})).unwrap();
+        let key = "container:job-123";
+        let resource: Resource = serde_json::from_value(json!({"kind":"container","key":"job-123","name":format!("hkg-{run}-container-1"),"id":null,"image":"sha256:pin","phase":"reserved"})).unwrap();
+        let template = json!({"Image":"sha256:pin","HostConfig":{"Mounts":[{"Type":"volume","Source":volume,"Target":"/var/lib/data","ReadOnly":false}]}});
+        let config = prepare(&template, &receipt, &resource, &["migrate".into()], None).unwrap();
+        let resources = verification_resources(&receipt, key, &resource);
+        // Only the job container is verified; parent containers are not re-inspected.
+        let containers: Vec<_> = resources
+            .iter()
+            .filter(|(_, r)| r.kind == Kind::Container)
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(containers, [key]);
+        let declared = json!({"/var/lib/data":{}});
+        admit(&declared, &config, &resources).unwrap();
+        // Without the parent volumes the same covered target was refused.
+        let job_only = BTreeMap::from([(key.to_owned(), resource.clone())]);
+        assert_eq!(
+            admit(&declared, &config, &job_only).unwrap_err().code,
+            UNCOVERED
+        );
+        // A declared target the parent storage does not cover still refuses.
+        assert_eq!(
+            admit(
+                &json!({"/var/lib/data":{},"/var/log/data":{}}),
+                &config,
+                &resources
+            )
+            .unwrap_err()
+            .code,
+            UNCOVERED
+        );
     }
 }

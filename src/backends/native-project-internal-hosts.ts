@@ -1,5 +1,11 @@
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
+import {
+  type ProjectConfig,
+  type ProjectContext,
+  readProjectConfig,
+} from "../lib/project.ts";
 import type { NativeHostDependency } from "./native-project-dependencies.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
 
@@ -277,6 +283,43 @@ function sameHosts(
   );
 }
 
+/** Fixed text when native up cannot read its project-wide alias inputs. */
+export const NATIVE_INTERNAL_HOSTS_UNREADABLE_REFUSAL =
+  "Native up requires a readable internal extra_hosts selection; values omitted.";
+
+/**
+ * The same project-wide aliases the Compose override renders (static
+ * `internal.extra_hosts` plus checkout-local entries), for native start.
+ *
+ * Without `cfg`, project configuration is read and validated again, so a
+ * caller that runs after lifecycle hooks observes what the hooks left behind.
+ * Invalid configuration or an unreadable local map refuses with a closed line
+ * instead of being skipped.
+ */
+export async function resolveNativeInternalExtraHosts(opts: {
+  readonly project: ProjectContext;
+  readonly cfg?: ProjectConfig;
+}): Promise<Record<string, string>> {
+  try {
+    const cfg = opts.cfg ?? (await readProjectConfig(opts.project));
+    if (cfg.parseError) {
+      throw new Error("invalid project configuration");
+    }
+    return (
+      await resolveInternalExtraHosts({
+        projectRoot: opts.project.projectRoot,
+        projectDir: opts.project.projectDir,
+        staticHosts: cfg.internal?.extraHosts,
+      })
+    ).hosts;
+  } catch {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: NATIVE_INTERNAL_HOSTS_UNREADABLE_REFUSAL,
+    });
+  }
+}
+
 /**
  * The Compose backend re-reads project-wide aliases after `up.before` hooks.
  * Native declares them before review, so a hook that changes them refuses
@@ -300,5 +343,24 @@ export async function requireNativeInternalExtraHostsUnchanged(opts: {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message: NATIVE_INTERNAL_HOSTS_CHANGED_REFUSAL,
+  });
+}
+
+/**
+ * Post-hook form of {@link requireNativeInternalExtraHostsUnchanged} for a
+ * project checkout: re-reads project configuration and the checkout-local
+ * alias maps, so an `up.before` hook that edits either refuses after cleanup.
+ * It deliberately takes no configuration snapshot.
+ */
+export async function requireNativeProjectInternalExtraHostsUnchanged(opts: {
+  readonly project: ProjectContext;
+  readonly reviewed: Readonly<Record<string, string>>;
+  readonly cleanup: () => Promise<void>;
+}): Promise<void> {
+  await requireNativeInternalExtraHostsUnchanged({
+    reviewed: opts.reviewed,
+    current: async () =>
+      await resolveNativeInternalExtraHosts({ project: opts.project }),
+    cleanup: opts.cleanup,
   });
 }

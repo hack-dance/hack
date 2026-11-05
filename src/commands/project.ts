@@ -46,7 +46,10 @@ import {
   nativeDownEnvironment,
   nativeProjectDown,
 } from "../backends/native-project-down.ts";
-import { requireNativeInternalExtraHostsUnchanged } from "../backends/native-project-internal-hosts.ts";
+import {
+  requireNativeProjectInternalExtraHostsUnchanged,
+  resolveNativeInternalExtraHosts,
+} from "../backends/native-project-internal-hosts.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
 import {
@@ -2915,31 +2918,6 @@ async function resolveInternalComposeOverride(opts: {
     projectDir: opts.project.projectDir,
     text,
   });
-}
-
-/**
- * The same project-wide aliases the Compose override renders (static
- * `internal.extra_hosts` plus checkout-local entries), for native start. An
- * unreadable local map refuses with a closed line instead of being skipped.
- */
-async function resolveNativeInternalExtraHosts(opts: {
-  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
-  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
-}): Promise<Record<string, string>> {
-  try {
-    return (
-      await resolveInternalExtraHosts({
-        ...opts.project,
-        staticHosts: resolveInternalSettings(opts.cfg).extraHosts ?? undefined,
-      })
-    ).hosts;
-  } catch {
-    throw new HackCliError({
-      code: "E_CONFIG_INVALID",
-      message:
-        "Native up requires a readable internal extra_hosts selection; values omitted.",
-    });
-  }
 }
 
 function shouldBuildInternalOverride(opts: {
@@ -5839,10 +5817,10 @@ async function handleNativeUp({
         });
       }
       // Native declares these before review; a hook cannot change them now.
-      await requireNativeInternalExtraHostsUnchanged({
+      // This re-reads hack.config.json, not the pre-hook `cfg` snapshot.
+      await requireNativeProjectInternalExtraHostsUnchanged({
+        project,
         reviewed: internalExtraHosts,
-        current: async () =>
-          await resolveNativeInternalExtraHosts({ project, cfg }),
         cleanup,
       });
       // The native backend launches services after this returns: refuse when a

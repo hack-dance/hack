@@ -1321,7 +1321,10 @@ to a different target also refuses. Earlier native builds ignored these entries,
 which let a container resolve the public name instead of the local listener.
 Native reads these aliases before lifecycle hooks, because they are part of the
 reviewed configuration; unlike the Compose backend, a hook that changes them makes
-`up` refuse after hook cleanup. Projects without project-wide aliases are unchanged.
+`up` refuse after hook cleanup. The check after hooks reads `hack.config.json` and
+the checkout-local alias map again, so an edit to either is caught. A local alias map
+that exists but cannot be read refuses with `E_CONFIG_INVALID` instead of being
+treated as empty. Projects without project-wide aliases are unchanged.
 Unlike a Compose host gateway, which reaches every host port, a service reaches
 each alias only on the one guest port its binding selects.
 

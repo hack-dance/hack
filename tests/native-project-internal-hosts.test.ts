@@ -1,15 +1,28 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { NativeHostDependency } from "../src/backends/native-project-dependencies.ts";
 import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
 import {
   applyNativeInternalHostAliases,
   NATIVE_INTERNAL_HOST_ALIAS_REFUSAL,
   NATIVE_INTERNAL_HOSTS_CHANGED_REFUSAL,
+  NATIVE_INTERNAL_HOSTS_UNREADABLE_REFUSAL,
   NATIVE_UNBOUND_HOST_ALIAS_REFUSAL,
   nativeServiceHostAliases,
   requireNativeHostAliasBindings,
   requireNativeInternalExtraHostsUnchanged,
+  requireNativeProjectInternalExtraHostsUnchanged,
+  resolveNativeInternalExtraHosts,
 } from "../src/backends/native-project-internal-hosts.ts";
+import {
+  readLocalExtraHosts,
+  resolveExtraHostsPath,
+  resolveInternalExtraHosts,
+  UNREADABLE_EXTRA_HOSTS_MAP,
+} from "../src/lib/internal-extra-hosts.ts";
+import { type ProjectContext, readProjectConfig } from "../src/lib/project.ts";
 import {
   expectCodedRefusal,
   expectCodedThrow,
@@ -262,4 +275,132 @@ test("aliases changed by lifecycle hooks refuse after hook cleanup", async () =>
     );
   }
   expect(cleaned).toBe(4);
+});
+
+const roots: string[] = [];
+afterEach(async () => {
+  for (const root of roots.splice(0)) {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** A plain (non-Git) project checkout, so no primary aliases are inherited. */
+async function projectFixture(config: unknown): Promise<ProjectContext> {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-internal-hosts-"))
+  );
+  roots.push(root);
+  const projectDir = join(root, ".hack");
+  await mkdir(join(projectDir, ".internal"), { recursive: true });
+  const configFile = join(projectDir, "hack.config.json");
+  await writeFile(configFile, JSON.stringify(config));
+  return {
+    projectRoot: root,
+    projectDirName: ".hack",
+    projectDir,
+    composeFile: join(projectDir, "docker-compose.yml"),
+    envFile: join(projectDir, ".env"),
+    configFile,
+  };
+}
+
+test("a hook that edits hack.config.json extra_hosts refuses after cleanup", async () => {
+  const config = {
+    name: "hosts-fixture",
+    internal: { extra_hosts: { "api.example.test": "host-gateway" } },
+  };
+  const project = await projectFixture(config);
+  // Startup resolves the reviewed aliases from the configuration it read
+  // before `up.before` ran.
+  const cfg = await readProjectConfig(project);
+  const reviewed = await resolveNativeInternalExtraHosts({ project, cfg });
+  expect(reviewed).toEqual({ "api.example.test": "host-gateway" });
+  let cleaned = 0;
+  const cleanup = async () => {
+    cleaned++;
+  };
+  await requireNativeProjectInternalExtraHostsUnchanged({
+    project,
+    reviewed,
+    cleanup,
+  });
+  expect(cleaned).toBe(0);
+
+  for (const edited of [
+    JSON.stringify({
+      ...config,
+      internal: {
+        extra_hosts: {
+          "api.example.test": "host-gateway",
+          "auth.example.test": "host-gateway",
+        },
+      },
+    }),
+    JSON.stringify({ ...config, internal: {} }),
+    "{ not json",
+  ]) {
+    // The hook rewrites the file; the stale `cfg` snapshot still matches.
+    await writeFile(project.configFile, edited);
+    expect(await resolveNativeInternalExtraHosts({ project, cfg })).toEqual(
+      reviewed
+    );
+    await expectCodedRefusal(
+      requireNativeProjectInternalExtraHostsUnchanged({
+        project,
+        reviewed,
+        cleanup,
+      }),
+      "E_NATIVE_PROJECT_UNSUPPORTED",
+      NATIVE_INTERNAL_HOSTS_CHANGED_REFUSAL
+    );
+  }
+  expect(cleaned).toBe(3);
+});
+
+test("an unreadable checkout-local alias map refuses; an absent one is empty", async () => {
+  const project = await projectFixture({
+    name: "hosts-fixture",
+    internal: { extra_hosts: { "api.example.test": "host-gateway" } },
+  });
+  const path = resolveExtraHostsPath(project.projectDir);
+  expect(await readLocalExtraHosts(path)).toEqual({});
+  expect(await resolveNativeInternalExtraHosts({ project })).toEqual({
+    "api.example.test": "host-gateway",
+  });
+
+  // A directory exists but cannot be read as a file, even when tests run as
+  // root (unlike a mode-000 file).
+  await mkdir(path);
+  await expectCodedRefusal(
+    readLocalExtraHosts(path),
+    "E_CONFIG_INVALID",
+    UNREADABLE_EXTRA_HOSTS_MAP
+  );
+  await expectCodedRefusal(
+    resolveInternalExtraHosts(project),
+    "E_CONFIG_INVALID",
+    UNREADABLE_EXTRA_HOSTS_MAP
+  );
+  await expectCodedRefusal(
+    resolveNativeInternalExtraHosts({ project }),
+    "E_CONFIG_INVALID",
+    NATIVE_INTERNAL_HOSTS_UNREADABLE_REFUSAL
+  );
+  // A post-hook map that became unreadable refuses rather than dropping it.
+  await rm(path, { recursive: true });
+  const reviewed = await resolveNativeInternalExtraHosts({ project });
+  await mkdir(path);
+  let cleaned = 0;
+  await expectCodedRefusal(
+    requireNativeProjectInternalExtraHostsUnchanged({
+      project,
+      reviewed,
+      cleanup: async () => {
+        cleaned++;
+      },
+    }),
+    "E_NATIVE_PROJECT_UNSUPPORTED",
+    NATIVE_INTERNAL_HOSTS_CHANGED_REFUSAL
+  );
+  expect(cleaned).toBe(1);
 });

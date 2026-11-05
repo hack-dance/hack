@@ -13,6 +13,7 @@ import {
 } from "./native-project-finalization.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { recoverNativeInterruptedStartupCleanup } from "./native-project-interrupted-cleanup.ts";
+import { withNativeRemovalLock } from "./native-project-removal-lock.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import {
   loadNativeProjectRun,
@@ -20,7 +21,6 @@ import {
   type NativeProjectRun,
   type NativeProjectRunScope,
   removeNativeProjectRun,
-  withNativeRestartLock,
 } from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
@@ -270,6 +270,18 @@ function removalRefused(cause?: unknown): Error {
   );
 }
 
+/** Canceled before the cleanup request: nothing was requested or removed. */
+function removalCanceled(): Error {
+  return new ClosedCliError(
+    "Native data removal was canceled before any cleanup request; nothing was removed and the run mapping is kept."
+  );
+}
+function requireActiveRemoval(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw removalCanceled();
+  }
+}
+
 /** Thrown when the graph still runs: removal never stops compute itself. */
 function removalRequiresStop(): Error {
   return new ClosedCliError(
@@ -392,9 +404,12 @@ function confirmRemoved(value: unknown, run: NativeProjectRun): void {
  *
  * Failure keeps the mapping. A rerun resumes from re-inspection: a durable
  * cleanup intent or an already removed receipt continues without replaying
- * deletion decisions. Cancellation before the runtime request has no effect;
- * after it the outcome is unknown and the mapping stays until a rerun
- * confirms removal.
+ * deletion decisions. Cancellation (`signal`) before the runtime request has
+ * no effect; after it the owned request is killed and awaited, the outcome is
+ * unknown and the mapping stays until a rerun confirms removal. Either way
+ * the lock is released before this returns. A process killed outright leaves
+ * the lock behind; the rerun reclaims it once the recorded owner has exited
+ * (see {@link withNativeRemovalLock}).
  */
 export async function nativeProjectRemoveData(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -406,14 +421,18 @@ export async function nativeProjectRemoveData(opts: {
   readonly confirm?: () => Promise<boolean>;
   readonly invoke?: typeof invokeNativeRuntime;
   readonly finalizationTimeoutMs?: number;
+  /** Ordinary cancellation (SIGINT/SIGTERM in the command). */
+  readonly signal?: AbortSignal;
 }) {
   const invoke = opts.invoke ?? invokeNativeRuntime;
+  const { signal } = opts;
   const inspect = (run: NativeProjectRun) =>
     inspectNativeProjectGraph({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       run: run.run,
       invoke,
+      signal,
     });
   const notStarted = {
     backend: "native",
@@ -433,7 +452,8 @@ export async function nativeProjectRemoveData(opts: {
       dataPreserved: true,
     } as const;
   }
-  return await withNativeRestartLock(opts.scope, async () => {
+  requireActiveRemoval(signal);
+  return await withNativeRemovalLock(opts.scope, async () => {
     if (await loadNativeRestartIntent(opts.scope)) {
       throw new ClosedCliError(
         "Native data removal refused: a native restart is pending; finish or recover it first. Nothing was removed."
@@ -455,10 +475,13 @@ export async function nativeProjectRemoveData(opts: {
         run,
         token: finalization,
         timeoutMs: opts.finalizationTimeoutMs,
+        signal,
       });
     } catch {
+      requireActiveRemoval(signal);
       throw finalizationRefused();
     }
+    requireActiveRemoval(signal);
     try {
       if (start !== "removed") {
         await invoke({
@@ -473,6 +496,7 @@ export async function nativeProjectRemoveData(opts: {
             "--json",
           ],
           timeoutMs: 590_000,
+          signal,
         });
       }
       confirmRemoved(await inspect(run), run);

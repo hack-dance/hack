@@ -294,13 +294,22 @@ export type NativeRestartIntent = {
   readonly run: NativeProjectRun;
   readonly finalization: NativeProjectFinalizationToken;
 };
+/**
+ * The private directory and the operation lock path shared by restart,
+ * filesystem recovery and data removal. Creates the excluded directory.
+ */
+export async function nativeRestartOperationLock(
+  opts: NativeProjectRunScope
+): Promise<{ readonly root: string; readonly lock: string }> {
+  const p = await paths(opts, true, "restart");
+  return { root: p.root, lock: `${p.lock}.operation` };
+}
 /** Serialize cleanup and replacement hooks; uncertain abandoned ownership requires inspection. */
 export async function withNativeRestartLock<T>(
   opts: NativeProjectRunScope,
   action: (release: () => Promise<void>) => Promise<T>
 ): Promise<T> {
-  const p = await paths(opts, true, "restart");
-  const lock = `${p.lock}.operation`;
+  const { lock } = await nativeRestartOperationLock(opts);
   try {
     await mkdir(lock, { mode: 0o700 });
   } catch {

@@ -13,7 +13,9 @@ const CONFIRM_HINT =
  * deletion of a stopped project's graph-owned data volumes. Asks once unless
  * `--yes` is given; `--json` without `--yes` refuses with
  * `E_INTERACTIVE_REQUIRED` before any runtime request. Output names no
- * volume, path or other authored value.
+ * volume, path or other authored value. SIGINT/SIGTERM cancel the removal:
+ * its owned runtime request is settled and the operation lock released
+ * before the command fails.
  */
 export async function runNativeDownRemoveData(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -28,22 +30,33 @@ export async function runNativeDownRemoveData(opts: {
       message: `Removing native project data requires confirmation. ${CONFIRM_HINT}`,
     });
   }
-  const result = await (opts.remove ?? nativeProjectRemoveData)({
-    runtime: opts.runtime,
-    scope: opts.scope,
-    ...(opts.yes
-      ? {}
-      : {
-          confirm: () =>
-            confirmSafe({
-              message:
-                "Delete this project's stopped native data volumes? This cannot be undone; shared dependency caches are kept.",
-              initialValue: false,
-              nonInteractive: "fail",
-              hint: CONFIRM_HINT,
-            }),
-        }),
-  });
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  process.on("SIGINT", cancel);
+  process.on("SIGTERM", cancel);
+  let result: Awaited<ReturnType<typeof nativeProjectRemoveData>>;
+  try {
+    result = await (opts.remove ?? nativeProjectRemoveData)({
+      runtime: opts.runtime,
+      scope: opts.scope,
+      signal: controller.signal,
+      ...(opts.yes
+        ? {}
+        : {
+            confirm: () =>
+              confirmSafe({
+                message:
+                  "Delete this project's stopped native data volumes? This cannot be undone; shared dependency caches are kept.",
+                initialValue: false,
+                nonInteractive: "fail",
+                hint: CONFIRM_HINT,
+              }),
+          }),
+    });
+  } finally {
+    process.off("SIGINT", cancel);
+    process.off("SIGTERM", cancel);
+  }
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return 0;

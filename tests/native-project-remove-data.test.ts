@@ -1,5 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { nativeProjectRemoveData } from "../src/backends/native-project-down.ts";
@@ -9,6 +16,7 @@ import {
 } from "../src/backends/native-project-finalization.ts";
 import {
   loadNativeProjectRun,
+  nativeRestartOperationLock,
   removeNativeProjectRun,
   saveNativeProjectRun,
   saveNativeRestartIntent,
@@ -95,7 +103,7 @@ function graph(phase: Phase, opts: { readonly remaining?: boolean } = {}) {
   };
 }
 
-async function fixture(saved = true) {
+async function fixture(saved = true, finalized = true) {
   const projectRoot = await realpath(
     await mkdtemp(join(tmpdir(), "native-remove-data-"))
   );
@@ -109,7 +117,9 @@ async function fixture(saved = true) {
     await saveNativeProjectRun({ ...scope, run });
   }
   const finalization = await beginNativeProjectFinalization({ scope, run });
-  await finalization.complete();
+  if (finalized) {
+    await finalization.complete();
+  }
   return { scope, runtime: { binary: "/not-invoked", home: nativeHome } };
 }
 
@@ -343,6 +353,211 @@ test("a pending restart refuses under the restart lock", async () => {
     "a native restart is pending"
   );
   expect(r.verbs()).toEqual(["inspect"]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+async function lockPresent(scope: Parameters<typeof loadNativeProjectRun>[0]) {
+  const { lock } = await nativeRestartOperationLock(scope);
+  return await lstat(lock).then(
+    () => true,
+    () => false
+  );
+}
+
+/** Run a TypeScript child that imports repository modules by absolute path. */
+async function child(source: string, input: unknown) {
+  const dir = await realpath(
+    await mkdtemp(join(tmpdir(), "native-remove-data-child-"))
+  );
+  roots.push(dir);
+  const script = join(dir, "child.ts");
+  await writeFile(script, source);
+  const proc = Bun.spawn([process.execPath, script, JSON.stringify(input)], {
+    env: { ...process.env, HACK_DAEMON_AUTOSTART_DISABLE: "1" },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 60_000,
+  });
+  const reader = proc.stdout.getReader();
+  let seen = "";
+  const waitFor = async (marker: string) => {
+    while (!seen.includes(marker)) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        throw new Error(`child exited before ${marker}`);
+      }
+      seen += new TextDecoder().decode(chunk.value);
+    }
+  };
+  return { proc, waitFor };
+}
+
+const source = (path: string) => JSON.stringify(resolve("src", path));
+
+test("a live removal owner refuses; once it is killed the rerun reclaims the lock and finishes", async () => {
+  const opts = await fixture();
+  const holder = await child(
+    `import { withNativeRemovalLock } from ${source("backends/native-project-removal-lock.ts")};
+setInterval(() => undefined, 1000);
+await withNativeRemovalLock(JSON.parse(process.argv[2]), async () => {
+  process.stdout.write("held\\n");
+  await new Promise(() => undefined);
+});
+`,
+    opts.scope
+  );
+  try {
+    await holder.waitFor("held");
+    const live = runtime({ phases: ["removed"] });
+    await expectClosedRefusal(
+      nativeProjectRemoveData({ ...opts, invoke: live.invoke }),
+      "holds the operation lock"
+    );
+    expect(live.verbs()).toEqual(["inspect"]);
+  } finally {
+    holder.proc.kill("SIGKILL");
+    await holder.proc.exited;
+  }
+  // The killed owner ran no finally: its lock is abandoned, not released.
+  expect(await lockPresent(opts.scope)).toBe(true);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+  const rerun = runtime({ phases: ["removed"] });
+  expect(
+    (await nativeProjectRemoveData({ ...opts, invoke: rerun.invoke })).status
+  ).toBe("removed");
+  expect(rerun.verbs()).toEqual(["inspect", "inspect", "inspect"]);
+  expect(await loadNativeProjectRun(opts.scope)).toBeNull();
+  expect(await lockPresent(opts.scope)).toBe(false);
+});
+
+test("locks without proof that a removal owner exited are never reclaimed", async () => {
+  const exited = Bun.spawn(["true"]);
+  await exited.exited;
+  const dead = exited.pid;
+  const nonce = `${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}`;
+  const cases: Record<string, (lock: string) => Promise<void>> = {
+    // Restart and filesystem recovery hold the directory with no owner.
+    "owner-less": async (lock) => {
+      await mkdir(lock, { mode: 0o700 });
+    },
+    "foreign operation": async (lock) => {
+      await mkdir(lock, { mode: 0o700 });
+      await writeFile(join(lock, "owner"), `restart\n${dead}\n${nonce}\n`, {
+        mode: 0o600,
+      });
+    },
+    "recovery guard busy": async (lock) => {
+      await mkdir(lock, { mode: 0o700 });
+      await writeFile(join(lock, "owner"), `remove-data\n${dead}\n${nonce}\n`, {
+        mode: 0o600,
+      });
+      await mkdir(`${lock}.recovery`, { mode: 0o700 });
+    },
+  };
+  for (const [name, plant] of Object.entries(cases)) {
+    const opts = await fixture();
+    const { lock } = await nativeRestartOperationLock(opts.scope);
+    await plant(lock);
+    const r = runtime({ phases: ["removed"] });
+    await expectClosedRefusal(
+      nativeProjectRemoveData({ ...opts, invoke: r.invoke }),
+      "holds the operation lock"
+    );
+    expect({ name, verbs: r.verbs() }).toEqual({ name, verbs: ["inspect"] });
+    expect(await lockPresent(opts.scope)).toBe(true);
+    expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+  }
+});
+
+test("cancellation during cleanup settles the owned request and releases the lock", async () => {
+  const opts = await fixture();
+  const controller = new AbortController();
+  const phases: Phase[] = ["stopped-data-retained", "stopped-data-retained"];
+  const verbs: string[] = [];
+  const invoke = (async (request) => {
+    verbs.push(request.args[1]!);
+    if (request.args[1] !== "cleanup") {
+      return graph(phases.shift() ?? "cleanup-intent");
+    }
+    expect(request.signal).toBe(controller.signal);
+    controller.abort();
+    // The runtime client kills and awaits its child, then reports the cancellation.
+    throw new NativeRuntimeRequestError({
+      message: "Native runtime request was canceled.",
+    });
+  }) as typeof invokeNativeRuntime;
+  await expectClosedRefusal(
+    nativeProjectRemoveData({ ...opts, invoke, signal: controller.signal }),
+    "Native data removal is unconfirmed; the run mapping is kept"
+  );
+  expect(verbs).toEqual(["inspect", "inspect", "cleanup"]);
+  expect(await lockPresent(opts.scope)).toBe(false);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+  const resumed = runtime({
+    phases: ["cleanup-intent", "cleanup-intent", "removed"],
+  });
+  expect(
+    (await nativeProjectRemoveData({ ...opts, invoke: resumed.invoke })).status
+  ).toBe("removed");
+});
+
+test("cancellation while waiting for finalization requests no cleanup and releases the lock", async () => {
+  const opts = await fixture(true, false);
+  const controller = new AbortController();
+  const r = runtime({ phases: ["stopped-data-retained"] });
+  const removal = nativeProjectRemoveData({
+    ...opts,
+    invoke: r.invoke,
+    signal: controller.signal,
+    finalizationTimeoutMs: 60_000,
+  });
+  await Bun.sleep(200);
+  controller.abort();
+  await expectClosedRefusal(removal, "canceled before any cleanup request");
+  expect(r.verbs()).toEqual(["inspect", "inspect"]);
+  expect(await lockPresent(opts.scope)).toBe(false);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("SIGINT during cleanup fails the command after releasing the lock", async () => {
+  const opts = await fixture();
+  const removal = await child(
+    `import { nativeProjectRemoveData } from ${source("backends/native-project-down.ts")};
+import { runNativeDownRemoveData } from ${source("commands/project-native-remove-data.ts")};
+const input = JSON.parse(process.argv[2]);
+setInterval(() => undefined, 1000);
+const invoke = async (request) => {
+  if (request.args[1] !== "cleanup") {
+    return input.reply;
+  }
+  process.stdout.write("cleanup\\n");
+  return await new Promise((_, reject) =>
+    request.signal?.addEventListener("abort", () => reject(new Error("canceled")))
+  );
+};
+try {
+  await runNativeDownRemoveData({
+    ...input,
+    yes: true,
+    json: true,
+    remove: (o) => nativeProjectRemoveData({ ...o, invoke }),
+  });
+  process.exit(0);
+} catch (error) {
+  process.stderr.write(error.message);
+  process.exit(3);
+}
+`,
+    { ...opts, reply: graph("stopped-data-retained") }
+  );
+  await removal.waitFor("cleanup");
+  removal.proc.kill("SIGINT");
+  expect(await removal.proc.exited).toBe(3);
+  expect(await new Response(removal.proc.stderr).text()).toContain(
+    "Native data removal is unconfirmed"
+  );
+  expect(await lockPresent(opts.scope)).toBe(false);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 

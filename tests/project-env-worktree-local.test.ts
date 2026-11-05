@@ -445,7 +445,7 @@ test("unreadable primary local files fail closed without exposing contents", asy
 
 async function runHack(cwd: string, args: string[], sandbox: string) {
   const proc = Bun.spawn(
-    ["bun", resolve(import.meta.dir, "../index.ts"), ...args],
+    [process.execPath, resolve(import.meta.dir, "../index.ts"), ...args],
     {
       cwd,
       env: privateCliEnv({

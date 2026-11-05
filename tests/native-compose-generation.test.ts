@@ -1400,7 +1400,7 @@ test("random reservation precedes render; exact immutable document and private r
   });
   expect(JSON.stringify(saved)).not.toContain(REVISION);
   expect(JSON.stringify(saved)).not.toContain("synthetic-secret");
-  expect(await readdir(dirname(generation.composeFile))).toEqual([
+  expect((await readdir(dirname(generation.composeFile))).sort()).toEqual([
     "compose.json",
     "manifest.json",
   ]);

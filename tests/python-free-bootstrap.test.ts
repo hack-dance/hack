@@ -41,10 +41,11 @@ function fixture(
     mkdirSync(path, { mode: 0o700 });
   }
   for (const tool of ["shasum", "mktemp", "chmod", "rm", "cp", "date"]) {
-    symlinkSync(
-      `${tool === "shasum" || tool === "mktemp" ? "/usr/bin" : "/bin"}/${tool}`,
-      join(bin, tool)
-    );
+    const executable = Bun.which(tool);
+    if (!executable) {
+      throw new Error(`Bootstrap fixture requires ${tool} on PATH`);
+    }
+    symlinkSync(executable, join(bin, tool));
   }
   const script = (name: string, text: string) =>
     writeFileSync(join(bin, name), `#!/bin/sh\nset -eu\n${text}\n`, {

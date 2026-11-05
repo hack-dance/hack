@@ -397,7 +397,7 @@ test("dead frontend recovery binds the stored run, holds startup, retires only a
     ordinaryAction = true;
   });
   expect(ordinaryAction).toBe(true);
-  expect(await readdir(current.paths.dir)).toEqual([
+  expect((await readdir(current.paths.dir)).sort()).toEqual([
     ".gitignore",
     `${current.selection.run}.frontend-recovered.json`,
   ]);

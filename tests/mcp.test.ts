@@ -118,7 +118,7 @@ async function startMcpClient(): Promise<Client> {
   const repoRoot = resolve(import.meta.dir, "..");
 
   const transport = new StdioClientTransport({
-    command: "bun",
+    command: process.execPath,
     args: ["index.ts", "mcp", "serve"],
     cwd: repoRoot,
     env: privateCliEnv({
@@ -137,7 +137,7 @@ async function startMcpClient(): Promise<Client> {
 
 function buildHackStubScript(): string {
   return [
-    "#!/usr/bin/env bun",
+    `#!${process.execPath}`,
     "const args = Bun.argv.slice(2)",
     'const cmd = args[0] ?? ""',
     'if (cmd === "projects") {',

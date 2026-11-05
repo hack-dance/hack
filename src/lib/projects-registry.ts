@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { GLOBAL_PROJECTS_REGISTRY_FILENAME } from "../constants.ts";
+import { HackCliError } from "./cli-result.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
-import { ensureDir, pathExists, readTextFile } from "./fs.ts";
+import { ensureDir, pathExists } from "./fs.ts";
 import {
   resolveGitCurrentBranch,
   resolveGitRegistrationMetadata,
@@ -29,6 +30,11 @@ import {
   withProjectsRegistryLock,
   writeProjectsRegistryAtomic,
 } from "./projects-registry-lock.ts";
+import {
+  attachValueFreeDiagnostic,
+  readValueFreeDiagnostic,
+  valueFreeErrorDiagnostic,
+} from "./value-free-diagnostic.ts";
 
 const REGISTRY_VERSION = 1 as const;
 const REGISTRY_LOCK_FILENAME = `${GLOBAL_PROJECTS_REGISTRY_FILENAME}.lock`;
@@ -80,12 +86,77 @@ export type RegisterOutcome =
       >;
     };
 
-/** Read an explicit session registry without changing process-wide environment. */
+const REGISTRY_READ_DIAGNOSTIC = "ProjectsRegistryReadError";
+
+/**
+ * Closed, value-free refusal when the projects registry exists (or may exist)
+ * but cannot be read. Only a missing file (ENOENT/ENOTDIR) means an empty
+ * registry; any other fault refuses so an unreadable registry is never
+ * reported, targeted or rewritten as if it were empty.
+ *
+ * `E_PERMISSION` covers EACCES/EPERM; every other fault is `E_CONFIG_INVALID`.
+ * The message never carries the OS message or the registry path. The fault's
+ * class and errno code (for example `Error:EACCES`) are kept only as a
+ * non-enumerable diagnostic; read it with {@link projectsRegistryReadDiagnostic}.
+ */
+export class ProjectsRegistryReadError extends HackCliError {
+  override readonly code: "E_PERMISSION" | "E_CONFIG_INVALID";
+
+  constructor(error: unknown) {
+    const errno = isRecord(error) ? error.code : undefined;
+    const code =
+      errno === "EACCES" || errno === "EPERM"
+        ? "E_PERMISSION"
+        : "E_CONFIG_INVALID";
+    super({
+      code,
+      message:
+        "Cannot read the Hack projects registry (projects.json). Check its filesystem permissions before retrying; it was not changed. Values omitted.",
+    });
+    this.name = "ProjectsRegistryReadError";
+    this.code = code;
+    attachValueFreeDiagnostic({
+      target: this,
+      diagnostic: valueFreeErrorDiagnostic(error),
+      fallback: REGISTRY_READ_DIAGNOSTIC,
+    });
+  }
+}
+
+/** The value-free diagnostic of a {@link ProjectsRegistryReadError}, for tests and debugging. */
+export function projectsRegistryReadDiagnostic(
+  error: unknown
+): string | undefined {
+  return error instanceof ProjectsRegistryReadError
+    ? readValueFreeDiagnostic(error)
+    : undefined;
+}
+
+async function readRegistryText(path: string): Promise<string | null> {
+  try {
+    return await Bun.file(path).text();
+  } catch (error: unknown) {
+    const errno = isRecord(error) ? error.code : undefined;
+    if (errno === "ENOENT" || errno === "ENOTDIR") {
+      return null;
+    }
+    throw new ProjectsRegistryReadError(error);
+  }
+}
+
+/**
+ * Read an explicit session registry without changing process-wide environment.
+ *
+ * A missing registry is empty, and so (best-effort) is one that is not valid
+ * JSON or not a registry. A registry that exists but cannot be read refuses
+ * with {@link ProjectsRegistryReadError}; writers reread under the lock, so
+ * they refuse too instead of replacing it.
+ */
 export async function readProjectsRegistry(opts?: {
   readonly registryPath?: string;
 }): Promise<ProjectsRegistry> {
   const path = opts?.registryPath ?? getRegistryPath();
-  const text = await readTextFile(path);
+  const text = await readRegistryText(path);
   if (!text) {
     return { version: REGISTRY_VERSION, projects: [] };
   }

@@ -548,6 +548,18 @@ fn graph_cli_rejects_duplicate_and_cross_action_flags_before_runtime_access() {
         ],
         vec!["graph", "inspect", "--run-id", "a", "--remove-data"],
         vec!["graph", "cleanup", "--run-id", "a", "--run-id", "b"],
+        // Stopped-only removal is a cleanup refinement and requires --remove-data.
+        vec!["graph", "cleanup", "--run-id", "a", "--retained-only"],
+        vec![
+            "graph",
+            "cleanup",
+            "--run-id",
+            "a",
+            "--remove-data",
+            "--retained-only",
+            "--retained-only",
+        ],
+        vec!["graph", "inspect", "--run-id", "a", "--retained-only"],
         vec![
             "graph",
             "run",

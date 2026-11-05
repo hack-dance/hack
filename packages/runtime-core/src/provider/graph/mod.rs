@@ -177,6 +177,12 @@ const MAX_VOLUMES: usize = 8;
 fn error(code: &'static str, message: &str) -> CandidateError {
     CandidateError::new(code, message)
 }
+fn not_retained() -> CandidateError {
+    error(
+        "graph_cleanup_not_retained",
+        "Stopped-only data removal refused: the graph is not stopped with retained data. Nothing was stopped or removed.",
+    )
+}
 fn hex(value: &str, len: usize) -> bool {
     value.len() == len
         && value
@@ -1638,6 +1644,27 @@ pub fn cleanup(
     // its environment inventory, so history is compacted under the same lease. A refusal keeps
     // the records for the next cleanup, restore or archive; it never reports this cleanup failed.
     // Relay-enrolled graphs compact in restore instead (see `environment_recovery::compaction`).
+    if let Some(containers) = environment::bound_containers(&receipt) {
+        environment::compact_history(candidate, &engine, &receipt.run, &containers);
+    }
+    Ok(receipt)
+}
+
+/// Stopped-only data removal for a graph without a foreground owner. The phase
+/// is checked under the same mutation lease that restore needs, so a run that
+/// was restored or started since the caller's inspection refuses instead of
+/// having its compute stopped. A durable cleanup intent or an already removed
+/// receipt resumes.
+pub fn remove_retained_data(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (receipt, root) = load(candidate, &engine, run)?;
+    if receipt.relay_startup.is_some()
+        || !["stopped-data-retained", "cleanup-intent", "removed"].contains(&receipt.phase.as_str())
+    {
+        return Err(not_retained());
+    }
+    cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
+    let receipt = cleanup_owned(candidate, &engine, receipt, &root, true)?;
     if let Some(containers) = environment::bound_containers(&receipt) {
         environment::compact_history(candidate, &engine, &receipt.run, &containers);
     }

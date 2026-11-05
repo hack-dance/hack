@@ -837,7 +837,11 @@ the graph's images, volumes or other resources, the retained data cannot be adop
 on a stopped project: run `hack down` first. It asks for confirmation (`--yes` skips the
 question; `--json` requires `--yes`), runs no lifecycle hooks, and asks the graph owner to
 delete only the volumes that this run created. Shared dependency caches are released, not
-deleted. The run mapping is retired only after every owned volume is confirmed absent, so
+deleted. The request uses `graph cleanup --remove-data --retained-only`: the runtime
+re-checks that the graph is still stopped while holding the lock a restore also needs, so if `hack up` in
+another terminal restored the run in the meantime, removal refuses
+(`graph_cleanup_not_retained`) instead of stopping it, and nothing is deleted. The run
+mapping is retired only after every owned volume is confirmed absent, so
 the next `up` starts a new run with new empty volumes. If removal is interrupted or
 cannot be confirmed, the mapping is kept and running the same command again resumes from
 the owner's durable cleanup intent. Ctrl-C (SIGINT) or SIGTERM ends the owned runtime

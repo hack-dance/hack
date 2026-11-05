@@ -630,6 +630,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let mut release_initializer_cache = std::collections::BTreeSet::new();
     let mut profiles = Vec::new();
     let mut remove_data = false;
+    let mut retained_only = false;
     let mut environment_stdin = false;
     let mut automatic_dependency_slots = false;
     let mut live_source = false;
@@ -694,6 +695,13 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 return Err(invalid());
             }
             remove_data = true;
+            continue;
+        }
+        if key == "--retained-only" {
+            if retained_only || *action != "cleanup" {
+                return Err(invalid());
+            }
+            retained_only = true;
             continue;
         }
         let value = *args.get(index).ok_or_else(invalid)?;
@@ -965,13 +973,25 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             }
         }
         "cleanup" => {
+            // Stopped-only data removal never reaches a live owner, so a graph
+            // restored after the caller confirmed it stopped is never stopped by it.
+            if retained_only && !remove_data {
+                return Err(invalid());
+            }
             #[cfg(target_os = "macos")]
             if graph::inspect(candidate, run)?
                 .receipt
                 .relay_startup
                 .is_some()
             {
-                return graph::foreground::cleanup_request(candidate, run, remove_data);
+                return if retained_only {
+                    graph::foreground::remove_retained_data(candidate, run)
+                } else {
+                    graph::foreground::cleanup_request(candidate, run, remove_data)
+                };
+            }
+            if retained_only {
+                return encode(graph::remove_retained_data(candidate, run)?);
             }
             encode(graph::cleanup(candidate, run, remove_data)?)
         }

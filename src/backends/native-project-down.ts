@@ -395,12 +395,16 @@ function confirmRemoved(value: unknown, run: NativeProjectRun): void {
  * Explicit retained-data removal for a stopped native Compose-file project
  * (Compose parity: `down --volumes`). It never stops compute or runs hooks:
  * a running graph refuses, so `hack down` must stop it first. Under the
- * restart lock and after the original frontend's finalization, it asks the
- * graph owner for `graph cleanup --remove-data`, which deletes only
- * receipt-owned volumes behind a durable cleanup intent and releases shared
- * dependency caches without deleting them. The run mapping is retired only
- * after every owned volume is confirmed absent, so the next `up` starts a
- * fresh run with new empty volumes.
+ * native operation lock and after the original frontend's finalization, it
+ * asks the graph owner for `graph cleanup --remove-data --retained-only`,
+ * which deletes only receipt-owned volumes behind a durable cleanup intent
+ * and releases shared dependency caches without deleting them.
+ * `--retained-only` makes the owner re-check the stopped state atomically, so
+ * a `hack up` elsewhere that restored the run after these frontend checks
+ * makes it refuse instead of stopping that run; the frontend lock alone cannot
+ * exclude that restore. The run mapping is retired only after every owned
+ * volume is confirmed absent, so the next `up` starts a fresh run with new
+ * empty volumes.
  *
  * Failure keeps the mapping. A rerun resumes from re-inspection: a durable
  * cleanup intent or an already removed receipt continues without replaying
@@ -493,6 +497,9 @@ export async function nativeProjectRemoveData(opts: {
             "--run-id",
             run.run,
             "--remove-data",
+            // Atomic stopped-only gate: the owner refuses a run restored since
+            // the checks above instead of stopping it and deleting its data.
+            "--retained-only",
             "--json",
           ],
           timeoutMs: 590_000,

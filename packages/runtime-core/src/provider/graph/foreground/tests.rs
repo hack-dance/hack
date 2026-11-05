@@ -533,3 +533,39 @@ fn dead_owner_selection_holds_lock_and_rejects_live_or_changed_records() {
     drop(guard);
     fs::remove_dir_all(path).unwrap();
 }
+#[test]
+fn stopped_only_removal_never_requests_an_owner_restored_after_inspection() {
+    let (_fixture, candidate, run) = fixture();
+    let path = root(&candidate, &run);
+    // The confirmed stopped run's owner retired; a restore then published a live owner.
+    let mut first = Publication::bind(&candidate, &run).unwrap();
+    first.finish().unwrap();
+    drop(first);
+    let mut restored = Publication::bind_retired(&candidate, &run).unwrap();
+    assert_eq!(
+        remove_retained_data(&candidate, &run).unwrap_err().code,
+        "graph_cleanup_not_retained"
+    );
+    // No request reached the restored owner, so it stopped nothing and deleted nothing.
+    assert!(restored.accept().unwrap().is_none());
+    // Control: the general cleanup request does fall back to that live owner.
+    std::thread::scope(|scope| {
+        let sender = scope.spawn(|| cleanup_request(&candidate, &run, true));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut server = loop {
+            if let Some(server) = restored.accept().unwrap() {
+                break server;
+            }
+            assert!(Instant::now() < deadline, "cleanup request never arrived");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let request: WireRequest =
+            transport::read(&mut server, Duration::from_secs(5), 64 * 1024).unwrap();
+        assert_eq!(request.remove_data, Some(true));
+        drop(server);
+        assert!(sender.join().unwrap().is_err());
+    });
+    restored.finish().unwrap();
+    drop(restored);
+    fs::remove_dir_all(path).unwrap();
+}

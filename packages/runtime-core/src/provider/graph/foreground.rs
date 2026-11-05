@@ -495,14 +495,35 @@ pub fn cleanup_request(
     remove_data: bool,
 ) -> Result<Value, CandidateError> {
     if remove_data {
-        if let Some(guard) = transport::Retired::acquire(candidate, run)? {
-            return retained_data::remove(candidate, run, guard);
-        }
-        if let Ok(guard) = transport::DeadOwner::acquire(candidate, run) {
-            return retained_data::remove_recovered(candidate, run, guard);
+        if let Some(removed) = remove_without_live_owner(candidate, run)? {
+            return Ok(removed);
         }
     }
     request(candidate, run, Some(remove_data))
+}
+
+/// Remove data only under the exact guard of a retired or dead owner. Each
+/// guard holds the run's operation lock, which a restoring owner must take
+/// before it publishes, and removal itself admits only a stopped receipt.
+fn remove_without_live_owner(
+    candidate: &Candidate,
+    run: &str,
+) -> Result<Option<Value>, CandidateError> {
+    if let Some(guard) = transport::Retired::acquire(candidate, run)? {
+        return retained_data::remove(candidate, run, guard).map(Some);
+    }
+    if let Ok(guard) = transport::DeadOwner::acquire(candidate, run) {
+        return retained_data::remove_recovered(candidate, run, guard).map(Some);
+    }
+    Ok(None)
+}
+
+/// Stopped-only data removal (`graph cleanup --remove-data --retained-only`).
+/// Unlike [`cleanup_request`] it never falls back to the live-owner request:
+/// a live owner, including one restored after the caller confirmed the graph
+/// stopped, refuses before any request reaches it, so nothing is stopped.
+pub fn remove_retained_data(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
+    remove_without_live_owner(candidate, run)?.ok_or_else(super::not_retained)
 }
 
 /// Status is None; cleanup is Some(remove_data). Missing/stale owners refuse; this

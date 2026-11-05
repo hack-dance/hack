@@ -213,7 +213,15 @@ test("a stopped project removes owned data, keeps caches and retires the mapping
   expect(r.calls).toEqual([
     ["graph", "inspect", "--run-id", run.run, "--json"],
     ["graph", "inspect", "--run-id", run.run, "--json"],
-    ["graph", "cleanup", "--run-id", run.run, "--remove-data", "--json"],
+    [
+      "graph",
+      "cleanup",
+      "--run-id",
+      run.run,
+      "--remove-data",
+      "--retained-only",
+      "--json",
+    ],
     ["graph", "inspect", "--run-id", run.run, "--json"],
   ]);
   expect(await loadNativeProjectRun(opts.scope)).toBeNull();
@@ -559,6 +567,50 @@ try {
   );
   expect(await lockPresent(opts.scope)).toBe(false);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("a restore landing between the stopped check and cleanup is refused by the owner: nothing is stopped or deleted", async () => {
+  const opts = await fixture();
+  // Models the runtime: the general cleanup path reaches a live restored owner,
+  // which stops it and deletes its data; `--retained-only` refuses instead.
+  const world = { restored: false, running: false, dataPresent: true };
+  let inspections = 0;
+  const invoke = (async (request) => {
+    if (request.args[1] === "cleanup") {
+      if (!world.restored) {
+        world.dataPresent = false;
+        return {};
+      }
+      if (!request.args.includes("--retained-only")) {
+        world.running = false;
+        world.dataPresent = false;
+        return {};
+      }
+      throw new NativeRuntimeRequestError({
+        message: "synthetic-private-diagnostic",
+        nativeCode: "graph_cleanup_not_retained",
+      });
+    }
+    inspections += 1;
+    if (world.restored) {
+      return graph("ready-observed");
+    }
+    if (inspections === 2) {
+      // `hack up` in another terminal restores the same run right after
+      // removal's stopped check under the lock, before its cleanup request.
+      world.restored = true;
+      world.running = true;
+    }
+    return graph("stopped-data-retained");
+  }) as typeof invokeNativeRuntime;
+  await expectClosedRefusal(
+    nativeProjectRemoveData({ ...opts, invoke }),
+    "Native data removal is unconfirmed (graph_cleanup_not_retained); the run mapping is kept"
+  );
+  expect(inspections).toBe(2);
+  expect(world).toEqual({ restored: true, running: true, dataPresent: true });
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+  expect(await lockPresent(opts.scope)).toBe(false);
 });
 
 test("a mapping replaced while confirming is never removed", async () => {

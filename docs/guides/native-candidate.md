@@ -272,6 +272,45 @@ window waits briefly, then reports that the runtime is busy (`runtime_busy`,
 exit 0) instead of failing. After the ready line, `hack ps` and `hack logs` run
 alongside the foreground command.
 
+### Network aliases and the Compose project name
+
+Native review accepts `networks.<name>.aliases` on a service attachment, as
+Compose does: each alias is an extra DNS name for that service on that network
+only. Aliases must be literal DNS names (letters, digits, `-`, `_` and dots; case
+is folded), at most 8 per attachment. Interpolated aliases and the other
+attachment keys (`ipv4_address`, `ipv6_address`, `priority`, `link_local_ips`,
+`mac_address`, `driver_opts`) remain `unsupported_field`. Native networking keeps
+one owner per DNS name, where Compose would round-robin: an alias that two active
+services declare on one network, an alias that is another active service's name
+on a network both join, or an alias that is also one of the same service's
+`extra_hosts` names refuses with `network_alias_collision`. When one of the two
+services is left inactive by the selected profiles, review reports the warning
+`inactive_network_alias_collision` instead; selecting that profile refuses. The
+graph verifies every reviewed alias as part of each container's identity. `hack
+run` one-off containers keep only the service name, so they never become a second
+owner. Aliases are part of the reviewed plan: changing one is an ordinary plan
+change, never a hostname-only change.
+
+Compose also supplies its project name to interpolation as `COMPOSE_PROJECT_NAME`
+and names each container `<project>-<service>-1`, which other containers can
+resolve. When a service references `COMPOSE_PROJECT_NAME`, native `up` and
+`restart` declare the instance's Compose project name (the same `<project>` or
+`<project>--<branch>` the Compose backend passes to `docker compose -p`) as the
+normalized document's top-level `name`. Review then binds the variable to that
+name (warning `compose_project_name_binding`) and adds the container name as an
+alias on every network the service joins, under the same collision rules. No
+caller can supply a different value. The name must follow Compose's rule
+(lowercase letters, digits, `-` and `_`, starting with a letter or digit), and a
+container name longer than one 63-byte DNS label refuses with
+`compose_container_alias_too_long`. A document that does not reference the
+variable keeps identical normalized bytes and gets no container-name aliases, so
+a hard-coded `<project>-<service>-1` name does not resolve natively; use the
+service name or `${COMPOSE_PROJECT_NAME}`. Without a declared name, for example
+when the internal planning path reviews the original file directly, review warns
+with `compose_project_name_unbound` and execution refuses with
+`execution_environment_missing`. Plans and receipts that carry the new fields are
+not readable by older bundles; clean up with the owning bundle.
+
 ## Manual candidate upgrade and rollback
 
 Manual candidate bundles are selected by their full path. The separate

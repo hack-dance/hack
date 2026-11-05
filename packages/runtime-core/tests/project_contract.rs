@@ -2510,3 +2510,276 @@ fn disposable_cache_declarations_are_exact_volume_relative_and_review_bound() {
         "invalid_disposable_cache"
     );
 }
+
+fn diagnostic_codes(report: &PlanReport) -> Vec<&str> {
+    report
+        .plan
+        .diagnostics
+        .iter()
+        .map(|d| d.code.as_str())
+        .collect()
+}
+
+#[test]
+fn network_aliases_are_reviewed_normalized_and_bounded() {
+    let fixture = Fixture::new(
+        "services:\n  api:\n    image: alpine:3.21\n    networks:\n      back:\n        aliases: [API.Internal, api, queue_main]\n      front:\n  web:\n    image: alpine:3.21\n    networks: [front]\nnetworks:\n  back:\n  front:\n",
+    );
+    let report = fixture.plan();
+    assert!(
+        report.plan.enrollment_compatible,
+        "{:?}",
+        diagnostic_codes(&report)
+    );
+    let api = &report.plan.services["api"];
+    assert_eq!(api.networks, ["back", "front"]);
+    assert_eq!(
+        api.network_aliases,
+        std::collections::BTreeMap::from([(
+            "back".to_owned(),
+            vec!["api.internal".to_owned(), "queue_main".to_owned()]
+        )])
+    );
+    assert!(report.plan.services["web"].network_aliases.is_empty());
+    let serialized = serde_json::to_value(&report.plan).unwrap();
+    assert!(
+        serialized["services"]["web"]
+            .get("network_aliases")
+            .is_none()
+    );
+    assert!(serialized.get("compose_project_name").is_none());
+
+    for (attachment, code) in [
+        ("{aliases: ['${ALIAS}']}", "invalid_network_alias"),
+        ("{aliases: ['10.0.0.1']}", "invalid_network_alias"),
+        ("{aliases: ['-bad']}", "invalid_network_alias"),
+        ("{aliases: [a, A]}", "invalid_network_alias"),
+        ("{aliases: a}", "invalid_network_alias"),
+        (
+            "{aliases: [a1, a2, a3, a4, a5, a6, a7, a8, a9]}",
+            "invalid_network_alias",
+        ),
+        ("{ipv4_address: 10.0.0.2}", "unsupported_field"),
+        ("{aliases: [a], priority: 1}", "unsupported_field"),
+    ] {
+        fs::write(
+            fixture.project.join("compose.yaml"),
+            format!(
+                "services:\n  api:\n    image: alpine:3.21\n    networks:\n      default: {attachment}\n"
+            ),
+        )
+        .unwrap();
+        let report = fixture.plan();
+        assert!(!report.plan.enrollment_compatible, "{attachment}");
+        assert!(diagnostic_codes(&report).contains(&code), "{attachment}");
+        let rendered = serde_json::to_string(&report.plan.diagnostics).unwrap();
+        assert!(!rendered.contains("10.0.0"), "{attachment}");
+    }
+}
+
+#[test]
+fn network_alias_owners_are_unique_per_network_and_profile_aware() {
+    let compose = |api: &str| {
+        format!(
+            "services:\n  api:\n    image: alpine:3.21\n{api}  db:\n    image: alpine:3.21\n    networks: [default, side]\n  replica:\n    image: alpine:3.21\n    profiles: [replica]\n    networks:\n      default:\n        aliases: [db]\nnetworks:\n  default:\n  side:\n  other:\n"
+        )
+    };
+    // (api declaration, profiles, expected collision code)
+    let cases: [(&str, &[&str], Option<&str>); 7] = [
+        // An inactive service's alias equal to an active service name warns.
+        ("", &[], Some("inactive_network_alias_collision")),
+        // Selecting its profile makes the same declaration an error.
+        ("", &["replica"], Some("network_alias_collision")),
+        // Two active owners of one alias on one network.
+        (
+            "    networks:\n      side:\n        aliases: [shared]\n  peer:\n    image: alpine:3.21\n    networks:\n      side:\n        aliases: [shared]\n",
+            &[],
+            Some("network_alias_collision"),
+        ),
+        // An alias that replaces another active service's name on a shared network.
+        (
+            "    networks:\n      side:\n        aliases: [db]\n",
+            &[],
+            Some("network_alias_collision"),
+        ),
+        // The same name on a network the owners do not share is allowed.
+        (
+            "    networks:\n      other:\n        aliases: [db]\n",
+            &[],
+            None,
+        ),
+        // An alias that is also one of the service's own extra_hosts names.
+        (
+            "    networks:\n      side:\n        aliases: [cache.internal]\n    extra_hosts: ['cache.internal:host-gateway']\n",
+            &[],
+            Some("network_alias_collision"),
+        ),
+        // A distinct alias has one owner.
+        (
+            "    networks:\n      side:\n        aliases: [api.internal]\n",
+            &[],
+            None,
+        ),
+    ];
+    for (api, profiles, expected) in cases {
+        let fixture = Fixture::new(&compose(api));
+        let profiles: Vec<String> = profiles.iter().map(|p| (*p).to_owned()).collect();
+        let report = project::plan(
+            &fixture.candidate,
+            PlanOptions {
+                profiles: &profiles,
+                ..fixture.options()
+            },
+        )
+        .unwrap();
+        let codes = diagnostic_codes(&report);
+        let collisions: Vec<&str> = codes
+            .iter()
+            .copied()
+            .filter(|code| code.ends_with("network_alias_collision"))
+            .collect();
+        match expected {
+            Some(code) => assert!(collisions.contains(&code), "{api:?} {profiles:?} {codes:?}"),
+            // Only the inactive replica's baseline warning remains.
+            None => assert!(
+                collisions
+                    .iter()
+                    .all(|code| *code == "inactive_network_alias_collision"),
+                "{api:?} {codes:?}"
+            ),
+        }
+        assert_eq!(
+            codes.contains(&"network_alias_collision"),
+            !report.plan.enrollment_compatible,
+            "{api:?} {profiles:?} {codes:?}"
+        );
+    }
+}
+
+#[test]
+fn compose_project_name_binds_interpolation_and_container_aliases() {
+    use project::inputs;
+    use std::collections::BTreeMap;
+    let body = concat!(
+        "services:\n",
+        "  app:\n",
+        "    image: alpine:3.21\n",
+        "    environment:\n",
+        "      QUEUE_ADDRESS: '${COMPOSE_PROJECT_NAME}-queue-1:9000'\n",
+        "      ESCAPED: '$${COMPOSE_PROJECT_NAME}'\n",
+        "    command: [echo, '${COMPOSE_PROJECT_NAME:-unset}']\n",
+        "  queue:\n",
+        "    image: alpine:3.21\n",
+        "    networks: [default, side]\n",
+        "  isolated:\n",
+        "    image: alpine:3.21\n",
+        "    network_mode: none\n",
+        "networks:\n",
+        "  side:\n",
+    );
+    let fixture = Fixture::new(&format!("name: app--feature-x\n{body}"));
+    let report = fixture.plan();
+    assert!(
+        report.plan.enrollment_compatible,
+        "{:?}",
+        diagnostic_codes(&report)
+    );
+    assert_eq!(
+        report.plan.compose_project_name.as_deref(),
+        Some("app--feature-x")
+    );
+    assert_eq!(
+        report.plan.diagnostics[0].code,
+        "compose_project_name_binding"
+    );
+    assert_eq!(
+        report.plan.services["queue"].network_aliases,
+        BTreeMap::from([
+            (
+                "default".to_owned(),
+                vec!["app--feature-x-queue-1".to_owned()]
+            ),
+            ("side".to_owned(), vec!["app--feature-x-queue-1".to_owned()]),
+        ])
+    );
+    assert!(report.plan.services["isolated"].network_aliases.is_empty());
+    let compiled = inputs::compile(
+        &fixture.candidate,
+        fixture.options(),
+        &report.plan_id,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let app = &compiled.services["app"];
+    assert_eq!(
+        app.environment,
+        [
+            "ESCAPED=${COMPOSE_PROJECT_NAME}",
+            "QUEUE_ADDRESS=app--feature-x-queue-1:9000"
+        ]
+    );
+    assert_eq!(app.command.as_ref().unwrap(), &["echo", "app--feature-x"]);
+    // No caller can substitute a different project name.
+    let failure = inputs::compile(
+        &fixture.candidate,
+        fixture.options(),
+        &report.plan_id,
+        &BTreeMap::from([("COMPOSE_PROJECT_NAME".into(), "other".into())]),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.code, "execution_environment_owner");
+
+    // Without a declared name the reference stays unbound and execution refuses.
+    fs::write(fixture.project.join("compose.yaml"), body).unwrap();
+    let report = fixture.plan();
+    assert!(report.plan.compose_project_name.is_none());
+    assert!(diagnostic_codes(&report).contains(&"compose_project_name_unbound"));
+    assert!(report.plan.services["queue"].network_aliases.is_empty());
+    let failure = inputs::compile(
+        &fixture.candidate,
+        fixture.options(),
+        &report.plan_id,
+        &BTreeMap::new(),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.code, "execution_environment_missing");
+
+    // Invalid Compose project names and over-long container names refuse.
+    for (name, code) in [
+        ("name: App\n", "invalid_compose_project_name"),
+        (
+            "name: a-very-long-compose-project-name-for-a-feature-branch-instance\n",
+            "compose_container_alias_too_long",
+        ),
+    ] {
+        fs::write(
+            fixture.project.join("compose.yaml"),
+            format!("{name}{body}"),
+        )
+        .unwrap();
+        let report = fixture.plan();
+        assert!(!report.plan.enrollment_compatible, "{name}");
+        assert!(diagnostic_codes(&report).contains(&code), "{name}");
+    }
+}
+
+#[test]
+fn declared_name_without_reference_keeps_review_unchanged() {
+    let fixture = Fixture::new(&format!("name: app\n{BASIC}"));
+    let report = fixture.plan();
+    assert!(report.plan.compose_project_name.is_none());
+    assert_eq!(
+        report.plan.diagnostics[0].code,
+        "candidate_project_namespace"
+    );
+    assert!(report.plan.services["web"].network_aliases.is_empty());
+    let serialized = serde_json::to_value(&report.plan).unwrap();
+    assert!(serialized.get("compose_project_name").is_none());
+    assert!(
+        serialized["services"]["web"]
+            .get("network_aliases")
+            .is_none()
+    );
+}

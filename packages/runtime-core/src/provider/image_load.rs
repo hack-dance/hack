@@ -176,13 +176,22 @@ struct Manifest {
 /// first bytes as the engine's loader does: gzip, zstd (including multiple and skippable
 /// frames) or an uncompressed tar. Returns true when the member was not compressed.
 fn decode_member(
-    member: impl Read,
+    mut member: impl Read,
     mut sink: impl FnMut(&[u8]) -> Result<(), CandidateError>,
 ) -> Result<bool, CandidateError> {
-    let mut member = BufReader::with_capacity(64 * 1024, member);
-    let head = member
-        .fill_buf()
-        .map_err(|_| error("Cannot read an image archive member."))?;
+    // The magic is read in full even when the member arrives in short reads.
+    let mut magic = [0_u8; 4];
+    let mut filled = 0;
+    while filled < magic.len() {
+        match member.read(&mut magic[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(error("Cannot read an image archive member.")),
+        }
+    }
+    let head = &magic[..filled];
+    let mut member = BufReader::with_capacity(64 * 1024, head.chain(member));
     let gzip = head.starts_with(&[0x1f, 0x8b]);
     // A zstd stream starts with a frame or a skippable frame (magic 0x184D2A50 through
     // 0x184D2A5F); both are little-endian.
@@ -298,19 +307,25 @@ fn validate_stream(
             let small = entry.size() <= MAX_METADATA_MEMBER;
             let mut digest = Sha256::new();
             let mut retained = small.then(Vec::new);
-            let mut first = true;
-            let mut raw_json = false;
+            // Decided by the first byte that is not JSON whitespace, in whichever chunk it
+            // arrives; the original bytes, whitespace included, are retained for identity.
+            let mut raw_json: Option<bool> = None;
             let uncompressed = decode_member(entry, |bytes| {
                 expanded += bytes.len() as u64;
                 if expanded > expanded_limit {
                     return Err(error("Image expansion exceeds its configured budget."));
                 }
                 digest.update(bytes);
-                if first {
-                    first = false;
-                    raw_json = matches!(bytes.first(), Some(b'{' | b'['));
+                if raw_json.is_none() {
+                    raw_json = bytes
+                        .iter()
+                        .find(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                        .map(|b| matches!(b, b'{' | b'['));
                 }
-                if let Some(kept) = retained.as_mut().filter(|_| raw_json) {
+                if raw_json == Some(false) {
+                    retained = None;
+                }
+                if let Some(kept) = retained.as_mut() {
                     kept.extend_from_slice(bytes);
                     if kept.len() as u64 > MAX_METADATA_MEMBER {
                         retained = None;
@@ -318,7 +333,7 @@ fn validate_stream(
                 }
                 Ok(())
             })?;
-            let retained = retained.filter(|kept| uncompressed && raw_json && !kept.is_empty());
+            let retained = retained.filter(|_| uncompressed && raw_json == Some(true));
             if let Some(kept) = &retained {
                 retained_total += kept.len();
                 if retained_total > MAX_RETAINED_METADATA {
@@ -859,6 +874,76 @@ pub(super) mod tests {
         corrupt[last] ^= 0xff;
         corrupt.truncate(corrupt.len() - 1);
         assert!(decode_member(Cursor::new(corrupt), |_| Ok(())).is_err());
+    }
+
+    /// Reads at most `step` bytes per call, so members arrive in many small chunks.
+    struct Trickle<'a> {
+        bytes: &'a [u8],
+        step: usize,
+    }
+    impl Read for Trickle<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let n = buffer.len().min(self.step).min(self.bytes.len());
+            buffer[..n].copy_from_slice(&self.bytes[..n]);
+            self.bytes = &self.bytes[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn metadata_with_leading_json_whitespace_is_retained_with_its_original_bytes() {
+        let payload: Vec<u8> = (0..4096_u32).map(|n| (n % 7) as u8).collect();
+        let layer = compress(Layer::Gzip, &payload);
+        let mut config = b" \t\r\n  ".to_vec();
+        config.extend(
+            serde_json::to_vec(&serde_json::json!({"architecture":"arm64","os":"linux",
+                "rootfs":{"type":"layers","diff_ids":[format!("sha256:{}", hash(&payload))]}}))
+            .unwrap(),
+        );
+        config.extend_from_slice(b"\n");
+        // The content ID covers the whitespace: identity uses the original bytes.
+        let image = format!("sha256:{}", hash(&config));
+        let mut manifest = b"\n\n".to_vec();
+        manifest.extend(
+            serde_json::to_vec(
+                &serde_json::json!([{"Config":"config.json","Layers":["layer"],"RepoTags":[]}]),
+            )
+            .unwrap(),
+        );
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, bytes) in [
+            ("config.json", config.as_slice()),
+            ("layer", layer.as_slice()),
+            ("manifest.json", manifest.as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, bytes).unwrap();
+        }
+        let bytes = builder.into_inner().unwrap();
+        assert_eq!(
+            validate(&bytes, &image, 1 << 20).unwrap(),
+            bytes.len() as u64
+        );
+        // One- and three-byte reads split the whitespace and the compression magic
+        // across chunk boundaries.
+        for step in [1, 3] {
+            let reader = Trickle {
+                bytes: &bytes,
+                step,
+            };
+            assert_eq!(
+                validate_stream(reader, &hash(&bytes), &image, 1 << 30, 1 << 20).unwrap(),
+                bytes.len() as u64,
+                "step {step}"
+            );
+        }
+        // The identity is still exact: the same JSON without the whitespace is a
+        // different content ID.
+        let trimmed = format!("sha256:{}", hash(config.trim_ascii()));
+        assert!(validate(&bytes, &trimmed, 1 << 20).is_err());
     }
 
     #[test]

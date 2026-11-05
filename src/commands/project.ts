@@ -41,6 +41,7 @@ import {
 } from "../agents/onboarding-handoff.ts";
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
+import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
 import { parseNativePreparedBase } from "../backends/native-prepared-base.ts";
 import {
   nativeDownEnvironment,
@@ -5794,6 +5795,11 @@ async function handleNativeUp({
     profiles: parseCsvList(args.options.profile),
     sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
     dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
+    dependencyOwners: createNativeDependencyOwnerResolver({
+      projectDir: project.projectDir,
+      composeProject,
+      sharedHelpers: cfg.lifecycle?.sharedHelpers ?? [],
+    }),
     adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
     allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
     preparedBase: parseNativePreparedBase(process.env),
@@ -5973,6 +5979,7 @@ async function restartNativeImageProject({
         composeFile: startup.composeFile,
         adaptationFile: startup.adaptationFile,
         dependencyFile: startup.dependencyFile,
+        dependencyOwners: startup.dependencyOwners,
         allowedHosts: startup.allowedHosts,
         runtimeMetadata: startup.runtimeMetadata,
         httpsPort: startup.https?.httpsPort ?? null,

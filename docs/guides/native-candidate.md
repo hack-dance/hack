@@ -1168,6 +1168,34 @@ Bindings sharing one listening transport must select the same executable, depth
 and reviewed ownership policy. A replaced ancestor, changed chain, adopted
 listener or inconsistent shared selection refuses before relay grants change.
 
+A listener that Hack itself starts can instead be selected by its owner, with no
+PID, path or depth in the file. Replace the authority fields with exactly one of:
+
+- `"host_lifecycle": "NAME"`: a persistent `up.before` hook (its `name`, or
+  `hook-N` when unnamed) or a `lifecycle.processes` entry of this instance. Hack
+  reads the pane PID from its lifecycle state and requires the live tmux session
+  to carry the recorded ownership token and that pane to be alive. zellij
+  sessions record no pane PID and refuse.
+- `"host_shared_helper": "NAME"`: an enabled `lifecycle.sharedHelpers` entry
+  whose claim is `owned` and `ready`, lists this instance as a holder, and whose
+  PID and birth time are live. An adopted helper refuses.
+
+After the hooks, Hack asks native discovery for the one same-user exclusive IPv4
+loopback listener on `host_port` and requires it to be the owner process or its
+descendant within eight ancestry links; it then proves the owner again. A
+listener outside the owner's tree refuses with "Native host dependency listener
+does not run under its selected owner"; this includes a listener the hook only
+adopted, or one that detached (for example with `ssh -f`), even if it was started
+by the hook. Use a `host_executable` selection for those. A listener deeper than
+the owner is reviewed as an executable selection at the discovered depth whose
+final ancestor must be exactly that owner process (PID and native start time), so
+a refresh follows replacements only beneath it. An owner that is itself the
+listener is a fixed-PID selection without replacement authority. Bindings sharing
+a host port must name the same owner. The owner names never reach native review,
+and the frontend never persists the resolved PIDs. Restart preflight resolves the
+same owners against the running instance; a cleaned retry validates the intent
+only and resolves owners after its hooks.
+
 Startup allows up to 60 seconds total for persistent hooks to create all selected
 listeners, with cancellable waits and bounded read-only discovery requests. It
 retries only native endpoint-identity refusals; malformed selections and other
@@ -1183,7 +1211,8 @@ With a packaged candidate, invoke it as:
 ./hack-native --candidate-root /absolute/private/candidate-home graph refresh-dependencies --run-id RUN_ID --json
 ```
 
-Only `host_executable` selections can follow a replacement, using the original
+Only `host_executable` selections (including owner-scoped selections deeper than
+their owner) can follow a replacement, using the original
 executable, host port and unchanged same-user ancestor selected by
 `host_supervisor_depth`, retaining the reviewed intermediate executable chain. A matching
 executable or port alone is insufficient. Missing or ambiguous listeners,
@@ -1280,8 +1309,15 @@ Subprocess text and unknown codes remain omitted. These diagnostics do not confi
 whether refresh effects occurred or authorize replay; the command is not dispatched.
 `ps` and `logs` remain observations and do not request refresh. Authenticated relay
 traffic reports a stale endpoint to the foreground owner, which attempts bounded
-refresh without idle polling. The affected application request can fail; it is
-never replayed, and later traffic can use a verified replacement. The explicit
+refresh without idle polling. The owner also watches each admitted replaceable
+listener process for exit (a kernel exit notice, not a scan), so a replaced
+listener is refreshed before the next request reaches it. Attempts run one at a
+time. When no replacement is listening yet, the refusal happens before any
+effect, and the owner retries after 1, 2, 4, 8, 15 and 30 seconds; after that only
+a new stale notice re-arms it. Once a rebind has written its journal and not
+completed, the owner never retries automatically. The affected application
+request can fail; it is never replayed, and later traffic can use a verified
+replacement. The explicit
 operation is also available before traffic. Refresh does not renew startup
 environment allocations. A lost reply or interrupted transition is never replayed.
 Partial transitions remain fenced and refuse new admission; inspect owned state and

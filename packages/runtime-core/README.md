@@ -914,6 +914,15 @@ selection. Discovery refuses a missing, ambiguous, wildcard, shared or
 wrong-executable listener. It does not authorize a port by itself; `dependency-plan`
 and `serve` recapture the selected process and socket generation.
 
+For a listener started by a process the frontend owns, `graph dependency-discover
+--host-port PORT --ancestor-pid PID --json` returns the one same-user exclusive
+listener on that port only when it is the selected owner process or descends from
+it within eight ancestry links, with its executable, depth and the owner's native
+start time. A listener outside that tree refuses as `host_endpoint_owner`; a
+missing or ambiguous one as `host_endpoint_identity`. The frontend then selects
+`host_executable` and `host_supervisor_depth` plus `host_ancestor_pid` and
+`host_ancestor_start_micros`; review refuses any other anchor at that depth.
+
 Run `graph serve` with the usual `graph run` project/file/plan/run/readiness options,
 plus `--dependencies FILE --expect-dependencies ID`. It remains foreground, prints
 one compact `graph_foreground_ready` JSON line after startup, and prints its final

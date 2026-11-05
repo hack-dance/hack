@@ -48,6 +48,13 @@ struct Binding {
         skip_serializing_if = "Option::is_none"
     )]
     host_supervisor_depth: Option<u8>,
+    /// Owner-scoped selections pin the exact supervisor the frontend resolved from
+    /// its own ownership record. Both fields are present together, with an
+    /// executable selection; review refuses any other anchor at that depth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_ancestor_pid: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_ancestor_start_micros: Option<u64>,
 }
 fn supervisor_depth<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<Option<u8>, D::Error> {
     u8::deserialize(decoder).map(Some)
@@ -107,6 +114,13 @@ impl Selection {
                     })
                     && b.host_supervisor_depth
                         .is_none_or(|depth| (1..=8).contains(&depth) && b.host_executable.is_some())
+                    && match (b.host_ancestor_pid, b.host_ancestor_start_micros) {
+                        (None, None) => true,
+                        (Some(pid), Some(start)) => {
+                            pid > 1 && start > 0 && b.host_executable.is_some()
+                        }
+                        _ => false,
+                    }
                     && keys.insert((&b.service, &b.binding))
                     && slots
                         .insert(
@@ -116,6 +130,8 @@ impl Selection {
                                 b.host_port,
                                 &b.host_executable,
                                 b.host_supervisor_depth.unwrap_or(1),
+                                b.host_ancestor_pid,
+                                b.host_ancestor_start_micros,
                             ),
                         )
                         .is_none_or(|prior| {
@@ -125,6 +141,8 @@ impl Selection {
                                     b.host_port,
                                     &b.host_executable,
                                     b.host_supervisor_depth.unwrap_or(1),
+                                    b.host_ancestor_pid,
+                                    b.host_ancestor_start_micros,
                                 )
                         })
                     && service_slots.insert((&b.service, b.slot))
@@ -174,12 +192,19 @@ impl Selection {
                 .host_executable
                 .as_ref()
                 .map(|executable| {
-                    graph::RefreshPolicy::capture(
+                    let policy = graph::RefreshPolicy::capture(
                         &endpoint,
                         executable,
                         binding.host_port,
                         binding.host_supervisor_depth.unwrap_or(1),
-                    )
+                    )?;
+                    if let (Some(pid), Some(start)) = (
+                        binding.host_ancestor_pid,
+                        binding.host_ancestor_start_micros,
+                    ) {
+                        policy.require_supervisor(pid, start)?;
+                    }
+                    Ok::<_, CandidateError>(policy)
                 })
                 .transpose()?;
             let fingerprint = endpoint.fingerprint()?;
@@ -220,6 +245,20 @@ impl Selection {
 pub(super) fn discover(executable: &Path, port: u16) -> Result<Value, CandidateError> {
     let (pid, fingerprint) = HostEndpoint::discover(executable, port)?;
     Ok(json!({"host_pid":pid,"endpoint_fingerprint":fingerprint}))
+}
+/// Owner-scoped discovery: the listener on `port` must be the selected owner
+/// process or its descendant. The executable path is returned only to the
+/// private frontend selection; review pins it, the depth and the owner again.
+pub(super) fn discover_descendant(port: u16, ancestor_pid: i32) -> Result<Value, CandidateError> {
+    let found = HostEndpoint::discover_descendant(port, ancestor_pid)?;
+    Ok(json!({
+        "host_pid": found.pid,
+        "endpoint_fingerprint": found.fingerprint,
+        "executable": found.executable,
+        "supervisor_depth": found.depth,
+        "ancestor_pid": ancestor_pid,
+        "ancestor_start_micros": found.ancestor_start_micros,
+    }))
 }
 pub(super) fn plan(path: &Path) -> Result<Value, CandidateError> {
     let selection = Selection::read(path)?;
@@ -379,6 +418,53 @@ mod tests {
             .remove("host_supervisor_depth");
         assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_ok());
         selected["dependencies"][1]["host_executable"] = json!("/other/tunnel");
+        assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_err());
+    }
+    #[test]
+    fn owner_anchor_requires_both_fields_and_an_executable_selection() {
+        let mut selected = value();
+        selected["dependencies"].as_array_mut().unwrap().truncate(1);
+        selected["dependencies"][0]["host_executable"] = json!("/reviewed/tunnel");
+        selected["dependencies"][0]["host_supervisor_depth"] = json!(3);
+        let parsed = Selection::parse(&serde_json::to_vec(&selected).unwrap()).unwrap();
+        // An anchorless selection serializes exactly as before.
+        assert!(
+            !serde_json::to_string(&parsed)
+                .unwrap()
+                .contains("host_ancestor")
+        );
+        selected["dependencies"][0]["host_ancestor_pid"] = json!(4242);
+        assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_err());
+        selected["dependencies"][0]["host_ancestor_start_micros"] =
+            json!(1_700_000_000_000_000_u64);
+        assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_ok());
+        for (key, bad) in [
+            ("host_ancestor_pid", json!(1)),
+            ("host_ancestor_pid", json!(-4)),
+            ("host_ancestor_start_micros", json!(0)),
+            ("host_ancestor_start_micros", json!("1")),
+        ] {
+            let mut document = selected.clone();
+            document["dependencies"][0][key] = bad;
+            assert!(
+                Selection::parse(&serde_json::to_vec(&document).unwrap()).is_err(),
+                "{key}"
+            );
+        }
+        let mut fixed = selected.clone();
+        let entry = fixed["dependencies"][0].as_object_mut().unwrap();
+        entry.remove("host_executable");
+        entry.remove("host_supervisor_depth");
+        assert!(Selection::parse(&serde_json::to_vec(&fixed).unwrap()).is_err());
+        // Bindings sharing one transport must pin the same owner.
+        let mut shared = selected["dependencies"][0].clone();
+        shared["service"] = json!("worker");
+        selected["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(shared);
+        assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_ok());
+        selected["dependencies"][1]["host_ancestor_pid"] = json!(4343);
         assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_err());
     }
     #[test]

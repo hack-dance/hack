@@ -1034,6 +1034,80 @@ test("host listener discovery after hooks binds the current executable-pinned PI
   expect(await startNativeProject({ ...opts, dependencyFile: path })).toBe(0);
 });
 
+test("an owner-scoped selection resolves its owner after hooks and pins it for review", async () => {
+  const { opts, events } = await fixture(false);
+  const path = join(opts.scope.projectRoot, "host-selection.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [
+        {
+          service: "web",
+          binding: "search",
+          guest_port: 443,
+          host_port: 8443,
+          host_lifecycle: "tunnel",
+          aliases: ["search.example.com"],
+        },
+      ],
+    })
+  );
+  const owners: string[] = [];
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "dependency-discover") {
+      expect(events).toContain("before");
+      expect(request.args.slice(2)).toEqual([
+        "--host-port",
+        "8443",
+        "--ancestor-pid",
+        "4100",
+        "--json",
+      ]);
+      return {
+        host_pid: 4321,
+        endpoint_fingerprint: "e".repeat(64),
+        executable: "/usr/local/bin/synthetic-tunnel",
+        supervisor_depth: 2,
+        ancestor_pid: 4100,
+        ancestor_start_micros: 1_700_000_000_000_001,
+      };
+    }
+    if (request.args[1] === "dependency-plan") {
+      const selection = JSON.parse(
+        await readFile(String(request.args[3]), "utf8")
+      );
+      expect(selection.dependencies[0]).toMatchObject({
+        host_pid: 4321,
+        host_executable: "/usr/local/bin/synthetic-tunnel",
+        host_supervisor_depth: 2,
+        host_ancestor_pid: 4100,
+        host_ancestor_start_micros: 1_700_000_000_000_001,
+      });
+      expect(selection.dependencies[0].host_lifecycle).toBeUndefined();
+    }
+    return await invoke(request);
+  };
+  expect(
+    await startNativeProject({
+      ...opts,
+      dependencyFile: path,
+      dependencyOwners: async (owner) => {
+        owners.push(`${owner.kind}:${owner.name}`);
+        expect(events).toContain("before");
+        return {
+          pid: 4100,
+          confirm: async () => {
+            owners.push("confirm");
+          },
+        };
+      },
+    })
+  ).toBe(0);
+  expect(owners).toEqual(["lifecycle:tunnel", "confirm"]);
+});
+
 test("a delayed hook listener gates runtime effects and cancellation cleans hooks", async () => {
   for (const cancel of [false, true]) {
     const { opts, events } = await fixture(false);

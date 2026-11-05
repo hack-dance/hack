@@ -595,6 +595,30 @@ behavior, repeated jobs, multiple slots and real one-off traffic remain separate
 implementation and runtime gates. The existing Rebind model covers original-target
 drain/revocation; this model checks the later commit-before-new-grant boundary.
 
+## Automatic dependency refresh
+
+`dependency-auto-refresh/AutoRefresh.tla` checks the foreground owner's
+schedule for automatic host dependency refresh. Its positive configuration
+(`MaxRetries = 2`, `MaxAttempts = 5`) exhausts 141 distinct states. A stale
+notice (traffic drift or a watched listener exit) arms one attempt; attempts are
+single-flight; a refusal before the rebind journal re-arms after a bounded
+backoff; a completed rebind clears it; and a failure after the journal closes
+the schedule. The negative control removes the close guard (`EnforceClose =
+FALSE`) and must fail `NoReplayAfterUnconfirmed` at `Start` with a second attempt
+after an unconfirmed rebind.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `ListenerExits` / `Traffic` | `foreground/signals.rs` `watch_listener_exit` and `Wake::ListenerExit`; relay owner identity notices drained in `foreground.rs` |
+| `Start` / `RefuseBeforeEffects` | `foreground/dependency_refresh.rs` `AutomaticRefresh` (`take_due`, `finish`, `AUTOMATIC_RETRY_DELAYS`) and `automatic_outcome` |
+| `WriteJournal` / `FailAfterJournal` | `startup/runtime/rebind.rs` sets the sticky `rebind_unconfirmed` flag before the first journal write; only a completed refresh clears it |
+| `Complete` | verified `refresh_dependencies` result; `ListenerWatches::sync` re-watches the admitted endpoints |
+
+The rebind protocol itself is `dependency-rebind/Rebind.tla`. This model does
+not prove the kqueue exit delivery, timer accuracy, provider lease acquisition
+or that a replacement listener appears; it abstracts the listener as live, gone
+or replaced, and the retry delays as an ordered bound.
+
 ## Stopped retained-pool startup
 
 `stopped-pool-startup/Resume.tla` checks one explicit startup from shape-valid

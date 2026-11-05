@@ -98,6 +98,9 @@ pub struct HostRelayRuntime {
     run: Option<String>,
     selected_run: Option<String>,
     startup_cancelled: Option<fn() -> bool>,
+    /// Sticky: a dependency rebind wrote its journal and did not complete. Its
+    /// effects are unconfirmed, so automatic refresh must never try again.
+    rebind_unconfirmed: bool,
     // Dropped after the managed listeners: only verified cleanup releases capacity.
     dependency_reservation: Option<super::super::dependency_slots::Reservation>,
 }
@@ -513,6 +516,7 @@ impl HostRelayRuntime {
             run: None,
             selected_run: selected_run.map(str::to_owned),
             startup_cancelled: None,
+            rebind_unconfirmed: false,
             dependency_reservation,
         })
     }
@@ -532,6 +536,29 @@ impl HostRelayRuntime {
     }
     pub fn drain_dependency_notifications(&self) -> Result<bool, CandidateError> {
         self.managed.drain_notifications()
+    }
+    /// True once any dependency rebind reached its journal without completing.
+    /// Callers that retry automatically must stop: the outcome is uncertain.
+    pub fn dependency_rebind_unconfirmed(&self) -> bool {
+        self.rebind_unconfirmed
+    }
+    /// Host PIDs of the currently admitted listeners that may follow a
+    /// replacement (executable or owner-scoped selections). Fixed-PID
+    /// selections carry no replacement authority and are omitted. This is a
+    /// selection of what to watch for exit, never authority to refresh.
+    #[cfg(target_os = "macos")]
+    pub fn refreshable_listener_identities(
+        &self,
+    ) -> Vec<crate::provider::identity::ProcessIdentity> {
+        let mut identities: Vec<_> = self
+            .dependencies
+            .values()
+            .filter(|dependency| dependency.refresh.is_some())
+            .map(|dependency| dependency.endpoint.process_identity())
+            .collect();
+        identities.sort_by_key(|identity| identity.pid);
+        identities.dedup();
+        identities
     }
     /// Stop only recorded listener generations, then use enrolled retirement and
     /// graph cleanup. A failed stop or uncertain journal remains retained.

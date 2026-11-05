@@ -308,16 +308,45 @@ fn serve_input<'a>(
             .map_err(|_| refused())?;
         drop(stdout);
         let mut queued = None;
+        let mut automatic = dependency_refresh::AutomaticRefresh::default();
+        let mut watches = dependency_refresh::ListenerWatches::default();
+        if watches.sync(&signals, &runtime) {
+            automatic.stale(Instant::now());
+        }
         loop {
-            if queued.is_none() && signals.wait()? {
-                cleanup_attempted = true;
-                return runtime.cleanup(candidate, false);
+            if queued.is_none() {
+                match signals.wait_until(automatic.deadline())? {
+                    signals::Wake::Signal => {
+                        cleanup_attempted = true;
+                        return runtime.cleanup(candidate, false);
+                    }
+                    // A watched refreshable listener exited: a stale notice
+                    // without traffic. Its replacement may still be starting.
+                    signals::Wake::ListenerExit => automatic.stale(Instant::now()),
+                    signals::Wake::Ready | signals::Wake::Timeout => {}
+                }
             }
             if queued.is_none() && runtime.drain_dependency_notifications()? {
                 // Authenticated traffic reports drift once; there is no idle scan.
-                // A refusal preserves the graph and leaves changed grants closed.
-                let _ =
+                automatic.stale(Instant::now());
+            }
+            if queued.is_none() && automatic.take_due(Instant::now()) {
+                // One attempt at a time. A refusal preserves the graph and leaves
+                // changed grants closed; only a pre-effect refusal is retried,
+                // after a bounded backoff, and an unconfirmed rebind never is.
+                let result =
                     dependency_refresh::automatic(candidate, &mut runtime, &receipt.run, &signals);
+                let outcome = dependency_refresh::automatic_outcome(
+                    &result,
+                    runtime.dependency_rebind_unconfirmed(),
+                );
+                automatic.finish(outcome, Instant::now());
+                if outcome == dependency_refresh::AutomaticOutcome::Refreshed
+                    && watches.sync(&signals, &runtime)
+                {
+                    automatic.stale(Instant::now());
+                }
+                continue;
             }
             let (mut stream, request) = if let Some(pending) = queued.take() {
                 pending
@@ -352,6 +381,9 @@ fn serve_input<'a>(
                     Err(error) => json!({"ok":false,"run":receipt.run,"code":error.code}),
                 };
                 let _ = transport::write(&mut stream, &response, Duration::from_secs(5));
+                if response["ok"] == true && watches.sync(&signals, &runtime) {
+                    automatic.stale(Instant::now());
+                }
                 continue;
             }
             if let Some(job) = request.job {

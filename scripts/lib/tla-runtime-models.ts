@@ -1138,6 +1138,20 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "dependency-auto-refresh",
+    module: "AutoRefresh",
+    states: 141,
+    invariant: "NoReplayAfterUnconfirmed",
+    action: "Start",
+    fields: [
+      "replayed = TRUE",
+      "unconfirmed = TRUE",
+      "closed = FALSE",
+      'journal = "none"',
+      "attempts = 2",
+    ],
+  },
+  {
     name: "relay-lifecycle-barrier",
     module: "Barrier",
     states: 1590,

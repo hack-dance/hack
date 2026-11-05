@@ -9,6 +9,7 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import {
   acquireNativeHttpsLease,
   NativeHttpsLeaseAcquisitionError,
@@ -26,6 +27,7 @@ import {
 } from "./native-project-cache.ts";
 import {
   discoverNativeHostDependency,
+  discoverNativeOwnedHostDependency,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
@@ -900,6 +902,11 @@ export async function startNativeProject(opts: {
   readonly restore?: NativeProjectRun;
   readonly onReady?: () => Promise<void>;
   readonly dependencyFile?: string;
+  /**
+   * Resolves `host_lifecycle` / `host_shared_helper` owners after lifecycle
+   * hooks; without it such selections refuse.
+   */
+  readonly dependencyOwners?: NativeDependencyOwnerResolver;
   readonly adaptationFile?: string;
   readonly allowedHosts?: readonly string[];
   readonly preparedBase?: NativePreparedBase;
@@ -1078,6 +1085,19 @@ export async function startNativeProject(opts: {
           projectRoot: opts.scope.projectRoot,
           hostPort: selection.hostPort,
           executable: selection.executable,
+          invoke: deps.invoke,
+          wait: {
+            deadlineMs: dependencyDiscoveryDeadline,
+            signal: controller.signal,
+          },
+        }),
+      owners: opts.dependencyOwners,
+      discoverOwned: (selection) =>
+        discoverNativeOwnedHostDependency({
+          runtime: opts.runtime,
+          projectRoot: opts.scope.projectRoot,
+          hostPort: selection.hostPort,
+          ancestorPid: selection.ancestorPid,
           invoke: deps.invoke,
           wait: {
             deadlineMs: dependencyDiscoveryDeadline,

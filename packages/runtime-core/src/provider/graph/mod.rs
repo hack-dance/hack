@@ -143,6 +143,7 @@ pub use service_logs::{
     ServiceLogOptions, ServiceLogResult, ServiceSelection, service_logs, service_selection,
 };
 mod source;
+pub use super::environment::{ManagedFile, ManagedFiles, ManagedInput};
 use super::{engine::Engine, state};
 use crate::{
     Candidate, CandidateError,
@@ -982,12 +983,18 @@ impl Driver for Session<'_, '_> {
             #[cfg(test)]
             self.fault_pause("after-environment-stage")?;
             let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+            let files = lease.file_mounts();
+            let wraps = lease.wraps_process();
             self.leases.insert(service.into(), lease);
-            launcher::attach(
-                self.configs.get_mut(service).expect("service"),
-                &path,
-                self.launcher.as_deref().expect("prepared launcher"),
-            )?;
+            let config = self.configs.get_mut(service).expect("service");
+            if wraps {
+                launcher::attach(
+                    config,
+                    &path,
+                    self.launcher.as_deref().expect("prepared launcher"),
+                )?;
+            }
+            launcher::attach_files(config, &files)?;
         }
         if let Some(startup) = &self.receipt.relay_startup {
             if let Some(selected) = startup.services.get(service) {
@@ -1089,6 +1096,7 @@ pub fn run_with_host_dependencies(
         options,
         runtime,
         managed,
+        &ManagedFiles::new(),
         environment_deadline(lifetime)?,
     )
 }
@@ -1099,11 +1107,12 @@ pub fn run_with_host_dependencies_until(
     options: RunOptions<'_>,
     runtime: &mut HostRelayRuntime,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
+    files: &ManagedFiles,
     deadline: std::time::Instant,
 ) -> Result<Receipt, CandidateError> {
     startup::Driver::check_cancelled(runtime)?;
     check_environment_deadline(deadline)?;
-    let (inputs, environments) = if managed.is_empty() {
+    let (inputs, environments) = if managed.is_empty() && files.is_empty() {
         (
             project::inputs::compile(
                 candidate,
@@ -1119,7 +1128,7 @@ pub fn run_with_host_dependencies_until(
             BTreeMap::new(),
         )
     } else {
-        compile_environment_inputs_until(candidate, &options, managed, deadline)?
+        compile_environment_inputs_until(candidate, &options, managed, files, deadline)?
     };
     check_environment_deadline(deadline)?;
     startup::Driver::check_cancelled(runtime)?;
@@ -1182,12 +1191,19 @@ fn compile_environment_inputs(
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     lifetime: Duration,
 ) -> Result<EnvironmentInputs, CandidateError> {
-    compile_environment_inputs_until(candidate, options, managed, environment_deadline(lifetime)?)
+    compile_environment_inputs_until(
+        candidate,
+        options,
+        managed,
+        &ManagedFiles::new(),
+        environment_deadline(lifetime)?,
+    )
 }
 pub(super) fn compile_environment_inputs_until(
     candidate: &Candidate,
     options: &RunOptions<'_>,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
+    files: &ManagedFiles,
     deadline: std::time::Instant,
 ) -> Result<EnvironmentInputs, CandidateError> {
     if !cfg!(feature = "environment-launcher") {
@@ -1209,16 +1225,79 @@ pub(super) fn compile_environment_inputs_until(
         options.non_secret_values,
         managed,
     )?;
-    let environments = scoped
-        .managed_environment
-        .iter()
-        .map(|(name, values)| {
-            super::environment::PendingEnvironment::until(name, values, deadline)
-                .map(|pending| (name.clone(), pending))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let environments = pending_environments(&scoped, files, deadline)?;
     check_environment_deadline(deadline)?;
     Ok((scoped.executable, environments))
+}
+/// Prepare one allocation per service with scoped values and/or private file members.
+/// File members require an active reviewed service; they never interpolate or replace
+/// Compose configuration. Values-only services keep the original launcher contract.
+pub(super) fn pending_environments(
+    scoped: &project::inputs::ScopedExecutionInputs,
+    files: &ManagedFiles,
+    deadline: std::time::Instant,
+) -> Result<BTreeMap<String, super::environment::PendingEnvironment>, CandidateError> {
+    if files.keys().any(|name| {
+        !scoped
+            .executable
+            .review
+            .plan
+            .services
+            .get(name)
+            .is_some_and(|service| service.active)
+    }) {
+        return Err(error(
+            "execution_environment_owner",
+            "Managed file members require active service ownership.",
+        ));
+    }
+    let empty = BTreeMap::new();
+    scoped
+        .managed_environment
+        .keys()
+        .chain(files.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|name| {
+            super::environment::PendingEnvironment::until_with_files(
+                name,
+                scoped.managed_environment.get(name).unwrap_or(&empty),
+                files.get(name).map_or(&[], Vec::as_slice),
+                deadline,
+            )
+            .map(|pending| (name.clone(), pending))
+        })
+        .collect()
+}
+/// Launcher admission for wrapped services, owner identity for every private service,
+/// and private-file target checks against the compiled container mounts.
+pub(super) fn validate_private_delivery(
+    configs: &BTreeMap<String, Value>,
+    environments: &BTreeMap<String, super::environment::PendingEnvironment>,
+) -> Result<(), CandidateError> {
+    for (name, pending) in environments {
+        let config = &configs[name];
+        if pending.wraps_process() {
+            launcher::validate(config)?;
+        } else {
+            launcher::identity(config)?;
+        }
+        launcher::validate_files(config, &pending.file_targets())?;
+    }
+    Ok(())
+}
+/// Services whose process the private launcher wraps, and files-only services whose
+/// image user must still be materialized for exact file ownership.
+pub(super) fn private_services(
+    environments: &BTreeMap<String, super::environment::PendingEnvironment>,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let (wrapped, owners): (Vec<_>, Vec<_>) = environments
+        .iter()
+        .partition(|(_, pending)| pending.wraps_process());
+    (
+        wrapped.into_iter().map(|(name, _)| name.clone()).collect(),
+        owners.into_iter().map(|(name, _)| name.clone()).collect(),
+    )
 }
 
 fn run_inputs(
@@ -1320,15 +1399,15 @@ fn run_inputs(
     }
     // Resolve inherited process defaults only from the exact verified image,
     // before the private launcher takes ownership of Entrypoint and Cmd.
+    let (wrapped, file_owners) = private_services(&environments);
     let expected_environment = verify_images(
         &engine,
         &prepared.resources,
         &mut prepared.configs,
-        &environments.keys().cloned().collect(),
+        &wrapped,
+        &file_owners,
     )?;
-    for name in environments.keys() {
-        launcher::validate(&prepared.configs[name])?;
-    }
+    validate_private_delivery(&prepared.configs, &environments)?;
     if let Some(driver) = startup.as_ref() {
         driver.check_cancelled()?;
     }
@@ -1885,6 +1964,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         &prepared.resources,
         &mut prepared.configs,
         &BTreeSet::new(),
+        &BTreeSet::new(),
     )?;
     probes::unchanged(&prepared.configs, &prepared.probes, &receipt)?;
     for resource in receipt.resources.values() {
@@ -2151,6 +2231,7 @@ fn verify_images(
     resources: &BTreeMap<String, Resource>,
     configs: &mut BTreeMap<String, Value>,
     private_services: &BTreeSet<String>,
+    file_owners: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>, CandidateError> {
     let mut expected = BTreeMap::new();
     for resource in resources.values().filter(|r| r.kind == Kind::Container) {
@@ -2176,6 +2257,13 @@ fn verify_images(
         }
         if private_services.contains(&resource.key) {
             image_process::apply_private(
+                configs
+                    .get_mut(&resource.key)
+                    .expect("compiled service config"),
+                &image["Config"],
+            )?;
+        } else if file_owners.contains(&resource.key) {
+            image_process::apply_file_owner(
                 configs
                     .get_mut(&resource.key)
                     .expect("compiled service config"),

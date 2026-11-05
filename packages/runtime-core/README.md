@@ -903,6 +903,27 @@ construction; fresh admission revalidates project inputs. The existing guest tmp
 and startup launcher deliver values under the selected UID/GID. Cleanup retains
 value-free allocation identities and verifies the selected tmpfs has been retired.
 
+Envelope `version: 2` additionally requires a nonempty `files` map from service name
+to one to four members, each `{"name", "target", "mode": "0400", "content_b64"}`. A
+version 1 envelope with `files`, a version 2 envelope without them, and unknown or
+duplicate member fields refuse, so an older runtime refuses file delivery instead of
+dropping it. Names use the service-name alphabet. Targets are absolute, normalized
+container paths outside `/proc`, `/sys`, `/dev`, `/run` and `/var/run`; within one
+service they are unique and never nest. Each member holds 1 to 16 KiB of decoded bytes,
+and the encoded values plus every member of a service share the 32 KiB payload budget.
+A service may receive files without values. Members are decoded into zeroized memory,
+staged in the same per-container tmpfs allocation as `values.json` (directory `files`,
+root-owned 0700; each member owned by the container's numeric UID with mode 0400), and
+bound read-only at their targets. A compiled mount or tmpfs target that equals,
+contains or sits under a member target refuses before effects. Members carry no
+separate deadline: they live as long as the allocation, which is the container's, and
+are retired with it by the existing allocation cleanup. A service with values keeps the
+launcher contract (numeric user, absolute entrypoint, `CMD` health with an absolute
+executable). A files-only service keeps its own process and needs only a numeric image
+or Compose user. Live-owner restore and normalized serve-restore deliver fresh members
+into new allocations. `graph exec` and one-off runs refuse envelopes with files; files
+already in a running container are never re-delivered or renewed.
+
 Expiry prevents new staging or execution; it does not revoke an already-running
 process's environment. Ordinary environment-bound restart/restore still require
 fresh-delivery support. This interface does not provide AWS credential acquisition,

@@ -209,6 +209,63 @@ pub(super) fn attach(config: &mut Value, path: &str, launcher: &str) -> Result<(
     Ok(())
 }
 
+fn file_refused() -> CandidateError {
+    error(
+        "environment_file_mount",
+        "A private file target is reserved or overlaps another container mount; values omitted.",
+    )
+}
+/// Container paths already claimed by compiled mounts and tmpfs entries.
+fn claimed_targets(config: &Value) -> Vec<String> {
+    let mut targets: Vec<String> = config["HostConfig"]["Mounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|mount| mount["Target"].as_str().unwrap_or("").to_owned())
+        .collect();
+    if let Some(tmpfs) = config["HostConfig"]["Tmpfs"].as_object() {
+        targets.extend(tmpfs.keys().cloned());
+    }
+    targets
+}
+/// Private file targets must be reserved-free absolute paths that neither equal, contain
+/// nor sit under any compiled mount or tmpfs target. A target that cannot be parsed refuses.
+pub(super) fn validate_files(config: &Value, targets: &[&str]) -> Result<(), CandidateError> {
+    let claimed = claimed_targets(config);
+    for target in targets {
+        if !crate::provider::environment::file_target(target)
+            || claimed.iter().any(|other| {
+                other.is_empty()
+                    || other == target
+                    || crate::provider::environment::within(target, other)
+                    || crate::provider::environment::within(other, target)
+            })
+        {
+            return Err(file_refused());
+        }
+    }
+    Ok(())
+}
+/// Bind each verified allocation member read-only at its declared target. Called after
+/// `attach` for wrapped services, so reserved launcher binds are also checked.
+pub(super) fn attach_files(
+    config: &mut Value,
+    files: &[(String, String)],
+) -> Result<(), CandidateError> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let targets: Vec<&str> = files.iter().map(|(_, target)| target.as_str()).collect();
+    validate_files(config, &targets)?;
+    let mounts = config["HostConfig"]["Mounts"]
+        .as_array_mut()
+        .ok_or_else(file_refused)?;
+    for (source, target) in files {
+        mounts.push(json!({"Type":"bind","Source":source,"Target":target,"ReadOnly":true,"BindOptions":{"Propagation":"rprivate"}}));
+    }
+    Ok(())
+}
+
 #[cfg(not(feature = "environment-launcher"))]
 pub(super) fn publish(_: &Engine<'_>) -> Result<String, CandidateError> {
     Err(error(
@@ -302,6 +359,63 @@ mod tests {
             value["User"] = invalid;
             assert!(identity(&value).is_err());
         }
+    }
+    #[test]
+    fn private_files_bind_read_only_after_launcher_mounts_and_refuse_overlap() {
+        let mut value = config();
+        value["HostConfig"]["Mounts"] = json!([{"Type":"volume","Target":"/data"}]);
+        attach(&mut value, "/run/slot/values.json", "/storage/launcher").unwrap();
+        let files = vec![(
+            "/run/slot/files/credential.json".to_owned(),
+            "/config/credential.json".to_owned(),
+        )];
+        attach_files(&mut value, &files).unwrap();
+        let mounts = value["HostConfig"]["Mounts"].as_array().unwrap();
+        assert_eq!(
+            mounts.last().unwrap(),
+            &json!({"Type":"bind","Source":"/run/slot/files/credential.json","Target":"/config/credential.json","ReadOnly":true,"BindOptions":{"Propagation":"rprivate"}})
+        );
+        // Files-only services keep their process; only the bind is added.
+        let mut plain = config();
+        attach_files(&mut plain, &files).unwrap();
+        assert_eq!(plain["Entrypoint"], config()["Entrypoint"]);
+        assert_eq!(plain["HostConfig"]["Mounts"].as_array().unwrap().len(), 1);
+        for (claimed, target) in [
+            ("/config/credential.json", "/config/credential.json"),
+            ("/config", "/config/credential.json"),
+            ("/config/credential.json/inner", "/config/credential.json"),
+            ("/", "/config/credential.json"),
+            ("", "/config/credential.json"),
+        ] {
+            let mut value = config();
+            value["HostConfig"]["Mounts"] = json!([{"Type":"bind","Target":claimed}]);
+            assert_eq!(
+                validate_files(&value, &[target]).err().unwrap().code,
+                "environment_file_mount"
+            );
+        }
+        let mut value = config();
+        value["HostConfig"]["Tmpfs"] = json!({"/tmp":"rw"});
+        assert!(validate_files(&value, &["/tmp/credential.json"]).is_err());
+        assert!(validate_files(&value, &["/tmpfile"]).is_ok());
+        for target in [
+            "/",
+            "relative",
+            "/run/credential",
+            "/var/run/credential",
+            "/proc/credential",
+            "/sys",
+            "/dev/shm/key",
+            "/config/../etc/passwd",
+            "/config//key",
+            "/config/key/",
+            "/config/./key",
+        ] {
+            assert!(validate_files(&config(), &[target]).is_err(), "{target}");
+        }
+        let mut value = config();
+        value["HostConfig"]["Mounts"] = json!(null);
+        assert!(attach_files(&mut value, &files).is_err());
     }
     #[test]
     fn ambiguous_users_health_exec_and_mount_collisions_refuse_before_attachment() {

@@ -79,7 +79,10 @@ pub fn serve_with_environment(
         candidate,
         options,
         runtime,
-        managed,
+        super::ManagedInput {
+            values: managed,
+            files: &super::ManagedFiles::new(),
+        },
         deadline,
         &BTreeMap::new(),
     )
@@ -90,7 +93,7 @@ pub fn serve_with_routes(
     candidate: &Candidate,
     options: RunOptions<'_>,
     runtime: HostRelayRuntime,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    managed: super::ManagedInput<'_>,
     deadline: Instant,
     route_slots: &BTreeMap<String, super::RouteSlot>,
 ) -> Result<Receipt, CandidateError> {
@@ -112,7 +115,7 @@ pub fn serve_normalized_with_routes(
     candidate: &Candidate,
     options: super::NormalizedRunOptions<'_>,
     runtime: HostRelayRuntime,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    managed: super::ManagedInput<'_>,
     deadline: Instant,
     route_slots: &BTreeMap<String, super::RouteSlot>,
 ) -> Result<Receipt, CandidateError> {
@@ -132,7 +135,7 @@ pub fn serve_restore_normalized_with_routes(
     candidate: &Candidate,
     options: super::NormalizedRunOptions<'_>,
     runtime: HostRelayRuntime,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    managed: super::ManagedInput<'_>,
     deadline: Instant,
     route_slots: &BTreeMap<String, super::RouteSlot>,
     generation: &str,
@@ -187,7 +190,7 @@ fn serve_input<'a>(
     candidate: &Candidate,
     options: RunOptions<'a>,
     mut runtime: HostRelayRuntime,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    managed: super::ManagedInput<'_>,
     deadline: Instant,
     route_slots: &BTreeMap<String, super::RouteSlot>,
     normalized: Option<(crate::project::NormalizedComposeOptions<'a>, Option<&str>)>,
@@ -195,8 +198,10 @@ fn serve_input<'a>(
     if options.routing_enrolled != !route_slots.is_empty() {
         return Err(refused());
     }
+    let input = managed;
+    let (managed, files) = (input.values, input.files);
     if let Some((compose, _)) = normalized {
-        super::compile_normalized_inputs(
+        let compiled = super::compile_normalized_inputs(
             candidate,
             &super::NormalizedRunOptions {
                 run: redelivery::options(&options),
@@ -204,10 +209,13 @@ fn serve_input<'a>(
             },
             managed,
         )?;
-    } else if !managed.is_empty() {
+        if !files.is_empty() {
+            super::pending_environments(&compiled, files, deadline)?;
+        }
+    } else if !managed.is_empty() || !files.is_empty() {
         // Refuse invalid scoped ownership or payload before publishing an owner.
         // Runtime admission compiles again to detect intervening project changes.
-        super::compile_environment_inputs_until(candidate, &options, managed, deadline)?;
+        super::compile_environment_inputs_until(candidate, &options, managed, files, deadline)?;
     }
     let run_id = options.run_id.to_owned();
     let fresh_generation = normalized.and_then(|(_, generation)| generation);
@@ -236,7 +244,7 @@ fn serve_input<'a>(
                 run: redelivery::options(&options),
                 compose,
             },
-            managed,
+            input,
             deadline,
             &mut runtime,
             generation,
@@ -251,6 +259,7 @@ fn serve_input<'a>(
             },
             &mut runtime,
             managed,
+            files,
             deadline,
         )
     } else {
@@ -259,6 +268,7 @@ fn serve_input<'a>(
             redelivery::options(&options),
             &mut runtime,
             managed,
+            files,
             deadline,
         )
     };

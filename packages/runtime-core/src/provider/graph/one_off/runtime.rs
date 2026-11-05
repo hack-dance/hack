@@ -62,6 +62,7 @@ pub fn begin(
         &BTreeMap::from([(key.clone(), resource.clone())]),
         &mut configs,
         &private,
+        &BTreeSet::new(),
     )?;
     let mut environments = BTreeMap::new();
     if let Some(values) = values.filter(|v| !v.is_empty()) {

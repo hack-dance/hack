@@ -1074,7 +1074,13 @@ pub(super) fn run_guarded(
         return Err(refused());
     }
     let expected = if config.data.is_empty() {
-        verify_images(&engine, &config.resources, &mut config.configs, &private)?
+        verify_images(
+            &engine,
+            &config.resources,
+            &mut config.configs,
+            &private,
+            &BTreeSet::new(),
+        )?
     } else {
         for service in config.data_mounts.keys() {
             storage_process_policy(&config.configs[service])?;

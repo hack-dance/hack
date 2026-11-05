@@ -1094,7 +1094,10 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                             candidate,
                             options,
                             runtime,
-                            managed.values(),
+                            graph::ManagedInput {
+                                values: managed.values(),
+                                files: managed.files(),
+                            },
                             managed.deadline(),
                             &route_slots,
                         )?
@@ -1103,7 +1106,10 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                             candidate,
                             options,
                             runtime,
-                            &BTreeMap::new(),
+                            graph::ManagedInput {
+                                values: &BTreeMap::new(),
+                                files: &graph::ManagedFiles::new(),
+                            },
                             std::time::Instant::now() + Duration::from_secs(120),
                             &route_slots,
                         )?

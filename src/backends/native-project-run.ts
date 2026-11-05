@@ -245,7 +245,7 @@ async function verifyIgnore(ignore: string) {
 async function paths(
   opts: NativeProjectRunScope,
   create: boolean,
-  kind: "run" | "restart" = "run"
+  kind: "run" | "restart" | "down-hooks" = "run"
 ) {
   const identity = await scope(opts);
   const internal = join(identity.projectDir, ".internal");
@@ -280,7 +280,7 @@ async function paths(
   const key = createHash("sha256")
     .update(JSON.stringify(identity.branch))
     .digest("hex");
-  const suffix = kind === "restart" ? ".restart" : "";
+  const suffix = kind === "run" ? "" : `.${kind}`;
   return {
     identity,
     root,
@@ -948,6 +948,22 @@ export async function recoverNativeProjectRunFilesystem(opts: {
   } finally {
     await releaseHeldDirectory(restartLock, restartHeld);
   }
+}
+/**
+ * Private paths of the value-free down-hook journal beside the run mapping,
+ * under the same scope, directory and ignore-file checks. Missing storage
+ * surfaces as the raw ENOENT error; callers treat it as "no journal".
+ */
+export async function nativeProjectDownHookPaths(
+  opts: NativeProjectRunScope,
+  create: boolean
+): Promise<{
+  readonly root: string;
+  readonly file: string;
+  readonly lock: string;
+}> {
+  const p = await paths(opts, create, "down-hooks");
+  return { root: p.root, file: p.file, lock: p.lock };
 }
 /** Establish excluded metadata before source identity is reviewed. */
 export async function prepareNativeProjectRunStorage(

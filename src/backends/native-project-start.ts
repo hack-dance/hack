@@ -30,10 +30,20 @@ import {
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
 import {
+  admitNativeDownHookGeneration,
+  createNativeForegroundDownHooks,
+} from "./native-project-down-hooks.ts";
+import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
+import {
+  createNativeForegroundStop,
+  type NativeForegroundStop,
+  type NativeForegroundStopCommands,
+  nativeForegroundStopSignals,
+} from "./native-project-foreground-stop.ts";
 import { isNativeHttpsProbePath } from "./native-project-https.ts";
 import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
@@ -245,6 +255,12 @@ export function reviewedNativeHttpsRoutes(
 type Hooks = {
   readonly cleanup: () => Promise<void>;
   readonly ready?: () => Promise<void>;
+  /**
+   * The project's `down.before`/`down.after` commands, present only when it
+   * declares them. Each resolves to the exit status after its child exited;
+   * the signal cancels a running phase (a second interrupt).
+   */
+  readonly stop?: NativeForegroundStopCommands;
 };
 type Dependencies = {
   prepare: typeof prepareNativeProjectInput;
@@ -265,6 +281,8 @@ type Dependencies = {
   finalization: typeof beginNativeProjectFinalization;
   captureFinalization: typeof captureNativeProjectFinalization;
   waitFinalization: typeof waitNativeProjectFinalization;
+  admitDownHooks: typeof admitNativeDownHookGeneration;
+  downHooks: typeof createNativeForegroundDownHooks;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
@@ -286,6 +304,8 @@ const DEFAULTS: Dependencies = {
   finalization: beginNativeProjectFinalization,
   captureFinalization: captureNativeProjectFinalization,
   waitFinalization: waitNativeProjectFinalization,
+  admitDownHooks: admitNativeDownHookGeneration,
+  downHooks: createNativeForegroundDownHooks,
 };
 /** Fixed text of the native foreground configuration refusal. */
 export const NATIVE_CONFIGURATION_REFUSAL =
@@ -920,6 +940,8 @@ export async function startNativeProject(opts: {
     readonly fingerprint: ComposeEnvFingerprintRecord;
   }) => Promise<void>;
   readonly signal?: AbortSignal;
+  /** A second stop request: cancels a running down hook and forces cleanup. */
+  readonly forceSignal?: AbortSignal;
   readonly dependencies?: Partial<Dependencies>;
 }): Promise<number> {
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
@@ -966,6 +988,9 @@ export async function startNativeProject(opts: {
     });
     requireActiveStartup(opts.signal);
   }
+  // A down hook of an earlier generation with unknown completion blocks this
+  // one before any hook runs; any other leftover record is superseded.
+  await deps.admitDownHooks(opts.scope);
   const profiles = selection.profiles;
   await preflightNativeProjectSource({
     runtime: opts.runtime,
@@ -1038,17 +1063,11 @@ export async function startNativeProject(opts: {
   const artifactHash = createHash("sha256")
     .update(new Uint8Array(await artifactFile.arrayBuffer()))
     .digest("hex");
-  const controller = new AbortController();
-  let interruptedExit = 130;
-  const cancel = () => controller.abort();
-  const terminate = () => {
-    interruptedExit = 143;
-    cancel();
-  };
-  process.on("SIGINT", cancel);
-  process.on("SIGTERM", terminate);
-  opts.signal?.addEventListener("abort", cancel, { once: true });
+  const stopSignals = nativeForegroundStopSignals(opts);
+  const controller = stopSignals.controller;
   let hooks: Hooks | undefined;
+  let foregroundStop: NativeForegroundStop | undefined;
+  let failed = false;
   let finalization:
     | Awaited<ReturnType<typeof beginNativeProjectFinalization>>
     | undefined;
@@ -1056,9 +1075,7 @@ export async function startNativeProject(opts: {
   let httpsCleanupConfirmed = false;
   let httpsAcquisitionFailure: unknown;
   try {
-    if (opts.signal?.aborted) {
-      cancel();
-    }
+    stopSignals.admitPending();
     requireActiveStartup(controller.signal);
     hooks = await opts.before(input);
     if (selection.aws) {
@@ -1222,6 +1239,16 @@ export async function startNativeProject(opts: {
         });
         const directory = await mkdtemp(join(tmpdir(), "hack-native-start-"));
         const run = runSelection.run;
+        const stop = hooks?.stop
+          ? createNativeForegroundStop({
+              scope: opts.scope,
+              run,
+              commands: hooks.stop,
+              force: stopSignals.force,
+              journal: deps.downHooks,
+            })
+          : undefined;
+        foregroundStop = stop;
         let mapping: NativeProjectRun | undefined;
         let https:
           | Awaited<ReturnType<typeof acquireNativeHttpsLease>>
@@ -1303,6 +1330,8 @@ export async function startNativeProject(opts: {
               privateInput: delivery.payload,
               startupTimeoutMs: 300_000,
               signal: controller.signal,
+              // Down hooks run on the first stop request of a ready graph.
+              ...stop?.serve,
               onExitDiagnostic: (diagnostic) => {
                 nativeExitCode = diagnostic.nativeCode;
               },
@@ -1400,6 +1429,8 @@ export async function startNativeProject(opts: {
                 }
                 await hooks?.ready?.();
                 await opts.onReady?.();
+                // Last: only microtasks separate this from readiness.
+                await stop?.owe(() => controller.signal.aborted);
               },
             });
           } catch (error) {
@@ -1438,7 +1469,7 @@ export async function startNativeProject(opts: {
           });
           return foregroundExitCode({
             aborted: controller.signal.aborted,
-            interruptedExit,
+            interruptedExit: stopSignals.interruptedExit(),
             failure: serveFailure,
             infrastructureFailure: httpsFailure,
             code,
@@ -1462,14 +1493,16 @@ export async function startNativeProject(opts: {
       },
     });
   } catch (error) {
+    failed = true;
     throw httpsCleanupFailure(httpsAcquisitionFailure, error);
   } finally {
-    process.off("SIGINT", cancel);
-    process.off("SIGTERM", terminate);
-    opts.signal?.removeEventListener("abort", cancel);
+    stopSignals.dispose();
     await hooks?.cleanup().catch((error: unknown) => {
       throw httpsCleanupFailure(httpsAcquisitionFailure, error);
     });
+    // down.after follows confirmed cleanup and lifecycle-process retirement,
+    // and precedes the finalization acknowledgement `down` waits for.
+    const stopFailure = await foregroundStop?.finish(graphCleanupConfirmed);
     await acknowledgeFinalization(
       finalization,
       graphCleanupConfirmed,
@@ -1477,5 +1510,12 @@ export async function startNativeProject(opts: {
     ).catch((error: unknown) => {
       throw httpsCleanupFailure(httpsAcquisitionFailure, error);
     });
+    reportForegroundStopFailure(stopFailure, failed);
+  }
+}
+/** A failed stop hook replaces the interrupted status, never a startup error. */
+function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
+  if (failure !== undefined && !failed) {
+    throw failure;
   }
 }

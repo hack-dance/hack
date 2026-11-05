@@ -45,6 +45,12 @@ type ProcessOptions = {
   /** Original owner only: emitted after captured exit/drain and group absence. */
   readonly onSettled?: () => undefined | Promise<undefined>;
   readonly forceSignal?: AbortSignal;
+  /**
+   * With `beforeStop` or `liveStopOwner`, settlement requires the owner's
+   * detached group to be absent (default). The Compose-import foreground keeps
+   * its final graph inspection as cleanup authority and passes false.
+   */
+  readonly requireGroupSettlement?: boolean;
   readonly onStopFailure?: () => void;
   /** Durable capture in the existing frontend owner, before private input delivery. */
   readonly onGroup?: (group: number) => Promise<void>;
@@ -478,11 +484,18 @@ async function serveGraphProcess(
     } catch {
       // Observation must never replace the startup result or cleanup authority.
     }
-    if (opts.beforeStop || opts.liveStopOwner) {
+    if (requiresGroupSettlement(opts)) {
       await requireGroupAbsent(child.pid);
     }
     await opts.onSettled?.();
   }
+}
+
+function requiresGroupSettlement(opts: ProcessOptions): boolean {
+  return (
+    (opts.beforeStop !== undefined || opts.liveStopOwner !== undefined) &&
+    opts.requireGroupSettlement !== false
+  );
 }
 
 /** An attached finite-hook owner must not retire while its captured detached group is present.

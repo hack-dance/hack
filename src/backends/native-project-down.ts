@@ -6,6 +6,7 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import { openNativeDownHookSession } from "./native-project-down-hooks.ts";
 import {
   captureNativeProjectFinalization,
   type NativeProjectFinalizationToken,
@@ -96,6 +97,22 @@ export async function nativeProjectDown(opts: {
   readonly beforeCleanup?: (run: NativeProjectRun) => Promise<void>;
   readonly retireHostProcesses?: (run: NativeProjectRun) => Promise<void>;
   readonly after?: (run: NativeProjectRun) => Promise<void>;
+  /**
+   * Journaled `down.before`/`down.after` (see `native-project-down-hooks.ts`).
+   * On a live graph they run around cleanup as before. On a graph that a
+   * foreground stop or recovery already stopped, only phases still owed run,
+   * once, after the original frontend's finalization. `run` rejects when the
+   * phase's commands fail. `configured` says whether the project declares
+   * down hooks; without a journal record nothing runs when it is false.
+   */
+  readonly hooks?: {
+    readonly configured: boolean;
+    readonly run: (phase: {
+      readonly phase: "before" | "after";
+      readonly run: NativeProjectRun;
+      readonly graphStopped: boolean;
+    }) => Promise<void>;
+  };
   readonly invoke?: typeof invokeNativeRuntime;
   /** Only the restart coordinator may defer to its already captured exact wait/recovery. */
   readonly deferFinalization?: boolean;
@@ -137,6 +154,25 @@ export async function nativeProjectDown(opts: {
       throw finalizationRefused();
     }
   };
+  const hooks = opts.hooks;
+  const owedAfterStop = async () => {
+    if (!hooks) {
+      return;
+    }
+    // Read only after finalization: the frontend may still be finishing them.
+    const session = await openNativeDownHookSession({
+      scope: opts.scope,
+      run,
+      graphStopped: true,
+      configured: hooks.configured,
+    });
+    await session.before(() =>
+      hooks.run({ phase: "before", run, graphStopped: true })
+    );
+    await session.after(() =>
+      hooks.run({ phase: "after", run, graphStopped: true })
+    );
+  };
   const recovered = await recoverNativeInterruptedStartupCleanup({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
@@ -148,6 +184,7 @@ export async function nativeProjectDown(opts: {
     verify(recovered, run, true);
     await opts.retireHostProcesses?.(run);
     await wait();
+    await owedAfterStop();
     return {
       backend: "native",
       status: "stopped",
@@ -160,10 +197,12 @@ export async function nativeProjectDown(opts: {
     isRecord(initial.receipt) &&
     initial.receipt.phase === "stopped-data-retained"
   ) {
-    // Recovery already stopped compute. User hooks and guest cleanup must not replay.
+    // Recovery or a foreground stop already stopped compute. Guest cleanup and
+    // completed hooks must not replay; only journaled owed phases run once.
     verify(initial, run, true);
     await opts.retireHostProcesses?.(run);
     await wait();
+    await owedAfterStop();
     return {
       backend: "native",
       status: "stopped",
@@ -171,7 +210,20 @@ export async function nativeProjectDown(opts: {
       dataPreserved: true,
     } as const;
   }
+  const session = hooks
+    ? await openNativeDownHookSession({
+        scope: opts.scope,
+        run,
+        graphStopped: false,
+        configured: hooks.configured,
+      })
+    : undefined;
   await opts.before?.(run);
+  if (hooks && session) {
+    await session.before(() =>
+      hooks.run({ phase: "before", run, graphStopped: false })
+    );
+  }
   // Recheck after hooks, which may run arbitrary user-authorized commands.
   verify(await inspect(), run, false);
   if (
@@ -193,6 +245,11 @@ export async function nativeProjectDown(opts: {
   verify(await inspect(), run, true);
   await opts.retireHostProcesses?.(run);
   await opts.after?.(run);
+  if (hooks && session) {
+    await session.after(() =>
+      hooks.run({ phase: "after", run, graphStopped: true })
+    );
+  }
   await wait();
   return {
     backend: "native",

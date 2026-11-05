@@ -689,6 +689,83 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-foreground-down-hooks",
+    module: "DownHooks",
+    states: 1246,
+    invariant: "Safe",
+    action: "DStart",
+    fields: [
+      "unsafeBefore = TRUE",
+      "beforeOpen = 2",
+      'jState = "beforeStarted"',
+      'jGen = "D"',
+    ],
+    alternativeWitnesses: [
+      {
+        action: "FInterrupt",
+        fields: [
+          "unsafeBefore = TRUE",
+          "beforeOpen = 2",
+          'jState = "beforeStarted"',
+          'jGen = "F"',
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "unknown-generation",
+        negative: true,
+        action: "NewUp",
+        fields: ["unsafeGen = TRUE", "newGen = TRUE", 'jState = "absent"'],
+      },
+      {
+        name: "owed-after-interrupt",
+        negative: true,
+        action: "FInterruptAtPublish",
+        fields: [
+          "unsafeOwe = TRUE",
+          "upInterrupted = TRUE",
+          'jState = "owed"',
+          'jGen = "F"',
+        ],
+      },
+      {
+        name: "complete-reachable",
+        negative: true,
+        invariant: "NeverComplete",
+        action: "FAfterDone",
+        fields: [
+          'jState = "complete"',
+          "afterDone = TRUE",
+          "unsafeAfter = FALSE",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "DAfterDone",
+            fields: [
+              'jState = "complete"',
+              "afterDone = TRUE",
+              "unsafeAfter = FALSE",
+            ],
+          },
+        ],
+      },
+      {
+        name: "recovery-reachable",
+        negative: true,
+        invariant: "NeverRecovered",
+        action: "DAfterDone",
+        fields: [
+          'fpc = "dead"',
+          'jState = "complete"',
+          'jGen = "D"',
+          "unsafeBefore = FALSE",
+          "unsafeAfter = FALSE",
+        ],
+      },
+    ],
+  },
+  {
     name: "native-route-stop",
     module: "Stop",
     states: 202,

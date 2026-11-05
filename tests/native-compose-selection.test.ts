@@ -138,7 +138,24 @@ test("authored format never silently changes an explicitly selected runtime", ()
   }
   for (const backend of ["native", "smol", "", "COMPOSE"]) {
     expect(() => requireNativeComposeBackend({ backend })).toThrow(
-      "Native project configuration currently requires the Compose backend"
+      "Native project configuration currently requires the Compose backend. The selected runtime was not changed. Rerun with HACK_RUNTIME_BACKEND=compose."
     );
   }
+});
+
+test("the backend refusal names the exact rerun for a read-only preview", () => {
+  expect(() =>
+    requireNativeComposeBackend({
+      backend: "native",
+      command: "hack config adopt --dry-run",
+    })
+  ).toThrow(
+    "Rerun with HACK_RUNTIME_BACKEND=compose, for example: HACK_RUNTIME_BACKEND=compose hack config adopt --dry-run"
+  );
+  expect(() =>
+    requireNativeComposeBackend({
+      backend: "compose",
+      command: "hack config adopt --dry-run",
+    })
+  ).not.toThrow();
 });

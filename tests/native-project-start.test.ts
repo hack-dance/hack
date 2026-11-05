@@ -1348,6 +1348,48 @@ test("readiness goals cover only services the reviewed plan marks active", () =>
   ).toEqual([]);
 });
 
+test("a reviewed one-shot service waits for successful completion", () => {
+  const image = `sha256:${"e".repeat(64)}`;
+  const specs = {
+    init: { image, healthcheck: { test: ["CMD", "true"] } },
+    seed: { image, profiles: ["debug"] },
+    web: { image },
+  };
+  const plan = (oneShot: unknown) => ({
+    enrollment_compatible: true,
+    services: {
+      init: { active: true, one_shot: oneShot },
+      // An inactive one-shot gets no goal: the runtime refuses inactive goals.
+      seed: { active: false, one_shot: true },
+      web: { active: true },
+    },
+  });
+  // The review's typed `one_shot`, not the label text, selects completion;
+  // it overrides the healthcheck default a long-running service would get.
+  expect(
+    readyGoals(
+      nativeReadinessArgs({
+        specs,
+        plan: plan(true),
+        initializers: new Set(),
+        routed: new Set(),
+      })
+    ).sort()
+  ).toEqual(["init=completed", "web=started"]);
+  for (const value of [false, "true", undefined]) {
+    expect(
+      readyGoals(
+        nativeReadinessArgs({
+          specs,
+          plan: plan(value),
+          initializers: new Set(),
+          routed: new Set(),
+        })
+      ).sort()
+    ).toEqual(["init=healthy", "web=started"]);
+  }
+});
+
 async function profileStartup(profiles: readonly string[] | undefined) {
   const { opts } = await fixture(false);
   const prepare = opts.dependencies.prepare!;

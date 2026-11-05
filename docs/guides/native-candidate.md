@@ -228,7 +228,27 @@ selection; see [Test both backends](https://github.com/hack-dance/hack/blob/next
 
 Other labels keep their native behavior. Routing (`caddy*`) and dependency cache
 (`hack.dependencies.*`) labels are reviewed as before, and other ordinary labels
-are refused with the general native configuration refusal. A basic build is also
+are refused with the general native configuration refusal.
+
+Hack's own one-shot marker is not an ownership label. A service labeled exactly
+`hack.service.one-shot: "true"` (or `hack.service.one-shot=true` in list form),
+the label [`hack config import --dry-run`](../reference/native-config-import.md)
+reports as `compose_one_shot_job`, is reviewed natively as a one-shot: the review
+plan marks it `one_shot`, and native `up` waits for it to exit successfully
+instead of waiting for it to keep running. The marker adds no container label.
+Only that exact key is recognized. Any other `hack.*` key, including another
+`hack.service.*` key, is still refused (`external_route_or_owner_label` in the
+native review), and a marker next to a reserved ownership label does not exempt
+it. The native review also refuses a marker whose value is not the string
+`true` (`invalid_one_shot_label`), a one-shot with `restart: always` or
+`unless-stopped` (`nonterminating_one_shot`), and a one-shot that also declares
+routing labels (`one_shot_route_conflict`).
+
+`hack config adopt`, including `--dry-run`, still requires the Compose backend,
+because it reads and adopts the Compose backend's existing containers and
+volumes. On the native backend it refuses before reading anything and names the
+rerun: `HACK_RUNTIME_BACKEND=compose hack config adopt --dry-run`. See
+[Legacy Compose adoption](../reference/native-compose-adoption.md). A basic build is also
 refused by native image-project `up`, with the general refusal: it needs the
 authored native format.
 

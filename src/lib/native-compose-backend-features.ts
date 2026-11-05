@@ -44,8 +44,9 @@ export type ComposeBackendFeature = (typeof COMPOSE_BACKEND_FEATURES)[number];
  *   source of truth for the ownership labels Hack itself writes.
  *
  * Other labels, including Hack's routing (`caddy*`), dependency cache
- * (`hack.dependencies.*`) and one-shot markers, are not reserved: native `up`
- * reviews them as it did before.
+ * (`hack.dependencies.*`) and one-shot (`hack.service.one-shot`) markers, are not
+ * reserved: native `up` reviews them itself. The native review accepts only the
+ * exact one-shot key, as a completion role, and still refuses other `hack.*` keys.
  */
 export const RESERVED_OWNERSHIP_LABEL_PREFIXES = [
   "com.docker.compose.",

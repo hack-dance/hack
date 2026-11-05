@@ -803,13 +803,43 @@ pub(super) fn compile(
             }
             diagnostics.push(Diagnostic::warning("dependency_cache_binding_required", &format!("{field}.labels"), "Dependency cache execution requires a verified source revision, pinned installer image and shared cache binding; declaration alone is not a completed install."));
         }
+        // Hack's own one-shot marker is a completion role, not ownership: only
+        // its exact key is exempt below, and only its literal `true` value is a
+        // declaration. Other `hack.*` keys keep the ownership refusal.
+        let one_shot = match super::one_shot::parse(m.get("labels")) {
+            super::one_shot::Declaration::Absent => false,
+            super::one_shot::Declaration::OneShot => true,
+            super::one_shot::Declaration::Invalid => {
+                diagnostics.push(Diagnostic::error(
+                    "invalid_one_shot_label",
+                    &format!("{field}.labels"),
+                    "The one-shot label accepts only the literal string value true; values omitted.",
+                ));
+                false
+            }
+        };
+        if one_shot && ["always", "unless-stopped"].contains(&restart.as_str()) {
+            diagnostics.push(Diagnostic::error(
+                "nonterminating_one_shot",
+                &format!("{field}.restart"),
+                "A one-shot service cannot use an unconditional restart policy.",
+            ));
+        }
+        if one_shot && routing.is_some() {
+            diagnostics.push(Diagnostic::error(
+                "one_shot_route_conflict",
+                &format!("{field}.labels"),
+                "A one-shot service finishes, so it cannot also declare local HTTPS routing.",
+            ));
+        }
         if routing_invalid
             || labels.keys().any(|key| {
-                // Hack's ownership namespaces are never exempt: no routing or
-                // dependency cache declaration may carry ownership evidence.
+                // Hack's ownership namespaces are never exempt: no routing,
+                // dependency cache or one-shot declaration may carry ownership evidence.
                 super::ownership_labels::is_hack_ownership_label(key)
                     || (!(dependency_cache.is_some() && super::dependency_cache::recognized(key))
                         && !(routing.is_some() && super::routing::recognized(key))
+                        && !super::one_shot::recognized(key)
                         && ["caddy", "traefik", "hack", "com.docker.compose"]
                             .iter()
                             .any(|prefix| key == prefix || key.starts_with(&format!("{prefix}."))))
@@ -927,7 +957,7 @@ pub(super) fn compile(
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,
-            platform,labels,routing,dependency_cache,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
+            platform,labels,routing,dependency_cache,one_shot,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
         });
     }
     Ok(result)

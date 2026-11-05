@@ -58,6 +58,22 @@ function input(
     serviceNames: Object.keys(services),
   };
 }
+/** Delivery against a reviewed plan whose `active` flags are given per service. */
+function deliver(
+  value: NativeProjectInput,
+  active: Record<string, boolean>
+): ReturnType<typeof nativeEnvironmentDelivery> {
+  return nativeEnvironmentDelivery({
+    input: value,
+    planId: "p".repeat(64),
+    reviewedPlan: {
+      services: Object.fromEntries(
+        Object.entries(active).map(([name, flag]) => [name, { active: flag }])
+      ),
+    },
+    run: "r".repeat(32),
+  });
+}
 const standard = () =>
   input(
     {
@@ -157,11 +173,7 @@ test("version two envelope carries files only when members exist", async () => {
     homeDirectory: root,
     mint: async () => undefined,
   });
-  const delivery = nativeEnvironmentDelivery(
-    adapted.input,
-    "p".repeat(64),
-    "r".repeat(32)
-  );
+  const delivery = deliver(adapted.input, { api: true, proxy: true });
   expect(delivery.flags).toEqual(["--environment-stdin"]);
   const envelope = JSON.parse(delivery.payload?.toString() ?? "");
   expect(envelope.version).toBe(2);
@@ -176,19 +188,68 @@ test("version two envelope carries files only when members exist", async () => {
       content_b64: Buffer.from(JSON.stringify(user)).toString("base64"),
     },
   ]);
-  const plain = nativeEnvironmentDelivery(
-    standard(),
-    "p".repeat(64),
-    "r".repeat(32)
-  );
+  const plain = deliver(standard(), { api: true, proxy: true });
   const v1 = JSON.parse(plain.payload?.toString() ?? "");
   expect(v1.version).toBe(1);
   expect(Object.hasOwn(v1, "files")).toBe(false);
+  expect(deliver(input({ web: {} }), { web: true })).toEqual({ flags: [] });
+});
+
+test("file members are delivered only for profile-active services; normalization is unchanged", async () => {
+  const root = await home();
+  const authored = standard();
+  const compose = JSON.parse(authored.normalizedComposeJson);
+  compose.services.proxy.profiles = ["tools"];
+  const optional = {
+    ...authored,
+    normalizedComposeJson: JSON.stringify(compose),
+  };
+  const adapted = await adaptNativeGcloudEnvironment({
+    input: optional,
+    mode: "file",
+    homeDirectory: root,
+    mint: async () => undefined,
+  });
+  // The inactive service is still normalized exactly as when it is selected.
+  const normalized = JSON.parse(adapted.input.normalizedComposeJson);
+  expect(normalized.services.proxy.volumes).toEqual([]);
+  expect(normalized.services.proxy.environment).toEqual({
+    GOOGLE_APPLICATION_CREDENTIALS: "/config/adc.json",
+  });
+  expect(Object.keys(adapted.input.managedFiles ?? {}).sort()).toEqual([
+    "api",
+    "proxy",
+  ]);
+  const delivery = deliver(adapted.input, {
+    api: true,
+    proxy: false,
+    other: true,
+  });
+  const envelope = JSON.parse(delivery.payload?.toString() ?? "");
+  expect(envelope.version).toBe(2);
+  expect(Object.keys(envelope.files)).toEqual(["api"]);
+  expect(envelope.files.api).toEqual([
+    {
+      name: "gcloud-adc.json",
+      target: "/srv/app/.config/gcloud/application_default_credentials.json",
+      mode: "0400",
+      content_b64: Buffer.from(JSON.stringify(user)).toString("base64"),
+    },
+  ]);
+  // A service missing from the reviewed plan is treated as inactive too.
+  const unreviewed = deliver(adapted.input, { api: true });
   expect(
-    nativeEnvironmentDelivery(
-      input({ web: {} }),
-      "p".repeat(64),
-      "r".repeat(32)
+    Object.keys(JSON.parse(unreviewed.payload?.toString() ?? "").files)
+  ).toEqual(["api"]);
+  // When no active service owns a file member the envelope stays version 1.
+  const valuesOnly = deliver(adapted.input, { api: false, proxy: false });
+  const v1 = JSON.parse(valuesOnly.payload?.toString() ?? "");
+  expect(v1.version).toBe(1);
+  expect(Object.hasOwn(v1, "files")).toBe(false);
+  expect(
+    deliver(
+      { ...adapted.input, managedEnvironment: {} },
+      { api: false, proxy: false }
     )
   ).toEqual({ flags: [] });
 });

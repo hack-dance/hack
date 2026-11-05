@@ -645,14 +645,33 @@ async function adaptNativeCredentials(opts: {
  * Private envelope for `graph serve --environment-stdin`. Version 1 carries values
  * only; version 2 adds service-scoped file members and is sent only when files
  * exist, so a runtime without file support refuses instead of dropping them.
+ *
+ * Adapters normalize every authored service, including those outside the selected
+ * profiles, so public Compose stays identical across profile selections. File
+ * members are delivered only for services the reviewed plan marks active: the
+ * runtime refuses file ownership for inactive services, so an optional disabled
+ * service must not block the selected graph.
  */
-export function nativeEnvironmentDelivery(
-  input: NativeProjectInput,
-  plan: string,
-  run: string
-): { flags: string[]; payload?: Buffer } {
+export function nativeEnvironmentDelivery(opts: {
+  readonly input: NativeProjectInput;
+  readonly planId: string;
+  readonly reviewedPlan: unknown;
+  readonly run: string;
+}): { flags: string[]; payload?: Buffer } {
+  const { input, planId: plan, run } = opts;
+  const reviewed =
+    isRecord(opts.reviewedPlan) && isRecord(opts.reviewedPlan.services)
+      ? opts.reviewedPlan.services
+      : {};
   const files = Object.entries(input.managedFiles ?? {}).filter(
-    ([, members]) => members.length > 0
+    ([service, members]) => {
+      const reviewedService = reviewed[service];
+      return (
+        members.length > 0 &&
+        isRecord(reviewedService) &&
+        reviewedService.active === true
+      );
+    }
   );
   if (
     Object.keys(input.managedEnvironment).length === 0 &&
@@ -1374,7 +1393,12 @@ export async function startNativeProject(opts: {
               run,
               invoke: deps.invoke,
             });
-          const delivery = nativeEnvironmentDelivery(input, review.planId, run);
+          const delivery = nativeEnvironmentDelivery({
+            input,
+            planId: review.planId,
+            reviewedPlan: review.report.plan,
+            run,
+          });
           let code = 1;
           let serveFailure: unknown;
           let nativeExitCode: string | undefined;

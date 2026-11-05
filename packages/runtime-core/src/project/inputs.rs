@@ -497,6 +497,24 @@ fn compile_inner(
     let raw = value["services"]
         .as_object()
         .ok_or_else(|| error("execution_services", "Missing reviewed services."))?;
+    // Compose supplies its project name to interpolation. Review bound it to
+    // the reviewed document, so no caller can substitute a different value.
+    let bound;
+    let supplied = match &review.plan.compose_project_name {
+        Some(name) => {
+            if supplied.contains_key(super::compose::COMPOSE_PROJECT_NAME) {
+                return Err(error(
+                    "execution_environment_owner",
+                    "COMPOSE_PROJECT_NAME is bound to the reviewed Compose project name and cannot be supplied separately.",
+                ));
+            }
+            let mut values = supplied.clone();
+            values.insert(super::compose::COMPOSE_PROJECT_NAME.into(), name.clone());
+            bound = values;
+            &bound
+        }
+        None => supplied,
+    };
     let mut resolver = Resolver {
         values: supplied,
         remaining: MAX_EXPANDED,

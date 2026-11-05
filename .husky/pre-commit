@@ -12,35 +12,69 @@ fi
 # (for example Next.js `site/app/docs/[[...slug]]/page.tsx`) reach Biome unchanged. Ultracite 7
 # shell-quoted each path and then ran Biome through a shell, which left literal quotes in the
 # path (HACK-1665). Nested configs such as `site/biome.jsonc` still apply per file.
-BIOME="$(git rev-parse --show-toplevel)/node_modules/.bin/biome"
+ROOT="$(git rev-parse --show-toplevel)"
+BIOME="$ROOT/node_modules/.bin/biome"
 if [ ! -x "$BIOME" ]; then
   echo "pre-commit: Biome is not installed at $BIOME. Run: bun install --frozen-lockfile" >&2
   exit 1
 fi
 
-# Stash unstaged tracked changes so we format the staged snapshot of each file.
-# Note: if unstaged changes touch the same lines formatting changes, stash pop may conflict. In that
-# case we abort the commit and leave the stash for manual resolution.
-STASHED=0
-if ! git diff --quiet; then
-  git stash push --quiet --keep-index --message "pre-commit-stash"
-  STASHED=1
-fi
+# Format the staged snapshot without touching `git stash` (HACK-1769). The stash stack is shared
+# by every worktree of the repository, so a push/pop here could pop another worktree's entry and
+# move its uncommitted work. Instead, export the index copy of each staged file, plus the tracked
+# Biome and ignore configs, into a private scratch tree; run Biome there; and write the results
+# back into the index. The working tree is only rewritten for files without unstaged changes.
+#
+# Hooks run at the top of the working tree. Pin the git dir and index (`git commit -a` and
+# `git commit <path>` point GIT_INDEX_FILE at a temporary index) to absolute paths, because
+# later steps run git with the scratch tree as their working tree.
+GIT_DIR="$(git rev-parse --absolute-git-dir)"
+case "${GIT_INDEX_FILE:-}" in
+  "") GIT_INDEX_FILE="$(git rev-parse --path-format=absolute --git-path index)" ;;
+  /*) ;;
+  *) GIT_INDEX_FILE="$ROOT/$GIT_INDEX_FILE" ;;
+esac
+export GIT_DIR GIT_INDEX_FILE
 
-# Format only staged files (avoid rewriting unrelated files).
+EXPORT="$(mktemp -d "${TMPDIR:-/tmp}/hack-pre-commit.XXXXXX")"
+trap 'rm -rf "$EXPORT"' EXIT
+trap 'exit 1' HUP INT TERM
+
+{
+  git diff --cached --name-only --diff-filter=ACMR -z
+  git ls-files -z -- ':(glob)**/biome.json' ':(glob)**/biome.jsonc' \
+    ':(glob)**/.gitignore' ':(glob)**/.ignore'
+} | git checkout-index --force --prefix="$EXPORT/" -z --stdin
+# Configs extend packages such as `ultracite`, resolved from the checkout's install.
+ln -s "$ROOT/node_modules" "$EXPORT/node_modules"
+
+# Format and lint only staged files (avoid rewriting unrelated files). Unfixable errors fail here.
 git diff --cached --name-only --diff-filter=ACMR -z |
-  xargs -0 "$BIOME" check --write --no-errors-on-unmatched --
+  (cd "$EXPORT" && xargs -0 "$BIOME" check --write --no-errors-on-unmatched --)
 
-# Restage in case the formatter changed them.
-git diff --cached --name-only --diff-filter=ACMR -z | xargs -0 git add --
-
-if [ "$STASHED" -eq 1 ]; then
-  if ! git stash pop --quiet; then
-    echo ""
-    echo "pre-commit: failed to re-apply unstaged changes (stash pop conflicted)."
-    echo "Resolve conflicts, then run:"
-    echo "  git stash list"
-    echo "  git stash pop"
-    exit 1
-  fi
-fi
+# Stage each formatted file. A file whose working copy matches the index also gets the formatted
+# content on disk and is restaged from there. A file with unstaged changes keeps its working copy
+# untouched; only its index entry is replaced from the export. Gitlinks have no exported file and
+# are skipped.
+git diff --cached --name-only --diff-filter=ACMR -z |
+  xargs -0 sh -c '
+    export_dir="$1"
+    shift
+    # Staged names are literal paths, not pathspec patterns (for example `[[...slug]]`).
+    GIT_LITERAL_PATHSPECS=1
+    export GIT_LITERAL_PATHSPECS
+    for path do
+      exported="$export_dir/$path"
+      if [ -L "$exported" ] || [ ! -f "$exported" ]; then
+        continue
+      fi
+      if git diff --quiet -- "$path"; then
+        if ! cmp -s "$exported" "./$path"; then
+          cat "$exported" >"./$path"
+        fi
+        git add -- "$path"
+      else
+        (cd "$export_dir" && git --work-tree=. add -- "$path")
+      fi
+    done
+  ' sh "$EXPORT"

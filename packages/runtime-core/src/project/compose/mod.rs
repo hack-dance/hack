@@ -4,6 +4,7 @@ mod dependency_cache;
 mod fields;
 mod graph;
 mod ownership_labels;
+mod ports;
 pub(super) mod routing;
 mod service;
 use fields::*;

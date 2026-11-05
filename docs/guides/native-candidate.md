@@ -232,6 +232,26 @@ are refused with the general native configuration refusal. A basic build is also
 refused by native image-project `up`, with the general refusal: it needs the
 authored native format.
 
+Native review reads Compose `ports` without reading environment values. Each
+entry may be short (`[host_ip:][published:]target[/protocol]`, with an IPv6 host
+in brackets such as `[::1]:8080:80`) or long (`target`, `published`, `host_ip`,
+`protocol`). The host IP and published port may each be one interpolation with a
+literal default, such as `"${SEARCH_BIND:-127.0.0.1}:${SEARCH_PORT:-8108}:8108"`.
+Native always uses the literal default, even when the variable is set, and warns
+with `interpolated_port_default`; the plan records only the variable names. A
+reference without a literal default (`${PORT}`, `${PORT:?message}`), a nested
+default, an interpolated target or protocol, or one reference that spans several
+components is an `unresolved_port_binding` error at
+`services.<name>.ports[<index>]`. The review still reports every other finding,
+and a service in an unselected profile does not block the plan.
+
+Native publishes only on host loopback. `127.0.0.1` and `::1` are kept. A bare
+port or an all-interface binding (`0.0.0.0`, `::`) is narrowed to `127.0.0.1` or
+`::1`, with a `proposed_loopback_binding` warning. Compose would bind every
+interface in that case; native does not expose development services to the
+network. A specific non-loopback address, such as a LAN address, is an
+`unsupported_host_binding` error. Keep such a project on the Compose backend.
+
 `hack doctor` reports the same features for the current project in its
 `compose backend features` check. With `--json`, the check's `composeBackend.features`
 lists the closed names `external_network`, `external_volume`, `reserved_label`,

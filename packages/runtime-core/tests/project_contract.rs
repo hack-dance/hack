@@ -835,7 +835,6 @@ fn invalid_limits_ports_commands_and_conflicting_owners_are_rejected() {
         "    ports: ['70000:80']\n",
         "    ports: ['8000-8001:80']\n",
         "    ports: ['80/sctp']\n",
-        "    ports: ['[::1]:8080:80']\n",
     ] {
         let fixture = Fixture::new(&format!("{BASIC}{extra}"));
         let plan = fixture.plan().plan;
@@ -864,7 +863,7 @@ fn invalid_limits_ports_commands_and_conflicting_owners_are_rejected() {
 #[test]
 fn unsupported_ports_are_located_diagnostics_collected_with_the_rest_of_the_review() {
     let fixture = Fixture::new(
-        "services:\n  web:\n    image: alpine:3.21\n    privileged: true\n    ports: ['8080:80']\n    expose: ['3000', '${EXPOSED:-4000}']\n  debug:\n    image: alpine:3.21\n    profiles: [debug]\n    ports: ['${BIND:-127.0.0.1}:9090:80', '9091:81', '${OTHER_BIND:-10.9.8.7}:9092:82']\n",
+        "services:\n  web:\n    image: alpine:3.21\n    privileged: true\n    ports: ['8080:80']\n    expose: ['3000', '${EXPOSED:-4000}']\n  debug:\n    image: alpine:3.21\n    profiles: [debug]\n    ports: ['${BIND}:9090:80', '9091:81', '${OTHER_BIND:-10.9.8.7}:9092:82', '${DEBUG_PORT:-9093}:${TARGET:-83}']\n",
     );
     let report = project::plan(&fixture.candidate, fixture.options()).unwrap();
     let plan = &report.plan;
@@ -872,15 +871,16 @@ fn unsupported_ports_are_located_diagnostics_collected_with_the_rest_of_the_revi
     let located: Vec<_> = plan
         .diagnostics
         .iter()
-        .filter(|d| d.code == "invalid_port")
-        .map(|d| (d.severity.as_str(), d.field.as_str()))
+        .filter(|d| d.severity == "error" && d.field.contains('['))
+        .map(|d| (d.code.as_str(), d.field.as_str()))
         .collect();
     assert_eq!(
         located,
         vec![
-            ("error", "services.debug.ports[0]"),
-            ("error", "services.debug.ports[2]"),
-            ("error", "services.web.expose[1]"),
+            ("invalid_port", "services.web.expose[1]"),
+            ("unresolved_port_binding", "services.debug.ports[0]"),
+            ("unresolved_port_binding", "services.debug.ports[3]"),
+            ("unsupported_host_binding", "services.debug.ports[2]"),
         ]
     );
     assert!(
@@ -889,24 +889,73 @@ fn unsupported_ports_are_located_diagnostics_collected_with_the_rest_of_the_revi
             .any(|d| d.code == "privileged_service" && d.field == "services.web")
     );
     assert!(!plan.services["debug"].active);
-    assert_eq!(plan.services["debug"].ports.len(), 1);
-    assert_eq!(plan.services["debug"].ports[0].published, Some(9091));
+    let debug_ports = &plan.services["debug"].ports;
+    assert_eq!(debug_ports.len(), 2);
+    assert_eq!(debug_ports[0].published, Some(9091));
+    assert_eq!(debug_ports[1].declared_host_ip, "[unsupported]");
+    assert_eq!(
+        debug_ports[1].host_ip_reference.as_deref(),
+        Some("OTHER_BIND")
+    );
     assert_eq!(plan.services["web"].ports[0].published, Some(8080));
     assert_eq!(plan.services["web"].exposed_ports, vec!["3000"]);
     let serialized = serde_json::to_string(&report).unwrap();
-    for authored in ["10.9.8.7", "OTHER_BIND", "EXPOSED", "${EXPOSED:-4000}"] {
+    for authored in [
+        "10.9.8.7",
+        "EXPOSED",
+        "${EXPOSED:-4000}",
+        "DEBUG_PORT",
+        "TARGET",
+    ] {
         assert!(!serialized.contains(authored), "{authored}");
     }
     // Report paths and hashes may contain numeric substrings by coincidence.
     // The authored default must stay out of diagnostic text specifically.
     let diagnostics = serde_json::to_string(&plan.diagnostics).unwrap();
-    assert!(!diagnostics.contains("4000"));
+    for authored in ["4000", "BIND", "9093"] {
+        assert!(!diagnostics.contains(authored), "{authored}");
+    }
     assert_eq!(
         project::enroll(&fixture.candidate, fixture.options(), &report.plan_id)
             .unwrap_err()
             .code,
         "incompatible_compose"
     );
+    assert!(!fixture.candidate.state_root.exists());
+}
+
+/// A profile-gated service whose ports use literal interpolation defaults no
+/// longer aborts the review: the default profile plan is enrollment compatible,
+/// records the variable names only, and selecting the profile still leaves
+/// publication to graph admission.
+#[test]
+fn interpolated_port_defaults_review_to_their_literal_and_keep_literal_plans_stable() {
+    let literal = Fixture::new(&format!("{BASIC}    ports: ['127.0.0.1:8108:8108']\n"));
+    let literal_report = project::plan(&literal.candidate, literal.options()).unwrap();
+    assert!(literal_report.plan.enrollment_compatible);
+    let literal_text = serde_json::to_string(&literal_report.plan).unwrap();
+    assert!(
+        !literal_text.contains("published_reference")
+            && !literal_text.contains("host_ip_reference")
+    );
+
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    command: [echo, hello]\n  search:\n    image: alpine:3.21\n    profiles: [local-search]\n    ports: ['${SEARCH_BIND:-127.0.0.1}:${SEARCH_PORT:-8108}:8108']\n",
+    );
+    let report = project::plan(&fixture.candidate, fixture.options()).unwrap();
+    let plan = &report.plan;
+    assert!(plan.enrollment_compatible, "{:?}", plan.diagnostics);
+    assert!(!plan.services["search"].active);
+    let port = &plan.services["search"].ports[0];
+    assert_eq!(
+        (port.declared_host_ip.as_str(), port.published, port.target),
+        ("127.0.0.1", Some(8108), 8108)
+    );
+    assert_eq!(port.host_ip_reference.as_deref(), Some("SEARCH_BIND"));
+    assert_eq!(port.published_reference.as_deref(), Some("SEARCH_PORT"));
+    assert!(plan.diagnostics.iter().any(|d| d.severity == "warning"
+        && d.code == "interpolated_port_default"
+        && d.field == "services.search.ports[0]"));
     assert!(!fixture.candidate.state_root.exists());
 }
 

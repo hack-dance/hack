@@ -159,7 +159,8 @@ pub fn restore_selection(candidate: &Candidate, run: &str) -> Result<Value, Cand
     for resource in receipt.resources.values() {
         let observed = super::inspect_resource(&engine, &receipt, resource)?;
         if resource.kind == super::Kind::Volume {
-            if observed.is_none() {
+            // A never-created (`reserved`) volume must be absent; settled data present.
+            if observed.is_none() == super::plan_reconcile::retained_volume(resource) {
                 return Err(refused());
             }
         } else if resource.phase != "absent" || observed.is_some() {

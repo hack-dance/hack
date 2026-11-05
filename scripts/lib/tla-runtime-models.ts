@@ -41,6 +41,28 @@ const laterIncompleteMissingLockStages = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "native-plan-reconcile",
+    module: "Reconcile",
+    states: 747_656,
+    invariant: "NoForeignAttach",
+    action: "Start",
+    fields: ["foreignAttach = TRUE", "unrecordedAttach = FALSE"],
+    additionalControls: [
+      {
+        name: "replacement",
+        negative: true,
+        invariant: "AttachSelected",
+        fields: ["unrecordedAttach = TRUE", "foreignAttach = FALSE"],
+      },
+      {
+        name: "drop-orphans",
+        negative: true,
+        invariant: "RetainedDataRecorded",
+        fields: ["lostData = TRUE", "foreignAttach = FALSE"],
+      },
+    ],
+  },
+  {
     name: "pre-ready-retirement",
     module: "Retirement",
     states: 10_965,

@@ -7,6 +7,7 @@ pub use service_exec::{
 };
 mod hostname_change;
 mod normalized;
+mod plan_reconcile;
 #[cfg(target_os = "macos")]
 pub use normalized::run_normalized_with_host_dependencies_until;
 pub use normalized::{
@@ -783,6 +784,8 @@ impl Session<'_, '_> {
         one_off::record_effect(&self.root, key, &self.receipt.resources[key])
     }
     fn create_resources(&mut self, retain_data: bool) -> Result<(), CandidateError> {
+        // Restore reattaches every settled volume. A volume still `reserved` never
+        // received a create intent; it is created exclusively, never adopted.
         let keys: Vec<_> = self
             .receipt
             .resources
@@ -793,7 +796,7 @@ impl Session<'_, '_> {
         for key in keys {
             self.check_cancelled()?;
             let resource = self.receipt.resources[&key].clone();
-            if retain_data && resource.kind == Kind::Volume {
+            if retain_data && plan_reconcile::retained_volume(&resource) {
                 if inspect_resource(&self.engine, &self.receipt, &resource)?.is_none() {
                     return Err(error(
                         "graph_data_missing",
@@ -1513,6 +1516,24 @@ pub fn source_compatibility(
         || root.join("state.pending").is_symlink()
     {
         return Err(refused());
+    }
+    #[cfg(target_os = "macos")]
+    let rebinding = source_rebind.is_some();
+    #[cfg(not(target_os = "macos"))]
+    let rebinding = false;
+    if plan_reconcile::applies(&receipt, plan_id, plan, normalized, rebinding) {
+        // Compute is recreated from this review; retained data is reattached by
+        // verified identity at admission, which repeats this proof under the lease.
+        plan_reconcile::prepare(plan, &receipt, normalized)?;
+        return Ok(json!({
+            "run": receipt.run,
+            "owner": receipt.owner,
+            "namespace": receipt.namespace,
+            "plan": receipt.plan_id,
+            "reviewed_plan": plan_id,
+            "source_revision": Value::Null,
+            "reconcile": true,
+        }));
     }
     let cached = plan
         .services

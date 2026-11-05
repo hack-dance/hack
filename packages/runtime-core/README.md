@@ -1394,11 +1394,23 @@ changed or uncertain mapping refuses before new graph effects. Earlier candidate
 builds removed the mapping on down; their retained volumes are not guessed or
 silently adopted by a fresh up and require explicit owned-state recovery.
 
+When the reviewed plan changed and the strict replay layout no longer applies,
+`serve-restore` reconciles instead (`provider/graph/plan_reconcile.rs`): after the
+same generation, absence and label checks, compute is prepared exactly as a fresh
+admission would, retained volumes are projected by logical key onto their recorded
+names, newly declared volumes receive unused `reserved` names in this run and are
+created exclusively, and retained volumes the plan no longer declares stay in the
+receipt. Run, owner, namespace and the ownership plan on every label are unchanged.
+`graph source-compatibility` reports `"reconcile": true` for this path. Receipts
+with dependency caches, live source or a pending source-device rebind keep the
+hostname/shared-source proofs. A volume still `reserved` in a stopped receipt was
+never created; selection requires it absent and restore creates it.
+
 Selection binds the receipt, current VM boot and verified current volume
 observations. Restoration rechecks these before effects, requires the old owner
 publication and lock to be retired, and verifies the historical cleanup
-acknowledgment in its original boot context. A changed plan, missing volume,
-active owner, or stale selection is refused. The prior stopped receipt is archived
+acknowledgment in its original boot context. A changed plan outside the
+reconciliation path above, missing volume, active owner, or stale selection is refused. The prior stopped receipt is archived
 before fresh dependency ownership is admitted. This does not enable file-based
 `graph restart`/`restore` or normalized live-owner redelivery, and does not replay
 initializer cache-release effects. Native same-run restoration and cross-boot

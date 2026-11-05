@@ -567,6 +567,18 @@ resolved again for those services. Missing images still refuse native admission;
 this selection never replaces generation, source or resource checks. Changing the
 original Compose file uses normal image resolution and the existing compatibility
 rules, rather than silently adopting an old image for a new declaration.
+
+Editing the Compose file of a stopped graph and running `hack up` again reconciles
+the same run, as `docker compose up` does. Every container and network is
+recreated from the new review, so changed commands, images, environment and added
+or removed services take effect. A named volume whose key the run already retains
+is reattached under its recorded name after the same label and identity checks; a
+newly declared volume is created fresh; a retained volume the new file no longer
+declares stays owned and unmounted until `hack down --remove-data` (Compose also
+keeps project volumes). Retained data is only ever reattached to the run and
+namespace that created it. Graphs with dependency caches, live source or a pending
+source-device rebind keep the narrower rules below. `hack restart` of a stopped
+graph refuses and points to `hack up`.
 For a shared-source graph admitted with a retained compatibility contract, ordinary
 source-content edits may change the reviewed plan ID: restart checks the stable
 execution, exclusion, mount and dependency-cache inputs before cleanup and again

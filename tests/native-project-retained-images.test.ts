@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { confirmedNativeRetainedGraph } from "../src/backends/native-project-retained.ts";
 import {
   selectNativeActiveImages,
   selectNativeRetainedImages,
@@ -405,4 +406,56 @@ test("malformed provenance or image and mismatched resource keys refuse reuse", 
         : "image selection changed"
     );
   }
+});
+
+test("a reconciled stopped graph's never-created volume must be absent, settled data present", () => {
+  const baseline = observation();
+  const reconciled = {
+    ...baseline,
+    receipt: {
+      ...baseline.receipt,
+      resources: {
+        ...baseline.receipt.resources,
+        "volume:added": { kind: "volume", key: "added", phase: "reserved" },
+      },
+    },
+    observations: {
+      ...baseline.observations,
+      "volume:added": { state: "absent" },
+    },
+  };
+  expect(confirmedNativeRetainedGraph(reconciled, saved)).toBe(true);
+  expect(
+    confirmedNativeRetainedGraph(
+      {
+        ...reconciled,
+        observations: {
+          ...reconciled.observations,
+          "volume:added": { state: "present" },
+        },
+      },
+      saved
+    )
+  ).toBe(false);
+  expect(
+    confirmedNativeRetainedGraph(
+      {
+        ...reconciled,
+        observations: {
+          ...reconciled.observations,
+          "volume:data": { state: "absent" },
+        },
+      },
+      saved
+    )
+  ).toBe(false);
+});
+test("restart of a stopped graph points at up instead of reporting image drift", async () => {
+  await expectClosedRefusal(
+    selectNativeActiveImages({
+      ...options,
+      invoke: async () => observation(),
+    }),
+    "stopped with data retained. Run hack up"
+  );
 });

@@ -639,6 +639,40 @@ represents an observed abort check, not arbitrary OS signal delivery; cancellati
 does not reverse an already-admitted boot. There is no fairness or eventual-start
 claim, and a model pass is not native startup qualification.
 
+## Retained-data handoff across plan changes
+
+`native-plan-reconcile/Reconcile.tla` checks how a stopped native graph hands its
+named data to the next admission after a Compose edit. Two interchangeable
+instances (checked up to permutation), two logical volume keys and three volume
+identities explore 747,656 distinct states. Every admission recreates compute from
+the current plan, so command, image and environment edits are abstracted; the model
+varies only the declared volume set. A declared key that the run already records is
+reattached; a newly declared key gets an exclusively created volume; recorded data
+the plan no longer declares stays recorded and unmounted until explicit removal.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `Edit` | Compose edit between ups; a new review and normalized identity |
+| `Select` | `provider/graph/foreground.rs::restore_selection` generation over the receipt and observed volume identities |
+| `Replace` / `Substitute` | Volume replaced between selection and admission, or a foreign-labeled volume under a recorded name |
+| `Admit` | `provider/graph/restore.rs::restore_inputs`: `plan_reconcile::Verified::verify_fresh` generation recheck and label/presence checks under the provider lease |
+| `CreateDeclared` | `plan_reconcile::Verified::project` fresh `reserved` names, then `Session::create_resources` exclusive create |
+| `Start` / `Stop` / `RemoveData` | Container creation with projected mounts; ordinary stop keeps volumes; `down --remove-data` deletes recorded volumes |
+
+The `negative` control adopts any live volume with a declared key and must fail
+`NoForeignAttach` in a `Start` state with `foreignAttach = TRUE`. The `replacement`
+control skips the generation recheck and must fail `AttachSelected` with
+`unrecordedAttach = TRUE`. The `drop-orphans` control forgets undeclared retained
+data and must fail `RetainedDataRecorded` with `lostData = TRUE`.
+
+Assumptions: admission through startup holds the provider mutation lease, so no
+replacement happens inside it. A replacement with copied ownership labels before
+selection is indistinguishable from the recorded volume by name and labels, as in
+the implementation; the generation fence protects only the selection-to-admission
+window. Dependency caches, live source and source-device rebinding keep their own
+proofs and are outside this model. It does not prove engine mount behavior, crash
+durability of the receipt, image resolution or application data contents.
+
 ## Graph admission
 
 `graph-admission/Admission.tla` checks the smallest admission race: two clients

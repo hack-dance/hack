@@ -189,7 +189,7 @@ Compose backend. Native support for them is planned after v5.
 
 | Compose feature | Kept on the Compose backend when |
 | --- | --- |
-| External network | A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the `HACK_NATIVE_ADAPTATION` selection (see [Frontend integration status](#frontend-integration-status)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
+| External network | A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the selected adaptation (`HACK_NATIVE_ADAPTATION` or the committed `.hack/native/adaptation.json`; see [Native settings files](#native-settings-files)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
 | External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
 | Reserved ownership label | A service, network or volume label key starts with `com.docker.compose.`, `io.hack-local.`, `io.hack.native-config.`, `io.hack.native-file.` or `io.hack.storage-witness.`. Compose, the native runtime and native-config Compose use these labels to prove which resources they own. |
 | Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. |
@@ -208,8 +208,11 @@ defaults such as `DOCKER_DEFAULT_PLATFORM`: a platform counts only when a servic
 sets its `platform` field. The native runtime's own review reports `extends` and
 `include` as unsupported fields.
 
-The check applies the explicit `HACK_NATIVE_ADAPTATION` selection first, as native
-start does. An unchanged Compose file whose external network is listed in
+The check applies the selected adaptation first, as native start does:
+`HACK_NATIVE_ADAPTATION`, else the committed `.hack/native/adaptation.json` or the
+`adaptation.<env>.json` for `--env <env>`. Without `--env`, a network counts as
+isolated only when every committed adaptation that could apply isolates it, because
+the effective env is not known yet. An unchanged Compose file whose external network is listed in
 `isolatedNetworks` therefore stays on native, and native start replaces that
 network with an owned isolated one. The selection is read only when the Compose
 file has an external network. If it cannot be read, is not version 1, or its
@@ -237,7 +240,7 @@ authored native format.
 lists the closed names `external_network`, `external_volume`, `reserved_label`,
 `unsupported_build` and `foreign_platform`. On the native backend a found feature
 is a warning; on the Compose backend it is informational. Native doctor applies
-the same `HACK_NATIVE_ADAPTATION` selection before it reports.
+the same adaptation selection as native `up` without `--env` before it reports.
 
 Publication control tokens are delivered to the relay through a one-shot inherited
 pipe (`--control-fd 0`), never through process arguments. The relay reads exactly
@@ -759,7 +762,8 @@ fresh ownership and runtime proof, even if containers still appear running.
 Unconfirmed ownership or an incomplete refresh requires inspection and explicit
 retaining recovery; command requests are never replayed.
 Foreground whole-project `hack up` additionally requires
-`HACK_NATIVE_SHARED_SOURCE=1`: it exposes the exact
+`HACK_NATIVE_SHARED_SOURCE=1` or `"sharedSource": true` in the
+[machine settings](#native-settings-files): it exposes the exact
 project tree, including ignored files, with each mount's declared write mode. Use
 an explicitly prepared candidate home and the binary from a complete native bundle.
 It acquires public images, privately supplies managed environment values, runs
@@ -1124,8 +1128,9 @@ identity and no listener. Torn records and sockets without complete ownership
 evidence remain unavailable; do not delete them to force allocation. Recovery of an
 already enrolled graph requires verified graph cleanup instead.
 
-`HACK_NATIVE_DEPENDENCIES` selects an absolute path to a regular JSON file with
-explicit host listeners. The CLI reads it after lifecycle hooks, so a hook can
+`HACK_NATIVE_DEPENDENCIES`, or `dependencies` in the
+[machine settings](#native-settings-files), selects a regular JSON file with
+explicit host listeners; the variable takes an absolute path. The CLI reads it after lifecycle hooks, so a hook can
 prepare current listeners before selection. For example:
 
 ```json
@@ -1314,9 +1319,10 @@ authority is inferred from a saved selection file. Image-only services omit grap
 shared-source mode; active project bind mounts still use the explicit project share.
 
 For projects whose checked-in Compose file needs explicit native health probes,
-`HACK_NATIVE_ADAPTATION` selects an absolute JSON file. This leaves the source file
-unchanged and preserves its identity in native review. Only the following bounded
-adaptations are accepted:
+an adaptation file adds them. Commit it as `.hack/native/adaptation.json` (see
+[Native settings files](#native-settings-files)), or select any absolute JSON file
+with `HACK_NATIVE_ADAPTATION`. This leaves the Compose file unchanged and preserves
+its identity in native review. Only the following bounded adaptations are accepted:
 
 ```json
 {
@@ -1352,6 +1358,116 @@ including the root mount's read-only setting. Unrelated services are unchanged.
 The layout participates in native dependency-cache identity. This shares compatible
 workspace installations; it does not implement a cross-project package store or
 claim deduplication across different lockfiles.
+
+### Native settings files
+
+Every native selection above can also come from a file, so a project runs with plain
+`hack up` instead of a set of exported variables. There are two kinds of file, because
+they carry different authority:
+
+| File | Holds | Where | Commit it? |
+| --- | --- | --- | --- |
+| Project adaptation | The adaptation above (`isolatedNetworks`, `httpProbes`, `additionalHostnames`, `additionalHostAliases`, `workspaceCache`) | `.hack/native/adaptation.json`, and optionally `.hack/native/adaptation.<env>.json` | Yes. Every checkout and worktree shares it. |
+| Machine settings | Grants and host authority: the project share, the AWS profile, host dependency files, HTTPS, prepared base and approved hosts | `${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/<project>/settings.json` | Never. It is per machine. |
+
+The project adaptation has the same authority as the Compose file it adapts. It grants
+nothing: its schema is the closed adaptation schema above, so a grant such as
+`sharedSource` in it refuses with `E_CONFIG_INVALID`. Hack reads only
+`adaptation.json` and `adaptation.<env>.json` from `.hack/native/`, where `<env>` is
+a lowercase env name. `hack doctor` warns about any other file there.
+
+The machine settings file lives outside the project because the project tree is
+shared read/write with the native VM: a container could rewrite a grant stored in the
+tree before the next `up`. `<project>` is the project name Hack uses (the Compose
+`name:`, else `name` in `hack.config.json`, else the directory name), lowercased with
+other characters replaced by `-`. Linked worktrees and branch instances of one project
+therefore share one machine file. Create it once per machine:
+
+```sh
+dir="${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/my-app"
+mkdir -p -m 700 "$dir"
+chmod 700 "$dir"
+touch "$dir/settings.json" && chmod 600 "$dir/settings.json"
+```
+
+```json
+{
+  "version": 1,
+  "sharedSource": true,
+  "aws": {"profile": "dev-sso", "region": "us-east-1"},
+  "dependencies": "dependencies.json",
+  "dependenciesByEnv": {"qa": "dependencies.qa.json"},
+  "https": {"caddyBinary": "/opt/caddy/bin/caddy", "caddySha256": "<sha256>", "port": 443},
+  "preparedBase": {"mode": "prefer"},
+  "allowHosts": ["registry.npmjs.org"]
+}
+```
+
+Every field except `version` is optional. The fields match the variables:
+
+| Field | Variable it stands for |
+| --- | --- |
+| `sharedSource` (`true` or `false`) | `HACK_NATIVE_SHARED_SOURCE=1` |
+| `aws.profile`, `aws.region` | `HACK_NATIVE_AWS_PROFILE`, `HACK_NATIVE_AWS_REGION` |
+| `dependencies`, `dependenciesByEnv` | `HACK_NATIVE_DEPENDENCIES` |
+| `https.caddyBinary`, `https.caddySha256`, `https.port` | `HACK_NATIVE_CADDY_BINARY`, `HACK_NATIVE_CADDY_SHA256`, `HACK_NATIVE_HTTPS_PORT` |
+| `preparedBase.mode` (`prefer`, `require` or `off`), `preparedBase.store` | `HACK_NATIVE_PREPARED_BASE`, `HACK_NATIVE_PREPARED_BASE_STORE` |
+| `allowHosts` (a list) | `HACK_NATIVE_ALLOW_HOSTS` (a comma-separated list) |
+
+`dependencies` and `dependenciesByEnv` name host dependency files (the format above)
+in the same directory: plain file names, never paths. The machine settings do not
+select the adaptation, the native binary or the native home. A `gcloud` field or any
+other field refuses.
+
+Hack refuses the machine file with `E_CONFIG_INVALID` before any branch, lifecycle,
+storage or runtime work unless all of these hold:
+
+- the directory is a real directory owned by you with mode `0700`;
+- the directory is outside the project root, and the project root is not inside it;
+- `settings.json` is a regular file owned by you with mode `0600`, not a symbolic or
+  hard link, at most 64 KiB, and unchanged while it is read;
+- every field is valid, including a field that a variable overrides.
+
+A missing directory or file means no machine settings.
+
+**Precedence.** For each setting, a variable that is set wins entirely, even when it
+is empty, then the machine settings, then the committed project file. Values are never
+merged. For example, `HACK_NATIVE_ADAPTATION` replaces the committed adaptation, and
+`HACK_NATIVE_SHARED_SOURCE=0` withholds a share that the machine file grants. A
+non-empty `HACK_NATIVE_AWS_PROFILE` selects the AWS variables; `HACK_NATIVE_AWS_REGION`
+without it is ignored, as before. Existing scripts that export the variables keep
+their exact behavior.
+
+**Per-env files.** `adaptation.<env>.json` and `dependenciesByEnv.<env>` replace the
+base file for runs whose effective env is `<env>`: the `--env` you pass, the env a
+retained run recorded, or the project's default env. Otherwise the base file applies.
+A fresh start, a retained start and a restart of one run therefore always select the
+same files.
+
+**Identity and recovery.** Settings resolution only reads files. It writes no state,
+so Ctrl-C needs no cleanup, and `down`, `ps`, `logs`, `exec` and `run` keep using the
+saved run mapping without reading the settings. A file-selected run and a
+variable-selected run with the same contents review the same native plan, so
+`restart` retains the run either way.
+
+`hack doctor` on the native backend adds a `native settings` check. It reports where
+each setting came from (`env`, `machine`, `project` or `unset`), never its value, and
+the machine settings path with your home shown as `~`. With `--json`, the check's
+`nativeSettings` holds `origins`, `adaptationFiles`, `machineSettings` and closed
+`warnings`:
+
+| Warning | Meaning |
+| --- | --- |
+| `shared_source_not_granted` | Native `up` and `restart` refuse until the project share is granted. |
+| `internal_dns_tls_not_applied` | `internal.dns` and `internal.tls` in `hack.config.json` are not applied on native, so containers cannot reach routes by their HTTPS names. Set both to `false` to silence it. |
+| `internal_extra_hosts_not_applied` | `internal.extra_hosts` is not applied on native. Declare `additionalHostAliases` with host dependency bindings instead. |
+| `routes_without_probes` | `routesWithoutProbes` routed services have no native HTTP probe after the adaptation for the default env; native `up` refuses them. |
+| `compose_profiles_ignored` | `COMPOSE_PROFILES` is set in the environment, but native selects profiles only from `--profile`. Managed `COMPOSE_PROFILES` values are not inspected. |
+| `aws_region_without_profile` | `HACK_NATIVE_AWS_REGION` is set without `HACK_NATIVE_AWS_PROFILE` and is ignored. |
+| `unread_project_settings_files` | `.hack/native/` holds files other than `adaptation*.json`; Hack does not read them. |
+
+An invalid settings file makes the check an error with the same closed line native
+`up` prints. The check runs no runtime request, credential export or network call.
 
 ### Optional prepared base for a fresh pool
 

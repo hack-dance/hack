@@ -51,6 +51,10 @@ verified candidate on the Compose backend, set `HACK_RUNTIME_BACKEND=compose`; s
 [Test both backends](#test-both-backends). Any other non-empty value refuses before
 the candidate starts. Explicit native project adaptation,
 dependency, AWS profile, routing, and source-sharing settings still reach the CLI.
+So do the committed `.hack/native/adaptation.json` and the per-machine
+`~/.config/hack/native/<project>/settings.json`
+([native settings files](native-candidate.md#native-settings-files)), which do not
+depend on the installed version.
 Arguments, standard input and output, exit codes, and signals reach the selected
 candidate. Concurrent observation and stop commands can accompany a foreground
 candidate command; selecting another bundle refuses while any launcher is active.

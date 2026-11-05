@@ -36,7 +36,10 @@ import {
   type NativeProjectRunScope,
   normalizeNativeProfiles,
 } from "./native-project-run.ts";
-import { readNativeSelection } from "./native-project-selection.ts";
+import {
+  readNativeSelection,
+  selectNativeEnvFile,
+} from "./native-project-selection.ts";
 import {
   nativeRuntimeMetadataSelected,
   prepareNativeProjectServices,
@@ -321,7 +324,11 @@ export async function preflightNativeRestart(opts: {
   /** Explicit frontend recovery may encounter a graph stopped before an intent was saved. */
   readonly recoverStopped?: boolean;
   readonly adaptationFile?: string;
+  /** Per-env adaptations; the retained run's effective env selects as start does. */
+  readonly adaptationFileByEnv?: Readonly<Record<string, string>>;
   readonly dependencyFile?: string;
+  /** Per-env dependency files; the retained run's effective env selects as start does. */
+  readonly dependencyFileByEnv?: Readonly<Record<string, string>>;
   readonly allowedHosts?: readonly string[];
   /** Same public metadata selection the replacement startup will review. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
@@ -361,9 +368,23 @@ export async function preflightNativeRestart(opts: {
     composeFile: opts.composeFile,
     envName: selected.envName,
   });
+  const adaptationFile = selectNativeEnvFile({
+    selection: {
+      file: opts.adaptationFile,
+      fileByEnv: opts.adaptationFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
+  const dependencyFile = selectNativeEnvFile({
+    selection: {
+      file: opts.dependencyFile,
+      fileByEnv: opts.dependencyFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
   input = await deps.adapt({
     input,
-    path: opts.adaptationFile,
+    path: adaptationFile,
   });
   const reviewedBranch = await prepareNativeReviewBranch({
     runtime: opts.runtime,
@@ -392,15 +413,15 @@ export async function preflightNativeRestart(opts: {
   input = metadata?.input ?? input;
   const specs = prepareNativeProjectServices(
     input,
-    opts.dependencyFile !== undefined
+    dependencyFile !== undefined
   );
   const dependencies = stoppedRetry
     ? await readNativeRestartDependencyIntent({
-        path: opts.dependencyFile,
+        path: dependencyFile,
         services: Object.keys(specs),
       })
     : await deps.dependencies({
-        path: opts.dependencyFile,
+        path: dependencyFile,
         services: Object.keys(specs),
         discover: (selection) =>
           discoverNativeHostDependency({

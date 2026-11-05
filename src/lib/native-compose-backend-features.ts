@@ -305,19 +305,41 @@ export async function readAdaptedIsolatedNetworks(
  */
 export async function readComposeBackendFeatures(
   composeFile: string,
-  opts?: { readonly adaptationFile?: string }
+  opts?: {
+    readonly adaptationFile?: string;
+    /**
+     * Every adaptation that could apply when the effective env is not yet known
+     * (`undefined` is "no adaptation"). A network counts as isolated only when
+     * every candidate isolates it, so the check never passes a project that the
+     * selected adaptation would leave external. Replaces `adaptationFile`.
+     */
+    readonly adaptationCandidates?: readonly (string | undefined)[];
+  }
 ): Promise<ComposeBackendFeature[]> {
   const compose = await readComposeDocument(composeFile);
   const features = findComposeBackendFeatures(compose);
+  const candidates =
+    opts?.adaptationCandidates ??
+    (opts?.adaptationFile === undefined ? [] : [opts.adaptationFile]);
   if (
-    opts?.adaptationFile === undefined ||
+    candidates.length === 0 ||
+    candidates.every((candidate) => candidate === undefined) ||
     !features.includes("external_network")
   ) {
     return features;
   }
-  return findComposeBackendFeatures(compose, {
-    isolatedNetworks: await readAdaptedIsolatedNetworks(opts.adaptationFile),
-  });
+  let isolated: ReadonlySet<string> | undefined;
+  for (const candidate of new Set(candidates)) {
+    const names =
+      candidate === undefined
+        ? new Set<string>()
+        : await readAdaptedIsolatedNetworks(candidate);
+    isolated =
+      isolated === undefined
+        ? names
+        : new Set([...isolated].filter((name) => names.has(name)));
+  }
+  return findComposeBackendFeatures(compose, { isolatedNetworks: isolated });
 }
 
 /** Value-free phrase list, such as "a and b" or "a, b and c". */
@@ -361,10 +383,13 @@ export async function refuseNativeComposeBackendFeatures(opts: {
   readonly composeFile: string;
   /** The `HACK_NATIVE_ADAPTATION` path native start applies, if any. */
   readonly adaptationFile?: string;
+  /** Every adaptation native start could apply; see {@link readComposeBackendFeatures}. */
+  readonly adaptationCandidates?: readonly (string | undefined)[];
   readonly restart: boolean;
 }): Promise<void> {
   const features = await readComposeBackendFeatures(opts.composeFile, {
     adaptationFile: opts.adaptationFile,
+    adaptationCandidates: opts.adaptationCandidates,
   });
   if (features.length > 0) {
     throw composeBackendRefusal({ features, restart: opts.restart });

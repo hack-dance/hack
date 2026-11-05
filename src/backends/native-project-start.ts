@@ -75,6 +75,7 @@ import {
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "./native-project-run.ts";
+import { selectNativeEnvFile } from "./native-project-selection.ts";
 import { preflightNativeProjectSource } from "./native-project-source-preflight.ts";
 import {
   invokeNativeRuntime,
@@ -356,7 +357,7 @@ export function prepareNativeProjectServices(
 }
 /** Fixed text of the refusal when the project share was not granted. */
 export const NATIVE_SHARED_SOURCE_REFUSAL =
-  "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 to share this exact project, including ignored files. Set it to grant that share and run the command again.";
+  "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings to share this exact project, including ignored files. Grant that share and run the command again.";
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -900,7 +901,11 @@ export async function startNativeProject(opts: {
   readonly restore?: NativeProjectRun;
   readonly onReady?: () => Promise<void>;
   readonly dependencyFile?: string;
+  /** Per-env dependency files; the entry for the run's effective env replaces `dependencyFile`. */
+  readonly dependencyFileByEnv?: Readonly<Record<string, string>>;
   readonly adaptationFile?: string;
+  /** Per-env adaptations; the entry for the run's effective env replaces `adaptationFile`. */
+  readonly adaptationFileByEnv?: Readonly<Record<string, string>>;
   readonly allowedHosts?: readonly string[];
   readonly preparedBase?: NativePreparedBase;
   readonly https?: NativeHttpsSelection;
@@ -996,9 +1001,25 @@ export async function startNativeProject(opts: {
       "Native retained environment selection changed; data was not replaced."
     );
   }
+  // The effective env (requested, retained or project default) picks the per-env
+  // files, so a fresh start, a retained start and a restart select the same ones.
+  const selectedAdaptationFile = selectNativeEnvFile({
+    selection: {
+      file: opts.adaptationFile,
+      fileByEnv: opts.adaptationFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
+  const selectedDependencyFile = selectNativeEnvFile({
+    selection: {
+      file: opts.dependencyFile,
+      fileByEnv: opts.dependencyFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
   input = await prepareNativeProjectAdaptation({
     input,
-    path: opts.adaptationFile,
+    path: selectedAdaptationFile,
   });
   input = (
     await prepareNativeReviewBranch({
@@ -1012,7 +1033,7 @@ export async function startNativeProject(opts: {
   ).input;
   let specs = prepareNativeProjectServices(
     input,
-    opts.dependencyFile !== undefined
+    selectedDependencyFile !== undefined
   );
   // Refuse malformed or unacquirable references before hooks, VM or provider start.
   await admitNativeProjectImages({
@@ -1065,12 +1086,12 @@ export async function startNativeProject(opts: {
       input = (await deps.adaptAws({ input, ...selection.aws })).input;
       specs = prepareNativeProjectServices(
         input,
-        opts.dependencyFile !== undefined
+        selectedDependencyFile !== undefined
       );
     }
     const dependencyDiscoveryDeadline = performance.now() + 60_000;
     const hostDependencies = await readNativeHostDependencies({
-      path: opts.dependencyFile,
+      path: selectedDependencyFile,
       services: Object.keys(specs),
       discover: (selection) =>
         discoverNativeHostDependency({
@@ -1159,7 +1180,7 @@ export async function startNativeProject(opts: {
     requireActiveStartup(controller.signal);
     specs = prepareNativeProjectServices(
       input,
-      opts.dependencyFile !== undefined
+      selectedDependencyFile !== undefined
     );
     prepareNativeDependencyServices({
       dependencies: hostDependencies,

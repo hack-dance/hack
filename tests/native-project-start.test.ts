@@ -2747,6 +2747,61 @@ test("startup and restart review use identical branch routes after adaptation", 
   ).toBe("feature-a.app.hack.local, feature-a.app.hack.gy");
 });
 
+test("startup applies the per-env adaptation for the run's effective env, else the base", async () => {
+  for (const [effectiveEnvName, expected] of [
+    ["qa", "app.hack.local, qa.example.test"],
+    [null, "app.hack.local, base.example.test"],
+  ] as const) {
+    const { opts } = await fixture(false);
+    const prepare = opts.dependencies.prepare!;
+    const base = join(opts.scope.projectRoot, "adaptation.json");
+    const qa = join(opts.scope.projectRoot, "adaptation.qa.json");
+    await writeFile(opts.composeFile, "services: {}\n");
+    await writeFile(
+      base,
+      JSON.stringify({
+        version: 1,
+        additionalHostnames: { web: ["base.example.test"] },
+      })
+    );
+    await writeFile(
+      qa,
+      JSON.stringify({
+        version: 1,
+        additionalHostnames: { web: ["qa.example.test"] },
+      })
+    );
+    opts.dependencies.prepare = async (request) => {
+      const input = await prepare(request);
+      const compose = JSON.parse(input.normalizedComposeJson);
+      compose.services.web.labels = {
+        caddy: "app.hack.local",
+        "caddy.tls": "internal",
+        "caddy.reverse_proxy": "{{upstreams 3000}}",
+      };
+      return {
+        ...input,
+        effectiveEnvName,
+        normalizedComposeJson: JSON.stringify(compose),
+      };
+    };
+    let caddy: unknown;
+    const before = async (input: NativeProjectInput) => {
+      caddy = JSON.parse(input.normalizedComposeJson).services.web.labels.caddy;
+      return await opts.before();
+    };
+    expect(
+      await startNativeProject({
+        ...opts,
+        adaptationFile: base,
+        adaptationFileByEnv: { qa },
+        before,
+      })
+    ).toBe(0);
+    expect(caddy).toBe(expected);
+  }
+});
+
 test("startup and restart review identical branch runtime metadata; legacy runs get none", async () => {
   const { opts } = await fixture(false);
   const review = opts.dependencies.review!;

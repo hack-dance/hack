@@ -41,13 +41,11 @@ import {
 } from "../agents/onboarding-handoff.ts";
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
-import { parseNativePreparedBase } from "../backends/native-prepared-base.ts";
 import {
   nativeDownEnvironment,
   nativeProjectDown,
 } from "../backends/native-project-down.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
-import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
 import {
   type NativeProjectPsResult,
   nativeProjectLogs,
@@ -69,11 +67,13 @@ import {
   nativeRestartSelection,
   preflightNativeRestart,
 } from "../backends/native-project-restart-preflight.ts";
-import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
 import {
-  parseNativeHttpsSelection,
-  startNativeProject,
-} from "../backends/native-project-start.ts";
+  nativeAdaptationCandidates,
+  resolveNativeAdaptationSelection,
+  resolveNativeHostSettings,
+} from "../backends/native-project-settings.ts";
+import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
+import { startNativeProject } from "../backends/native-project-start.ts";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -5726,11 +5726,22 @@ async function handleNativeUp({
   });
   // Before branch, config, env, lifecycle, storage or runtime work. `down`
   // stays available for any graph a project already has.
-  // The explicit adaptation applies first: a network it isolates is not
-  // external here, exactly as native start normalizes it.
+  // The selected adaptation applies first: a network it isolates is not
+  // external here, exactly as native start normalizes it. Without --env every
+  // committed per-env adaptation is a candidate (see nativeAdaptationCandidates).
+  const requestedEnvName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  const adaptation = await resolveNativeAdaptationSelection({
+    env: process.env,
+    projectDir: project.projectDir,
+  });
   await refuseNativeComposeBackendFeatures({
     composeFile: project.composeFile,
-    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
+    adaptationCandidates: nativeAdaptationCandidates({
+      selection: adaptation,
+      requestedEnvName,
+    }),
     restart,
   });
   const branch = await resolveEffectiveBranchForCommand({
@@ -5744,6 +5755,11 @@ async function handleNativeUp({
     );
   }
   const projectName = await resolveComposeProjectName({ project, cfg });
+  const host = await resolveNativeHostSettings({
+    env: process.env,
+    projectName,
+    projectRoot: project.projectRoot,
+  });
   const composeProject = resolveLifecycleComposeProjectName({
     projectName,
     branch,
@@ -5765,20 +5781,17 @@ async function handleNativeUp({
       branch,
     },
     composeFile: project.composeFile,
-    envName: resolveRequestedEnvName({ envOption: args.options.env }),
+    envName: requestedEnvName,
     profiles: parseCsvList(args.options.profile),
-    sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
-    dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
-    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
-    allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
-    preparedBase: parseNativePreparedBase(process.env),
-    https: parseNativeHttpsSelection(process.env),
-    aws: process.env.HACK_NATIVE_AWS_PROFILE
-      ? {
-          profile: process.env.HACK_NATIVE_AWS_PROFILE,
-          region: process.env.HACK_NATIVE_AWS_REGION,
-        }
-      : undefined,
+    sharedSource: host.sharedSource,
+    dependencyFile: host.dependencyFile,
+    dependencyFileByEnv: host.dependencyFileByEnv,
+    adaptationFile: adaptation.file,
+    adaptationFileByEnv: adaptation.fileByEnv,
+    allowedHosts: host.allowedHosts,
+    preparedBase: host.preparedBase,
+    https: host.https,
+    aws: host.aws,
     runtimeMetadata: {
       devHost,
       aliasHost: resolveBranchAliasHost({ devHost, cfg }),
@@ -5848,7 +5861,7 @@ async function handleNativeUp({
     throw new HackCliError({
       code: "E_PERMISSION",
       message:
-        "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup; nothing was stopped. Set it to grant the project share and run the command again.",
+        "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings before cleanup; nothing was stopped. Grant the project share and run the command again.",
     });
   }
   try {
@@ -5947,7 +5960,9 @@ async function restartNativeImageProject({
         scope: startup.scope,
         composeFile: startup.composeFile,
         adaptationFile: startup.adaptationFile,
+        adaptationFileByEnv: startup.adaptationFileByEnv,
         dependencyFile: startup.dependencyFile,
+        dependencyFileByEnv: startup.dependencyFileByEnv,
         allowedHosts: startup.allowedHosts,
         runtimeMetadata: startup.runtimeMetadata,
         httpsPort: startup.https?.httpsPort ?? null,

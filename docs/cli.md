@@ -36,6 +36,14 @@ to compare a manually observed browser failure with a verified CLI HTTPS request
 See [macOS browser connectivity](guides/macos-browser-network.md) for supported
 observations, Local Network permission guidance and the required browser recheck.
 
+On the native backend, `hack doctor` adds a `native settings` check. It reports where each native
+selection comes from (`env`, `machine`, `project` or `unset`) without its value, and warns about
+project configuration that native `up` refuses or does not apply. The committed
+`.hack/native/adaptation.json` and the per-machine
+`${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/<project>/settings.json` replace exported
+`HACK_NATIVE_*` variables; a variable that is set still wins. See
+[Native settings files](guides/native-candidate.md#native-settings-files).
+
 Project names in the registry and `--project`/MCP selectors use the same lowercase,
 hyphenated key: for example, `my_app` selects `my-app`. Existing registry spellings
 remain readable aliases; a later registration of that checkout canonicalizes the

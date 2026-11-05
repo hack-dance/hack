@@ -395,6 +395,66 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
   );
 });
 
+test("preflight selects the per-env adaptation and dependency files by the retained env", async () => {
+  const { preflightNativeRestart } = await import(
+    "../src/backends/native-project-restart-preflight.ts"
+  );
+  const image = `sha256:${"9".repeat(64)}`;
+  const selected: Record<string, string | undefined> = {};
+  const preflight = (effectiveEnvName: string | null) =>
+    preflightNativeRestart({
+      runtime: { binary: "/unused", home: "/candidate" },
+      scope,
+      composeFile: "/fixture/.hack/docker-compose.yml",
+      run,
+      adaptationFile: "/fixture/.hack/native/adaptation.json",
+      adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
+      dependencyFile: "/machine/dependencies.json",
+      dependencyFileByEnv: { qa: "/machine/dependencies.qa.json" },
+      dependencies: {
+        activeImages: async () => activeImageFixture(),
+        prepare: async () => ({
+          originalSha256: "1".repeat(64),
+          environmentFiles: [],
+          serviceNames: ["app"],
+          normalizedComposeJson: JSON.stringify({
+            services: { app: { image } },
+          }),
+          managedEnvironment: {},
+          lifecycleHostEnvironment: {},
+          effectiveEnvName,
+        }),
+        adapt: async ({ input: prepared, path }) => {
+          selected.adaptation = path;
+          return prepared;
+        },
+        dependencies: async ({ path }) => {
+          selected.dependencies = path;
+          throw new ClosedCliError("stop after dependency selection");
+        },
+        invoke: async ({ args }) =>
+          args[1] === "probe" ? { admitted: true } : { network: "internet" },
+        review: async (options) =>
+          await options.run({
+            planId: run.planId,
+            namespace: run.namespace,
+            report: {},
+            projectArgs: [],
+          }),
+      },
+    });
+  await expectClosedRefusal(preflight("qa"), "stop after dependency selection");
+  expect(selected).toEqual({
+    adaptation: "/fixture/.hack/native/adaptation.qa.json",
+    dependencies: "/machine/dependencies.qa.json",
+  });
+  await expectClosedRefusal(preflight(null), "stop after dependency selection");
+  expect(selected).toEqual({
+    adaptation: "/fixture/.hack/native/adaptation.json",
+    dependencies: "/machine/dependencies.json",
+  });
+});
+
 test("preflight refuses a stale host listener before restart cleanup", async () => {
   const { preflightNativeRestart } = await import(
     "../src/backends/native-project-restart-preflight.ts"

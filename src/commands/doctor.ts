@@ -13,6 +13,10 @@ import {
   runNativeProjectMappingCommand,
 } from "../backends/native-project-mapping-command.ts";
 import {
+  nativeAdaptationCandidates,
+  resolveNativeAdaptationSelection,
+} from "../backends/native-project-settings.ts";
+import {
   type NativeRuntimeSelection,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
@@ -103,6 +107,11 @@ import {
   untrackGeneratedFiles,
 } from "../lib/doctor-generated-files.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
+import {
+  checkNativeSettings,
+  NATIVE_SETTINGS_CHECK,
+  type NativeSettingsReport,
+} from "../lib/doctor-native-settings.ts";
 import {
   findCrossCheckoutInstances,
   inspectWorktreeSecretKeys,
@@ -235,6 +244,8 @@ interface CheckResult {
   readonly envKey?: EnvKeyInspection;
   /** Closed Compose-backend feature names only; never authored values. */
   readonly composeBackend?: ComposeBackendReport;
+  /** Native setting origins and closed warnings only; never setting values. */
+  readonly nativeSettings?: NativeSettingsReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -1112,8 +1123,15 @@ async function handleNativeDoctor(opts: {
         checkComposeBackendFeatures({
           startDir: opts.startDir,
           backend: "native",
-          adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
         })
+      )
+    );
+    results.push(
+      await runCheck(
+        progress,
+        NATIVE_SETTINGS_CHECK,
+        () => checkNativeProjectSettings({ startDir: opts.startDir }),
+        { timeoutMs: 5000 }
       )
     );
   }
@@ -1282,6 +1300,8 @@ export type DoctorJsonCheck = {
   readonly envKey?: EnvKeyInspection;
   /** Present only on the Compose-backend feature check: closed feature names. */
   readonly composeBackend?: ComposeBackendReport;
+  /** Present only on the native settings check: origins and closed warnings. */
+  readonly nativeSettings?: NativeSettingsReport;
 };
 
 export type DoctorJsonData = {
@@ -1319,6 +1339,9 @@ export function buildDoctorJsonData(opts: {
       ...(result.envKey ? { envKey: result.envKey } : {}),
       ...(result.composeBackend
         ? { composeBackend: result.composeBackend }
+        : {}),
+      ...(result.nativeSettings
+        ? { nativeSettings: result.nativeSettings }
         : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
@@ -2929,13 +2952,13 @@ export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
 /**
  * Reports which Compose features keep the current project on the Compose
  * backend (HACK-1291). Reads only the project's Compose file and, on the native
- * backend, the `HACK_NATIVE_ADAPTATION` selection native up applies. An
+ * backend, the adaptation selection native up applies without `--env`
+ * (`HACK_NATIVE_ADAPTATION`, else the committed `.hack/native/` files). An
  * invalid selection is the same value-free error native up gives.
  */
 async function checkComposeBackendFeatures(opts: {
   readonly startDir: string;
   readonly backend: "native" | "compose";
-  readonly adaptationFile?: string;
 }): Promise<CheckResult> {
   const ctx = await findProjectContext(opts.startDir);
   if (!ctx) {
@@ -2945,12 +2968,46 @@ async function checkComposeBackendFeatures(opts: {
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
     };
   }
+  const adaptationCandidates =
+    opts.backend === "native"
+      ? nativeAdaptationCandidates({
+          selection: await resolveNativeAdaptationSelection({
+            env: process.env,
+            projectDir: ctx.projectDir,
+          }),
+          requestedEnvName: undefined,
+        })
+      : undefined;
   return composeBackendCheckResult({
     backend: opts.backend,
     features: await readComposeBackendFeatures(ctx.composeFile, {
-      adaptationFile: opts.adaptationFile,
+      adaptationCandidates,
     }),
   });
+}
+
+/** The `native settings` check: origins and closed warnings, never values. */
+async function checkNativeProjectSettings(opts: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(opts.startDir);
+  if (!ctx) {
+    return {
+      name: NATIVE_SETTINGS_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  const cfg = await readProjectConfig(ctx);
+  if (cfg.parseError) {
+    return {
+      name: NATIVE_SETTINGS_CHECK,
+      status: "error",
+      message:
+        "Native settings require valid project configuration; values omitted.",
+    };
+  }
+  return await checkNativeSettings({ project: ctx, cfg, env: process.env });
 }
 
 /**

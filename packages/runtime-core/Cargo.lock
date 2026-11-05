@@ -397,6 +397,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2",
  "tar",
+ "tokio",
  "unicode-normalization",
  "zeroize",
 ]

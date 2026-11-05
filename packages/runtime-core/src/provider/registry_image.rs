@@ -8,8 +8,15 @@
 //! - **Authentication.** Requests start anonymous. A `401` challenge is answered with an
 //!   anonymous Bearer token first, and only then with the host user's existing Docker
 //!   credentials (read-only; see `registry_credentials`). Credentials and tokens stay in
-//!   zeroizing memory for one acquisition, are sent only to the registry origin or its
-//!   token realm, and never appear in output or errors.
+//!   zeroizing memory for one acquisition and never appear in output or errors. Only a
+//!   challenge from the registry origin itself is answered, and credentials go only to
+//!   the registry origin or a token realm on the registry's own host or a parent domain
+//!   of it (Docker Hub: `auth.docker.io`).
+//! - **Addresses.** Local and private destinations are refused by the address actually
+//!   connected to, not only by host name: a custom resolver refuses names that resolve
+//!   to loopback, private, link-local, CGNAT, multicast or unspecified addresses
+//!   (including IPv4-mapped forms), and IP literals are checked before each request.
+//!   Only an explicitly allowed local registry's own origin may reach such addresses.
 //! - **Content.** OCI and Docker v2 indexes and manifests; gzip, zstd and uncompressed
 //!   layers. Every manifest, config and layer is checked against its descriptor digest
 //!   and size while streaming, and the assembled archive is validated again before it is
@@ -23,6 +30,7 @@ use crate::CandidateError;
 use reqwest::{
     StatusCode, Url,
     blocking::{Client, Response},
+    dns::{Addrs, Name, Resolve, Resolving},
     header::{ACCEPT, AUTHORIZATION, HeaderValue, LOCATION, WWW_AUTHENTICATE},
     redirect::Policy,
 };
@@ -31,9 +39,13 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
+    net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     os::unix::fs::OpenOptionsExt,
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
@@ -92,24 +104,152 @@ fn ipv4(host: &str) -> Option<[u8; 4]> {
     parts.next().is_none().then_some(octets)
 }
 
+fn public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..128).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..32).contains(&b))
+        || (a == 192 && b == 168)
+        || a >= 224)
+}
+
+/// Whether `ip` is a public unicast address. Loopback, unspecified, private (RFC 1918 and
+/// IPv6 ULA `fc00::/7`), link-local (`169.254.0.0/16`, `fe80::/10`), deprecated
+/// site-local (`fec0::/10`), CGNAT (`100.64.0.0/10`), multicast, broadcast and reserved
+/// addresses are not, nor are IPv6 forms that embed such an IPv4 address (mapped,
+/// compatible, NAT64 `64:ff9b::/96` and 6to4 `2002::/16`).
+pub(super) fn public_ip(ip: IpAddr) -> bool {
+    let ip = match ip {
+        IpAddr::V4(ip) => return public_ipv4(ip),
+        IpAddr::V6(ip) => ip,
+    };
+    let segments = ip.segments();
+    let embedded = |high: u16, low: u16| {
+        Ipv4Addr::new((high >> 8) as u8, high as u8, (low >> 8) as u8, low as u8)
+    };
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return public_ipv4(v4);
+    }
+    if segments[..6] == [0; 6] {
+        // `::`, `::1` and the deprecated IPv4-compatible `::a.b.c.d`.
+        return !ip.is_unspecified()
+            && !ip.is_loopback()
+            && public_ipv4(embedded(segments[6], segments[7]));
+    }
+    if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return public_ipv4(embedded(segments[6], segments[7]));
+    }
+    if segments[0] == 0x2002 {
+        return public_ipv4(embedded(segments[1], segments[2]));
+    }
+    !(ip.is_multicast()
+        || (segments[0] & 0xfe00) == 0xfc00
+        || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] & 0xffc0) == 0xfec0)
+}
+
 /// Hosts that are not public registries: loopback names, non-public IPv4 literals,
 /// single-label names and mDNS `.local` names. They resolve on this host or its network,
-/// so acquisition refuses them unless the policy names the registry explicitly.
+/// so acquisition refuses them unless the policy names the registry explicitly. Public
+/// names that merely resolve to local addresses are refused by [`GuardedResolver`].
 pub(super) fn local_host(host: &str) -> bool {
     if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
         return true;
     }
-    if let Some([a, b, ..]) = ipv4(host) {
-        return a == 0
-            || a == 10
-            || a == 127
-            || (a == 100 && (64..128).contains(&b))
-            || (a == 169 && b == 254)
-            || (a == 172 && (16..32).contains(&b))
-            || (a == 192 && b == 168)
-            || a >= 224;
+    if let Some(octets) = ipv4(host) {
+        return !public_ipv4(Ipv4Addr::from(octets));
     }
     !host.contains('.')
+}
+
+/// Host-name lookup used by [`GuardedResolver`]; tests inject a fixed table so no real
+/// DNS is consulted.
+pub(crate) type LookupFn = dyn Fn(&str) -> std::io::Result<Vec<IpAddr>> + Send + Sync;
+
+/// An injectable host-name lookup for the registry client.
+#[derive(Clone)]
+pub(crate) struct HostLookup(pub(crate) Arc<LookupFn>);
+
+impl std::fmt::Debug for HostLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HostLookup")
+    }
+}
+
+fn system_lookup(host: &str) -> std::io::Result<Vec<IpAddr>> {
+    Ok((host, 0)
+        .to_socket_addrs()?
+        .map(|address| address.ip())
+        .collect())
+}
+
+/// A resolution refused because the name resolved to a local or private address.
+#[derive(Debug)]
+struct LocalAddressRefused;
+
+impl std::fmt::Display for LocalAddressRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("registry host resolved to a local or private address")
+    }
+}
+
+impl std::error::Error for LocalAddressRefused {}
+
+fn local_address_refused() -> CandidateError {
+    CandidateError::new(
+        "registry_local_address",
+        "A registry, redirect or token host resolved to a local or private network address; allow a local registry explicitly with --allow-local-registry.",
+    )
+}
+
+/// The registry client's resolver. Every connection the client makes (registry origin,
+/// redirects and token realms) resolves through it, so the local-address policy holds
+/// for the address actually connected to. A name that resolves to any non-public address
+/// is refused as a whole, except the host of an explicitly allowed local registry.
+struct GuardedResolver {
+    /// Lowercase host name of the explicitly allowed local registry being fetched.
+    allowed_host: Option<String>,
+    lookup: Arc<LookupFn>,
+}
+
+impl Resolve for GuardedResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_ascii_lowercase();
+        let allowed = self.allowed_host.as_deref() == Some(host.as_str());
+        let lookup = self.lookup.clone();
+        Box::pin(async move {
+            let addresses = tokio::task::spawn_blocking(move || lookup(&host)).await??;
+            if addresses.is_empty() {
+                return Err("registry host has no addresses".into());
+            }
+            if !allowed && !addresses.iter().all(|ip| public_ip(*ip)) {
+                return Err(Box::new(LocalAddressRefused) as _);
+            }
+            let addresses: Addrs = Box::new(
+                addresses
+                    .into_iter()
+                    .map(|ip| SocketAddr::new(ip, 0))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            );
+            Ok(addresses)
+        })
+    }
+}
+
+/// A transport failure, naming a local-address refusal when the resolver made one.
+fn transport_error(failure: &reqwest::Error, message: &str) -> CandidateError {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(failure);
+    while let Some(cause) = source {
+        if cause.is::<LocalAddressRefused>() {
+            return local_address_refused();
+        }
+        source = cause.source();
+    }
+    error(message)
 }
 
 /// The reference grammar's `host[:port]` syntax, for local registry opt-ins.
@@ -124,6 +264,9 @@ pub(super) struct Registry {
     domain: String,
     /// `scheme://host[:port]` of the distribution API.
     origin: Url,
+    /// True when the policy explicitly allows this registry as a local registry; only
+    /// then may its own origin reach local or private addresses.
+    local: bool,
 }
 
 impl Registry {
@@ -142,6 +285,7 @@ fn registry(named: &NamedReference, policy: &ImagePolicy) -> Result<Registry, Ca
         return Ok(Registry {
             domain: DOCKER_HUB.into(),
             origin: Url::parse(DOCKER_HUB_ORIGIN).map_err(|_| error("Invalid registry origin."))?,
+            local: false,
         });
     }
     let host = named.domain.split(':').next().unwrap_or_default();
@@ -168,6 +312,7 @@ fn registry(named: &NamedReference, policy: &ImagePolicy) -> Result<Registry, Ca
     Ok(Registry {
         domain: named.domain.clone(),
         origin,
+        local: opt_in.is_some(),
     })
 }
 
@@ -334,10 +479,59 @@ fn docker_hub_redirect_allowed(url: &Url) -> bool {
                 || h.ends_with(".r2.cloudflarestorage.com")
         })
 }
+/// The IP address of a URL whose host is an IP literal.
+fn literal_ip(url: &Url) -> Option<IpAddr> {
+    let host = url.host_str()?;
+    host.strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
+        .parse()
+        .ok()
+}
+
+/// The lowercase host name of a URL whose host is a domain, not an IP literal.
+fn domain_host(url: &Url) -> Option<&str> {
+    url.host_str().filter(|_| literal_ip(url).is_none())
+}
+
 fn same_origin(a: &Url, b: &Url) -> bool {
     a.scheme() == b.scheme()
         && a.host_str() == b.host_str()
         && a.port_or_known_default() == b.port_or_known_default()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Loopback fixture origins that tests treat as public HTTPS hosts, so redirect and
+    /// realm handling for foreign hosts can be exercised without TLS or public networks.
+    pub(super) static TEST_PUBLIC_ORIGINS: std::cell::RefCell<Vec<Url>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn test_public_origin(_url: &Url) -> bool {
+    #[cfg(test)]
+    {
+        TEST_PUBLIC_ORIGINS.with(|origins| origins.borrow().iter().any(|o| same_origin(o, _url)))
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// A public HTTPS origin on port 443 without embedded credentials: not a local name, an
+/// IPv6 literal or a non-public IPv4 literal.
+fn public_https_origin(url: &Url) -> bool {
+    if test_public_origin(url) {
+        return true;
+    }
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url
+            .host_str()
+            .is_some_and(|host| !host.starts_with('[') && !local_host(host))
 }
 /// Redirect policy: the registry's own origin, Docker Hub's known blob origins, or for
 /// other registries any public HTTPS origin on port 443 (registries commonly serve blobs
@@ -352,15 +546,12 @@ fn redirect_allowed(registry: &Registry, url: &Url) -> bool {
     if registry.docker_hub() {
         return docker_hub_redirect_allowed(url);
     }
-    url.scheme() == "https"
-        && url.port_or_known_default() == Some(443)
-        && url
-            .host_str()
-            .is_some_and(|host| !host.starts_with('[') && !local_host(host))
+    public_https_origin(url)
 }
 
-/// A token realm must be the registry origin itself, or a public HTTPS endpoint; Docker
-/// Hub's realm is fixed.
+/// A token realm may receive an anonymous token request when it is the registry origin
+/// itself or a public HTTPS endpoint; Docker Hub's realm is fixed. See
+/// [`credential_realm_allowed`] for realms that may receive credentials.
 fn realm_allowed(registry: &Registry, realm: &Url) -> bool {
     if !realm.username().is_empty() || realm.password().is_some() {
         return false;
@@ -368,11 +559,36 @@ fn realm_allowed(registry: &Registry, realm: &Url) -> bool {
     if registry.docker_hub() {
         return realm.as_str() == DOCKER_HUB_REALM;
     }
-    same_origin(&registry.origin, realm)
-        || (realm.scheme() == "https"
-            && realm
-                .host_str()
-                .is_some_and(|h| !local_host(h) && !h.starts_with('[')))
+    same_origin(&registry.origin, realm) || public_https_origin(realm)
+}
+
+/// A token realm that may receive the host user's Docker credentials (a Basic header or
+/// an identity refresh token). Docker Hub's realm is fixed to `auth.docker.io`. For other
+/// registries the realm must be the registry origin, or HTTPS on port 443 at the
+/// registry's own host name or a parent domain of it with at least two labels (for
+/// example `gitlab.com` for `registry.gitlab.com`): whoever controls a parent domain can
+/// already direct the registry's own name. Sibling hosts, unrelated hosts and IP
+/// literals never receive credentials; without a public-suffix list a shared registrable
+/// domain cannot be proven, so it is not assumed.
+fn credential_realm_allowed(registry: &Registry, realm: &Url) -> bool {
+    if !realm_allowed(registry, realm) {
+        return false;
+    }
+    if registry.docker_hub() || same_origin(&registry.origin, realm) {
+        return true;
+    }
+    let (Some(realm_host), Some(registry_host)) =
+        (domain_host(realm), domain_host(&registry.origin))
+    else {
+        return false;
+    };
+    realm.scheme() == "https"
+        && realm.port_or_known_default() == Some(443)
+        && realm_host.contains('.')
+        && (registry_host == realm_host
+            || registry_host
+                .strip_suffix(realm_host)
+                .is_some_and(|prefix| prefix.ends_with('.')))
 }
 
 /// One `WWW-Authenticate` challenge: scheme and parameters.
@@ -458,10 +674,23 @@ impl<'a> Fetch<'a> {
         path: &str,
         policy: &'a ImagePolicy,
     ) -> Result<Self, CandidateError> {
+        let resolver = GuardedResolver {
+            allowed_host: registry
+                .local
+                .then(|| domain_host(&registry.origin).map(str::to_ascii_lowercase))
+                .flatten(),
+            lookup: policy
+                .host_lookup
+                .as_ref()
+                .map_or_else(|| Arc::new(system_lookup) as Arc<LookupFn>, |l| l.0.clone()),
+        };
+        // One client serves every request of the acquisition (registry origin, redirects
+        // and token realms), so the resolver and the destination check cover them all.
         let client = Client::builder()
             .https_only(registry.origin.scheme() == "https")
             .no_proxy()
             .redirect(Policy::none())
+            .dns_resolver(Arc::new(resolver))
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|_| error("Cannot initialize registry TLS client."))?;
@@ -489,10 +718,33 @@ impl<'a> Fetch<'a> {
             .map_err(|_| error("Invalid registry object address."))
     }
 
+    /// Whether a request may be sent to `url` by address: an IP literal must be public
+    /// (the resolver is not consulted for literals), except an explicitly allowed local
+    /// registry's own origin. That registry's host name is accepted only at its origin.
+    fn destination_allowed(&self, url: &Url) -> bool {
+        if test_public_origin(url) {
+            return true;
+        }
+        let origin = same_origin(&self.registry.origin, url);
+        if self.registry.local && origin {
+            return true;
+        }
+        match (literal_ip(url), url.host_str()) {
+            (Some(ip), _) => public_ip(ip),
+            (None, Some(host)) => {
+                origin || !self.registry.local || self.registry.origin.host_str() != Some(host)
+            }
+            (None, None) => false,
+        }
+    }
+
     /// One request with redirects followed under [`redirect_allowed`]. Authorization is
     /// attached only while the request targets the registry origin.
     fn send(&self, mut url: Url, timeout: Duration) -> Result<Response, CandidateError> {
         for hop in 0..=4 {
+            if !self.destination_allowed(&url) {
+                return Err(local_address_refused());
+            }
             let mut request = self
                 .client
                 .get(url.clone())
@@ -510,7 +762,7 @@ impl<'a> Fetch<'a> {
             }
             let response = request
                 .send()
-                .map_err(|_| error("Registry request failed or timed out."))?;
+                .map_err(|e| transport_error(&e, "Registry request failed or timed out."))?;
             if !response.status().is_redirection() {
                 return Ok(response);
             }
@@ -534,11 +786,21 @@ impl<'a> Fetch<'a> {
     }
 
     /// A successful response for `url`, answering at most two authentication challenges:
-    /// anonymously first, then with the host user's Docker credentials.
+    /// anonymously first, then with the host user's Docker credentials. Only a challenge
+    /// from the registry origin itself is answered; a redirected host that refuses access
+    /// fails without any token or credential request.
     fn get(&mut self, url: Url, timeout: Duration) -> Result<Response, CandidateError> {
         loop {
             let response = self.send(url.clone(), timeout)?;
             let status = response.status();
+            if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+                && !same_origin(&self.registry.origin, response.url())
+            {
+                return Err(CandidateError::new(
+                    "registry_redirect_refused",
+                    "A redirected registry storage host refused access; authentication is answered only for the registry origin.",
+                ));
+            }
             if status == StatusCode::UNAUTHORIZED && self.stage != Stage::Credentialed {
                 let challenge = response
                     .headers()
@@ -566,9 +828,29 @@ impl<'a> Fetch<'a> {
         }
     }
 
-    /// Advance one authentication stage for `challenge`.
+    /// Advance one authentication stage for `challenge`, which came from the registry
+    /// origin. Credentials are looked up only after the realm that would receive them
+    /// passes [`credential_realm_allowed`].
     fn authorize(&mut self, challenge: &Challenge) -> Result<(), CandidateError> {
         let credentialed = self.stage == Stage::AnonymousToken || !challenge.bearer;
+        let realm = if challenge.bearer {
+            let realm = challenge
+                .realm
+                .as_deref()
+                .and_then(|r| Url::parse(r).ok())
+                .filter(|r| realm_allowed(&self.registry, r))
+                .ok_or_else(|| error("The registry token endpoint is not supported."))?;
+            if credentialed && !credential_realm_allowed(&self.registry, &realm) {
+                self.stage = Stage::Credentialed;
+                return Err(CandidateError::new(
+                    "registry_realm_refused",
+                    "The registry token endpoint is not on the registry's own host or a parent domain, so Docker credentials are not sent to it.",
+                ));
+            }
+            Some(realm)
+        } else {
+            None
+        };
         let credential = if credentialed {
             self.stage = Stage::Credentialed;
             Some(
@@ -592,12 +874,7 @@ impl<'a> Fetch<'a> {
             self.authorization = Some(basic);
             return Ok(());
         }
-        let realm = challenge
-            .realm
-            .as_deref()
-            .and_then(|r| Url::parse(r).ok())
-            .filter(|r| realm_allowed(&self.registry, r))
-            .ok_or_else(|| error("The registry token endpoint is not supported."))?;
+        let realm = realm.ok_or_else(|| error("The registry token endpoint is not supported."))?;
         let token = match self.token(&realm, challenge.service.as_deref(), credential.as_ref()) {
             Err(failure) if credential.is_none() && failure.code == "registry_token_refused" => {
                 // An endpoint that refuses anonymous tokens needs credentials.
@@ -615,6 +892,9 @@ impl<'a> Fetch<'a> {
         service: Option<&str>,
         credential: Option<&Credential>,
     ) -> Result<Zeroizing<String>, CandidateError> {
+        if !self.destination_allowed(realm) {
+            return Err(local_address_refused());
+        }
         let scope = format!("repository:{}:pull", self.path);
         let request = match credential {
             Some(Credential::IdentityToken(refresh)) => {
@@ -651,7 +931,7 @@ impl<'a> Fetch<'a> {
         let response = request
             .timeout(self.remaining()?.min(REQUEST_TIMEOUT))
             .send()
-            .map_err(|_| error("Registry token request failed or timed out."))?;
+            .map_err(|e| transport_error(&e, "Registry token request failed or timed out."))?;
         if matches!(
             response.status(),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN

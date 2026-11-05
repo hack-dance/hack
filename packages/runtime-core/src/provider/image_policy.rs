@@ -54,6 +54,9 @@ pub struct ImagePolicy {
     pub docker_config: Option<PathBuf>,
     /// Directories searched for `docker-credential-*` helpers. `None` means `PATH`.
     pub(crate) helper_path: Option<Vec<PathBuf>>,
+    /// Host-name lookup for registry connections. `None` means the system resolver; only
+    /// tests replace it.
+    pub(crate) host_lookup: Option<super::registry_image::HostLookup>,
 }
 
 impl Default for ImagePolicy {
@@ -65,6 +68,7 @@ impl Default for ImagePolicy {
             local_registries: Vec::new(),
             docker_config: None,
             helper_path: None,
+            host_lookup: None,
         }
     }
 }

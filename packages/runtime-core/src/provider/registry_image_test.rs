@@ -10,7 +10,7 @@ use base64::Engine as _;
 use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader},
-    net::{TcpListener, TcpStream},
+    net::{IpAddr, TcpListener, TcpStream},
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -186,8 +186,17 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
     })
 }
 
+/// A fake server's reply to one request, given the server's own port.
+type Handler = Box<dyn Fn(&Request, u16) -> Reply + Send>;
+
 impl Registry {
     fn start(content: Content, auth: Auth, tamper: bool) -> Self {
+        Self::serve(Box::new(move |request, port| {
+            respond(&content, auth, tamper, port, request)
+        }))
+    }
+
+    fn serve(handler: Handler) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -203,7 +212,7 @@ impl Registry {
                     continue;
                 };
                 thread_log.lock().unwrap().push(request.clone());
-                let reply = respond(&content, auth, tamper, port, &request);
+                let reply = handler(&request, port);
                 let mut head = format!(
                     "HTTP/1.1 {} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n",
                     reply.status,
@@ -227,6 +236,10 @@ impl Registry {
 
     fn domain(&self) -> String {
         format!("127.0.0.1:{}", self.port)
+    }
+
+    fn origin(&self) -> String {
+        format!("http://{}", self.domain())
     }
 
     fn policy(&self, docker: &DockerFixture) -> ImagePolicy {
@@ -758,6 +771,319 @@ fn redirects_and_token_realms_cannot_downgrade_or_reach_local_origins() {
     ] {
         assert!(!realm_allowed(&other, &url(value)), "{value}");
     }
+}
+
+/// Treats `origins` as public HTTPS hosts for this test thread, standing in for foreign
+/// storage and token hosts that the loopback fixtures cannot serve over TLS.
+struct PublicOrigins;
+impl PublicOrigins {
+    fn new(origins: &[&Registry]) -> Self {
+        TEST_PUBLIC_ORIGINS.with(|list| {
+            *list.borrow_mut() = origins
+                .iter()
+                .map(|r| Url::parse(&r.origin()).unwrap())
+                .collect();
+        });
+        Self
+    }
+}
+impl Drop for PublicOrigins {
+    fn drop(&mut self) {
+        TEST_PUBLIC_ORIGINS.with(|list| list.borrow_mut().clear());
+    }
+}
+
+fn credentials_for(registry: &Registry) -> DockerFixture {
+    DockerFixture::new(&serde_json::json!({"auths": {
+        registry.domain(): {"auth": base64::engine::general_purpose::STANDARD.encode(format!("{USER}:{PASSWORD}"))}
+    }}))
+}
+
+#[test]
+fn a_redirected_storage_host_challenge_never_reaches_a_token_realm_or_credentials() {
+    let content = content();
+    // The foreign storage host refuses every request with a Bearer realm it controls.
+    let storage = Registry::serve(Box::new(|request, port| {
+        if request.path.starts_with("/token") {
+            return Reply::new(200, r#"{"token":"storage-token"}"#);
+        }
+        Reply::new(401, "{}").header(
+            "WWW-Authenticate",
+            format!(r#"Bearer realm="http://127.0.0.1:{port}/token",service="storage""#),
+        )
+    }));
+    let storage_origin = storage.origin();
+    let served = content.clone();
+    let registry = Registry::serve(Box::new(move |request, port| {
+        let layer = request
+            .path
+            .strip_prefix(&format!("/v2/{REPOSITORY}/blobs/"))
+            .filter(|blob| served.layer_digests.iter().any(|d| d == blob));
+        match layer {
+            Some(blob) => {
+                Reply::new(307, "").header("Location", format!("{storage_origin}/storage/{blob}"))
+            }
+            None => respond(&served, Auth::None, false, port, request),
+        }
+    }));
+    let _public = PublicOrigins::new(&[&storage]);
+    let docker = credentials_for(&registry);
+    let pinned = format!(
+        "{}/{REPOSITORY}@{}",
+        registry.domain(),
+        content.index_digest
+    );
+    let output = Output::new();
+    let failure = acquire(
+        &pinned,
+        &output.archive(),
+        &registry.policy(&docker),
+        u64::MAX,
+    )
+    .unwrap_err();
+    assert_eq!(failure.code, "registry_redirect_refused", "{failure:?}");
+    assert_eq!(output.entries(), 0);
+    // The storage host saw one unauthenticated blob request and no token request; the
+    // registry's own realm was never asked either.
+    let requests = storage.requests();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(requests[0].path.starts_with("/storage/") && requests[0].authorization.is_none());
+    assert!(
+        registry
+            .requests()
+            .iter()
+            .all(|r| !r.path.starts_with("/token") && r.authorization.is_none())
+    );
+}
+
+#[test]
+fn a_foreign_token_realm_gets_anonymous_requests_but_never_the_users_credentials() {
+    let content = content();
+    // A foreign realm that would grant a pull token for the user's credentials.
+    let realm = Registry::serve(Box::new(|request, _| {
+        match request.authorization.as_deref() {
+            None => Reply::new(200, r#"{"token":"anonymous-token"}"#),
+            Some(_) => Reply::new(200, r#"{"token":"pull-token"}"#),
+        }
+    }));
+    let realm_origin = realm.origin();
+    let served = content.clone();
+    let registry = Registry::serve(Box::new(move |request, port| {
+        if request.authorization.as_deref() == Some("Bearer pull-token") {
+            return respond(&served, Auth::None, false, port, request);
+        }
+        Reply::new(401, "{}").header(
+            "WWW-Authenticate",
+            format!(r#"Bearer realm="{realm_origin}/token",service="fixture-registry""#),
+        )
+    }));
+    let _public = PublicOrigins::new(&[&realm]);
+    let pinned = format!(
+        "{}/{REPOSITORY}@{}",
+        registry.domain(),
+        content.index_digest
+    );
+    for docker in [
+        credentials_for(&registry),
+        DockerFixture::new(
+            &serde_json::json!({"auths": {registry.domain(): {"identitytoken": "refresh-fixture"}}}),
+        ),
+    ] {
+        let output = Output::new();
+        let failure = acquire(
+            &pinned,
+            &output.archive(),
+            &registry.policy(&docker),
+            u64::MAX,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "registry_realm_refused", "{failure:?}");
+        assert_eq!(output.entries(), 0);
+    }
+    let requests = realm.requests();
+    assert!(!requests.is_empty());
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.method == "GET" && r.authorization.is_none() && !r.body.contains("refresh")),
+        "{requests:?}"
+    );
+}
+
+#[test]
+fn credentialed_realms_are_limited_to_the_registry_host_and_its_parent_domains() {
+    let policy = ImagePolicy::default();
+    let pin = format!("sha256:{}", "a".repeat(64));
+    let registry = |reference: &str| {
+        pinned(&format!("{reference}/org/app@{pin}"), &policy)
+            .unwrap()
+            .registry
+    };
+    let url = |value: &str| Url::parse(value).unwrap();
+    let hub = pinned(&format!("alpine@{pin}"), &policy).unwrap().registry;
+    assert!(credential_realm_allowed(&hub, &url(DOCKER_HUB_REALM)));
+    let gitlab = registry("registry.gitlab.com");
+    for value in [
+        "https://registry.gitlab.com/jwt/auth",
+        "https://gitlab.com/jwt/auth",
+    ] {
+        assert!(credential_realm_allowed(&gitlab, &url(value)), "{value}");
+    }
+    let ported = registry("registry.example.com:8443");
+    assert!(credential_realm_allowed(
+        &ported,
+        &url("https://registry.example.com:8443/token")
+    ));
+    assert!(credential_realm_allowed(
+        &ported,
+        &url("https://example.com/token")
+    ));
+    for value in [
+        // Anonymous requests may go to any public realm; credentials may not.
+        "https://auth.gitlab.com/jwt/auth",
+        "https://evil.example/token",
+        "https://gitlab.com.evil.example/token",
+        "https://com/token",
+        "https://gitlab.com:8443/jwt/auth",
+        "http://gitlab.com/jwt/auth",
+        "https://203.0.113.5/token",
+    ] {
+        assert!(!credential_realm_allowed(&gitlab, &url(value)), "{value}");
+    }
+    assert!(realm_allowed(&gitlab, &url("https://evil.example/token")));
+}
+
+#[test]
+fn public_names_resolving_to_local_addresses_refuse_unless_the_registry_is_allowed() {
+    let content = content();
+    let registry = Registry::start(content.clone(), Auth::None, false);
+    let table: BTreeMap<&str, IpAddr> = [
+        ("registry.example.test", "127.0.0.1"),
+        ("private.example.test", "10.0.0.7"),
+        ("mapped.example.test", "::ffff:127.0.0.1"),
+        ("ula.example.test", "fd00::1"),
+    ]
+    .into_iter()
+    .map(|(name, ip)| (name, ip.parse().unwrap()))
+    .collect();
+    let lookup = HostLookup(Arc::new(move |name| {
+        table
+            .get(name)
+            .map(|ip| vec![*ip])
+            .ok_or_else(|| std::io::Error::other("unknown fixture host"))
+    }));
+    let docker = empty_docker();
+    let policy = |opt_in: Option<String>| ImagePolicy {
+        host_lookup: Some(lookup.clone()),
+        local_registries: opt_in
+            .map(|domain| LocalRegistry {
+                domain,
+                plain_http: true,
+            })
+            .into_iter()
+            .collect(),
+        ..docker.policy()
+    };
+    for host in [
+        "registry.example.test",
+        "private.example.test",
+        "mapped.example.test",
+        "ula.example.test",
+    ] {
+        let reference = format!("{host}:{}/{REPOSITORY}:v1", registry.port);
+        // The name looks public, so admission (which does no resolution) accepts it.
+        assert_eq!(admit(&reference, &policy(None)).unwrap().kind, "registry");
+        let failure = resolve(&reference, &policy(None)).unwrap_err();
+        assert_eq!(
+            failure.code, "registry_local_address",
+            "{host}: {failure:?}"
+        );
+        // An opt-in for a different registry does not allow this one.
+        let other = policy(Some(format!("other.example.test:{}", registry.port)));
+        assert_eq!(
+            resolve(&reference, &other).unwrap_err().code,
+            "registry_local_address"
+        );
+    }
+    assert!(registry.requests().is_empty());
+    // An explicit opt-in allows exactly that registry, through the injected lookup.
+    let domain = format!("registry.example.test:{}", registry.port);
+    let allowed = policy(Some(domain.clone()));
+    let resolved = resolve(&format!("{domain}/{REPOSITORY}:v1"), &allowed).unwrap();
+    assert_eq!(resolved.image_id, content.config_digest);
+    assert!(!registry.requests().is_empty());
+}
+
+#[test]
+fn ip_literals_are_checked_by_address_before_any_request() {
+    for ip in [
+        "127.0.0.1",
+        "10.0.0.1",
+        "100.64.0.1",
+        "169.254.169.254",
+        "172.16.0.1",
+        "192.168.0.1",
+        "0.0.0.0",
+        "224.0.0.1",
+        "255.255.255.255",
+        "::",
+        "::1",
+        "::ffff:127.0.0.1",
+        "::ffff:10.0.0.1",
+        "::127.0.0.1",
+        "64:ff9b::a00:1",
+        "2002:7f00:1::",
+        "fc00::1",
+        "fd12:3456::1",
+        "fe80::1",
+        "fec0::1",
+        "ff02::1",
+    ] {
+        assert!(!public_ip(ip.parse().unwrap()), "{ip}");
+    }
+    for ip in [
+        "8.8.8.8",
+        "203.0.113.5",
+        "2606:4700::1111",
+        "::ffff:8.8.8.8",
+        "2002:808:808::",
+    ] {
+        assert!(public_ip(ip.parse().unwrap()), "{ip}");
+    }
+    let policy = ImagePolicy::default();
+    let pin = format!("sha256:{}", "a".repeat(64));
+    let public = pinned(&format!("ghcr.io/org/app@{pin}"), &policy).unwrap();
+    let fetch = Fetch::new(&public.registry, &public.path, &policy).unwrap();
+    let url = |value: &str| Url::parse(value).unwrap();
+    for value in [
+        "https://127.0.0.1/blob",
+        "https://[::1]/blob",
+        "https://[::ffff:127.0.0.1]/blob",
+        "https://[fd00::1]/blob",
+        "https://10.0.0.1/token",
+    ] {
+        assert!(!fetch.destination_allowed(&url(value)), "{value}");
+    }
+    for value in ["https://ghcr.io/v2/", "https://203.0.113.5/blob"] {
+        assert!(fetch.destination_allowed(&url(value)), "{value}");
+    }
+    // A local opt-in allows its own origin only, not its host on another port.
+    let allowed =
+        ImagePolicy::from_flags(&["--allow-local-registry", "http://127.0.0.1:5000"]).unwrap();
+    let local = pinned(&format!("127.0.0.1:5000/org/app@{pin}"), &allowed).unwrap();
+    let fetch = Fetch::new(&local.registry, &local.path, &allowed).unwrap();
+    assert!(fetch.destination_allowed(&url("http://127.0.0.1:5000/v2/")));
+    assert!(!fetch.destination_allowed(&url("http://127.0.0.1:5001/v2/")));
+    let allowed =
+        ImagePolicy::from_flags(&["--allow-local-registry", "registry.corp.example:5000"]).unwrap();
+    let named = pinned(
+        &format!("registry.corp.example:5000/org/app@{pin}"),
+        &allowed,
+    )
+    .unwrap();
+    let fetch = Fetch::new(&named.registry, &named.path, &allowed).unwrap();
+    assert!(fetch.destination_allowed(&url("https://registry.corp.example:5000/v2/")));
+    assert!(!fetch.destination_allowed(&url("https://registry.corp.example/blob")));
 }
 
 #[test]

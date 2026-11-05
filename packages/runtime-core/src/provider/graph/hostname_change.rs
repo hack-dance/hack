@@ -223,6 +223,7 @@ pub(super) mod tests {
             selection_sha256: snapshot.receipt().selection_sha256.clone(),
         };
         let resource = |key: &str, kind, routing| Resource {
+            loopback_ports: Vec::new(),
             routing,
             networks: None,
             outbound: false,

@@ -48,6 +48,7 @@ fn projection(before: &Receipt, job: &JobIntent) -> Result<Receipt, CandidateErr
         || resource.name != job.container_name
         || resource.phase != "absent"
         || resource.routing.is_some()
+        || !resource.loopback_ports.is_empty()
         || resource.cache.is_some()
         || job
             .container_id

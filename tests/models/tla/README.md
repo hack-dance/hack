@@ -752,6 +752,7 @@ have canonical copies and were not duplicated.
 | authority-lifetime | 9 | Authority cannot outlive completed runtime shutdown; removing the startup lease permits a late bind | `hostname_authority.rs` startup lock and shutdown |
 | publication-journal | 50 | Recovery cannot adopt a live writer's pending entry; unsafe recovery violates that condition | `publication.rs` journal recovery |
 | publication | 16 | A live native publication retains its intent, directory and guest; early retirement breaks ownership | `publication.rs`, `publication_stage.rs` |
+| loopback-port-publication | 1008 | One listener per published host port, forwarding only to the pinned container incarnation, recovery only for a dead owner, and no listener after acknowledged stop. Negative controls: recovery without the dead-owner check (`negative`), no loopback probe (`no-probe`), no endpoint identity check (`stale-target`), acknowledging stop before closing the listener (`ack-before-close`) | `publication.rs` (`require_loopback_port_free`, `release`), `graph/bridges.rs` loopback bridges, `graph/foreground/publishers.rs` |
 | fence-first | 24 | First recovery needs terminal prior state, no occupied slot, and complete evidence; ignoring occupancy fails | `graph/relay-fence.sh` initial recovery |
 | fence-pending | 7 | Recover only permitted pending transitions; accepting launching-to-stopped leaves a live process | `graph/relay-fence.sh` pending recovery |
 | relay-staging | 9 | Discarded preparation cannot contain a live child; discarding an authorized launch fails | `publication_stage.rs` and `graph/relay-fence.sh` launch ordering |
@@ -763,6 +764,11 @@ other models use finite phase/boolean sets. No fairness or eventual-progress cla
 is made. The first-fence model checks an admission predicate, not an interleaving
 proof. Journal `skipped` is constrained by the recovery guard and its negative
 control specifically tests live-writer recovery, not every corruption condition.
+Loopback port publication uses two owners and one foreign listener for one host
+port, and one container replacement per publication. Publish is one step: the
+real interval between the loopback probe and the publisher's own bind is not
+modeled, so a foreign wildcard listener that binds inside it is a documented
+residual risk rather than a checked property.
 OS process identity, file locks, fsync, symlink races, host mounts, credentials,
 network behavior and actual crash recovery require implementation tests and live
 qualification. A passing abstract model does not close those runtime gates.

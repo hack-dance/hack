@@ -305,6 +305,7 @@ fn options<'a>(
         shared_source: false,
         release_initializer_cache: std::collections::BTreeSet::new(),
         routing_enrolled: false,
+        loopback_ports: false,
         project: PlanOptions {
             branch: None,
             project: fixture,

@@ -382,6 +382,7 @@ fn restore_inputs(
             environment: !environments.is_empty(),
             dependency_hosts: fresh.is_some(),
             routing_enrolled: options.routing_enrolled,
+            loopback_ports: options.loopback_ports,
         },
     )?;
     if let Some(change) = &hostname_change {
@@ -762,6 +763,7 @@ mod tests {
             shared_source: false,
             release_initializer_cache: std::collections::BTreeSet::new(),
             routing_enrolled: false,
+            loopback_ports: false,
             project: PlanOptions {
                 branch: None,
                 project: &fixture.0,
@@ -834,6 +836,7 @@ mod tests {
                 shared_source: false,
                 release_initializer_cache: std::collections::BTreeSet::new(),
                 routing_enrolled: false,
+                loopback_ports: false,
                 project: project_options(),
                 expected_plan: &review.plan_id,
                 source_revision: None,

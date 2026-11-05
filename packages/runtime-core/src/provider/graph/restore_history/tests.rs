@@ -20,6 +20,7 @@ fn receipt(index: usize) -> Receipt {
         resources: BTreeMap::from([(
             "container:web".into(),
             Resource {
+                loopback_ports: Vec::new(),
                 routing: None,
                 networks: None,
                 outbound: false,

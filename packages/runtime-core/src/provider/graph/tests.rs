@@ -1013,6 +1013,7 @@ fn fault_child() -> Result<(), CandidateError> {
             shared_source: false,
             release_initializer_cache: std::collections::BTreeSet::new(),
             routing_enrolled: false,
+            loopback_ports: false,
             project: options(),
             expected_plan: &review.plan_id,
             source_revision: None,
@@ -1318,6 +1319,7 @@ fn native_http_graph_readiness_restart_restore_and_supervisor_loss() -> Result<(
         shared_source: false,
         release_initializer_cache: std::collections::BTreeSet::new(),
         routing_enrolled: false,
+        loopback_ports: false,
         project: fixture.options(),
         expected_plan: &review.plan_id,
         source_revision: None,
@@ -1438,6 +1440,7 @@ kill -KILL "$1"
             shared_source: false,
             release_initializer_cache: std::collections::BTreeSet::new(),
             routing_enrolled: false,
+            loopback_ports: false,
             project: fixture.options(),
             expected_plan: &review.plan_id,
             source_revision: None,
@@ -1640,6 +1643,7 @@ fn native_http_preserves_scoped_nonroot_delivery_and_fresh_restore() -> Result<(
         shared_source: false,
         release_initializer_cache: std::collections::BTreeSet::new(),
         routing_enrolled: false,
+        loopback_ports: false,
         project: fixture.options(),
         expected_plan: &review.plan_id,
         source_revision: None,
@@ -1877,6 +1881,7 @@ fn dependency_cache_graphs_share_only_verified_binding_and_pin_restore_targets()
 #[test]
 fn outbound_network_is_pinned_and_requires_explicit_pool_capability() {
     let resource = Resource {
+        loopback_ports: Vec::new(),
         routing: None,
         networks: None,
         outbound: true,
@@ -2019,6 +2024,7 @@ fn endpoint_selects_service_primary_not_unrelated_first_graph_network() {
         receipt.resources.insert(
             format!("network:{key}"),
             Resource {
+                loopback_ports: Vec::new(),
                 routing: None,
                 networks: None,
                 outbound: false,
@@ -2299,4 +2305,155 @@ fn shared_source_preserves_app_writes_but_freezes_cache_installer_inputs() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn loopback_ports_are_admitted_only_for_the_foreground_owner() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let prepare = |document: &Value, loopback_ports: bool| {
+        state::write(&fixture.0.join("compose.yaml"), document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )?;
+        config::prepare_delivery(
+            inputs,
+            &goals(),
+            &"a".repeat(32),
+            &"b".repeat(32),
+            None,
+            config::DeliveryOptions {
+                loopback_ports,
+                ..Default::default()
+            },
+        )
+    };
+    let mut published = compose(&image, "marker", false);
+    published["services"]["web"]["ports"] = json!(["127.0.0.1:8787:3000", "8788:3000"]);
+    // Every non-foreground path keeps refusing `ports`.
+    assert_eq!(
+        prepare(&published, false).err().map(|e| e.code),
+        Some("graph_subset")
+    );
+    let prepared = prepare(&published, true).unwrap();
+    assert_eq!(
+        prepared.resources["container:web"].loopback_ports,
+        vec![
+            LoopbackPort {
+                host_port: 8787,
+                target: 3000
+            },
+            LoopbackPort {
+                host_port: 8788,
+                target: 3000
+            }
+        ]
+    );
+    assert!(
+        prepared.resources["container:init"]
+            .loopback_ports
+            .is_empty()
+    );
+    // Publication is an owned host effect, never an engine port binding.
+    let host = &prepared.configs["web"]["HostConfig"];
+    assert!(host.get("PortBindings").is_none() && host.get("PublishAllPorts").is_none());
+    for (ports, check) in [
+        (json!(["127.0.0.1:8787:3000/udp"]), "web"),
+        (json!(["[::1]:8787:3000"]), "web"),
+        (json!(["3000"]), "web"),
+        (json!(["8787:3000"]), "check"),
+    ] {
+        let mut document = compose(&image, "marker", false);
+        document["services"]["web"]["ports"] = json!(["8787:3000"]);
+        if check == "web" {
+            document["services"]["web"]["ports"] = ports.clone();
+        } else {
+            document["services"][check]["ports"] = ports.clone();
+        }
+        let code = prepare(&document, true).err().map(|e| e.code);
+        // Duplicate host ports across services are a review-time conflict.
+        let expected = if check == "web" {
+            "graph_port_publication"
+        } else {
+            "execution_incompatible"
+        };
+        assert_eq!(code, Some(expected), "{ports}");
+    }
+    let mut many = compose(&image, "marker", false);
+    many["services"]["web"]["ports"] = json!(
+        (0..17)
+            .map(|offset| format!("{}:3000", 9000 + offset))
+            .collect::<Vec<_>>()
+    );
+    let review_of_many = {
+        state::write(&fixture.0.join("compose.yaml"), &many).unwrap();
+        project::plan(&candidate, fixture.options()).unwrap()
+    };
+    assert!(
+        review_of_many.plan.enrollment_compatible,
+        "{:?}",
+        review_of_many.plan.diagnostics
+    );
+    assert_eq!(
+        prepare(&many, true).err().map(|e| e.code),
+        Some("graph_port_publication")
+    );
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
+fn receipt_loopback_intent_is_bounded_unique_and_container_only() {
+    let container = |key: &str, ports: Vec<LoopbackPort>| Resource {
+        routing: None,
+        loopback_ports: ports,
+        networks: None,
+        outbound: false,
+        cache: None,
+        cache_provenance: None,
+        disposable_caches: Vec::new(),
+        kind: Kind::Container,
+        key: key.into(),
+        name: format!("owned-{key}"),
+        id: None,
+        image: None,
+        phase: "absent".into(),
+    };
+    let port = |host_port, target| LoopbackPort { host_port, target };
+    let resources = |entries: Vec<Resource>| {
+        entries
+            .into_iter()
+            .map(|r| (format!("container:{}", r.key), r))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert!(loopback_ports_valid(&resources(vec![
+        container("web", vec![port(8080, 80), port(8081, 80)]),
+        container("api", vec![port(9090, 90)]),
+    ])));
+    for invalid in [
+        vec![container("web", vec![port(8081, 80), port(8080, 80)])],
+        vec![container("web", vec![port(0, 80)])],
+        vec![container("web", vec![port(8080, 0)])],
+        vec![
+            container("web", vec![port(8080, 80)]),
+            container("api", vec![port(8080, 90)]),
+        ],
+        vec![container(
+            "web",
+            (0..17).map(|offset| port(9000 + offset, 80)).collect(),
+        )],
+    ] {
+        assert!(!loopback_ports_valid(&resources(invalid)));
+    }
+    let mut network = container("net", vec![port(8080, 80)]);
+    network.kind = Kind::Network;
+    assert!(!loopback_ports_valid(&BTreeMap::from([(
+        "network:net".into(),
+        network
+    )])));
 }

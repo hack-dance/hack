@@ -252,6 +252,35 @@ interface in that case; native does not expose development services to the
 network. A specific non-loopback address, such as a LAN address, is an
 `unsupported_host_binding` error. Keep such a project on the Compose backend.
 
+Native foreground `hack up` publishes the reviewed ports of active services on
+host `127.0.0.1`. Each published port is forwarded through an owned application
+bridge to the container's target port, after the graph is ready. The rules:
+
+- Only TCP with an explicit host port is published. UDP, an engine-assigned host
+  port (a bare `"3000"`), and IPv6 loopback (`::1`) publication are refused with
+  `graph_port_publication`; keep those projects on the Compose backend.
+- One graph publishes at most 16 ports. Routes and published ports share the
+  pool's 32 application bridge sockets.
+- Two active services, two graphs in the same pool, or a graph and any other
+  host process cannot hold the same host port. Before graph admission, and again
+  under the provider lease just before binding, native refuses a host port that
+  already accepts connections on `127.0.0.1` (`published_port_in_use`, or
+  `E_CONFIG_INVALID` from the frontend check). The other listener is left
+  untouched.
+- A connection is forwarded only to the container incarnation the bridge was
+  started for. A replaced container does not receive traffic from an older
+  publication.
+- Stopping the foreground owner (Ctrl-C) closes each host listener before its
+  bridge and the containers stop, then retires the publication. Dead-owner
+  cleanup retires a publication only after proving its owner is gone. A
+  retaining restart publishes the same ports again.
+- `graph run` and other non-foreground paths do not publish ports and keep
+  refusing them with `graph_subset`.
+
+The loopback check is point-in-time. A process that binds the same port on all
+interfaces between the check and native's own bind can still share loopback
+traffic with it; stop such listeners before `hack up`.
+
 `hack doctor` reports the same features for the current project in its
 `compose backend features` check. With `--json`, the check's `composeBackend.features`
 lists the closed names `external_network`, `external_volume`, `reserved_label`,

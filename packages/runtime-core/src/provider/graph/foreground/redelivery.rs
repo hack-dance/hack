@@ -24,6 +24,7 @@ pub(super) fn options<'a>(original: &RunOptions<'a>) -> RunOptions<'a> {
         shared_source: original.shared_source,
         release_initializer_cache: original.release_initializer_cache.clone(),
         routing_enrolled: original.routing_enrolled,
+        loopback_ports: original.loopback_ports,
         project: crate::project::PlanOptions {
             branch: original.project.branch,
             project: original.project.project,

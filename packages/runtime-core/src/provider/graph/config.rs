@@ -112,6 +112,73 @@ pub(super) struct DeliveryOptions {
     pub environment: bool,
     pub dependency_hosts: bool,
     pub routing_enrolled: bool,
+    pub loopback_ports: bool,
+}
+/// Most loopback publications one graph may own. Each uses one application
+/// bridge slot and one host listener, shared with route bridges.
+pub(super) const MAX_LOOPBACK_PORTS: usize = 16;
+
+fn port_refused(message: &str) -> CandidateError {
+    error("graph_port_publication", message)
+}
+
+/// Admit reviewed Compose `ports` of active services as owned host-loopback TCP
+/// publications. Only the foreground owner, which starts and retires the host
+/// publishers, admits them; every other path keeps refusing `ports` with
+/// `graph_subset`. Review already narrowed all-interface bindings to loopback.
+pub(super) fn loopback_publications(
+    plan: &project::PlanData,
+    enabled: bool,
+) -> Result<BTreeMap<String, Vec<LoopbackPort>>, CandidateError> {
+    let mut result = BTreeMap::new();
+    if !enabled {
+        return Ok(result);
+    }
+    let mut host_ports = BTreeSet::new();
+    for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
+        let mut ports = Vec::new();
+        for port in &service.ports {
+            if port.protocol != "tcp" {
+                return Err(port_refused(
+                    "Native publishes only TCP ports; keep UDP publication on the Compose backend.",
+                ));
+            }
+            if port.proposed_host_ip != "127.0.0.1" {
+                return Err(port_refused(
+                    "Native publishes ports only on IPv4 loopback (127.0.0.1); IPv6 loopback publication is not available yet.",
+                ));
+            }
+            let Some(host_port) = port.published else {
+                return Err(port_refused(
+                    "Native requires an explicit published host port; an engine-assigned host port is not modeled.",
+                ));
+            };
+            if service.network_mode != "project-networks" || service.networks.is_empty() {
+                return Err(port_refused(
+                    "A published port requires a service attached to a project network.",
+                ));
+            }
+            if !host_ports.insert(host_port) {
+                return Err(port_refused(
+                    "Two active publications request the same host port.",
+                ));
+            }
+            ports.push(LoopbackPort {
+                host_port,
+                target: port.target,
+            });
+        }
+        ports.sort();
+        if !ports.is_empty() {
+            result.insert(name.clone(), ports);
+        }
+    }
+    if host_ports.len() > MAX_LOOPBACK_PORTS {
+        return Err(port_refused(
+            "At most 16 published ports fit one native graph.",
+        ));
+    }
+    Ok(result)
 }
 pub(super) fn prepare_delivery(
     inputs: ExecutionInputs,
@@ -125,6 +192,7 @@ pub(super) fn prepare_delivery(
         environment: delivery,
         dependency_hosts,
         routing_enrolled,
+        loopback_ports,
     } = options;
     if inputs.requires_managed_environment() && !delivery {
         return Err(unsupported());
@@ -179,13 +247,14 @@ pub(super) fn prepare_delivery(
     } else {
         BTreeMap::new()
     };
+    let publications = loopback_publications(plan, loopback_ports)?;
     let mut networks = BTreeSet::new();
     let mut volumes = BTreeSet::new();
     let mut total_memory = 0u64;
     let mut total_cpus = 0f64;
     for service in plan.services.values().filter(|s| s.active) {
         if service.restart != "no"
-            || !service.ports.is_empty()
+            || (!service.ports.is_empty() && !loopback_ports)
             || service.labels.keys().any(|key| {
                 !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
                     && !(service.dependency_cache.is_some()
@@ -305,6 +374,7 @@ pub(super) fn prepare_delivery(
             }
             let resource = Resource {
                 routing: None,
+                loopback_ports: Vec::new(),
                 networks: None,
                 outbound: kind == Kind::Network && !plan.networks[&key].internal,
                 cache: cache.cloned(),
@@ -330,6 +400,7 @@ pub(super) fn prepare_delivery(
         let image = service.image.as_ref().expect("checked image");
         let resource = Resource {
             routing: service.routing.clone(),
+            loopback_ports: publications.get(name).cloned().unwrap_or_default(),
             networks: Some(service.networks.clone()),
             outbound: false,
             cache: None,

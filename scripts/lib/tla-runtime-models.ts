@@ -1200,6 +1200,50 @@ const contracts: readonly ModelContract[] = [
     fields: ["alive = TRUE", "recoveredLive = TRUE"],
   },
   {
+    // Loopback TCP publication of Compose `ports`: one listener per host
+    // port, no forwarding to a replaced container, no recovery of a live
+    // owner, no listener after acknowledged stop; see tests/models/tla/README.md.
+    name: "loopback-port-publication",
+    module: "LoopbackPort",
+    states: 1008,
+    invariant: "Safe",
+    action: "Recover",
+    fields: ["retiredLive = TRUE", "alive = [a |-> TRUE, b |-> TRUE]"],
+    additionalControls: [
+      {
+        name: "no-probe",
+        negative: true,
+        action: "Publish",
+        fields: ["shared = TRUE", 'holders = {"a", "foreign"}'],
+        // TLC's two workers may report either owner as the second listener.
+        alternativeWitnesses: [
+          {
+            action: "Publish",
+            fields: ["shared = TRUE", 'holders = {"b", "foreign"}'],
+          },
+        ],
+      },
+      {
+        name: "stale-target",
+        negative: true,
+        action: "Forward",
+        fields: ["staleForward = TRUE", "target = [a |-> 0, b |-> 0]"],
+      },
+      {
+        name: "ack-before-close",
+        negative: true,
+        action: "Retire",
+        fields: ["ackedListening = TRUE", 'holders = {"a"}'],
+        alternativeWitnesses: [
+          {
+            action: "Retire",
+            fields: ["ackedListening = TRUE", 'holders = {"b"}'],
+          },
+        ],
+      },
+    ],
+  },
+  {
     name: "publication",
     module: "Publication",
     states: 16,

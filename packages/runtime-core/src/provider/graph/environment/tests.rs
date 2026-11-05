@@ -139,6 +139,7 @@ fn container_attachment_records_ownership_before_create_and_omits_values_from_me
         state::private_directory(&root).unwrap();
         let engine = Engine::connect(&candidate).unwrap();
         let resource = Resource {
+            loopback_ports: Vec::new(),
             routing: None,
             networks: None,
             outbound: false,

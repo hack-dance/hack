@@ -987,6 +987,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             let values = BTreeMap::new();
             let options = graph::RunOptions {
                 routing_enrolled: !route_slots.is_empty(),
+                loopback_ports: ["serve", "serve-restore"].contains(action),
                 project: PlanOptions {
                     branch: singles.get("--branch").copied(),
                     project: Path::new(project),

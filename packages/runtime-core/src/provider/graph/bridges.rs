@@ -18,6 +18,10 @@ pub struct Assignment {
     pub phase: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<relay::Relay>,
+    /// Set for a loopback TCP publication bridge: the reviewed host port and the
+    /// container target it forwards to. Absent for route and legacy bridges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loopback_port: Option<LoopbackPort>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,7 +59,9 @@ fn validate(store: &Store, owner: &str, capacity: u8) -> Result<(), CandidateErr
             || !hex(&a.run, 32)
             || a.service.is_empty()
             || a.service.len() > 128
-            || !services.insert((&a.run, &a.service))
+            || !services.insert((&a.run, &a.service, a.loopback_port.map(|p| p.host_port)))
+            || a.loopback_port
+                .is_some_and(|p| p.host_port == 0 || p.target == 0)
             || !hex(&a.generation, 64)
             || !hex(&a.container_id, 64)
             || !hex(&a.network_id, 64)
@@ -146,6 +152,16 @@ fn read_owner_registry(
     Ok(store)
 }
 
+/// The endpoint a bridge forwards to: the route/probe endpoint, or for a
+/// loopback publication the container's endpoint at that publication's target.
+fn bridge_endpoint<'s>(snapshot: &'s Snapshot, a: &Assignment) -> Option<&'s GuestEndpoint> {
+    match a.loopback_port {
+        None => snapshot.guest_endpoints.get(&a.service),
+        Some(port) => snapshot
+            .port_endpoints
+            .get(&port_endpoint_key(&a.service, port.target)),
+    }
+}
 fn matches_endpoint(a: &Assignment, e: &GuestEndpoint, boot: &str) -> bool {
     a.boot_id == boot
         && a.generation == e.generation
@@ -239,11 +255,11 @@ fn select_route_slots(
         .collect::<std::collections::BTreeSet<_>>();
     let mut selected = BTreeMap::new();
     for (service, choice) in requested {
-        if store
-            .slots
-            .values()
-            .any(|assignment| assignment.run == run && assignment.service == *service)
-        {
+        if store.slots.values().any(|assignment| {
+            assignment.run == run
+                && assignment.service == *service
+                && assignment.loopback_port.is_none()
+        }) {
             return Err(error(
                 "bridge_slot_busy",
                 "The service is already reserved; no reassignment was attempted.",
@@ -309,6 +325,7 @@ fn reserve_selected(
             boot_id: boot_id.into(),
             phase: "reserved".into(),
             relay: None,
+            loopback_port: None,
         };
         store.slots.insert(slot, assignment.clone());
         reserved.insert(service, ReservedRoute { slot, assignment });
@@ -363,6 +380,117 @@ pub(in crate::provider::graph) fn reserve_routes(
         &snapshot.guest_endpoints,
     )
 }
+/// Reserve one bridge per declared loopback publication against one validated
+/// graph snapshot, under the provider lease. Refusal writes no assignments.
+/// Keys are reviewed host ports.
+#[cfg(target_os = "macos")]
+pub(in crate::provider::graph) fn reserve_loopback_ports(
+    candidate: &Candidate,
+    receipt: &Receipt,
+) -> Result<BTreeMap<u16, ReservedRoute>, CandidateError> {
+    let engine = Engine::connect_cleanup(candidate)?;
+    let capacity = engine
+        .guest()
+        .bridge_intent()
+        .ok_or_else(|| {
+            error(
+                "bridge_unavailable",
+                "The pool has no application bridge capacity.",
+            )
+        })?
+        .slots;
+    let snapshot = inspect_using(candidate, &engine, &receipt.run)?;
+    if snapshot.receipt.owner != receipt.owner
+        || snapshot.receipt.plan_id != receipt.plan_id
+        || snapshot.receipt.namespace != receipt.namespace
+        || snapshot.receipt.phase != "ready-observed"
+    {
+        return Err(error(
+            "bridge_generation_stale",
+            "The reviewed graph changed before bridge reservation.",
+        ));
+    }
+    let store = load_store(candidate, &engine, false)?;
+    reserve_loopback_selected(
+        candidate,
+        store,
+        capacity,
+        &snapshot,
+        engine.guest().boot_id(),
+    )
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn reserve_loopback_selected(
+    candidate: &Candidate,
+    mut store: Store,
+    capacity: u8,
+    snapshot: &Snapshot,
+    boot_id: &str,
+) -> Result<BTreeMap<u16, ReservedRoute>, CandidateError> {
+    let run = &snapshot.receipt.run;
+    let mut used = store
+        .slots
+        .keys()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut reserved = BTreeMap::new();
+    for resource in snapshot
+        .receipt
+        .resources
+        .values()
+        .filter(|r| r.kind == Kind::Container)
+    {
+        for port in &resource.loopback_ports {
+            if store.slots.values().any(|a| {
+                a.run == *run
+                    && a.service == resource.key
+                    && a.loopback_port.map(|p| p.host_port) == Some(port.host_port)
+            }) {
+                return Err(error(
+                    "bridge_slot_busy",
+                    "The published port is already reserved; no reassignment was attempted.",
+                ));
+            }
+            let endpoint = snapshot
+                .port_endpoints
+                .get(&port_endpoint_key(&resource.key, port.target))
+                .ok_or_else(|| {
+                    error(
+                        "bridge_endpoint_unavailable",
+                        "A published port requires a running, ready owned container endpoint.",
+                    )
+                })?;
+            let slot = (0..capacity).find(|slot| !used.contains(slot)).ok_or_else(|| {
+                error(
+                    "bridge_capacity_exhausted",
+                    "No free application bridge socket remains in this pool; no ports were reserved.",
+                )
+            })?;
+            used.insert(slot);
+            let assignment = Assignment {
+                reservation: probes::token()?,
+                run: run.clone(),
+                service: resource.key.clone(),
+                generation: endpoint.generation.clone(),
+                container_id: endpoint.container_id.clone(),
+                network_id: endpoint.network_id.clone(),
+                boot_id: boot_id.into(),
+                phase: "reserved".into(),
+                relay: None,
+                loopback_port: Some(*port),
+            };
+            store.slots.insert(slot, assignment.clone());
+            reserved.insert(port.host_port, ReservedRoute { slot, assignment });
+        }
+    }
+    if reserved.is_empty() {
+        return Ok(reserved);
+    }
+    validate(&store, &store.owner, capacity)?;
+    save(candidate, &store)?;
+    Ok(reserved)
+}
 pub fn reserve_bridge(
     candidate: &Candidate,
     options: ReserveBridgeOptions<'_>,
@@ -408,10 +536,9 @@ pub fn reserve_bridge(
     }
     let mut store = load_store(candidate, &engine, false)?;
     if store.slots.contains_key(&options.slot)
-        || store
-            .slots
-            .values()
-            .any(|a| a.run == options.run && a.service == options.service)
+        || store.slots.values().any(|a| {
+            a.run == options.run && a.service == options.service && a.loopback_port.is_none()
+        })
     {
         return Err(error(
             "bridge_slot_busy",
@@ -428,6 +555,7 @@ pub fn reserve_bridge(
         boot_id: engine.guest().boot_id().into(),
         phase: "reserved".into(),
         relay: None,
+        loopback_port: None,
     };
     store.slots.insert(options.slot, assignment.clone());
     save(candidate, &store)?;
@@ -457,9 +585,7 @@ pub fn start_bridge(
         })?
         .clone();
     let snapshot = inspect_using(candidate, &engine, run)?;
-    let endpoint = snapshot
-        .guest_endpoints
-        .get(&a.service)
+    let endpoint = bridge_endpoint(&snapshot, &a)
         .filter(|e| matches_endpoint(&a, e, engine.guest().boot_id()))
         .ok_or_else(|| {
             error(
@@ -479,9 +605,7 @@ pub fn start_bridge(
         as u32;
     let start = relay::target_start(&engine, pid)?;
     let checked = inspect_using(candidate, &engine, run)?;
-    if !checked
-        .guest_endpoints
-        .get(&a.service)
+    if !bridge_endpoint(&checked, &a)
         .is_some_and(|e| matches_endpoint(&a, e, engine.guest().boot_id()))
     {
         return Err(error(
@@ -509,9 +633,7 @@ pub fn start_bridge(
     save(candidate, &store)?;
     relay::operate(&engine, slot, &store.slots[&slot], "start", Some(&input))?;
     let checked = inspect_using(candidate, &engine, run)?;
-    if !checked
-        .guest_endpoints
-        .get(&a.service)
+    if !bridge_endpoint(&checked, &a)
         .is_some_and(|e| matches_endpoint(&a, e, engine.guest().boot_id()))
     {
         stop_slot(candidate, &engine, &mut store, slot)?;
@@ -523,6 +645,27 @@ pub fn start_bridge(
     store.slots.get_mut(&slot).expect("checked slot").phase = "running".into();
     save(candidate, &store)?;
     Ok(store.slots[&slot].clone())
+}
+/// A loopback publication bridge authorizes exactly its reviewed host port over
+/// TCP, forwarding to its reviewed target; never hostnames or another port.
+fn validate_loopback_publication(
+    resource: &Resource,
+    loopback: LoopbackPort,
+    upstream_port: u16,
+    host_port: Option<u16>,
+    hostnames: &[String],
+) -> Result<(), CandidateError> {
+    if !resource.loopback_ports.contains(&loopback)
+        || upstream_port != loopback.target
+        || host_port != Some(loopback.host_port)
+        || !hostnames.is_empty()
+    {
+        return Err(error(
+            "graph_port_publication",
+            "Publication differs from the graph's declared loopback port.",
+        ));
+    }
+    Ok(())
 }
 /// Declared routes authorize only their complete hostname set over Unix
 /// publication. Legacy un-enrolled services retain the existing publication API.
@@ -585,9 +728,7 @@ pub fn publish_bridge(
         })
         .ok_or_else(invalid)?;
     let snapshot = inspect_using(candidate, &engine, run)?;
-    if !snapshot
-        .guest_endpoints
-        .get(&a.service)
+    if !bridge_endpoint(&snapshot, a)
         .is_some_and(|e| matches_endpoint(a, e, engine.guest().boot_id()))
         || relay::operate(&engine, slot, a, "inspect", None)? != "running"
     {
@@ -599,12 +740,16 @@ pub fn publish_bridge(
         .get(&format!("container:{}", a.service))
         .filter(|resource| resource.kind == Kind::Container && resource.key == a.service)
         .ok_or_else(invalid)?;
-    validate_route_publication(
-        resource.routing.as_ref(),
-        a.relay.as_ref().ok_or_else(invalid)?.port,
-        port,
-        hostnames,
-    )?;
+    let upstream_port = a.relay.as_ref().ok_or_else(invalid)?.port;
+    match a.loopback_port {
+        Some(loopback) => {
+            validate_loopback_publication(resource, loopback, upstream_port, port, hostnames)?;
+            super::super::publication::require_loopback_port_free(loopback.host_port)?;
+        }
+        None => {
+            validate_route_publication(resource.routing.as_ref(), upstream_port, port, hostnames)?
+        }
+    }
     let upstream = engine
         .guest()
         .engine_socket()?
@@ -692,7 +837,7 @@ pub(super) fn inspect_bridges_using(
         .iter()
         .filter(|(_, a)| a.run == run)
         .map(|(slot, a)| {
-            let current = snapshot.guest_endpoints.get(&a.service)
+            let current = bridge_endpoint(&snapshot, a)
                 .is_some_and(|e| matches_endpoint(a, e, engine.guest().boot_id()));
             let status = if a.relay.is_some() && a.boot_id == engine.guest().boot_id() && a.phase != "stopped" {
                 relay::operate(engine, *slot, a, "inspect", None)?
@@ -817,6 +962,7 @@ mod tests {
             slots: BTreeMap::from([(
                 0,
                 Assignment {
+                    loopback_port: None,
                     reservation: "a".repeat(32),
                     run: "b".repeat(32),
                     service: "web".into(),
@@ -829,6 +975,90 @@ mod tests {
                 },
             )]),
         }
+    }
+    #[test]
+    fn loopback_bridges_coexist_with_routes_but_own_one_host_port_each() {
+        let mut store = fixture();
+        let loopback = |host_port, target| {
+            let mut a = store.slots[&0].clone();
+            a.reservation = format!("{host_port:032x}");
+            a.loopback_port = Some(LoopbackPort { host_port, target });
+            a
+        };
+        let first = loopback(8787, 3000);
+        let second = loopback(8788, 3000);
+        store.slots.insert(1, first.clone());
+        store.slots.insert(2, second);
+        validate(&store, "owner", 4).unwrap();
+        // The route bridge for the same service still counts as that service's route.
+        let requests = BTreeMap::from([("web".into(), RouteSlot::Auto)]);
+        assert_eq!(
+            select_route_slots(&store, &requests, 4, &"b".repeat(32))
+                .unwrap_err()
+                .code,
+            "bridge_slot_busy"
+        );
+        store.slots.remove(&0);
+        assert_eq!(
+            select_route_slots(&store, &requests, 4, &"b".repeat(32)).unwrap()["web"],
+            0
+        );
+        let mut duplicate = first.clone();
+        duplicate.reservation = "f".repeat(32);
+        store.slots.insert(3, duplicate);
+        assert!(validate(&store, "owner", 4).is_err());
+        store.slots.remove(&3);
+        let mut zero = first;
+        zero.reservation = "e".repeat(32);
+        zero.loopback_port = Some(LoopbackPort {
+            host_port: 9999,
+            target: 0,
+        });
+        store.slots.insert(3, zero);
+        assert!(validate(&store, "owner", 4).is_err());
+    }
+    #[test]
+    fn loopback_publication_authorizes_only_its_reviewed_port_and_target() {
+        let port = LoopbackPort {
+            host_port: 8787,
+            target: 3000,
+        };
+        let resource = Resource {
+            routing: None,
+            loopback_ports: vec![port],
+            networks: None,
+            outbound: false,
+            cache: None,
+            cache_provenance: None,
+            disposable_caches: Vec::new(),
+            kind: Kind::Container,
+            key: "web".into(),
+            name: "owned-web".into(),
+            id: None,
+            image: None,
+            phase: "running".into(),
+        };
+        validate_loopback_publication(&resource, port, 3000, Some(8787), &[]).unwrap();
+        for (upstream, host, hostnames) in [
+            (3001, Some(8787), vec![]),
+            (3000, Some(8788), vec![]),
+            (3000, None, vec![]),
+            (3000, Some(8787), vec!["web.example".to_owned()]),
+        ] {
+            assert_eq!(
+                validate_loopback_publication(&resource, port, upstream, host, &hostnames)
+                    .unwrap_err()
+                    .code,
+                "graph_port_publication"
+            );
+        }
+        let undeclared = LoopbackPort {
+            host_port: 9090,
+            target: 3000,
+        };
+        assert!(
+            validate_loopback_publication(&resource, undeclared, 3000, Some(9090), &[]).is_err()
+        );
     }
     #[test]
     fn automatic_routes_allocate_distinct_free_slots_without_stealing_foreign_owners() {

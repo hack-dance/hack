@@ -488,9 +488,17 @@ test("foreground partial shutdown is reported without selecting failed-start rec
   expect(events).not.toContain("remove");
 });
 
+test("published ports pass frontend preparation; the runtime admits them", () => {
+  const services = prepareNativeProjectServices({
+    normalizedComposeJson: JSON.stringify({
+      services: { web: { image: "busybox", ports: ["127.0.0.1:8080:80"] } },
+    }),
+  } as NativeProjectInput);
+  expect(services.web?.ports).toEqual(["127.0.0.1:8080:80"]);
+});
+
 test.each([
   { build: "." },
-  { ports: ["8080:80"] },
   { restart: "always" },
 ])("an unsupported service setting %j is a coded configuration refusal", (setting) => {
   const refusal = (() => {

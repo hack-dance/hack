@@ -209,12 +209,23 @@ impl Kind {
         }
     }
 }
+/// One reviewed Compose `127.0.0.1:host_port:target/tcp` publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopbackPort {
+    pub host_port: u16,
+    pub target: u16,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resource {
     /// Explicitly enrolled local HTTPS intent, not a claim of active publication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<project::RoutingPlan>,
+    /// Admitted Compose `ports` published on host IPv4 loopback by the
+    /// foreground owner. Intent only; publication is a separate owned effect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loopback_ports: Vec<LoopbackPort>,
     /// Ordered logical attachments; absent only on legacy container receipts or non-containers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub networks: Option<Vec<String>>,
@@ -276,7 +287,16 @@ pub struct Snapshot {
     pub interrupted_start_cleanup_incomplete: bool,
     pub observations: BTreeMap<String, Value>,
     pub guest_endpoints: BTreeMap<String, GuestEndpoint>,
+    /// Ready containers' loopback publication targets, keyed by
+    /// [`port_endpoint_key`]. Independent of HTTP probes: a published port
+    /// needs a running (and, when declared, healthy) owned container.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub port_endpoints: BTreeMap<String, GuestEndpoint>,
     pub storage_references: Value,
+}
+/// Service names are Compose identifiers and never contain `:`.
+pub(super) fn port_endpoint_key(service: &str, target: u16) -> String {
+    format!("{service}:{target}")
 }
 fn labels(owner: &str, run: &str, namespace: &str, plan: &str, resource: &Resource) -> Value {
     json!({"io.hack-local.owner":owner,"io.hack-local.graph":run,"io.hack-local.namespace":namespace,"io.hack-local.plan":plan,"io.hack-local.kind":resource.kind.word(),"io.hack-local.resource":resource.key})
@@ -446,6 +466,7 @@ fn same_resource_bindings(
                     && old.cache == resource.cache
                     && old.outbound == resource.outbound
                     && old.routing == resource.routing
+                    && old.loopback_ports == resource.loopback_ports
                     && (old.networks == resource.networks
                         // Old receipts predate attachment persistence and admitted at most
                         // one network. The caller also requires the unchanged plan identity.
@@ -453,6 +474,22 @@ fn same_resource_bindings(
                             && resource.networks.as_ref().is_some_and(|v| v.len() <= 1)))
             })
         })
+}
+
+/// Receipt-load bound for loopback publication intent: containers only, unique
+/// non-zero host ports graph-wide, and the admission budget.
+fn loopback_ports_valid(resources: &BTreeMap<String, Resource>) -> bool {
+    let mut host_ports = BTreeSet::new();
+    resources.values().all(|resource| {
+        (resource.loopback_ports.is_empty() || resource.kind == Kind::Container)
+            && resource
+                .loopback_ports
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && resource.loopback_ports.iter().all(|port| {
+                port.host_port != 0 && port.target != 0 && host_ports.insert(port.host_port)
+            })
+    }) && host_ports.len() <= config::MAX_LOOPBACK_PORTS
 }
 
 fn network_bindings_valid(resources: &BTreeMap<String, Resource>) -> bool {
@@ -551,6 +588,7 @@ fn load_at(
                 resource.kind != Kind::Container || !routes::valid_intent(route)
             })
         })
+        || !loopback_ports_valid(&receipt.resources)
         || ![
             "preparing",
             "ready-observed",
@@ -639,6 +677,9 @@ pub struct RunOptions<'a> {
     pub release_initializer_cache: BTreeSet<String>,
     /// Admit reviewed route intent; this does not itself publish an HTTPS route.
     pub routing_enrolled: bool,
+    /// Admit reviewed loopback TCP `ports`. Only the foreground owner, which
+    /// starts and retires the host publishers, may set this.
+    pub loopback_ports: bool,
     pub project: PlanOptions<'a>,
     pub expected_plan: &'a str,
     pub source_revision: Option<&'a str>,
@@ -1307,6 +1348,7 @@ fn run_inputs(
             environment: !environments.is_empty(),
             dependency_hosts: startup.is_some(),
             routing_enrolled: options.routing_enrolled,
+            loopback_ports: options.loopback_ports,
         },
     )?;
     initializer_cache::validate_selection(
@@ -1570,6 +1612,7 @@ fn inspect_using(
         networks.insert(key.clone(), inspect_resource(engine, &receipt, resource)?);
     }
     let mut guest_endpoints = BTreeMap::new();
+    let mut port_endpoints = BTreeMap::new();
     for (key, resource) in &receipt.resources {
         let inspected = if resource.kind == Kind::Network {
             networks.get(key).expect("network inspected").clone()
@@ -1604,6 +1647,34 @@ fn inspect_using(
                         )?,
                     );
                 }
+                if !journal_incomplete
+                    && receipt.phase == "ready-observed"
+                    && resource.id.is_some()
+                    && !resource.loopback_ports.is_empty()
+                    && matches!(
+                        observation,
+                        Observation::Running {
+                            health: Health::Healthy | Health::None
+                        }
+                    )
+                    && endpoint_network(&receipt, &v, &networks)?.is_some()
+                {
+                    for port in &resource.loopback_ports {
+                        port_endpoints.insert(
+                            port_endpoint_key(&resource.key, port.target),
+                            endpoints::resolve_attached(
+                                &v,
+                                &networks,
+                                port.target,
+                                &endpoints::EndpointScope {
+                                    receipt: &receipt,
+                                    boot: engine.guest().boot_id(),
+                                    service: &resource.key,
+                                },
+                            )?,
+                        );
+                    }
+                }
                 serde_json::to_value(observation)
                     .map_err(|_| error("graph_state", "Cannot encode observation."))?
             }
@@ -1621,6 +1692,7 @@ fn inspect_using(
         interrupted_start_cleanup_incomplete,
         observations,
         guest_endpoints,
+        port_endpoints,
         storage_references,
     })
 }

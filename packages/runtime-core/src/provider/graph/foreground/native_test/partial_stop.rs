@@ -52,6 +52,7 @@ fn run_options<'a>(
         shared_source: false,
         release_initializer_cache: BTreeSet::new(),
         routing_enrolled: false,
+        loopback_ports: false,
         project: options(project_path),
         expected_plan: plan,
         source_revision: None,

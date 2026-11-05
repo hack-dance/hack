@@ -879,6 +879,7 @@ mod tests {
             resources: BTreeMap::from([(
                 "container:web".into(),
                 Resource {
+                    loopback_ports: Vec::new(),
                     kind: Kind::Container,
                     key: "web".into(),
                     name: format!("hkg-{run}-container-0"),

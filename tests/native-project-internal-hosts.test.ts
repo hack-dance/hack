@@ -1,0 +1,265 @@
+import { expect, test } from "bun:test";
+import type { NativeHostDependency } from "../src/backends/native-project-dependencies.ts";
+import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
+import {
+  applyNativeInternalHostAliases,
+  NATIVE_INTERNAL_HOST_ALIAS_REFUSAL,
+  NATIVE_INTERNAL_HOSTS_CHANGED_REFUSAL,
+  NATIVE_UNBOUND_HOST_ALIAS_REFUSAL,
+  nativeServiceHostAliases,
+  requireNativeHostAliasBindings,
+  requireNativeInternalExtraHostsUnchanged,
+} from "../src/backends/native-project-internal-hosts.ts";
+import {
+  expectCodedRefusal,
+  expectCodedThrow,
+} from "./helpers/closed-refusal.ts";
+
+function input(services: Record<string, unknown>): NativeProjectInput {
+  return {
+    originalSha256: "d".repeat(64),
+    normalizedComposeJson: JSON.stringify({ services }),
+    managedEnvironment: {},
+    lifecycleHostEnvironment: {},
+    environmentFiles: [],
+    effectiveEnvName: null,
+    serviceNames: Object.keys(services),
+  };
+}
+function services(result: NativeProjectInput): Record<string, any> {
+  return JSON.parse(result.normalizedComposeJson).services;
+}
+function binding(service: string, aliases: string[]): NativeHostDependency {
+  return {
+    service,
+    binding: "api",
+    slot: 0,
+    guest_port: 443,
+    aliases,
+    host_pid: 123,
+    host_port: 8443,
+  };
+}
+
+test("no project-wide aliases leaves the normalized input byte-identical", () => {
+  const original = input({ web: { image: "nginx" } });
+  for (const hosts of [undefined, {}]) {
+    expect(
+      applyNativeInternalHostAliases({
+        input: original,
+        hosts,
+        hasDependencySelection: false,
+      })
+    ).toBe(original);
+  }
+});
+
+test("project-wide aliases are declared on every service like the Compose override", () => {
+  const result = applyNativeInternalHostAliases({
+    input: input({
+      web: { image: "nginx" },
+      worker: {
+        image: "nginx",
+        extra_hosts: ["own.example.test:host-gateway"],
+      },
+      map: {
+        image: "nginx",
+        extra_hosts: { "api.example.test": "host-gateway" },
+      },
+      later: { image: "nginx", profiles: ["later"] },
+    }),
+    hosts: {
+      "api.example.test": "host-gateway",
+      "auth.example.test": "host-gateway",
+    },
+    hasDependencySelection: true,
+  });
+  expect(services(result)).toEqual({
+    web: {
+      image: "nginx",
+      extra_hosts: [
+        "api.example.test:host-gateway",
+        "auth.example.test:host-gateway",
+      ],
+    },
+    worker: {
+      image: "nginx",
+      extra_hosts: [
+        "own.example.test:host-gateway",
+        "api.example.test:host-gateway",
+        "auth.example.test:host-gateway",
+      ],
+    },
+    map: {
+      image: "nginx",
+      extra_hosts: {
+        "api.example.test": "host-gateway",
+        "auth.example.test": "host-gateway",
+      },
+    },
+    later: {
+      image: "nginx",
+      profiles: ["later"],
+      extra_hosts: [
+        "api.example.test:host-gateway",
+        "auth.example.test:host-gateway",
+      ],
+    },
+  });
+});
+
+test("project-wide aliases without any dependency selection refuse instead of being ignored", () => {
+  expectCodedThrow(
+    () =>
+      applyNativeInternalHostAliases({
+        input: input({ web: { image: "nginx" } }),
+        hosts: { "api.example.test": "host-gateway" },
+        hasDependencySelection: false,
+      }),
+    "E_NATIVE_PROJECT_UNSUPPORTED",
+    NATIVE_UNBOUND_HOST_ALIAS_REFUSAL
+  );
+});
+
+test("project-wide aliases native cannot honor refuse value-free", () => {
+  for (const hosts of [
+    { "api.example.test": "10.0.0.5" },
+    { "api.example.test": "Host-Gateway" },
+    { "API.example.test": "host-gateway" },
+    { "*.example.test": "host-gateway" },
+    { localhost: "host-gateway" },
+    { "app.localhost": "host-gateway" },
+    { "127.0.0.1": "host-gateway" },
+    Object.fromEntries(
+      Array.from({ length: 33 }, (_, i) => [
+        `h${i}.example.test`,
+        "host-gateway",
+      ])
+    ),
+  ]) {
+    const error = expectCodedThrow(
+      () =>
+        applyNativeInternalHostAliases({
+          input: input({ web: { image: "nginx" } }),
+          hosts,
+          hasDependencySelection: true,
+        }),
+      "E_NATIVE_PROJECT_UNSUPPORTED",
+      NATIVE_INTERNAL_HOST_ALIAS_REFUSAL
+    );
+    expect(error.message).not.toContain("example");
+    expect(error.message).not.toContain("10.0.0.5");
+  }
+});
+
+test("a service that maps the alias to another target conflicts", () => {
+  for (const extra_hosts of [
+    ["api.example.test:10.0.0.5"],
+    ["api.example.test=10.0.0.5"],
+    { "api.example.test": "10.0.0.5" },
+    "api.example.test:host-gateway",
+    Array.from({ length: 32 }, (_, i) => `h${i}.example.test:host-gateway`),
+  ]) {
+    expectCodedThrow(
+      () =>
+        applyNativeInternalHostAliases({
+          input: input({ web: { image: "nginx", extra_hosts } }),
+          hosts: { "api.example.test": "host-gateway" },
+          hasDependencySelection: true,
+        }),
+      "E_CONFIG_INVALID",
+      "Native host alias selection conflicts with declared configuration; values omitted."
+    );
+  }
+});
+
+test("host aliases are collected only for profile-active services", () => {
+  expect(
+    nativeServiceHostAliases({
+      services: {
+        web: { extra_hosts: ["api.example.test:host-gateway"] },
+        eq: { extra_hosts: ["eq.example.test=host-gateway"] },
+        map: {
+          extra_hosts: {
+            "map.example.test": "host-gateway",
+            "fixed.example.test": "10.0.0.5",
+          },
+        },
+        plain: {},
+        later: {
+          profiles: ["later"],
+          extra_hosts: ["api.example.test:host-gateway"],
+        },
+        selected: {
+          profiles: ["debug"],
+          extra_hosts: ["api.example.test:host-gateway"],
+        },
+      },
+      profiles: ["debug"],
+    })
+  ).toEqual({
+    web: ["api.example.test"],
+    eq: ["eq.example.test"],
+    map: ["map.example.test"],
+    plain: [],
+    selected: ["api.example.test"],
+  });
+});
+
+test("every active declared alias needs a binding of that same service", () => {
+  const hostAliases = {
+    web: ["api.example.test", "auth.example.test"],
+    worker: ["api.example.test"],
+    plain: [],
+  };
+  requireNativeHostAliasBindings({
+    dependencies: [
+      binding("web", ["api.example.test", "auth.example.test"]),
+      binding("worker", ["api.example.test"]),
+    ],
+    hostAliases,
+  });
+  for (const dependencies of [
+    [],
+    [binding("web", ["api.example.test", "auth.example.test"])],
+    [
+      binding("web", ["api.example.test"]),
+      binding("worker", ["api.example.test", "auth.example.test"]),
+    ],
+  ]) {
+    expectCodedThrow(
+      () => requireNativeHostAliasBindings({ dependencies, hostAliases }),
+      "E_NATIVE_PROJECT_UNSUPPORTED",
+      NATIVE_UNBOUND_HOST_ALIAS_REFUSAL
+    );
+  }
+});
+
+test("aliases changed by lifecycle hooks refuse after hook cleanup", async () => {
+  const reviewed = { "api.example.test": "host-gateway" };
+  let cleaned = 0;
+  const cleanup = async () => {
+    cleaned++;
+  };
+  await requireNativeInternalExtraHostsUnchanged({
+    reviewed,
+    current: async () => ({ "api.example.test": "host-gateway" }),
+    cleanup,
+  });
+  expect(cleaned).toBe(0);
+  for (const current of [
+    async () => ({}),
+    async () => ({ "api.example.test": "10.0.0.5" }),
+    async () => ({ ...reviewed, "auth.example.test": "host-gateway" }),
+    async () => {
+      throw new Error("synthetic unreadable map");
+    },
+  ]) {
+    await expectCodedRefusal(
+      requireNativeInternalExtraHostsUnchanged({ reviewed, current, cleanup }),
+      "E_NATIVE_PROJECT_UNSUPPORTED",
+      NATIVE_INTERNAL_HOSTS_CHANGED_REFUSAL
+    );
+  }
+  expect(cleaned).toBe(4);
+});

@@ -3,6 +3,7 @@ import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  compileNativeHostDependencySelection,
   discoverNativeHostDependency,
   parseNativeHostDependencies,
   prepareNativeDependencyServices,
@@ -483,4 +484,195 @@ test("logical grant bounds and endpoint identity remain independent of transport
       { ...binding("service-1"), host_pid: 124 },
     ]).map((entry) => entry.slot)
   ).toEqual([0, 1]);
+});
+
+const declaredAliases = {
+  web: ["api.example.test", "auth.example.test"],
+  worker: ["api.example.test"],
+  db: [],
+};
+function declarative(entry: Record<string, unknown> = {}) {
+  return {
+    binding: "api",
+    guest_port: 443,
+    host_port: 8443,
+    host_executable: "/usr/local/bin/synthetic-tunnel",
+    host_supervisor_depth: 2,
+    aliases: ["api.example.test", "auth.example.test"],
+    ...entry,
+  };
+}
+function compile(dependencies: unknown[], hostAliases = declaredAliases) {
+  return compileNativeHostDependencySelection({
+    value: { version: 2, dependencies },
+    hostAliases,
+  });
+}
+
+test("a declarative binding expands to every service that declares its aliases", () => {
+  const authority = {
+    binding: "api",
+    guest_port: 443,
+    host_port: 8443,
+    host_executable: "/usr/local/bin/synthetic-tunnel",
+    host_supervisor_depth: 2,
+  };
+  expect(compile([declarative()])).toEqual({
+    version: 1,
+    dependencies: [
+      {
+        ...authority,
+        service: "web",
+        aliases: ["api.example.test", "auth.example.test"],
+      },
+      { ...authority, service: "worker", aliases: ["api.example.test"] },
+    ],
+  });
+  expect(
+    compile([
+      declarative({ services: ["worker"], aliases: ["api.example.test"] }),
+    ])
+  ).toEqual({
+    version: 1,
+    dependencies: [
+      { ...authority, service: "worker", aliases: ["api.example.test"] },
+    ],
+  });
+  const v1 = { version: 1, dependencies: [binding()] };
+  expect(
+    compileNativeHostDependencySelection({
+      value: v1,
+      hostAliases: declaredAliases,
+    })
+  ).toBe(v1);
+});
+
+test("declarative bindings refuse unused, ambiguous or unscoped authority before discovery", () => {
+  for (const value of [
+    { version: 2, dependencies: [] },
+    { version: 2, dependencies: [declarative()], extra: true },
+    { version: 2 },
+    {
+      version: 2,
+      dependencies: Array.from({ length: 129 }, (_, i) =>
+        declarative({ binding: `b${i}` })
+      ),
+    },
+  ]) {
+    expectCodedThrow(
+      () =>
+        compileNativeHostDependencySelection({
+          value,
+          hostAliases: declaredAliases,
+        }),
+      "E_CONFIG_INVALID",
+      "values omitted"
+    );
+  }
+  for (const dependencies of [
+    // The same binding twice.
+    [declarative(), declarative()],
+    // A listed service declares none of the aliases.
+    [declarative({ services: ["db"] })],
+    // An alias no selected service declares.
+    [declarative({ aliases: ["api.example.test", "other.example.test"] })],
+    [declarative({ services: ["worker"] })],
+    // Unknown, inactive, repeated or empty service scopes.
+    [declarative({ services: ["missing"] })],
+    [declarative({ services: ["web", "web"] })],
+    [declarative({ services: [] })],
+    [declarative({ services: "web" })],
+    // A per-service field or unknown key.
+    [declarative({ service: "web" })],
+    [declarative({ value: "synthetic-do-not-print" })],
+    [declarative({ aliases: [] })],
+    [declarative({ aliases: ["api.example.test", "api.example.test"] })],
+  ]) {
+    const error = expectCodedThrow(
+      () => compile(dependencies),
+      "E_CONFIG_INVALID",
+      "values omitted"
+    );
+    expect(error.message).not.toContain("synthetic");
+  }
+  expectCodedThrow(
+    () =>
+      compileNativeHostDependencySelection({
+        value: { version: 2, dependencies: [declarative()] },
+      }),
+    "E_CONFIG_INVALID",
+    "values omitted"
+  );
+});
+
+test("limits apply after declarative expansion and one discovery serves every expanded binding", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-dependencies-v2-"));
+  roots.push(root);
+  const path = join(root, "selection.json");
+  const many = Object.fromEntries(
+    Array.from({ length: 129 }, (_, i) => [`s${i}`, ["api.example.test"]])
+  );
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 2,
+      dependencies: [declarative({ aliases: ["api.example.test"] })],
+    })
+  );
+  await expectCodedRefusal(
+    readNativeHostDependencies({
+      path,
+      services: Object.keys(many),
+      hostAliases: many,
+      discover: async () => ({
+        host_pid: 456,
+        endpoint_fingerprint: "e".repeat(64),
+      }),
+    }),
+    "E_CONFIG_INVALID",
+    "values omitted"
+  );
+  const discovered: unknown[] = [];
+  await writeFile(
+    path,
+    JSON.stringify({ version: 2, dependencies: [declarative()] })
+  );
+  const selected = await readNativeHostDependencies({
+    path,
+    services: ["web", "worker", "db"],
+    hostAliases: declaredAliases,
+    discover: async (selection) => {
+      discovered.push(selection);
+      return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
+    },
+  });
+  expect(discovered).toEqual([
+    { executable: "/usr/local/bin/synthetic-tunnel", hostPort: 8443 },
+  ]);
+  expect(
+    selected.map(({ service, slot, host_pid, aliases }) => ({
+      service,
+      slot,
+      host_pid,
+      aliases,
+    }))
+  ).toEqual([
+    {
+      service: "web",
+      slot: 0,
+      host_pid: 456,
+      aliases: ["api.example.test", "auth.example.test"],
+    },
+    {
+      service: "worker",
+      slot: 0,
+      host_pid: 456,
+      aliases: ["api.example.test"],
+    },
+  ]);
+  await expectCodedRefusal(
+    readNativeHostDependencies({ path, services: ["web", "worker", "db"] }),
+    "E_CONFIG_INVALID",
+    "values omitted"
+  );
 });

@@ -3349,3 +3349,178 @@ test("restart preflight refuses runtime host metadata that differs from reviewed
     "Native runtime metadata"
   );
 });
+
+async function internalHostsFixture() {
+  const { opts, events } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.worker = { ...compose.services.web };
+    compose.services.later = { ...compose.services.web, profiles: ["later"] };
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  const path = join(opts.scope.projectRoot, "host-selection.json");
+  const internalExtraHosts = { "api.example.test": "host-gateway" };
+  return { opts, events, path, internalExtraHosts };
+}
+
+test("project-wide host aliases are declared like Compose and bound by one declarative selection", async () => {
+  const { opts, path, internalExtraHosts } = await internalHostsFixture();
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 2,
+      dependencies: [
+        {
+          binding: "api",
+          aliases: ["api.example.test"],
+          guest_port: 443,
+          host_port: 8443,
+          host_pid: 123,
+        },
+      ],
+    })
+  );
+  const reviewed: NativeProjectInput[] = [];
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) => {
+    reviewed.push(request.input);
+    return await review(request);
+  };
+  const plans: unknown[] = [];
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "dependency-plan") {
+      plans.push(
+        JSON.parse(await readFile(String(request.args[3]), "utf8")).dependencies
+      );
+    }
+    return await invoke(request);
+  };
+  expect(
+    await startNativeProject({
+      ...opts,
+      dependencyFile: path,
+      internalExtraHosts,
+    })
+  ).toBe(0);
+  const services = JSON.parse(reviewed[0]?.normalizedComposeJson ?? "{}")
+    .services as Record<string, Record<string, unknown>>;
+  for (const name of ["web", "worker", "later"]) {
+    expect(services[name]?.extra_hosts).toEqual([
+      "api.example.test:host-gateway",
+    ]);
+  }
+  // The inactive profile service is declared but never bound.
+  const binding = {
+    binding: "api",
+    slot: 0,
+    guest_port: 443,
+    host_port: 8443,
+    host_pid: 123,
+    aliases: ["api.example.test"],
+  };
+  expect(plans).toEqual([
+    [
+      { ...binding, service: "web" },
+      { ...binding, service: "worker" },
+    ],
+  ]);
+  expect(services.web?.init).toBe(true);
+  expect(services.later?.init).toBeUndefined();
+
+  reviewed.length = 0;
+  await preflightNativeRestart({
+    runtime: opts.runtime,
+    scope: opts.scope,
+    composeFile: opts.composeFile,
+    dependencyFile: path,
+    internalExtraHosts,
+    run: {
+      run: "1".repeat(32),
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      planId: "a".repeat(64),
+      effectiveEnvName: null,
+      profiles: [],
+      aws: null,
+    },
+    dependencies: {
+      prepare: opts.dependencies.prepare,
+      review: opts.dependencies.review,
+      invoke: async (request) => {
+        if (request.args[1] === "dependency-plan") {
+          plans.push(
+            JSON.parse(await readFile(String(request.args[3]), "utf8"))
+              .dependencies
+          );
+          return {
+            plan_id: "a".repeat(64),
+            dependency_plan_id: "f".repeat(64),
+          };
+        }
+        return await restartPreflightInvoke(request);
+      },
+    },
+  });
+  expect(reviewed).toHaveLength(1);
+  // Restart reviews the same declarations and bindings startup admitted.
+  expect(
+    JSON.parse(reviewed[0]?.normalizedComposeJson ?? "{}").services
+  ).toEqual(services);
+  expect(plans[1]).toEqual(plans[0]);
+});
+
+test("a project-wide alias without a binding for every active service refuses before runtime effects", async () => {
+  const { opts, events, path, internalExtraHosts } =
+    await internalHostsFixture();
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [
+        {
+          service: "web",
+          binding: "api",
+          aliases: ["api.example.test"],
+          guest_port: 443,
+          host_port: 8443,
+          host_pid: 123,
+        },
+      ],
+    })
+  );
+  const error = await startNativeProject({
+    ...opts,
+    dependencyFile: path,
+    internalExtraHosts,
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(HackCliError);
+  expect(error).toHaveProperty("code", "E_NATIVE_PROJECT_UNSUPPORTED");
+  expect(String((error as Error).message)).toContain(
+    "Native host alias has no reviewed host dependency binding"
+  );
+  expect(String((error as Error).message)).not.toContain("example");
+  expect(events).toContain("before");
+  expect(events).toContain("cleanup");
+  expect(events).not.toContain("runtime up");
+  expect(events).not.toContain("graph dependency-plan");
+});
+
+test("project-wide aliases without a dependency selection refuse before hooks instead of being ignored", async () => {
+  const { opts, events, internalExtraHosts } = await internalHostsFixture();
+  const error = await startNativeProject({
+    ...opts,
+    internalExtraHosts,
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(HackCliError);
+  expect(error).toHaveProperty("code", "E_NATIVE_PROJECT_UNSUPPORTED");
+  expect(String((error as Error).message)).toContain(
+    "configuration was not dropped"
+  );
+  expect(events).not.toContain("before");
+  expect(events).not.toContain("runtime up");
+  // Without project-wide aliases the same project still starts unchanged.
+  expect(await startNativeProject({ ...opts, internalExtraHosts: {} })).toBe(0);
+});

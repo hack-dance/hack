@@ -7,6 +7,7 @@ import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
+  compileNativeHostDependencySelection,
   discoverNativeHostDependency,
   type NativeHostDependency,
   parseNativeHostDependencies,
@@ -15,6 +16,11 @@ import {
 } from "./native-project-dependencies.ts";
 import { prepareNativeProjectInput } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
+import {
+  applyNativeInternalHostAliases,
+  nativeServiceHostAliases,
+  requireNativeHostAliasBindings,
+} from "./native-project-internal-hosts.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import {
   nativeReviewNeedsCompatibility,
@@ -143,12 +149,16 @@ async function verifyNativeRestartListeners(opts: {
 async function readNativeRestartDependencyIntent(opts: {
   readonly path?: string;
   readonly services: readonly string[];
+  readonly hostAliases: Readonly<Record<string, readonly string[]>>;
 }): Promise<NativeHostDependency[]> {
   if (opts.path === undefined) {
     return [];
   }
   try {
-    const value = await readNativeSelection(opts.path);
+    const value = compileNativeHostDependencySelection({
+      value: await readNativeSelection(opts.path),
+      hostAliases: opts.hostAliases,
+    });
     if (!(isRecord(value) && Array.isArray(value.dependencies))) {
       throw new ClosedCliError("Invalid dependency intent");
     }
@@ -322,6 +332,8 @@ export async function preflightNativeRestart(opts: {
   readonly recoverStopped?: boolean;
   readonly adaptationFile?: string;
   readonly dependencyFile?: string;
+  /** Same project-wide host aliases the replacement startup declares. */
+  readonly internalExtraHosts?: Readonly<Record<string, string>>;
   readonly allowedHosts?: readonly string[];
   /** Same public metadata selection the replacement startup will review. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
@@ -365,6 +377,11 @@ export async function preflightNativeRestart(opts: {
     input,
     path: opts.adaptationFile,
   });
+  input = applyNativeInternalHostAliases({
+    input,
+    hosts: opts.internalExtraHosts,
+    hasDependencySelection: opts.dependencyFile !== undefined,
+  });
   const reviewedBranch = await prepareNativeReviewBranch({
     runtime: opts.runtime,
     scope: opts.scope,
@@ -394,14 +411,20 @@ export async function preflightNativeRestart(opts: {
     input,
     opts.dependencyFile !== undefined
   );
+  const hostAliases = nativeServiceHostAliases({
+    services: specs,
+    profiles: selected.profiles,
+  });
   const dependencies = stoppedRetry
     ? await readNativeRestartDependencyIntent({
         path: opts.dependencyFile,
         services: Object.keys(specs),
+        hostAliases,
       })
     : await deps.dependencies({
         path: opts.dependencyFile,
         services: Object.keys(specs),
+        hostAliases,
         discover: (selection) =>
           discoverNativeHostDependency({
             runtime: opts.runtime,
@@ -411,6 +434,7 @@ export async function preflightNativeRestart(opts: {
             invoke: deps.invoke,
           }),
       });
+  requireNativeHostAliasBindings({ dependencies, hostAliases });
   prepareNativeDependencyServices({ dependencies, services: specs });
   const activeImages = stoppedRetry
     ? undefined

@@ -127,6 +127,135 @@ function requireSameEndpointPolicy(opts: {
   opts.policies.set(opts.endpoint, policy);
 }
 
+const DECLARATIVE_FIELDS = new Set([
+  "binding",
+  "services",
+  "guest_port",
+  "aliases",
+  "host_pid",
+  "host_port",
+  "host_executable",
+  "host_supervisor_depth",
+]);
+
+function declaredServices(opts: {
+  readonly entry: Record<string, unknown>;
+  readonly hostAliases: Readonly<Record<string, readonly string[]>>;
+}): readonly string[] {
+  const selected = opts.entry.services;
+  if (selected === undefined) {
+    return Object.keys(opts.hostAliases);
+  }
+  if (
+    !(
+      Array.isArray(selected) &&
+      selected.length > 0 &&
+      selected.length <= 128 &&
+      new Set(selected).size === selected.length &&
+      selected.every(
+        (service) =>
+          typeof service === "string" &&
+          Object.hasOwn(opts.hostAliases, service)
+      )
+    )
+  ) {
+    throw refused();
+  }
+  return selected as string[];
+}
+
+type DeclarativeEntry = Record<string, unknown> & {
+  readonly binding: string;
+  readonly aliases: string[];
+};
+function declarativeEntry(entry: unknown): entry is DeclarativeEntry {
+  return (
+    isRecord(entry) &&
+    Object.keys(entry).every((key) => DECLARATIVE_FIELDS.has(key)) &&
+    typeof entry.binding === "string" &&
+    Array.isArray(entry.aliases) &&
+    entry.aliases.length > 0 &&
+    entry.aliases.length <= 8 &&
+    entry.aliases.every((alias) => typeof alias === "string") &&
+    new Set(entry.aliases).size === entry.aliases.length
+  );
+}
+function expandDeclarativeEntry(opts: {
+  readonly entry: DeclarativeEntry;
+  readonly hostAliases: Readonly<Record<string, readonly string[]>>;
+}): Record<string, unknown>[] {
+  const { services: _services, ...authority } = opts.entry;
+  const used = new Set<string>();
+  const result: Record<string, unknown>[] = [];
+  for (const service of declaredServices(opts)) {
+    const declared = new Set(opts.hostAliases[service]);
+    const aliases = opts.entry.aliases.filter((alias) => declared.has(alias));
+    if (aliases.length === 0) {
+      if (opts.entry.services !== undefined) {
+        throw refused();
+      }
+      continue;
+    }
+    for (const alias of aliases) {
+      used.add(alias);
+    }
+    result.push({ ...authority, service, aliases });
+  }
+  if (used.size !== opts.entry.aliases.length) {
+    throw refused();
+  }
+  return result;
+}
+
+/**
+ * Expand a declarative (version 2) selection into version 1 bindings.
+ *
+ * A version 2 entry names one binding once, without a `service`. It applies to
+ * the listed `services`, or, when `services` is omitted, to every
+ * profile-active service that declares one of its aliases as a host-gateway
+ * extra host (including project-wide internal aliases). Each expanded binding
+ * carries only the aliases that service declares. A listed service that
+ * declares none of the aliases, an alias no selected service declares, or a
+ * repeated binding name refuses. The same listener authority (PID or
+ * executable and depth) applies to every expanded binding, so endpoint
+ * sharing and the 128-binding and 32-transport limits are enforced after
+ * expansion by {@link parseNativeHostDependencies}. Version 1 values pass
+ * through unchanged.
+ */
+export function compileNativeHostDependencySelection(opts: {
+  readonly value: unknown;
+  readonly hostAliases?: Readonly<Record<string, readonly string[]>>;
+}): unknown {
+  const value = opts.value;
+  if (!(isRecord(value) && value.version === 2)) {
+    return value;
+  }
+  const hostAliases = opts.hostAliases;
+  if (
+    !(
+      hostAliases &&
+      Object.keys(value).every((key) =>
+        ["version", "dependencies"].includes(key)
+      ) &&
+      Array.isArray(value.dependencies) &&
+      value.dependencies.length > 0 &&
+      value.dependencies.length <= 128
+    )
+  ) {
+    throw refused();
+  }
+  const bindings = new Set<string>();
+  const dependencies: Record<string, unknown>[] = [];
+  for (const entry of value.dependencies) {
+    if (!declarativeEntry(entry) || bindings.has(entry.binding)) {
+      throw refused();
+    }
+    bindings.add(entry.binding);
+    dependencies.push(...expandDeclarativeEntry({ entry, hostAliases }));
+  }
+  return { version: 1, dependencies };
+}
+
 /** Native dependency-plan pins the live process/listener identity after this structural check. */
 export function parseNativeHostDependencies(opts: {
   readonly value: unknown;
@@ -237,6 +366,8 @@ export function parseNativeHostDependencies(opts: {
 export async function readNativeHostDependencies(opts: {
   readonly path?: string;
   readonly services: readonly string[];
+  /** Host-gateway aliases per profile-active service, for version 2 selections. */
+  readonly hostAliases?: Readonly<Record<string, readonly string[]>>;
   readonly discover?: (selection: {
     readonly hostPort: number;
     readonly executable: string;
@@ -249,7 +380,10 @@ export async function readNativeHostDependencies(opts: {
     return [];
   }
   try {
-    const value = await readNativeSelection(opts.path);
+    const value = compileNativeHostDependencySelection({
+      value: await readNativeSelection(opts.path),
+      hostAliases: opts.hostAliases,
+    });
     if (!(isRecord(value) && Array.isArray(value.dependencies))) {
       throw refused();
     }

@@ -1307,6 +1307,49 @@ stopped run and its volumes remain available for a corrected retry.
 Selected services receive `init: true` when omitted because the guest relay launcher
 requires a reaping init process. An explicit `init: false` is refused, not replaced.
 
+Project-wide host aliases from `internal.extra_hosts` in `hack.config.json`, plus
+checkout-local `hack internal extra-hosts` entries, follow the Compose backend:
+native `up` and `restart` declare each one on every service as a `host-gateway`
+extra host. Native has no general host gateway, so every profile-active service
+must then have a selected binding for each alias it declares. A missing binding
+refuses with `E_NATIVE_PROJECT_UNSUPPORTED` ("Native host alias has no reviewed
+host dependency binding; configuration was not dropped."), before any runtime
+work; with no dependency selection at all it refuses before lifecycle hooks.
+An entry whose target is not `host-gateway` (for example a fixed address), a name
+that is not an exact lowercase DNS name, or a service that already maps the name
+to a different target also refuses. Earlier native builds ignored these entries,
+which let a container resolve the public name instead of the local listener.
+Native reads these aliases before lifecycle hooks, because they are part of the
+reviewed configuration; unlike the Compose backend, a hook that changes them makes
+`up` refuse after hook cleanup. Projects without project-wide aliases are unchanged.
+Unlike a Compose host gateway, which reaches every host port, a service reaches
+each alias only on the one guest port its binding selects.
+
+To avoid repeating one listener for every service, a version 2 selection names
+each binding once:
+
+```json
+{
+  "version": 2,
+  "dependencies": [{
+    "binding": "search",
+    "aliases": ["search.example.com"],
+    "guest_port": 443,
+    "host_port": 8443,
+    "host_executable": "/absolute/path/to/the/listener-binary"
+  }]
+}
+```
+
+Without `services`, the entry applies to every profile-active service that
+declares one of its aliases, and each service receives only the aliases it
+declares. `"services": ["web", "worker"]` limits it to those services, each of
+which must declare at least one of the aliases. The CLI expands the entry into
+the version 1 bindings shown above before discovery and review. The same listener
+authority applies to every expanded binding, and the 128-binding and 32-transport
+limits apply after expansion. A repeated binding name, an alias no selected service
+declares, a per-entry `service` key or an unknown or inactive service refuses.
+
 Fresh pools reserve the number of distinct dependency transports from that
 selection. Existing pool capacity cannot be silently widened. The selection is copied into the temporary exact-plan
 dependency request and removed when foreground startup exits. No durable listener

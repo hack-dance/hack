@@ -12,5 +12,11 @@
     "platform": "linux-arm64",
     "url": "https://download.docker.com/linux/static/stable/aarch64/docker-29.5.2.tgz",
     "archive_sha256": "d1d9cb857c32c596ea96a9ca6b25d13621a97c83511e667868a33a320b2a707f"
+  },
+  "buildx": {
+    "version": "0.34.1",
+    "platform": "darwin-arm64",
+    "url": "https://github.com/docker/buildx/releases/download/v0.34.1/buildx-v0.34.1.darwin-arm64",
+    "archive_sha256": "e5040acdaac1a349de84c0e7a80c861a368e0d141bf7260e1fd9a74b16749477"
   }
 }

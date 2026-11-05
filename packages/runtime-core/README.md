@@ -477,6 +477,9 @@ pinned package preparation, ownership, resource admission, lifecycle commands, a
 The default private build includes native HTTP graph probes (local `_docs/docs/plans/v5/native-http-probe-20260915.md`)
 and requires Zig 0.15.2 plus a host C compiler.
 [Provider pins](provider-pins.json) record the exact package inputs; the engine runs inside the VM.
+The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
+image-reference scanner (`provider/build_scan.rs`) prepare for native image builds;
+no command builds images yet.
 
 Source binaries embed their build checkout. If a copied Cargo target directory
 retains a different checkout identity, use a fresh `--target-dir` for checks and

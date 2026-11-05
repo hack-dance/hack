@@ -94,6 +94,7 @@ Usage:
   hack-local graph serve|run ... --shared-source
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
+  hack-local runtime prepare-builder --archive <pinned-docker-buildx>
   hack-local runtime prepare-network-tools --directory <private-pinned-apk-directory>
   hack-local runtime up --profile research|development --prepared-base prefer|require [--prepared-base-store <absolute-private-store>] [--json]
   hack-local runtime prepared-base build --profile research|development [--base-id <id>] [--store <absolute-private-store>] [--json]
@@ -925,6 +926,12 @@ fn run() -> Result<(), CandidateError> {
         }
         ["runtime", "prepare-engine", "--archive", archive] => {
             print_json(&hack_runtime_core::provider::prepare_engine(
+                &discover_candidate(&requested)?,
+                Path::new(archive),
+            )?)?;
+        }
+        ["runtime", "prepare-builder", "--archive", archive] => {
+            print_json(&hack_runtime_core::provider::prepare_builder(
                 &discover_candidate(&requested)?,
                 Path::new(archive),
             )?)?;

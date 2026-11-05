@@ -443,6 +443,20 @@ Provider setup is separate and explicit. Obtain the exact archives identified in
 ./hack-native --candidate-root /absolute/private/candidate-home runtime probe --json
 ```
 
+The pins also name a BuildKit client (`buildx`, `darwin-arm64`) for future native image
+builds. Native `up` still refuses `build:` services and nothing runs this client yet.
+Preparing it is optional:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-builder --archive /absolute/docker-buildx
+```
+
+The command takes the exact release file named in `provider-pins.json`. It checks
+the SHA-256 before it changes any state, then copies the file into private candidate
+state and checks its code signature. If a prepared client exists, the command checks
+it again and does not replace it. If the prepared tree changes, `runtime probe`
+refuses; it reports `builder_prepared` when the client is present and unchanged.
+
 Before startup, network-tool preparation additionally requires all four pinned
 Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), with
 regular, singly linked mode-`0600` files. Acquire the matching public package bytes;

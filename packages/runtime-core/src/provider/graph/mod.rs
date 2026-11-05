@@ -98,6 +98,7 @@ mod config;
 mod dependency_cache;
 mod image_environment;
 mod image_process;
+mod image_volumes;
 #[cfg(feature = "native-config-plan")]
 pub mod native;
 pub use cleanup_enrollment::{Phase as RelayCleanupPhase, RelayCleanup};
@@ -172,7 +173,7 @@ const MAX_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const GUEST_MEMORY_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TOTAL_MEMORY_BYTES: u64 =
     super::Profile::Development.memory_mib() as u64 * 1024 * 1024 - GUEST_MEMORY_RESERVE_BYTES;
-const MAX_VOLUMES: usize = 8;
+const MAX_VOLUMES: usize = 16;
 
 fn error(code: &'static str, message: &str) -> CandidateError {
     CandidateError::new(code, message)
@@ -2165,15 +2166,19 @@ fn verify_images(
         if image["Id"].as_str() != resource.image.as_deref()
             || image["Os"] != "linux"
             || image["Architecture"] != "arm64"
-            || image["Config"]["Volumes"]
-                .as_object()
-                .is_some_and(|v| !v.is_empty())
         {
             return Err(error(
                 "graph_image",
-                "Pinned image architecture or implicit volumes are incompatible.",
+                "Pinned image identity, OS or architecture is incompatible.",
             ));
         }
+        // Image VOLUME targets are admitted only when covered by exactly one owned
+        // named mount; the engine never allocates anonymous storage for a graph.
+        image_volumes::admit(
+            &image["Config"]["Volumes"],
+            &configs[&resource.key],
+            resources,
+        )?;
         if private_services.contains(&resource.key) {
             image_process::apply_private(
                 configs

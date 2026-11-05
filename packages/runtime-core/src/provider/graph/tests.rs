@@ -342,6 +342,89 @@ fn omitted_service_limits_share_pool_and_explicit_caps_remain_enforced() {
     assert!(!candidate.state_root.exists());
 }
 #[test]
+fn lowered_named_volume_covers_image_volume_and_subpath_or_missing_cover_refuses() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let declared = json!({"/var/lib/data":{}});
+    for (mounts, admitted) in [
+        (json!(["state:/var/lib/data/"]), true),
+        (json!(["state:/var/lib/other"]), false),
+        (
+            json!([{"type":"volume","source":"state","target":"/var/lib/data","volume":{"subpath":"db"}}]),
+            false,
+        ),
+    ] {
+        state::write(
+            &fixture.0.join("compose.yaml"),
+            &json!({"services":{"db":{"image":image,"user":"999:999","network_mode":"none","volumes":mounts}},"volumes":{"state":{}}}),
+        )
+        .unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let goals = BTreeMap::from([("db".to_string(), Condition::Started)]);
+        let prepared =
+            config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None).unwrap();
+        assert_eq!(prepared.configs["db"]["User"], "999:999");
+        let result = image_volumes::admit(&declared, &prepared.configs["db"], &prepared.resources);
+        if admitted {
+            result.unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().code, image_volumes::UNCOVERED);
+        }
+    }
+    assert!(!candidate.state_root.exists());
+}
+#[test]
+fn graph_volume_budget_admits_sixteen_named_volumes_and_refuses_seventeen() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    for (count, accepted) in [(MAX_VOLUMES, true), (MAX_VOLUMES + 1, false)] {
+        assert_eq!(MAX_VOLUMES, 16);
+        let mounts: Vec<String> = (0..count).map(|i| format!("data-{i}:/data/{i}")).collect();
+        let volumes: serde_json::Map<String, Value> = (0..count)
+            .map(|i| (format!("data-{i}"), json!({})))
+            .collect();
+        state::write(
+            &fixture.0.join("compose.yaml"),
+            &json!({"services":{"job":{"image":image,"network_mode":"none","command":["true"],"volumes":mounts}},"volumes":volumes}),
+        )
+        .unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let goals = BTreeMap::from([("job".to_string(), Condition::Completed)]);
+        let result = config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None);
+        if !accepted {
+            assert_eq!(result.err().unwrap().code, "graph_budget");
+            continue;
+        }
+        let prepared = result.unwrap();
+        let owned = prepared
+            .resources
+            .values()
+            .filter(|resource| resource.kind == Kind::Volume)
+            .count();
+        assert_eq!(owned, count);
+        assert!(resource_counts_fit(&prepared.resources));
+    }
+    assert!(!candidate.state_root.exists());
+}
+#[test]
 fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
     let fixture = Fixture::new();
     let candidate_root = Fixture::new();

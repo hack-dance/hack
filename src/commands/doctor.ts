@@ -146,6 +146,12 @@ import {
 import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
 import { readComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
 import {
+  NATIVE_DATA_CHECK,
+  type NativeDataReport,
+  nativeDataCheckResult,
+  readNativeDataAdvisories,
+} from "../lib/native-data-advisories.ts";
+import {
   describeHackLocalRoute,
   HACK_LOCAL_ROLLBACK_COMMAND,
   type HackLocalRouteDependencies,
@@ -235,6 +241,8 @@ interface CheckResult {
   readonly envKey?: EnvKeyInspection;
   /** Closed Compose-backend feature names only; never authored values. */
   readonly composeBackend?: ComposeBackendReport;
+  /** Closed native data advisory codes and service names only. */
+  readonly nativeData?: NativeDataReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -1116,6 +1124,11 @@ async function handleNativeDoctor(opts: {
         })
       )
     );
+    results.push(
+      await runCheck(progress, NATIVE_DATA_CHECK, () =>
+        checkNativeDataAdvisories({ startDir: opts.startDir })
+      )
+    );
   }
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
   const hasError = results.some((result) => result.status === "error");
@@ -1282,6 +1295,8 @@ export type DoctorJsonCheck = {
   readonly envKey?: EnvKeyInspection;
   /** Present only on the Compose-backend feature check: closed feature names. */
   readonly composeBackend?: ComposeBackendReport;
+  /** Present only on the native data-service check: closed codes and service names. */
+  readonly nativeData?: NativeDataReport;
 };
 
 export type DoctorJsonData = {
@@ -1320,6 +1335,7 @@ export function buildDoctorJsonData(opts: {
       ...(result.composeBackend
         ? { composeBackend: result.composeBackend }
         : {}),
+      ...(result.nativeData ? { nativeData: result.nativeData } : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,
@@ -2951,6 +2967,25 @@ async function checkComposeBackendFeatures(opts: {
       adaptationFile: opts.adaptationFile,
     }),
   });
+}
+
+/**
+ * Warning-only native data-service advisories (image entrypoint ownership
+ * handoff and mutable tags on services with named data volumes). Reads only
+ * the project's Compose file; never blocks native up.
+ */
+async function checkNativeDataAdvisories(opts: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(opts.startDir);
+  if (!ctx) {
+    return {
+      name: NATIVE_DATA_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  return nativeDataCheckResult(await readNativeDataAdvisories(ctx.composeFile));
 }
 
 /**

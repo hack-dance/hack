@@ -1156,6 +1156,23 @@ other ownership or image-populated volume content need a separate explicit contr
 Root-only volume mounts without subpaths keep their existing behavior. Native
 workspace installation and engine subpath confinement require separate qualification.
 
+An image that declares `VOLUME` targets is admitted on a Compose-file graph only when
+each declared target is covered by exactly one explicit mount, and that mount is a
+whole (no subpath) named volume owned by the same graph receipt. A missing, duplicate,
+bind, subpath, tmpfs or dependency-cache cover refuses with
+`graph_image_volume_uncovered` before any container is created; a foreign OS,
+architecture or image identity still refuses with `graph_image`. Start, restart,
+restore and one-off share the same predicate, and it reads only reviewed
+configuration, so plan and receipt identities do not change. The engine therefore
+never allocates an anonymous volume for a graph. Because these covers have no subpath,
+Docker copy-up gives a freshly created, empty owned volume the image directory's
+contents, owner and mode; a retained, non-empty volume is mounted unchanged. No
+capability is added: an image entrypoint that starts as root and changes ownership
+(`chown` followed by a user switch) still fails under the dropped capability set, so
+declare an explicit numeric `user:` matching the image's data user instead. A graph
+may own at most 16 volumes, dependency caches included, beside 32 networks and 32
+services.
+
 Fresh `graph run` or `graph serve` may explicitly select
 `--release-initializer-cache <service>` (repeatable). The service must be a reviewed
 dependency-cache bootstrap initializer with completed readiness. This optional

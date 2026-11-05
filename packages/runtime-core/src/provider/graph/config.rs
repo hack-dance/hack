@@ -283,7 +283,7 @@ pub(super) fn prepare_delivery(
     {
         return Err(error(
             "graph_budget",
-            "Graph exceeds 32 networks, eight volumes, four CPUs or the development guest memory reservation budget.",
+            "Graph exceeds 32 networks, 16 volumes, four CPUs or the development guest memory reservation budget.",
         ));
     }
     let mut resources = BTreeMap::new();

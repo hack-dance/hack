@@ -611,6 +611,21 @@ layer. Removing the owned container discards that layer; use named volumes for
 durable data. Source bind mounts still require read-only publication. Writable
 container layers do not imply writable source synchronization.
 
+An image that declares `VOLUME` (for example a database image) runs natively only
+when the service mounts a named volume at each declared path, as in
+`db-data:/var/lib/postgresql/data`. Hack never creates an anonymous volume: a declared
+path without exactly one whole named volume of the project refuses with
+`graph_image_volume_uncovered`, and a bind mount, a `volume.subpath` mount or a
+dependency-cache volume at that path does not count. On first use the engine copies
+the image directory's contents, owner and mode into the new, empty volume; later runs
+mount the retained data unchanged. Native containers drop all capabilities, so an
+image entrypoint that starts as root and hands the data directory to another user
+(`chown` and then a user switch) fails. Set an explicit numeric `user:` that matches
+the image's data user (look it up in the image's `/etc/passwd`); the entrypoint then
+skips the handoff. `hack doctor` warns about this case and about data services on
+mutable image tags. A native graph can own at most 16 named volumes, dependency
+caches included.
+
 The normal-CLI integration helpers prepare modern environment overlays and
 worktree inheritance in memory, with null declarations in public normalized
 configuration. An explicit AWS profile adapter can replace the recognized

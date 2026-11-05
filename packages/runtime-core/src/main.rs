@@ -91,6 +91,8 @@ Usage:
   hack-local runtime up --profile research|development [--bridge-sockets <1..32> | --minimum-bridge-sockets <1..32>] [--dependency-sockets <1..32> | --minimum-dependency-sockets <1..32>] [--json]
   hack-local runtime up --profile development --project-share <exact-project-root> --unfiltered-source [--json]
   hack-local runtime check-project-share --project-share <exact-project-root> --unfiltered-source --json
+  hack-local runtime project-share add --project-share <exact-project-root> --unfiltered-source --json
+  hack-local runtime project-share remove --project-share <absolute-recorded-root> --json
   hack-local graph serve|run ... --shared-source
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
@@ -402,6 +404,35 @@ fn run() -> Result<(), CandidateError> {
             print_json(&hack_runtime_core::provider::check_project_share(
                 &discover_candidate(&requested)?,
                 &share,
+            )?)?;
+        }
+        [
+            "runtime",
+            "project-share",
+            "add",
+            "--project-share",
+            project,
+            "--unfiltered-source",
+            "--json",
+        ] => {
+            let share =
+                hack_runtime_core::provider::ProjectShareIntent::approve(Path::new(project), true)?;
+            print_json(&hack_runtime_core::provider::add_project_share(
+                &discover_candidate(&requested)?,
+                &share,
+            )?)?;
+        }
+        [
+            "runtime",
+            "project-share",
+            "remove",
+            "--project-share",
+            project,
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::remove_project_share(
+                &discover_candidate(&requested)?,
+                Path::new(project),
             )?)?;
         }
         ["runtime", "up", arguments @ ..]

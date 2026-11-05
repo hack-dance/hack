@@ -215,6 +215,11 @@ impl Default for ReclamationPolicy {
 pub struct Owner {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_share: Option<super::ProjectShareIntent>,
+    /// Further project roots shared into the same development pool, in admission order.
+    /// Added or removed only by the journaled stopped-pool share update; empty for
+    /// single-root pools, whose receipt bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_project_shares: Vec<super::ProjectShareIntent>,
     #[serde(default)]
     pub network: super::NetworkIntent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -308,9 +313,10 @@ impl Owner {
         }
         let owner: Self = read(&root.join("owner.json"))?;
         owner.network.validate()?;
-        if let Some(share) = &owner.project_share {
-            share.validate_receipt()?;
-        }
+        super::project_share::validate_set(
+            owner.project_share.as_ref(),
+            &owner.additional_project_shares,
+        )?;
         if owner.created
             && matches!(&owner.network, super::NetworkIntent::ApprovedHosts { cidrs, .. } if cidrs.is_empty())
         {
@@ -470,6 +476,7 @@ impl Owner {
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let owner = Self {
             project_share,
+            additional_project_shares: Vec::new(),
             network,
             profile,
             application_bridge,
@@ -514,6 +521,19 @@ impl Owner {
             ));
         }
         Ok(owner)
+    }
+    /// The pool's whole share set: the primary share first, then additional roots.
+    pub fn project_shares(&self) -> Vec<&super::ProjectShareIntent> {
+        self.project_share
+            .iter()
+            .chain(&self.additional_project_shares)
+            .collect()
+    }
+    /// The exact share approved for one project root, if this pool shares it.
+    pub fn project_share_for(&self, project: &Path) -> Option<&super::ProjectShareIntent> {
+        self.project_shares()
+            .into_iter()
+            .find(|share| share.project == project)
     }
     pub fn real_data_dir(&self, candidate: &Candidate) -> Result<PathBuf, CandidateError> {
         let relative = self

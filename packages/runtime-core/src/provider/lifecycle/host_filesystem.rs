@@ -179,6 +179,12 @@ fn selection(
             "Only a common device-number change with unchanged disk inode, size and UUID is accepted",
         ));
     }
+    // Legacy device-number recovery is defined only for a single-root pool.
+    if !owner.additional_project_shares.is_empty() {
+        return Err(refused(
+            "Device-number recovery supports only a pool with a single project share",
+        ));
+    }
     let mut next = owner.clone();
     if let Some(share) = &owner.project_share {
         let observed =

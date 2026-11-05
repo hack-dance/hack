@@ -694,7 +694,29 @@ This shares the entire approved project, including ignored local files, with gue
 read/write access. Filtered source publication remains the default. Do not use the
 unfiltered mode for a checkout whose local files must remain hidden from its services.
 Only the exact canonical project root is accepted; home/credential directories,
-aliased roots, and changes to a retained pool's mount intent are refused.
+aliased roots, and changes to a running pool's mount intent are refused.
+
+One development pool can host several project roots and linked worktrees. The
+first root is the pool's primary share. Add another root to a **stopped** pool with
+`runtime project-share add --project-share /absolute/other-project --unfiltered-source --json`;
+the share is mounted at the next boot. A running pool's mounts never change, so
+`up` for a root outside the set refuses with `project_share_extension_required`
+until the pool is stopped and the root is added. Remove an additional root (for
+example a deleted worktree) from a stopped pool with
+`runtime project-share remove --project-share /absolute/old-worktree --json`; removal
+refuses with `project_share_in_use` while any retained graph still names that
+share, and the primary share is never removed. A pool holds at most eight shares.
+Boot refuses with `project_share_stale` while any share's root moved, changed or
+was removed. Every update is journaled like the stopped network extension, and
+startup refuses while the journal is unfinished.
+
+Projects in one pool are separated the way Compose projects in one Docker VM are:
+each graph binds only its own root's share (bind paths stay under that share),
+graph namespaces derive from the canonical root and branch, cleanup acts on one
+run's own labelled resources, and resource admission is one budget per pool. The
+VM boundary between projects that separate pools gave no longer applies inside one
+pool. Legacy device-rebind and host-pin recovery stay single-root and refuse on a
+pool with additional shares.
 
 Shared-source graphs with dependency caches still require a freshly published
 source revision. Cache initializer services read that immutable publication through

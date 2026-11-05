@@ -28,7 +28,7 @@ fn refused() -> CandidateError {
 fn root(candidate: &Candidate) -> PathBuf {
     candidate.state_root.join("run/smolvm")
 }
-fn database(candidate: &Candidate) -> PathBuf {
+pub(super) fn database(candidate: &Candidate) -> PathBuf {
     #[cfg(target_os = "macos")]
     let relative = "home/Library/Application Support/smolvm/server/smolvm.db";
     #[cfg(not(target_os = "macos"))]
@@ -57,6 +57,13 @@ pub(super) fn require_complete(candidate: &Candidate) -> Result<(), CandidateErr
     Ok(())
 }
 fn file_identity(path: &Path) -> Result<(u64, u64), CandidateError> {
+    file_identity_with(path, refused)
+}
+/// Exact private file identity; `refused` names the calling update's closed code.
+pub(super) fn file_identity_with(
+    path: &Path,
+    refused: fn() -> CandidateError,
+) -> Result<(u64, u64), CandidateError> {
     let m = fs::symlink_metadata(path).map_err(|_| refused())?;
     if m.len() > 16 * 1024 * 1024
         || !m.is_file()
@@ -69,6 +76,17 @@ fn file_identity(path: &Path) -> Result<(u64, u64), CandidateError> {
     Ok((m.dev(), m.ino()))
 }
 fn stopped(candidate: &Candidate, owner: &Owner) -> Result<File, CandidateError> {
+    stopped_with(candidate, owner, refused)
+}
+/// Prove a created pool is stopped and its provider released: no live retained process,
+/// verified registry and disks, the provider VM lock held exclusively, and no disk handles.
+/// The returned lock must be held through both commits of a stopped-pool update.
+pub(super) fn stopped_with(
+    candidate: &Candidate,
+    owner: &Owner,
+    refused: fn() -> CandidateError,
+) -> Result<File, CandidateError> {
+    let file_identity = |path: &Path| file_identity_with(path, refused);
     if ![
         "stopped",
         "stopped-before-engine",
@@ -285,6 +303,13 @@ fn validate_sides(j: &Journal, owner: &Value, record: &Value) -> Result<(), Cand
     Ok(())
 }
 fn verify_record_process(owner: &Owner, record: &Value) -> Result<(), CandidateError> {
+    verify_record_process_with(owner, record, refused)
+}
+pub(super) fn verify_record_process_with(
+    owner: &Owner,
+    record: &Value,
+    refused: fn() -> CandidateError,
+) -> Result<(), CandidateError> {
     let process = owner.process.as_ref().ok_or_else(refused)?;
     if record["pid"] != json!(process.pid)
         || record["pid_start_time"] != json!(process.start_micros)
@@ -294,7 +319,28 @@ fn verify_record_process(owner: &Owner, record: &Value) -> Result<(), CandidateE
     Ok(())
 }
 fn apply_database(path: &Path, machine: &str, j: &Journal) -> Result<(), CandidateError> {
-    if file_identity(path)? != j.database_identity {
+    apply_record(
+        path,
+        machine,
+        j.database_identity,
+        &j.record_before,
+        &j.record_after,
+        refused,
+    )
+}
+/// Move this pool's single provider record from exactly `before` to exactly `after`
+/// inside one immediate transaction. Repeating after a commit is a no-op; any other
+/// record, row count or database replacement refuses without writes.
+pub(super) fn apply_record(
+    path: &Path,
+    machine: &str,
+    database_identity: (u64, u64),
+    record_before: &Value,
+    record_after: &Value,
+    refused: fn() -> CandidateError,
+) -> Result<(), CandidateError> {
+    let file_identity = |path: &Path| file_identity_with(path, refused);
+    if file_identity(path)? != database_identity {
         return Err(refused());
     }
     // Existing audited schema only. No CREATE, replacement, or unrelated row writes.
@@ -326,14 +372,14 @@ fn apply_database(path: &Path, machine: &str, j: &Journal) -> Result<(), Candida
         return Err(refused());
     }
     let current: Value = serde_json::from_slice(&bytes).map_err(|_| refused())?;
-    if current != j.record_before && current != j.record_after {
+    if current != *record_before && current != *record_after {
         return Err(refused());
     }
-    if file_identity(path)? != j.database_identity {
+    if file_identity(path)? != database_identity {
         return Err(refused());
     }
-    if current == j.record_before {
-        let bytes = serde_json::to_vec(&j.record_after).map_err(|_| refused())?;
+    if current == *record_before {
+        let bytes = serde_json::to_vec(record_after).map_err(|_| refused())?;
         if bytes.len() > 65536 {
             return Err(refused());
         }
@@ -348,7 +394,7 @@ fn apply_database(path: &Path, machine: &str, j: &Journal) -> Result<(), Candida
         }
     }
     transaction.commit().map_err(|_| refused())?;
-    if file_identity(path)? != j.database_identity {
+    if file_identity(path)? != database_identity {
         return Err(refused());
     }
     Ok(())
@@ -372,6 +418,8 @@ fn update_network(
     hosts.sort();
     reject_aliased_state(&root(candidate))?;
     let _lock = state::Lock::acquire(&root(candidate))?;
+    // Stopped-pool updates never interleave: one journal owns the provider record at a time.
+    super::share_update::require_complete(candidate)?;
     let owner = Owner::load(candidate)?;
     let _vm_lock = stopped(candidate, &owner)?;
     let path = root(candidate).join("network-update.json");

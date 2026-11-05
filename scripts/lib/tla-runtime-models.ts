@@ -1074,6 +1074,53 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "multi-root-share",
+    module: "Shares",
+    states: 55,
+    invariant: "OwnShareOnly",
+    action: "StartGraph",
+    fields: [
+      'graph = [a |-> "none", b |-> "live", c |-> "none"]',
+      'bound = [a |-> "none", b |-> "a", c |-> "none"]',
+      'mounted = {"a"}',
+    ],
+    additionalControls: [
+      {
+        name: "unfenced-boot",
+        negative: true,
+        invariant: "RunningMountsAudited",
+        action: "Boot",
+        fields: [
+          'journal = [op |-> "add", p |-> "b"]',
+          'phase = "running"',
+          'mounted = {"a"}',
+        ],
+      },
+      {
+        name: "owner-first",
+        negative: true,
+        invariant: "OwnerNeverAhead",
+        action: "CommitOwner",
+        fields: [
+          'journal = [op |-> "add", p |-> "b"]',
+          'recordSet = {"a"}',
+          'ownerSet = {"a", "b"}',
+        ],
+      },
+      {
+        name: "referenced-removal",
+        negative: true,
+        invariant: "ReferencedSharesKept",
+        action: "CommitRecord",
+        fields: [
+          'graph = [a |-> "none", b |-> "retained", c |-> "none"]',
+          'journal = [op |-> "remove", p |-> "b"]',
+          'recordSet = {"a"}',
+        ],
+      },
+    ],
+  },
+  {
     name: "dependency-rebind",
     module: "Rebind",
     states: 21,

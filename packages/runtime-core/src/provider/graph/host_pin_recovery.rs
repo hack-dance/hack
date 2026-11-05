@@ -542,6 +542,10 @@ fn select_content(
     {
         return Err(refused());
     }
+    // Legacy host-pin recovery is defined only for a single-root pool.
+    if !owner.additional_project_shares.is_empty() {
+        return Err(refused());
+    }
     if let Some(share) = &owner.project_share {
         share.validate()?;
     }

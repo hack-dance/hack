@@ -1049,3 +1049,31 @@ Closing the residual needs a mutation fence rather than a timeout: target tmux
 mutations by session ID (`#{session_id}`, never reused by a server) captured with
 the token read. That fence, and full zellij support for shared-helper lifecycle
 sessions, are tracked in HACK-1849 and are not in this slice.
+
+## Multi-root pool shares
+
+`multi-root-share/Shares.tla` models one development pool that hosts several
+project roots. The share set is the pool's mount intent. It changes only through
+the journaled stopped-pool update in `provider::share_update`: the provider record
+commits before the owner receipt, and startup refuses while the journal exists.
+Boot mounts exactly the audited set. A graph binds only the share whose root equals
+its own reviewed source, and a share stays while any graph of that project is live
+or retained.
+
+The positive configuration (three roots, a two-share bound) exhausts **55 distinct
+states**. Four guard-removal controls must fail at the named action with the exact
+same-state witness: `negative` (a graph may select any mounted share) fails
+`OwnShareOnly` at `StartGraph`; `unfenced-boot` fails `RunningMountsAudited` at
+`Boot`; `owner-first` fails `OwnerNeverAhead` at `CommitOwner`; and
+`referenced-removal` fails `ReferencedSharesKept` at `CommitRecord`.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `BeginAdd` / `BeginRemove` | `share_update::plan`: owned stopped pool (`network_update::stopped_with`), primary share kept, bounded set, removal refused while a graph record names the share (`require_unreferenced`). |
+| `CommitRecord` / `CommitOwner` / `Finish` | `network_update::apply_record`, then the owner save, then journal removal; `validate_sides` refuses an owner ahead of its record. |
+| `Boot` | `share_update::require_complete`, `project_share::check_boot` and `config_audit` mount verification before `machine start`. |
+| `StartGraph` | `OwnedGuest::project_share_for(plan.source)` in shared source selection; `ProjectShareIntent::bind_path` keeps every bind under that share. |
+
+The model does not cover provider behavior: that the pinned provider mounts an
+updated record at the next boot, virtio-fs device limits, or live multi-project
+graphs on a host VM. Cleanup is abstracted to one run's own resources.

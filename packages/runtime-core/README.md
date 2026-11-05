@@ -88,6 +88,10 @@ This does not create an immutable snapshot or publish a new source revision.
 Source consumption requires the provider pool to already contain the exact
 explicitly approved unfiltered project share. The consumer never approves that
 whole-tree writable share, changes pool mounts or enrolls a project implicitly.
+A pool's share set holds its primary root plus up to seven additional roots; a
+graph selects only the share whose root equals its reviewed source. The set
+changes only through the journaled stopped-pool `runtime project-share add|remove`
+update (`provider::share_update`, modeled by `tests/models/tla/multi-root-share`).
 Individual workload binds are read-only and `rprivate`. Selection pins the source
 root, every selected path and its ancestors by device, inode, type, UID and full
 mode; aliases, hardlinked selected files and permission changes refuse. Startup

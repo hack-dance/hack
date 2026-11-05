@@ -119,7 +119,7 @@ fn verify_mounts(
         "/opt/hack-engine",
         true
     ])];
-    if let Some(share) = &owner.project_share {
+    for share in owner.project_shares() {
         share.validate_receipt()?;
         mounts.push(share.database_mount());
     }

@@ -364,7 +364,11 @@ pub(super) fn prepare(
     selected: &Selection,
 ) -> Result<Binding, CandidateError> {
     selected.verify()?;
-    let share = engine.guest().project_share().ok_or_else(refused)?;
+    // Select only this graph's own root; other shares in the pool are never bound.
+    let share = engine
+        .guest()
+        .project_share_for(&selected.root)
+        .ok_or_else(refused)?;
     share.validate().map_err(|_| refused())?;
     let binding = selected.bind(share)?;
     verify(engine, &binding, true)?;
@@ -400,7 +404,7 @@ fn verify_using(
     if let Some(deadline) = deadline {
         crate::provider::managed_environment::remaining_until(deadline)?;
     }
-    if engine.guest().project_share() != Some(&binding.share) {
+    if !engine.guest().has_project_share(&binding.share) {
         return Err(refused());
     }
     if active {

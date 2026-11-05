@@ -123,6 +123,24 @@ test("the hook rejects the commit when Biome reports an error it cannot fix", as
   ).not.toBe(0);
 });
 
+test.skipIf(process.getuid?.() === 0)(
+  "the hook rejects the commit when it cannot write the formatted file back",
+  async () => {
+    const repo = await scratchRepo();
+    const path = "src/read-only.ts";
+    await Bun.write(join(repo, path), UNFORMATTED);
+    mustGit(repo, ["add", "--all"]);
+    await chmod(join(repo, path), 0o444);
+
+    const commit = git(repo, ["commit", "--quiet", "-m", "test: read-only"]);
+    expect(commit.exitCode).not.toBe(0);
+    expect(
+      git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]).exitCode
+    ).not.toBe(0);
+    expect(await Bun.file(join(repo, path)).text()).toBe(UNFORMATTED);
+  }
+);
+
 /** Single-quotes a value for a POSIX shell script. */
 function shQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;

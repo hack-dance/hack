@@ -55,9 +55,10 @@ git diff --cached --name-only --diff-filter=ACMR -z |
 # Stage each formatted file. A file whose working copy matches the index also gets the formatted
 # content on disk and is restaged from there. A file with unstaged changes keeps its working copy
 # untouched; only its index entry is replaced from the export. Gitlinks have no exported file and
-# are skipped.
+# are skipped. The loop runs with `-e` (a `sh -c` child does not inherit this shell's `set -e`),
+# so a failed copy or `git add` stops the commit instead of committing unformatted content.
 git diff --cached --name-only --diff-filter=ACMR -z |
-  xargs -0 sh -c '
+  xargs -0 sh -e -c '
     export_dir="$1"
     shift
     # Staged names are literal paths, not pathspec patterns (for example `[[...slug]]`).
@@ -74,6 +75,11 @@ git diff --cached --name-only --diff-filter=ACMR -z |
         fi
         git add -- "$path"
       else
+        status=$?
+        # `git diff --quiet` exits 1 for unstaged changes; anything else is an error.
+        if [ "$status" -ne 1 ]; then
+          exit "$status"
+        fi
         (cd "$export_dir" && git --work-tree=. add -- "$path")
       fi
     done

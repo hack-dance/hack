@@ -139,7 +139,7 @@ test("an entrypoint override or local build is not an image handoff", () => {
   ]);
 });
 
-test("dependency-cache and disposable-cache volumes are not data", () => {
+test("dependency-cache volumes are not data", () => {
   expect(
     findNativeDataAdvisories(
       project(
@@ -152,7 +152,7 @@ test("dependency-cache and disposable-cache volumes are not data", () => {
           app: {
             image: "example/app",
             labels: ["unrelated=1"],
-            volumes: ["deps:/deps:ro", "scratch:/cache"],
+            volumes: ["deps:/deps:ro"],
           },
           listed: {
             image: "example/app",
@@ -160,14 +160,28 @@ test("dependency-cache and disposable-cache volumes are not data", () => {
             volumes: ["listed-deps:/deps"],
           },
         },
-        {
-          deps: {},
-          "listed-deps": {},
-          scratch: { "x-hack-disposable-cache": [".cache"] },
-        }
+        { deps: {}, "listed-deps": {} }
       )
     )
   ).toEqual([]);
+});
+
+test("a volume with disposable-cache directories is still data", () => {
+  // `x-hack-disposable-cache` names regenerable directories inside the volume;
+  // everything outside them is retained, and an empty list names none.
+  for (const directories of [[".cache"], []]) {
+    expect(
+      findNativeDataAdvisories(
+        project(
+          { db: { image: "example/database", volumes: ["data:/var/lib/db"] } },
+          { data: { "x-hack-disposable-cache": directories } }
+        )
+      )
+    ).toEqual([
+      { code: "native_data_owner_handoff_unqualified", services: ["db"] },
+      { code: "native_retained_data_mutable_image", services: ["db"] },
+    ]);
+  }
 });
 
 test("the doctor result is a warning with codes and service names only", () => {

@@ -96,20 +96,16 @@ function namedVolumeSources(service: Record<string, unknown>): string[] {
 }
 
 /**
- * Volumes that hold disposable or shared dependency content, not service
- * data: `x-hack-disposable-cache` volumes and every volume a service selects
- * with the `hack.dependencies.cache-volume` label.
+ * Volumes that hold shared dependency content, not service data: every volume
+ * a service selects with the `hack.dependencies.cache-volume` label. A volume
+ * that declares `x-hack-disposable-cache` stays data: that extension names
+ * regenerable directories inside the volume (possibly none), and everything
+ * outside them is retained.
  */
 function cacheVolumes(
-  services: readonly Record<string, unknown>[],
-  volumes: Record<string, unknown>
+  services: readonly Record<string, unknown>[]
 ): Set<string> {
   const caches = new Set<string>();
-  for (const [name, volume] of Object.entries(volumes)) {
-    if (isRecord(volume) && volume["x-hack-disposable-cache"] !== undefined) {
-      caches.add(name);
-    }
-  }
   for (const service of services) {
     const cache = labelValue(service.labels, DEPENDENCY_CACHE_LABEL);
     if (cache !== undefined) {
@@ -164,10 +160,7 @@ export function findNativeDataAdvisories(
     (entry): entry is [string, Record<string, unknown>] => isRecord(entry[1])
   );
   const declared = isRecord(compose.volumes) ? compose.volumes : {};
-  const caches = cacheVolumes(
-    entries.map(([, service]) => service),
-    declared
-  );
+  const caches = cacheVolumes(entries.map(([, service]) => service));
   const found: Record<NativeDataAdvisoryCode, Set<string>> = {
     native_data_owner_handoff_unqualified: new Set(),
     native_retained_data_mutable_image: new Set(),

@@ -295,16 +295,15 @@ impl Owner {
     ) -> Result<Self, CandidateError> {
         let root = candidate.state_root.join("run/smolvm");
         reject_aliased_state(&root)?;
-        if allow_missing {
-            match fs::symlink_metadata(root.join("owner.pending")) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                _ => {
-                    return Err(CandidateError::new(
-                        "recovery_required",
-                        "Provider owner update is pending or unobservable; HOME alias was not restored.",
-                    ));
-                }
-            }
+        let no_pending_update = matches!(
+            fs::symlink_metadata(root.join("owner.pending")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        );
+        if allow_missing && !no_pending_update {
+            return Err(CandidateError::new(
+                "recovery_required",
+                "Provider owner update is pending or unobservable; HOME alias was not restored.",
+            ));
         }
         let owner: Self = read(&root.join("owner.json"))?;
         owner.network.validate()?;
@@ -343,9 +342,77 @@ impl Owner {
                 "Provider owner identity does not match this checkout.",
             ));
         }
-        owner.check_short_home(candidate, allow_missing)?;
+        // A clean stop's alias may be absent: `down` releases it, and the next mutating
+        // operation restores it under the pool lock before using it.
+        let released = owner.short_home_releasable() && no_pending_update;
+        owner.check_short_home(candidate, allow_missing || released)?;
         check_private_directory(&root.join("home"))?;
         Ok(owner)
+    }
+
+    /// Whether this receipt is a clean stop: the `stopped` phase with the clean-stop marker,
+    /// which only `down` writes, after proving provider and socket absence, in one receipt
+    /// write. Only such a receipt may exist without its temporary HOME alias. Any other
+    /// phase write clears the marker, so every later phase needs the alias again.
+    pub(super) fn short_home_releasable(&self) -> bool {
+        self.phase == "stopped" && self.clean_stop.is_some()
+    }
+
+    /// Remove the temporary `/private/tmp` HOME alias of a clean stop, so a stopped pool
+    /// leaves nothing outside its candidate home. Called by `down` under the pool lock
+    /// after its stopped receipt is written. The alias is removed only when it is exactly
+    /// this receipt's own link; an absent alias is already released. A replaced alias is
+    /// refused and kept.
+    pub(super) fn release_short_home(&self, candidate: &Candidate) -> Result<(), CandidateError> {
+        if !self.short_home_releasable() {
+            return Err(CandidateError::new(
+                "recovery_required",
+                "Only a clean stop releases the provider HOME alias.",
+            ));
+        }
+        match fs::symlink_metadata(&self.short_home) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(io(error)),
+            Ok(_) => {}
+        }
+        self.check_short_home(candidate, false)?;
+        // `/private/tmp` is sticky: only this user can unlink or rename its own link, so the
+        // link checked above is the one removed.
+        match fs::remove_file(&self.short_home) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(io(error)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Restore the alias `down` released, before a mutating operation uses it. Called under
+    /// the pool lock. A present alias is checked, not replaced; an absent one is created
+    /// exclusively after the durable receipt is rechecked, as in explicit recovery.
+    pub(super) fn restore_released_short_home(
+        &self,
+        candidate: &Candidate,
+    ) -> Result<(), CandidateError> {
+        match fs::symlink_metadata(&self.short_home) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io(error)),
+            Ok(_) => return self.check_short_home(candidate, false),
+        }
+        if !self.short_home_releasable() || Self::load(candidate)? != *self {
+            return Err(CandidateError::new(
+                "foreign_state",
+                "Provider owner changed before HOME alias restoration; no alias was restored.",
+            ));
+        }
+        std::os::unix::fs::symlink(
+            candidate.state_root.join("run/smolvm/home"),
+            &self.short_home,
+        )
+        .map_err(|_| {
+            CandidateError::new(
+                "socket_alias_collision",
+                "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
+            )
+        })?;
+        self.check_short_home(candidate, false)
     }
     /// The only permitted alias is the exact receipt-bound HOME for Unix sockets.
     fn check_short_home(

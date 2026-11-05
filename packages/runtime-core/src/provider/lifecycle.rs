@@ -1167,6 +1167,9 @@ fn start_pool(
         || admission_pool::probe(candidate, profile, &admission_owner),
     )?;
     samples.extend(fresh_samples);
+    // A clean stop released its temporary HOME alias; restore it under the lease before the
+    // release checks probe its sockets or the provider runs with it as HOME.
+    restore_released_short_home(candidate)?;
     // Under the lease: the selection is rechecked. A stopped pool keeps the reserve only if
     // a sample needs it, and then its provider release (VM lock, disk handles, listeners,
     // provider configuration) is proven; otherwise this start uses the fresh budget.
@@ -1830,7 +1833,11 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         && initial.process_alive != Some(true)
     {
         // These phases are written only before a start or after proven absence; no recorded
-        // provider (`None`) is as stopped as a dead one.
+        // provider (`None`) is as stopped as a dead one. A clean stop left by an earlier
+        // `down` that kept its alias releases it now.
+        if owner.short_home_releasable() {
+            owner.release_short_home(candidate)?;
+        }
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
@@ -1933,8 +1940,28 @@ sync"#,
         finish_stopped(candidate, &mut owner, "stopped-after-engine-failure")?;
     } else {
         finish_quiesced_stop(candidate, &mut owner)?;
+        // The stopped receipt is written; the temporary `/private/tmp` HOME alias is not
+        // needed again until the next start restores it.
+        owner.release_short_home(candidate)?;
     }
     status(candidate)
+}
+
+/// Restore the HOME alias a clean `down` released, under the caller's pool lock. Any other
+/// receipt, or one whose alias is present, is left as [`Owner::load`] checked it.
+pub(super) fn restore_released_short_home(candidate: &Candidate) -> Result<(), CandidateError> {
+    if !root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?
+    {
+        return Ok(());
+    }
+    let owner = Owner::load(candidate)?;
+    if owner.short_home_releasable() {
+        owner.restore_released_short_home(candidate)?;
+    }
+    Ok(())
 }
 
 /// `down`'s completion after the guest acknowledged flush and shutdown of a quiesced engine
@@ -2127,6 +2154,8 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return Ok(initial);
     }
     let lock = state::Lock::acquire(&root(candidate))?;
+    // Recovery rewrites the phase, which needs the alias a clean stop released.
+    restore_released_short_home(candidate)?;
     let mut owner = Owner::load(candidate)?;
     let Some(process) = owner.process.as_ref() else {
         // A start interrupted before the provider identity was recorded; see `interrupted`.

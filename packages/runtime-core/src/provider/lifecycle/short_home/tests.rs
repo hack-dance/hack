@@ -406,3 +406,174 @@ fn vm_lock_release_child() {
         drop(listener);
     }
 }
+
+/// HACK-1916: a clean `down` releases the temporary HOME alias, so a stopped pool leaves
+/// nothing under `/private/tmp`, and the next mutating operation restores it exactly.
+impl Pool {
+    /// The receipt `down` writes after a quiesced stop: `stopped` plus the clean-stop marker.
+    fn cleanly_stopped(mut self) -> Self {
+        self.owner.guest_boot_id = Some("00000000-0000-0000-0000-000000000000".into());
+        self.owner.daemon_pid = Some(1);
+        self.owner.daemon_start = Some(1);
+        self.owner.phase = "stopped".into();
+        self.owner.clean_stop = state::CleanStop::of(&self.owner);
+        assert!(self.owner.short_home_releasable());
+        self.owner.save(&self.candidate).unwrap();
+        self
+    }
+    fn alias_absent(&self) -> bool {
+        matches!(
+            fs::symlink_metadata(&self.owner.short_home),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+}
+
+#[test]
+fn clean_stop_releases_the_alias_and_the_next_mutation_restores_it_exactly() {
+    let pool = Pool::new().cleanly_stopped();
+    let before = pool.receipt();
+    pool.owner.release_short_home(&pool.candidate).unwrap();
+    assert!(pool.alias_absent());
+    assert_eq!(pool.receipt(), before);
+    // Observation accepts the released alias and creates nothing.
+    assert_eq!(Owner::load(&pool.candidate).unwrap(), pool.owner);
+    assert_eq!(status(&pool.candidate).unwrap().phase, "stopped");
+    assert!(pool.alias_absent());
+    // Releasing again is a no-op.
+    pool.owner.release_short_home(&pool.candidate).unwrap();
+    assert!(pool.alias_absent());
+
+    let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+    super::super::restore_released_short_home(&pool.candidate).unwrap();
+    assert_eq!(
+        fs::read_link(&pool.owner.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
+    let inode = fs::symlink_metadata(&pool.owner.short_home).unwrap().ino();
+    // A present exact alias is checked, never replaced.
+    super::super::restore_released_short_home(&pool.candidate).unwrap();
+    assert_eq!(
+        fs::symlink_metadata(&pool.owner.short_home).unwrap().ino(),
+        inode
+    );
+    assert_eq!(pool.receipt(), before);
+    drop(lock);
+}
+
+#[test]
+fn only_a_clean_stop_may_lack_its_alias() {
+    // Every other phase keeps the strict missing-HOME refusal and explicit recovery.
+    // `stopped` without the clean-stop marker is an unclean or uncertain stop.
+    for phase in ["stopped", "running", "stopping", "recovered-unclean"] {
+        let mut pool = Pool::new();
+        pool.owner.phase = phase.into();
+        pool.owner.save(&pool.candidate).unwrap();
+        assert_eq!(
+            pool.owner
+                .release_short_home(&pool.candidate)
+                .unwrap_err()
+                .code,
+            "recovery_required"
+        );
+        assert!(!pool.alias_absent());
+        pool.remove_alias();
+        let before = pool.receipt();
+        assert_eq!(
+            Owner::load(&pool.candidate).unwrap_err().code,
+            "provider_home_missing"
+        );
+        let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+        assert_eq!(
+            super::super::restore_released_short_home(&pool.candidate)
+                .unwrap_err()
+                .code,
+            "provider_home_missing"
+        );
+        drop(lock);
+        pool.unchanged(&before);
+    }
+    // A pending owner update keeps even a clean stop strict.
+    let pool = Pool::new().cleanly_stopped();
+    pool.owner.release_short_home(&pool.candidate).unwrap();
+    let pending = root(&pool.candidate).join("owner.pending");
+    fs::write(&pending, b"interrupted update").unwrap();
+    assert_eq!(
+        Owner::load(&pool.candidate).unwrap_err().code,
+        "provider_home_missing"
+    );
+    assert!(pool.alias_absent());
+    assert_eq!(fs::read(&pending).unwrap(), b"interrupted update");
+}
+
+#[test]
+fn a_released_alias_path_taken_by_anything_else_is_never_adopted_or_replaced() {
+    let pool = Pool::new().cleanly_stopped();
+    pool.owner.release_short_home(&pool.candidate).unwrap();
+    let before = pool.receipt();
+    let foreign = pool.directory.join("foreign");
+    state::private_directory(&foreign).unwrap();
+    std::os::unix::fs::symlink(&foreign, &pool.owner.short_home).unwrap();
+    assert_eq!(
+        Owner::load(&pool.candidate).unwrap_err().code,
+        "foreign_state"
+    );
+    assert_eq!(
+        pool.owner
+            .restore_released_short_home(&pool.candidate)
+            .unwrap_err()
+            .code,
+        "foreign_state"
+    );
+    assert_eq!(
+        pool.owner
+            .release_short_home(&pool.candidate)
+            .unwrap_err()
+            .code,
+        "foreign_state"
+    );
+    assert_eq!(fs::read_link(&pool.owner.short_home).unwrap(), foreign);
+    assert_eq!(fs::read_dir(&foreign).unwrap().count(), 0);
+    assert_eq!(pool.receipt(), before);
+    fs::remove_file(&pool.owner.short_home).unwrap();
+
+    // A receipt that changed after it was observed restores nothing.
+    let observed = pool.owner.clone();
+    let mut changed = pool.owner.clone();
+    changed.phase = "recovered-unclean".into();
+    changed.clean_stop = None;
+    changed.save(&pool.candidate).unwrap();
+    let changed_receipt = pool.receipt();
+    assert_eq!(
+        observed
+            .restore_released_short_home(&pool.candidate)
+            .unwrap_err()
+            .code,
+        "provider_home_missing"
+    );
+    assert!(pool.alias_absent());
+    assert_eq!(pool.receipt(), changed_receipt);
+}
+
+#[test]
+fn recovery_of_a_released_clean_stop_restores_the_alias_first() {
+    isolated("released_recovery_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by recovery_of_a_released_clean_stop_restores_the_alias_first"]
+fn released_recovery_child() {
+    let pool = Pool::new().cleanly_stopped();
+    pool.owner.release_short_home(&pool.candidate).unwrap();
+    let recovered = crate::provider::recover(&pool.candidate).unwrap();
+    assert_eq!(recovered.phase, "recovered-unclean");
+    assert_eq!(
+        fs::read_link(&pool.owner.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
+    // The recovered receipt needs its alias, and has it.
+    assert_eq!(
+        Owner::load(&pool.candidate).unwrap().phase,
+        "recovered-unclean"
+    );
+}

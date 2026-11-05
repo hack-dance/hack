@@ -119,7 +119,11 @@ import {
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
-import { renderCompose, TODO_IMAGE_SENTINEL } from "../init/compose.ts";
+import {
+  type InitComposeBackend,
+  renderCompose,
+  TODO_IMAGE_SENTINEL,
+} from "../init/compose.ts";
 import type { ServiceCandidate } from "../init/discovery.ts";
 import { discoverRepo } from "../init/discovery.ts";
 import {
@@ -3850,6 +3854,7 @@ export async function handleInit({
 
   const repoRoot = await findRepoRootForInit(startDir);
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
+  const backend = resolveInitComposeBackend();
 
   if (!io.canPrompt()) {
     requireInteractive({
@@ -3942,6 +3947,7 @@ export async function handleInit({
       projectSlug: slug,
       candidates: discovery.candidates,
       oauth: { enabled: oauth.enabled, tld: oauth.tld },
+      backend,
     },
   });
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
@@ -4010,6 +4016,7 @@ export async function handleInit({
     ...(io.agentPrompts ? { prompts: io.agentPrompts } : {}),
   });
 
+  const next = initNextSteps({ backend, devHost });
   note(
     [
       `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_COMPOSE_FILENAME}`,
@@ -4018,10 +4025,9 @@ export async function handleInit({
       `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_ENV_CONFIG_DEFAULT_FILENAME}`,
       "",
       "Next:",
-      "  hack up",
-      "  hack open",
+      ...next.commands.map((command) => `  ${command}`),
       "",
-      `Check DNS/TLS for ${devHost}; hack global install configures managed global domains (needs sudo).`,
+      next.routing,
     ].join("\n"),
     "Initialized"
   );
@@ -4050,6 +4056,7 @@ async function handleInitAuto({
   const startDir = resolveStartDir(ctx, args.options.path);
   const repoRoot = await findRepoRootForInit(startDir);
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
+  const backend = resolveInitComposeBackend();
 
   const slug = resolveInitSlug({
     repoRoot,
@@ -4110,12 +4117,14 @@ async function handleInitAuto({
         projectSlug: slug,
         candidates: discovery.candidates,
         oauth,
+        backend,
       })
     : await buildManualComposeAuto({
         repoRoot,
         devHost,
         projectSlug: slug,
         oauth,
+        backend,
       });
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
   await ensureDir(hackDir);
@@ -4179,11 +4188,12 @@ async function handleInitAuto({
   logger.success({
     message: `Initialized ${HACK_PROJECT_DIR_PRIMARY}/ for ${slug}`,
   });
+  const next = initNextSteps({ backend, devHost });
   logger.info({
-    message: "Next: hack up --detach && hack open",
+    message: `Next: ${next.autoCommand}`,
   });
   logger.info({
-    message: `Check DNS/TLS for ${devHost}; hack global install configures managed global domains (needs sudo).`,
+    message: next.routing,
   });
 
   if (withValue) {
@@ -4369,6 +4379,51 @@ export interface ComposeWizardInput {
   readonly oauth: {
     readonly enabled: boolean;
     readonly tld: string;
+  };
+  /** Backend the scaffold targets; omitted means `compose`. */
+  readonly backend?: InitComposeBackend;
+}
+
+/**
+ * The backend `hack init` scaffolds for. Native is chosen only by the same
+ * explicit `HACK_RUNTIME_BACKEND=native` selection `hack up` reads (the
+ * `hack-next` launcher sets it); anything else keeps the Compose scaffold.
+ */
+export function resolveInitComposeBackend(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): InitComposeBackend {
+  return env.HACK_RUNTIME_BACKEND === "native" ? "native" : "compose";
+}
+
+/**
+ * Follow-up commands `hack init` prints, limited to ones the selected backend
+ * accepts. Native `up` runs in the foreground only, needs the explicit
+ * project-share grant, and refuses `--detach`; `hack global install` refuses
+ * on native, where routes use the optional native HTTPS frontend instead.
+ */
+export function initNextSteps(opts: {
+  readonly backend: InitComposeBackend;
+  readonly devHost: string;
+}): {
+  readonly commands: readonly string[];
+  readonly autoCommand: string;
+  readonly routing: string;
+} {
+  if (opts.backend === "native") {
+    const up = "HACK_NATIVE_SHARED_SOURCE=1 hack up";
+    return {
+      commands: [
+        `${up}   (foreground; keep it running)`,
+        "hack open   (from another terminal)",
+      ],
+      autoCommand: `${up} (foreground; keep it running), then hack open from another terminal`,
+      routing: `Routes for ${opts.devHost} need the optional native HTTPS frontend (HACK_NATIVE_CADDY_BINARY, HACK_NATIVE_CADDY_SHA256, HACK_NATIVE_HTTPS_PORT); check one with hack doctor --browser-url https://${opts.devHost}.`,
+    };
+  }
+  return {
+    commands: ["hack up", "hack open"],
+    autoCommand: "hack up --detach && hack open",
+    routing: `Check DNS/TLS for ${opts.devHost}; hack global install configures managed global domains (needs sudo).`,
   };
 }
 
@@ -4884,6 +4939,7 @@ async function buildDiscoveredCompose(
       detections: backingServices,
       existingComposeFiles,
     }),
+    backend: input.backend ?? "compose",
   });
 }
 
@@ -5057,6 +5113,7 @@ export async function buildDiscoveredComposeAuto(
       detections: backingServices,
       existingComposeFiles,
     }),
+    backend: input.backend ?? "compose",
   });
 }
 
@@ -5068,6 +5125,7 @@ interface ManualComposeWizardInput {
     readonly enabled: boolean;
     readonly tld: string;
   };
+  readonly backend?: InitComposeBackend;
 }
 
 function validateRepoRelativeWorkingDir(
@@ -5222,7 +5280,11 @@ async function buildManualCompose(
     oauth: input.oauth,
   });
 
-  return renderCompose({ name: input.projectSlug, services });
+  return renderCompose({
+    name: input.projectSlug,
+    services,
+    backend: input.backend ?? "compose",
+  });
 }
 
 function buildManualComposeAuto(input: ManualComposeWizardInput): string {
@@ -5244,7 +5306,11 @@ function buildManualComposeAuto(input: ManualComposeWizardInput): string {
     oauth: input.oauth,
   });
 
-  return renderCompose({ name: input.projectSlug, services });
+  return renderCompose({
+    name: input.projectSlug,
+    services,
+    backend: input.backend ?? "compose",
+  });
 }
 
 function formatCandidateLabel(c: ServiceCandidate): string {
@@ -5358,9 +5424,10 @@ function buildServicesFromDrafts(opts: {
 
     const labels = new Map<string, string>();
     const networks = d.role === "http" ? ["hack-dev", "default"] : [];
+    const httpPort = d.role === "http" ? (d.port ?? 3000) : undefined;
 
-    if (d.role === "http") {
-      const port = d.port ?? 3000;
+    if (httpPort !== undefined) {
+      const port = httpPort;
       const host =
         d.subdomain && d.subdomain.length > 0
           ? `${d.subdomain}.${opts.devHost}`
@@ -5382,6 +5449,7 @@ function buildServicesFromDrafts(opts: {
       env,
       labels,
       networks,
+      ...(httpPort === undefined ? {} : { httpPort }),
       ...(d.comments && d.comments.length > 0 ? { comments: d.comments } : {}),
     };
   });

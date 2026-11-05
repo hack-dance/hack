@@ -491,7 +491,7 @@ test("foreground partial shutdown is reported without selecting failed-start rec
 test.each([
   { build: "." },
   { ports: ["8080:80"] },
-  { restart: "always" },
+  { restart: 1 },
 ])("an unsupported service setting %j is a coded configuration refusal", (setting) => {
   const refusal = (() => {
     try {
@@ -509,6 +509,21 @@ test.each([
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message: NATIVE_CONFIGURATION_REFUSAL,
   });
+});
+
+test.each([
+  "no",
+  "always",
+  "unless-stopped",
+  "on-failure",
+  "on-failure:3",
+])("restart policy %s is left to runtime graph admission", (restart) => {
+  const services = prepareNativeProjectServices({
+    normalizedComposeJson: JSON.stringify({
+      services: { worker: { image: "busybox", restart } },
+    }),
+  } as NativeProjectInput);
+  expect(services.worker?.restart).toBe(restart);
 });
 
 test("a canceled start reports cancellation, not the configuration refusal", async () => {

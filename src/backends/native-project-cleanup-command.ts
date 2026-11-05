@@ -80,6 +80,9 @@ function containerState(
     case "created":
     case "absent":
       return value;
+    // A pending engine restart is live compute that cleanup must still stop.
+    case "restarting":
+      return "running";
     default:
       throw refused();
   }

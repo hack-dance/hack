@@ -157,6 +157,196 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     assert!(!candidate.state_root.exists());
 }
 #[test]
+fn compose_restart_policies_lower_to_engine_policies_with_receipt_authority() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    for (web, init, expected) in [
+        (None, None, Ok((json!({"Name":"no"}), None))),
+        (
+            Some("unless-stopped"),
+            Some("on-failure:2"),
+            Ok((
+                json!({"Name":"unless-stopped","MaximumRetryCount":0}),
+                Some(restart_policy::RestartPolicy::UnlessStopped),
+            )),
+        ),
+        (
+            Some("always"),
+            Some("no"),
+            Ok((
+                json!({"Name":"always","MaximumRetryCount":0}),
+                Some(restart_policy::RestartPolicy::Always),
+            )),
+        ),
+        (
+            Some("on-failure:3"),
+            None,
+            Ok((
+                json!({"Name":"on-failure","MaximumRetryCount":3}),
+                Some(restart_policy::RestartPolicy::OnFailure {
+                    maximum_retry_count: 3,
+                }),
+            )),
+        ),
+        // A completion goal cannot use an unconditional policy (review and graph).
+        (None, Some("unless-stopped"), Err(())),
+    ] {
+        let mut document = compose(&format!("sha256:{}", "a".repeat(64)), "marker", false);
+        if let Some(value) = web {
+            document["services"]["web"]["restart"] = json!(value);
+        }
+        if let Some(value) = init {
+            document["services"]["init"]["restart"] = json!(value);
+        }
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let compiled = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        );
+        let result = compiled.and_then(|inputs| {
+            config::prepare(inputs, &goals(), &"a".repeat(32), &"b".repeat(32), None)
+        });
+        let Ok((policy, admitted)) = expected else {
+            assert!(result.is_err(), "{web:?} {init:?}");
+            continue;
+        };
+        let prepared = result.unwrap();
+        assert_eq!(
+            prepared.configs["web"]["HostConfig"]["RestartPolicy"],
+            policy
+        );
+        assert_eq!(prepared.resources["container:web"].restart_policy, admitted);
+        // `check` never declared a policy and keeps Docker's `no`.
+        assert_eq!(
+            prepared.configs["check"]["HostConfig"]["RestartPolicy"],
+            json!({"Name":"no"})
+        );
+        assert!(
+            prepared.resources["container:check"]
+                .restart_policy
+                .is_none()
+        );
+        let init_policy = prepared.resources["container:init"].restart_policy;
+        assert_eq!(
+            init_policy,
+            (init == Some("on-failure:2")).then_some(restart_policy::RestartPolicy::OnFailure {
+                maximum_retry_count: 2
+            })
+        );
+        // The admitted policy is part of the retained resource binding: a replay
+        // under a different policy cannot adopt these containers.
+        let mut changed = prepared.resources.clone();
+        changed.get_mut("container:web").unwrap().restart_policy = if admitted.is_some() {
+            None
+        } else {
+            Some(restart_policy::RestartPolicy::Always)
+        };
+        assert!(same_resource_bindings(
+            &prepared.resources,
+            &prepared.resources
+        ));
+        assert!(!same_resource_bindings(&changed, &prepared.resources));
+        // Receipt encoding omits an absent policy so existing receipts are unchanged.
+        let encoded = serde_json::to_value(&prepared.resources["container:check"]).unwrap();
+        assert!(encoded.get("restart_policy").is_none());
+    }
+}
+#[test]
+fn compose_restart_policy_refuses_managed_delivery_and_host_dependencies() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let document = json!({"services":{"worker":{
+        "image":image, "read_only":true, "network_mode":"none", "init":true,
+        "entrypoint":["/bin/worker"], "restart":"unless-stopped",
+        "environment":{"TOKEN":null}
+    }}});
+    state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    let managed = BTreeMap::from([(
+        "worker".into(),
+        BTreeMap::from([("TOKEN".into(), "synthetic-restart-canary".into())]),
+    )]);
+    let scoped = project::inputs::compile_scoped(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+        &managed,
+    )
+    .unwrap();
+    let error = config::prepare_delivery(
+        scoped.executable,
+        &BTreeMap::from([("worker".into(), Condition::Started)]),
+        &token(),
+        &token(),
+        None,
+        config::DeliveryOptions {
+            environment: true,
+            ..Default::default()
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "graph_restart_policy");
+    assert!(!error.message.contains("synthetic-restart-canary"));
+    let document = json!({"services":{"worker":{
+        "image":image, "read_only":true, "init":true, "entrypoint":["/bin/worker"],
+        "restart":"always", "networks":["private"],
+        "extra_hosts":["db.example.test:host-gateway"]
+    }},"networks":{"private":{"internal":true}}});
+    state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    let inputs = project::inputs::compile(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let error = config::prepare_delivery(
+        inputs,
+        &BTreeMap::from([("worker".into(), Condition::Started)]),
+        &token(),
+        &token(),
+        None,
+        config::DeliveryOptions {
+            dependency_hosts: true,
+            ..Default::default()
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "graph_restart_policy");
+}
+#[test]
+fn restarting_observation_requires_receipt_admission() {
+    let restarting = json!({"State":{"Running":true,"Restarting":true,"Status":"restarting",
+        "Pid":0,"Dead":false,"OOMKilled":true,"ExitCode":137}});
+    assert_eq!(observation(&restarting).unwrap(), Observation::Restarting);
+    for (field, value) in [
+        ("Running", json!(false)),
+        ("Pid", json!(9)),
+        ("Dead", json!(true)),
+    ] {
+        let mut changed = restarting.clone();
+        changed["State"][field] = value;
+        assert!(observation(&changed).is_err(), "{field}");
+    }
+    // OOM evidence of a previous incarnation is not a terminal Dead state while
+    // the engine is restarting; once restarts stop it is an ordinary failure.
+    let mut stopped = restarting.clone();
+    stopped["State"]["Restarting"] = json!(false);
+    stopped["State"]["Running"] = json!(false);
+    stopped["State"]["Status"] = json!("exited");
+    assert_eq!(observation(&stopped).unwrap(), Observation::Dead);
+}
+#[test]
 fn compose_pid_limit_is_opt_in_and_explicit_limits_remain_verified() {
     let fixture = Fixture::new();
     let home = Fixture::new();
@@ -401,6 +591,7 @@ fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
                             cache: None,
                             cache_provenance: None,
                             disposable_caches: Vec::new(),
+                            restart_policy: None,
                             kind,
                             ..template.clone()
                         },
@@ -419,6 +610,7 @@ fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
                         cache: None,
                         cache_provenance: None,
                         disposable_caches: Vec::new(),
+                        restart_policy: None,
                         kind,
                         ..template.clone()
                     },
@@ -1883,6 +2075,7 @@ fn outbound_network_is_pinned_and_requires_explicit_pool_capability() {
         cache: None,
         cache_provenance: None,
         disposable_caches: Vec::new(),
+        restart_policy: None,
         kind: Kind::Network,
         key: "default".into(),
         name: "owned-network".into(),
@@ -2025,6 +2218,7 @@ fn endpoint_selects_service_primary_not_unrelated_first_graph_network() {
                 cache: None,
                 cache_provenance: None,
                 disposable_caches: Vec::new(),
+                restart_policy: None,
                 kind: Kind::Network,
                 key: key.into(),
                 name: name.into(),

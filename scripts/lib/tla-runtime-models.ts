@@ -1441,6 +1441,58 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "service-restart-policy",
+    module: "RestartPolicy",
+    states: 134,
+    invariant: "NoIncarnationAfterStop",
+    action: "DaemonRestart",
+    fields: [
+      'phase = "stopping"',
+      'policy = "armed"',
+      'engine = "running"',
+      "lateStart = TRUE",
+    ],
+    additionalControls: [
+      {
+        name: "unproved-terminal",
+        negative: true,
+        invariant: "TerminalProof",
+        action: "ObserveTerminal",
+        fields: [
+          'phase = "stopped"',
+          'engine = "running"',
+          "cancelled = TRUE",
+          "unsafeTerminal = TRUE",
+        ],
+      },
+      {
+        name: "stale-generation",
+        negative: true,
+        invariant: "NoStaleIncarnation",
+        action: "Use",
+        fields: [
+          'phase = "serving"',
+          'engine = "restarting"',
+          "bound = 1",
+          "staleUse = TRUE",
+        ],
+      },
+      {
+        name: "completion-reachable",
+        negative: true,
+        invariant: "NeverRemoved",
+        action: "Remove",
+        fields: [
+          'phase = "removed"',
+          'engine = "absent"',
+          'policy = "no"',
+          "unsafeTerminal = FALSE",
+          "lateStart = FALSE",
+        ],
+      },
+    ],
+  },
+  {
     name: "relay-fence",
     module: "RelayFence",
     negativeModule: "RelayFenceBroken",

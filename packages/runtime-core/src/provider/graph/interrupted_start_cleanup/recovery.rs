@@ -240,6 +240,13 @@ fn advance_stop(
     if key == proof.selected.failed_key {
         failed_created(resource, &value)?;
     }
+    if !journal.pending {
+        // Disarming is idempotent and reducing, so it precedes the journaled
+        // stop and never creates a pending effect of its own.
+        fence(proof, coordinator, journal)?;
+        shutdown::disarm_one(&proof.engine, &proof.current, resource)?;
+    }
+    let value = inspect_resource(&proof.engine, &proof.current, resource)?.ok_or_else(refused)?;
     if stop_decision(resource, &value, journal.pending)? == StopDecision::IssueOneStop {
         let prepared = shutdown::prepare(resource, &value)?;
         journal.pending = true;

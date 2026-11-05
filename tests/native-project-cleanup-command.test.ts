@@ -93,6 +93,21 @@ test("cleanup doctor inspects one mapped branch without requesting recovery and 
   expect(JSON.stringify(result)).not.toContain(opts.scope.projectRoot);
 });
 
+test("a pending engine restart counts as running compute that cleanup must stop", async () => {
+  const opts = await fixture();
+  const restarting = snapshot();
+  Object.assign(restarting.observations, {
+    "container:ws": { state: "restarting" },
+  });
+  const result = await inspectNativeProjectCleanup({
+    ...opts,
+    invoke: async () => restarting,
+  });
+  expect(result).toMatchObject({
+    counts: { running: 1, exited: 1, created: 0, absent: 0 },
+  });
+});
+
 test("legacy hints and missing volumes report observations without inventing recovery authority", async () => {
   const opts = await fixture();
   const legacy = snapshot();

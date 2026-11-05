@@ -229,6 +229,7 @@ pub(super) mod tests {
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind,
             key: key.into(),
             name: format!("owned-{key}"),

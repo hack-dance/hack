@@ -1011,6 +1011,7 @@ mod tests {
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind: Kind::Container,
             key: "web".into(),
             name: "owned-web".into(),

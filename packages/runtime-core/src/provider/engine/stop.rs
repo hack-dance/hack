@@ -128,6 +128,33 @@ impl Engine<'_> {
             .map_err(|failure| failure.error)
     }
 
+    /// Disarm an owned container's engine restart policy before a stop. This is
+    /// a reducing effect like stop: it never allocates or starts anything, so it
+    /// is permitted on cleanup connections. The caller has inspected ownership and
+    /// must reinspect afterward; a transport success is not proof of the change.
+    pub(in crate::provider) fn disarm_restart_policy(
+        &self,
+        id: &str,
+    ) -> Result<(), CandidateError> {
+        if id.len() != 64
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(failure(
+                "Restart policy update requires an immutable container ID.",
+            ));
+        }
+        self.guest.verify()?;
+        let result = self.transport.request(
+            Method::POST,
+            &format!("/v1.53/containers/{id}/update"),
+            Some(&serde_json::json!({"RestartPolicy":{"Name":"no","MaximumRetryCount":0}})),
+        );
+        self.guest.verify()?;
+        result.map(|_| ())
+    }
+
     pub(in crate::provider) fn stop_containers_diagnosed(
         &self,
         stops: &[(String, u64)],

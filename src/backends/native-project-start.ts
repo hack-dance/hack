@@ -345,7 +345,9 @@ export function prepareNativeProjectServices(
       (value.extra_hosts !== undefined && !hasHostDependencies) ||
       value.ports !== undefined ||
       value.logging !== undefined ||
-      (value.restart !== undefined && value.restart !== "no") ||
+      // Restart policies are admitted (or refused with a fixed reason) by the
+      // runtime graph, which owns stop/restart interaction; only the type is checked here.
+      (value.restart !== undefined && typeof value.restart !== "string") ||
       !hasOnlyNativeSupportedLabels(value.labels)
     ) {
       throw refused();

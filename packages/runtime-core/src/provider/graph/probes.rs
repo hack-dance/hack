@@ -204,6 +204,17 @@ pub(super) fn observe(
     value: &Value,
 ) -> Result<Observation, CandidateError> {
     let observed = observation(value)?;
+    if observed == Observation::Restarting
+        && !receipt
+            .resources
+            .get(&format!("container:{name}"))
+            .is_some_and(super::restart_policy::admits_restarting)
+    {
+        return Err(error(
+            "graph_state",
+            "Owned service is restarting without an admitted restart policy.",
+        ));
+    }
     let Some(p) = receipt.probes.get(name) else {
         return Ok(observed);
     };

@@ -109,6 +109,7 @@ pub use host_relay::{
     HostRelayService, cleanup_with_relay, confirm_relay_cleanup, resume_relay_cleanup,
 };
 mod relay;
+mod restart_policy;
 pub use bridges::{
     ReserveBridgeOptions, RouteSlot, inspect_bridges, publish_bridge, reconcile_bridges,
     release_bridge, reserve_bridge, start_bridge,
@@ -229,6 +230,10 @@ pub struct Resource {
     /// Fixed at admission; only these exact paths may be explicitly quarantined.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disposable_caches: Vec<String>,
+    /// Admitted engine restart policy of a container; absent means `no`.
+    /// Only this receipt field authorizes engine restart states during stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_policy: Option<restart_policy::RestartPolicy>,
     pub kind: Kind,
     pub key: String,
     pub name: String,
@@ -387,6 +392,15 @@ fn verify_resource_identity(
 }
 fn observation(value: &Value) -> Result<Observation, CandidateError> {
     let state = &value["State"];
+    // A restarting container keeps its previous exit facts (including OOM) while
+    // the engine waits to start the next incarnation. Callers decide whether the
+    // receipt admits this state; see `probes::observe`.
+    if state["Restarting"] == true {
+        if state["Running"] != true || state["Pid"] != 0 || state["Dead"] == true {
+            return Err(error("graph_state", "Unexpected owned service state."));
+        }
+        return Ok(Observation::Restarting);
+    }
     if state["Dead"] == true || state["OOMKilled"] == true {
         return Ok(Observation::Dead);
     }
@@ -446,6 +460,7 @@ fn same_resource_bindings(
                     && old.cache == resource.cache
                     && old.outbound == resource.outbound
                     && old.routing == resource.routing
+                    && old.restart_policy == resource.restart_policy
                     && (old.networks == resource.networks
                         // Old receipts predate attachment persistence and admitted at most
                         // one network. The caller also requires the unchanged plan identity.
@@ -549,6 +564,19 @@ fn load_at(
         || receipt.resources.values().any(|resource| {
             resource.routing.as_ref().is_some_and(|route| {
                 resource.kind != Kind::Container || !routes::valid_intent(route)
+            })
+        })
+        // Restart authority exists only on containers, never alongside an
+        // incarnation-bound route or a completion goal that cannot retry.
+        || receipt.resources.values().any(|resource| {
+            resource.restart_policy.as_ref().is_some_and(|policy| {
+                resource.kind != Kind::Container
+                    || !policy.valid()
+                    || resource.routing.is_some()
+                    || resource.cache.is_some()
+                    || receipt.probes.contains_key(&resource.key)
+                    || (receipt.readiness.get(&resource.key) == Some(&Condition::Completed)
+                        && !matches!(policy, restart_policy::RestartPolicy::OnFailure { .. }))
             })
         })
         || ![

@@ -78,6 +78,10 @@ pub(super) fn stop_owned(
     {
         return Err(refused());
     }
+    // Stop wins against engine restarts: disarm every admitted policy and
+    // confirm it with a fresh observation before the first stop request. A
+    // restart already pending in the engine is cancelled by the stop itself.
+    disarm_owned(engine, receipt)?;
     let mut selected = Vec::new();
     for resource in receipt
         .resources
@@ -118,6 +122,41 @@ pub(super) fn stop_owned(
         );
     }
     state::write(&path, &evidence)
+}
+
+/// Disarm the engine restart policy of every owned container that still has one.
+/// Each target is ownership-verified by inspection before and after the update.
+/// Idempotent: an already disarmed or absent container needs no effect.
+pub(super) fn disarm_owned(engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError> {
+    for resource in receipt
+        .resources
+        .values()
+        .filter(|r| r.kind == Kind::Container)
+    {
+        disarm_one(engine, receipt, resource)?;
+    }
+    Ok(())
+}
+
+/// Disarm one owned container. The receipt-admitted policy is the authority;
+/// an engine policy the receipt never admitted refuses without any effect.
+pub(super) fn disarm_one(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    resource: &Resource,
+) -> Result<(), CandidateError> {
+    let Some(value) = inspect_resource(engine, receipt, resource)? else {
+        return Ok(());
+    };
+    let Some(id) = super::restart_policy::disarm_target(resource, &value)? else {
+        return Ok(());
+    };
+    engine.disarm_restart_policy(&id)?;
+    let value = inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
+    if value["Id"].as_str() != Some(id.as_str()) {
+        return Err(refused());
+    }
+    super::restart_policy::verify_disarmed(&value)
 }
 
 pub(super) fn stop_error(
@@ -252,8 +291,16 @@ pub(super) fn prepare(resource: &Resource, inspected: &Value) -> Result<Prepared
         return Err(refused());
     }
     let state = &inspected["State"];
+    // The engine reports a pending policy restart as running with no process.
+    // Only a receipt-admitted policy makes that a stoppable state; the stop
+    // cancels the pending restart and a fresh terminal observation must follow.
+    let restarting = state["Restarting"].as_bool() == Some(true)
+        && super::restart_policy::admits_restarting(resource)
+        && state["Running"] == true
+        && state["Status"] == "restarting"
+        && state["Pid"] == 0;
     if state["Paused"].as_bool() != Some(false)
-        || state["Restarting"].as_bool() != Some(false)
+        || (state["Restarting"].as_bool() != Some(false) && !restarting)
         || state["Dead"].as_bool() != Some(false)
         || state["OOMKilled"].as_bool().is_none()
         || state["ExitCode"]
@@ -270,6 +317,7 @@ pub(super) fn prepare(resource: &Resource, inspected: &Value) -> Result<Prepared
         .ok_or_else(refused)?;
     match (running, state["Status"].as_str(), pid) {
         (true, Some("running"), 1..) => {}
+        (true, Some("restarting"), 0) if restarting => {}
         (false, Some("exited"), 0) => {}
         // Docker may assign a nonzero exit code when startup fails before the
         // container ever runs. Preserve that failure without requesting a stop.
@@ -410,6 +458,7 @@ mod tests {
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind: Kind::Container,
             key: "service".into(),
             name: "owned-service".into(),
@@ -463,6 +512,47 @@ mod tests {
             assert!(prepare(&resource, &changed).is_err(), "{field}");
         }
         assert!(terminal(&resource, &value, true).is_err());
+    }
+
+    fn restarting(value: &mut Value) {
+        value["State"]["Restarting"] = json!(true);
+        value["State"]["Status"] = json!("restarting");
+        value["State"]["Pid"] = json!(0);
+        value["State"]["ExitCode"] = json!(137);
+        // The engine keeps the previous incarnation's exit facts while waiting.
+        value["State"]["OOMKilled"] = json!(true);
+    }
+
+    #[test]
+    fn admitted_restart_policy_makes_pending_restart_a_stop_target() {
+        let (mut resource, mut value) = fixture();
+        restarting(&mut value);
+        // Without receipt admission a restarting container stays uncertain.
+        assert!(prepare(&resource, &value).is_err());
+        resource.restart_policy = Some(super::super::restart_policy::RestartPolicy::UnlessStopped);
+        let prepared = prepare(&resource, &value).unwrap();
+        assert!(prepared.running);
+        assert_eq!(prepared.grace_seconds, 10);
+        // A stop cannot be confirmed while the engine still reports a pending restart.
+        assert!(terminal(&resource, &value, true).is_err());
+        for (field, invalid) in [
+            ("Running", json!(false)),
+            ("Status", json!("running")),
+            ("Pid", json!(42)),
+            ("Paused", json!(true)),
+            ("Dead", json!(true)),
+        ] {
+            let mut changed = value.clone();
+            changed["State"][field] = invalid;
+            assert!(prepare(&resource, &changed).is_err(), "{field}");
+        }
+        // After the stop wins, the ordinary terminal proof applies unchanged.
+        value["State"]["Restarting"] = json!(false);
+        value["State"]["Running"] = json!(false);
+        value["State"]["Status"] = json!("exited");
+        let evidence = terminal(&resource, &value, true).unwrap();
+        assert_eq!(evidence.exit_code, 137);
+        assert!(evidence.stop_requested);
     }
 
     #[test]

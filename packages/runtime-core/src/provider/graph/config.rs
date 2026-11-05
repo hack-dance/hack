@@ -88,7 +88,7 @@ fn retain_ownership(
 fn unsupported() -> CandidateError {
     error(
         "graph_subset",
-        "Graph driver requires pinned images, explicit managed environment delivery, internal networks, named volumes and no automatic restart; build, unbound/writable source, port, label and logging overrides remain gated.",
+        "Graph driver requires pinned images, explicit managed environment delivery, internal networks and named volumes; build, unbound/writable source, port, label and logging overrides remain gated.",
     )
 }
 pub(super) fn prepare(
@@ -179,13 +179,29 @@ pub(super) fn prepare_delivery(
     } else {
         BTreeMap::new()
     };
+    // Restart policies lower to the engine's own policy only for service classes
+    // whose guards do not depend on a single container incarnation.
+    let mut restart_policies = BTreeMap::new();
+    for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
+        if let Some(policy) = super::restart_policy::admit(&super::restart_policy::Admission {
+            service,
+            ready: graph.services[name].ready,
+            managed_environment: inputs.service_requires_managed_environment(name),
+            host_dependencies: !service.extra_hosts.is_empty()
+                || inputs
+                    .services
+                    .get(name)
+                    .is_some_and(|values| !values.extra_hosts.is_empty()),
+        })? {
+            restart_policies.insert(name.clone(), policy);
+        }
+    }
     let mut networks = BTreeSet::new();
     let mut volumes = BTreeSet::new();
     let mut total_memory = 0u64;
     let mut total_cpus = 0f64;
     for service in plan.services.values().filter(|s| s.active) {
-        if service.restart != "no"
-            || !service.ports.is_empty()
+        if !service.ports.is_empty()
             || service.labels.keys().any(|key| {
                 !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
                     && !(service.dependency_cache.is_some()
@@ -310,6 +326,7 @@ pub(super) fn prepare_delivery(
                 cache: cache.cloned(),
                 cache_provenance: None,
                 disposable_caches,
+                restart_policy: None,
                 kind,
                 key: key.clone(),
                 name: cache.map_or_else(
@@ -335,6 +352,7 @@ pub(super) fn prepare_delivery(
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: restart_policies.get(name).copied(),
             kind: Kind::Container,
             key: name.clone(),
             name: format!("hkg-{run}-container-{index}"),
@@ -374,6 +392,8 @@ pub(super) fn prepare_delivery(
         // Writable roots are container-owned layers, not writable source binds.
         // Their contents are discarded when the container is removed; durable data uses named volumes.
         let mut config = container_base(image, labels);
+        config["HostConfig"]["RestartPolicy"] =
+            super::restart_policy::RestartPolicy::engine(resource.restart_policy.as_ref());
         for (field, value) in [
             ("NetworkMode", json!(network)),
             ("Memory", json!(service.limits.memory_bytes.unwrap_or(0))),

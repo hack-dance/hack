@@ -24,11 +24,17 @@ pub struct ScopedExecutionInputs {
 pub struct ExecutionInputs {
     pub review: PlanReport,
     pub services: BTreeMap<String, ServiceInputs>,
-    managed_environment_required: bool,
+    /// Services that receive at least one managed value through private delivery.
+    managed_environment_services: std::collections::BTreeSet<String>,
 }
 impl ExecutionInputs {
     pub fn requires_managed_environment(&self) -> bool {
-        self.managed_environment_required
+        !self.managed_environment_services.is_empty()
+    }
+
+    /// Whether this service's process depends on single-incarnation managed delivery.
+    pub fn service_requires_managed_environment(&self, service: &str) -> bool {
+        self.managed_environment_services.contains(service)
     }
 }
 fn error(code: &'static str, message: &str) -> CandidateError {
@@ -599,7 +605,7 @@ fn compile_inner(
         executable: ExecutionInputs {
             review,
             services,
-            managed_environment_required: !managed_environment.is_empty(),
+            managed_environment_services: managed_environment.keys().cloned().collect(),
         },
         managed_environment,
     })

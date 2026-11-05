@@ -611,6 +611,30 @@ layer. Removing the owned container discards that layer; use named volumes for
 durable data. Source bind mounts still require read-only publication. Writable
 container layers do not imply writable source synchronization.
 
+A service `restart` policy (`always`, `unless-stopped`, `on-failure` or
+`on-failure:N`) becomes the guest engine's own restart policy, so restart timing,
+backoff, retry counting and the manual-stop rule follow Docker. `no` or omission
+keeps automatic restarts off. A one-shot service with `service_completed_successfully`
+readiness accepts only `on-failure[:N]`, which retries until it succeeds or its
+retries run out; `always` and `unless-stopped` refuse there, as in Compose. While
+the engine waits to start the next incarnation, `hack ps` reports the service as
+`restarting`, and it satisfies no readiness goal. A policy-restarted container
+keeps its container ID but gets a new start time, so Hack treats it as a new
+incarnation: any proof bound to the previous one refuses rather than adopting it.
+For that reason the graph refuses a restart policy, with `graph_restart_policy`,
+on routed services, services with a native HTTP probe, services with host
+dependencies, services that receive managed environment values (delivery is
+single-use and time-bounded) and dependency-cache initializers. Remove the
+`restart` key from those services, or keep them on the Compose backend.
+
+Every owned stop first sets the engine policy back to `no` and confirms that with a
+fresh inspection, then requests the stop. A restart that was already pending is
+cancelled by the stop, and cleanup still requires an observation that is neither
+running nor restarting before it deletes anything. A guest engine restart or VM
+reboot while a graph is still owned restarts its `always` and `unless-stopped`
+containers, as Docker does; owned cleanup or recovery stops and removes them.
+`hack run` one-off containers never inherit the service restart policy.
+
 The normal-CLI integration helpers prepare modern environment overlays and
 worktree inheritance in memory, with null declarations in public normalized
 configuration. An explicit AWS profile adapter can replace the recognized

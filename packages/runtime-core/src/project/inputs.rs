@@ -146,6 +146,20 @@ impl Resolver<'_> {
         self.remaining -= text.len();
         Ok(())
     }
+    /// Append one piece of a default/alternative word. Nested words are built
+    /// before the top-level `resolve` charges them, so every intermediate is
+    /// bounded by the remaining budget here; the budget itself is charged once,
+    /// when `resolve` appends the finished value.
+    fn append(&self, result: &mut String, piece: &str) -> Result<(), CandidateError> {
+        if piece.len() > self.remaining.saturating_sub(result.len()) {
+            return Err(error(
+                "execution_input_budget",
+                "Executable values contain NUL or exceed the 1 MiB expanded budget.",
+            ));
+        }
+        result.push_str(piece);
+        Ok(())
+    }
     fn owned(&self, name: &str) -> Result<(), CandidateError> {
         if self.managed.contains(name) {
             return Err(error(
@@ -226,7 +240,7 @@ impl Resolver<'_> {
                 return Err(unsupported_interpolation());
             }
             if live {
-                result.push_str(literal);
+                self.append(&mut result, literal)?;
             }
             if index == rest.len() {
                 return Ok(result);
@@ -234,7 +248,7 @@ impl Resolver<'_> {
             rest = &rest[index + 1..];
             if let Some(tail) = rest.strip_prefix('$') {
                 if live {
-                    result.push('$');
+                    self.append(&mut result, "$")?;
                 }
                 rest = tail;
                 continue;
@@ -247,7 +261,7 @@ impl Resolver<'_> {
             }
             let end = braced_end(braced).ok_or_else(unsupported_interpolation)?;
             let value = self.expression(&braced[..end], depth + 1, live)?;
-            result.push_str(&value);
+            self.append(&mut result, &value)?;
             rest = &braced[end + 1..];
         }
     }

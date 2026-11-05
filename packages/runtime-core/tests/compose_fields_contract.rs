@@ -317,6 +317,30 @@ fn nested_defaults_share_the_expanded_budget() {
 }
 
 #[test]
+fn nested_default_words_charge_the_budget_exactly_once() {
+    // `echo` (4 bytes) + a nested word of two 400 KiB values + a second
+    // top-level value fill the 1 MiB budget exactly. A double charge of nested
+    // output would refuse the exact fit; one more byte must refuse.
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    command: [echo, '${A:-${B}${B}}', '${C:-${D}}']\n",
+    );
+    let half = "x".repeat(400 * 1024);
+    let fill = "y".repeat(1024 * 1024 - 4 - 2 * half.len());
+    let compiled = fixture.compile(&[("B", &half), ("D", &fill)]).unwrap();
+    let command = compiled.services["web"].command.clone().unwrap();
+    assert_eq!(command[1].len(), 2 * half.len());
+    assert_eq!(command[2], fill);
+    let over = format!("{fill}y");
+    assert_eq!(
+        fixture
+            .compile(&[("B", &half), ("D", &over)])
+            .err()
+            .as_deref(),
+        Some("execution_input_budget")
+    );
+}
+
+#[test]
 fn references_to_managed_service_inputs_refuse_instead_of_using_defaults() {
     let canary = "synthetic-managed-canary";
     for (field, value) in [

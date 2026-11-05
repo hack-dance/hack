@@ -601,6 +601,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "restore-selection",
         "retained-preflight",
         "owner-status",
+        "observe",
         "restart",
         "restore",
         "inspect",
@@ -923,6 +924,16 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "reconcile-export" => graph::reconcile_export(candidate, run),
         "inspect" => serde_json::to_value(graph::inspect(candidate, run)?)
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph snapshot.")),
+        "observe" => {
+            #[cfg(target_os = "macos")]
+            {
+                graph::observe(candidate, run)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(invalid())
+            }
+        }
         "export" => serde_json::to_value(graph::export(candidate, run)?)
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph export.")),
         "archive" => encode(graph::archive(candidate, run)?),

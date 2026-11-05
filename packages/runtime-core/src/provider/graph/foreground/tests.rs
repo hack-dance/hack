@@ -533,3 +533,34 @@ fn dead_owner_selection_holds_lock_and_rejects_live_or_changed_records() {
     drop(guard);
     fs::remove_dir_all(path).unwrap();
 }
+#[test]
+fn inspect_names_only_an_absent_unpublished_attempt_as_unreserved() {
+    // HACK-1915: a foreground start refused before admission reserved nothing and
+    // must be distinguishable from retained or damaged graph state.
+    let (_fixture, candidate, run) = fixture();
+    let code = |candidate: &Candidate| match super::super::inspect(candidate, &run) {
+        Ok(_) => "inspected",
+        Err(error) => error.code,
+    };
+    assert_eq!(code(&candidate), "graph_unreserved");
+
+    // A published foreground owner is evidence, never "unreserved".
+    let mut publication = Publication::bind(&candidate, &run).unwrap();
+    assert_ne!(code(&candidate), "graph_unreserved");
+    publication.finish().unwrap();
+    drop(publication);
+    assert_eq!(code(&candidate), "graph_unreserved");
+
+    // Any journal (active, archived or consumed) keeps ordinary receipt validation.
+    for path in [
+        super::super::directory(&candidate, &run).unwrap(),
+        super::super::archive::path(&candidate, &run).unwrap(),
+        super::super::retention::consumed(&candidate, &run).unwrap(),
+    ] {
+        crate::provider::state::private_directory(&path).unwrap();
+        assert_ne!(code(&candidate), "graph_unreserved", "{}", path.display());
+        fs::remove_dir(&path).unwrap();
+    }
+    assert_eq!(code(&candidate), "graph_unreserved");
+    fs::remove_dir_all(root(&candidate, &run)).unwrap();
+}

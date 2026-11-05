@@ -60,7 +60,7 @@ impl Diagnostic {
         }
     }
 }
-fn problem(code: &'static str, message: &str) -> CandidateError {
+fn problem(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 

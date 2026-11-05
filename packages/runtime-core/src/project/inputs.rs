@@ -31,7 +31,7 @@ impl ExecutionInputs {
         self.managed_environment_required
     }
 }
-fn error(code: &'static str, message: &str) -> CandidateError {
+fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 const MAX_EXPANDED: usize = 1024 * 1024;

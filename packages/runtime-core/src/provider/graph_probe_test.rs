@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{path::Path, time::Duration};
 
-fn error(message: &str) -> CandidateError {
+fn error(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("graph_probe", message)
 }
 

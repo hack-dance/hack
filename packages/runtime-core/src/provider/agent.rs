@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 const MAX_FRAME: usize = 64 * 1024;
-fn failure(message: impl Into<String>) -> CandidateError {
+fn failure(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("agent_protocol_uncertain", message)
 }
 

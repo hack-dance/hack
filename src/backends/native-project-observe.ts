@@ -286,6 +286,7 @@ export async function nativeProjectLogs(
   ) {
     throw refused();
   }
+  const lines = logLines(result.lines, result.stdout, result.stderr);
   const after = await inspect(opts, run);
   if (
     after.items.find((item) => item.service === opts.service)?.container !==
@@ -300,8 +301,47 @@ export async function nativeProjectLogs(
     container: service.container,
     stdout: result.stdout,
     stderr: result.stderr,
+    lines,
     truncated: result.truncated,
   };
+}
+
+/** One retained log line in engine (time) order. */
+export type NativeLogLine = {
+  readonly stream: "stdout" | "stderr";
+  readonly text: string;
+};
+
+/**
+ * The runtime's whole lines in engine order. A runtime without `lines` returns
+ * the streams apart, so their order is unknown: keep stdout before stderr.
+ */
+function logLines(
+  value: unknown,
+  stdout: string,
+  stderr: string
+): NativeLogLine[] {
+  if (value === undefined) {
+    return [
+      ...(stdout ? [{ stream: "stdout" as const, text: stdout }] : []),
+      ...(stderr ? [{ stream: "stderr" as const, text: stderr }] : []),
+    ];
+  }
+  if (!Array.isArray(value) || value.length > 16_384) {
+    throw refused();
+  }
+  return value.map((line: unknown) => {
+    if (
+      !(
+        isRecord(line) &&
+        (line.stream === "stdout" || line.stream === "stderr") &&
+        typeof line.text === "string"
+      )
+    ) {
+      throw refused();
+    }
+    return { stream: line.stream, text: line.text };
+  });
 }
 
 /** Refuse before any legacy lifecycle effects until the native operation is wired. */

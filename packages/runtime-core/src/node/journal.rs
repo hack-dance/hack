@@ -1043,7 +1043,8 @@ mod tests {
             serde_json::to_value(&failure).unwrap(),
             serde_json::json!({
                 "code": "journal_busy",
-                "message": "Node journal is busy; retry with the same operation ID."
+                "message": "Node journal is busy; retry with the same operation ID.",
+                "message_fixed": true
             })
         );
         assert_eq!(operations(&node), 0);
@@ -1082,7 +1083,7 @@ mod tests {
         assert!(started.elapsed() >= BUSY_TIMEOUT);
         assert_eq!(
             serde_json::to_value(&failure).unwrap(),
-            serde_json::json!({"code": "journal_busy", "message": BUSY_HINT})
+            serde_json::json!({"code": "journal_busy", "message": BUSY_HINT, "message_fixed": true})
         );
         assert_eq!(snapshot(&supervisor, &id), before);
 
@@ -1112,7 +1113,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             serde_json::to_value(&failure).unwrap(),
-            serde_json::json!({"code": "journal_busy", "message": BUSY_HINT})
+            serde_json::json!({"code": "journal_busy", "message": BUSY_HINT, "message_fixed": true})
         );
         blocker.connection.execute_batch("ROLLBACK").unwrap();
         assert_eq!(

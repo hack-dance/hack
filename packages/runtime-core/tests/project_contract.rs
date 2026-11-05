@@ -2510,3 +2510,46 @@ fn disposable_cache_declarations_are_exact_volume_relative_and_review_bound() {
         "invalid_disposable_cache"
     );
 }
+
+#[test]
+fn text_plan_exits_non_zero_on_error_diagnostics_and_json_keeps_the_report() {
+    let compiled = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let plan = |fixture: &Fixture, json: bool| {
+        let mut args = vec![
+            "--candidate-root".to_owned(),
+            compiled.to_str().unwrap().to_owned(),
+            "project".into(),
+            "plan".into(),
+            "--project".into(),
+            fixture.project.to_str().unwrap().to_owned(),
+            "--file".into(),
+            "compose.yaml".into(),
+        ];
+        if json {
+            args.push("--json".into());
+        }
+        Command::new(env!("CARGO_BIN_EXE_hack-runtime-candidate"))
+            .env_clear()
+            .env("PATH", "")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let clean = Fixture::new(BASIC);
+    assert!(plan(&clean, false).status.success());
+    let failing = Fixture::new(&format!("{BASIC}    privileged: true\n"));
+    let text = plan(&failing, false);
+    assert!(!text.status.success());
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    assert!(stdout.contains("error [privileged_service]"), "{stdout}");
+    let refusal: serde_json::Value = serde_json::from_slice(&text.stderr).unwrap();
+    assert_eq!(refusal["code"], "plan_diagnostics");
+    assert_eq!(refusal["message_fixed"], true);
+    let json = plan(&failing, true);
+    assert!(json.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(report["plan"]["enrollment_compatible"], false);
+}

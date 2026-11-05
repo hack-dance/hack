@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const MAX_RECORD: u64 = 16 * 1024 * 1024;
-fn error(message: &str) -> CandidateError {
+fn error(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("source_sync", message)
 }
 fn hex(value: &str, length: usize) -> bool {

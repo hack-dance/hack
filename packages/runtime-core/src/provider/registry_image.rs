@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 const MAX_ARCHIVE: usize = 256 * 1024 * 1024;
 const MAX_METADATA: usize = 1024 * 1024;
 const ACCEPT_MANIFEST: &str = "application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json";
-fn error(message: &str) -> CandidateError {
+fn error(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("registry_image", message)
 }
 fn digest(bytes: &[u8]) -> String {

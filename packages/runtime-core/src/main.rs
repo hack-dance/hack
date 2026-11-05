@@ -22,7 +22,7 @@ Usage:
   hack-local project publish-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--reconcile] [--json]
   hack-local project verify-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
   hack-local graph run|restart|restore --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
-  hack-local graph inspect|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
+  hack-local graph inspect|observe|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
   hack-local graph native plan --source-file <absolute-v2-native-source.json> [--json]
   hack-local graph native run|serve --source-file <absolute-v2-native-source.json> --expect-review <64-hex> [--environment-stdin] [--timeout-seconds <1..300>] [--json]
@@ -1358,7 +1358,28 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
             println!(
                 "Planning has no effects. Enrollment saves metadata only; project execution remains gated."
             );
+            // A human review that reports errors fails like `compose config` does.
+            // JSON keeps exit 0: the report is the result, and its consumers read
+            // `diagnostics` and `enrollment_compatible` (Hack plans original input
+            // that normalization later adapts).
+            plan_text_result(&report.plan.diagnostics)?;
         }
+    }
+    Ok(())
+}
+
+/// Text-mode `project plan` exits non-zero when any diagnostic is an error.
+fn plan_text_result(
+    diagnostics: &[hack_runtime_core::project::Diagnostic],
+) -> Result<(), CandidateError> {
+    if diagnostics
+        .iter()
+        .any(|finding| finding.severity == "error")
+    {
+        return Err(CandidateError::new(
+            "plan_diagnostics",
+            "The project plan reported error diagnostics; review them above.",
+        ));
     }
     Ok(())
 }

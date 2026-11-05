@@ -147,6 +147,8 @@ async function fixture() {
     binary,
     `#!${process.execPath}
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
+if (process.argv.includes("fixed-message")) { console.error(JSON.stringify({code:"graph_image",message:"Pinned image architecture or implicit volumes are incompatible.",message_fixed:true,service:"web"})); process.exit(2); }
+if (process.argv.includes("unsafe-fixed")) { console.error(JSON.stringify({code:"graph_image",message:"synthetic-secret-diagnostic\\nsecond line",message_fixed:true,service:"../synthetic-secret-diagnostic"})); process.exit(2); }
 if (process.argv.includes("structured")) { console.error(JSON.stringify({code:"source_conflict",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("foreground-stopped")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"runtime_not_running",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("foreground-other")) { console.error(JSON.stringify({code:"native_graph_foreground",cause_code:"engine_protocol",message:"synthetic-secret-diagnostic"})); process.exit(23); }
@@ -919,6 +921,35 @@ test("an unparseable control response is a closed refusal", async () => {
     invokeNativeRuntime({ runtime, cwd: runtime.home, args: ["garbage"] }),
     "Native runtime returned an invalid control response."
   );
+});
+
+test("a runtime message marked fixed is shown with its validated service", async () => {
+  const runtime = await fixture();
+  const error: unknown = await invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: ["fixed-message"],
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+  expect((error as Error).message).toBe(
+    "Native runtime request failed (graph_image); inspect owned state before retrying. Service web: Pinned image architecture or implicit volumes are incompatible."
+  );
+  expect(error).toHaveProperty("nativeCode", "graph_image");
+  expect(error).toHaveProperty(
+    "nativeMessage",
+    "Pinned image architecture or implicit volumes are incompatible."
+  );
+  expect(error).toHaveProperty("nativeService", "web");
+  // A fixed flag never admits a multi-line message or a non-identifier service.
+  const unsafe: unknown = await invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: ["unsafe-fixed"],
+  }).catch((caught: unknown) => caught);
+  expect((unsafe as Error).message).toBe(
+    "Native runtime request failed (graph_image); inspect owned state before retrying."
+  );
+  expect(String(unsafe)).not.toContain("synthetic-secret-diagnostic");
 });
 
 test("structured failures expose only a bounded code, never their message", async () => {

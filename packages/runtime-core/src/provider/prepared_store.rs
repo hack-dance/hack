@@ -26,7 +26,7 @@ const LOCK: &str = "store.lock";
 const VERIFIED: &str = ".verified";
 const LIMIT: u64 = 256 * 1024;
 
-fn error(code: &'static str, message: impl Into<String>) -> CandidateError {
+fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 

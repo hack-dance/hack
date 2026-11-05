@@ -272,6 +272,21 @@ window waits briefly, then reports that the runtime is busy (`runtime_busy`,
 exit 0) instead of failing. After the ready line, `hack ps` and `hack logs` run
 alongside the foreground command.
 
+While the project runs, foreground `up` reports each service container that stops,
+as attached Compose `up` does (`SERVICE exited with code N`), including one-shot
+services. It keeps running while any service runs; once every service container has
+stopped, it prints that, stops the graph through the ordinary owned cleanup and exits
+0, like Compose `up` without `--abort-on-container-exit`. The monitor reads
+`graph observe`, which takes no provider lease, so it never contends with `ps`, `logs`
+or `exec`.
+
+Runtime refusals print their code and, when the runtime marks its message as a fixed
+literal that cannot carry values, that message and the service it concerns (for
+example `Service web: Pinned image architecture or implicit volumes are
+incompatible.`). Formatted runtime messages stay omitted. A start refused before the
+runtime reserved any graph state reports that nothing was retained instead of
+unconfirmed cleanup.
+
 ## Manual candidate upgrade and rollback
 
 Manual candidate bundles are selected by their full path. The separate
@@ -521,6 +536,22 @@ For an existing owned graph, bounded service diagnostics use its run identifier:
 Both commands select the current container and recheck its boot, receipt generation
 and ownership before reading or executing. Logs include exited services, default to
 200 lines (maximum 1,000), and return bounded, UTF-8-lossy text with a truncation flag.
+`lines` lists the retained lines in engine order, so stdout and stderr interleave by
+time; `stdout` and `stderr` hold the same lines per stream. Retention keeps whole
+lines, newest first, within 32 KiB of JSON text and sets `truncated` when older lines
+were dropped. Only a single line longer than that budget is cut. `hack logs SERVICE
+--no-follow` prints `lines` in that order, each to its own stream.
+
+`graph observe --run-id RUN_ID --json` reports each service container's current state
+(`running` with the engine's health, `exited` with its code, `dead`, `created`,
+`absent` or `unknown`) without taking the provider lease. It only reads, checks each
+recorded container's ownership, runs no probes and grants no authority; foreground
+`hack up` polls it to report service exits.
+
+`project plan` without `--json` exits non-zero (`plan_diagnostics`) after printing a
+report that contains an error diagnostic. With `--json` it exits 0 and the report is
+the result: `diagnostics` and `enrollment_compatible` carry the outcome, because Hack
+plans original input that its normalization adapts afterwards.
 Exec requires a running service and returns Base64 stdout/stderr to preserve arbitrary
 bytes, an exit code, and a truncation flag. The CLI also exits with the command's exit
 code. Retained exec output is limited to 1 MiB per stream.

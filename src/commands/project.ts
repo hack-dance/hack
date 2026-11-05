@@ -76,6 +76,7 @@ import {
   startNativeProject,
 } from "../backends/native-project-start.ts";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
+import type { NativeServiceExit } from "../backends/native-service-exit-monitor.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
@@ -5719,6 +5720,16 @@ async function runRemoteLifecycleCommand(opts: {
   });
 }
 
+/** Compose-style line for a service that stopped while `up` runs. */
+function nativeServiceExitMessage(exit: NativeServiceExit): string {
+  if (exit.state === "exited") {
+    return `${exit.service} exited with code ${exit.code}`;
+  }
+  return exit.state === "dead"
+    ? `${exit.service} died (dead or out of memory)`
+    : `${exit.service} container was removed`;
+}
+
 /**
  * Foreground native progress, matching Compose's attached `up`: steps while the
  * graph starts, one ready line, then the stop sequence after Ctrl-C.
@@ -5742,6 +5753,14 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
     case "ready":
       logger.success({
         message: `Project is ready (${event.services.join(", ")}). Use hack ps and hack logs from another terminal; press Ctrl-C to stop.`,
+      });
+      return;
+    case "service-exited":
+      logger.warn({ message: nativeServiceExitMessage(event) });
+      return;
+    case "all-stopped":
+      logger.info({
+        message: "All services have stopped; ending native up as Compose does.",
       });
       return;
     case "stopping":
@@ -9569,10 +9588,14 @@ async function handleNativeLogs({
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } else {
     process.stderr.write(
-      `Native logs: ${result.service}${result.truncated ? " (truncated)" : ""}\n`
+      `Native logs: ${result.service}${result.truncated ? " (truncated; older lines omitted)" : ""}\n`
     );
-    process.stdout.write(result.stdout);
-    process.stderr.write(result.stderr);
+    // Engine order interleaves the streams by time; each keeps its own descriptor.
+    for (const line of result.lines) {
+      (line.stream === "stdout" ? process.stdout : process.stderr).write(
+        line.text
+      );
+    }
   }
   return 0;
 }

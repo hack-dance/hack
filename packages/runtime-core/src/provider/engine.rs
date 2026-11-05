@@ -197,7 +197,7 @@ fn rejection_category(bytes: &[u8]) -> &'static str {
     "unclassified"
 }
 
-fn failure(message: &str) -> CandidateError {
+fn failure(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("engine_protocol", message)
 }
 
@@ -387,21 +387,35 @@ impl<'a> Engine<'a> {
     pub(super) fn logs(&self, id: &str) -> Result<(String, String, bool), CandidateError> {
         self.logs_with_tail(id, "all")
     }
+    /// Bounded per-stream tail for callers that keep the streams apart. Built from
+    /// the same whole-line, newest-first selection as [`Self::logs_tail_lines`].
+    #[cfg(feature = "native-config-plan")]
     pub(super) fn logs_tail(
         &self,
         id: &str,
         tail: u16,
     ) -> Result<(String, String, bool), CandidateError> {
+        let tail = self.logs_tail_lines(id, tail)?;
+        let (stdout, stderr) = tail.split();
+        Ok((stdout, stderr, tail.truncated))
+    }
+    /// Bounded tail in engine order, which interleaves stdout and stderr by time.
+    /// Whole lines are kept newest first; see [`LogTail`].
+    pub(super) fn logs_tail_lines(&self, id: &str, tail: u16) -> Result<LogTail, CandidateError> {
         if !(1..=1000).contains(&tail) {
             return Err(failure("Container log tail must be from 1 to 1000."));
         }
-        self.logs_with_tail(id, &tail.to_string())
+        let bytes = self.logs_bytes(id, &tail.to_string())?;
+        decode_log_lines(&bytes)
     }
     fn logs_with_tail(
         &self,
         id: &str,
         tail: &str,
     ) -> Result<(String, String, bool), CandidateError> {
+        decode_logs(&self.logs_bytes(id, tail)?)
+    }
+    fn logs_bytes(&self, id: &str, tail: &str) -> Result<Vec<u8>, CandidateError> {
         if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(failure("Invalid container log identity."));
         }
@@ -411,9 +425,8 @@ impl<'a> Engine<'a> {
             &format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail={tail}"),
             None,
         )?;
-        let result = decode_logs(&bytes)?;
         self.guest.verify()?;
-        Ok(result)
+        Ok(bytes)
     }
     pub(super) fn guest(&self) -> &OwnedGuest<'a> {
         &self.guest
@@ -581,6 +594,18 @@ impl<'a> Observer<'a> {
         Ok(Self { guest, transport })
     }
 
+    pub(super) fn incarnation(&self) -> &str {
+        self.guest.incarnation()
+    }
+
+    /// One read-only engine GET, with runtime identity verified on both sides.
+    pub(super) fn get(&self, path: &str) -> Result<Value, CandidateError> {
+        self.guest.verify()?;
+        let value = self.transport.request(Method::GET, path, None)?;
+        self.guest.verify()?;
+        Ok(value)
+    }
+
     pub(super) fn storage_usage(&self) -> Result<Value, CandidateError> {
         self.info()?;
         self.guest.verify()?;
@@ -658,6 +683,161 @@ fn decode_logs(bytes: &[u8]) -> Result<(String, String, bool), CandidateError> {
     let stdout = bounded_log_text(&stdout, &mut truncated);
     let stderr = bounded_log_text(&stderr, &mut truncated);
     Ok((stdout, stderr, truncated))
+}
+
+/// Output stream of one log line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogStream {
+    Stdout,
+    Stderr,
+}
+
+/// One log line in engine order. `text` keeps its trailing newline when the
+/// engine supplied one; only the final line of a stream can lack it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LogLine {
+    pub stream: LogStream,
+    pub text: String,
+}
+
+/// A bounded log tail. Lines are whole and in engine order, so stdout and stderr
+/// interleave by time. When the selection exceeds [`LOG_TAIL_BUDGET`] JSON bytes,
+/// the oldest whole lines are dropped and `truncated` is set; a line is cut only
+/// when it alone exceeds the budget (or [`LOG_LINE_LIMIT`] while decoding), and
+/// that also sets `truncated`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogTail {
+    pub lines: Vec<LogLine>,
+    pub truncated: bool,
+}
+
+impl LogTail {
+    /// Per-stream text of the same retained lines.
+    pub fn split(&self) -> (String, String) {
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        for line in &self.lines {
+            match line.stream {
+                LogStream::Stdout => stdout.push_str(&line.text),
+                LogStream::Stderr => stderr.push_str(&line.text),
+            }
+        }
+        (stdout, stderr)
+    }
+}
+
+/// JSON-encoded budget for the retained text of one tail, across both streams.
+pub const LOG_TAIL_BUDGET: usize = 32 * 1024;
+/// Raw bytes kept for one line while decoding; the response body is bounded too.
+pub const LOG_LINE_LIMIT: usize = 64 * 1024;
+/// Approximate JSON overhead of one line entry (`{"stream":"stderr","text":""},`).
+const LOG_LINE_OVERHEAD: usize = 32;
+
+fn json_text_cost(character: char) -> usize {
+    match character {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        c if c <= '\u{1f}' => 6,
+        c => c.len_utf8(),
+    }
+}
+
+fn decode_log_lines(bytes: &[u8]) -> Result<LogTail, CandidateError> {
+    struct Entry {
+        stream: LogStream,
+        bytes: Vec<u8>,
+        clipped: bool,
+    }
+    let mut entries: Vec<Entry> = Vec::new();
+    // Index of the unterminated line each stream is still filling.
+    let mut open: [Option<usize>; 2] = [None, None];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let header = bytes
+            .get(offset..offset + 8)
+            .ok_or_else(|| failure("Truncated container log header."))?;
+        if ![1, 2].contains(&header[0]) || header[1..4] != [0, 0, 0] {
+            return Err(failure("Invalid container log stream."));
+        }
+        let length = u32::from_be_bytes(header[4..8].try_into().expect("length field")) as usize;
+        offset += 8;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| failure("Invalid container log length."))?;
+        let mut rest = bytes
+            .get(offset..end)
+            .ok_or_else(|| failure("Truncated container log payload."))?;
+        offset = end;
+        let (slot, stream) = if header[0] == 1 {
+            (0, LogStream::Stdout)
+        } else {
+            (1, LogStream::Stderr)
+        };
+        while !rest.is_empty() {
+            let (chunk, complete) = match rest.iter().position(|byte| *byte == b'\n') {
+                Some(index) => (&rest[..=index], true),
+                None => (rest, false),
+            };
+            rest = &rest[chunk.len()..];
+            let index = *open[slot].get_or_insert_with(|| {
+                entries.push(Entry {
+                    stream,
+                    bytes: Vec::new(),
+                    clipped: false,
+                });
+                entries.len() - 1
+            });
+            let entry = &mut entries[index];
+            let keep = chunk
+                .len()
+                .min(LOG_LINE_LIMIT.saturating_sub(entry.bytes.len()));
+            entry.bytes.extend_from_slice(&chunk[..keep]);
+            if keep < chunk.len() {
+                entry.clipped = true;
+                if complete {
+                    entry.bytes.push(b'\n');
+                }
+            }
+            if complete {
+                open[slot] = None;
+            }
+        }
+    }
+    let mut truncated = entries.iter().any(|entry| entry.clipped);
+    let mut lines = Vec::new();
+    let mut used = 0;
+    for entry in entries.iter().rev() {
+        let text = String::from_utf8_lossy(&entry.bytes);
+        let cost = LOG_LINE_OVERHEAD + text.chars().map(json_text_cost).sum::<usize>();
+        if used + cost <= LOG_TAIL_BUDGET {
+            used += cost;
+            lines.push(LogLine {
+                stream: entry.stream,
+                text: text.into_owned(),
+            });
+            continue;
+        }
+        truncated = true;
+        if lines.is_empty() {
+            // The newest line alone exceeds the budget: keep its start.
+            let mut clipped = String::new();
+            let mut cost = LOG_LINE_OVERHEAD;
+            for character in text.chars() {
+                cost += json_text_cost(character);
+                if cost > LOG_TAIL_BUDGET {
+                    break;
+                }
+                clipped.push(character);
+            }
+            lines.push(LogLine {
+                stream: entry.stream,
+                text: clipped,
+            });
+        }
+        break;
+    }
+    lines.reverse();
+    Ok(LogTail { lines, truncated })
 }
 
 fn bounded_log_text(bytes: &[u8], truncated: &mut bool) -> String {
@@ -766,6 +946,73 @@ mod tests {
         let (stdout, _, truncated) = decode_logs(&frame(1, &vec![0; 16000])).unwrap();
         assert!(truncated);
         assert!(serde_json::to_vec(&stdout).unwrap().len() <= 16386);
+    }
+
+    #[test]
+    fn log_tails_interleave_by_engine_order_and_keep_whole_newest_lines() {
+        let frame = |stream: u8, payload: &[u8]| {
+            let mut bytes = vec![stream, 0, 0, 0];
+            bytes.extend((payload.len() as u32).to_be_bytes());
+            bytes.extend(payload);
+            bytes
+        };
+        let line = |stream, text: &str| LogLine {
+            stream,
+            text: text.into(),
+        };
+        // Engine order interleaves streams; a line split across frames stays whole.
+        let mut bytes = frame(1, b"one\n");
+        bytes.extend(frame(2, b"warn\n"));
+        bytes.extend(frame(1, b"tw"));
+        bytes.extend(frame(2, b"err\n"));
+        bytes.extend(frame(1, b"o\nlast"));
+        let tail = decode_log_lines(&bytes).unwrap();
+        assert_eq!(
+            tail.lines,
+            vec![
+                line(LogStream::Stdout, "one\n"),
+                line(LogStream::Stderr, "warn\n"),
+                line(LogStream::Stdout, "two\n"),
+                line(LogStream::Stderr, "err\n"),
+                line(LogStream::Stdout, "last"),
+            ]
+        );
+        assert!(!tail.truncated);
+        assert_eq!(
+            tail.split(),
+            ("one\ntwo\nlast".into(), "warn\nerr\n".into())
+        );
+        assert!(decode_log_lines(&bytes[..bytes.len() - 1]).is_err());
+        assert!(decode_log_lines(&[3, 0, 0, 0, 0, 0, 0, 0]).is_err());
+
+        // Over budget: the oldest whole lines are dropped, newest kept, never cut.
+        let mut bytes = Vec::new();
+        for index in 0..2000 {
+            let stream = if index % 3 == 0 { 2 } else { 1 };
+            bytes.extend(frame(stream, format!("line {index:04} \"x\"\n").as_bytes()));
+        }
+        let tail = decode_log_lines(&bytes).unwrap();
+        assert!(tail.truncated);
+        assert_eq!(tail.lines.last().unwrap().text, "line 1999 \"x\"\n");
+        assert!(tail.lines.len() < 2000);
+        assert!(
+            tail.lines
+                .iter()
+                .all(|line| { line.text.starts_with("line ") && line.text.ends_with("\"x\"\n") })
+        );
+        let first: usize = tail.lines[0].text[5..9].parse().unwrap();
+        assert_eq!(first + tail.lines.len(), 2000);
+        let encoded = serde_json::to_vec(&tail.lines).unwrap().len();
+        assert!(encoded <= LOG_TAIL_BUDGET, "{encoded}");
+
+        // Only a single line larger than the whole budget is cut, and that is explicit.
+        let tail = decode_log_lines(&frame(1, &vec![b'y'; 100_000])).unwrap();
+        assert!(tail.truncated);
+        assert_eq!(tail.lines.len(), 1);
+        assert!(serde_json::to_vec(&tail.lines).unwrap().len() <= LOG_TAIL_BUDGET);
+        let tail = decode_log_lines(&frame(2, &vec![0; 20_000])).unwrap();
+        assert!(tail.truncated);
+        assert!(serde_json::to_vec(&tail.lines).unwrap().len() <= LOG_TAIL_BUDGET);
     }
 
     #[test]

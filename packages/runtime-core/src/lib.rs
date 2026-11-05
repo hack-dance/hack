@@ -18,7 +18,7 @@ pub const CANDIDATE_VERSION: &str = "5.0.0-dev.6";
 
 mod error;
 mod error_stop_diagnostics;
-pub use error::CandidateError;
+pub use error::{CandidateError, ErrorMessage};
 #[cfg(all(test, feature = "native-config-plan"))]
 mod test_budget;
 #[cfg(test)]

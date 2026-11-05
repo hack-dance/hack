@@ -174,7 +174,7 @@ const MAX_TOTAL_MEMORY_BYTES: u64 =
     super::Profile::Development.memory_mib() as u64 * 1024 * 1024 - GUEST_MEMORY_RESERVE_BYTES;
 const MAX_VOLUMES: usize = 8;
 
-fn error(code: &'static str, message: &str) -> CandidateError {
+fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 fn hex(value: &str, len: usize) -> bool {
@@ -1455,9 +1455,87 @@ fn endpoint_network<'a>(
 }
 
 /// Read-only recovery inspection; historical ready phase is not a current health assertion.
+/// Read-only inspection of one owned graph attempt.
+///
+/// A run whose active, archived and consumed journals are all exactly absent and
+/// whose foreground owner is not published refuses `graph_unreserved` before any
+/// guest access. Absence is a point-in-time observation: only a caller that
+/// separately proved its own consumer settled may treat it as "never reserved"
+/// (for example a foreground start refused before admission). Every other journal
+/// state keeps the ordinary receipt validation.
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
+    #[cfg(target_os = "macos")]
+    if unreserved(candidate, run)? {
+        return Err(error(
+            "graph_unreserved",
+            "No runtime state was reserved for this graph attempt: no journal exists and no foreground owner is published. Nothing was created, repaired or adopted.",
+        ));
+    }
     let engine = Engine::connect_cleanup(candidate)?;
     inspect_using(candidate, &engine, run)
+}
+
+/// Lock-free current service states for one owned graph attempt.
+///
+/// For observers that must not contend with an operation holding the provider
+/// lease, such as a foreground `up` reporting service exits while `exec` runs.
+/// It takes no lease, issues only engine GETs, verifies each recorded container's
+/// ownership labels and identity, runs no probes and grants no authority: the
+/// result is a point-in-time observation (`running` health is the engine's own).
+#[cfg(target_os = "macos")]
+pub fn observe(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
+    let observer = super::engine::Observer::connect(candidate)?;
+    let (receipt, _) = load_at(directory(candidate, run)?, run, observer.incarnation())?;
+    let mut services = serde_json::Map::new();
+    for resource in receipt
+        .resources
+        .values()
+        .filter(|resource| resource.kind == Kind::Container)
+    {
+        let state = match resource.id.as_deref() {
+            None => json!({"state":"absent"}),
+            Some(id) => match observer.get(&format!("/v1.53/containers/{id}/json")) {
+                Ok(value) => {
+                    verify_resource_identity(&receipt, resource, &value)?;
+                    match observation(&value) {
+                        Ok(observed) => serde_json::to_value(observed).map_err(|_| {
+                            error("graph_output", "Cannot encode graph observation.")
+                        })?,
+                        // A restarting or paused container is neither running nor stopped.
+                        Err(_) => json!({"state":"unknown"}),
+                    }
+                }
+                Err(error) if error.code == "engine_not_found" => json!({"state":"absent"}),
+                Err(error) => return Err(error),
+            },
+        };
+        services.insert(resource.key.clone(), state);
+    }
+    Ok(json!({"run":receipt.run,"phase":receipt.phase,"services":services}))
+}
+
+/// A foreground start binds its publication before it creates the journal, so
+/// the journal is checked on both sides of the publication check.
+#[cfg(target_os = "macos")]
+fn unreserved(candidate: &Candidate, run: &str) -> Result<bool, CandidateError> {
+    let absent = |path: &std::path::Path| match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Ok(_) => Ok(false),
+        Err(error) => Err(state::io(error)),
+    };
+    let journals_absent = || -> Result<bool, CandidateError> {
+        Ok(absent(&directory(candidate, run)?)?
+            && absent(&archive::path(candidate, run)?)?
+            && absent(&retention::consumed(candidate, run)?)?)
+    };
+    if !journals_absent()? {
+        return Ok(false);
+    }
+    let publication = foreground::transport::root(candidate, run)?;
+    if !(absent(&publication.join("owner.json"))? && absent(&publication.join("control.sock"))?) {
+        return Ok(false);
+    }
+    journals_absent()
 }
 
 fn unchanged_normalized_review(
@@ -2172,7 +2250,8 @@ fn verify_images(
             return Err(error(
                 "graph_image",
                 "Pinned image architecture or implicit volumes are incompatible.",
-            ));
+            )
+            .with_service(&resource.key));
         }
         if private_services.contains(&resource.key) {
             image_process::apply_private(

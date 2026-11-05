@@ -479,7 +479,10 @@ fn cli(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
         }
         return Err(error(
             "graph_test_cli",
-            value["code"].as_str().unwrap_or("unknown CLI failure"),
+            value["code"]
+                .as_str()
+                .unwrap_or("unknown CLI failure")
+                .to_owned(),
         ));
     }
     serde_json::from_slice(&output.stdout).map_err(|_| error("graph_test", "Invalid CLI receipt."))

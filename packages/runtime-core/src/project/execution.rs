@@ -94,7 +94,7 @@ pub trait Driver {
     fn start(&mut self, service: &str) -> Result<(), CandidateError>;
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError>;
 }
-fn error(code: &'static str, message: &str) -> CandidateError {
+fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 impl Graph {
@@ -250,7 +250,7 @@ fn inspect(
     if state.failed() {
         return Err(error(
             "graph_service_failed",
-            &match state {
+            match state {
                 Observation::Exited { code } => format!(
                     "Owned graph service {name} exited with code {code}; no further services will start."
                 ),
@@ -261,7 +261,8 @@ fn inspect(
                     "Owned graph service {name} is unhealthy; no further services will start."
                 ),
             },
-        ));
+        )
+        .with_service(name));
     }
     Ok(state)
 }

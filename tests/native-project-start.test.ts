@@ -1867,6 +1867,107 @@ test("final inspection failure reports uncertainty without echoing arbitrary fai
   expect(events).not.toContain("remove");
 });
 
+test("a refusal before admission reports that nothing was retained, with the runtime reason", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.serve = async () => {
+    throw new ClosedCliError(
+      "Native graph startup was interrupted or failed (graph_image); inspect owned state before retrying. Service web: Pinned image architecture or implicit volumes are incompatible."
+    );
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "inspect") {
+      throw new NativeRuntimeRequestError({
+        message:
+          "Native runtime request failed (graph_unreserved); inspect owned state before retrying.",
+        nativeCode: "graph_unreserved",
+      });
+    }
+    return invoke(request);
+  };
+  const failure = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect(failure).toBeInstanceOf(ClosedCliError);
+  expect((failure as Error).message).toBe(
+    "Native graph startup failed before any runtime state was reserved; nothing was retained. Startup diagnostic: Native graph startup was interrupted or failed (graph_image). Service web: Pinned image architecture or implicit volumes are incompatible."
+  );
+  expect(events).not.toContain("save");
+  expect(events).not.toContain("remove");
+  expect(events.at(-1)).toBe("cleanup");
+});
+
+test("an unreserved inspection without a settled startup failure stays uncertain", async () => {
+  const { opts } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let inspections = 0;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "inspect" && ++inspections === 2) {
+      throw new NativeRuntimeRequestError({
+        message: "unreserved",
+        nativeCode: "graph_unreserved",
+      });
+    }
+    return invoke(request);
+  };
+  const failure = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect((failure as Error).message).toContain("cleanup is unconfirmed");
+});
+
+test("foreground up reports a stopped service and ends like Compose once all services stopped", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let run = "";
+  opts.dependencies.exitMonitorIntervalMs = 1;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "observe") {
+      events.push("graph observe");
+      return {
+        run,
+        phase: "ready-observed",
+        services: { web: { state: "exited", code: 2 } },
+      };
+    }
+    return invoke(request);
+  };
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (args) => {
+    run = args.run;
+    return await serve({
+      ...args,
+      onReady: async () => {
+        await args.onReady();
+        await new Promise((resolve) =>
+          args.signal?.addEventListener("abort", resolve, { once: true })
+        );
+      },
+    });
+  };
+  const progress: string[] = [];
+  expect(
+    await startNativeProject({
+      ...opts,
+      onProgress: (event) =>
+        progress.push(
+          event.phase === "service-exited"
+            ? `${event.service}:${event.state}:${"code" in event ? event.code : ""}`
+            : event.phase
+        ),
+    })
+  ).toBe(0);
+  expect(progress.slice(progress.indexOf("ready"))).toEqual([
+    "ready",
+    "web:exited:2",
+    "all-stopped",
+    "stopping",
+    "stopped",
+  ]);
+  expect(events).toContain("graph observe");
+  expect(events.at(-1)).toBe("cleanup");
+});
+
 test("HTTPS route paths come only from reviewed native probes and conflicts refuse", () => {
   const service = (path: string) => ({
     routing: { hostnames: ["web.example.com"] },

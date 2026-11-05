@@ -84,7 +84,7 @@ const RECORD: &str = "prepared-base.json";
 const PENDING: &str = "prepared-base.json.pending";
 const TEMPLATE_DIR: &str = "home/.smolvm";
 
-fn error(code: &'static str, message: impl Into<String>) -> CandidateError {
+fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 

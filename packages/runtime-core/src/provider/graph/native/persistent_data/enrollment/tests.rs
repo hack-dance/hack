@@ -332,7 +332,8 @@ fn adapter_errors_are_normalized_before_return_including_ambiguous_original_crea
             serde_json::to_value(&error).unwrap(),
             json!({
                 "code": "native_persistent_data_enrollment",
-                "message": "Persistent data enrollment is incomplete, ambiguous or changed; retained data was not adopted or deleted."
+                "message": "Persistent data enrollment is incomplete, ambiguous or changed; retained data was not adopted or deleted.",
+                "message_fixed": true
             })
         );
         assert!(!serde_json::to_string(&error).unwrap().contains("private-"));

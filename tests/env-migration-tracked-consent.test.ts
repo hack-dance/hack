@@ -361,6 +361,36 @@ for (const route of ["implicit", "doctor"] as const) {
 }
 
 test(
+  "implicit migration keeps a .env when a variable env_file path hides what Compose interpolates",
+  async () => {
+    // The Compose file never names the key; the env_file it selects through a
+    // variable does, and this check can't tell which file that is.
+    const project = await createProject({
+      compose:
+        'services:\n  api:\n    image: alpine:3.20\n    env_file: "${API_ENV_FILE:-./api.env}"\n',
+      contract: SERVICE_SCOPED_CONTRACT,
+    });
+    await writeFile(
+      join(project.projectDir, "api.env"),
+      `IMAGE_TAG=\${${KEY}}\n`
+    );
+
+    const run = await runImplicit(project);
+
+    expect(run.exitCode, run.output).toBe(0);
+    expect(run.output).not.toContain(VALUE);
+    expect(run.output).toContain(
+      `Kept .hack/.env: Compose interpolates ${KEY}, which the env layers now set only for a service`
+    );
+    expect(run.output).not.toContain("Removed .hack/.env");
+    expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
+      `${KEY}=${VALUE}\n`
+    );
+  },
+  CLI_TEST_TIMEOUT_MS
+);
+
+test(
   "a service-scoped key Compose doesn't interpolate still drops the plaintext copy",
   async () => {
     const project = await createProject({

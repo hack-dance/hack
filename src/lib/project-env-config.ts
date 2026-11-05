@@ -5973,13 +5973,14 @@ function assertNoComposeToolKeys(opts: {
 
 /**
  * Text of each non-legacy `env_file`, because Compose expands variables inside
- * those files too. An absent file adds nothing; an unreadable one was refused
- * by {@link composeEnvFileKeyConflicts}.
+ * those files too. An absent file adds nothing. An unreadable one returns null,
+ * so a caller can't mistake it for a file that names nothing; the refusal path
+ * already refused it in {@link composeEnvFileKeyConflicts}.
  */
 async function composeOtherEnvFileText(opts: {
   readonly projectDir: string;
   readonly services: Record<string, unknown>;
-}): Promise<string> {
+}): Promise<string | null> {
   const paths = new Set(
     composeServiceEntries(opts.services).flatMap(([, rawService]) =>
       readComposeEnvFilePaths({ rawService })
@@ -5996,7 +5997,10 @@ async function composeOtherEnvFileText(opts: {
   const texts: string[] = [];
   for (const path of paths) {
     const read = await readOptionalTextFile(path);
-    if (read.kind !== "absent" && read.kind !== "unreadable") {
+    if (read.kind === "unreadable") {
+      return null;
+    }
+    if (read.kind === "text") {
       texts.push(read.text);
     }
   }
@@ -6279,10 +6283,12 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
     projectDir: opts.projectDir,
   });
   const referenced = composeReferencedOverlayKeys({
-    searchText: `${JSON.stringify(parsed)}\n${await composeOtherEnvFileText({
-      projectDir: opts.projectDir,
-      services,
-    })}`,
+    searchText: `${JSON.stringify(parsed)}\n${
+      (await composeOtherEnvFileText({
+        projectDir: opts.projectDir,
+        services,
+      })) ?? ""
+    }`,
     legacyValues: opts.legacyValues,
     defaultOverlay,
   });
@@ -8280,8 +8286,10 @@ async function readLegacyDotenvCleanupEntries(opts: {
  * `env_file` it names (Compose expands variables there too), or when it is one
  * of Compose's own `COMPOSE_*` settings. Matching the name anywhere keeps the
  * file more often than it must, which is the safe direction. When the Compose
- * input can't be fully read here (unreadable, not one YAML document, or using
- * `include` or `extends`), every service-only key counts. Key names only.
+ * input can't be fully read here (an unreadable file, not one YAML document, or
+ * an input {@link uncheckableComposeEnvInputs} names, such as `include`,
+ * `extends` or an `env_file` path with a variable), every service-only key
+ * counts. Key names only.
  */
 async function composeInterpolatedServiceOnlyKeys(opts: {
   readonly projectDir: string;
@@ -8313,19 +8321,28 @@ async function composeInterpolatedServiceOnlyKeys(opts: {
   }
   const parsed =
     composeRead.kind === "text" ? await readComposeFile({ composeFile }) : null;
-  const services = parsed ? (getRecord(parsed, "services") ?? {}) : {};
+  if (composeRead.kind !== "text" || parsed === null) {
+    return composeRead.kind === "text" && composeRead.text.trim().length === 0
+      ? new Set()
+      : new Set(serviceOnly);
+  }
+  const services = getRecord(parsed, "services") ?? {};
+  const otherEnvFileText = await composeOtherEnvFileText({
+    projectDir: opts.projectDir,
+    services,
+  });
   if (
-    composeRead.kind !== "text" ||
-    (parsed === null && composeRead.text.trim().length > 0) ||
-    (parsed !== null && "include" in parsed) ||
-    composeServiceEntries(services).some(([, service]) => "extends" in service)
+    otherEnvFileText === null ||
+    uncheckableComposeEnvInputs({
+      projectDir: opts.projectDir,
+      composeText: composeRead.text,
+      parsed,
+      services,
+    }).length > 0
   ) {
     return new Set(serviceOnly);
   }
-  const searchText = `${composeRead.text}\n${await composeOtherEnvFileText({
-    projectDir: opts.projectDir,
-    services,
-  })}`;
+  const searchText = `${composeRead.text}\n${otherEnvFileText}`;
   return new Set(
     serviceOnly.filter(
       // Keys match PROJECT_ENV_KEY_PATTERN, so they are safe in a pattern.

@@ -146,7 +146,7 @@ const PROJECT_ENV_IV_BYTES = 12;
 const PROJECT_ENV_TAG_BYTES = 16;
 /** Decoded ciphertext bound; a value never exceeds its 1 MiB env layer. */
 const PROJECT_ENV_CIPHERTEXT_LIMIT = NATIVE_CONFIG_INPUT_LIMIT;
-const PROJECT_ENV_SECRET_KEY_ENV = "HACK_ENV_SECRET_KEY";
+export const PROJECT_ENV_SECRET_KEY_ENV = "HACK_ENV_SECRET_KEY";
 export const PROJECT_ENV_HOST_SCOPE = "host" as const;
 
 type ProjectEnvScalar = string | number | boolean;
@@ -4116,11 +4116,19 @@ async function resolveProjectEnvKey(opts: {
     const searchedPaths = [keyPath, sharedKeyPath]
       .filter((value): value is string => typeof value === "string")
       .join(" or ");
-    throw new Error(
+    throw new ProjectEnvKeyMissingError(
       `Missing project env key at ${searchedPaths}. Run "hack env add --secret ..." to generate it, restore the key file, or set ${PROJECT_ENV_SECRET_KEY_ENV}.`
     );
   }
   return null;
+}
+
+/**
+ * Secret env entries exist but no project env key was found. The message names
+ * the searched key paths and the next action; it never carries key or env values.
+ */
+export class ProjectEnvKeyMissingError extends Error {
+  override readonly name = "ProjectEnvKeyMissingError";
 }
 
 /** Native reads preserve this owner's local/shared/primary/environment key priority without mutation. */

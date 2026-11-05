@@ -753,6 +753,74 @@ test("cancellation after readiness retains mapping when data is preserved", asyn
   expect(events.at(-1)).toBe("cleanup");
 });
 
+test("foreground reports progress, one ready line after publication, and the stop sequence", async () => {
+  const { opts, events } = await fixture();
+  const controller = new AbortController();
+  const original = opts.dependencies.serve;
+  opts.dependencies.serve = async (args) => {
+    await original?.(args);
+    controller.abort();
+    throw new Error("cancelled after ready");
+  };
+  const progress: string[] = [];
+  expect(
+    await startNativeProject({
+      ...opts,
+      signal: controller.signal,
+      onProgress: (event) => {
+        events.push(`progress:${event.phase}`);
+        progress.push(
+          "services" in event
+            ? `${event.phase}:${event.services.join(",")}`
+            : event.phase
+        );
+      },
+    })
+  ).toBe(130);
+  expect(progress).toEqual([
+    "input",
+    "runtime",
+    "images",
+    "services:web",
+    "ready:web",
+    "stopping",
+    "stopped",
+  ]);
+  // The ready line follows mapping publication and the lifecycle ready hook.
+  expect(events.indexOf("progress:ready")).toBeGreaterThan(
+    events.indexOf("save")
+  );
+  expect(events.indexOf("progress:ready")).toBeGreaterThan(
+    events.indexOf("ready")
+  );
+});
+test("a throwing progress observer never changes foreground startup", async () => {
+  const { opts } = await fixture();
+  expect(
+    await startNativeProject({
+      ...opts,
+      onProgress: () => {
+        throw new Error("observer failure");
+      },
+    })
+  ).toBe(0);
+});
+test("a startup failure before readiness prints no ready or stopped line", async () => {
+  const { opts } = await fixture();
+  opts.dependencies.serve = async () => {
+    throw new Error("startup failed");
+  };
+  const progress: string[] = [];
+  await expect(
+    startNativeProject({
+      ...opts,
+      onProgress: (event) => progress.push(event.phase),
+    })
+  ).rejects.toThrow();
+  expect(progress).not.toContain("ready");
+  expect(progress).not.toContain("stopped");
+});
+
 test("projects without managed values omit the private environment envelope", async () => {
   const { opts, events } = await fixture(false);
   expect(await startNativeProject(opts)).toBe(0);

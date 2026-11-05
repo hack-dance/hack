@@ -890,6 +890,40 @@ async function requireAcknowledgedRetainedFinalization(opts: {
   }
 }
 /** Explicit unfiltered project sharing; foreground only. Native refusal never falls back to Compose. */
+/**
+ * Value-free foreground progress for the terminal. `services` are the reviewed
+ * service names. Observation only: a throwing observer never changes startup.
+ */
+export type NativeStartupProgress =
+  | { readonly phase: "input" | "runtime" | "images" | "stopping" | "stopped" }
+  | {
+      readonly phase: "services" | "ready";
+      readonly services: readonly string[];
+    };
+
+function progressReporter(
+  observe: ((event: NativeStartupProgress) => void) | undefined
+): (event: NativeStartupProgress) => void {
+  return (event) => {
+    try {
+      observe?.(event);
+    } catch {
+      // Progress is advisory terminal output.
+    }
+  };
+}
+
+/** After confirmed cleanup, an interrupted foreground graph has stopped. */
+function reportStopped(
+  progress: (event: NativeStartupProgress) => void,
+  signal: AbortSignal,
+  infrastructureFailure: Error | undefined
+): void {
+  if (signal.aborted && !infrastructureFailure) {
+    progress({ phase: "stopped" });
+  }
+}
+
 export async function startNativeProject(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
@@ -920,8 +954,11 @@ export async function startNativeProject(opts: {
     readonly fingerprint: ComposeEnvFingerprintRecord;
   }) => Promise<void>;
   readonly signal?: AbortSignal;
+  /** Foreground progress and the ready line; see {@link NativeStartupProgress}. */
+  readonly onProgress?: (event: NativeStartupProgress) => void;
   readonly dependencies?: Partial<Dependencies>;
 }): Promise<number> {
+  const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
   requireActiveStartup(opts.signal);
   const allowedHosts = validateNativeAllowedHosts(opts.allowedHosts);
@@ -967,6 +1004,7 @@ export async function startNativeProject(opts: {
     requireActiveStartup(opts.signal);
   }
   const profiles = selection.profiles;
+  progress({ phase: "input" });
   await preflightNativeProjectSource({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
@@ -1045,6 +1083,11 @@ export async function startNativeProject(opts: {
     interruptedExit = 143;
     cancel();
   };
+  controller.signal.addEventListener(
+    "abort",
+    () => progress({ phase: "stopping" }),
+    { once: true }
+  );
   process.on("SIGINT", cancel);
   process.on("SIGTERM", terminate);
   opts.signal?.addEventListener("abort", cancel, { once: true });
@@ -1096,6 +1139,7 @@ export async function startNativeProject(opts: {
       load: deps.load,
     });
     requireActiveStartup(controller.signal);
+    progress({ phase: "runtime" });
     await deps.invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
@@ -1172,6 +1216,7 @@ export async function startNativeProject(opts: {
       restore,
       invoke: deps.invoke,
     });
+    progress({ phase: "images" });
     await pinNativeProjectImages({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
@@ -1271,6 +1316,8 @@ export async function startNativeProject(opts: {
           let code = 1;
           let serveFailure: unknown;
           let nativeExitCode: string | undefined;
+          const services = Object.keys(specs).sort();
+          progress({ phase: "services", services });
           try {
             code = await deps.serve({
               runtime: opts.runtime,
@@ -1400,6 +1447,7 @@ export async function startNativeProject(opts: {
                 }
                 await hooks?.ready?.();
                 await opts.onReady?.();
+                progress({ phase: "ready", services });
               },
             });
           } catch (error) {
@@ -1436,6 +1484,7 @@ export async function startNativeProject(opts: {
             scope: opts.scope,
             remove: deps.remove,
           });
+          reportStopped(progress, controller.signal, httpsFailure);
           return foregroundExitCode({
             aborted: controller.signal.aborted,
             interruptedExit,

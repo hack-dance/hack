@@ -510,3 +510,138 @@ test("logs refuse a stopped runtime with a closed, coded error", async () => {
     })
   ).rejects.toThrow("(engine_protocol)");
 });
+test("ps reports a busy runtime after bounded lease retries instead of failing", async () => {
+  const opts = await fixture();
+  let calls = 0;
+  const started = performance.now();
+  expect(
+    await nativeProjectPs({
+      ...opts,
+      invoke: () => {
+        calls++;
+        return Promise.reject(nativeRefusal("provider_busy"));
+      },
+    })
+  ).toEqual({
+    backend: "native",
+    status: "runtime_busy",
+    run: run.run,
+    phase: null,
+    items: [],
+  });
+  // Read-only inspection retried lease contention for its bounded budget only.
+  expect(calls).toBeGreaterThan(1);
+  expect(performance.now() - started).toBeLessThan(10_000);
+});
+test("ps and logs observe after brief lease contention without failing", async () => {
+  const opts = await fixture();
+  let busy = 1;
+  const invoke = async (request: { args: readonly string[] }) => {
+    if (request.args[1] === "inspect" && busy-- > 0) {
+      throw nativeRefusal("provider_busy");
+    }
+    if (request.args[1] === "inspect") {
+      return snapshot();
+    }
+    return { container: id, stdout: "out\n", stderr: "", truncated: false };
+  };
+  expect(await nativeProjectPs({ ...opts, invoke })).toMatchObject({
+    status: "observed",
+    items: [{ service: "web", state: "running" }],
+  });
+  busy = 1;
+  expect(
+    await nativeProjectLogs({
+      ...opts,
+      invoke,
+      service: "web",
+      follow: false,
+      tail: 20,
+    })
+  ).toMatchObject({ stdout: "out\n" });
+});
+test("plain native ps explains a busy runtime and shows exit codes like Compose", async () => {
+  const { writeFile, chmod } = await import("node:fs/promises");
+  const { resolve } = await import("node:path");
+  const opts = await fixture();
+  await writeFile(
+    join(opts.scope.projectDir, "hack.config.json"),
+    '{"name":"native-observe"}'
+  );
+  await writeFile(
+    join(opts.scope.projectDir, "docker-compose.yml"),
+    "services:\n  web:\n    image: example:public\n"
+  );
+  const exited = snapshot();
+  exited.observations["container:web"] = {
+    state: "exited",
+    code: 3,
+  } as never;
+  const binary = join(opts.scope.projectRoot, "fake-native");
+  const marker = join(opts.scope.projectRoot, "busy");
+  await writeFile(
+    binary,
+    `#!/bin/sh
+if [ -e '${marker}' ]; then
+  echo '{"code":"provider_busy","message":"Another candidate operation holds the provider lock."}' >&2
+  exit 2
+fi
+if [ "$3" = graph ] && [ "$4" = inspect ]; then
+  cat <<'JSON'
+${JSON.stringify(exited)}
+JSON
+  exit 0
+fi
+exit 2
+`
+  );
+  await chmod(binary, 0o700);
+  const ps = async () => {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "../index.ts"),
+        "ps",
+        "--path",
+        opts.scope.projectRoot,
+      ],
+      {
+        env: {
+          PATH: "/usr/bin:/bin",
+          HOME: opts.scope.projectRoot,
+          HACK_HOME: join(opts.scope.projectRoot, "isolated-global"),
+          HACK_RUNTIME_BACKEND: "native",
+          HACK_NATIVE_BINARY: binary,
+          HACK_NATIVE_HOME: opts.scope.nativeHome,
+          HACK_LOGGER: "console",
+          HACK_DAEMON_AUTOSTART_DISABLE: "1",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
+    try {
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      return { stdout, stderr, code };
+    } finally {
+      clearTimeout(timer);
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  };
+  const observed = await ps();
+  expect(observed.code).toBe(0);
+  expect(observed.stdout).toContain("exited (3)");
+  await writeFile(marker, "");
+  const busy = await ps();
+  expect(busy.code).toBe(0);
+  expect(busy.stderr).toContain(
+    "Native runtime is busy with another operation"
+  );
+  expect(busy.stderr).not.toContain("provider_busy");
+}, 60_000);

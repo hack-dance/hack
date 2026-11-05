@@ -1,6 +1,10 @@
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  inspectNativeProjectGraph,
+  isNativeProviderBusy,
+} from "./native-project-inspect.ts";
+import {
   loadNativeProjectRun,
   type NativeProjectRun,
   type NativeProjectRunScope,
@@ -42,11 +46,14 @@ function runtimeNotRunning(): HackCliError {
 /**
  * Native ps result. `runtime_not_running` means the project has an owned run
  * mapping but the candidate runtime is stopped: nothing was observed, so
- * `phase` is null and `items` is empty.
+ * `phase` is null and `items` is empty. `runtime_busy` means another operation
+ * held the exclusive provider lease for the whole bounded read (a starting
+ * foreground `up` holds it until its graph is ready): nothing was observed either.
  */
 export type NativeProjectPsStatus =
   | "not_started"
   | "runtime_not_running"
+  | "runtime_busy"
   | "observed"
   | "owner_unconfirmed"
   | "runtime_degraded";
@@ -128,16 +135,29 @@ function containerItem(
     exitCode: typeof observation.code === "number" ? observation.code : null,
   };
 }
+/** Read-only inspection retries brief provider lease contention, never effects. */
 async function inspect(opts: Options, run: NativeProjectRun) {
   return inspected(
-    await (opts.invoke ?? invokeNativeRuntime)({
+    await inspectNativeProjectGraph({
       runtime: opts.runtime,
-      cwd: opts.scope.projectRoot,
-      args: ["graph", "inspect", "--run-id", run.run, "--json"],
-      timeoutMs: 30_000,
+      projectRoot: opts.scope.projectRoot,
+      run: run.run,
+      invoke: opts.invoke,
     }),
     run
   );
+}
+/** Ordinary states in which nothing was observed; every other refusal rethrows. */
+function unobservedStatus(
+  error: unknown
+): "runtime_not_running" | "runtime_busy" {
+  if (isNativeRuntimeNotRunning(error)) {
+    return "runtime_not_running";
+  }
+  if (isNativeProviderBusy(error)) {
+    return "runtime_busy";
+  }
+  throw error;
 }
 /**
  * Historical receipt phase is separated from current per-service observations.
@@ -161,12 +181,9 @@ export async function nativeProjectPs(
   try {
     snapshot = await inspect(opts, run);
   } catch (error: unknown) {
-    if (!isNativeRuntimeNotRunning(error)) {
-      throw error;
-    }
     return {
       backend: "native",
-      status: "runtime_not_running",
+      status: unobservedStatus(error),
       run: run.run,
       phase: null,
       items: [],

@@ -262,6 +262,16 @@ Native `up` and `restart` also stay in the foreground in every project:
 keep it open, use `hack ps` and `hack logs` from another terminal, and press
 Ctrl-C to stop it. For detached startup, use the Compose backend.
 
+Foreground image-project `up` prints each startup step (input, runtime, images,
+services) and one ready line, `Project is ready (SERVICES)`, after the graph is
+ready and its run mapping is published. Ctrl-C prints the stop sequence and
+`Native project stopped.` once owned cleanup is confirmed. Until the ready line,
+startup holds the runtime's exclusive provider lease, so graph admission cannot
+interleave with another operation. A `hack ps` from another terminal during that
+window waits briefly, then reports that the runtime is busy (`runtime_busy`,
+exit 0) instead of failing. After the ready line, `hack ps` and `hack logs` run
+alongside the foreground command.
+
 ## Manual candidate upgrade and rollback
 
 Manual candidate bundles are selected by their full path. The separate
@@ -744,15 +754,20 @@ Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `hack logs SERVICE --no-follow`. They verify the project/branch run mapping
 against the current native graph. Logs do not support following or Loki options.
 A project with no admitted mapping reports not started. `hack ps` keeps container
-observations separate from the last graph receipt. For a ready foreground graph,
+observations separate from the last graph receipt; an exited container's state
+shows its exit code, as in Compose (`exited (1)`). For a ready foreground graph,
 it also checks the live owner: `owner_unconfirmed` means the
 owner could not be authenticated, while `runtime_degraded` means its runtime check
 failed. A stopped candidate runtime is an ordinary state for `ps`: with a mapping
 present it exits 0 and reports `runtime_not_running` (no phase, no service rows),
 and text output prints "Native runtime is not running; no services are running."
+A provider lease held for the whole bounded read, for example by a starting
+foreground `up`, is also an ordinary state: `ps` exits 0 and reports
+`runtime_busy` (no phase, no service rows). Reads retry brief lease contention.
 `hack ps --json` prints the standard `{ok: true, data}` envelope; `data` holds
-`backend: "native"`, `status` (`not_started`, `runtime_not_running`, `observed`,
-`owner_unconfirmed` or `runtime_degraded`), `run`, `phase` and `items`. Bounded
+`backend: "native"`, `status` (`not_started`, `runtime_not_running`,
+`runtime_busy`, `observed`, `owner_unconfirmed` or `runtime_degraded`), `run`,
+`phase` and `items`. Bounded
 logs refuse a stopped runtime with `E_DOCKER_UNAVAILABLE` and exit 1. Native `exec` and `run` refresh admitted host dependencies once before
 command selection and managed environment preparation. They proceed only with
 fresh ownership and runtime proof, even if containers still appear running.
@@ -779,7 +794,12 @@ form: run `hack up` in the foreground in its own terminal and use `hack ps` and
 `hack logs` from another. Routed services and host dependencies require the
 explicit native selections described below. Unsupported Compose or environment input
 (for example a service `env_file`, or a project `.env` without managed env) and
-unreviewed route labels refuse with `E_NATIVE_PROJECT_UNSUPPORTED`; invalid branch
+unreviewed route labels refuse with `E_NATIVE_PROJECT_UNSUPPORTED`. The input
+refusal names its cause and, where known, the service and Compose field (for
+example `service api field env_file`), never values or file contents. Secret
+managed env without a project env key refuses with `E_CONFIG_INVALID` and names the
+recovery actions; other unreadable managed env refuses with `E_CONFIG_INVALID`
+without layer excerpts. Invalid branch
 hosts, project adaptations, AWS selections and changed fresh-exec environments refuse
 with `E_CONFIG_INVALID`, as do an unbounded `--profile` selection, a malformed
 `HACK_NATIVE_DEPENDENCIES` listener selection and an occupied HTTPS port. A runtime

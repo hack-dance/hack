@@ -685,6 +685,9 @@ struct FakeState {
     fail_start: bool,
     fail_delete: bool,
     fail_stop: bool,
+    /// Stops every selected instance except the last N, which report a connect failure.
+    unreachable_stops: usize,
+    stop_selections: Vec<usize>,
     fail_network_create: bool,
     fail_network_after_apply: bool,
     fail_network_delete_after_apply: bool,
@@ -1003,6 +1006,9 @@ impl Backend for Fake {
         assert_eq!(self.receipt().phase, Phase::StopIntent);
         let mut state = self.state.borrow_mut();
         state.stop_batches += 1;
+        state.stop_selections.push(selected.len());
+        let reached = selected.len().saturating_sub(state.unreachable_stops);
+        let (selected, unreachable) = selected.split_at(reached);
         if state.fail_stop {
             return Err(super::super::super::shutdown::stop_error(
                 crate::provider::engine::StopBatchFailure {
@@ -1030,6 +1036,21 @@ impl Backend for Fake {
         }
         if let Some(canceled) = &state.cancel_after_stop {
             canceled.set(true);
+        }
+        if !unreachable.is_empty() {
+            return Err(super::super::super::shutdown::stop_error(
+                crate::provider::engine::StopBatchFailure {
+                    error: error("engine_protocol", "value-free connect refusal"),
+                    failures: unreachable
+                        .iter()
+                        .map(|(id, _)| crate::provider::engine::StopFailure {
+                            id: id.clone(),
+                            stage: crate::error::StopFailureStage::Connect,
+                        })
+                        .collect(),
+                },
+                admitted,
+            ));
         }
         Ok(())
     }
@@ -1860,6 +1881,73 @@ fn native_stop_failure_keeps_reservation_and_maps_only_owned_ids_to_workload_nam
     session.backend.state.borrow_mut().fail_stop = false;
     cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
     assert_eq!(session.receipt.phase, Phase::Removed);
+}
+
+fn fourteen_services() -> (Value, Value) {
+    let names = (0..14).map(|n| format!("svc{n:02}")).collect::<Vec<_>>();
+    let services = names
+        .iter()
+        .map(|name| {
+            (
+                name.clone(),
+                json!({"image":image(),"command":{"exec":["/bin/echo","$EXACT"]}}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let metadata = names
+        .iter()
+        .map(|name| (name.clone(), json!({})))
+        .collect::<serde_json::Map<_, _>>();
+    (
+        json!({"schema_version":1,"name":"fixture","services":services}),
+        Value::Object(metadata),
+    )
+}
+
+#[test]
+fn fourteen_service_connect_failures_keep_resumable_progress_and_retry_only_unstopped() {
+    let (project, metadata) = fourteen_services();
+    let fixture = Fixture::new(project);
+    let (graph, mut session) = fixture.session(fixture.prepared(metadata, &BTreeMap::new()));
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
+    session.backend.state.borrow_mut().unreachable_stops = 3;
+    let error = cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap_err();
+    assert_eq!(error.code, "engine_protocol");
+    let detail = error.stop_failures.as_ref().unwrap();
+    assert_eq!(detail.failures.len(), 3);
+    assert!(detail.failures.iter().all(|failure| failure.stage
+        == crate::error::StopFailureStage::Connect
+        && failure.service.starts_with("svc")));
+    assert_eq!(session.backend.receipt().phase, Phase::StopIntent);
+    assert!(
+        !session
+            .backend
+            .state
+            .borrow()
+            .effects
+            .iter()
+            .any(|effect| effect.starts_with("delete:"))
+    );
+    // The retry inspects every instance, stops only the three unreached ones,
+    // and completes cleanup without replaying the eleven committed stops.
+    session.backend.state.borrow_mut().unreachable_stops = 0;
+    cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+    assert_eq!(session.receipt.phase, Phase::Removed);
+    let state = session.backend.state.borrow();
+    assert_eq!(state.stop_selections, vec![14, 3]);
+    let stops = state
+        .effects
+        .iter()
+        .filter(|effect| effect.starts_with("stop:"))
+        .collect::<Vec<_>>();
+    assert_eq!(stops.len(), 14);
+    assert_eq!(
+        stops
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        14
+    );
 }
 
 #[test]

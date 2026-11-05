@@ -1317,7 +1317,10 @@ host dependency binding; configuration was not dropped."), before any runtime
 work; with no dependency selection at all it refuses before lifecycle hooks.
 An entry whose target is not `host-gateway` (for example a fixed address), a name
 that is not an exact lowercase DNS name, or a service that already maps the name
-to a different target also refuses. Earlier native builds ignored these entries,
+to a different target also refuses. Service-declared names are matched in the
+form native review compiles them to (one trailing dot removed, lowercased), so a
+service that declares `API.Example.` is covered by a binding for `api.example` and
+does not receive a second spelling. Earlier native builds ignored these entries,
 which let a container resolve the public name instead of the local listener.
 Native reads these aliases before lifecycle hooks, because they are part of the
 reviewed configuration; unlike the Compose backend, a hook that changes them makes

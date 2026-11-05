@@ -67,6 +67,32 @@ function exactAlias(value: string): boolean {
   );
 }
 
+const ASCII = /^[\x20-\x7e]*$/;
+
+/**
+ * The name native review compiles a service-declared extra host to, with the
+ * runtime's `normalize_hostname` semantics: strip one trailing dot, lowercase
+ * ASCII, and require an exact DNS name (not an address). Returns null for a
+ * name this check cannot canonicalize (for example an `${...}` reference the
+ * runtime resolves later); native admission still enforces exact alias and
+ * binding equality for those.
+ */
+function canonicalHostName(value: string): string | null {
+  if (!ASCII.test(value)) {
+    return null;
+  }
+  const name = (value.endsWith(".") ? value.slice(0, -1) : value).toLowerCase();
+  if (
+    name.length === 0 ||
+    name.length > 253 ||
+    NUMERIC_HOST.test(name) ||
+    !name.split(".").every((label) => LABEL.test(label))
+  ) {
+    return null;
+  }
+  return name;
+}
+
 /**
  * Split one Compose `extra_hosts` value into (name, target) pairs, using the
  * first `:` or `=` like the native review does. Returns undefined for a shape
@@ -127,9 +153,11 @@ function declareOnService(
   if (!entries) {
     throw conflict();
   }
+  // Compare by the compiled name: `API.Example.` and `api.example` are one
+  // runtime alias, so adding the second spelling would duplicate it.
   const declared = new Map<string, string>();
   for (const [name, target] of entries) {
-    declared.set(name, target);
+    declared.set(canonicalHostName(name) ?? name, target);
   }
   const added: string[] = [];
   for (const alias of aliases) {
@@ -216,9 +244,12 @@ function activeService(
 }
 
 /**
- * The exact `host-gateway` aliases each profile-active service declares,
- * keyed by service. Inactive services are never scheduled and receive no
- * bindings, so they need none. Malformed declarations are left to review.
+ * The `host-gateway` aliases each profile-active service declares, keyed by
+ * service, in the canonical form native review compiles them to (see
+ * {@link canonicalHostName}), so a declared `API.Example.` matches a binding
+ * for `api.example`. Inactive services are never scheduled and receive no
+ * bindings, so they need none. Malformed or not-yet-resolved declarations are
+ * left to review and admission.
  */
 export function nativeServiceHostAliases(opts: {
   readonly services: Readonly<
@@ -231,11 +262,15 @@ export function nativeServiceHostAliases(opts: {
     if (!activeService(spec, opts.profiles)) {
       continue;
     }
-    const aliases = (extraHostEntries(spec.extra_hosts) ?? [])
-      .filter(([, target]) => target === "host-gateway")
-      .map(([alias]) => alias);
+    const aliases = new Set<string>();
+    for (const [alias, target] of extraHostEntries(spec.extra_hosts) ?? []) {
+      const canonical = canonicalHostName(alias);
+      if (target === "host-gateway" && canonical !== null) {
+        aliases.add(canonical);
+      }
+    }
     Object.defineProperty(result, name, {
-      value: aliases,
+      value: [...aliases],
       enumerable: true,
       writable: true,
       configurable: true,

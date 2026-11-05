@@ -219,6 +219,78 @@ test("host aliases are collected only for profile-active services", () => {
   });
 });
 
+test("service aliases are canonicalized like native review before matching bindings", () => {
+  const hostAliases = nativeServiceHostAliases({
+    services: {
+      web: { extra_hosts: ["API.Example.:host-gateway"] },
+      map: { extra_hosts: { "Search.EXAMPLE.test.": "host-gateway" } },
+      both: {
+        extra_hosts: ["api.example:host-gateway", "API.EXAMPLE.=host-gateway"],
+      },
+      // Resolved by the runtime later; admission checks these exactly.
+      later: { extra_hosts: ["${ALIAS}:host-gateway", "1.2.3.4:host-gateway"] },
+    },
+    profiles: [],
+  });
+  expect(hostAliases).toEqual({
+    web: ["api.example"],
+    map: ["search.example.test"],
+    both: ["api.example"],
+    later: [],
+  });
+  requireNativeHostAliasBindings({
+    dependencies: [
+      binding("web", ["api.example"]),
+      binding("map", ["search.example.test"]),
+      binding("both", ["api.example"]),
+    ],
+    hostAliases,
+  });
+  // A genuinely different name is still unbound.
+  expectCodedThrow(
+    () =>
+      requireNativeHostAliasBindings({
+        dependencies: [binding("web", ["api.example.test"])],
+        hostAliases: { web: hostAliases.web ?? [] },
+      }),
+    "E_NATIVE_PROJECT_UNSUPPORTED",
+    NATIVE_UNBOUND_HOST_ALIAS_REFUSAL
+  );
+});
+
+test("a project-wide alias another spelling already declares is not duplicated", () => {
+  const result = applyNativeInternalHostAliases({
+    input: input({
+      web: { image: "nginx", extra_hosts: ["API.Example.Test.:host-gateway"] },
+      map: {
+        image: "nginx",
+        extra_hosts: { "Api.example.test": "host-gateway" },
+      },
+    }),
+    hosts: { "api.example.test": "host-gateway" },
+    hasDependencySelection: true,
+  });
+  expect(services(result)).toEqual({
+    web: { image: "nginx", extra_hosts: ["API.Example.Test.:host-gateway"] },
+    map: {
+      image: "nginx",
+      extra_hosts: { "Api.example.test": "host-gateway" },
+    },
+  });
+  expectCodedThrow(
+    () =>
+      applyNativeInternalHostAliases({
+        input: input({
+          web: { image: "nginx", extra_hosts: ["API.Example.Test.:10.0.0.5"] },
+        }),
+        hosts: { "api.example.test": "host-gateway" },
+        hasDependencySelection: true,
+      }),
+    "E_CONFIG_INVALID",
+    "Native host alias selection conflicts with declared configuration; values omitted."
+  );
+});
+
 test("every active declared alias needs a binding of that same service", () => {
   const hostAliases = {
     web: ["api.example.test", "auth.example.test"],

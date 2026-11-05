@@ -102,6 +102,7 @@ Usage:
   hack-local runtime prepared-base status --profile research|development [--store <absolute-private-store>] [--json]
   hack-local runtime prepared-base remove --base-id <id> [--store <absolute-private-store>] [--json]
   hack-local runtime admit-image --reference <[namespace/]repository[:tag][@sha256:digest]|sha256:image-id> --json
+  hack-local runtime build-image --request <private-0600-request.json> --json
   hack-local runtime ensure-image --reference <[namespace/]repository[:tag]|[namespace/]repository@sha256:digest> --json
   hack-local runtime resolve-image --reference <[namespace/]repository[:tag]> --json
   hack-local runtime fetch-image --reference <[namespace/]repository@sha256:digest> --archive <new-flat-image.tar> [--json]
@@ -946,6 +947,13 @@ fn run() -> Result<(), CandidateError> {
             print_json(&hack_runtime_core::provider::image_ensure::ensure(
                 &discover_candidate(&requested)?,
                 reference,
+            )?)?;
+        }
+        ["runtime", "build-image", "--request", request, "--json"] => {
+            // Build output streams to stderr; only the result is printed on stdout.
+            print_json(&hack_runtime_core::provider::image_build::build_image(
+                &discover_candidate(&requested)?,
+                Path::new(request),
             )?)?;
         }
         ["runtime", "admit-image", "--reference", reference, "--json"] => {

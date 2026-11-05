@@ -311,6 +311,11 @@ pub fn prepare_builder(candidate: &Candidate, binary: &Path) -> Result<Artifact,
     prepare_binary(candidate, binary, &BUILDER)
 }
 
+/// The prepared BuildKit client executable. Callers run it only after `verify_builder`.
+pub fn builder_executable(candidate: &Candidate) -> PathBuf {
+    binary_root(candidate, &BUILDER).join(BUILDER.executable)
+}
+
 /// Verify the prepared BuildKit client before any use.
 pub fn verify_builder(candidate: &Candidate) -> Result<Artifact, CandidateError> {
     verify_binary(candidate, &BUILDER)

@@ -94,6 +94,7 @@ impl Transport {
         {
             return Err(failure("Invalid private engine request path."));
         }
+        require_owned_network(&method, path, body)?;
         let requires_admission = ![Method::GET, Method::HEAD, Method::DELETE].contains(&method);
         let mut request = self
             .client
@@ -125,6 +126,40 @@ impl Transport {
         let response = request.send().map_err(|_| failure("Engine request failed or timed out; its effect may be uncertain. No request was replayed."))?;
         response_bytes(response)
     }
+}
+
+/// Every container Hack creates names its network explicitly: an owned network, `none`
+/// or another container's namespace. Egress pools give the engine a default bridge that
+/// only BuildKit `RUN` steps may use (guest-daemon.sh); an unset, `default`, `bridge`
+/// or `host` mode, or a connect to the default bridge, would put a container on it or
+/// in the guest root namespace, so both refuse before dispatch.
+fn require_owned_network(
+    method: &Method,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<(), CandidateError> {
+    if *method != Method::POST {
+        return Ok(());
+    }
+    let route = path.split('?').next().unwrap_or(path);
+    let refused = || {
+        CandidateError::new(
+            "engine_network_refused",
+            "Containers must name an owned network or none; the engine default bridge is reserved for image builds.",
+        )
+    };
+    if route.ends_with("/containers/create") {
+        let mode = body
+            .and_then(|body| body["HostConfig"]["NetworkMode"].as_str())
+            .unwrap_or("");
+        if mode.is_empty() || ["default", "bridge", "host"].contains(&mode) {
+            return Err(refused());
+        }
+    }
+    if route.ends_with("/networks/bridge/connect") {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 // One minimum budget reaches dispatch. A later explicit deadline cannot replace
@@ -690,6 +725,38 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn containers_must_name_their_network_and_never_join_the_build_bridge() {
+        let create = |mode: Value| {
+            require_owned_network(
+                &Method::POST,
+                "/v1.53/containers/create?name=x",
+                Some(&serde_json::json!({"HostConfig": {"NetworkMode": mode}})),
+            )
+        };
+        for refused in [
+            Value::Null,
+            serde_json::json!(""),
+            serde_json::json!("default"),
+            serde_json::json!("bridge"),
+            serde_json::json!("host"),
+            serde_json::json!(7),
+        ] {
+            assert_eq!(create(refused).unwrap_err().code, "engine_network_refused");
+        }
+        for allowed in ["none", "hack-local-owned", "container:abc"] {
+            assert!(create(serde_json::json!(allowed)).is_ok());
+        }
+        assert!(require_owned_network(&Method::POST, "/v1.53/containers/create", None).is_err());
+        assert!(
+            require_owned_network(&Method::POST, "/v1.53/networks/bridge/connect", None).is_err()
+        );
+        assert!(
+            require_owned_network(&Method::POST, "/v1.53/networks/owned/connect", None).is_ok()
+        );
+        assert!(require_owned_network(&Method::GET, "/v1.53/networks/bridge", None).is_ok());
+    }
 
     #[test]
     fn explicit_request_budget_never_extends_mutation_admission() {

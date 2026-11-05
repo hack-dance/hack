@@ -1658,6 +1658,21 @@ exit 43"#,
     }
     owner.save(candidate)?;
     engine_ping(&socket(candidate, owner, "docker.sock")?)?;
+    if network_mode != "isolated" {
+        // Build-bridge isolation is not a startup requirement: graph containers never
+        // join the default bridge. A failure leaves no readiness marker, and native
+        // image builds refuse on that pool (see `image_build::verify_build_network`).
+        let _ = guest(
+            candidate,
+            owner,
+            include_str!("guest-build-network.sh"),
+            &[
+                network_mode,
+                owner.guest_boot_id.as_deref().expect("verified boot"),
+            ],
+            false,
+        );
+    }
     phase(candidate, owner, "running")?;
     status(candidate)
 }
@@ -1817,6 +1832,8 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     }
     artifact::verify(candidate)?;
     let _lock = state::Lock::acquire(&root(candidate))?;
+    // Builds take their shared fence only under this lease, so none can start after this.
+    super::image_build::require_no_active_build(candidate)?;
     let mut owner = Owner::load(candidate)?;
     super::hostname_authority::managed::stop(candidate, &owner)?;
     super::publication::release(candidate, &owner.token, None)?;

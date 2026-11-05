@@ -478,8 +478,15 @@ The default private build includes native HTTP graph probes (local `_docs/docs/p
 and requires Zig 0.15.2 plus a host C compiler.
 [Provider pins](provider-pins.json) record the exact package inputs; the engine runs inside the VM.
 The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
-image-reference scanner (`provider/build_scan.rs`) prepare for native image builds;
-no command builds images yet.
+image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
+(`provider/image_build.rs`), which builds one Compose-style image in the guest engine
+from a private request file. Its build key, receipts, leases, the `runtime down`
+build fence, cancellation and timeout rules are documented in that module. Egress
+pools give dockerd a fixed default bridge (`10.213.255.0/24`, `icc=false`) that only
+BuildKit `RUN` steps use; `guest-build-network.sh` isolates it from the guest, the host
+gateway and link-local metadata, and the engine client refuses any container create
+that does not name an owned network or `none`. Native `up` does not call the build
+operation yet.
 
 Source binaries embed their build checkout. If a copied Cargo target directory
 retains a different checkout identity, use a fresh `--target-dir` for checks and

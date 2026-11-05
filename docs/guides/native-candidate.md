@@ -457,6 +457,35 @@ state and checks its code signature. If a prepared client exists, the command ch
 it again and does not replace it. If the prepared tree changes, `runtime probe`
 refuses; it reports `builder_prepared` when the client is present and unchanged.
 
+`runtime build-image --request <file> --json` builds one image in the running
+runtime's engine with that client. It is a building block: native `up` still refuses
+`build:` services and does not call it. The request is a private JSON file (a singly
+linked, mode-`0600` file owned by you), because build-argument values are in it:
+
+```json
+{"version": 1, "project_root": "/absolute/project", "context": "app",
+ "dockerfile": "Dockerfile", "target": null, "args": {"NAME": "literal"},
+ "policy": "missing", "timeout_seconds": 1800}
+```
+
+- The context and Dockerfile must be inside the project and reached without symlinks.
+  The Dockerfile is read, never run, to find every image it can pull. Each image must
+  be a public Docker Hub reference; it is pinned to a digest before the build starts.
+  Base images with stored `ONBUILD` triggers refuse.
+- Argument values reach the client only through its environment, never its command
+  line, receipts or output. Names that would change the client's own environment
+  (`PATH`, `HOME`, `DOCKER_*`, `BUILDX_*`, `BUILDKIT_*`, proxies, locale, Git and SSH
+  settings) refuse.
+- `missing` reuses a verified image for the same build key without running the client;
+  `rebuild` always builds. The key covers the Dockerfile and `.dockerignore` bytes,
+  target, arguments and versions, not the context's other files (as with Compose).
+- The runtime must have network egress and the isolated build network that a runtime
+  started by this version sets up. An older runtime refuses with
+  `native_build_runtime_restart`: stop it and start it again.
+- `runtime down` refuses while a build runs. Ctrl-C or SIGTERM cancels the build and
+  stops the client's whole process group; so does the time budget (default 30 minutes,
+  at most 2 hours).
+
 Before startup, network-tool preparation additionally requires all four pinned
 Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), with
 regular, singly linked mode-`0600` files. Acquire the matching public package bytes;

@@ -336,14 +336,26 @@ pub struct ResolvedImage {
 /// fetch must use pinned_reference: reusing the original tag would discard this review.
 pub fn resolve(reference_text: &str) -> Result<ResolvedImage, CandidateError> {
     let (repo, tag) = tagged_reference(reference_text)?;
-    let (repo, tag) = (repo.as_str(), tag.as_str());
+    resolve_manifest(&repo, &tag, None).map(|(resolved, _)| resolved)
+}
+
+/// Resolve one repository at a tag or digest to a Linux ARM64 image and its config bytes.
+/// `expected_source` binds a digest-pinned request to the manifest actually returned.
+fn resolve_manifest(
+    repo: &str,
+    reference: &str,
+    expected_source: Option<&str>,
+) -> Result<(ResolvedImage, Vec<u8>), CandidateError> {
     let fetch = authenticated_fetch(repo)?;
     let url = Url::parse(&format!(
-        "https://registry-1.docker.io/v2/{repo}/manifests/{tag}"
+        "https://registry-1.docker.io/v2/{repo}/manifests/{reference}"
     ))
     .map_err(|_| error("Invalid manifest address."))?;
     let initial = fetch.bytes(url, MAX_METADATA, true)?;
     let source_digest = digest(&initial);
+    if expected_source.is_some_and(|expected| expected != source_digest) {
+        return Err(error("Registry manifest digest or size mismatch."));
+    }
     let mut manifest = parse_manifest(&initial, &source_digest)?;
     let mut manifest_digest = source_digest.clone();
     if !manifest.manifests.is_empty() {
@@ -360,12 +372,66 @@ pub fn resolve(reference_text: &str) -> Result<ResolvedImage, CandidateError> {
         .ok_or_else(|| error("Image config descriptor is missing."))?;
     let config_bytes = fetch.object(repo, "blobs", &config, MAX_METADATA)?;
     verify_platform(&config_bytes)?;
-    Ok(ResolvedImage {
-        pinned_reference: format!("docker.io/{repo}@{source_digest}"),
-        source_digest,
-        manifest_digest,
-        image_id: config.digest,
-        platform: "linux/arm64",
+    Ok((
+        ResolvedImage {
+            pinned_reference: format!("docker.io/{repo}@{source_digest}"),
+            source_digest,
+            manifest_digest,
+            image_id: config.digest,
+            platform: "linux/arm64",
+        },
+        config_bytes,
+    ))
+}
+
+/// A base image a native build may pull, pinned to the exact manifest the registry
+/// served when the build was admitted.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BuildBase {
+    /// `docker.io/<repository>@<source digest>`: the only form handed to the builder.
+    pub pinned_reference: String,
+    /// Digest of the manifest or index the reference resolved to.
+    pub source_digest: String,
+    /// Content ID of the selected Linux ARM64 image.
+    pub image_id: String,
+}
+
+/// Resolve one normalized base-image reference for a native build. A tag resolves once
+/// to its current manifest; a digest-pinned reference must resolve to exactly that pin.
+/// Either way the image must offer exactly one Linux ARM64 image, and its configuration
+/// must declare no `ONBUILD` triggers: a stored trigger could pull images the Dockerfile
+/// scan never saw. No layers, credentials or runtime state are touched.
+pub fn resolve_build_base(named: &NamedReference) -> Result<BuildBase, CandidateError> {
+    let repo = named.docker_hub_repository().ok_or_else(|| {
+        error("Only public Docker Hub [namespace/]repository[:tag][@sha256] references are supported.")
+    })?;
+    let (reference, expected) = match (&named.digest, &named.tag) {
+        (Some(pin), _) => (pin.as_str(), Some(pin.as_str())),
+        (None, Some(tag)) => (tag.as_str(), None),
+        (None, None) => ("latest", None),
+    };
+    let (resolved, config) = resolve_manifest(repo, reference, expected)?;
+    if declares_onbuild(&config)? {
+        return Err(CandidateError::new(
+            "native_build_base_image",
+            "A build base image declares ONBUILD triggers; native builds refuse stored triggers.",
+        ));
+    }
+    Ok(BuildBase {
+        pinned_reference: resolved.pinned_reference,
+        source_digest: resolved.source_digest,
+        image_id: resolved.image_id,
+    })
+}
+
+/// Whether an image configuration carries stored `ONBUILD` triggers.
+fn declares_onbuild(config_bytes: &[u8]) -> Result<bool, CandidateError> {
+    let config: serde_json::Value =
+        serde_json::from_slice(config_bytes).map_err(|_| error("Invalid image configuration."))?;
+    Ok(match &config["config"]["OnBuild"] {
+        serde_json::Value::Null => false,
+        serde_json::Value::Array(triggers) => !triggers.is_empty(),
+        _ => return Err(error("Invalid image configuration.")),
     })
 }
 fn verify_platform(config_bytes: &[u8]) -> Result<(), CandidateError> {
@@ -503,6 +569,26 @@ fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stored_onbuild_triggers_are_detected_and_malformed_configs_refuse() {
+        assert!(!declares_onbuild(br#"{"config":{}}"#).unwrap());
+        assert!(!declares_onbuild(br#"{"config":{"OnBuild":null}}"#).unwrap());
+        assert!(!declares_onbuild(br#"{"config":{"OnBuild":[]}}"#).unwrap());
+        assert!(declares_onbuild(br#"{"config":{"OnBuild":["COPY --from=x / /"]}}"#).unwrap());
+        assert!(declares_onbuild(br#"{"config":{"OnBuild":"RUN x"}}"#).is_err());
+        assert!(declares_onbuild(b"not json").is_err());
+    }
+
+    #[test]
+    fn build_bases_accept_only_docker_hub_references() {
+        let named = |value: &str| match normalize(value).unwrap() {
+            ImageReference::Named(named) => named,
+            ImageReference::ImageId(_) => unreachable!(),
+        };
+        let error = resolve_build_base(&named("ghcr.io/example/app:1")).unwrap_err();
+        assert_eq!(error.code, "registry_image");
+    }
+
     #[test]
     fn publication_preserves_existing_output_and_failed_writes_leave_no_final_file() {
         static NEXT_TEST: AtomicU64 = AtomicU64::new(0);

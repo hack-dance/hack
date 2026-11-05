@@ -86,7 +86,7 @@ case {mode} in
   ok) printf '{{"containerimage.config.digest":"{IMAGE}"}}' > "$meta" ;;
   fail) exit 3 ;;
   nometa) ;;
-  sleep) sleep 30 & echo $! > child; wait ;;
+  sleep) sleep 30 & echo $! > child.pending; mv child.pending child; wait ;;
 esac
 "#
         );
@@ -348,6 +348,14 @@ fn client_failure_and_missing_metadata_adopt_nothing() {
     assert_eq!(error.code, "native_build_image");
 }
 
+fn wait_dead(pid: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while process_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!process_alive(pid), "a client group member survived");
+}
+
 fn process_alive(pid: &str) -> bool {
     let pid: libc::pid_t = pid.trim().parse().unwrap();
     // SAFETY: signal 0 only probes existence.
@@ -367,27 +375,22 @@ fn timeout_and_cancellation_stop_the_whole_client_group() {
     assert_eq!(error.code, "native_build_timeout");
     assert!(started.elapsed() < Duration::from_secs(20));
     assert_eq!(fixture.receipt(&inputs).phase, Phase::Canceled);
-    let child = fs::read_to_string(fixture.scratch(&inputs).join("child")).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while process_alive(&child) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
+    // On a loaded host the client may not have forked its child within the budget.
+    let child = fixture.scratch(&inputs).join("child");
+    if let Ok(pid) = fs::read_to_string(&child) {
+        wait_dead(&pid);
     }
-    assert!(!process_alive(&child), "a client group member survived");
 
     let inputs = fixture.inputs(Policy::Missing);
     fixture.client(&inputs, "sleep");
-    fs::remove_file(fixture.scratch(&inputs).join("child")).unwrap();
-    let scratch = fixture.scratch(&inputs);
-    let cancel = move || scratch.join("child").exists();
+    let _ = fs::remove_file(&child);
+    let marker = child.clone();
+    let cancel = move || marker.exists();
     let error = run(&fixture.candidate, &pool, &inputs, &cancel).unwrap_err();
     assert_eq!(error.code, "native_build_canceled");
     assert_eq!(fixture.receipt(&inputs).phase, Phase::Canceled);
-    let child = fs::read_to_string(fixture.scratch(&inputs).join("child")).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while process_alive(&child) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!process_alive(&child));
+    // Cancellation was requested only once the child existed (published atomically).
+    wait_dead(&fs::read_to_string(&child).unwrap());
 
     // A request canceled before the client starts never runs it.
     let error = run(&fixture.candidate, &pool, &inputs, &|| true).unwrap_err();

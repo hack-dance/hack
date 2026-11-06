@@ -89,14 +89,15 @@ pub(in crate::provider) struct StopFailure {
 
 pub(in crate::provider) struct StopBatchFailure {
     pub error: CandidateError,
-    pub failures: Vec<StopFailure>,
+    /// Boxed slice, not `Vec`, to keep `Result<_, StopBatchFailure>` small.
+    pub failures: Box<[StopFailure]>,
 }
 
 impl StopBatchFailure {
     fn plain(error: CandidateError) -> Self {
         Self {
             error,
-            failures: Vec::new(),
+            failures: Box::default(),
         }
     }
 }
@@ -318,7 +319,10 @@ where
         });
     }
     match first_error {
-        Some(error) => Err(StopBatchFailure { error, failures }),
+        Some(error) => Err(StopBatchFailure {
+            error,
+            failures: failures.into(),
+        }),
         None => Ok(()),
     }
 }

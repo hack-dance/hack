@@ -37,7 +37,7 @@ const SEED: &str = "prepared-seed.json";
 const TEMPLATE_DIR: &str = "home/.smolvm";
 const LIMIT: u64 = 64 * 1024;
 
-fn error(code: &'static str, message: impl Into<String>) -> CandidateError {
+fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 

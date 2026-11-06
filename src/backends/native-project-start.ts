@@ -106,6 +106,7 @@ import {
 import { preflightNativeProjectSource } from "./native-project-source-preflight.ts";
 import {
   invokeNativeRuntime,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 import {
@@ -113,6 +114,10 @@ import {
   type NativeRuntimeMetadataSelection,
   verifyNativeRuntimeMetadataRoutes,
 } from "./native-runtime-metadata.ts";
+import {
+  monitorNativeServiceExits,
+  type NativeServiceExit,
+} from "./native-service-exit-monitor.ts";
 import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
@@ -307,6 +312,8 @@ type Dependencies = {
   discardFailedStart: typeof discardUnpublishedNativeStart;
   admitDownHooks: typeof admitNativeDownHookGeneration;
   downHooks: typeof createNativeForegroundDownHooks;
+  /** Poll interval of the ready graph's service exit monitor. */
+  exitMonitorIntervalMs: number;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
@@ -335,6 +342,7 @@ const DEFAULTS: Dependencies = {
   discardFailedStart: discardUnpublishedNativeStart,
   admitDownHooks: admitNativeDownHookGeneration,
   downHooks: createNativeForegroundDownHooks,
+  exitMonitorIntervalMs: 2000,
 };
 /** Fixed text of the native foreground configuration refusal. */
 export const NATIVE_CONFIGURATION_REFUSAL =
@@ -766,25 +774,69 @@ function withStartupLogReport(error: unknown, report: string): unknown {
   return error;
 }
 const SAFE_STARTUP_DIAGNOSTIC =
-  /^(Native (?:graph startup (?:failed|was interrupted or failed)|HTTPS verification failed)) \(([A-Za-z0-9_]{1,80})\); (?:inspect owned state before retrying\.|peer values omitted\.)$/;
-/** Preserve only the fixed diagnostic envelope emitted by the native clients. */
+  /^(Native (?:graph startup (?:failed|was interrupted or failed)|HTTPS verification failed)) \(([A-Za-z0-9_]{1,80})\); (?:inspect owned state before retrying\.|peer values omitted\.)( Service [A-Za-z0-9_.-]{1,128}: [\x20-\x7e]{1,400}| Runtime: [\x20-\x7e]{1,400}| Service: [A-Za-z0-9_.-]{1,128}\.)?$/;
+/**
+ * Preserve only the fixed diagnostic envelope emitted by the native clients,
+ * including the value-free runtime note they append (see `nativeFailureNote`).
+ */
+function startupDiagnostic(startupFailure: unknown): string {
+  if (startupFailure === undefined) {
+    return "";
+  }
+  const message = startupFailure instanceof Error ? startupFailure.message : "";
+  const diagnostic = SAFE_STARTUP_DIAGNOSTIC.exec(message);
+  if (!diagnostic) {
+    return " Startup diagnostic: STARTUP_FAILURE (details omitted).";
+  }
+  return ` Startup diagnostic: ${diagnostic[1]} (${diagnostic[2]}).${diagnostic[3] ?? ""}`;
+}
 function cleanupUnconfirmed(
   startupFailure?: unknown,
   nativeCode?: string,
   recordedRun?: string
 ): Error {
-  const message = startupFailure instanceof Error ? startupFailure.message : "";
-  const diagnostic = SAFE_STARTUP_DIAGNOSTIC.exec(message);
-  const startup =
-    startupFailure === undefined
-      ? ""
-      : ` Startup diagnostic: ${diagnostic ? `${diagnostic[1]} (${diagnostic[2]})` : "STARTUP_FAILURE (details omitted)"}.`;
   const recorded =
     recordedRun !== undefined && RUN.test(recordedRun)
       ? ` The failed run ${recordedRun} is recorded as this project's run mapping; hack ps, hack down and hack doctor --native-cleanup inspect select it.`
       : "";
   return new ClosedCliError(
-    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startup}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
+    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startupDiagnostic(startupFailure)}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
+  );
+}
+/**
+ * The settled foreground start failed and fresh inspection proves this run never
+ * reserved runtime state (no journal, no published owner). Nothing is retained,
+ * so report the startup failure itself instead of uncertain cleanup.
+ */
+function unreservedStartupFailure(
+  startupFailure: unknown,
+  inspectionFailure: unknown
+): Error | undefined {
+  if (
+    startupFailure === undefined ||
+    !(
+      inspectionFailure instanceof NativeRuntimeRequestError &&
+      inspectionFailure.nativeCode === "graph_unreserved"
+    )
+  ) {
+    return;
+  }
+  return new ClosedCliError(
+    `Native graph startup failed before any runtime state was reserved; nothing was retained.${startupDiagnostic(startupFailure)}`
+  );
+}
+/**
+ * Error for a failed final inspection. deps.serve settles only after the owned
+ * child exited, so the consumer that could still reserve state is gone.
+ */
+function finalInspectionFailure(
+  serveFailure: unknown,
+  inspectionFailure: unknown,
+  nativeExitCode: string | undefined
+): Error {
+  return (
+    unreservedStartupFailure(serveFailure, inspectionFailure) ??
+    cleanupUnconfirmed(serveFailure ?? inspectionFailure, nativeExitCode)
   );
 }
 function requireConfirmedCleanup(
@@ -1174,11 +1226,20 @@ async function requireAcknowledgedRetainedFinalization(opts: {
  * service names. Observation only: a throwing observer never changes startup.
  */
 export type NativeStartupProgress =
-  | { readonly phase: "input" | "runtime" | "images" | "stopping" | "stopped" }
+  | {
+      readonly phase:
+        | "input"
+        | "runtime"
+        | "images"
+        | "all-stopped"
+        | "stopping"
+        | "stopped";
+    }
   | {
       readonly phase: "services" | "ready";
       readonly services: readonly string[];
-    };
+    }
+  | ({ readonly phase: "service-exited" } & NativeServiceExit);
 
 function progressReporter(
   observe: ((event: NativeStartupProgress) => void) | undefined
@@ -1189,6 +1250,36 @@ function progressReporter(
     } catch {
       // Progress is advisory terminal output.
     }
+  };
+}
+
+/**
+ * Watch a ready foreground graph for stopped services, as attached Compose `up`
+ * does. When every service has stopped, `up` ends like Compose: request the
+ * ordinary owned stop and exit 0. Returns the monitor's stop function.
+ */
+function watchServiceExits(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: string;
+  readonly intervalMs: number;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly progress: (event: NativeStartupProgress) => void;
+  readonly onAllStopped: () => void;
+}): () => Promise<void> {
+  const controller = new AbortController();
+  const monitoring = monitorNativeServiceExits({
+    ...opts,
+    signal: controller.signal,
+    onExit: (exit) => opts.progress({ phase: "service-exited", ...exit }),
+    onAllStopped: () => {
+      opts.progress({ phase: "all-stopped" });
+      opts.onAllStopped();
+    },
+  }).catch(() => undefined);
+  return async () => {
+    controller.abort();
+    await monitoring;
   };
 }
 
@@ -1654,6 +1745,7 @@ export async function startNativeProject(opts: {
           let startupLogReport = "";
           const services = Object.keys(specs).sort();
           progress({ phase: "services", services });
+          let stopWatching: (() => Promise<void>) | undefined;
           try {
             code = await deps.serve({
               runtime: opts.runtime,
@@ -1796,6 +1888,18 @@ export async function startNativeProject(opts: {
                 await hooks?.ready?.();
                 await opts.onReady?.();
                 progress({ phase: "ready", services });
+                stopWatching = watchServiceExits({
+                  runtime: opts.runtime,
+                  projectRoot: opts.scope.projectRoot,
+                  run,
+                  intervalMs: deps.exitMonitorIntervalMs,
+                  invoke: deps.invoke,
+                  progress,
+                  onAllStopped: () => {
+                    stopSignals.servicesStopped();
+                    controller.abort();
+                  },
+                });
                 // Last: only microtasks separate this from readiness.
                 await stop?.owe(() => controller.signal.aborted);
               },
@@ -1804,14 +1908,16 @@ export async function startNativeProject(opts: {
             serveFailure = error;
           } finally {
             delivery.payload?.fill(0);
+            await stopWatching?.();
           }
           try {
             let final: unknown;
             try {
               final = await invokeInspect();
             } catch (inspectionFailure) {
-              throw cleanupUnconfirmed(
-                serveFailure ?? inspectionFailure,
+              throw finalInspectionFailure(
+                serveFailure,
+                inspectionFailure,
                 nativeExitCode
               );
             }

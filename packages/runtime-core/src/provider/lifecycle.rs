@@ -361,6 +361,12 @@ impl<'a> ObservedGuest<'a> {
         self.verify()?;
         socket(self.candidate, &self.owner, "docker.sock")
     }
+
+    /// The observed runtime incarnation; receipts name the incarnation that owns them.
+    #[cfg(target_os = "macos")]
+    pub(super) fn incarnation(&self) -> &str {
+        &self.owner.token
+    }
 }
 
 pub(super) struct OwnedGuest<'a> {

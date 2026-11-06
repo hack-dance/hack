@@ -38,7 +38,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-fn error(code: &'static str, message: impl Into<String>) -> CandidateError {
+fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 

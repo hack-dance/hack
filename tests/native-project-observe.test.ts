@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  type NativeLogLine,
   nativeProjectLogs,
   nativeProjectPs,
 } from "../src/backends/native-project-observe.ts";
@@ -645,3 +646,46 @@ exit 2
   );
   expect(busy.stderr).not.toContain("provider_busy");
 }, 60_000);
+test("logs keep the runtime's interleaved whole lines and refuse malformed ones", async () => {
+  const opts = await fixture();
+  const lines: NativeLogLine[] = [
+    { stream: "stdout", text: "starting\n" },
+    { stream: "stderr", text: "warning\n" },
+    { stream: "stdout", text: "ready\n" },
+  ];
+  const reply =
+    (extra: Record<string, unknown>) =>
+    async (request: { args: readonly string[] }) =>
+      request.args[1] === "logs"
+        ? {
+            container: id,
+            stdout: "starting\nready\n",
+            stderr: "warning\n",
+            truncated: false,
+            ...extra,
+          }
+        : snapshot();
+  const logs = (invoke: ReturnType<typeof reply>) =>
+    nativeProjectLogs({
+      ...opts,
+      invoke,
+      service: "web",
+      tail: 20,
+      follow: false,
+    });
+  expect((await logs(reply({ lines }))).lines).toEqual(lines);
+  // An older runtime without engine order keeps stdout before stderr.
+  expect((await logs(reply({}))).lines).toEqual([
+    { stream: "stdout", text: "starting\nready\n" },
+    { stream: "stderr", text: "warning\n" },
+  ]);
+  for (const malformed of [
+    "not-a-list",
+    [{ stream: "stdin", text: "x" }],
+    [{ stream: "stdout", text: 1 }],
+  ]) {
+    await expect(logs(reply({ lines: malformed }))).rejects.toThrow(
+      "observation refused"
+    );
+  }
+});

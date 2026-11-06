@@ -324,7 +324,8 @@ mod tests {
                 failures: vec![StopFailure {
                     id: id.clone(),
                     stage: StopFailureStage::Timeout,
-                }],
+                }]
+                .into(),
             },
             &BTreeMap::from([(id.as_str(), "web")]),
         );
@@ -338,7 +339,8 @@ mod tests {
                 failures: vec![StopFailure {
                     id: secret_id.clone(),
                     stage: StopFailureStage::Timeout,
-                }],
+                }]
+                .into(),
             },
             &BTreeMap::from([(id.as_str(), "web")]),
         );

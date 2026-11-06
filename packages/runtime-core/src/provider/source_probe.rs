@@ -23,7 +23,7 @@ pub struct ProbeReceipt {
     pub failure_code: Option<String>,
 }
 
-fn problem(message: &str) -> CandidateError {
+fn problem(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("source_probe", message)
 }
 fn hex(value: &str, length: usize) -> bool {

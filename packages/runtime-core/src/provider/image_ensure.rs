@@ -12,7 +12,7 @@ use std::{
 const MAX_ARCHIVES: usize = 16;
 const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
 const MAX_CACHE: u64 = 2 * 1024 * 1024 * 1024;
-fn refused(message: &str) -> CandidateError {
+fn refused(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("image_cache", message)
 }
 fn current_uid() -> u32 {

@@ -118,7 +118,7 @@ pub(super) struct DeliveryOptions {
 /// bridge slot and one host listener, shared with route bridges.
 pub(super) const MAX_LOOPBACK_PORTS: usize = 16;
 
-fn port_refused(message: &str) -> CandidateError {
+fn port_refused(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     error("graph_port_publication", message)
 }
 

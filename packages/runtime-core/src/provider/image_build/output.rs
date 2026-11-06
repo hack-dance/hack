@@ -1,7 +1,7 @@
 //! The build client's output boundary.
 //!
 //! The client's stderr is a pipe read here, never inherited. Each line is redacted of
-//! every build-argument value (the request treats them all as secrets), stripped of
+//! every build-argument value (defense in depth; arguments are not secrets), stripped of
 //! terminal control characters and escape sequences, cut at a fixed length, and counted
 //! against a fixed budget before it is written to the caller's stream. Each value is
 //! matched raw and in the forms the client prints it in: Go `%q` quoting, JSON string

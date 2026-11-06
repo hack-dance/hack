@@ -289,6 +289,62 @@ test("native metadata matches the Compose backend's keys and values", () => {
   ]);
 });
 
+test("hostnames without an upstream keep Compose metadata but are not reviewed routes", () => {
+  const services = {
+    web: {
+      image: "example",
+      labels: {
+        caddy: "web.hack.local",
+        "caddy.reverse_proxy": "{{upstreams 3000}}",
+        "caddy.tls": "internal",
+      },
+    },
+    worker: {
+      image: "example",
+      labels: { caddy: "worker.hack.local", "caddy.tls": "internal" },
+    },
+    listed: {
+      image: "example",
+      labels: ["caddy=listed.hack.local", "caddy.tls=internal"],
+    },
+  };
+  const native = applyNativeRuntimeMetadata({
+    input: input(services),
+    selection: SELECTION,
+    branch: null,
+    httpsPort: null,
+  });
+  expect([...native.routes]).toEqual([["web", ["web.hack.local"]]]);
+  // Runtime host metadata still advertises inert hosts, as the Compose backend does.
+  const compose = buildRuntimeHostMetadataOverride({
+    composeYamls: [JSON.stringify({ services })],
+    branch: null,
+    devHost: SELECTION.devHost,
+    aliasHost: SELECTION.aliasHost,
+    composeProject: SELECTION.projectName,
+  });
+  const parsed = YAML.parse(compose ?? "") as {
+    services: Record<string, { environment: Record<string, string> }>;
+  };
+  expect(environment(native.input, "worker")).toEqual(
+    parsed.services.worker?.environment ?? {}
+  );
+  expect(environment(native.input, "worker").HACK_SERVICE_URL).toBe(
+    "https://worker.hack.local"
+  );
+  // The reviewed plan has a route only for the proxied service.
+  verifyNativeRuntimeMetadataRoutes({
+    plan: {
+      services: {
+        web: { active: true, routing: { hostnames: ["web.hack.local"] } },
+        worker: { active: true, inert_route_labels: true },
+        listed: { active: true, inert_route_labels: true },
+      },
+    },
+    routes: native.routes,
+  });
+});
+
 test("reviewed routes must match the advertised hostnames for active services", () => {
   const routes = new Map([["web", ["b.hack", "a.hack"]]]);
   const plan = (hostnames: unknown, active = true) => ({

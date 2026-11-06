@@ -124,7 +124,11 @@ import {
   readHackEnvContract,
 } from "../lib/hack-env.ts";
 import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
-import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
+import {
+  canPrompt,
+  confirmSafe,
+  requireInteractive,
+} from "../lib/interactivity.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
@@ -166,6 +170,7 @@ import {
 import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
   canMigrateCheckoutLegacyDotenv,
+  describeRetainedLegacyEnvFile,
   discoverComposeServiceNames,
   ensureHackDirGitignore,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
@@ -173,15 +178,18 @@ import {
   HackDirGitignoreRefusalError,
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
+  isGitTrackedOrUnknownProjectPath,
   type LegacyComposeEnvFileReference,
   LegacyDotenvMigrationRefusalError,
   type LegacyProjectEnvMigration,
   migrateLegacyProjectEnv,
   ProjectEnvLayerPathConflictError,
+  planTrackedEnvMigrationChanges,
   projectEnvConfigExistsForMutation,
   removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
+  type TrackedEnvMigrationChange,
 } from "../lib/project-env-config.ts";
 import {
   inspectProjectLifecycleHygiene,
@@ -279,6 +287,14 @@ const optMigrateEnvConfig = defineOption({
     "Migrate legacy hack.env.json/.env state to the new env config files",
 } as const);
 
+const optAcceptTrackedEnvChanges = defineOption({
+  name: "acceptTrackedEnvChanges",
+  type: "boolean",
+  long: "--accept-tracked-env-changes",
+  description:
+    "With --migrate-env-config and no prompt, allow deleting or editing git-tracked files (hack.env.json, the Compose file)",
+} as const);
+
 const optBrowserUrl = defineOption({
   name: "browserUrl",
   type: "string",
@@ -307,6 +323,7 @@ const doctorOptions = [
   optPath,
   optFix,
   optMigrateEnvConfig,
+  optAcceptTrackedEnvChanges,
   optDomainMigration,
   optJson,
   optBrowserUrl,
@@ -567,6 +584,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     json,
     fix: args.options.fix === true,
     migrateEnvConfig: args.options.migrateEnvConfig === true,
+    acceptTrackedEnvChanges: args.options.acceptTrackedEnvChanges === true,
   });
   const native = resolveNativeRuntimeSelection();
   if (native) {
@@ -577,6 +595,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       json,
       fix: args.options.fix === true,
       migrateEnvConfig: args.options.migrateEnvConfig === true,
+      acceptTrackedEnvChanges: args.options.acceptTrackedEnvChanges === true,
     });
   }
   const results: TimedCheckResult[] = [];
@@ -897,6 +916,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     await runDoctorFix({
       startDir,
       migrateEnvConfig: args.options.migrateEnvConfig === true,
+      acceptTrackedEnvChanges: args.options.acceptTrackedEnvChanges === true,
     });
     note("Re-run: hack doctor", "doctor");
   }
@@ -967,12 +987,18 @@ async function handleNativeDoctor(opts: {
   readonly browser: ReturnType<typeof parseBrowserNetworkOptions>;
   readonly json: boolean;
   readonly fix: boolean;
+  /**
+   * Runs the same project-file env migration as Compose doctor after the
+   * checks. It changes project files only, so it needs no native runtime.
+   */
   readonly migrateEnvConfig: boolean;
+  readonly acceptTrackedEnvChanges: boolean;
 }): Promise<number> {
   if (opts.migrateEnvConfig) {
-    throw new CliUsageError(
-      "Native doctor does not run the Docker-era env migration; use an installed v4 invocation for that migration."
-    );
+    await assertTrackedEnvMigrationConsent({
+      startDir: opts.startDir,
+      accept: opts.acceptTrackedEnvChanges,
+    });
   }
   const results: TimedCheckResult[] = [];
   const progress = createDoctorProgress({ json: opts.json });
@@ -1135,7 +1161,28 @@ async function handleNativeDoctor(opts: {
       "Native HTTPS"
     );
   }
+  await maybeRunNativeDoctorEnvMigration(opts);
   return hasError ? 1 : 0;
+}
+
+/**
+ * Native doctor's `--migrate-env-config`: the same project-file migration as
+ * Compose doctor, including its consent for git-tracked files. It needs no
+ * Docker and no native runtime.
+ */
+async function maybeRunNativeDoctorEnvMigration(opts: {
+  readonly startDir: string;
+  readonly migrateEnvConfig: boolean;
+  readonly acceptTrackedEnvChanges: boolean;
+}): Promise<void> {
+  if (!opts.migrateEnvConfig) {
+    return;
+  }
+  await maybeMigrateProjectEnvConfig({
+    startDir: opts.startDir,
+    acceptTrackedChanges: opts.acceptTrackedEnvChanges,
+  });
+  note("Re-run: hack doctor", "doctor");
 }
 
 /**
@@ -1344,10 +1391,16 @@ export function assertDoctorOptionCompatibility(opts: {
   readonly json: boolean;
   readonly fix: boolean;
   readonly migrateEnvConfig: boolean;
+  readonly acceptTrackedEnvChanges?: boolean;
 }): void {
   if (opts.json && (opts.fix || opts.migrateEnvConfig)) {
     throw new CliUsageError(
       "--json cannot be combined with --fix or --migrate-env-config because repair commands mutate state. Run the repair and JSON audit separately."
+    );
+  }
+  if (opts.acceptTrackedEnvChanges === true && !opts.migrateEnvConfig) {
+    throw new CliUsageError(
+      "--accept-tracked-env-changes applies only to --migrate-env-config."
     );
   }
 }
@@ -3581,7 +3634,14 @@ async function readLegacyEnvDevHost(envFile: string): Promise<string | null> {
 async function runDoctorFix(opts: {
   readonly startDir: string;
   readonly migrateEnvConfig: boolean;
+  readonly acceptTrackedEnvChanges: boolean;
 }): Promise<void> {
+  if (opts.migrateEnvConfig) {
+    await assertTrackedEnvMigrationConsent({
+      startDir: opts.startDir,
+      accept: opts.acceptTrackedEnvChanges,
+    });
+  }
   const remediationPlan = await buildDoctorRemediationPlanLines({
     startDir: opts.startDir,
     migrateEnvConfig: opts.migrateEnvConfig,
@@ -3610,7 +3670,10 @@ async function runDoctorFix(opts: {
   // Env migration changes project files only, so it runs before the Docker
   // gate: an unreachable Docker never skips a requested migration.
   if (opts.migrateEnvConfig) {
-    await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
+    await maybeMigrateProjectEnvConfig({
+      startDir: opts.startDir,
+      acceptTrackedChanges: opts.acceptTrackedEnvChanges,
+    });
     await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   }
 
@@ -3714,6 +3777,87 @@ function renderSkippedDoctorFixSteps(): void {
   );
 }
 
+/** `delete .hack/hack.env.json; edit .hack/docker-compose.yml`, relative to the project root. */
+function describeTrackedEnvMigrationChanges(opts: {
+  readonly projectRoot: string;
+  readonly changes: readonly TrackedEnvMigrationChange[];
+}): string {
+  return opts.changes
+    .map(
+      (change) => `${change.change} ${relative(opts.projectRoot, change.path)}`
+    )
+    .join("; ");
+}
+
+/**
+ * Refuses an env migration that would delete or edit git-tracked files when
+ * it cannot ask and `--accept-tracked-env-changes` was not passed. It runs
+ * before any doctor fix step writes, so the refusal changes nothing.
+ * Teammates share those files (the contract, the Compose file), so a run with
+ * no prompt never changes one on its own; an interactive run asks per step.
+ */
+export async function assertTrackedEnvMigrationConsent(opts: {
+  readonly startDir: string;
+  readonly accept: boolean;
+}): Promise<void> {
+  if (opts.accept || canPrompt()) {
+    return;
+  }
+  const project = await findDoctorLegacyProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+  const changes = await planTrackedEnvMigrationChanges({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    composeFile: project.composeFile,
+  });
+  if (changes.length === 0) {
+    return;
+  }
+  requireInteractive({
+    what: `confirm env migration changes to git-tracked files (${describeTrackedEnvMigrationChanges({ projectRoot: project.projectRoot, changes })})`,
+    hint: "Nothing was changed. Teammates share these files, so they change only with consent. Re-run interactively to confirm each change, or pass --accept-tracked-env-changes to apply them without a prompt.",
+  });
+}
+
+/**
+ * Confirms a step that deletes or edits a git-tracked file. Without a prompt it
+ * proceeds only with `--accept-tracked-env-changes`; otherwise it declines.
+ */
+async function confirmTrackedEnvChange(opts: {
+  readonly message: string;
+  readonly accept: boolean;
+}): Promise<boolean> {
+  return await confirmSafe({
+    message: opts.message,
+    initialValue: true,
+    nonInteractive: opts.accept ? "accept-default" : "decline",
+  });
+}
+
+/** Confirms the Compose env_file repair, as a tracked change when git tracks the file. */
+async function confirmComposeEnvRepair(opts: {
+  readonly projectRoot: string;
+  readonly composeFile: string;
+  readonly acceptTrackedChanges: boolean;
+}): Promise<boolean> {
+  const message =
+    "Remove legacy .hack/.env* env_file references from compose now?";
+  if (
+    await isGitTrackedOrUnknownProjectPath({
+      projectRoot: opts.projectRoot,
+      path: opts.composeFile,
+    })
+  ) {
+    return await confirmTrackedEnvChange({
+      message: `${message} (git tracks ${relative(opts.projectRoot, opts.composeFile)}; commit the change for teammates)`,
+      accept: opts.acceptTrackedChanges,
+    });
+  }
+  return await doctorConfirm({ message, initialValue: true });
+}
+
 function buildEnvMigrationNote(opts: {
   readonly migrated: LegacyProjectEnvMigration;
   readonly projectRoot: string;
@@ -3740,9 +3884,11 @@ function buildEnvMigrationNote(opts: {
 
 /** Describes the env migration and asks whether to run it. */
 async function confirmProjectEnvMigration(opts: {
+  readonly projectRoot: string;
   readonly projectDir: string;
   readonly contractPath: string;
   readonly hasContract: boolean;
+  readonly trackedChanges: readonly TrackedEnvMigrationChange[];
 }): Promise<boolean> {
   const { projectDir, contractPath, hasContract } = opts;
   note(
@@ -3755,6 +3901,11 @@ async function confirmProjectEnvMigration(opts: {
         ? `- target: ${resolve(projectDir, "hack.env.default.yaml")}`
         : `- target: values go to the gitignored ${resolve(projectDir, "hack.env.local.yaml")} (and hack.env.<overlay>.local.yaml); ${resolve(projectDir, "hack.env.default.yaml")} is written with no values`,
       "- runtime: direct env injection by default; .hack/.env becomes compatibility-only",
+      ...(opts.trackedChanges.length > 0
+        ? [
+            `- git-tracked files that may change (deletes and Compose edits ask first): ${describeTrackedEnvMigrationChanges({ projectRoot: opts.projectRoot, changes: opts.trackedChanges })}`,
+          ]
+        : []),
     ].join("\n"),
     "env migration"
   );
@@ -3767,6 +3918,7 @@ async function confirmProjectEnvMigration(opts: {
 
 async function maybeMigrateProjectEnvConfig(opts: {
   readonly startDir: string;
+  readonly acceptTrackedChanges: boolean;
 }): Promise<void> {
   const project = await findDoctorLegacyProjectContext(opts.startDir);
   if (!project) {
@@ -3793,8 +3945,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
   ) {
     note("Project already uses the new env config files.", "doctor");
     await maybeRepairModernProjectComposeEnvReferences({
+      projectRoot: project.projectRoot,
       composeFile: project.composeFile,
       projectDir: project.projectDir,
+      acceptTrackedChanges: opts.acceptTrackedChanges,
     });
     return;
   }
@@ -3824,9 +3978,15 @@ async function maybeMigrateProjectEnvConfig(opts: {
   if (
     contract.parseError === undefined &&
     !(await confirmProjectEnvMigration({
+      projectRoot: project.projectRoot,
       projectDir: project.projectDir,
       contractPath,
       hasContract,
+      trackedChanges: await planTrackedEnvMigrationChanges({
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        composeFile: project.composeFile,
+      }),
     }))
   ) {
     return;
@@ -3855,7 +4015,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
 
   for (const retained of migrated.retainedEnvFiles) {
     note(
-      `Kept ${retained.path}: keys not preserved in env layers: ${retained.keys.join(", ")} (values omitted).`,
+      describeRetainedLegacyEnvFile({ shownPath: retained.path, retained }),
       "env cleanup"
     );
   }
@@ -3868,10 +4028,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
       }),
       "compose env repair"
     );
-    const shouldRepairCompose = await doctorConfirm({
-      message:
-        "Remove legacy .hack/.env* env_file references from compose now?",
-      initialValue: true,
+    const shouldRepairCompose = await confirmComposeEnvRepair({
+      projectRoot: project.projectRoot,
+      composeFile: project.composeFile,
+      acceptTrackedChanges: opts.acceptTrackedChanges,
     });
     if (shouldRepairCompose) {
       const repaired = await repairLegacyComposeEnvFileReferences({
@@ -3908,29 +4068,91 @@ async function maybeMigrateProjectEnvConfig(opts: {
     migrated,
     composeRepaired,
   });
-  if (cleanupCandidates.length === 0) {
-    return;
-  }
-
-  note(
-    [
-      "Legacy env artifacts still exist and can now be removed:",
-      ...cleanupCandidates.map((path) => `- ${path}`),
-    ].join("\n"),
-    "env cleanup"
-  );
-  const shouldCleanup = await doctorConfirm({
-    message:
-      "Remove legacy env files and obsolete project env config entries now?",
-    initialValue: true,
-  });
-  if (!shouldCleanup) {
-    return;
-  }
-
-  const removed = await removeLegacyProjectEnvArtifacts({
-    paths: cleanupCandidates,
+  await offerDoctorEnvCleanup({
     projectRoot: project.projectRoot,
+    paths: cleanupCandidates,
+    acceptTrackedChanges: opts.acceptTrackedChanges,
+  });
+}
+
+/**
+ * Offers the legacy env files a migration left for removal. Untracked files
+ * keep doctor's usual prompt; git-tracked ones get their own prompt and,
+ * without one, are removed only with `--accept-tracked-env-changes`.
+ */
+async function offerDoctorEnvCleanup(opts: {
+  readonly projectRoot: string;
+  readonly paths: readonly string[];
+  readonly acceptTrackedChanges: boolean;
+}): Promise<void> {
+  const untracked: string[] = [];
+  const tracked: string[] = [];
+  for (const path of opts.paths) {
+    ((await isGitTrackedOrUnknownProjectPath({
+      projectRoot: opts.projectRoot,
+      path,
+    }))
+      ? tracked
+      : untracked
+    ).push(path);
+  }
+
+  if (untracked.length > 0) {
+    note(
+      [
+        "Legacy env artifacts still exist and can now be removed:",
+        ...untracked.map((path) => `- ${path}`),
+      ].join("\n"),
+      "env cleanup"
+    );
+    if (
+      await doctorConfirm({
+        message:
+          "Remove legacy env files and obsolete project env config entries now?",
+        initialValue: true,
+      })
+    ) {
+      await removeDoctorEnvCleanup({
+        projectRoot: opts.projectRoot,
+        paths: untracked,
+      });
+    }
+  }
+
+  if (tracked.length > 0) {
+    note(
+      [
+        "These legacy env files are tracked by git and can now be removed. Teammates share them, so commit the removal together with the new env layers:",
+        ...tracked.map((path) => `- ${path}`),
+      ].join("\n"),
+      "env cleanup"
+    );
+    if (
+      await confirmTrackedEnvChange({
+        message: "Remove these git-tracked legacy env files now?",
+        accept: opts.acceptTrackedChanges,
+      })
+    ) {
+      await removeDoctorEnvCleanup({
+        projectRoot: opts.projectRoot,
+        paths: tracked,
+      });
+    } else {
+      note(
+        "Kept the git-tracked legacy env files. Remove them with `git rm` when teammates have migrated.",
+        "env cleanup"
+      );
+    }
+  }
+}
+
+async function removeDoctorEnvCleanup(opts: {
+  readonly projectRoot: string;
+  readonly paths: readonly string[];
+}): Promise<void> {
+  const removed = await removeLegacyProjectEnvArtifacts({
+    paths: opts.paths,
+    projectRoot: opts.projectRoot,
   });
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
@@ -3970,8 +4192,10 @@ function buildComposeEnvRepairNote(opts: {
 }
 
 async function maybeRepairModernProjectComposeEnvReferences(opts: {
+  readonly projectRoot: string;
   readonly composeFile: string;
   readonly projectDir: string;
+  readonly acceptTrackedChanges: boolean;
 }): Promise<void> {
   const references = await inspectLegacyComposeEnvFileReferences({
     composeFile: opts.composeFile,
@@ -3987,9 +4211,10 @@ async function maybeRepairModernProjectComposeEnvReferences(opts: {
     }),
     "compose env repair"
   );
-  const shouldRepairCompose = await doctorConfirm({
-    message: "Remove legacy .hack/.env* env_file references from compose now?",
-    initialValue: true,
+  const shouldRepairCompose = await confirmComposeEnvRepair({
+    projectRoot: opts.projectRoot,
+    composeFile: opts.composeFile,
+    acceptTrackedChanges: opts.acceptTrackedChanges,
   });
   if (!shouldRepairCompose) {
     note(

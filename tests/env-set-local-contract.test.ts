@@ -279,7 +279,7 @@ test(
   CLI_TEST_TIMEOUT_MS
 );
 
-async function runDoctor(project: Project) {
+async function runDoctor(project: Project, extraArgs: readonly string[] = []) {
   const tools = join(project.root, "tools");
   await mkdir(tools, { recursive: true });
   await writeFile(join(tools, "bun"), "#!/bin/sh\necho 1.4.2\n", {
@@ -300,6 +300,7 @@ async function runDoctor(project: Project) {
       "doctor",
       "--migrate-env-config",
       "--no-interactive",
+      ...extraArgs,
       "--path",
       project.projectRoot,
     ],
@@ -376,7 +377,9 @@ for (const lateContract of [false, true]) {
           `LOCAL_KEY=${VALUE}\n`
         );
       }
-      const run = await runDoctor(project);
+      // The contract and Compose file are tracked, so a run without a prompt
+      // changes them only with explicit consent (HACK-1904).
+      const run = await runDoctor(project, ["--accept-tracked-env-changes"]);
       expect(run.output).not.toContain(VALUE);
       expect(run.exitCode, run.output).toBe(0);
       const local = join(project.projectDir, "hack.env.local.yaml");

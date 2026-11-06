@@ -170,6 +170,27 @@ test("doctor rejects mutating repair flags combined with json", () => {
   ).not.toThrow();
 });
 
+test("doctor accepts tracked env changes only with the env migration (HACK-1904)", () => {
+  expect(() =>
+    assertDoctorOptionCompatibility({
+      json: false,
+      fix: true,
+      migrateEnvConfig: false,
+      acceptTrackedEnvChanges: true,
+    })
+  ).toThrow(
+    "--accept-tracked-env-changes applies only to --migrate-env-config"
+  );
+  expect(() =>
+    assertDoctorOptionCompatibility({
+      json: false,
+      fix: false,
+      migrateEnvConfig: true,
+      acceptTrackedEnvChanges: true,
+    })
+  ).not.toThrow();
+});
+
 for (const form of ["dangling link", "malformed"] as const) {
   test(`doctor remediation plan says a ${form} contract refuses, and doesn't offer the migration`, async () => {
     const root = await createDoctorTestProject({ legacy: true });

@@ -237,6 +237,10 @@ fn port_scalar(value: &Value) -> Result<u16, CandidateError> {
         _ => Err(problem("invalid_port", "Invalid port value.")),
     }
 }
+/// Review every declared port entry. An entry outside the modeled subset becomes
+/// an `invalid_port` error diagnostic that points at `services.<name>.ports[<i>]`
+/// (messages never echo the authored value), so one unsupported port neither
+/// hides the rest of the review nor makes the plan enrollment compatible.
 fn ports(
     value: Option<&Value>,
     field: &str,
@@ -245,90 +249,115 @@ fn ports(
     let Some(value) = value else {
         return Ok(vec![]);
     };
+    let Some(values) = value.as_array() else {
+        diagnostics.push(Diagnostic::error(
+            "invalid_port",
+            field,
+            "Ports must be a list.",
+        ));
+        return Ok(vec![]);
+    };
     let mut result = Vec::new();
-    for value in value
-        .as_array()
-        .ok_or_else(|| problem("invalid_port", "Ports must be a list."))?
-    {
-        let (target, published, protocol, host) = if let Value::Object(m) = value {
-            keys(
-                m,
-                &["target", "published", "protocol", "host_ip"],
-                field,
-                diagnostics,
-            );
-            (
-                port_scalar(
-                    m.get("target")
-                        .ok_or_else(|| problem("invalid_port", "Port target is required."))?,
-                )?,
-                m.get("published").map(port_scalar).transpose()?,
-                m.get("protocol")
-                    .map(string)
-                    .transpose()?
-                    .unwrap_or("tcp")
-                    .to_owned(),
-                m.get("host_ip")
-                    .map(string)
-                    .transpose()?
-                    .unwrap_or("0.0.0.0")
-                    .to_owned(),
-            )
-        } else {
-            let text = match value {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                _ => return Err(problem("invalid_port", "Invalid port form.")),
-            };
-            let (binding, protocol) = text.split_once('/').unwrap_or((&text, "tcp"));
-            let parts: Vec<_> = binding.split(':').collect();
-            match parts.as_slice() {
-                [target] => (
-                    port_number(target)?,
-                    None,
-                    protocol.into(),
-                    "0.0.0.0".into(),
-                ),
-                [published, target] => (
-                    port_number(target)?,
-                    Some(port_number(published)?),
-                    protocol.into(),
-                    "0.0.0.0".into(),
-                ),
-                [host, published, target] => (
-                    port_number(target)?,
-                    Some(port_number(published)?),
-                    protocol.into(),
-                    host.to_string(),
-                ),
-                _ => return Err(problem("invalid_port", "Unsupported port syntax.")),
-            }
-        };
-        if !["tcp", "udp"].contains(&protocol.as_str()) {
-            return Err(problem(
+    for (index, value) in values.iter().enumerate() {
+        match port(value, field, diagnostics) {
+            Ok(plan) => result.push(plan),
+            Err(error) if error.code == "invalid_port" => diagnostics.push(Diagnostic::error(
                 "invalid_port",
-                "Only TCP and UDP ports are modeled.",
-            ));
+                &format!("{field}[{index}]"),
+                &error.message,
+            )),
+            Err(error) => return Err(error),
         }
-        if !["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
-            diagnostics.push(Diagnostic::error("unsupported_host_binding",field,"Only explicit IPv4 loopback or an explicit proposal to restrict an all-interface binding is supported."));
-        }
-        if host == "0.0.0.0" {
-            diagnostics.push(Diagnostic::warning("proposed_loopback_binding",field,"Enrollment proposes restricting the declared all-interface publication to 127.0.0.1. No port is bound by this checkpoint."));
-        }
-        result.push(PortPlan {
-            target,
-            published,
-            protocol,
-            declared_host_ip: if ["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
-                host
-            } else {
-                "[unsupported]".into()
-            },
-            proposed_host_ip: "127.0.0.1".into(),
-        });
     }
     Ok(result)
+}
+fn port(
+    value: &Value,
+    field: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<PortPlan, CandidateError> {
+    let (target, published, protocol, host) = if let Value::Object(m) = value {
+        keys(
+            m,
+            &["target", "published", "protocol", "host_ip"],
+            field,
+            diagnostics,
+        );
+        (
+            port_scalar(
+                m.get("target")
+                    .ok_or_else(|| problem("invalid_port", "Port target is required."))?,
+            )?,
+            m.get("published").map(port_scalar).transpose()?,
+            m.get("protocol")
+                .map(string)
+                .transpose()?
+                .unwrap_or("tcp")
+                .to_owned(),
+            m.get("host_ip")
+                .map(string)
+                .transpose()?
+                .unwrap_or("0.0.0.0")
+                .to_owned(),
+        )
+    } else {
+        let text = match value {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => return Err(problem("invalid_port", "Invalid port form.")),
+        };
+        let (binding, protocol) = text.split_once('/').unwrap_or((&text, "tcp"));
+        let parts: Vec<_> = binding.split(':').collect();
+        match parts.as_slice() {
+            [target] => (
+                port_number(target)?,
+                None,
+                protocol.into(),
+                "0.0.0.0".into(),
+            ),
+            [published, target] => (
+                port_number(target)?,
+                Some(port_number(published)?),
+                protocol.into(),
+                "0.0.0.0".into(),
+            ),
+            [host, published, target] => (
+                port_number(target)?,
+                Some(port_number(published)?),
+                protocol.into(),
+                host.to_string(),
+            ),
+            _ => {
+                return Err(problem(
+                    "invalid_port",
+                    "Unsupported port syntax. Use a literal [host_ip:]published:target[/protocol] entry; interpolation, ranges and IPv6 bindings are not supported.",
+                ));
+            }
+        }
+    };
+    if !["tcp", "udp"].contains(&protocol.as_str()) {
+        return Err(problem(
+            "invalid_port",
+            "Only TCP and UDP ports are modeled.",
+        ));
+    }
+    if !["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
+        diagnostics.push(Diagnostic::error("unsupported_host_binding",field,"Only explicit IPv4 loopback or an explicit proposal to restrict an all-interface binding is supported."));
+    }
+    if host == "0.0.0.0" {
+        diagnostics.push(Diagnostic::warning("proposed_loopback_binding",field,"Enrollment proposes restricting the declared all-interface publication to 127.0.0.1. No port is bound by this checkpoint."));
+    }
+    Ok(PortPlan {
+        target,
+        published,
+        protocol,
+        declared_host_ip: if ["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
+            host
+        } else {
+            "[unsupported]".into()
+        },
+        proposed_host_ip: "127.0.0.1".into(),
+    })
 }
 fn dependencies(
     value: Option<&Value>,
@@ -966,12 +995,25 @@ pub(super) fn compile(
                 "Only Linux arm64/amd64 image platform declarations are modeled.",
             ));
         }
-        let exposed_ports = strings(m.get("expose"))?;
-        for value in &exposed_ports {
-            let (port, protocol) = value.split_once('/').unwrap_or((value, "tcp"));
-            port_number(port)?;
-            if !["tcp", "udp"].contains(&protocol) {
-                return Err(problem("invalid_port", "Invalid exposed port protocol."));
+        // Invalid entries are reported by pointer and omitted from the plan so
+        // authored text (including interpolation defaults) is never echoed.
+        let mut exposed_ports = Vec::new();
+        for (index, value) in strings(m.get("expose"))?.into_iter().enumerate() {
+            let (port, protocol) = value.split_once('/').unwrap_or((&value, "tcp"));
+            let message = match port_number(port) {
+                Err(error) => Some(error.message),
+                Ok(_) if !["tcp", "udp"].contains(&protocol) => {
+                    Some("Invalid exposed port protocol.".into())
+                }
+                Ok(_) => None,
+            };
+            match message {
+                Some(message) => diagnostics.push(Diagnostic::error(
+                    "invalid_port",
+                    &format!("{field}.expose[{index}]"),
+                    &message,
+                )),
+                None => exposed_ports.push(value),
             }
         }
         let stop_signal = optional_text(m.get("stop_signal"))?;

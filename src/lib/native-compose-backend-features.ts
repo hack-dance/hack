@@ -125,6 +125,17 @@ function isUnsupportedBuild(service: Record<string, unknown>): boolean {
 }
 
 /**
+ * A basic build is one the import preview's build mapper accepts for a service
+ * that names no image. It does not keep the project on the Compose backend,
+ * but native image-project `up` still refuses it with its general
+ * configuration refusal (`NATIVE_CONFIGURATION_REFUSAL`), because native builds
+ * need the authored native format.
+ */
+function isBasicBuild(service: Record<string, unknown>): boolean {
+  return Object.hasOwn(service, "build") && !isUnsupportedBuild(service);
+}
+
+/**
  * Compose takes an absent or `null` `platform` as unset, and native review
  * does the same, so only a declared value other than the native platform is
  * foreign. Environment defaults such as `DOCKER_DEFAULT_PLATFORM` are not read.
@@ -292,6 +303,56 @@ export async function readAdaptedIsolatedNetworks(
 }
 
 /**
+ * Whether any service, including one outside the selected profiles, declares a
+ * basic build (see {@link isBasicBuild}). Shapes this check does not recognize
+ * return false and stay with native review.
+ */
+export function hasBasicComposeBuild(compose: unknown): boolean {
+  if (!isRecord(compose)) {
+    return false;
+  }
+  return topLevelEntries(compose, "services")
+    .filter(isRecord)
+    .some(isBasicBuild);
+}
+
+/** What doctor reports for one Compose file: closed names and flags only. */
+export type ComposeBackendReading = {
+  readonly features: ComposeBackendFeature[];
+  /** A basic build that native image-project `up` refuses; see {@link hasBasicComposeBuild}. */
+  readonly basicBuild: boolean;
+};
+
+/**
+ * Reads one Compose file once and reports both its Compose-backend features
+ * (after the explicit native adaptation, as {@link readComposeBackendFeatures})
+ * and whether it declares a basic build. Read-only and value-free.
+ */
+export async function readComposeBackendReading(
+  composeFile: string,
+  opts?: { readonly adaptationFile?: string }
+): Promise<ComposeBackendReading> {
+  const compose = await readComposeDocument(composeFile);
+  return {
+    features: await classifyAdapted(compose, opts?.adaptationFile),
+    basicBuild: hasBasicComposeBuild(compose),
+  };
+}
+
+async function classifyAdapted(
+  compose: unknown,
+  adaptationFile: string | undefined
+): Promise<ComposeBackendFeature[]> {
+  const features = findComposeBackendFeatures(compose);
+  if (adaptationFile === undefined || !features.includes("external_network")) {
+    return features;
+  }
+  return findComposeBackendFeatures(compose, {
+    isolatedNetworks: await readAdaptedIsolatedNetworks(adaptationFile),
+  });
+}
+
+/**
  * Reads and classifies one Compose file after the explicit native adaptation.
  * Read-only: no lock, no write, no runtime request. A Compose file that is
  * missing, oversized, a symlink or not parseable returns no features, so the
@@ -308,16 +369,7 @@ export async function readComposeBackendFeatures(
   opts?: { readonly adaptationFile?: string }
 ): Promise<ComposeBackendFeature[]> {
   const compose = await readComposeDocument(composeFile);
-  const features = findComposeBackendFeatures(compose);
-  if (
-    opts?.adaptationFile === undefined ||
-    !features.includes("external_network")
-  ) {
-    return features;
-  }
-  return findComposeBackendFeatures(compose, {
-    isolatedNetworks: await readAdaptedIsolatedNetworks(opts.adaptationFile),
-  });
+  return await classifyAdapted(compose, opts?.adaptationFile);
 }
 
 /** Value-free phrase list, such as "a and b" or "a, b and c". */
@@ -334,6 +386,17 @@ export function describeComposeBackendFeatures(
 /** The selection that runs this project on the Compose backend. */
 export const COMPOSE_BACKEND_SELECTION =
   "Set HACK_RUNTIME_BACKEND=compose (hack-next and hack-v5 accept it too)";
+
+/**
+ * The documented selection that keeps a project with an external network on
+ * native: native start replaces each listed network with an owned isolated one.
+ */
+export const ISOLATED_NETWORKS_SELECTION =
+  "An external network can stay on native instead: list it by name in `isolatedNetworks` of the `HACK_NATIVE_ADAPTATION` selection, and native start replaces it with an owned isolated network that does not join the external one";
+
+/** The next step for a basic build, which native image-project `up` refuses. */
+export const BASIC_BUILD_NEXT_STEP =
+  "Native builds need the authored native format: preview the conversion with `hack config import --dry-run --path <project root>`";
 
 /**
  * The closed refusal for a project that needs the Compose backend: stable code

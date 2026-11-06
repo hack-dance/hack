@@ -23,6 +23,14 @@ const NATIVE_LOCAL_FILENAME = "hack.local.json";
 const MANAGED_ENV_FILENAME =
   /^hack\.env\.[a-z0-9]+(?:-[a-z0-9]+)*(?:\.local)?\.yaml$/;
 
+/**
+ * Fixed refusal when the selected root is not a native project (no
+ * `.hack/hack.project.json`, or a Compose `.hack/hack.config.json` project). It names
+ * the next step without disclosing any path or authored value.
+ */
+export const NATIVE_INPUT_FAMILY_REFUSAL =
+  "Project-aware native validation requires an exact native input family: a project root with .hack/hack.project.json. For a Compose project (.hack/hack.config.json), preview its native conversion with `hack config import --dry-run --path <project root>`; values omitted.";
+
 /** Fixed failures never disclose authored bytes, paths, or filesystem error text. */
 export class NativeProjectInputError extends HackCliError {
   constructor(kind: "unsupported" | "unsafe") {
@@ -33,7 +41,7 @@ export class NativeProjectInputError extends HackCliError {
           : "E_CONFIG_INVALID",
       message:
         kind === "unsupported"
-          ? "Project-aware native validation requires an exact native input family; values omitted."
+          ? NATIVE_INPUT_FAMILY_REFUSAL
           : "Native project inputs must be stable, readable regular files of at most 1 MiB in unredirected directories; values omitted.",
     });
     this.name = "NativeProjectInputError";

@@ -237,7 +237,16 @@ authored native format.
 lists the closed names `external_network`, `external_volume`, `reserved_label`,
 `unsupported_build` and `foreign_platform`. On the native backend a found feature
 is a warning; on the Compose backend it is informational. Native doctor applies
-the same `HACK_NATIVE_ADAPTATION` selection before it reports.
+the same `HACK_NATIVE_ADAPTATION` selection before it reports. When it finds an
+external network, the message also names the `isolatedNetworks` selection above,
+which keeps that network's project on native.
+
+A basic build is not one of these features, but native image-project `up` still
+refuses it, so doctor does not report it as ok. On the native backend the check
+warns, names the general configuration refusal and the next step (preview the
+authored native conversion with `hack config import --dry-run`, or select the
+Compose backend), and its JSON adds `composeBackend.nativeUpRefusals:
+["basic_build"]`. On the Compose backend the same note is informational.
 
 Publication control tokens are delivered to the relay through a one-shot inherited
 pipe (`--control-fd 0`), never through process arguments. The relay reads exactly

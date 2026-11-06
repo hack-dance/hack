@@ -66,7 +66,11 @@ whitespace-only entrypoint explicitly clears the image entrypoint; empty or
 whitespace-only command refuses because the native command model cannot express
 Compose's explicit empty override. Outside argv and basic build paths, dollars in runtime strings and NUL in runtime values refuse
 rather than inheriting ambient environment. Environment list entries without `=`, duplicate
-names, nulls and non-string values refuse.
+names, nulls and non-string values refuse. Each environment entry is reviewed on its own:
+only an interpolated or otherwise unsupported entry is refused, at its own pointer such as
+`/services/web/environment/FROM_ENV` or `/services/web/environment/1`, while literal
+siblings in the same map or list stay mapped. Any refused entry still makes the whole
+preview incomplete.
 
 Every unknown field remains a refusal, including fields in inactive profiles.
 Advanced builds, volumes/bind mounts, other network shapes, ports, other labels,

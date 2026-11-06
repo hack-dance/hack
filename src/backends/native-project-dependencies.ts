@@ -46,6 +46,9 @@ const OWNER_AUTHORITY_FIELDS = [
   ...RESOLVED_OWNER_FIELDS,
 ] as const;
 
+/** Most bindings one selection may grant, counted after version 2 expansion. */
+const LIMIT = 128;
+
 export type NativeHostDependency = {
   readonly service: string;
   readonly binding: string;
@@ -411,6 +414,7 @@ function requireSameEndpointPolicy(opts: {
 
 const DECLARATIVE_FIELDS = new Set([
   "binding",
+  "service",
   "services",
   "guest_port",
   "aliases",
@@ -420,24 +424,46 @@ const DECLARATIVE_FIELDS = new Set([
   "host_supervisor_depth",
 ]);
 
+/**
+ * The services a version 2 entry selects: `service` is shorthand for a
+ * one-element `services` list, and naming neither selects every profile-active
+ * service. Listed services must be distinct and profile-active.
+ */
 function declaredServices(opts: {
   readonly entry: Record<string, unknown>;
   readonly hostAliases: Readonly<Record<string, readonly string[]>>;
 }): readonly string[] {
-  const selected = opts.entry.services;
-  if (selected === undefined) {
+  const { service, services } = opts.entry;
+  if (service !== undefined && services !== undefined) {
+    throw refused(
+      "a version 2 entry sets at most one of service and services",
+      `binding ${opts.entry.binding}`
+    );
+  }
+  if (service !== undefined) {
+    if (
+      !(typeof service === "string" && Object.hasOwn(opts.hostAliases, service))
+    ) {
+      throw refused(
+        "service must name a profile-active service",
+        `binding ${opts.entry.binding}`
+      );
+    }
+    return [service];
+  }
+  if (services === undefined) {
     return Object.keys(opts.hostAliases);
   }
   if (
     !(
-      Array.isArray(selected) &&
-      selected.length > 0 &&
-      selected.length <= 128 &&
-      new Set(selected).size === selected.length &&
-      selected.every(
-        (service) =>
-          typeof service === "string" &&
-          Object.hasOwn(opts.hostAliases, service)
+      Array.isArray(services) &&
+      services.length > 0 &&
+      services.length <= LIMIT &&
+      new Set(services).size === services.length &&
+      services.every(
+        (selected) =>
+          typeof selected === "string" &&
+          Object.hasOwn(opts.hostAliases, selected)
       )
     )
   ) {
@@ -446,7 +472,7 @@ function declaredServices(opts: {
       `binding ${opts.entry.binding}`
     );
   }
-  return selected as string[];
+  return services as string[];
 }
 
 type DeclarativeEntry = Record<string, unknown> & {
@@ -469,14 +495,16 @@ function expandDeclarativeEntry(opts: {
   readonly entry: DeclarativeEntry;
   readonly hostAliases: Readonly<Record<string, readonly string[]>>;
 }): Record<string, unknown>[] {
-  const { services: _services, ...authority } = opts.entry;
+  const { service: _service, services: _services, ...authority } = opts.entry;
+  const listed =
+    opts.entry.service !== undefined || opts.entry.services !== undefined;
   const used = new Set<string>();
   const result: Record<string, unknown>[] = [];
   for (const service of declaredServices(opts)) {
     const declared = new Set(opts.hostAliases[service]);
     const aliases = opts.entry.aliases.filter((alias) => declared.has(alias));
     if (aliases.length === 0) {
-      if (opts.entry.services !== undefined) {
+      if (listed) {
         throw refused(
           "a listed service declares none of the binding's aliases as a host-gateway extra host",
           `binding ${opts.entry.binding}`
@@ -499,19 +527,21 @@ function expandDeclarativeEntry(opts: {
 }
 
 /**
- * Expand a declarative (version 2) selection into version 1 bindings.
+ * Expand a version 2 selection into version 1 bindings.
  *
- * A version 2 entry names one binding once, without a `service`. It applies to
- * the listed `services`, or, when `services` is omitted, to every
- * profile-active service that declares one of its aliases as a host-gateway
- * extra host (including project-wide internal aliases). Each expanded binding
- * carries only the aliases that service declares. A listed service that
- * declares none of the aliases, an alias no selected service declares, or a
- * repeated binding name refuses. The same listener authority (PID or
- * executable and depth) applies to every expanded binding, so endpoint
- * sharing and the 128-binding and 32-transport limits are enforced after
- * expansion by {@link parseNativeHostDependencies}. Version 1 values pass
- * through unchanged.
+ * A version 2 entry names one binding once. It applies to the listed
+ * `services` (in list order), to one `service` (shorthand for a one-element
+ * list), or, when neither is set, to every profile-active service that
+ * declares one of its aliases as a host-gateway extra host (including
+ * project-wide internal aliases). An entry sets at most one of `service` and
+ * `services`. Each expanded binding carries the same ports and listener
+ * authority and only the aliases that service declares; native review accepts
+ * no other aliases, so when every selected service declares every alias the
+ * result equals repeating the entry per service in version 1. A listed service
+ * that declares none of the aliases, an alias no selected service declares, a
+ * repeated binding name, or more than 128 expanded bindings refuses. Endpoint
+ * sharing and the 32-transport limit are enforced after expansion by
+ * {@link parseNativeHostDependencies}. Version 1 values pass through unchanged.
  */
 export function compileNativeHostDependencySelection(opts: {
   readonly value: unknown;
@@ -522,15 +552,19 @@ export function compileNativeHostDependencySelection(opts: {
     return value;
   }
   const hostAliases = opts.hostAliases;
+  if (!hostAliases) {
+    throw refused(
+      "a version 2 selection needs the services' declared host-gateway aliases, which this command does not read"
+    );
+  }
   if (
     !(
-      hostAliases &&
       Object.keys(value).every((key) =>
         ["version", "dependencies"].includes(key)
       ) &&
       Array.isArray(value.dependencies) &&
       value.dependencies.length > 0 &&
-      value.dependencies.length <= 128
+      value.dependencies.length <= LIMIT
     )
   ) {
     throw refused(
@@ -547,6 +581,11 @@ export function compileNativeHostDependencySelection(opts: {
     }
     bindings.add(entry.binding);
     dependencies.push(...expandDeclarativeEntry({ entry, hostAliases }));
+    if (dependencies.length > LIMIT) {
+      throw refused(
+        "the version 2 selection expands to more than 128 bindings"
+      );
+    }
   }
   return { version: 1, dependencies };
 }
@@ -566,7 +605,7 @@ export function parseNativeHostDependencies(opts: {
       ) &&
       Array.isArray(value.dependencies) &&
       value.dependencies.length > 0 &&
-      value.dependencies.length <= 128
+      value.dependencies.length <= LIMIT
     )
   ) {
     throw refused(SHAPE_REASON);

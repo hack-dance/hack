@@ -1736,6 +1736,35 @@ prepare current listeners before selection. For example:
 
 Replace the example PID with the actual listener process. Up to 128 service-specific
 bindings and eight exact aliases per binding are supported, within 32 listening transports shared with the pool's route bridges.
+
+When several services need the same binding, version 2 lets one entry list them
+with `services` instead of repeating the entry for each `service`:
+
+```json
+{
+  "version": 2,
+  "dependencies": [{
+    "services": ["web", "worker", "api"],
+    "binding": "search",
+    "guest_port": 443,
+    "aliases": ["search.example.com"],
+    "host_executable": "/usr/local/bin/tunnel",
+    "host_port": 8443
+  }]
+}
+```
+
+Hack expands each such entry into one version 1 entry per listed service, in order,
+with the same binding, ports and host authority, and then validates the result exactly
+as version 1. Each listed service receives the binding's aliases that it declares as
+`host-gateway` extra hosts (native review accepts no others), so when every listed
+service declares every alias, both forms produce the same dependency plan. The limits
+count expanded entries: at most 128 bindings in all. An entry sets at most one of
+`service` and `services`; a version 2 entry that names neither applies to every service
+that declares one of its aliases, as described with project-wide host aliases
+below. A service listed twice, or a binding name used by more than one entry, refuses
+as a duplicate. Version 1 files keep working unchanged.
+
 For a listener started or rotated by a lifecycle hook, replace `host_pid` with
 `"host_executable": "/absolute/path/to/the/listener-binary"`. Hack discovers
 the current PID after the hooks and again before restart cleanup, requiring one
@@ -2023,12 +2052,14 @@ each binding once:
 
 Without `services`, the entry applies to every profile-active service that
 declares one of its aliases, and each service receives only the aliases it
-declares. `"services": ["web", "worker"]` limits it to those services, each of
-which must declare at least one of the aliases. The CLI expands the entry into
-the version 1 bindings shown above before discovery and review. The same listener
-authority applies to every expanded binding, and the 128-binding and 32-transport
-limits apply after expansion. A repeated binding name, an alias no selected service
-declares, a per-entry `service` key or an unknown or inactive service refuses.
+declares. `"services": ["web", "worker"]` limits it to those services, in that
+order, each of which must declare at least one of the aliases; `"service": "web"`
+is shorthand for a one-element list, and an entry sets at most one of the two.
+The CLI expands the entry into the version 1 bindings shown above before
+discovery and review. The same listener authority applies to every expanded
+binding, and the 128-binding and 32-transport limits apply after expansion. A
+repeated binding name, an alias no selected service declares, both `service` and
+`services`, or an unknown or inactive service refuses.
 
 Fresh pools reserve the number of distinct dependency transports from that
 selection. Existing pool capacity cannot be silently widened. The selection is copied into the temporary exact-plan

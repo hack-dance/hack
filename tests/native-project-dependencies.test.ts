@@ -317,7 +317,9 @@ test("ambiguous, undeclared, wildcard or credential-bearing dependencies refuse 
   }
   for (const value of [
     null,
+    // Version 2 compiles to version 1 first (below); parsing takes version 1 only.
     { version: 2, dependencies: [binding()] },
+    { version: 3, dependencies: [binding()] },
     {
       version: 1,
       dependencies: [binding()],
@@ -717,8 +719,10 @@ test("declarative bindings refuse unused, ambiguous or unscoped authority before
     [declarative({ services: ["web", "web"] })],
     [declarative({ services: [] })],
     [declarative({ services: "web" })],
-    // A per-service field or unknown key.
-    [declarative({ service: "web" })],
+    // Both service selectors, an inactive single service, or an unknown key.
+    [declarative({ service: "web", services: ["web"] })],
+    [declarative({ service: "missing" })],
+    [declarative({ service: "db" })],
     [declarative({ value: "synthetic-do-not-print" })],
     [declarative({ aliases: [] })],
     [declarative({ aliases: ["api.example.test", "api.example.test"] })],
@@ -810,4 +814,175 @@ test("limits apply after declarative expansion and one discovery serves every ex
     "E_CONFIG_INVALID",
     "values omitted"
   );
+});
+
+// A compact services list (#598) is the version 2 `services` selector: each
+// listed service receives the binding's aliases it declares, so a list whose
+// services declare every alias equals the repeated version 1 entries.
+const compactAliases = {
+  web: ["search.example.com", "content.example.com"],
+  worker: ["search.example.com"],
+  api: ["search.example.com"],
+};
+function parseCompact(
+  value: unknown,
+  services: readonly string[],
+  hostAliases: Readonly<Record<string, readonly string[]>> = compactAliases
+) {
+  return parseNativeHostDependencies({
+    value: compileNativeHostDependencySelection({ value, hostAliases }),
+    services,
+  });
+}
+
+test("a version 2 entry with services expands to the same plan as version 1 entries", () => {
+  const { service: _web, ...shared } = binding();
+  const services = ["web", "worker", "api"];
+  const v1 = parseNativeHostDependencies({
+    value: {
+      version: 1,
+      dependencies: [
+        ...services.map((service) => binding(service)),
+        binding("web", "content"),
+      ],
+    },
+    services,
+  });
+  const v2 = parseCompact(
+    {
+      version: 2,
+      dependencies: [{ ...shared, services }, binding("web", "content")],
+    },
+    services
+  );
+  expect(v2).toEqual(v1);
+  // Shared listeners still get one transport per service, as in version 1.
+  expect(v2.map((entry) => [entry.service, entry.slot])).toEqual([
+    ["web", 0],
+    ["worker", 0],
+    ["api", 0],
+    ["web", 1],
+  ]);
+  // Version 1 values pass through unchanged.
+  const value = { version: 1, dependencies: [binding()] };
+  expect(
+    compileNativeHostDependencySelection({
+      value,
+      hostAliases: compactAliases,
+    })
+  ).toBe(value);
+});
+
+test("version 2 limits and duplicate checks apply after expansion", () => {
+  const { service: _web, ...shared } = binding();
+  const many = Array.from({ length: 65 }, (_, index) => `svc-${index}`);
+  const hostAliases = Object.fromEntries(
+    ["web", "worker", ...many].map((service) => [
+      service,
+      ["search.example.com", "other.example.com"],
+    ])
+  );
+  const refusals: unknown[] = [
+    // 130 expanded bindings exceed the 128-binding limit.
+    {
+      version: 2,
+      dependencies: [
+        { ...shared, services: many },
+        {
+          ...shared,
+          binding: "other",
+          aliases: ["other.example.com"],
+          services: many,
+        },
+      ],
+    },
+    // A service listed twice for one binding is a duplicate binding.
+    { version: 2, dependencies: [{ ...shared, services: ["web", "web"] }] },
+    // The same binding from a services list and a single entry is a duplicate.
+    {
+      version: 2,
+      dependencies: [{ ...shared, services: ["web", "worker"] }, binding()],
+    },
+    // At most one of service and services.
+    {
+      version: 2,
+      dependencies: [{ ...shared, service: "web", services: ["worker"] }],
+    },
+    { version: 2, dependencies: [{ ...shared, services: [] }] },
+    { version: 2, dependencies: [{ ...shared, services: "web" }] },
+    { version: 2, dependencies: [{ ...shared, services: ["web"], extra: 1 }] },
+    { version: 2, dependencies: [] },
+    {
+      version: 2,
+      dependencies: [binding()],
+      password: "synthetic-do-not-print",
+    },
+    { version: 3, dependencies: [binding()] },
+  ];
+  for (const value of refusals) {
+    expectCodedThrow(
+      () => parseCompact(value, ["web", "worker", ...many], hostAliases),
+      "E_CONFIG_INVALID",
+      "values omitted"
+    );
+  }
+  // Naming neither selector applies the binding to every service that
+  // declares its alias (the declarative form above), not a refusal.
+  expect(
+    parseCompact(
+      { version: 2, dependencies: [shared] },
+      ["web", "worker", ...many],
+      hostAliases
+    )
+  ).toHaveLength(67);
+  expect(
+    parseCompact(
+      {
+        version: 2,
+        dependencies: [
+          { ...shared, services: many.slice(0, 64) },
+          {
+            ...shared,
+            binding: "other",
+            aliases: ["other.example.com"],
+            services: many.slice(0, 64),
+          },
+        ],
+      },
+      many,
+      hostAliases
+    )
+  ).toHaveLength(128);
+});
+
+test("a version 2 file discovers one PID per shared executable listener", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-dependencies-v2-"));
+  roots.push(root);
+  const path = join(root, "selection.json");
+  const executable = "/usr/local/bin/synthetic-tunnel";
+  const { service: _web, host_pid: _pid, ...shared } = binding();
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 2,
+      dependencies: [
+        { ...shared, host_executable: executable, services: ["web", "worker"] },
+      ],
+    })
+  );
+  const calls: unknown[] = [];
+  const result = await readNativeHostDependencies({
+    path,
+    services: ["web", "worker"],
+    hostAliases: compactAliases,
+    discover: async (request) => {
+      calls.push(request);
+      return { host_pid: 456, endpoint_fingerprint: "a".repeat(64) };
+    },
+  });
+  expect(calls).toEqual([{ hostPort: 8443, executable }]);
+  expect(result.map((entry) => [entry.service, entry.host_pid])).toEqual([
+    ["web", 456],
+    ["worker", 456],
+  ]);
 });

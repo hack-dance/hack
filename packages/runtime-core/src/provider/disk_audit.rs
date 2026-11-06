@@ -5,6 +5,22 @@ use super::identity::ProcessIdentity;
 use crate::CandidateError;
 use std::path::Path;
 
+/// First descriptor-list capacity when the kernel's sizing estimate is unusable.
+#[cfg(any(target_os = "macos", test))]
+const INITIAL_FDS: usize = 4096;
+/// Hard ceiling on listed descriptor records (8 bytes each, so 8 MiB at most).
+///
+/// The audit proves that the owned provider process holds the expected disk
+/// images; every other descriptor is only classified and skipped. A provider that
+/// shares a project source holds one host descriptor per guest-open shared file
+/// (dev servers, file watchers, `tail -f`), so ordinary projects exceed a few
+/// thousand. The listing therefore grows to the process's actual table and only
+/// refuses above this ceiling, which is above the default macOS per-process limit
+/// (`kern.maxfilesperproc`). A table that cannot be listed completely is refused:
+/// a truncated listing is never treated as evidence.
+#[cfg(any(target_os = "macos", test))]
+const MAX_FDS: usize = 1 << 20;
+
 fn unavailable() -> CandidateError {
     CandidateError::new(
         "unaudited_provider_config",
@@ -33,7 +49,6 @@ pub(super) fn verify(
         file: FileInfo,
         vnode: libc::vnode_info_path,
     }
-    const MAX_FDS: usize = 4096;
     const VNODE_PATH_INFO: i32 = 2;
     if expected.is_empty() || expected.len() > 2 {
         return Err(unavailable());
@@ -50,27 +65,9 @@ pub(super) fn verify(
             Ok((metadata.dev(), metadata.ino()))
         })
         .collect::<Result<Vec<_>, CandidateError>>()?;
-    let mut entries = vec![
-        libc::proc_fdinfo {
-            proc_fd: 0,
-            proc_fdtype: 0
-        };
-        MAX_FDS
-    ];
-    let bytes = std::mem::size_of_val(entries.as_slice());
-    // SAFETY: initialized, aligned buffer holds exactly MAX_FDS native records.
-    let read = unsafe {
-        libc::proc_pidinfo(
-            process.pid,
-            libc::PROC_PIDLISTFDS,
-            0,
-            entries.as_mut_ptr().cast(),
-            bytes as i32,
-        )
-    };
-    let count = record_count(read, bytes, std::mem::size_of::<libc::proc_fdinfo>())?;
+    let entries = list_descriptors(process.pid)?;
     let mut found = vec![false; expected.len()];
-    for entry in &entries[..count] {
+    for entry in &entries {
         if entry.proc_fdtype != libc::PROX_FDTYPE_VNODE as u32 {
             continue;
         }
@@ -125,6 +122,62 @@ pub(super) fn verify(
     Ok(())
 }
 
+/// Complete descriptor table of `pid`, or a refusal. The buffer starts from the
+/// kernel's sizing estimate and doubles while the reply fills it, up to `MAX_FDS`.
+#[cfg(target_os = "macos")]
+fn list_descriptors(pid: i32) -> Result<Vec<libc::proc_fdinfo>, CandidateError> {
+    let size = std::mem::size_of::<libc::proc_fdinfo>();
+    // SAFETY: a null buffer with zero size only asks for the kernel's estimate.
+    let estimate =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    let mut capacity = initial_capacity(estimate, size);
+    loop {
+        let mut entries = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0
+            };
+            capacity
+        ];
+        let bytes = std::mem::size_of_val(entries.as_slice());
+        let bytes_arg = i32::try_from(bytes).map_err(|_| unavailable())?;
+        // SAFETY: initialized, aligned buffer holds exactly `capacity` native records.
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                entries.as_mut_ptr().cast(),
+                bytes_arg,
+            )
+        };
+        match record_count(read, bytes, size)? {
+            Some(count) => {
+                entries.truncate(count);
+                return Ok(entries);
+            }
+            None => capacity = next_capacity(capacity).ok_or_else(unavailable)?,
+        }
+    }
+}
+
+/// Records for the first listing: the kernel estimate (table size plus slack)
+/// with headroom for descriptors opened before the listing, within the bounds.
+#[cfg(any(target_os = "macos", test))]
+fn initial_capacity(estimate: i32, size: usize) -> usize {
+    usize::try_from(estimate)
+        .ok()
+        .filter(|bytes| *bytes > 0)
+        .map_or(INITIAL_FDS, |bytes| bytes / size + 64)
+        .clamp(INITIAL_FDS, MAX_FDS)
+}
+
+/// Doubled capacity after a full reply, or `None` once the ceiling was listed.
+#[cfg(any(target_os = "macos", test))]
+fn next_capacity(current: usize) -> Option<usize> {
+    (current < MAX_FDS).then(|| current.saturating_mul(2).min(MAX_FDS))
+}
+
 #[cfg(not(target_os = "macos"))]
 pub(super) fn verify(
     _: &ProcessIdentity,
@@ -134,12 +187,20 @@ pub(super) fn verify(
     Err(unavailable())
 }
 
+/// Complete record count, `None` for a reply that filled the buffer (possibly
+/// truncated, so the caller must list again with more room), or a refusal.
 #[cfg(any(target_os = "macos", test))]
-fn record_count(read: i32, capacity: usize, size: usize) -> Result<usize, CandidateError> {
-    if read <= 0 || read as usize >= capacity || read as usize % size != 0 {
+fn record_count(read: i32, capacity: usize, size: usize) -> Result<Option<usize>, CandidateError> {
+    let Some(read) = usize::try_from(read).ok().filter(|read| *read > 0) else {
+        return Err(unavailable());
+    };
+    if read % size != 0 || read > capacity {
         return Err(unavailable());
     }
-    Ok(read as usize / size)
+    if read == capacity {
+        return Ok(None);
+    }
+    Ok(Some(read / size))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -216,6 +277,7 @@ mod tests {
             std::mem::size_of_val(entries.as_slice()),
             std::mem::size_of::<libc::proc_fdinfo>(),
         )
+        .unwrap()
         .unwrap();
         assert!(
             entries[..count]
@@ -251,11 +313,98 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_or_full_descriptor_buffers_are_refused() {
-        for read in [-1, 0, 7, 32, 40] {
+    fn incomplete_descriptor_buffers_are_refused_and_full_ones_grow() {
+        for read in [-1, 0, 7, 33, 40] {
             assert!(record_count(read, 32, 8).is_err());
         }
-        assert_eq!(record_count(24, 32, 8).unwrap(), 3);
+        assert_eq!(record_count(24, 32, 8).unwrap(), Some(3));
+        // A reply that fills the buffer may be truncated: list again, never trust it.
+        assert_eq!(record_count(32, 32, 8).unwrap(), None);
+    }
+
+    #[test]
+    fn descriptor_capacity_follows_the_table_within_a_hard_ceiling() {
+        assert_eq!(initial_capacity(-1, 8), INITIAL_FDS);
+        assert_eq!(initial_capacity(0, 8), INITIAL_FDS);
+        assert_eq!(initial_capacity(100 * 8, 8), INITIAL_FDS);
+        assert_eq!(initial_capacity(5_200 * 8, 8), 5_264);
+        assert_eq!(initial_capacity(i32::MAX, 8), MAX_FDS);
+        assert_eq!(next_capacity(INITIAL_FDS), Some(2 * INITIAL_FDS));
+        assert_eq!(next_capacity(MAX_FDS - 1), Some(MAX_FDS));
+        assert_eq!(next_capacity(MAX_FDS), None);
+        let mut capacity = INITIAL_FDS;
+        let mut listings = 1;
+        while let Some(next) = next_capacity(capacity) {
+            capacity = next;
+            listings += 1;
+        }
+        assert_eq!(capacity, MAX_FDS);
+        assert!(listings <= 9, "growth is bounded");
+    }
+
+    /// HACK-1917: a provider sharing a project source holds a host descriptor for
+    /// every guest-open file. More than 4,096 unrelated descriptors (here with the
+    /// disks opened last, at the highest numbers) must not hide the owned disks.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn owned_disks_are_found_among_more_than_four_thousand_descriptors() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "hack-audit-many-{}-{}",
+            std::process::id(),
+            crate::next_test_scratch()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let shared = root.join("shared-source-file");
+        std::fs::write(&shared, b"source").unwrap();
+        let paths = [root.join("storage.raw"), root.join("overlay.raw")];
+        for path in &paths {
+            std::fs::write(path, b"owned").unwrap();
+        }
+        let mut child = Child(
+            Command::new("/bin/zsh")
+                .args([
+                    "-fc",
+                    "ulimit -n 8192 || exit 3; integer i=0; while (( i < 5000 )); do exec {fd}<\"$1\"; (( i++ )); done; exec {a}<\"$2\" {b}<\"$3\"; print ready; read -r answer",
+                    "audit",
+                ])
+                .arg(&shared)
+                .args(&paths)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        BufReader::new(child.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line, "ready\n");
+        let pid = child.0.id() as i32;
+        assert!(list_descriptors(pid).unwrap().len() > 5_000);
+        let process = identity::observe(pid).unwrap();
+        verify(&process, &process.executable, &paths).unwrap();
+        let missing = root.join("missing.raw");
+        std::fs::write(&missing, b"not open").unwrap();
+        assert!(verify(&process, &process.executable, &[missing]).is_err());
+        child
+            .0
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"done\n")
+            .unwrap();
+        child.0.wait().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[cfg(target_os = "macos")]
     #[test]

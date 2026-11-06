@@ -20,9 +20,14 @@ import {
   waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
 import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
+import { nativeProjectPs } from "../src/backends/native-project-observe.ts";
 import { preflightNativeRestart } from "../src/backends/native-project-restart-preflight.ts";
 import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
-import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
+import {
+  loadNativeProjectRun,
+  type NativeProjectRun,
+  saveNativeProjectRun,
+} from "../src/backends/native-project-run.ts";
 import {
   NATIVE_CONFIGURATION_REFUSAL,
   NATIVE_SHARED_SOURCE_REFUSAL,
@@ -442,6 +447,158 @@ test("failed startup recovers exact pending cleanup and still reports the startu
   expect(events).not.toContain("save");
   expect(events.at(-1)).toBe("cleanup");
 });
+/** A started graph whose foreground failed before Ready and could not clean up. */
+function failedStartupFixture(
+  fixtureValue: Awaited<ReturnType<typeof fixture>>,
+  receipt: { readonly journalIncomplete?: boolean } = {}
+) {
+  const { opts, events } = fixtureValue;
+  const invoke = opts.dependencies.invoke!;
+  const selected = { run: "" };
+  opts.dependencies.serve = async (request) => {
+    selected.run = request.run;
+    throw new Error(
+      "Native graph startup was interrupted or failed (unaudited_provider_config); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.save = async (request) => {
+    events.push("save");
+    await saveNativeProjectRun(request);
+  };
+  opts.dependencies.finalization = async (request) => {
+    events.push("finalization");
+    const lifetime = await beginNativeProjectFinalization(request);
+    return {
+      ...lifetime,
+      complete: async () => {
+        events.push("finalization-complete");
+        await lifetime.complete();
+      },
+    };
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "inspect") {
+      events.push("graph inspect");
+      return {
+        journal_incomplete: receipt.journalIncomplete === true,
+        receipt: {
+          run: selected.run,
+          owner: "c".repeat(32),
+          namespace: "b".repeat(64),
+          plan_id: "a".repeat(64),
+          phase: "ready-observed",
+          relay_startup: { control_only: true },
+          resources: {
+            "container:web": {
+              kind: "container",
+              key: "web",
+              id: "f".repeat(64),
+              phase: "started",
+            },
+          },
+        },
+        observations: { "container:web": { state: "running" } },
+      };
+    }
+    if (request.args[1] === "owner-status") {
+      throw new Error("synthetic dead foreground owner");
+    }
+    return await invoke(request);
+  };
+  return selected;
+}
+
+test("a post-start failure whose cleanup is unconfirmed records the run for ps and down", async () => {
+  const value = await fixture(false);
+  const { opts, events } = value;
+  const selected = failedStartupFixture(value);
+  const failure = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect(failure).toBeInstanceOf(ClosedCliError);
+  const message = (failure as Error).message;
+  expect(message).toContain("cleanup is unconfirmed");
+  expect(message).toContain("(unaudited_provider_config)");
+  expect(message).toContain(
+    `The failed run ${selected.run} is recorded as this project's run mapping`
+  );
+  // Readiness never happened: no hooks ran, and nothing claims finalization.
+  expect(events).not.toContain("ready");
+  expect(events).not.toContain("remove");
+  expect(events).not.toContain("finalization-complete");
+  expect(events.indexOf("finalization")).toBeGreaterThan(-1);
+  expect(events.indexOf("finalization")).toBeLessThan(events.indexOf("save"));
+  expect(events.at(-1)).toBe("cleanup");
+  const mapping = {
+    run: selected.run,
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+  };
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(mapping);
+  // ps selects the recorded run and reports its stale owner instead of "not started".
+  const ps = await nativeProjectPs({
+    runtime: opts.runtime,
+    scope: opts.scope,
+    invoke: opts.dependencies.invoke,
+  });
+  expect(ps).toMatchObject({
+    status: "owner_unconfirmed",
+    run: selected.run,
+    phase: "ready-observed",
+  });
+  expect(ps.items).toEqual([
+    expect.objectContaining({ service: "web", state: "running" }),
+  ]);
+});
+
+test("a post-start failure with an unauthenticated receipt records no owner", async () => {
+  const value = await fixture(false);
+  const { opts, events } = value;
+  failedStartupFixture(value, { journalIncomplete: true });
+  const failure = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).not.toContain("is recorded");
+  expect(events).not.toContain("finalization");
+  expect(events).not.toContain("save");
+  expect(await loadNativeProjectRun(opts.scope)).toBeNull();
+});
+
+test("a retained run's post-start failure keeps its existing mapping unchanged", async () => {
+  const { opts, events, saved } = await retainedFinalizationFixture();
+  await acknowledgeRetainedFrontend(opts.scope, saved);
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.serve = async () => {
+    throw new Error(
+      "Native graph startup failed (engine_rejected); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (
+      request.args[1] === "inspect" &&
+      events.includes("graph dependency-plan")
+    ) {
+      return {
+        ...stoppedGraph(saved),
+        observations: { "container:web": { state: "running" } },
+      };
+    }
+    return await invoke(request);
+  };
+  opts.dependencies.save = async () => {
+    events.push("save");
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "cleanup is unconfirmed"
+  );
+  expect(events).not.toContain("save");
+});
+
 test("foreground partial shutdown is reported without selecting failed-start recovery", async () => {
   const { opts, events } = await fixture();
   const invoke = opts.dependencies.invoke!;

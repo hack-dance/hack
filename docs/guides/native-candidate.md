@@ -805,6 +805,13 @@ It acquires public images, privately supplies managed environment values, runs
 lifecycle hooks, and publishes the run mapping after native readiness. Ctrl-C waits
 for owned cleanup and keeps the stopped run mapping and named volumes after
 confirming cleanup. The VM remains available until explicit runtime shutdown.
+If startup fails after the graph started resources and the frontend cannot
+confirm their cleanup, it publishes the authenticated failed run as the project's
+run mapping before exiting, so `hack ps`, `hack down` and
+`hack doctor --native-cleanup inspect` select that run instead of reporting the
+project as not started; nothing is stopped or replayed to do so. When the
+receipt itself cannot be authenticated, nothing is recorded and the runtime
+journal keeps the graph for explicit recovery.
 
 Without that grant, `up` and `restart` refuse with `E_PERMISSION` before any stop or
 runtime request; set it and run the command again.

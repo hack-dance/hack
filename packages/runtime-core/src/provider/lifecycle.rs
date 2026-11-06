@@ -695,8 +695,11 @@ fn enable_amd64_emulation(
     candidate: &Candidate,
     owner: &mut Owner,
     requested: bool,
+    restart: &mut admission_pool::Restart<'_>,
+    lock: &state::Lock,
 ) -> Result<(), CandidateError> {
-    if requested && !owner.amd64_emulation {
+    let enabled = requested && !owner.amd64_emulation;
+    if enabled {
         owner.amd64_emulation = true;
         owner.save(candidate)?;
     }
@@ -709,6 +712,11 @@ fn enable_amd64_emulation(
                 &["machine", "update", "--name", &owner.machine, "--rosetta"],
             )?;
         }
+    }
+    if enabled {
+        // A reserve-qualified restart follows this authorized intent change, rechecked on
+        // the provider's updated configuration, instead of refusing it as a changed owner.
+        restart.requalify_amd64_emulation(candidate, lock)?;
     }
     Ok(())
 }
@@ -1327,7 +1335,7 @@ fn start_pool(
         return status(candidate);
     }
     // Only a clean stopped selection continues, as a restart of its verified retained disks.
-    let restart = admission_pool::restart_only(candidate, settled, &owner, &lock)?;
+    let mut restart = admission_pool::restart_only(candidate, settled, &owner, &lock)?;
     if ![
         "initializing",
         "stopped",
@@ -1351,7 +1359,13 @@ fn start_pool(
         }
         verify_disks(candidate, &owner)?;
     }
-    enable_amd64_emulation(candidate, &mut owner, start.amd64_emulation)?;
+    enable_amd64_emulation(
+        candidate,
+        &mut owner,
+        start.amd64_emulation,
+        &mut restart,
+        &lock,
+    )?;
     prepare_rootfs(candidate, &mut owner)?;
     if !owner.created {
         // A reserve-qualified start never reaches `machine create`.

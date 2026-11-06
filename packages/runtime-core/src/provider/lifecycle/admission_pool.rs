@@ -387,8 +387,7 @@ pub(super) fn settle<'a>(
 
 /// The admission basis this start settled under the startup lease. Only [`settle`] issues
 /// it, and [`restart_only`] needs it.
-#[derive(Clone, Copy)]
-pub(super) struct Settled<'a>(&'a Choice);
+pub(super) struct Settled<'a>(&'a mut Choice);
 
 impl Settled<'_> {
     pub(super) fn selected(&self) -> Option<&Selection> {
@@ -398,7 +397,7 @@ impl Settled<'_> {
 
 /// Authority for create or restart effects and for the pre-boot admission. Only
 /// [`restart_only`] issues it.
-pub(super) struct Restart<'a>(&'a Choice);
+pub(super) struct Restart<'a>(&'a mut Choice);
 
 /// Before a restart effect under the startup lease: a selection continues only as a
 /// restart of its clean stopped pool's verified retained disks.
@@ -420,6 +419,36 @@ pub(super) fn restart_only<'a>(
     }
     selected.reverify_leased(candidate, lease)?;
     Ok(Restart(choice))
+}
+
+impl Restart<'_> {
+    /// Follow the one owner change a restart itself authorizes: `runtime up
+    /// --amd64-emulation` records the translation intent on the stopped pool (and stores it
+    /// in the provider with `machine update --rosetta`) after [`restart_only`] and before
+    /// the pre-boot admission, under the same startup lease.
+    ///
+    /// A start without a selection needs nothing. A stopped selection is rebound only when
+    /// the current receipt differs from the selected one by gaining that intent and nothing
+    /// else; the full leased recheck (receipt and release checks, including the provider
+    /// configuration audit against the new intent) then runs on the rebound receipt. Any
+    /// other change still refuses `admission_owner_changed`.
+    pub(super) fn requalify_amd64_emulation(
+        &mut self,
+        candidate: &Candidate,
+        lease: &state::Lock,
+    ) -> Result<(), CandidateError> {
+        let Some(selected) = self.0.selection.as_mut() else {
+            return Ok(());
+        };
+        let current = Owner::load(candidate)?;
+        let mut expected = selected.owner.clone();
+        expected.amd64_emulation = true;
+        if !selected.is_stopped() || selected.owner.amd64_emulation || current != expected {
+            return Err(changed());
+        }
+        selected.owner = current;
+        selected.reverify_leased(candidate, lease)
+    }
 }
 
 /// Authority to run `machine create`: only a start without a reserve selection allocates
@@ -458,7 +487,7 @@ pub(super) enum BootGate<'a> {
 pub(super) fn admit_boot<'a>(
     candidate: &Candidate,
     profile: Profile,
-    restart: &Restart<'a>,
+    restart: &'a Restart<'_>,
     baseline_swapouts: Option<u64>,
 ) -> Result<BootGate<'a>, CandidateError> {
     admit_boot_with(candidate, restart.0, baseline_swapouts, |owned| {

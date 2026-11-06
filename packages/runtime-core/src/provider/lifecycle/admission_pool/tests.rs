@@ -1121,12 +1121,11 @@ fn a_reserve_selection_only_restarts_and_never_creates() {
 fn reserve_restart_only_child() {
     let _serial = serial();
     let pool = stopped_pool();
-    let choice = select(&pool.candidate, Profile::Development).unwrap();
+    let mut choice = select(&pool.candidate, Profile::Development).unwrap();
     let lease = lease(&pool);
     let owner = Owner::load(&pool.candidate).unwrap();
     // Each case stands for a start whose basis `settle` already settled under the lease.
-    let settled = Settled(&choice);
-    let restart = restart_only(&pool.candidate, settled, &owner, &lease).unwrap();
+    let restart = restart_only(&pool.candidate, Settled(&mut choice), &owner, &lease).unwrap();
     assert_eq!(
         fresh_create(&restart).err().unwrap().code,
         "admission_owner_changed"
@@ -1135,7 +1134,7 @@ fn reserve_restart_only_child() {
     let mut uncreated = owner.clone();
     uncreated.created = false;
     assert_eq!(
-        restart_only(&pool.candidate, settled, &uncreated, &lease)
+        restart_only(&pool.candidate, Settled(&mut choice), &uncreated, &lease)
             .err()
             .unwrap()
             .code,
@@ -1144,7 +1143,7 @@ fn reserve_restart_only_child() {
     let mut other = owner.clone();
     other.guest_boot_id = None;
     assert_eq!(
-        restart_only(&pool.candidate, settled, &other, &lease)
+        restart_only(&pool.candidate, Settled(&mut choice), &other, &lease)
             .err()
             .unwrap()
             .code,
@@ -1153,7 +1152,7 @@ fn reserve_restart_only_child() {
     // The provider's release is proven under the lease before any restart effect.
     let held = exclusive_lock(&pool.data().join("vm.lock"));
     assert_eq!(
-        restart_only(&pool.candidate, settled, &owner, &lease)
+        restart_only(&pool.candidate, Settled(&mut choice), &owner, &lease)
             .err()
             .unwrap()
             .code,
@@ -1164,25 +1163,169 @@ fn reserve_restart_only_child() {
 
     // A live selection never restarts or creates.
     let running = Pool::new();
-    let choice = select(&running.candidate, Profile::Development).unwrap();
+    let mut choice = select(&running.candidate, Profile::Development).unwrap();
     let lease = state::Lock::acquire(&root(&running.candidate)).unwrap();
     let owner = Owner::load(&running.candidate).unwrap();
     assert_eq!(
-        restart_only(&running.candidate, Settled(&choice), &owner, &lease)
+        restart_only(&running.candidate, Settled(&mut choice), &owner, &lease)
             .err()
             .unwrap()
             .code,
         "admission_owner_changed"
     );
-    assert!(fresh_create(&Restart(&choice)).is_err());
+    assert!(fresh_create(&Restart(&mut choice)).is_err());
 
     // Without a selection, the unchanged fresh path may create.
-    let fresh = Choice {
+    let mut fresh = Choice {
         selection: None,
         refusal: None,
     };
-    let restart = restart_only(&running.candidate, Settled(&fresh), &owner, &lease).unwrap();
+    let restart = restart_only(&running.candidate, Settled(&mut fresh), &owner, &lease).unwrap();
     fresh_create(&restart).unwrap();
+}
+
+/// `machine update --rosetta`: the provider stores the translation setting in this pool's
+/// machine record.
+fn provider_rosetta(pool: &Pool, enabled: bool) {
+    let connection = rusqlite::Connection::open(provider_database(pool)).unwrap();
+    let data: Vec<u8> = connection
+        .query_row(
+            "SELECT data FROM vms WHERE name = ?1",
+            [&pool.owner.machine],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut record: Value = serde_json::from_slice(&data).unwrap();
+    record["rosetta"] = Value::Bool(enabled);
+    connection
+        .execute(
+            "UPDATE vms SET data = ?1 WHERE name = ?2",
+            rusqlite::params![serde_json::to_vec(&record).unwrap(), pool.owner.machine],
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_reserve_restart_follows_only_the_authorized_amd64_emulation_change() {
+    isolated("reserve_amd64_emulation_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by a_reserve_restart_follows_only_the_authorized_amd64_emulation_change"]
+fn reserve_amd64_emulation_child() {
+    let _serial = serial();
+    let pool = stopped_pool();
+    let lease = lease(&pool);
+    let original = Owner::load(&pool.candidate).unwrap();
+    assert!(!original.amd64_emulation);
+    // Record the intent as `runtime up --amd64-emulation` does after the restart gate.
+    let record_intent = |provider: bool, change: &dyn Fn(&mut Owner)| {
+        let mut owner = original.clone();
+        owner.amd64_emulation = true;
+        change(&mut owner);
+        owner.save(&pool.candidate).unwrap();
+        provider_rosetta(&pool, provider);
+    };
+    let reset = || {
+        original.save(&pool.candidate).unwrap();
+        provider_rosetta(&pool, false);
+    };
+
+    // Free disk between the host reserve and the fresh budget: the start keeps its reserve
+    // selection under the lease.
+    let mut choice = select(&pool.candidate, Profile::Development).unwrap();
+    let mut samples = window(admission::OwnedPool::Stopped, &[30 * GIB, 30 * GIB]);
+    let settled = settle(&pool.candidate, &mut choice, &lease, &mut samples).unwrap();
+    assert!(settled.selected().is_some_and(Selection::is_stopped));
+    let mut restart = restart_only(&pool.candidate, settled, &original, &lease).unwrap();
+    record_intent(true, &|_| {});
+    // The selection still names the receipt before the intent: unrequalified, the
+    // pre-boot admission refuses the authorized change as a changed owner.
+    assert_eq!(
+        admit_boot_with(&pool.candidate, restart.0, Some(7), |owned| {
+            Ok(sample(owned, true, Some(7)))
+        })
+        .err()
+        .unwrap()
+        .code,
+        "admission_owner_changed"
+    );
+    restart
+        .requalify_amd64_emulation(&pool.candidate, &lease)
+        .unwrap();
+    // Still a restart of the retained disks: never a create.
+    assert_eq!(
+        fresh_create(&restart).err().unwrap().code,
+        "admission_owner_changed"
+    );
+    let mut asked = None;
+    let gate = admit_boot_with(&pool.candidate, restart.0, Some(7), |owned| {
+        asked = Some(owned);
+        Ok(sample(owned, true, Some(7)))
+    })
+    .unwrap();
+    assert_eq!(asked, Some(admission::OwnedPool::Stopped));
+    let BootGate::Admitted(boot) = gate else {
+        panic!("requalified reserve pre-boot sample admitted")
+    };
+    boot.release(&pool.candidate, &lease).unwrap();
+    reset();
+
+    // Each refusal starts from a reserve restart of the unchanged receipt.
+    let refused = |provider: bool, change: &dyn Fn(&mut Owner)| {
+        let mut choice = select(&pool.candidate, Profile::Development).unwrap();
+        let mut restart =
+            restart_only(&pool.candidate, Settled(&mut choice), &original, &lease).unwrap();
+        record_intent(provider, change);
+        let code = restart
+            .requalify_amd64_emulation(&pool.candidate, &lease)
+            .err()
+            .unwrap()
+            .code;
+        reset();
+        code
+    };
+    // Any other owner change beside the intent is still a changed owner.
+    assert_eq!(
+        refused(true, &|owner| owner.guest_boot_id = None),
+        "admission_owner_changed"
+    );
+    assert_eq!(
+        refused(true, &|owner| owner.phase = "booting".into()),
+        "admission_owner_changed"
+    );
+    // No intent change at all is not this transition.
+    assert_eq!(
+        refused(false, &|owner| owner.amd64_emulation = false),
+        "admission_owner_changed"
+    );
+    // The retained-disk release checks still run on the rebound receipt: a provider whose
+    // stored configuration lacks translation is not this pool's audited configuration.
+    assert_eq!(refused(false, &|_| {}), "retained_reserve_foreign_owner");
+    // An active provider still refuses.
+    let held = exclusive_lock(&pool.data().join("vm.lock"));
+    let mut choice = select(&pool.candidate, Profile::Development).unwrap();
+    let mut restart = Restart(&mut choice);
+    record_intent(true, &|_| {});
+    assert_eq!(
+        restart
+            .requalify_amd64_emulation(&pool.candidate, &lease)
+            .err()
+            .unwrap()
+            .code,
+        "retained_reserve_active_owner"
+    );
+    drop(held);
+    reset();
+
+    // Without a selection, the fresh path needs no requalification.
+    let mut fresh = Choice {
+        selection: None,
+        refusal: None,
+    };
+    Restart(&mut fresh)
+        .requalify_amd64_emulation(&pool.candidate, &lease)
+        .unwrap();
 }
 
 /// Qualifying samples on `owned`'s basis, each observing `free` bytes of free disk.

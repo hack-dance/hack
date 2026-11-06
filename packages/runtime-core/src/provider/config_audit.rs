@@ -22,6 +22,30 @@ pub(super) fn verify(candidate: &Candidate, owner: &Owner) -> Result<(), Candida
     verify_value(candidate, owner, &record)
 }
 
+/// [`verify`] for a stopped pool before its restart repairs translation: it also accepts the
+/// one pending transition an interrupted `runtime up --amd64-emulation` leaves, where the
+/// receipt already records the intent but the provider has not stored `rosetta` yet. The
+/// record must then be exactly this pool's audited configuration without translation. The
+/// reverse (a provider with translation the receipt does not record) is still refused, and
+/// the strict [`verify`] runs again after `machine update --rosetta` and before boot.
+pub(super) fn verify_before_translation_repair(
+    candidate: &Candidate,
+    owner: &Owner,
+) -> Result<(), CandidateError> {
+    let home = candidate.state_root.join("run/smolvm/home");
+    #[cfg(target_os = "macos")]
+    let database = home.join("Library/Application Support/smolvm/server/smolvm.db");
+    #[cfg(not(target_os = "macos"))]
+    let database = home.join(".local/share/smolvm/server/smolvm.db");
+    let record = read_database(&database, &owner.machine)?;
+    if owner.amd64_emulation && !record_amd64_emulation(&record)? {
+        let mut pending = owner.clone();
+        pending.amd64_emulation = false;
+        return verify_value(candidate, &pending, &record);
+    }
+    verify_value(candidate, owner, &record)
+}
+
 pub(super) fn verify_value(
     candidate: &Candidate,
     owner: &Owner,

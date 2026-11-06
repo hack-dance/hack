@@ -237,16 +237,34 @@ pub(super) fn stopped(candidate: &Candidate, owner: &Owner) -> Result<(), Stoppe
 /// machine (free VM lock, no open disk handle, no owned listener) and the provider's
 /// persisted configuration is still this pool's audited one. The VM lock is released on
 /// return; the provider's own `machine start` reacquires it.
+///
+/// Before the restart's translation repair ([`Audit::BeforeRepair`]), the provider may still
+/// lack the `rosetta` setting the receipt records after an interrupted `machine update`; the
+/// restart repeats that update. Every later release check audits the configuration exactly.
 fn released(
     candidate: &Candidate,
     owner: &Owner,
     lease: &state::Lock,
+    audit: Audit,
 ) -> Result<(), StoppedRefusal> {
     let check = |error: CandidateError| StoppedRefusal::from_check(&error);
     lease.verify_path(&root(candidate)).map_err(check)?;
     lock_absent_disks_within(candidate, owner, disk_handles::RELEASE_HANDLE_WAIT).map_err(check)?;
     sockets_absent(owner).map_err(check)?;
-    config_audit::verify(candidate, owner).map_err(check)
+    match audit {
+        Audit::BeforeRepair => config_audit::verify_before_translation_repair(candidate, owner),
+        Audit::Exact => config_audit::verify(candidate, owner),
+    }
+    .map_err(check)
+}
+
+/// How a release check audits the provider's persisted configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Audit {
+    /// Before any restart effect: a pending translation update is accepted (see [`released`]).
+    BeforeRepair,
+    /// After the restart's provider effects: exactly the receipt's configuration.
+    Exact,
 }
 
 fn changed() -> CandidateError {
@@ -291,9 +309,18 @@ impl Selection {
         candidate: &Candidate,
         lease: &state::Lock,
     ) -> Result<(), CandidateError> {
+        self.reverify_leased_with(candidate, lease, Audit::Exact)
+    }
+
+    fn reverify_leased_with(
+        &self,
+        candidate: &Candidate,
+        lease: &state::Lock,
+        audit: Audit,
+    ) -> Result<(), CandidateError> {
         self.reverify(candidate)?;
         if self.basis == Basis::Stopped {
-            released(candidate, &self.owner, lease).map_err(StoppedRefusal::error)?;
+            released(candidate, &self.owner, lease, audit).map_err(StoppedRefusal::error)?;
             // The receipt cannot have changed under the lease, but bind it after the
             // release probes as well.
             self.reverify(candidate)?;
@@ -378,7 +405,7 @@ pub(super) fn settle<'a>(
                 samples.iter_mut().for_each(admission::rebase_fresh);
                 choice.selection = None;
             } else {
-                selected.reverify_leased(candidate, lease)?;
+                selected.reverify_leased_with(candidate, lease, Audit::BeforeRepair)?;
             }
         }
     }
@@ -417,7 +444,7 @@ pub(super) fn restart_only<'a>(
             "Reserve-qualified ownership no longer names its selected pool; no create or boot was admitted.",
         ));
     }
-    selected.reverify_leased(candidate, lease)?;
+    selected.reverify_leased_with(candidate, lease, Audit::BeforeRepair)?;
     Ok(Restart(choice))
 }
 

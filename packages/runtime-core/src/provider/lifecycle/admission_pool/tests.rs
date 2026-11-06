@@ -1328,6 +1328,81 @@ fn reserve_amd64_emulation_child() {
         .unwrap();
 }
 
+#[test]
+fn an_interrupted_translation_update_recovers_on_the_reserve() {
+    isolated("interrupted_translation_update_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by an_interrupted_translation_update_recovers_on_the_reserve"]
+fn interrupted_translation_update_child() {
+    let _serial = serial();
+    let pool = stopped_pool();
+    let lease = lease(&pool);
+    // `runtime up --amd64-emulation` saved the intent; `machine update --rosetta` did not
+    // complete, so the provider still stores no translation.
+    let mut owner = Owner::load(&pool.candidate).unwrap();
+    owner.amd64_emulation = true;
+    owner.save(&pool.candidate).unwrap();
+    let reserve = || window(admission::OwnedPool::Stopped, &[30 * GIB, 30 * GIB]);
+
+    // The retry settles on the reserve and passes the restart gate, so it reaches the repair.
+    let mut choice = select(&pool.candidate, Profile::Development).unwrap();
+    let mut samples = reserve();
+    let settled = settle(&pool.candidate, &mut choice, &lease, &mut samples).unwrap();
+    assert!(settled.selected().is_some_and(Selection::is_stopped));
+    let restart = restart_only(&pool.candidate, settled, &owner, &lease).unwrap();
+    let admitted = |restart: &Restart<'_>| match admit_boot_with(
+        &pool.candidate,
+        restart.0,
+        Some(7),
+        |owned| Ok(sample(owned, true, Some(7))),
+    )
+    .unwrap()
+    {
+        BootGate::Admitted(boot) => boot.release(&pool.candidate, &lease),
+        BootGate::Refused(_) => panic!("reserve pre-boot sample admitted"),
+    };
+    // Boot stays exact: without the repeated update, `machine start` is not permitted.
+    assert_eq!(
+        admitted(&restart).err().unwrap().code,
+        "retained_reserve_foreign_owner"
+    );
+    // The restart repeats `machine update --rosetta`; then the exact audit passes.
+    provider_rosetta(&pool, true);
+    admitted(&restart).unwrap();
+
+    // Only that pending direction is accepted: a provider with translation the receipt does
+    // not record is still foreign before any restart effect.
+    let original = Owner::load(&pool.candidate).unwrap();
+    let mut unrecorded = original.clone();
+    unrecorded.amd64_emulation = false;
+    unrecorded.save(&pool.candidate).unwrap();
+    let mut choice = select(&pool.candidate, Profile::Development).unwrap();
+    let mut samples = reserve();
+    assert_eq!(
+        settle(&pool.candidate, &mut choice, &lease, &mut samples)
+            .err()
+            .unwrap()
+            .code,
+        "retained_reserve_foreign_owner"
+    );
+    // The other release checks still run with a pending update.
+    owner.save(&pool.candidate).unwrap();
+    provider_rosetta(&pool, false);
+    let held = exclusive_lock(&pool.data().join("vm.lock"));
+    let mut choice = select(&pool.candidate, Profile::Development).unwrap();
+    let mut samples = reserve();
+    assert_eq!(
+        settle(&pool.candidate, &mut choice, &lease, &mut samples)
+            .err()
+            .unwrap()
+            .code,
+        "retained_reserve_active_owner"
+    );
+    drop(held);
+}
+
 /// Qualifying samples on `owned`'s basis, each observing `free` bytes of free disk.
 fn window(owned: admission::OwnedPool, free: &[u64]) -> Vec<admission::Admission> {
     free.iter()

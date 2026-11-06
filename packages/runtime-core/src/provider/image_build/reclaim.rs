@@ -9,7 +9,8 @@
 //! - no retained graph state (`run/graphs`, `run/native-graphs`, `run/graph-archive`)
 //!   mentions its content ID anywhere, whatever the graph's phase or branch;
 //! - the engine agrees to remove it without force, which it refuses while any
-//!   container, running or stopped, uses the image.
+//!   container, running or stopped, uses the image. Untagged parent images are never
+//!   pruned along with it (`noprune=true`); each must pass these checks itself.
 //!
 //! The operation runs under the provider lease and refuses while a build is admitted,
 //! so no build can adopt an image between the reference scan and the removal. If the
@@ -314,17 +315,19 @@ impl ReclaimPool for LivePool<'_> {
             .ok_or_else(|| refusal("engine_protocol", "The engine image list is not an array."))
     }
     fn remove(&self, lease: &Self::Lease, image: &str) -> Result<bool, CandidateError> {
-        match lease.request(
-            reqwest::Method::DELETE,
-            &format!("/v1.53/images/{image}?force=false&noprune=false"),
-            None,
-        ) {
+        match lease.request(reqwest::Method::DELETE, &removal_path(image), None) {
             Ok(_) => Ok(true),
             Err(error) if error.code == "engine_not_found" => Ok(true),
             Err(error) if error.code == "engine_rejected" => Ok(false),
             Err(error) => Err(error),
         }
     }
+}
+
+/// Remove exactly one image: never forced, and never its untagged parents
+/// (`noprune=true`), so every image the engine deletes has passed [`plan`] itself.
+fn removal_path(image: &str) -> String {
+    format!("/v1.53/images/{image}?force=false&noprune=true")
 }
 
 /// `runtime reclaim-build-images`: see the module documentation.
@@ -382,6 +385,13 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn removal_never_forces_or_prunes_untagged_parents() {
+        let path = removal_path(A);
+        assert_eq!(path, format!("/v1.53/images/{A}?force=false&noprune=true"));
+        assert!(!path.contains("noprune=false") && !path.contains("force=true"));
     }
 
     #[test]

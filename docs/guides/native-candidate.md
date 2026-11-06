@@ -494,11 +494,17 @@ linked, mode-`0600` file owned by you), because build-argument values are in it:
 - The context and Dockerfile must be inside the project and reached without symlinks.
   The Dockerfile is read, never run, to find every image it can pull. Each image must
   be a public Docker Hub reference; it is pinned to a digest before the build starts.
-  Base images with stored `ONBUILD` triggers refuse.
+  Base images with stored `ONBUILD` triggers refuse. The client builds from a private
+  copy of the Dockerfile and ignore rules that were scanned, so editing either file
+  during the build has no effect on it.
 - Argument values reach the client only through its environment, never its command
-  line, receipts or output. Names that would change the client's own environment
+  line or receipts. Names that would change the client's own environment
   (`PATH`, `HOME`, `DOCKER_*`, `BUILDX_*`, `BUILDKIT_*`, proxies, locale, Git and SSH
   settings) refuse.
+- Build output is shown on stderr after filtering: every argument value is replaced
+  with `[redacted]`, terminal control characters are removed, lines are cut at 16 KiB
+  and output stops after 4 MiB. A value that a Dockerfile transforms before printing
+  it (for example, by encoding it) is not detected.
 - `missing` reuses a verified image for the same build key without running the client;
   `rebuild` always builds. The key covers the Dockerfile and `.dockerignore` bytes,
   target, arguments and versions, not the context's other files (as with Compose).
@@ -518,7 +524,8 @@ linked, mode-`0600` file owned by you), because build-argument values are in it:
 same key replaced. It keeps every image a build receipt names as current, every image
 that any retained run's saved state mentions, every image a container still uses (the
 engine refuses those), and every image whose ownership labels are not exactly this
-runtime's. It refuses while a build runs, and removes nothing if it cannot read all
+runtime's. Each removal deletes that one image only, never its untagged parent
+images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
 
 Before startup, network-tool preparation additionally requires all four pinned

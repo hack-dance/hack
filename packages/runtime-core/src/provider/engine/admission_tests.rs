@@ -72,6 +72,12 @@ fn empty_admission() -> super::super::managed_environment::Managed {
     managed
 }
 
+/// Every create Hack dispatches names its network; the engine guard refuses one that
+/// does not before admission is consulted, so these controls name `none`.
+fn owned_create() -> Value {
+    serde_json::json!({"HostConfig": {"NetworkMode": "none"}})
+}
+
 fn expire(deadline: Instant) {
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         std::thread::sleep(remaining + Duration::from_millis(1));
@@ -129,7 +135,11 @@ fn empty_admission_expiring_before_create_sends_no_request() {
     let transport = fixture.transport(managed.deadline(), Duration::from_millis(250));
     expire(managed.deadline());
     let failure = transport
-        .request(Method::POST, "/v1.53/containers/create?name=owned", None)
+        .request(
+            Method::POST,
+            "/v1.53/containers/create?name=owned",
+            Some(&owned_create()),
+        )
         .unwrap_err();
     assert_eq!(failure.code, "graph_environment_input");
     fixture.assert_no_request();
@@ -183,7 +193,11 @@ fn empty_admission_expiring_after_create_blocks_start_but_allows_owned_delete() 
         None,
     );
     transport
-        .request(Method::POST, "/v1.53/containers/create?name=owned", None)
+        .request(
+            Method::POST,
+            "/v1.53/containers/create?name=owned",
+            Some(&owned_create()),
+        )
         .unwrap();
     create.join().unwrap();
     let id = "1".repeat(64);
@@ -243,7 +257,11 @@ fn in_flight_mutation_cannot_renew_empty_admission_transport_budget() {
     // The request was dispatched while valid, but its response arrives after expiry.
     // Without the remaining-lifetime timeout it would succeed under the 3s default.
     let failure = transport
-        .request(Method::POST, "/v1.53/containers/create?name=owned", None)
+        .request(
+            Method::POST,
+            "/v1.53/containers/create?name=owned",
+            Some(&owned_create()),
+        )
         .unwrap_err();
     assert_eq!(failure.code, "engine_protocol");
     assert!(failure.message.contains("effect may be uncertain"));

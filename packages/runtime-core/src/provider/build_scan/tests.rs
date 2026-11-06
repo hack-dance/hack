@@ -391,6 +391,25 @@ fn doubling_argument_defaults_stay_bounded() {
 }
 
 #[test]
+fn a_stage_may_not_be_named_scratch() {
+    // The frontend links `FROM scratch` to an earlier stage of that name, so the
+    // stage's image and platform would apply.
+    for dockerfile in [
+        "FROM alpine:3.22 AS scratch\nFROM scratch\n",
+        "FROM --platform=linux/amd64 alpine:3.22 AS Scratch\nFROM scratch\n",
+        "FROM alpine:3.22 AS SCRATCH\nFROM busybox:1.37\nCOPY --from=scratch / /\n",
+    ] {
+        assert_eq!(code(dockerfile), "native_build_dockerfile", "{dockerfile}");
+    }
+    // Plain `scratch` is still the empty image.
+    assert!(images("FROM scratch\n").is_empty());
+    assert_eq!(
+        images("FROM alpine:3.22 AS build\nFROM scratch\nCOPY --from=build / /\n"),
+        ["alpine:3.22"]
+    );
+}
+
+#[test]
 fn frontend_selection_directives_refuse() {
     for dockerfile in [
         "# syntax=docker/dockerfile:1\nFROM alpine:3.22\n",
@@ -479,6 +498,29 @@ COPY --from=0 / /
     assert_eq!(
         images("FROM alpine:3.22\nLABEL note=\"<<EOF\"\nFROM busybox:1.37\nCOPY --from=0 / /\n"),
         ["alpine:3.22", "busybox:1.37"]
+    );
+}
+
+#[test]
+fn whitespace_after_the_heredoc_operator_keeps_the_heredoc() {
+    // The frontend lexes `<< CMD` as one heredoc word, so the body is not a stage.
+    for dockerfile in [
+        "FROM alpine:3.22\nRUN true << CMD\nFROM scratch\nCMD\n",
+        "FROM alpine:3.22\nRUN cat <<\t\"EOF\" > /x\nFROM scratch\nEOF\n",
+        "FROM alpine:3.22\nCOPY <<  'FILE' /etc/x\nFROM scratch\nFILE\n",
+        "FROM alpine:3.22\nRUN true <<CMD\nFROM scratch\nCMD\n",
+    ] {
+        assert_eq!(images(dockerfile), ["alpine:3.22"], "{dockerfile}");
+    }
+    assert_eq!(
+        code("FROM alpine:3.22\nRUN true << CMD\nFROM scratch\n"),
+        "native_build_dockerfile"
+    );
+    // A `-` stops the whitespace, so `<<- CMD` is two words and no heredoc: the
+    // following lines are instructions.
+    assert_eq!(
+        images("FROM alpine:3.22\nRUN true <<- CMD\nFROM busybox:1.37\n"),
+        ["busybox:1.37"]
     );
 }
 

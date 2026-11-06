@@ -4,7 +4,11 @@
 //! working directory, so no test writes and then executes a fresh binary. It records its
 //! argv, the one build-argument variable it was given, and a call count.
 use super::*;
-use std::{cell::RefCell, os::unix::fs::PermissionsExt};
+use std::{
+    cell::RefCell,
+    os::unix::fs::PermissionsExt,
+    sync::{Arc, Mutex},
+};
 
 const IMAGE: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PIN: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -77,13 +81,20 @@ echo $((count + 1)) > calls
 printf '%s\n' "$@" > argv
 printf '%s' "${{GREETING-}}" > greeting
 meta=
+file=
 previous=
 for argument do
   if [ "$previous" = --metadata-file ]; then meta=$argument; fi
+  if [ "$previous" = --file ]; then file=$argument; fi
   previous=$argument
 done
+cat "$file" > seen-dockerfile
+cat "$file.dockerignore" > seen-dockerignore
 case {mode} in
   ok) printf '{{"containerimage.config.digest":"{IMAGE}"}}' > "$meta" ;;
+  leak)
+    printf '#5 0.1 value=%s\n\033[31mred\033[0m\033]0;title\007\n' "$GREETING" >&2
+    printf '{{"containerimage.config.digest":"{IMAGE}"}}' > "$meta" ;;
   fail) exit 3 ;;
   nometa) ;;
   sleep) sleep 30 & echo $! > child.pending; mv child.pending child; wait ;;
@@ -124,6 +135,7 @@ struct FakePool {
     resolve_error: bool,
     available: RefCell<u64>,
     prunes: RefCell<Vec<u64>>,
+    output: Arc<Mutex<Vec<u8>>>,
 }
 impl FakePool {
     fn new(incarnation: &str) -> Self {
@@ -136,6 +148,7 @@ impl FakePool {
             resolve_error: false,
             available: RefCell::new(64 * GIB),
             prunes: RefCell::new(Vec::new()),
+            output: Arc::default(),
         }
     }
     /// Register the image the fake client "builds", with the labels the build expects.
@@ -179,12 +192,27 @@ impl BuildPool for FakePool {
     fn builder(&self) -> Result<PathBuf, CandidateError> {
         Ok(PathBuf::from("/bin/sh"))
     }
+    fn output(&self) -> Box<dyn Write + Send> {
+        Box::new(Captured(Arc::clone(&self.output)))
+    }
     fn storage_available(&self, _: &()) -> Result<u64, CandidateError> {
         Ok(*self.available.borrow())
     }
     fn prune_cache(&self, _: &(), max_used: u64) -> Result<u64, CandidateError> {
         self.prunes.borrow_mut().push(max_used);
         Ok(7)
+    }
+}
+
+/// The caller's stream as the fake pool sees it.
+struct Captured(Arc<Mutex<Vec<u8>>>);
+impl Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -244,6 +272,72 @@ fn cold_build_passes_values_only_through_the_environment_and_records_the_result(
     )
     .unwrap();
     assert!(!text.contains(SECRET), "argument value reached the receipt");
+}
+
+#[test]
+fn client_output_reaches_the_caller_redacted_and_without_terminal_controls() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    fixture.client(&inputs, "leak");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    let output = String::from_utf8(pool.output.lock().unwrap().clone()).unwrap();
+    assert_eq!(output, "#5 0.1 value=[redacted]\n[31mred[0m]0;title\n");
+    assert!(!output.contains(SECRET));
+}
+
+#[test]
+fn the_client_builds_the_scanned_dockerfile_and_ignore_rules_not_later_edits() {
+    let fixture = Fixture::new();
+    let app = fixture.project.join("app");
+    let scanned = fs::read(app.join("Dockerfile")).unwrap();
+    fs::write(app.join(".dockerignore"), "*.txt\n").unwrap();
+    let inputs = fixture.inputs(Policy::Missing);
+    // Edits after the scan (while bases resolve) must not reach the client.
+    fs::write(app.join("Dockerfile"), "FROM unpinned:latest\nRUN id\n").unwrap();
+    fs::write(app.join(".dockerignore"), "!*\n").unwrap();
+    fs::write(app.join("Dockerfile.dockerignore"), "main.txt\n").unwrap();
+    let pool = FakePool::new("pool-1");
+    fixture.client(&inputs, "ok");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    let scratch = fixture.scratch(&inputs);
+    assert_eq!(fs::read(scratch.join("seen-dockerfile")).unwrap(), scanned);
+    assert_eq!(
+        fs::read_to_string(scratch.join("seen-dockerignore")).unwrap(),
+        "*.txt\n"
+    );
+    let argv = fs::read_to_string(scratch.join("argv")).unwrap();
+    let lines: Vec<&str> = argv.lines().collect();
+    let file = lines
+        .windows(2)
+        .find(|w| w[0] == "--file")
+        .map(|w| PathBuf::from(w[1]))
+        .unwrap();
+    assert!(file.starts_with(&scratch), "the client read a project path");
+
+    // A Dockerfile-specific ignore file wins; with none at all, the private rules are
+    // empty, so a context .dockerignore created later is never applied.
+    let inputs = fixture.inputs(Policy::Rebuild);
+    fs::remove_file(app.join("Dockerfile.dockerignore")).unwrap();
+    fixture.client(&inputs, "ok");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(
+        fs::read_to_string(fixture.scratch(&inputs).join("seen-dockerignore")).unwrap(),
+        "main.txt\n"
+    );
+    fs::remove_file(app.join(".dockerignore")).unwrap();
+    let inputs = fixture.inputs(Policy::Rebuild);
+    fs::write(app.join(".dockerignore"), "*\n").unwrap();
+    fixture.client(&inputs, "ok");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(
+        fs::read(fixture.scratch(&inputs).join("seen-dockerignore")).unwrap(),
+        b""
+    );
 }
 
 #[test]
@@ -793,6 +887,18 @@ fn cold_builds_need_free_storage_and_successful_builds_prune_the_cache() {
     let reused = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
     assert!(reused.reused);
     assert_eq!(pool.prunes.borrow().len(), 1);
+
+    // A rebuild that fails verifies no image: the last verified size still applies.
+    *pool.available.borrow_mut() = 10 * GIB;
+    fixture.client(&rebuild, "fail");
+    let error = run(&fixture.candidate, &pool, &rebuild, &never).unwrap_err();
+    assert_eq!(error.code, "native_build_failed");
+    let receipt = fixture.receipt(&rebuild);
+    assert_eq!(receipt.phase, Phase::Failed);
+    assert_eq!(receipt.image_bytes, Some(5 * GIB));
+    *pool.available.borrow_mut() = 6 * GIB;
+    let error = run(&fixture.candidate, &pool, &rebuild, &never).unwrap_err();
+    assert_eq!(error.code, "native_build_storage");
 }
 
 impl reclaim::ReclaimPool for FakePool {

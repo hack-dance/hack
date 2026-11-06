@@ -446,18 +446,118 @@ pub(super) fn environment_files(
     }
     Ok(result)
 }
+/// Normalize one Compose network alias as an exact DNS name. Compose accepts
+/// underscores in names, so labels may contain them; case is folded because
+/// DNS lookups are case-insensitive. Interpolated aliases are not reviewable.
+pub(super) fn network_alias(value: &str) -> Option<String> {
+    let name = value.to_ascii_lowercase();
+    let valid = !name.is_empty()
+        && name.len() <= 253
+        && name.is_ascii()
+        && name.parse::<std::net::IpAddr>().is_err()
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with(['-', '_'])
+                && !label.ends_with(['-', '_'])
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        });
+    valid.then_some(name)
+}
+
+/// Declared attachments in order, plus normalized extra aliases per network.
+pub(super) type ServiceNetworks = (Vec<String>, BTreeMap<String, Vec<String>>);
+
+fn attachment_aliases(
+    service: &str,
+    value: &Value,
+    field: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Vec<String>, CandidateError> {
+    if value.is_null() {
+        return Ok(vec![]);
+    }
+    let attachment = object(value)?;
+    keys(attachment, &["aliases"], field, diagnostics);
+    let Some(declared) = attachment.get("aliases") else {
+        return Ok(vec![]);
+    };
+    let invalid = |diagnostics: &mut Vec<Diagnostic>, message: &str| {
+        diagnostics.push(Diagnostic::error(
+            "invalid_network_alias",
+            &format!("{field}.aliases"),
+            message,
+        ));
+    };
+    let Value::Array(entries) = declared else {
+        invalid(
+            diagnostics,
+            "Network aliases must be a list of literal DNS names.",
+        );
+        return Ok(vec![]);
+    };
+    if entries.len() > MAX_NETWORK_ALIASES {
+        invalid(
+            diagnostics,
+            "At most 8 network aliases are accepted per service attachment.",
+        );
+        return Ok(vec![]);
+    }
+    let own = service.to_ascii_lowercase();
+    let mut result = BTreeSet::new();
+    for entry in entries {
+        let Some(text) = entry.as_str() else {
+            invalid(
+                diagnostics,
+                "Network aliases must be a list of literal DNS names.",
+            );
+            continue;
+        };
+        if text.contains('$') {
+            invalid(
+                diagnostics,
+                "Interpolated network aliases are not reviewable; declare a literal DNS name.",
+            );
+            continue;
+        }
+        let Some(alias) = network_alias(text) else {
+            invalid(
+                diagnostics,
+                "A network alias must be an exact DNS name; values omitted.",
+            );
+            continue;
+        };
+        // The service name is always an alias; repeating it is a no-op.
+        if alias != own && !result.insert(alias) {
+            invalid(
+                diagnostics,
+                "Network aliases must be unique per attachment.",
+            );
+        }
+    }
+    Ok(result.into_iter().collect())
+}
+
 fn service_networks(
+    service: &str,
     value: Option<&Value>,
     diagnostics: &mut Vec<Diagnostic>,
     field: &str,
-) -> Result<Vec<String>, CandidateError> {
+) -> Result<ServiceNetworks, CandidateError> {
+    let mut aliases = BTreeMap::new();
     let result = match value {
         None => vec!["default".into()],
         Some(Value::Array(_)) => strings(value)?,
         Some(Value::Object(m)) => {
-            for value in m.values() {
-                if !value.is_null() {
-                    keys(object(value)?, &[], field, diagnostics);
+            for (network, value) in m {
+                identifier(network)?;
+                // Diagnostics keep the attachment-independent field path:
+                // network names are project details and stay out of reports.
+                let declared = attachment_aliases(service, value, field, diagnostics)?;
+                if !declared.is_empty() {
+                    aliases.insert(network.clone(), declared);
                 }
             }
             m.keys().cloned().collect()
@@ -483,7 +583,7 @@ fn service_networks(
             "Service network declarations must be unique.",
         ));
     }
-    Ok(result)
+    Ok((result, aliases))
 }
 fn limits(
     m: &Map<String, Value>,
@@ -655,10 +755,15 @@ pub(super) fn compile(
                 "networks and network_mode cannot both own the service network.",
             ));
         }
-        let networks = if network_mode == "none" {
-            vec![]
+        let (networks, network_aliases) = if network_mode == "none" {
+            (vec![], BTreeMap::new())
         } else {
-            service_networks(m.get("networks"), diagnostics, &format!("{field}.networks"))?
+            service_networks(
+                name,
+                m.get("networks"),
+                diagnostics,
+                &format!("{field}.networks"),
+            )?
         };
         let restart = m
             .get("restart")
@@ -790,7 +895,23 @@ pub(super) fn compile(
         }) {
             return Err(problem("invalid_stop_signal", "Unsupported stop signal."));
         }
-        let extra_hosts = extra_host_entries(m.get("extra_hosts"))?
+        let host_entries = extra_host_entries(m.get("extra_hosts"))?;
+        // A container's /etc/hosts entry would shadow its own network alias:
+        // one owner per name, so the two declarations cannot share a name.
+        if host_entries.iter().any(|(hostname, _)| {
+            network_alias(hostname).is_some_and(|hostname| {
+                network_aliases
+                    .values()
+                    .any(|aliases| aliases.contains(&hostname))
+            })
+        }) {
+            diagnostics.push(Diagnostic::error(
+                "network_alias_collision",
+                &format!("{field}.networks"),
+                "A network alias cannot also be one of the service's extra_hosts names; values omitted.",
+            ));
+        }
+        let extra_hosts = host_entries
             .into_iter()
             .map(|(hostname, target)| {
                 Ok(ExtraHostPlan {
@@ -834,7 +955,7 @@ pub(super) fn compile(
             environment_files:environment_files(project,base,m.get("env_file"),&format!("{field}.env_file"),diagnostics)?,
             environment_precedence:"Compose environment keys override explicitly listed env_file inputs; bare keys and references remain unresolved; no ambient/.env values are loaded".into(),
             healthcheck:health(m.get("healthcheck"),&format!("{field}.healthcheck"),diagnostics)?,
-            ports:ports(m.get("ports"),&format!("{field}.ports"),diagnostics)?,exposed_ports,networks,network_mode:if ["project-networks", "none"].contains(&network_mode) {network_mode.into()} else {"[unsupported]".into()},
+            ports:ports(m.get("ports"),&format!("{field}.ports"),diagnostics)?,exposed_ports,networks,network_aliases,network_mode:if ["project-networks", "none"].contains(&network_mode) {network_mode.into()} else {"[unsupported]".into()},
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,

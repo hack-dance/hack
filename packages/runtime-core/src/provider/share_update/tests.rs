@@ -414,8 +414,11 @@ fn interrupted_addition_resumes_its_recorded_share_after_the_root_is_removed() {
     )
     .unwrap();
     state::write(&root(&candidate).join(JOURNAL), &j).unwrap();
-    // The added root disappears before the interrupted update is repeated.
-    fs::remove_dir_all(&f.second.project).unwrap();
+    // The added root moves away before the interrupted update is repeated. Moving it
+    // (rather than deleting it) keeps its inode allocated, so the recreated directory
+    // below is guaranteed another identity; filesystems such as ext4 reuse a freed inode.
+    let moved = f.directory.join("second-app-moved");
+    fs::rename(&f.second.project, &moved).unwrap();
     assert!(f.second.validate().is_err());
     assert_eq!(
         addition(&candidate, &f.second.project, true).unwrap(),
@@ -431,6 +434,13 @@ fn interrupted_addition_resumes_its_recorded_share_after_the_root_is_removed() {
         ProjectShareIntent::approve(&f.second.project, true).unwrap(),
         f.second
     );
+    assert_eq!(
+        addition(&candidate, &f.second.project, true).unwrap(),
+        f.second
+    );
+    // A deleted root resumes the same way.
+    fs::remove_dir_all(&f.second.project).unwrap();
+    fs::remove_dir_all(&moved).unwrap();
     assert_eq!(
         addition(&candidate, &f.second.project, true).unwrap(),
         f.second

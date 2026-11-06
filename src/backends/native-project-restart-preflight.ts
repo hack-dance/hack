@@ -5,14 +5,16 @@ import { dirname, join } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import { adaptNativeGcloudEnvironment } from "./native-gcloud-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   compileNativeHostDependencySelection,
   discoverNativeHostDependency,
+  discoverNativeOwnedHostDependency,
   type NativeHostDependency,
-  parseNativeHostDependencies,
   prepareNativeDependencyServices,
+  provisionalNativeHostDependencies,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
 import { prepareNativeProjectInput } from "./native-project-input.ts";
@@ -157,23 +159,13 @@ async function readNativeRestartDependencyIntent(opts: {
     return [];
   }
   try {
-    const value = compileNativeHostDependencySelection({
-      value: await readNativeSelection(opts.path),
-      hostAliases: opts.hostAliases,
-    });
-    if (!(isRecord(value) && Array.isArray(value.dependencies))) {
-      throw new ClosedCliError("Invalid dependency intent");
-    }
-    return parseNativeHostDependencies({
+    // Owner and executable entries validate with a provisional PID only.
+    return provisionalNativeHostDependencies({
       services: opts.services,
-      value: {
-        ...value,
-        dependencies: value.dependencies.map((entry) =>
-          isRecord(entry) && entry.host_executable !== undefined
-            ? { ...entry, host_pid: entry.host_pid ?? 2 }
-            : entry
-        ),
-      },
+      value: compileNativeHostDependencySelection({
+        value: await readNativeSelection(opts.path),
+        hostAliases: opts.hostAliases,
+      }),
     });
   } catch {
     throw new ClosedCliError(
@@ -337,6 +329,8 @@ export async function preflightNativeRestart(opts: {
   readonly dependencyFile?: string;
   /** Same project-wide host aliases the replacement startup declares. */
   readonly internalExtraHosts?: Readonly<Record<string, string>>;
+  /** Resolves owner-scoped dependency selections against the running instance. */
+  readonly dependencyOwners?: NativeDependencyOwnerResolver;
   readonly allowedHosts?: readonly string[];
   /** Same public metadata selection the replacement startup will review. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
@@ -437,6 +431,15 @@ export async function preflightNativeRestart(opts: {
             projectRoot: opts.scope.projectRoot,
             hostPort: selection.hostPort,
             executable: selection.executable,
+            invoke: deps.invoke,
+          }),
+        owners: opts.dependencyOwners,
+        discoverOwned: (selection) =>
+          discoverNativeOwnedHostDependency({
+            runtime: opts.runtime,
+            projectRoot: opts.scope.projectRoot,
+            hostPort: selection.hostPort,
+            ancestorPid: selection.ancestorPid,
             invoke: deps.invoke,
           }),
       });

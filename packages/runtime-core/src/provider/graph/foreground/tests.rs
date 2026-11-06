@@ -469,6 +469,28 @@ fn retained_publisher_exit_wakes_owner_and_retired_watch_does_not() {
     let mut notice = [0];
     std::io::Read::read_exact(&mut receiver, &mut notice).unwrap();
     assert_eq!(notice, [b'D']);
+    // A watched dependency listener's exit wakes the owner as a stale notice,
+    // not as a publisher failure, and a bounded retry deadline times out.
+    let mut listener = spawn();
+    let identity = crate::provider::identity::observe(listener.id() as i32).unwrap();
+    assert!(events.watch_listener_exit(&identity).unwrap());
+    assert_eq!(
+        events
+            .wait_until(Some(Instant::now() + Duration::from_millis(20)))
+            .unwrap(),
+        signals::Wake::Timeout
+    );
+    listener.kill().unwrap();
+    assert_eq!(
+        events
+            .wait_until(Some(Instant::now() + Duration::from_secs(10)))
+            .unwrap(),
+        signals::Wake::ListenerExit
+    );
+    listener.wait().unwrap();
+    // An exited or reused identity is already stale and leaves no watch.
+    assert!(!events.watch_listener_exit(&identity).unwrap());
+    events.unwatch_listener_exit(identity.pid).unwrap();
     let _client = Pin::load(&candidate, &run).unwrap().connect().unwrap();
     assert!(!events.wait().unwrap());
     drop(events);

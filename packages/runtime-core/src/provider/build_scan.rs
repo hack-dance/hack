@@ -518,7 +518,14 @@ fn instruction_uses(
             }
         }
         "add" => {
-            parse_flags(&instruction.flags, &ADD_FLAGS, line)?;
+            let flags = parse_flags(&instruction.flags, &ADD_FLAGS, line)?;
+            if flags.contains_key("checksum") || flags.contains_key("keep-git-dir") {
+                return Err(refusal(
+                    Some(line),
+                    "ADD --checksum and --keep-git-dir apply only to remote sources, which native builds do not fetch.",
+                ));
+            }
+            refuse_remote_add_sources(&instruction.args, escape, line)?;
         }
         "run" => {
             let flags = parse_flags(&instruction.flags, &RUN_FLAGS, line)?;
@@ -545,6 +552,51 @@ fn instruction_uses(
         _ => {}
     }
     Ok(uses)
+}
+
+/// Refuse an `ADD` that could fetch a remote source.
+///
+/// The engine fetches `ADD` URLs and git refs from the guest's own network
+/// namespace, outside the build network's isolation, so a native build may add
+/// only local build-context files. The frontend splits a shell-form `ADD` on
+/// whitespace (or reads a JSON string array), takes every word but the last as a
+/// source, and expands variables in each. A source is remote when it starts with
+/// `scheme://` (http, https, git, ssh) or is an scp-style `user@host:path` git ref.
+/// This refuses a superset: after dropping quotes and escapes, any source with
+/// `://`, with `@` followed by `:`, or with a `$` that could expand to either.
+fn refuse_remote_add_sources(args: &str, escape: char, line: usize) -> Result<(), CandidateError> {
+    let words: Vec<String> = if json_form(args, line)? {
+        serde_json::from_str::<Vec<String>>(args.trim_start()).map_err(|_| {
+            refusal(
+                Some(line),
+                "a JSON-form argument list must contain strings.",
+            )
+        })?
+    } else {
+        args.split(is_frontend_whitespace)
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    // Every word but the destination; a lone word is checked as well.
+    let sources = match words.len() {
+        0 | 1 => &words[..],
+        count => &words[..count - 1],
+    };
+    for source in sources {
+        let bare: String = source
+            .chars()
+            .filter(|&c| !matches!(c, '\'' | '"' | '\\') && c != escape)
+            .collect();
+        let scp_like = bare.find('@').is_some_and(|at| bare[at..].contains(':'));
+        if bare.contains("://") || scp_like || bare.contains('$') {
+            return Err(refusal(
+                Some(line),
+                "ADD may use only local build context sources, without URLs, git refs or variables.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Whether the frontend parses these arguments as a JSON string array (exec form).

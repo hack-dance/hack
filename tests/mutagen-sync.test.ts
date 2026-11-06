@@ -57,10 +57,10 @@ test("buildMutagenSshUri renders Mutagen-compatible SSH endpoints", () => {
         host: "198.51.100.42",
         port: 2222,
       },
-      remotePath: "/Users/remote-user/.hack/projects/event-agent",
+      remotePath: "/Users/remote-user/.hack/projects/example-app",
     })
   ).toBe(
-    "remote-user@198.51.100.42:2222:/Users/remote-user/.hack/projects/event-agent"
+    "remote-user@198.51.100.42:2222:/Users/remote-user/.hack/projects/example-app"
   );
 
   expect(
@@ -75,14 +75,14 @@ test("buildMutagenSshUri renders Mutagen-compatible SSH endpoints", () => {
 
 test("buildMutagenSessionName is deterministic and normalized", () => {
   const first = __testOnlyMutagenSync.buildMutagenSessionName({
-    projectName: "Live Nation App",
+    projectName: "Example App",
     nodeId: "db5d885f-1647-4229-add9-2a5e5833e7a4",
     branch: "feat/remote-sync",
     localProjectRoot: "/Users/local-user/dev/hack",
     remoteProjectRoot: "/Users/remote-user/.hack/projects/hack",
   });
   const second = __testOnlyMutagenSync.buildMutagenSessionName({
-    projectName: "Live Nation App",
+    projectName: "Example App",
     nodeId: "db5d885f-1647-4229-add9-2a5e5833e7a4",
     branch: "feat/remote-sync",
     localProjectRoot: "/Users/local-user/dev/hack",
@@ -90,7 +90,7 @@ test("buildMutagenSessionName is deterministic and normalized", () => {
   });
 
   expect(first).toBe(second);
-  expect(first.startsWith("hack-live-nation-app-db5d885f-")).toBe(true);
+  expect(first.startsWith("hack-example-app-db5d885f-")).toBe(true);
   expect(/-[a-f0-9]{8}$/.test(first)).toBe(true);
   expect(first.length).toBeLessThanOrEqual(72);
 });
@@ -98,12 +98,12 @@ test("buildMutagenSessionName is deterministic and normalized", () => {
 test("ensureMutagenLocalToRemoteSync creates and flushes session", async () => {
   const calls: string[][] = [];
   const result = await ensureMutagenLocalToRemoteSync({
-    projectName: "event-agent",
+    projectName: "example-app",
     nodeId: "node-1",
     branch: "feat/e2e",
     nodeSource: "remote-user@198.51.100.42:2222",
     localProjectRoot: tempDir!,
-    remoteProjectRoot: "/Users/remote-user/.hack/projects/event-agent",
+    remoteProjectRoot: "/Users/remote-user/.hack/projects/example-app",
     exclude: ["node_modules", "dist", ".git"],
     resolveBinary: () => "/opt/homebrew/bin/mutagen",
     execCommand: async ({ cmd }) => {
@@ -145,11 +145,11 @@ test("ensureMutagenLocalToRemoteSync creates and flushes session", async () => {
 test("ensureMutagenLocalToRemoteSync tolerates existing session and still flushes", async () => {
   const calls: string[][] = [];
   const result = await ensureMutagenLocalToRemoteSync({
-    projectName: "event-agent",
+    projectName: "example-app",
     nodeId: "node-1",
     nodeSource: "remote-user@198.51.100.42",
     localProjectRoot: tempDir!,
-    remoteProjectRoot: "/Users/remote-user/.hack/projects/event-agent",
+    remoteProjectRoot: "/Users/remote-user/.hack/projects/example-app",
     resolveBinary: () => "/opt/homebrew/bin/mutagen",
     execCommand: async ({ cmd }) => {
       calls.push([...cmd]);
@@ -158,7 +158,7 @@ test("ensureMutagenLocalToRemoteSync tolerates existing session and still flushe
           exitCode: 1,
           stdout: "",
           stderr:
-            "session named hack-event-agent-node-1-default already exists",
+            "session named hack-example-app-node-1-default already exists",
         };
       }
       return {
@@ -179,11 +179,11 @@ test("ensureMutagenLocalToRemoteSync tolerates existing session and still flushe
 
 test("ensureMutagenLocalToRemoteSync fails when binary is unavailable", async () => {
   const result = await ensureMutagenLocalToRemoteSync({
-    projectName: "event-agent",
+    projectName: "example-app",
     nodeId: "node-1",
     nodeSource: "remote-user@198.51.100.42",
     localProjectRoot: tempDir!,
-    remoteProjectRoot: "/Users/remote-user/.hack/projects/event-agent",
+    remoteProjectRoot: "/Users/remote-user/.hack/projects/example-app",
     resolveBinary: () => null,
   });
 
@@ -196,11 +196,11 @@ test("ensureMutagenLocalToRemoteSync fails when binary is unavailable", async ()
 
 test("ensureMutagenLocalToRemoteSync fails when node source is missing", async () => {
   const result = await ensureMutagenLocalToRemoteSync({
-    projectName: "event-agent",
+    projectName: "example-app",
     nodeId: "node-1",
     nodeSource: " ",
     localProjectRoot: tempDir!,
-    remoteProjectRoot: "/Users/remote-user/.hack/projects/event-agent",
+    remoteProjectRoot: "/Users/remote-user/.hack/projects/example-app",
     resolveBinary: () => "/opt/homebrew/bin/mutagen",
     execCommand: async () => {
       return {

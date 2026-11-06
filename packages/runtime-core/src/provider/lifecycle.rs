@@ -2667,7 +2667,7 @@ printf 'verified-cache\n'
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
-    #[ignore = "Manual owned M3 fixture only; requires explicit candidate root and host watchdog"]
+    #[ignore = "Manual owned macOS fixture only; requires explicit candidate root and host watchdog"]
     fn owned_provider_exit_recovery() {
         let path = std::env::var("HACK_LOCAL_CRASH_FIXTURE_ROOT").expect("explicit fixture root");
         let candidate = Candidate::discover(Path::new(&path)).unwrap();

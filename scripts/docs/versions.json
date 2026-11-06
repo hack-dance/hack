@@ -1162,7 +1162,7 @@
         "slug": "guides/native-candidate",
         "title": "Native candidate limits",
         "snapshot": "docs/versions/v5/originals/next6/docs/guides/native-candidate.md",
-        "sha256": "68c11f2f7c107e58d6832fce7daacb42f22fac87f0de907309bffa5860044e4e"
+        "sha256": "59b191d20027c12bdcd840ef19b6e60ac5d5e25125c3f9afa6c847e0f25a522a"
       },
       {
         "file": "docs/reference/native-config-import.md",

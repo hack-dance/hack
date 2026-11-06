@@ -855,7 +855,7 @@ two concurrent routed graphs still require native acceptance. A bounded native
 reference control qualifies one graph with two networks and two declared hostnames:
 both forward real HTTP over Unix publication, followed by authenticated cleanup,
 foreground exit and independently verified resource absence. This does not qualify
-actual Event Agent routing, TLS, two routed graphs, restore, publisher-exit/partial
+real application routing, TLS, two routed graphs, restore, publisher-exit/partial
 startup failure, owner-crash recovery, scale or performance. No global Caddy
 configuration or trust installation is performed by this contract.
 

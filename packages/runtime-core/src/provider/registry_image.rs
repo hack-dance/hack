@@ -737,7 +737,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Explicit public Docker Hub acquisition; no runtime import"]
-    fn pinned_event_agent_image_downloads_without_docker() {
+    fn pinned_bun_node_image_downloads_without_docker() {
         let path = std::env::var("HACK_REGISTRY_TEST_ARCHIVE").expect("explicit new archive path");
         let receipt=acquire("imbios/bun-node:1.3.14-24-alpine@sha256:744fb75f37bbe5cca4ba5e9645c7e4454adb58e17752caf53dd61924123297dc",Path::new(&path)).unwrap();
         let bytes = std::fs::read(&path).unwrap();

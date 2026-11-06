@@ -69,7 +69,7 @@ SCHEDULE_DESIGN = "williams"
 MIN_OBSERVER_FACTOR = 2
 MIN_OBSERVER_WINDOW_SECONDS = 600
 WORKLOAD_SHAPES = {
-    "event-agent": {"services": 14, "http_health_checks": 9, "initializers": 2},
+    "large-application": {"services": 14, "http_health_checks": 9, "initializers": 2},
     "small-fixture": {"services": 2, "http_health_checks": 1, "initializers": 1},
 }
 # Gate C phases. "restore" is an ordinary up after a retaining down, with data readback.
@@ -130,12 +130,12 @@ FROZEN_LANES = {
 FROZEN_CANDIDATE_CAPACITY = {"profile": "development", "vcpus": 4, "memory_mib": 6144, "storage_gib": 32,
                              "overlay_gib": 10}
 FROZEN_WORKLOAD_PINS = {
-    "event-agent": "application commit and configuration digest recorded per cohort; identical across lanes",
+    "large-application": "application commit and configuration digest recorded per cohort; identical across lanes",
     "small-fixture": "image oven/bun:1.4.2-slim with its image ID recorded per cohort, pull never",
 }
 # Frozen correctness checks per workload. A revision may add checks, never drop one.
 FROZEN_CORRECTNESS = {
-    "event-agent": (
+    "large-application": (
         "all declared long-running services running and every HTTP health check healthy",
         "both initializers exited 0",
         "routed sign-in page returns HTTP 200",

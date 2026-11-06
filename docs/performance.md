@@ -696,7 +696,7 @@ linked-worktree roots through the runtime interface, one pool per root. They do 
 the `hack up` frontend, routing, application-specific images or cold host caches, and each
 fresh home still acquires the image, which is timed separately.
 
-Prepared bases carry no application images. On an M3 (September 2026, one prepared pool, three
+Prepared bases carry no application images. On an Apple silicon host (September 2026, one prepared pool, three
 repeats), `ensure-image` for `postgres:16-alpine` (114 MB archive) took 10.6 s cold. The engine
 load itself took 3.1 s and host digest and layer validation about 1.8 s; the rest was registry
 acquisition into the home's image cache. `node:22-alpine` (61 MB) took 6.3 s cold, with a 1.7 s
@@ -712,7 +712,7 @@ image-free. The larger remaining costs are image acquisition and per-incarnation
 Revision 1 of the v5 matched application benchmark is frozen in the
 [application benchmark protocol](reference/application-benchmark-protocol.md)
 (HACK-1169). It fixes the exact candidate and stable artifacts, the host and engine
-versions, the Event Agent and small-fixture workloads, capacities, cache classes, a
+versions, the large-application and small-fixture workloads, capacities, cache classes, a
 10-round rotated order, sample counts, observer accounting and the program budgets.
 It records no results.
 

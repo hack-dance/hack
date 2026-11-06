@@ -285,7 +285,7 @@ fn owned_source_watch_live() -> Result<(), CandidateError> {
         .join("review/wu05/application-watch.json");
     state::write(
         &evidence,
-        &json!({"scope":"container inotify callback over actual selected source; not Event Agent service startup",
+        &json!({"scope":"container inotify callback over actual selected source; not real application service startup",
         "source":source,"marker":name,"receipts":receipts,"observations":observations,
         "record":record,"passed":result.is_ok() && cleanup.is_ok()}),
     )?;

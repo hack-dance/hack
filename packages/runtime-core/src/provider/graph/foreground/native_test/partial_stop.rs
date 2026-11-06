@@ -157,7 +157,7 @@ fn resource(engine: &graph::Engine<'_>, receipt: &graph::Receipt, key: &str) -> 
 }
 
 #[test]
-#[ignore = "fresh owned M3 pool, pinned image, and external 300-second watchdog required"]
+#[ignore = "fresh owned macOS development pool, pinned image, and external 300-second watchdog required"]
 fn exact_partial_stop_recovers_only_on_immediate_successor_boot() {
     if std::env::var_os(CHILD).is_some() {
         child();

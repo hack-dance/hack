@@ -36,7 +36,7 @@ const run = {
   planId: "d".repeat(64),
   effectiveEnvName: "qa",
   profiles: ["worker"],
-  aws: { profile: "livenation_qa", region: "us-east-1" },
+  aws: { profile: "example_qa", region: "us-east-1" },
 };
 const runtime: NativeRuntimeSelection = {
   binary: "/unused/hack-native",
@@ -56,7 +56,7 @@ async function fixture() {
     projectRoot,
     projectDir,
     nativeHome,
-    branch: "event-agent",
+    branch: "example-app",
   };
   await save({ ...scope, run });
   const key = createHash("sha256")

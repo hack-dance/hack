@@ -38,17 +38,17 @@ test("readLifecycleState preserves lifecycle pane and process group metadata", a
       {
         entries: [
           {
-            composeProject: "event-agent",
-            projectName: "event-agent",
+            composeProject: "example-app",
+            projectName: "example-app",
             branch: "feature-cleanup",
-            sessionName: "event-agent--lifecycle-feature-cleanup",
+            sessionName: "example-app--lifecycle-feature-cleanup",
             backend: "tmux",
             updatedAt: "2026-04-01T14:00:00.000Z",
             processes: [
               {
                 name: "proxy",
                 windowName: "proxy",
-                logPath: "/tmp/event-agent.log",
+                logPath: "/tmp/example-app.log",
                 panePid: "12345",
                 processGroupId: 67_890,
               },
@@ -68,7 +68,7 @@ test("readLifecycleState preserves lifecycle pane and process group metadata", a
     {
       name: "proxy",
       windowName: "proxy",
-      logPath: "/tmp/event-agent.log",
+      logPath: "/tmp/example-app.log",
       panePid: 12_345,
       processGroupId: 67_890,
     },
@@ -104,17 +104,17 @@ test("collectDescendantProcessGroupIds returns root and descendant groups once",
 test("resolveLifecycleProcessGroupIdsForTmuxState ignores stale persisted ids", () => {
   const groups = resolveLifecycleProcessGroupIdsForTmuxState({
     lifecycleEntry: {
-      composeProject: "event-agent",
-      projectName: "event-agent",
+      composeProject: "example-app",
+      projectName: "example-app",
       branch: "feature-cleanup",
-      sessionName: "event-agent--lifecycle-feature-cleanup",
+      sessionName: "example-app--lifecycle-feature-cleanup",
       backend: "tmux",
       updatedAt: "2026-04-01T14:00:00.000Z",
       processes: [
         {
           name: "proxy",
           windowName: "proxy",
-          logPath: "/tmp/event-agent.log",
+          logPath: "/tmp/example-app.log",
           panePid: 99_999,
           processGroupId: 99_999,
         },
@@ -134,17 +134,17 @@ test("resolveLifecycleProcessGroupIdsForTmuxState ignores stale persisted ids", 
 test("resolveLifecycleProcessGroupIdsForTmuxState falls back to persisted live groups when panes disappear", () => {
   const groups = resolveLifecycleProcessGroupIdsForTmuxState({
     lifecycleEntry: {
-      composeProject: "event-agent",
-      projectName: "event-agent",
+      composeProject: "example-app",
+      projectName: "example-app",
       branch: "feature-cleanup",
-      sessionName: "event-agent--lifecycle-feature-cleanup",
+      sessionName: "example-app--lifecycle-feature-cleanup",
       backend: "tmux",
       updatedAt: "2026-04-01T14:00:00.000Z",
       processes: [
         {
           name: "proxy",
           windowName: "proxy",
-          logPath: "/tmp/event-agent.log",
+          logPath: "/tmp/example-app.log",
           panePid: 500,
           processGroupId: 500,
         },
@@ -163,17 +163,17 @@ test("resolveLifecycleProcessGroupIdsForTmuxState falls back to persisted live g
 test("resolveLifecycleProcessGroupIdsForTmuxState ignores recycled process groups without a live pane pid", () => {
   const groups = resolveLifecycleProcessGroupIdsForTmuxState({
     lifecycleEntry: {
-      composeProject: "event-agent",
-      projectName: "event-agent",
+      composeProject: "example-app",
+      projectName: "example-app",
       branch: "feature-cleanup",
-      sessionName: "event-agent--lifecycle-feature-cleanup",
+      sessionName: "example-app--lifecycle-feature-cleanup",
       backend: "tmux",
       updatedAt: "2026-04-01T14:00:00.000Z",
       processes: [
         {
           name: "proxy",
           windowName: "proxy",
-          logPath: "/tmp/event-agent.log",
+          logPath: "/tmp/example-app.log",
           panePid: 9999,
           processGroupId: 500,
         },
@@ -192,17 +192,17 @@ test("resolveLifecycleProcessGroupIdsForTmuxState ignores recycled process group
 test("resolveLifecycleProcessGroupIdsForTmuxState recovers a persisted leaderless group and descendants", () => {
   const groups = resolveLifecycleProcessGroupIdsForTmuxState({
     lifecycleEntry: {
-      composeProject: "event-agent",
-      projectName: "event-agent",
+      composeProject: "example-app",
+      projectName: "example-app",
       branch: "feature-cleanup",
-      sessionName: "event-agent--lifecycle-feature-cleanup",
+      sessionName: "example-app--lifecycle-feature-cleanup",
       backend: "tmux",
       updatedAt: "2026-04-01T14:00:00.000Z",
       processes: [
         {
           name: "proxy",
           windowName: "proxy",
-          logPath: "/tmp/event-agent.log",
+          logPath: "/tmp/example-app.log",
           panePid: 500,
           processGroupId: 500,
         },
@@ -222,17 +222,17 @@ test("resolveLifecycleProcessGroupIdsForTmuxState recovers a persisted leaderles
 test("resolvePersistedLifecycleProcessGroupIds recovers live groups without a mux session", () => {
   const groups = resolvePersistedLifecycleProcessGroupIds({
     lifecycleEntry: {
-      composeProject: "event-agent",
-      projectName: "event-agent",
+      composeProject: "example-app",
+      projectName: "example-app",
       branch: "feature-cleanup",
-      sessionName: "event-agent--lifecycle-feature-cleanup",
+      sessionName: "example-app--lifecycle-feature-cleanup",
       backend: "tmux",
       updatedAt: "2026-04-01T14:00:00.000Z",
       processes: [
         {
           name: "proxy",
           windowName: "proxy",
-          logPath: "/tmp/event-agent.log",
+          logPath: "/tmp/example-app.log",
           panePid: 500,
           processGroupId: 500,
         },
@@ -251,17 +251,17 @@ test("resolveLifecycleStopProcessGroupIds skips persisted cleanup without a live
   const groups = resolveLifecycleStopProcessGroupIds({
     matchedLiveSession: false,
     lifecycleEntry: {
-      composeProject: "event-agent",
-      projectName: "event-agent",
+      composeProject: "example-app",
+      projectName: "example-app",
       branch: "feature-cleanup",
-      sessionName: "event-agent--lifecycle-feature-cleanup",
+      sessionName: "example-app--lifecycle-feature-cleanup",
       backend: "tmux",
       updatedAt: "2026-04-01T14:00:00.000Z",
       processes: [
         {
           name: "proxy",
           windowName: "proxy",
-          logPath: "/tmp/event-agent.log",
+          logPath: "/tmp/example-app.log",
           panePid: 500,
           processGroupId: 500,
         },
@@ -280,17 +280,17 @@ test("resolveLifecycleStopProcessGroupIds skips a leaderless persisted group wit
   const groups = resolveLifecycleStopProcessGroupIds({
     matchedLiveSession: false,
     lifecycleEntry: {
-      composeProject: "event-agent",
-      projectName: "event-agent",
+      composeProject: "example-app",
+      projectName: "example-app",
       branch: "feature-cleanup",
-      sessionName: "event-agent--lifecycle-feature-cleanup",
+      sessionName: "example-app--lifecycle-feature-cleanup",
       backend: "tmux",
       updatedAt: "2026-04-01T14:00:00.000Z",
       processes: [
         {
           name: "proxy",
           windowName: "proxy",
-          logPath: "/tmp/event-agent.log",
+          logPath: "/tmp/example-app.log",
           panePid: 500,
           processGroupId: 500,
         },
@@ -310,17 +310,17 @@ test("resolveLifecycleStopProcessGroupIds recovers a leaderless persisted group 
   const groups = resolveLifecycleStopProcessGroupIds({
     matchedLiveSession: true,
     lifecycleEntry: {
-      composeProject: "event-agent",
-      projectName: "event-agent",
+      composeProject: "example-app",
+      projectName: "example-app",
       branch: "feature-cleanup",
-      sessionName: "event-agent--lifecycle-feature-cleanup",
+      sessionName: "example-app--lifecycle-feature-cleanup",
       backend: "tmux",
       updatedAt: "2026-04-01T14:00:00.000Z",
       processes: [
         {
           name: "proxy",
           windowName: "proxy",
-          logPath: "/tmp/event-agent.log",
+          logPath: "/tmp/example-app.log",
           panePid: 500,
           processGroupId: 500,
         },
@@ -340,8 +340,8 @@ test("resolveLifecycleStopProcessGroupIds recovers a leaderless persisted group 
 test("wrapLifecyclePersistentCommand uses external kill for process-group cleanup", () => {
   const script = wrapLifecyclePersistentCommand({
     command: "bun run proxy",
-    commandPidPath: "/tmp/event-agent.pid",
-    logPath: "/tmp/event-agent.log",
+    commandPidPath: "/tmp/example-app.pid",
+    logPath: "/tmp/example-app.log",
     serviceName: "proxy",
   });
 
@@ -355,8 +355,8 @@ test("wrapLifecyclePersistentCommand uses external kill for process-group cleanu
 test("wrapLifecyclePersistentCommand avoids login-shell execution", () => {
   const script = wrapLifecyclePersistentCommand({
     command: "bun run proxy",
-    commandPidPath: "/tmp/event-agent.pid",
-    logPath: "/tmp/event-agent.log",
+    commandPidPath: "/tmp/example-app.pid",
+    logPath: "/tmp/example-app.log",
     serviceName: "proxy",
   });
 

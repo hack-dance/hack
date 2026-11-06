@@ -149,7 +149,7 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
         value: "qa-second",
       });
 
-      const branchName = "feat-msp-human-handoff";
+      const branchName = "feat-sample-handoff";
       const branchUp = await ctx.cli({
         args: ["up", "--detach", "--json", "--branch", branchName],
         cwd: fixture.root,

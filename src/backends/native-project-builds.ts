@@ -103,7 +103,8 @@ function buildArguments(value: unknown): Record<string, string> {
   if (entries.length > MAX_ARGS) {
     throw refused("a native build accepts at most 64 build args.");
   }
-  const result: Record<string, string> = {};
+  // A null prototype keeps every admitted name an own property, `__proto__` included.
+  const result: Record<string, string> = Object.create(null);
   for (const [name, raw] of entries) {
     if (!ARGUMENT.test(name) || Object.hasOwn(result, name)) {
       throw refused("build arg names must be unique identifiers.");

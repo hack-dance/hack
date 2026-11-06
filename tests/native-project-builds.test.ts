@@ -75,6 +75,31 @@ test("admitted build forms follow Compose paths and literal arguments", () => {
   expect(admit({ image: "busybox" })).toBeUndefined();
 });
 
+test("an argument named __proto__ survives admission and serialization", () => {
+  const requested = '{"__proto__":"requested-value"}';
+  for (const args of [["__proto__=requested-value"], JSON.parse(requested)]) {
+    const request = admit({ build: { args } });
+    expect(Object.keys(request?.args ?? {})).toEqual(["__proto__"]);
+    expect(JSON.stringify(request?.args)).toBe(requested);
+  }
+  // Declarations that differ only in that argument stay distinct builds.
+  const builds = admitNativeProjectBuilds({
+    services: {
+      plain: { build: { context: "..", args: ["A=1"] } },
+      proto: {
+        build: { context: "..", args: ["A=1", "__proto__=requested-value"] },
+      },
+    },
+    projectRoot: "/p",
+    composeFile: "/p/.hack/compose.yaml",
+    enabled: true,
+  });
+  expect(JSON.stringify(builds.get("proto")?.args)).toBe(
+    '{"A":"1","__proto__":"requested-value"}'
+  );
+  expect(JSON.stringify(builds.get("plain")?.args)).toBe('{"A":"1"}');
+});
+
 test.each([
   [{ image: "busybox", build: "." }, "both image and build"],
   [{ build: { context: ".", ssh: ["default"] } }, "only build context"],

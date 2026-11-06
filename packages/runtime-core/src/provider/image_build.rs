@@ -987,8 +987,9 @@ pub(super) fn run<P: BuildPool>(
     })
 }
 
-/// Hold the shared build fence as an admitted build does, for lifecycle tests.
-#[cfg(test)]
+/// Hold the shared build fence as an admitted build does, for the macOS-only lifecycle
+/// test of the silent-guest stop.
+#[cfg(all(test, target_os = "macos"))]
 pub(super) fn hold_build_fence_for_test(candidate: &Candidate) -> impl Drop {
     let root = builds_root(candidate);
     state::private_directory(&root).unwrap();

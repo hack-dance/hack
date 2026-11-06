@@ -15,8 +15,8 @@ import {
   admitNativeProjectBuilds,
   buildNativeProjectImages,
   invokeNativeBuild,
-  NATIVE_BUILDS_DISABLED_REFUSAL,
   type NativeBuildRequest,
+  nativeBuildsDisabledRefusal,
   nativeBuildsEnabled,
   nativeServiceActive,
   refuseManagedSecretBuildArguments,
@@ -45,7 +45,12 @@ function admit(
   service: Record<string, unknown>,
   composeFile = "/p/.hack/compose.yaml"
 ) {
-  return admitNativeProjectBuild({ service, projectRoot: "/p", composeFile });
+  return admitNativeProjectBuild({
+    name: "app",
+    service,
+    projectRoot: "/p",
+    composeFile,
+  });
 }
 
 test("admitted build forms follow Compose paths and literal arguments", () => {
@@ -132,8 +137,14 @@ test.each([
   })();
   expect(error).toBeInstanceOf(HackCliError);
   expect(error).toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
-  expect(String((error as Error).message)).toContain(text);
-  expect(String((error as Error).message)).not.toContain("HOST_VALUE");
+  const message = String((error as Error).message);
+  expect(message).toContain(text);
+  // HACK-1927: every admission refusal names the service it is about.
+  expect(message).toStartWith(
+    "Native foreground up cannot build service app: "
+  );
+  expect(message).not.toContain("HOST_VALUE");
+  expect(message).not.toContain("HACK_RUNTIME_BACKEND");
 });
 
 test("builds refuse unless explicitly enabled, and projects without builds are unaffected", () => {
@@ -145,7 +156,10 @@ test("builds refuse unless explicitly enabled, and projects without builds are u
       composeFile: "/p/compose.yaml",
       enabled: false,
     })
-  ).toThrow(NATIVE_BUILDS_DISABLED_REFUSAL);
+  ).toThrow(nativeBuildsDisabledRefusal("web"));
+  expect(nativeBuildsDisabledRefusal("web")).toContain(
+    "cannot build service web: "
+  );
   expect(
     admitNativeProjectBuilds({
       services: { db: { image: "postgres:17" } },
@@ -367,10 +381,14 @@ test("a build arg equal to a managed secret value refuses without showing it", (
   expect(refusal).toBeInstanceOf(HackCliError);
   const error = refusal as HackCliError;
   expect(error.code).toBe("E_NATIVE_PROJECT_UNSUPPORTED");
+  // HACK-1925: the refusal names the service and the argument, never the value,
+  // and does not point at the Compose backend, which would bake it into history.
   expect(error.message).toContain(
-    "build arg TOKEN equals a hack env secret value"
+    "cannot build service web: build arg TOKEN equals a hack env secret value"
   );
   expect(error.message).not.toContain(secret);
+  expect(error.message).not.toContain("HACK_RUNTIME_BACKEND");
+  expect(error.message).not.toContain("Compose backend");
   // Values that are not managed secrets pass; so does any build with no secrets.
   refuseManagedSecretBuildArguments({
     builds: new Map([["web", request({ MODE: "production" })]]),
@@ -459,4 +477,58 @@ test("cancellation sends SIGTERM so the runtime can stop its build client", asyn
   const error = await pending;
   expect(String(error)).toContain("canceled during an image build");
   expect(await readFile(`${fake.binary}.signal`, "utf8")).toBe("terminated");
+});
+
+test("runtime build refusals name the services and the build source policy", async () => {
+  const project = await root();
+  const policy =
+    "Dockerfile line 1: build images must be public Docker Hub references.";
+  const fail = (nativeCode: string, message: string) => async () => {
+    throw new NativeRuntimeRequestError({ message, nativeCode });
+  };
+  const run = async (invoke: () => Promise<never>) =>
+    await buildNativeProjectImages({
+      runtime,
+      projectRoot: project,
+      branch: null,
+      profiles: [],
+      // Identical declarations build once, so one refusal covers both services.
+      builds: new Map([
+        ["web", request()],
+        ["worker", request()],
+      ]),
+      specs: { web: { build: "app" }, worker: { build: "app" } },
+      retainedImages: new Map(),
+      restore: false,
+      rebuild: false,
+      signal: new AbortController().signal,
+      invoke,
+    }).catch((caught: unknown) => caught);
+
+  const refused = await run(fail("native_build_base_image", policy));
+  expect(refused).toBeInstanceOf(NativeRuntimeRequestError);
+  expect(refused).toMatchObject({ nativeCode: "native_build_base_image" });
+  const message = (refused as Error).message;
+  expect(message).toStartWith(
+    "Native foreground up cannot build services web and worker: the native build source policy refused it. "
+  );
+  expect(message).toContain(policy);
+  expect(message).toContain("Use public Docker Hub images");
+  expect(message).not.toContain(VALUE);
+
+  // A failure that is not a policy refusal names the services and keeps its message.
+  const failed = await run(
+    fail("native_build_failed", "The image build failed.")
+  );
+  expect(failed).toMatchObject({ nativeCode: "native_build_failed" });
+  expect((failed as Error).message).toBe(
+    "Native foreground up could not build services web and worker: The image build failed."
+  );
+  expect((failed as Error).message).not.toContain("source policy");
+
+  // An inherited property name is not a policy code.
+  const odd = await run(fail("constructor", "Unexpected failure."));
+  expect((odd as Error).message).toBe(
+    "Native foreground up could not build services web and worker: Unexpected failure."
+  );
 });

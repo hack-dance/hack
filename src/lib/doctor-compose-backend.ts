@@ -1,6 +1,7 @@
 import {
   COMPOSE_BACKEND_SELECTION,
   type ComposeBackendFeature,
+  type ComposeBackendFeatureOptions,
   describeComposeBackendFeatures,
 } from "./native-compose-backend-features.ts";
 
@@ -21,10 +22,12 @@ export type ComposeBackendReport = {
  * refuses the project; on the Compose backend it is informational, because
  * the project already runs where those features are supported.
  */
-export function composeBackendCheckResult(opts: {
-  readonly backend: "native" | "compose";
-  readonly features: readonly ComposeBackendFeature[];
-}): {
+export function composeBackendCheckResult(
+  opts: {
+    readonly backend: "native" | "compose";
+    readonly features: readonly ComposeBackendFeature[];
+  } & ComposeBackendFeatureOptions
+): {
   readonly name: string;
   readonly status: "ok" | "warn";
   readonly message: string;
@@ -40,7 +43,7 @@ export function composeBackendCheckResult(opts: {
       composeBackend,
     };
   }
-  const uses = `This project uses ${describeComposeBackendFeatures(opts.features)}`;
+  const uses = `This project uses ${describeComposeBackendFeatures(opts.features, opts)}`;
   if (opts.backend === "native") {
     return {
       name: COMPOSE_BACKEND_CHECK,

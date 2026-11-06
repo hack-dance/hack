@@ -192,7 +192,7 @@ Compose backend. Native support for them is planned after v5.
 | External network | A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the `HACK_NATIVE_ADAPTATION` selection (see [Frontend integration status](#frontend-integration-status)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
 | External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
 | Reserved ownership label | A service, network or volume label key starts with `com.docker.compose.`, `io.hack-local.`, `io.hack.native-config.`, `io.hack.native-file.` or `io.hack.storage-witness.`. Compose, the native runtime and native-config Compose use these labels to prove which resources they own. |
-| Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. |
+| Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. With `HACK_NATIVE_BUILDS=1` (see below), only a build field other than `context`, `dockerfile`, `target` and `args`, or `image` together with `build`, counts; native build admission reviews the values of those four fields itself. |
 | Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64 only. A missing or `null` `platform` is unset and passes. |
 
 Native `hack up` and `hack restart` check for these features after selecting the
@@ -244,8 +244,14 @@ With it:
   remote contexts and `image` together with `build` refuse. Values are never shown.
 - Build args are not secrets: as with Docker, the image records them in its history.
   A build arg whose value equals a `hack env` secret value of this project and
-  environment refuses before any hook or VM effect, naming only the argument. Pass
+  environment refuses before any hook or VM effect, naming the service and the
+  argument but never the value. The refusal does not suggest the Compose backend,
+  because a Compose build would record the value in the image history too. Pass
   secrets with BuildKit build secrets instead; native builds do not support them yet.
+- Every build refusal names the service. A refusal from the runtime's build source
+  policy (for example a base image that is not a public Docker Hub reference) says
+  that it is the build source policy and what to change. Other build failures name
+  the service and keep the runtime's message.
 - After the runtime is up, each distinct build runs once with
   `runtime build-image` (below), and its filtered output streams to your terminal.
   Every service with that build is then pinned to the built content ID, so review,
@@ -548,8 +554,11 @@ saved run state. The report lists removed images and why each other one was kept
 
 Before startup, network-tool preparation additionally requires all four pinned
 Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), with
-regular, singly linked mode-`0600` files. Acquire the matching public package bytes;
-the command never downloads packages or accepts substitute versions:
+regular, singly linked mode-`0600` files. The pins are the Alpine v3.19 `main`
+repository for `aarch64`. Other Alpine releases, such as v3.20, publish files with
+the same names but different bytes, which the command refuses. Acquire the matching
+public package bytes; the command never downloads packages or accepts substitute
+versions:
 
 | File | SHA-256 |
 | --- | --- |

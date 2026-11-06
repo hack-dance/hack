@@ -42,6 +42,7 @@ import {
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { parseNativePreparedBase } from "../backends/native-prepared-base.ts";
+import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
   nativeDownEnvironment,
   nativeProjectDown,
@@ -5728,10 +5729,13 @@ async function handleNativeUp({
   // stays available for any graph a project already has.
   // The explicit adaptation applies first: a network it isolates is not
   // external here, exactly as native start normalizes it.
+  // With native builds enabled, build fields native builds implement pass
+  // here and native build admission reviews them, secret-valued args included.
   await refuseNativeComposeBackendFeatures({
     composeFile: project.composeFile,
     adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
     restart,
+    buildsEnabled: nativeBuildsEnabled(),
   });
   const branch = await resolveEffectiveBranchForCommand({
     project,

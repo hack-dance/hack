@@ -2,7 +2,9 @@
 //!
 //! One operation builds one image for one build key inside the guest engine, through
 //! the pinned host BuildKit client (`docker-buildx`, docker driver) talking to the
-//! engine's verified forwarded socket. The built image lands in the guest image store,
+//! engine's verified forwarded socket through a private relay ([`client_relay`]) that
+//! keeps the provider's socket forwarding out of a known busy loop. The built image
+//! lands in the guest image store,
 //! where graph admission already looks, and the caller pins the service to the content
 //! ID it returns, so review, receipts and restore treat it like a pulled image.
 //!
@@ -68,6 +70,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod client_relay;
 mod output;
 pub mod reclaim;
 #[cfg(test)]
@@ -875,8 +878,17 @@ pub(super) fn run<P: BuildPool>(
     // outlives the client run.
     let _definition = RemoveOnDrop(scratch.join("definition").join(BAKE_DEFINITION));
     let _policy = RemoveOnDrop(scratch.join("definition").join(SOURCE_POLICY));
+    // The client reaches the engine only through the relay, which keeps the provider's
+    // forwarded socket out of the state described in `client_relay`.
+    let relay = client_relay::ClientRelay::start(&identity.socket)?;
     let mut client = command(
-        &builder, &scratch, &metadata, inputs, &identity, &pins, &expected,
+        &builder,
+        &scratch,
+        &metadata,
+        inputs,
+        relay.socket(),
+        &pins,
+        &expected,
     )?;
     inherit_locks(&mut client, &[&fence, &key_lock]);
     let ended = supervise(
@@ -886,6 +898,8 @@ pub(super) fn run<P: BuildPool>(
         output::Filter::new(inputs.args.values().map(String::as_str)),
         pool.output(),
     );
+    // The client has exited or was stopped; wait for the guest to end its connections.
+    relay.finish(client_relay::FINISH_GRACE);
     let ended = match ended {
         Ok(ended) => ended,
         Err(error) => {
@@ -1101,7 +1115,7 @@ fn command(
     scratch: &Path,
     metadata: &Path,
     inputs: &Inputs,
-    identity: &PoolIdentity,
+    engine: &Path,
     pins: &BTreeMap<String, String>,
     labels: &BTreeMap<&'static str, String>,
 ) -> Result<std::process::Command, CandidateError> {
@@ -1128,10 +1142,7 @@ fn command(
         .current_dir(scratch)
         .env("HOME", scratch)
         .env("TMPDIR", scratch)
-        .env(
-            "DOCKER_HOST",
-            format!("unix://{}", identity.socket.display()),
-        )
+        .env("DOCKER_HOST", format!("unix://{}", engine.display()))
         // An empty private client configuration: no contexts, credential helpers or
         // proxies from the user's Docker setup.
         .env("DOCKER_CONFIG", &config)

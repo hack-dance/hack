@@ -490,7 +490,12 @@ that does not name an owned network or `none`. Cold builds need free guest stora
 cache to 8 GiB, and `runtime reclaim-build-images` removes only owned, superseded,
 unreferenced images (`provider/image_build/reclaim.rs`; model
 `tests/models/tla/native-build-retention`). Native `up` calls the build operation
-for Compose `build:` services only when `HACK_NATIVE_BUILDS=1` is set.
+for Compose `build:` services only when `HACK_NATIVE_BUILDS=1` is set. The client reaches
+the engine through a private relay (`provider/image_build/client_relay.rs`): the pinned
+provider's macOS socket forwarding can loop forever when a host client closes a forwarded
+connection while the guest is still sending, which saturated the guest and stopped every later
+agent and engine request. The relay always drains guest bytes, forwards a client's end of
+stream only as a half-close, and closes a provider connection only after the guest ended it.
 
 Source binaries embed their build checkout. If a copied Cargo target directory
 retains a different checkout identity, use a fresh `--target-dir` for checks and

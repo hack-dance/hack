@@ -110,6 +110,7 @@ import { deactivateNativeDomainDns } from "../lib/native-domain-dns-deactivate.t
 import { createNativeDnsHostDependencies } from "../lib/native-domain-dns-host.ts";
 import { prepareNativeDnsLaunchdRestart } from "../lib/native-domain-dns-launchd.ts";
 import {
+  describeNativeDnsPreview,
   type NativeDnsReceipt,
   planNativeDomainDns,
 } from "../lib/native-domain-dns-plan.ts";
@@ -453,11 +454,12 @@ async function handleGlobalDnsPreview({
     return 0;
   }
   const { domain } = selected;
-  const { inspection, receiptPath } = await inspectNativeDnsPlan({
+  const inspected = await inspectNativeDnsPlan({
     runtime,
     domain,
   });
-  const { plan } = inspection;
+  const { receiptPath, includeDir } = inspected;
+  const { plan } = inspected.inspection;
   const output = {
     domain: plan.domain,
     status: plan.status,
@@ -465,19 +467,15 @@ async function handleGlobalDnsPreview({
     resolverPath: plan.resolverPath,
     receiptPath,
     address: DEFAULT_HOST_DNS_IP,
+    includeDir,
+    includeLoadedBy: plan.includeArgument,
     activation: plan.activation,
   };
   if (args.options.json) {
     console.log(JSON.stringify({ ok: true, data: output }));
   } else {
     logger.info({
-      message: [
-        `Native DNS ${plan.status} for *.${domain}`,
-        `dnsmasq: ${plan.dnsmasqPath}`,
-        `resolver: ${plan.resolverPath}`,
-        `private receipt: ${receiptPath}`,
-        ...plan.activation,
-      ].join("\n"),
+      message: describeNativeDnsPreview({ plan, receiptPath }).join("\n"),
     });
   }
   return 0;

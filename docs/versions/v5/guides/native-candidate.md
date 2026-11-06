@@ -1441,8 +1441,14 @@ and then `hack global dns activate --domain v5.hack.gy`. Without `--domain`,
 these commands use the global `default_domain` only when it is a custom suffix;
 changing that shared setting also changes the installed v4 CLI's default. With a
 built-in default such as `hack.local`, they stop with a usage message that names
-`hack doctor --fix` and the rollback command below. Preview is read-only;
-activation shows the exact scoped claim and requires interactive confirmation
+`hack doctor --fix` and the rollback command below. Preview is read-only. It
+names the running dnsmasq argument that loads the include directory, normally
+the Homebrew service's `-7 <prefix>/etc/dnsmasq.d,*.conf`. That argument, not a
+`conf-dir` line in `dnsmasq.conf`, is what Hack relies on, so a commented-out
+`conf-dir` line does not matter. When the running dnsmasq lacks the argument,
+preview refuses, says whether `dnsmasq.conf` has a matching `conf-dir` line, and
+names the next step: `sudo brew services restart dnsmasq`, then preview again.
+Activation shows the exact scoped claim and requires interactive confirmation
 and a native administrator prompt. Run it from a terminal; the bounded privileged
 steps preserve that terminal's sudo authorization and report the underlying
 command failure if a step fails. If you approve but the administrator prompt

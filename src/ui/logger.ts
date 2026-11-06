@@ -23,6 +23,8 @@ export interface Logger {
 
 type LoggerBackend = "gum" | "clack" | "console";
 
+const LINE_BREAK = /\r?\n/;
+
 let backendOverride: LoggerBackend | null = null;
 
 /**
@@ -125,18 +127,34 @@ function resolveGumLogExtra(level: LogLevel): LogFields | undefined {
   return undefined;
 }
 
+/** Width of gum's level label plus its separator, e.g. `INFO `. */
+const GUM_CONTINUATION_INDENT = " ".repeat(5);
+
+/**
+ * `gum log` joins a multi-line message into one line, on a terminal and when
+ * piped. Log only the first line through gum and write the rest to the same
+ * stream (gum logs to stderr), indented under the message, so every line
+ * break survives. A failed gum call falls back to clack for the whole message.
+ */
 function logWithGum(level: LogLevel, { message, fields }: LogInput): void {
   const extra = resolveGumLogExtra(level);
+  const [first = "", ...rest] = message.split(LINE_BREAK);
 
   const ok = tryGumLog({
     level: toGumLevel(level),
-    message,
+    message: first,
     fields: toGumFields(mergeFields(fields, extra)),
   });
 
   if (!ok) {
     // Fallback without throwing.
     logWithClack(level, { message, fields });
+    return;
+  }
+  if (rest.length > 0) {
+    process.stderr.write(
+      `${rest.map((line) => (line ? `${GUM_CONTINUATION_INDENT}${line}` : line)).join("\n")}\n`
+    );
   }
 }
 

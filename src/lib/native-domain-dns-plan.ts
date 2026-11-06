@@ -36,6 +36,8 @@ const LINE_BREAK = /\r?\n/;
 const NUMERIC_DOMAIN = /^\d+(?:\.\d+)+$/;
 const WHITESPACE = /\s+/;
 const TRAILING_DOT = /\.$/;
+const LEADING_COMMENT = /^#+\s*/;
+const TRAILING_SLASHES = /(?<=.)\/+$/;
 
 /** A complete, bounded read of a file; null means the file does not exist. */
 export interface NativeDnsFileSnapshot {
@@ -68,6 +70,14 @@ export interface NativeDnsPlan {
   readonly inactiveReceipt: NativeDnsReceipt;
   /** Verified parent claim used to prove fallback after scoped deactivation. */
   readonly parentAddress: string | null;
+  /**
+   * The running dnsmasq argument that loads the managed include directory,
+   * for example `-7 /opt/homebrew/etc/dnsmasq.d,*.conf`. The main
+   * configuration's own `conf-dir` lines are not this proof: native
+   * activation restarts dnsmasq only through the Homebrew service job, which
+   * loads the directory with this argument.
+   */
+  readonly includeArgument: string;
   readonly activation: readonly string[];
 }
 
@@ -161,16 +171,89 @@ function claimsInConfig(
   return claims;
 }
 
-function hasRuntimeInclude(
-  args: readonly string[],
-  includeDir: string
-): boolean {
-  const expected = `${includeDir},*.conf`;
-  return args.some(
-    (arg, index) =>
-      (arg === "-7" && args[index + 1] === expected) ||
-      arg === `-7${expected}` ||
-      arg === `--conf-dir=${expected}`
+/**
+ * Return the running dnsmasq argument that loads exactly
+ * `<includeDir>,*.conf`, in any getopt spelling (`-7 v`, `-7v`,
+ * `--conf-dir=v`, `--conf-dir v`), or null when the process does not load it.
+ */
+export function findDnsmasqIncludeArgument(opts: {
+  readonly args: readonly string[];
+  readonly includeDir: string;
+}): string | null {
+  const expected = `${opts.includeDir},*.conf`;
+  for (const [index, arg] of opts.args.entries()) {
+    const next = opts.args[index + 1];
+    if ((arg === "-7" || arg === "--conf-dir") && next === expected) {
+      return `${arg} ${expected}`;
+    }
+    if (arg === `-7${expected}` || arg === `--conf-dir=${expected}`) {
+      return arg;
+    }
+  }
+  return null;
+}
+
+/** A main-configuration `conf-dir` line that names the include directory. */
+interface ConfDirLine {
+  /** One-based line number. */
+  readonly line: number;
+  readonly active: boolean;
+}
+
+/**
+ * Find the first `conf-dir` line, active or commented out, whose directory is
+ * the include directory (ignoring a trailing slash and any file filters).
+ * Used only to explain a refusal; it never proves the directory is loaded.
+ */
+function findIncludeConfDirLine(opts: {
+  readonly content: string;
+  readonly includeDir: string;
+}): ConfDirLine | null {
+  let commented: ConfDirLine | null = null;
+  for (const [index, rawLine] of opts.content.split(LINE_BREAK).entries()) {
+    const trimmed = rawLine.trim();
+    const active = !trimmed.startsWith("#");
+    const line = trimmed.replace(LEADING_COMMENT, "");
+    const equal = line.indexOf("=");
+    if (equal < 0 || line.slice(0, equal).trim().toLowerCase() !== "conf-dir") {
+      continue;
+    }
+    const directory = (line.slice(equal + 1).split(",", 1)[0] ?? "")
+      .trim()
+      .replace(TRAILING_SLASHES, "");
+    if (directory !== opts.includeDir) {
+      continue;
+    }
+    if (active) {
+      return { line: index + 1, active };
+    }
+    commented ??= { line: index + 1, active };
+  }
+  return commented;
+}
+
+/**
+ * Refuse with what is missing and the concrete next step. Messages name only
+ * validated paths and line numbers, never configuration contents.
+ */
+function refuseUnloadedInclude(opts: NativeDnsPlanOptions): never {
+  const argument = `-7 ${opts.includeDir},*.conf`;
+  const mainPath = opts.mainConfig.path;
+  const next = `Next: restart dnsmasq through its Homebrew service, which passes ${argument} (sudo brew services restart dnsmasq), then rerun hack global dns preview --domain ${opts.domain}.`;
+  const line = findIncludeConfDirLine({
+    content: opts.mainConfig.content ?? "",
+    includeDir: opts.includeDir,
+  });
+  if (line?.active) {
+    return refuse(
+      `running dnsmasq was not started with ${argument}; ${mainPath} line ${line.line} names the include directory, but native activation restarts dnsmasq only through its Homebrew service job. ${next}`
+    );
+  }
+  const detail = line
+    ? `${mainPath} line ${line.line} has its conf-dir commented out`
+    : `${mainPath} has no conf-dir line for it`;
+  return refuse(
+    `running dnsmasq does not load the managed include directory ${opts.includeDir}: the process has no ${argument} argument and ${detail}. ${next}`
   );
 }
 
@@ -332,6 +415,7 @@ function validateInputs(opts: NativeDnsPlanOptions): {
   domain: string;
   builtInParent: "hack.gy" | undefined;
   parentAddress: string | null;
+  includeArgument: string;
 } {
   const domain = parseDefaultDomain(opts.domain);
   if (
@@ -352,8 +436,12 @@ function validateInputs(opts: NativeDnsPlanOptions): {
   if (opts.mainConfig.path === opts.hosts.path || includeDir === resolverDir) {
     refuse("DNS input or output paths overlap");
   }
-  if (!hasRuntimeInclude(opts.dnsmasqArgs, includeDir)) {
-    refuse("running dnsmasq does not load the managed include directory");
+  const includeArgument = findDnsmasqIncludeArgument({
+    args: opts.dnsmasqArgs,
+    includeDir,
+  });
+  if (includeArgument === null) {
+    return refuseUnloadedInclude(opts);
   }
   checkConfigSources(opts);
   const builtInParent = BUILT_IN_DOMAINS.find((root) =>
@@ -364,7 +452,7 @@ function validateInputs(opts: NativeDnsPlanOptions): {
   }
   const parentAddress =
     builtInParent === DEFAULT_OAUTH_ALIAS_ROOT ? checkParentClaim(opts) : null;
-  return { domain, builtInParent, parentAddress };
+  return { domain, builtInParent, parentAddress, includeArgument };
 }
 
 function managedFile(
@@ -499,7 +587,8 @@ function resolveStatus(opts: {
  * persist pending/active receipts, and independently prove live DNS after restart.
  */
 export function planNativeDomainDns(opts: NativeDnsPlanOptions): NativeDnsPlan {
-  const { domain, builtInParent, parentAddress } = validateInputs(opts);
+  const { domain, builtInParent, parentAddress, includeArgument } =
+    validateInputs(opts);
   const dnsmasqPath = join(opts.includeDir, `hack-native-${domain}.conf`);
   const resolverPath = join(opts.resolverDir, domain);
   if (Buffer.byteLength(basename(dnsmasqPath), "utf8") > 255) {
@@ -588,6 +677,27 @@ export function planNativeDomainDns(opts: NativeDnsPlanOptions): NativeDnsPlan {
     removingReceipt,
     inactiveReceipt,
     parentAddress,
+    includeArgument,
     activation: Object.freeze(activation),
   });
+}
+
+/**
+ * Human preview lines for a plan, one fact per line. The caller prints them
+ * joined with line breaks; the include line names the process argument that
+ * proves dnsmasq loads the managed directory.
+ */
+export function describeNativeDnsPreview(opts: {
+  readonly plan: NativeDnsPlan;
+  readonly receiptPath: string;
+}): readonly string[] {
+  const { plan } = opts;
+  return [
+    `Native DNS ${plan.status} for *.${plan.domain}`,
+    `dnsmasq: ${plan.dnsmasqPath}`,
+    `include: ${dirname(plan.dnsmasqPath)} (loaded by running dnsmasq ${plan.includeArgument})`,
+    `resolver: ${plan.resolverPath}`,
+    `private receipt: ${opts.receiptPath}`,
+    ...plan.activation,
+  ];
 }

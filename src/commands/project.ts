@@ -76,6 +76,7 @@ import {
 } from "../backends/native-project-restart-preflight.ts";
 import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
 import {
+  type NativeStartupProgress,
   parseNativeHttpsSelection,
   startNativeProject,
 } from "../backends/native-project-start.ts";
@@ -5824,6 +5825,44 @@ async function runRemoteLifecycleCommand(opts: {
   });
 }
 
+/**
+ * Foreground native progress, matching Compose's attached `up`: steps while the
+ * graph starts, one ready line, then the stop sequence after Ctrl-C.
+ */
+function reportNativeStartupProgress(event: NativeStartupProgress): void {
+  switch (event.phase) {
+    case "input":
+      logger.step({ message: "Preparing native project input…" });
+      return;
+    case "runtime":
+      logger.step({ message: "Starting the native runtime…" });
+      return;
+    case "images":
+      logger.step({ message: "Acquiring service images…" });
+      return;
+    case "services":
+      logger.step({
+        message: `Starting services: ${event.services.join(", ")}…`,
+      });
+      return;
+    case "ready":
+      logger.success({
+        message: `Project is ready (${event.services.join(", ")}). Use hack ps and hack logs from another terminal; press Ctrl-C to stop.`,
+      });
+      return;
+    case "stopping":
+      logger.step({
+        message: "Stopping the native project; waiting for owned cleanup…",
+      });
+      return;
+    case "stopped":
+      logger.info({ message: "Native project stopped." });
+      return;
+    default:
+      return;
+  }
+}
+
 async function handleNativeUp({
   ctx,
   args,
@@ -5925,6 +5964,7 @@ async function handleNativeUp({
       await envFingerprints.record(
         createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
       ),
+    onProgress: reportNativeStartupProgress,
     before: async (input) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
         title: "Lifecycle (native up before)",
@@ -8583,6 +8623,13 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
+/** Compose-style state cell: an exited container shows its exit code. */
+function nativePsState(item: NativeProjectPsResult["items"][number]): string {
+  return item.state === "exited" && item.exitCode !== null
+    ? `exited (${item.exitCode})`
+    : item.state;
+}
+
 /**
  * Native ps output. `--json` prints the standard `{ok: true, data}` envelope
  * whose `data` is the native ps result, matching authored native ps.
@@ -8601,6 +8648,11 @@ async function displayNativePs(
     logger.info({
       message: "Native runtime is not running; no services are running.",
     });
+  } else if (result.status === "runtime_busy") {
+    logger.info({
+      message:
+        "Native runtime is busy with another operation, such as a starting hack up; service state is available once it finishes or reports ready.",
+    });
   } else if (result.status === "owner_unconfirmed") {
     logger.warn({
       message:
@@ -8617,7 +8669,7 @@ async function displayNativePs(
     rows: result.items.map((item) => [
       item.service,
       item.container ?? "",
-      item.state,
+      nativePsState(item),
       item.health ?? "",
     ]),
   });

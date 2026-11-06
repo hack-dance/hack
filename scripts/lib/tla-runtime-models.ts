@@ -39,6 +39,20 @@ const laterIncompleteMissingLockStages = [
   "socket",
   "owner",
 ] as const;
+// TLC's two-worker search does not always report the shortest trace, so the
+// restart-policy controls accept every first violation the model can reach.
+// A stale use is a bound incarnation that is older than the current one, or
+// equal to it while the engine is no longer running.
+const restartPolicyStaleUses = [
+  { engine: "restarting", bound: 1 },
+  { engine: "exited", bound: 1 },
+  { engine: "running", bound: 1 },
+  { engine: "restarting", bound: 2 },
+  { engine: "exited", bound: 2 },
+  { engine: "running", bound: 2 },
+  { engine: "restarting", bound: 3 },
+  { engine: "exited", bound: 3 },
+] as const;
 const contracts: readonly ModelContract[] = [
   {
     name: "pre-ready-retirement",
@@ -1452,6 +1466,19 @@ const contracts: readonly ModelContract[] = [
       'engine = "running"',
       "lateStart = TRUE",
     ],
+    // DaemonRestart needs a present container, so a stop-requested phase is
+    // either stopping or, after terminal proof, stopped.
+    alternativeWitnesses: [
+      {
+        action: "DaemonRestart",
+        fields: [
+          'phase = "stopped"',
+          'policy = "armed"',
+          'engine = "running"',
+          "lateStart = TRUE",
+        ],
+      },
+    ],
     additionalControls: [
       {
         name: "unproved-terminal",
@@ -1463,6 +1490,18 @@ const contracts: readonly ModelContract[] = [
           'engine = "running"',
           "cancelled = TRUE",
           "unsafeTerminal = TRUE",
+        ],
+        // A non-terminal engine is either running or has a pending restart.
+        alternativeWitnesses: [
+          {
+            action: "ObserveTerminal",
+            fields: [
+              'phase = "stopped"',
+              'engine = "restarting"',
+              "cancelled = TRUE",
+              "unsafeTerminal = TRUE",
+            ],
+          },
         ],
       },
       {
@@ -1476,6 +1515,15 @@ const contracts: readonly ModelContract[] = [
           "bound = 1",
           "staleUse = TRUE",
         ],
+        alternativeWitnesses: restartPolicyStaleUses.slice(1).map((use) => ({
+          action: "Use",
+          fields: [
+            'phase = "serving"',
+            `engine = "${use.engine}"`,
+            `bound = ${use.bound}`,
+            "staleUse = TRUE",
+          ],
+        })),
       },
       {
         name: "completion-reachable",

@@ -32,14 +32,18 @@ model of the stop/restart interaction, not an implementation-refinement proof.
 
 The positive configuration exhausts 134 distinct states with `MaxIncarnation = 3`
 and at most one engine restart. Each negative control removes one guard and must
-fail its property with the exact same-state witness:
+fail its property with a same-state witness. TLC's two-worker search does not
+always report the shortest trace, so each control accepts every first violation
+the model can reach, and nothing else:
 
 - `negative.cfg` (no disarm): `DaemonRestart` after the stop request starts a new
-  incarnation (`NoIncarnationAfterStop`).
+  incarnation (`NoIncarnationAfterStop`), in the `stopping` or `stopped` phase.
 - `unproved-terminal.cfg` (stop transport success taken as proof):
-  `ObserveTerminal` records evidence while the engine still runs (`TerminalProof`).
-- `stale-generation.cfg` (no generation recheck): `Use` acts on a restarting
-  container's old incarnation (`NoStaleIncarnation`).
+  `ObserveTerminal` records evidence while the engine is still running or has a
+  pending restart (`TerminalProof`).
+- `stale-generation.cfg` (no generation recheck): `Use` acts on a bound
+  incarnation that is older than the current one, or on the current one after
+  it stopped running (`NoStaleIncarnation`).
 - `completion-reachable.cfg`: cleanup reaches removal with every guard enforced.
 
 ## Omissions

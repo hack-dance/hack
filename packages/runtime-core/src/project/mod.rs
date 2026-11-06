@@ -117,6 +117,12 @@ pub struct PortPlan {
     pub protocol: String,
     pub declared_host_ip: String,
     pub proposed_host_ip: String,
+    /// Variable name whose literal default supplied `published`; never a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_reference: Option<String>,
+    /// Variable name whose literal default supplied the host IP; never a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_ip_reference: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]

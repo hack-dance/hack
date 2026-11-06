@@ -27,10 +27,12 @@
 //!   is released only when its holder exits): it is recorded `indeterminate` and the
 //!   image is built again. Build outputs are content addressed and adoption always
 //!   rechecks labels and incarnation, so no operator action is needed.
-//! - Argument values never appear in argv, receipts or messages: the client receives
-//!   `--build-arg NAME` and reads the value from its private environment. Its output
-//!   reaches the caller only through [`output::Filter`], which redacts every value and
-//!   strips terminal control sequences, within fixed bounds.
+//! - Argument values never appear in argv, the client's environment, receipts or
+//!   messages: the client runs `buildx bake` with a private mode-0600 definition file
+//!   that carries them, removed after the run, and its environment is cleared to a
+//!   fixed allowlist. Its output reaches the caller only through [`output::Filter`],
+//!   which redacts every value and strips terminal control sequences, within fixed
+//!   bounds.
 //! - The client builds from a private copy of the Dockerfile and ignore bytes that were
 //!   scanned and hashed, never from the project paths again.
 //! - Nothing here removes images, prunes caches or adopts an image whose labels differ.
@@ -273,18 +275,15 @@ pub(super) fn namespace(root: &Path, branch: Option<&str>) -> String {
     format!("{:x}", digest.finalize())
 }
 
-/// Client environment the build must not let an argument name override, plus names
-/// the client itself interprets (proxies would redirect the client's own traffic).
+/// Build-argument names BuildKit or buildx interpret themselves rather than passing to
+/// the Dockerfile: `BUILDKIT_*` (for example `BUILDKIT_SYNTAX` selects a frontend
+/// image), `BUILDX_*` and `SOURCE_DATE_EPOCH`. Any case refuses. Other names, including
+/// ones a process environment would interpret (`PATH`, `LD_*`, `GO*`, proxies), are
+/// ordinary Dockerfile arguments here: values travel only in the private bake
+/// definition and never enter the client's environment.
 fn reserved_argument(name: &str) -> bool {
-    const EXACT: [&str; 6] = ["PATH", "HOME", "LANG", "TMPDIR", "USER", "SHELL"];
-    const PREFIXES: [&str; 3] = ["DOCKER_", "BUILDX_", "BUILDKIT_"];
     let upper = name.to_ascii_uppercase();
-    EXACT.contains(&upper.as_str())
-        || PREFIXES.iter().any(|prefix| upper.starts_with(prefix))
-        || upper.ends_with("_PROXY")
-        || upper.starts_with("LC_")
-        || upper.starts_with("GIT_")
-        || upper.starts_with("SSH_")
+    upper.starts_with("BUILDKIT_") || upper.starts_with("BUILDX_") || upper == "SOURCE_DATE_EPOCH"
 }
 
 fn valid_argument_name(name: &str) -> bool {
@@ -351,7 +350,7 @@ fn validate_request(request: &BuildRequest) -> Result<(), CandidateError> {
         if reserved_argument(name) {
             return Err(refusal(
                 "native_build_argument",
-                "Build argument names may not set the build client's own environment (PATH, HOME, DOCKER_*, BUILDX_*, BUILDKIT_*, proxies, locale, Git or SSH settings).",
+                "Build argument names may not be ones BuildKit or buildx interpret themselves (BUILDKIT_*, BUILDX_*, SOURCE_DATE_EPOCH).",
             ));
         }
         if value.bytes().any(|b| b == 0) {
@@ -806,6 +805,8 @@ pub(super) fn run<P: BuildPool>(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(state::io(error)),
     }
+    // The definition carries argument values; it never outlives the client run.
+    let _definition = RemoveOnDrop(scratch.join("definition").join(BAKE_DEFINITION));
     let ended = supervise(
         command(
             &builder, &scratch, &metadata, inputs, &identity, &pins, &expected,
@@ -912,7 +913,7 @@ fn built_image_id(metadata: &Path) -> Result<String, CandidateError> {
             "The build client wrote malformed image metadata.",
         )
     })?;
-    let id = value["containerimage.config.digest"]
+    let id = value[BAKE_TARGET]["containerimage.config.digest"]
         .as_str()
         .filter(|id| image_id(id))
         .ok_or_else(|| {
@@ -955,8 +956,70 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), CandidateError> {
     file.write_all(bytes).map_err(state::io)
 }
 
-/// The client command: argv carries only paths, names and non-secret labels; argument
-/// values reach the client through its environment.
+/// The one bake target a build defines; its metadata is keyed by this name.
+const BAKE_TARGET: &str = "build";
+const BAKE_DEFINITION: &str = "definition.json";
+
+/// Removes one private file when dropped, on every exit path.
+struct RemoveOnDrop(PathBuf);
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Escape a string for the bake definition. Bake reads JSON definitions as HCL, where
+/// `${...}` interpolates (variables, the environment, functions) and `%{...}` is a
+/// template directive; `$${` and `%%{` are their literal forms. Every string in the
+/// definition passes through here, so no project-supplied text is ever evaluated.
+fn bake_literal(text: &str) -> String {
+    text.replace("${", "$${").replace("%{", "%%{")
+}
+
+fn bake_strings(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(bake_literal(&text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(bake_strings).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (bake_literal(&key), bake_strings(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// The private bake definition: everything the build needs, argument values
+/// included. It is written mode 0600 in the client's private scratch directory.
+fn bake_definition(
+    inputs: &Inputs,
+    dockerfile: &Path,
+    pins: &BTreeMap<String, String>,
+    labels: &BTreeMap<&'static str, String>,
+) -> Value {
+    let contexts: BTreeMap<&str, String> = pins
+        .iter()
+        .map(|(name, reference)| (name.as_str(), format!("docker-image://{reference}")))
+        .collect();
+    let mut target = serde_json::json!({
+        "context": inputs.context.to_string_lossy(),
+        "dockerfile": dockerfile.to_string_lossy(),
+        "args": inputs.args,
+        "contexts": contexts,
+        "labels": labels,
+        "tags": [inputs.tag()],
+        "platforms": ["linux/arm64"],
+        "output": ["type=docker"],
+    });
+    if let Some(stage) = &inputs.target {
+        target["target"] = Value::String(stage.clone());
+    }
+    bake_strings(serde_json::json!({"target": {BAKE_TARGET: target}}))
+}
+
+/// The client command: `buildx bake` with the private definition. Argv carries only
+/// paths and fixed flags, and the environment is cleared to a fixed allowlist: argument
+/// values travel only in the definition, never in argv or the client's environment.
 fn command(
     builder: &Path,
     scratch: &Path,
@@ -968,9 +1031,15 @@ fn command(
 ) -> Result<std::process::Command, CandidateError> {
     let config = scratch.join("docker-config");
     let buildx = scratch.join("buildx");
+    let bake = scratch.join("definition");
     state::private_directory(&config)?;
     state::private_directory(&buildx)?;
+    state::private_directory(&bake)?;
     let dockerfile = stage_dockerfile(scratch, inputs)?;
+    let definition = bake.join(BAKE_DEFINITION);
+    let encoded = serde_json::to_vec(&bake_definition(inputs, &dockerfile, pins, labels))
+        .map_err(|_| invalid("Cannot encode the build definition."))?;
+    write_private(&definition, &encoded)?;
     let mut command = super::process::clean_command(builder);
     command
         .current_dir(scratch)
@@ -986,35 +1055,32 @@ fn command(
         .env("BUILDX_CONFIG", &buildx)
         .env("BUILDX_NO_DEFAULT_ATTESTATIONS", "1")
         .env("DOCKER_CLI_HINTS", "false")
-        .args(["build", "--progress=plain", "--platform", "linux/arm64"])
-        .args(["--provenance=false", "--sbom=false", "--load"])
+        .args([
+            "bake",
+            "--progress=plain",
+            "--provenance=false",
+            "--sbom=false",
+        ])
         .arg("--file")
-        .arg(&dockerfile)
+        .arg(&definition)
         .arg("--metadata-file")
         .arg(metadata)
-        .args(["--tag", &inputs.tag()]);
-    if let Some(target) = &inputs.target {
-        command.args(["--target", target]);
-    }
-    for (name, value) in &inputs.args {
-        command.args(["--build-arg", name]).env(name, value);
-    }
-    for (name, reference) in pins {
-        command
-            .arg("--build-context")
-            .arg(format!("{name}=docker-image://{reference}"));
-    }
-    for (name, value) in labels {
-        command.arg("--label").arg(format!("{name}={value}"));
-    }
-    command
-        .arg(&inputs.context)
+        // Bake requires explicit read access outside its working directory.
+        .arg("--allow")
+        .arg(format!("fs.read={}", inputs.context.display()))
+        .arg("--allow")
+        .arg(format!("fs.read={}", bake_parent(&dockerfile).display()))
+        .arg(BAKE_TARGET)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         // Output reaches the caller only through `output::Filter`.
         .stderr(Stdio::piped())
         .process_group(0);
     Ok(command)
+}
+
+fn bake_parent(path: &Path) -> &Path {
+    path.parent().unwrap_or(path)
 }
 
 #[derive(Debug, Eq, PartialEq)]

@@ -474,14 +474,16 @@ linked, mode-`0600` file owned by you), because build-argument values are in it:
   Base images with stored `ONBUILD` triggers refuse. The client builds from a private
   copy of the Dockerfile and ignore rules that were scanned, so editing either file
   during the build has no effect on it.
-- Argument values reach the client only through its environment, never its command
-  line or receipts. Names that would change the client's own environment
-  (`PATH`, `HOME`, `DOCKER_*`, `BUILDX_*`, `BUILDKIT_*`, proxies, locale, Git and SSH
-  settings) refuse.
+- Argument values reach the client only through a private definition file (mode
+  `0600`, removed after the build), never its command line, its environment or
+  receipts; the client's environment is a fixed list of its own settings. Names must
+  be plain identifiers. Names BuildKit or buildx interpret themselves (`BUILDKIT_*`,
+  `BUILDX_*`, `SOURCE_DATE_EPOCH`) and the platform arguments refuse.
 - Build output is shown on stderr after filtering: every argument value is replaced
-  with `[redacted]`, terminal control characters are removed, lines are cut at 16 KiB
-  and output stops after 4 MiB. A value that a Dockerfile transforms before printing
-  it (for example, by encoding it) is not detected.
+  with `[redacted]`, also when quoted or escaped the way the client prints values,
+  terminal control characters are removed, lines are cut at 16 KiB and output stops
+  after 4 MiB. A value that a Dockerfile transforms before printing it (for example,
+  by encoding it) is not detected.
 - `missing` reuses a verified image for the same build key without running the client;
   `rebuild` always builds. The key covers the Dockerfile and `.dockerignore` bytes,
   target, arguments and versions, not the context's other files (as with Compose).

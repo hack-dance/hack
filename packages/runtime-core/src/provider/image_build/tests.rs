@@ -1,8 +1,9 @@
 //! `runtime build-image` against a fake pool and a fake build client.
 //!
-//! The fake client is `/bin/sh` reading a script named `build` from the client's private
-//! working directory, so no test writes and then executes a fresh binary. It records its
-//! argv, the one build-argument variable it was given, and a call count.
+//! The fake client is `/bin/sh` reading a script named `bake` (its first argument) from
+//! the client's private working directory, so no test writes and then executes a fresh
+//! binary. It records its argv, its whole environment, a copy of the bake definition,
+//! the staged Dockerfile and ignore rules, and a call count.
 use super::*;
 use std::{
     cell::RefCell,
@@ -79,7 +80,7 @@ impl Fixture {
 count=$(cat calls 2>/dev/null || echo 0)
 echo $((count + 1)) > calls
 printf '%s\n' "$@" > argv
-printf '%s' "${{GREETING-}}" > greeting
+env > env
 meta=
 file=
 previous=
@@ -88,21 +89,22 @@ for argument do
   if [ "$previous" = --file ]; then file=$argument; fi
   previous=$argument
 done
-cat "$file" > seen-dockerfile
-cat "$file.dockerignore" > seen-dockerignore
+cat "$file" > seen-bake.json
+cat dockerfile/Dockerfile > seen-dockerfile
+cat dockerfile/Dockerfile.dockerignore > seen-dockerignore
 case {mode} in
-  ok) printf '{{"containerimage.config.digest":"{IMAGE}"}}' > "$meta" ;;
+  ok) printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
   leak)
-    printf '#5 0.1 value=%s\n\033[31mred\033[0m\033]0;title\007\n' "$GREETING" >&2
-    printf '{{"containerimage.config.digest":"{IMAGE}"}}' > "$meta" ;;
+    printf '#5 0.1 value=%s\n\033[31mred\033[0m\033]0;title\007\n' '{SECRET}' >&2
+    printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
   fail) exit 3 ;;
   nometa) ;;
   sleep) sleep 30 & echo $! > child.pending; mv child.pending child; wait ;;
 esac
 "#
         );
-        fs::write(scratch.join("build"), script).unwrap();
-        fs::set_permissions(scratch.join("build"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(scratch.join("bake"), script).unwrap();
+        fs::set_permissions(scratch.join("bake"), fs::Permissions::from_mode(0o600)).unwrap();
     }
     fn calls(&self, inputs: &Inputs) -> u32 {
         fs::read_to_string(self.scratch(inputs).join("calls"))
@@ -217,7 +219,7 @@ fn never() -> bool {
 }
 
 #[test]
-fn cold_build_passes_values_only_through_the_environment_and_records_the_result() {
+fn cold_build_passes_values_only_through_the_private_definition_and_records_the_result() {
     let fixture = Fixture::new();
     let inputs = fixture.inputs(Policy::Missing);
     let pool = FakePool::new("pool-1");
@@ -237,27 +239,37 @@ fn cold_build_passes_values_only_through_the_environment_and_records_the_result(
     let argv = fs::read_to_string(scratch.join("argv")).unwrap();
     assert!(!argv.contains(SECRET), "argument value reached argv");
     let lines: Vec<&str> = argv.lines().collect();
-    assert!(lines.windows(2).any(|w| w == ["--build-arg", "GREETING"]));
-    assert!(lines.windows(2).any(|w| w
-        == [
-            "--build-context",
-            &format!("alpine:3.20=docker-image://docker.io/library/alpine@{PIN}")
-        ]));
-    assert!(lines.windows(2).any(|w| w == ["--platform", "linux/arm64"]));
-    assert!(lines.contains(&"--provenance=false"));
-    assert!(
-        lines
-            .windows(2)
-            .any(|w| w == ["--label", "io.hack-local.kind=build-image"])
-    );
+    // `sh` ran the script named by the first argument, so that argument was `bake`.
+    assert_eq!(lines.last(), Some(&"build"));
+    assert!(lines.contains(&"--provenance=false") && lines.contains(&"--sbom=false"));
+    assert!(lines.windows(2).any(|w| w[0] == "--allow"
+        && w[1] == format!("fs.read={}", fixture.project.join("app").display())));
     assert!(
         !argv.contains("pool-1"),
         "the pool incarnation reached argv"
     );
-    assert_eq!(
-        fs::read_to_string(scratch.join("greeting")).unwrap(),
-        SECRET
+    let env = fs::read_to_string(scratch.join("env")).unwrap();
+    assert!(
+        !env.contains(SECRET),
+        "argument value reached the client environment"
     );
+    assert!(!env.lines().any(|line| line.starts_with("GREETING=")));
+    let bake: Value =
+        serde_json::from_slice(&fs::read(scratch.join("seen-bake.json")).unwrap()).unwrap();
+    let target = &bake["target"]["build"];
+    assert_eq!(target["args"], serde_json::json!({"GREETING": SECRET}));
+    assert_eq!(
+        target["contexts"],
+        serde_json::json!({
+            "alpine:3.20": format!("docker-image://docker.io/library/alpine@{PIN}")
+        })
+    );
+    assert_eq!(target["platforms"], serde_json::json!(["linux/arm64"]));
+    assert_eq!(target["output"], serde_json::json!(["type=docker"]));
+    assert_eq!(target["labels"]["io.hack-local.kind"], "build-image");
+    assert_eq!(target["tags"], serde_json::json!([inputs.tag()]));
+    // The definition carries argument values; it is gone once the client has run.
+    assert!(!scratch.join("definition").join(BAKE_DEFINITION).exists());
     let receipt = fixture.receipt(&inputs);
     assert_eq!(receipt.phase, Phase::ContentIdVerified);
     assert_eq!(receipt.image_id.as_deref(), Some(IMAGE));
@@ -268,6 +280,104 @@ fn cold_build_passes_values_only_through_the_environment_and_records_the_result(
     )
     .unwrap();
     assert!(!text.contains(SECRET), "argument value reached the receipt");
+}
+
+#[test]
+fn environment_names_are_plain_arguments_that_never_reach_the_client_environment() {
+    let fixture = Fixture::new();
+    let names = [
+        "DYLD_INSERT_LIBRARIES",
+        "LD_PRELOAD",
+        "GODEBUG",
+        "PATH",
+        "HTTPS_PROXY",
+        "KUBECONFIG",
+        "DOCKER_HOST",
+    ];
+    let mut request = fixture.request(Policy::Missing);
+    for name in names {
+        request
+            .args
+            .insert(name.to_owned(), format!("{SECRET}-{name}"));
+    }
+    let inputs = prepare(request).unwrap();
+    let pool = FakePool::new("pool-1");
+    fixture.client(&inputs, "ok");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    let scratch = fixture.scratch(&inputs);
+    let env = fs::read_to_string(scratch.join("env")).unwrap();
+    assert!(
+        !env.contains(SECRET),
+        "an argument value reached the client environment"
+    );
+    // The client environment is exactly the fixed allowlist (plus what `sh` adds itself).
+    let allowed = [
+        "PATH",
+        "LANG",
+        "HOME",
+        "TMPDIR",
+        "DOCKER_HOST",
+        "DOCKER_CONFIG",
+        "BUILDX_CONFIG",
+        "BUILDX_NO_DEFAULT_ATTESTATIONS",
+        "DOCKER_CLI_HINTS",
+        "PWD",
+        "OLDPWD",
+        "SHLVL",
+        "_",
+    ];
+    for line in env.lines() {
+        let name = line.split('=').next().unwrap();
+        assert!(allowed.contains(&name), "unexpected client variable {name}");
+    }
+    assert!(
+        env.lines()
+            .any(|line| line == "PATH=/usr/bin:/bin:/usr/sbin:/sbin")
+    );
+    assert!(
+        !env.lines()
+            .any(|line| line.starts_with("DYLD_") || line.starts_with("GODEBUG="))
+    );
+    let bake: Value =
+        serde_json::from_slice(&fs::read(scratch.join("seen-bake.json")).unwrap()).unwrap();
+    for name in names {
+        assert_eq!(
+            bake["target"]["build"]["args"][name],
+            format!("{SECRET}-{name}")
+        );
+    }
+}
+
+#[test]
+fn bake_definitions_never_evaluate_project_text() {
+    assert_eq!(bake_literal("${HOME}"), "$${HOME}");
+    assert_eq!(
+        bake_literal("%{ if true }x%{ endif }"),
+        "%%{ if true }x%%{ endif }"
+    );
+    assert_eq!(bake_literal("$${x} a$ % \\${y}"), "$$${x} a$ % \\$${y}");
+    let escaped = bake_strings(serde_json::json!({"a${b}": ["${c}", {"d": "%{e}"}], "n": 1}));
+    assert_eq!(
+        escaped,
+        serde_json::json!({"a$${b}": ["$${c}", {"d": "%%{e}"}], "n": 1})
+    );
+    let fixture = Fixture::new();
+    let mut request = fixture.request(Policy::Missing);
+    request
+        .args
+        .insert("TEMPLATE".into(), "${HOME}%{ if true }".into());
+    let inputs = prepare(request).unwrap();
+    let definition = bake_definition(
+        &inputs,
+        Path::new("/s/Dockerfile"),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
+    assert_eq!(
+        definition["target"]["build"]["args"]["TEMPLATE"],
+        "$${HOME}%%{ if true }"
+    );
 }
 
 #[test]
@@ -304,13 +414,9 @@ fn the_client_builds_the_scanned_dockerfile_and_ignore_rules_not_later_edits() {
         fs::read_to_string(scratch.join("seen-dockerignore")).unwrap(),
         "*.txt\n"
     );
-    let argv = fs::read_to_string(scratch.join("argv")).unwrap();
-    let lines: Vec<&str> = argv.lines().collect();
-    let file = lines
-        .windows(2)
-        .find(|w| w[0] == "--file")
-        .map(|w| PathBuf::from(w[1]))
-        .unwrap();
+    let bake: Value =
+        serde_json::from_slice(&fs::read(scratch.join("seen-bake.json")).unwrap()).unwrap();
+    let file = PathBuf::from(bake["target"]["build"]["dockerfile"].as_str().unwrap());
     assert!(file.starts_with(&scratch), "the client read a project path");
 
     // A Dockerfile-specific ignore file wins; with none at all, the private rules are
@@ -706,16 +812,11 @@ fn requests_refuse_unsafe_paths_arguments_and_bounds() {
         assert_eq!(code(request), "native_build_request");
     }
     for name in [
-        "PATH",
-        "home",
-        "DOCKER_HOST",
         "BUILDX_CONFIG",
         "BUILDKIT_SYNTAX",
-        "HTTPS_PROXY",
-        "no_proxy",
-        "LC_ALL",
-        "GIT_DIR",
-        "SSH_AUTH_SOCK",
+        "buildkit_inline_cache",
+        "SOURCE_DATE_EPOCH",
+        "TARGETPLATFORM",
         "1BAD",
         "bad-name",
         "",
@@ -737,7 +838,7 @@ fn requests_refuse_unsafe_paths_arguments_and_bounds() {
     assert_eq!(code(request), "native_build_argument");
     // Refusals never echo argument values.
     let mut request = base();
-    request.args = BTreeMap::from([("DOCKER_HOST".to_owned(), SECRET.to_owned())]);
+    request.args = BTreeMap::from([("BUILDKIT_SYNTAX".to_owned(), SECRET.to_owned())]);
     assert!(!prepare(request).unwrap_err().message.contains(SECRET));
 }
 

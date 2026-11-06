@@ -34,6 +34,7 @@ import {
 import {
   type NativeProjectRun,
   type NativeProjectRunScope,
+  nativeRunEnvironmentAvailable,
   normalizeNativeProfiles,
 } from "./native-project-run.ts";
 import {
@@ -368,6 +369,16 @@ export async function preflightNativeRestart(opts: {
     composeFile: opts.composeFile,
     envName: selected.envName,
   });
+  if (
+    !nativeRunEnvironmentAvailable({
+      run: opts.run,
+      environmentFiles: input.environmentFiles,
+    })
+  ) {
+    throw new ClosedCliError(
+      "Native restart environment selection changed since startup; restart was refused. The current graph was not stopped."
+    );
+  }
   const adaptationFile = selectNativeEnvFile({
     selection: {
       file: opts.adaptationFile,

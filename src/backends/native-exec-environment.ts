@@ -1,10 +1,10 @@
-import { basename } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectInput } from "./native-project-input.ts";
-import type {
-  NativeProjectRun,
-  NativeProjectRunScope,
+import {
+  type NativeProjectRun,
+  type NativeProjectRunScope,
+  nativeRunEnvironmentAvailable,
 } from "./native-project-run.ts";
 
 /** Marks a selection that no longer matches the run's recorded startup selection. */
@@ -54,22 +54,11 @@ export async function prepareNativeExecEnvironment(opts: {
     ) {
       throw new SelectionChanged();
     }
-    const selected = opts.run.effectiveEnvName;
-    // A run recorded as started without any managed env file used its env only to
-    // select the per-env native files; with still no file there are no values. Any
-    // other run whose selected overlay is gone has a changed selection.
-    const unmanaged =
-      opts.run.unmanagedEnvironment === true &&
-      input.environmentFiles.length === 0;
     if (
-      selected !== null &&
-      !unmanaged &&
-      !input.environmentFiles.some((path) =>
-        [
-          `hack.env.${selected}.yaml`,
-          `hack.env.${selected}.local.yaml`,
-        ].includes(basename(path))
-      )
+      !nativeRunEnvironmentAvailable({
+        run: opts.run,
+        environmentFiles: input.environmentFiles,
+      })
     ) {
       throw new SelectionChanged();
     }

@@ -1,4 +1,3 @@
-import { basename } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -17,6 +16,7 @@ import {
   loadNativeProjectRun,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  nativeRunEnvironmentAvailable,
 } from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
@@ -220,28 +220,18 @@ export async function nativeDownEnvironment(opts: {
       envName: opts.run.effectiveEnvName,
       serviceNames: opts.serviceNames,
     });
-    if (!resolved) {
-      // Only a run recorded as started without managed env files may find none now;
-      // for any other named selection the overlay disappeared.
-      if (
-        opts.run.effectiveEnvName !== null &&
-        opts.run.unmanagedEnvironment !== true
-      ) {
-        throw refused();
-      }
-      return {};
-    }
-    const selected = opts.run.effectiveEnvName;
+    // Only a run recorded as started without managed env files may find none now;
+    // for any other named selection a missing overlay disappeared.
     if (
-      selected !== null &&
-      !resolved.files.some((path) =>
-        [
-          `hack.env.${selected}.yaml`,
-          `hack.env.${selected}.local.yaml`,
-        ].includes(basename(path))
-      )
+      !nativeRunEnvironmentAvailable({
+        run: opts.run,
+        environmentFiles: resolved?.files ?? [],
+      })
     ) {
       throw refused();
+    }
+    if (!resolved) {
+      return {};
     }
     return selectProjectEnvValuesForExecutionTarget({
       resolved,

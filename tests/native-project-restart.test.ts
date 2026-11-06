@@ -41,6 +41,8 @@ const run = {
   effectiveEnvName: "qa",
   profiles: ["app"],
   aws: null,
+  // The stubbed input preparation reports no managed env file.
+  unmanagedEnvironment: true as const,
 };
 const token = {
   version: 1 as const,
@@ -470,12 +472,19 @@ test("preflight keeps the retained env's per-env files without managed env files
       })
     );
     const selected: Record<string, string | undefined> = {};
-    const preflight = (effectiveEnvName: string | null) =>
+    const preflight = (
+      effectiveEnvName: string | null,
+      startedWithManagedFiles = false
+    ) =>
       preflightNativeRestart({
         runtime: { binary: "/unused", home: "/candidate" },
         scope: { ...scope, projectRoot: root, projectDir },
         composeFile,
-        run: { ...run, effectiveEnvName },
+        run: {
+          ...run,
+          effectiveEnvName,
+          unmanagedEnvironment: startedWithManagedFiles ? undefined : true,
+        },
         adaptationFile: "/fixture/.hack/native/adaptation.json",
         adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
         dependencyFile: "/machine/dependencies.json",
@@ -514,6 +523,16 @@ test("preflight keeps the retained env's per-env files without managed env files
       env: undefined,
       dependencies: "/machine/dependencies.json",
     });
+    // A run that started with managed env files refuses once they are all gone,
+    // before any adaptation, dependency or cleanup step.
+    for (const key of Object.keys(selected)) {
+      delete selected[key];
+    }
+    await expectClosedRefusal(
+      preflight("qa", true),
+      "Native restart environment selection changed since startup; restart was refused. The current graph was not stopped."
+    );
+    expect(selected).toEqual({});
   } finally {
     await rm(root, { recursive: true, force: true });
   }

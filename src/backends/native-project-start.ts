@@ -70,6 +70,7 @@ import {
   loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  nativeRunEnvironmentAvailable,
   normalizeNativeProfiles,
   prepareNativeProjectRunStorage,
   removeNativeProjectRun,
@@ -785,6 +786,38 @@ async function selectNativeStartup(opts: {
   const restore = opts.restore ?? retained ?? undefined;
   return { retained, restore, selection, retainedFlags };
 }
+/**
+ * Before any hook, refuse a retained run whose recorded env selection changed: its
+ * env must resolve the same, and it keeps the managed env files it started with. Only
+ * a run recorded as started without them may still find none, and a retained run never
+ * becomes unmanaged after the fact. A legacy restore without a recorded selection keeps
+ * its earlier behavior. Returns whether the new mapping records no managed env files.
+ */
+function requireRetainedEnvironment(opts: {
+  /** The retained env a resumed (not restored) run must still resolve to. */
+  readonly retainedSelection: string | null | undefined;
+  readonly restore: NativeProjectRun | undefined;
+  readonly input: NativeProjectInput;
+}): boolean {
+  const { restore, input } = opts;
+  if (
+    (opts.retainedSelection !== undefined &&
+      input.effectiveEnvName !== opts.retainedSelection) ||
+    (restore?.effectiveEnvName !== undefined &&
+      !nativeRunEnvironmentAvailable({
+        run: restore,
+        environmentFiles: input.environmentFiles,
+      }))
+  ) {
+    throw new ClosedCliError(
+      "Native retained environment selection changed; data was not replaced."
+    );
+  }
+  return (
+    input.environmentFiles.length === 0 &&
+    (restore === undefined || restore.unmanagedEnvironment === true)
+  );
+}
 function selectedMapping(opts: {
   readonly ready: NativeProjectRun;
   readonly effectiveEnvName: string | null;
@@ -998,15 +1031,12 @@ export async function startNativeProject(opts: {
         envByService: input.managedEnvironment,
       })
     : undefined;
-  if (
-    retained &&
-    !opts.restore &&
-    input.effectiveEnvName !== selection.envName
-  ) {
-    throw new ClosedCliError(
-      "Native retained environment selection changed; data was not replaced."
-    );
-  }
+  const unmanagedEnvironment = requireRetainedEnvironment({
+    retainedSelection:
+      retained && !opts.restore ? selection.envName : undefined,
+    restore,
+    input,
+  });
   // The effective env (requested, retained or project default) picks the per-env
   // files, so a fresh start, a retained start and a restart select the same ones.
   const selectedAdaptationFile = selectNativeEnvFile({
@@ -1351,7 +1381,7 @@ export async function startNativeProject(opts: {
                   profiles,
                   aws: selection.aws,
                   runtimeMetadata: metadata !== undefined,
-                  unmanagedEnvironment: input.environmentFiles.length === 0,
+                  unmanagedEnvironment,
                 });
                 // Enrollment must exist before taking a shared lease: release
                 // requires independent proof of this exact graph's cleanup.

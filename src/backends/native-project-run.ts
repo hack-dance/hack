@@ -10,7 +10,7 @@ import {
   rmdir,
   unlink,
 } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -55,6 +55,39 @@ export type NativeProjectRun = {
    */
   readonly unmanagedEnvironment?: true;
 };
+/**
+ * Whether the managed env files a run's recorded selection needs are still present.
+ * A base selection needs none. A named selection needs its overlay
+ * (`hack.env.<env>.yaml` or `hack.env.<env>.local.yaml`), except for a run recorded
+ * as started without any managed env file while there still is none. A legacy
+ * mapping without a recorded selection never qualifies.
+ */
+export function nativeRunEnvironmentAvailable(opts: {
+  readonly run: Pick<
+    NativeProjectRun,
+    "effectiveEnvName" | "unmanagedEnvironment"
+  >;
+  readonly environmentFiles: readonly string[];
+}): boolean {
+  const selected = opts.run.effectiveEnvName;
+  if (selected === undefined) {
+    return false;
+  }
+  if (selected === null) {
+    return true;
+  }
+  if (
+    opts.run.unmanagedEnvironment === true &&
+    opts.environmentFiles.length === 0
+  ) {
+    return true;
+  }
+  return opts.environmentFiles.some((path) =>
+    [`hack.env.${selected}.yaml`, `hack.env.${selected}.local.yaml`].includes(
+      basename(path)
+    )
+  );
+}
 export type NativeProjectRunScope = {
   readonly projectRoot: string;
   readonly projectDir: string;

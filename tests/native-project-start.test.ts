@@ -42,6 +42,7 @@ import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -2891,6 +2892,61 @@ test("startup records the requested or default env and marks runs without manage
         effectiveEnvName: "qa",
         unmanagedEnvironment: managed ? undefined : true,
       });
+    }
+  }
+});
+
+test("a retained run that started with managed env files refuses before hooks once they are gone", async () => {
+  const qaFile = "/fixture/.hack/hack.env.qa.yaml";
+  for (const [unmanaged, environmentFiles, expected] of [
+    [false, [], "refused"],
+    [true, [], "unmanaged"],
+    [false, [qaFile], "managed"],
+  ] as const) {
+    const { opts, events } = await fixture(false);
+    const restore: NativeProjectRun = {
+      run: "1".repeat(32),
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      planId: "a".repeat(64),
+      effectiveEnvName: "qa",
+      profiles: [],
+      aws: null,
+      ...(unmanaged ? { unmanagedEnvironment: true as const } : {}),
+    };
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      effectiveEnvName: "qa",
+      environmentFiles,
+    });
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.invoke = async (request) =>
+      request.args[1] === "restore-selection"
+        ? { ...restore, plan: restore.planId, generation: "2".repeat(64) }
+        : await invoke(request);
+    const saved: NativeProjectRun[] = [];
+    opts.dependencies.save = async (request) => {
+      saved.push(request.run);
+    };
+    const started = startNativeProject({ ...opts, restore });
+    if (expected === "refused") {
+      await expectClosedRefusal(
+        started,
+        "Native retained environment selection changed; data was not replaced."
+      );
+      expect(events).not.toContain("before");
+      expect(saved).toEqual([]);
+      continue;
+    }
+    expect(await started).toBe(0);
+    expect(events).toContain("before");
+    expect(saved.length).toBeGreaterThan(0);
+    for (const mapping of saved) {
+      // A managed run is never relabeled unmanaged; an unmanaged one keeps its marker.
+      expect(mapping.unmanagedEnvironment).toBe(
+        expected === "unmanaged" ? true : undefined
+      );
     }
   }
 });

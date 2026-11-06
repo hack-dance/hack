@@ -505,6 +505,10 @@ tests; Cargo reporting a cached binary as fresh does not qualify that identity.
 native process/disk identity, guest protocol, and lifecycle decisions. Guest requests use a bounded
 connection to the existing socket; they cannot silently start or recover a VM. Failed operations
 retain their phase and receipts. Recovery preserves disks and labels an unclean exit explicitly.
+When the guest agent stops responding (three pings over about 13 seconds start no reply),
+`runtime down` and `runtime recover` stop this home's recorded provider after verifying its PID,
+start time, user and executable, without guest quiescence, and record `recovered-unclean`; a
+guest that answers keeps the normal clean stop, and `recover` still refuses it.
 
 SmolVM seeds a machine's disks during its first start (`machine create` makes none) from expanded
 `*-template.ext4` files that it creates from the verified compressed templates and then reuses.

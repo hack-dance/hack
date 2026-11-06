@@ -112,6 +112,59 @@ fn exchange(
     serde_json::from_slice(&body).map_err(|_| failure("Malformed guest response."))
 }
 
+/// Whether the agent at `path` starts any reply to a ping within `timeout`. No
+/// connection, a connection that ends before a reply, and no reply by the deadline are
+/// silence; any reply byte, even of an unexpected response, is an answer. Only a stop of
+/// a guest that stopped responding relies on this.
+pub(super) fn answers_ping(path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let Ok(bytes) = encode(&json!({"method":"ping"})) else {
+        return false;
+    };
+    let Ok(mut stream) = UnixStream::connect(path) else {
+        return false;
+    };
+    let mut frame = (bytes.len() as u32).to_be_bytes().to_vec();
+    frame.extend_from_slice(&bytes);
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut written = 0;
+    let mut reply = [0_u8; 1];
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return false;
+        };
+        if written < frame.len() {
+            match stream.write(&frame[written..]) {
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return false,
+            }
+        }
+        match stream.read(&mut reply) {
+            Ok(0) => return false,
+            Ok(_) => return true,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: if written < frame.len() {
+                libc::POLLIN | libc::POLLOUT
+            } else {
+                libc::POLLIN
+            },
+            revents: 0,
+        };
+        let milliseconds = (remaining.as_millis() + 1).min(i32::MAX as u128) as i32;
+        // SAFETY: the descriptor is borrowed from the live stream for this synchronous wait.
+        unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+    }
+}
+
 pub fn ping(path: &Path) -> Result<(), CandidateError> {
     let response = request(path, json!({"method":"ping"}), Duration::from_secs(3))?;
     if response["status"] != "pong" || response["version"] != 1 {

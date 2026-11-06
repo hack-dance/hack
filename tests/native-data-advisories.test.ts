@@ -49,7 +49,10 @@ function project(
 test("a root data handoff needs a warning only when its capabilities are dropped", () => {
   const db = { image: PINNED, volumes: ["data:/var/lib/data"] };
   const handoff = [
-    { code: "native_data_owner_handoff_unqualified", services: ["db"] },
+    {
+      code: "native_data_owner_handoff_unqualified" as const,
+      services: ["db"],
+    },
   ];
   // Docker's default capabilities keep CHOWN, DAC_OVERRIDE, FOWNER, SETUID and SETGID.
   for (const lists of [

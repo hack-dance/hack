@@ -227,6 +227,13 @@ test(
     for (const [args, command] of [
       [["config", "adopt", "--dry-run"], "hack config adopt --dry-run"],
       [["config", "adopt"], "hack config adopt"],
+      [["config", "adopt", "--rollback"], "hack config adopt --rollback"],
+      [["config", "adopt", "--recover"], "hack config adopt --recover"],
+      [["config", "adopt", "--stop"], "hack config adopt --stop"],
+      [
+        ["config", "adopt", "--recover", "--rollback"],
+        "hack config adopt --rollback --recover",
+      ],
     ] as const) {
       const result = await cli({ fixture: f, args });
       expectOneClosedLine(

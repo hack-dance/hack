@@ -113,3 +113,75 @@ test("the report redacts values of every service and names omitted lines", () =>
     formatNativeStartupLogReport({ logs: [], managedEnvironment: {} })
   ).toBe("");
 });
+
+// Synthetic dummy credential material only; nothing here is a real key or token.
+// Built at runtime so the synthetic PEM framing is not a key-shaped literal.
+const PEM_BEGIN = ["-----BEGIN", "PRIVATE", "KEY-----"].join(" ");
+const PEM_END = ["-----END", "PRIVATE", "KEY-----"].join(" ");
+const syntheticAdc = {
+  type: "service_account",
+  client_id: "000000000000000000000",
+  client_secret: "synthetic-client-secret-value",
+  refresh_token: "1//synthetic-refresh-token-value",
+  private_key_id: "0123456789abcdef0123456789abcdef01234567",
+  private_key: `${PEM_BEGIN}\nU1lOVEhFVElDLURVTU1ZLUtFWS1MSU5FLU9ORQ==\nU1lOVEhFVElDLURVTU1ZLUtFWS1MSU5FLVRXTw==\n${PEM_END}\n`,
+};
+const adcFile = (content: Buffer) => ({
+  name: "gcloud-adc.json",
+  target: "/config/adc.json",
+  content,
+});
+
+test("credential file values are redacted from every service's output", () => {
+  const echoed = [
+    `refresh=${syntheticAdc.refresh_token}`,
+    `secret "${syntheticAdc.client_secret}"`,
+    `key id ${syntheticAdc.private_key_id}`,
+    syntheticAdc.private_key.trimEnd(),
+    `quoted ${JSON.stringify(syntheticAdc.private_key)}`,
+  ].join("\n");
+  const report = formatNativeStartupLogReport({
+    logs: [
+      tail({ stderr: echoed }),
+      tail({ service: "worker", stdout: echoed }),
+    ],
+    managedEnvironment: {},
+    managedFiles: {
+      web: [adcFile(Buffer.from(JSON.stringify(syntheticAdc, null, 2)))],
+    },
+  });
+  for (const secret of [
+    syntheticAdc.refresh_token,
+    syntheticAdc.client_secret,
+    syntheticAdc.private_key_id,
+    "U1lOVEhFVElDLURVTU1ZLUtFWS1MSU5FLU9ORQ==",
+    "U1lOVEhFVElDLURVTU1ZLUtFWS1MSU5FLVRXTw==",
+    "synthetic",
+  ]) {
+    expect(report).not.toContain(secret);
+  }
+  expect(report).toContain("refresh=[REDACTED]");
+  expect(report).toContain("--- worker stdout ---");
+});
+
+test("a credential file that cannot be redacted withholds its service's output", () => {
+  for (const content of [
+    Buffer.from([0xff, 0xfe, 0x00, 0x73, 0x79, 0x6e]),
+    Buffer.from('{"refresh_token": "synthetic-unclosed'),
+  ]) {
+    const report = formatNativeStartupLogReport({
+      logs: [
+        tail({ stderr: "synthetic-unparsed-secret-output" }),
+        tail({ service: "worker", stdout: "worker ok" }),
+      ],
+      managedEnvironment: {},
+      managedFiles: { web: [adcFile(content)] },
+    });
+    expect(report).not.toContain("synthetic-unparsed-secret-output");
+    expect(report).toContain(
+      "--- web ---\n(output withheld: this service received credential files that could not be redacted; run hack logs web to read it)"
+    );
+    // Only the service holding the file is withheld.
+    expect(report).toContain("--- worker stdout ---\nworker ok");
+  }
+});

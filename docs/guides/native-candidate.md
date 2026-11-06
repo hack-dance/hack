@@ -1527,8 +1527,15 @@ startup failure report, and it never saves the tail or the report:
   shred unrelated output.
 - Other control characters except tab and newline are shown as U+FFFD.
 
-Redaction covers only managed values. Application output can still hold other
-sensitive data, such as values a service read from its own files.
+Private credential files, such as gcloud Application Default Credentials, are
+redacted the same way: the whole file text, each of its lines, and every JSON string
+value of four or more characters, such as a refresh token or private key. When a
+service received a credential file that is not UTF-8 text, or looks like JSON but
+does not parse, its output is withheld from the report instead; read it with
+`hack logs SERVICE`.
+
+Redaction covers only managed values and credential files. Application output can
+still hold other sensitive data, such as values a service read from its own files.
 
 A Docker container can remain `created` with a nonzero error when its first start
 fails before a process runs. Retaining shutdown accepts this state only with

@@ -1635,6 +1635,7 @@ export async function startNativeProject(opts: {
                 startupLogReport = formatNativeStartupLogReport({
                   logs,
                   managedEnvironment: input.managedEnvironment,
+                  managedFiles: input.managedFiles,
                 });
               },
               onReady: async () => {

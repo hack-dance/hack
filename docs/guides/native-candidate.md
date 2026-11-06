@@ -1399,10 +1399,16 @@ Every boot audits translation against the pool's recorded intent: the provider's
 stored machine setting, its running configuration, and the guest's `binfmt_misc`
 `rosetta` registration (the x86_64 ELF match with the fixed `rosetta-wrapper`
 interpreter). A pool without translation must have no such registration. The image
-cache keeps amd64 archives separate from arm64 ones, and the runtime admits an amd64
-image only for an opted-in service (`x-hack-amd64-emulation: true` in the reviewed
-Compose service, which the adaptation writes) in a pool booted with translation. A
-service that is not opted in still refuses a declared `linux/amd64` in native review.
+cache keeps amd64 archives separate from arm64 ones. Under `prefer-native`, a cached
+amd64 archive is reused only after the pinned image is confirmed not to publish arm64.
+The runtime admits an amd64 image only for an opted-in service
+(`x-hack-amd64-emulation: prefer-native` or `amd64` in the reviewed Compose service,
+which the adaptation writes) in a pool booted with translation. A service that is not
+opted in still refuses a declared `linux/amd64` in native review.
+
+The mode is part of the reviewed plan. Restart and restored `up` reuse a service's
+retained image only when the retained graph recorded the same mode for it; after a mode
+change the service's image is selected again under the new mode.
 
 Emulated services are slower than native ones and can behave differently from arm64
 builds. `hack doctor` on the native backend reports an `amd64 emulation` warning with

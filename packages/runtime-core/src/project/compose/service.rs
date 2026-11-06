@@ -862,8 +862,20 @@ pub(super) fn compile(
                 "Only Linux arm64/amd64 image platform declarations are modeled.",
             ));
         }
-        let amd64_emulation = boolean(m.get("x-hack-amd64-emulation"), false)?;
-        if amd64_emulation
+        let amd64_emulation = match m.get("x-hack-amd64-emulation") {
+            None => None,
+            Some(value) => Some(match value.as_str() {
+                Some("prefer-native") => Amd64Emulation::PreferNative,
+                Some("amd64") => Amd64Emulation::Amd64,
+                _ => {
+                    return Err(problem(
+                        "invalid_compose_field",
+                        "x-hack-amd64-emulation must be prefer-native or amd64.",
+                    ));
+                }
+            }),
+        };
+        if amd64_emulation.is_some()
             && platform
                 .as_deref()
                 .is_some_and(|v| ["linux/arm64", "linux/arm64/v8"].contains(&v))

@@ -173,7 +173,7 @@ fn declared_amd64_requires_the_explicit_emulation_opt_in() {
             document["services"]["web"]["platform"] = json!(platform);
         }
         if opted {
-            document["services"]["web"]["x-hack-amd64-emulation"] = json!(true);
+            document["services"]["web"]["x-hack-amd64-emulation"] = json!("prefer-native");
         }
         state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
         let review = project::plan(&candidate, fixture.options()).unwrap();
@@ -194,13 +194,16 @@ fn declared_amd64_requires_the_explicit_emulation_opt_in() {
                     .unwrap();
                 // Only the opted-in service may later admit an amd64 image; the others stay
                 // arm64-only regardless of what the engine holds.
-                assert_eq!(web.amd64_emulation, opted);
+                assert_eq!(
+                    web.amd64_emulation,
+                    opted.then_some(crate::project::Amd64Emulation::PreferNative)
+                );
                 assert!(
                     prepared
                         .resources
                         .values()
                         .filter(|resource| resource.key != "web")
-                        .all(|resource| !resource.amd64_emulation)
+                        .all(|resource| resource.amd64_emulation.is_none())
                 );
             }
             Err(error) => {
@@ -1944,7 +1947,7 @@ fn outbound_network_is_pinned_and_requires_explicit_pool_capability() {
         id: None,
         image: None,
         phase: "reserved".into(),
-        amd64_emulation: false,
+        amd64_emulation: None,
     };
     let resources = BTreeMap::from([("network:default".into(), resource)]);
     assert!(check_network_request(&super::super::NetworkIntent::Isolated, &resources).is_err());
@@ -2087,7 +2090,7 @@ fn endpoint_selects_service_primary_not_unrelated_first_graph_network() {
                 id: Some(id.clone()),
                 image: None,
                 phase: "created".into(),
-                amd64_emulation: false,
+                amd64_emulation: None,
             },
         );
         networks.insert(format!("network:{key}"), Some(json!({"Id":id,"Name":name,"Containers":{"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee":{"EndpointID":"f".repeat(64),"IPv4Address":"172.20.0.2/16"}}})));

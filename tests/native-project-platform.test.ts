@@ -126,11 +126,14 @@ test("only opted-in services get the reviewed runtime field, and declared arm64 
     },
   });
   expect(policies).toEqual({ legacy: "amd64", tool: "prefer-native" });
+  // The reviewed field carries the policy, so the two modes are distinct plans.
   expect(services.legacy).toMatchObject({
     platform: "linux/amd64",
-    [AMD64_EMULATION_FIELD]: true,
+    [AMD64_EMULATION_FIELD]: "amd64",
   });
-  expect(services.tool).toMatchObject({ [AMD64_EMULATION_FIELD]: true });
+  expect(services.tool).toMatchObject({
+    [AMD64_EMULATION_FIELD]: "prefer-native",
+  });
   expect(services.native).toEqual({ image: "example/native:1" });
   for (const platform of ["linux/arm64", "linux/arm64/v8"]) {
     expectInvalid(() =>
@@ -171,7 +174,7 @@ test("native adaptation carries emulation policies only when a service opts in",
   });
   expect(adapted.amd64Emulation).toEqual({ legacy: "prefer-native" });
   const compose = JSON.parse(adapted.normalizedComposeJson);
-  expect(compose.services.legacy[AMD64_EMULATION_FIELD]).toBe(true);
+  expect(compose.services.legacy[AMD64_EMULATION_FIELD]).toBe("prefer-native");
   expect(compose.services.web[AMD64_EMULATION_FIELD]).toBeUndefined();
   // The original input is not modified.
   expect(JSON.parse(original.normalizedComposeJson).services.legacy).toEqual({

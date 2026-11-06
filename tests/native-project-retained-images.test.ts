@@ -60,6 +60,54 @@ test("unchanged retained input selects verified content IDs without resolving ta
   ]);
 });
 
+function withRetainedPolicy<T extends ReturnType<typeof observation>>(
+  observed: T,
+  policy: unknown
+): T {
+  return {
+    ...observed,
+    receipt: {
+      ...observed.receipt,
+      resources: {
+        ...observed.receipt.resources,
+        "container:web": {
+          ...observed.receipt.resources["container:web"],
+          amd64_emulation: policy,
+        },
+      },
+    },
+  };
+}
+test("retained images are reused only under the platform policy they were selected with", async () => {
+  const cases = [
+    // [retained receipt policy, current policy, reused]
+    [undefined, undefined, true],
+    ["prefer-native", "prefer-native", true],
+    ["amd64", "amd64", true],
+    ["prefer-native", "amd64", false],
+    ["amd64", "prefer-native", false],
+    [undefined, "amd64", false],
+    ["prefer-native", undefined, false],
+  ] as const;
+  for (const [retained, current, reused] of cases) {
+    const selected = await selectNativeRetainedImages({
+      ...options,
+      amd64Emulation: current === undefined ? undefined : { web: current },
+      invoke: async () => withRetainedPolicy(observation(), retained),
+    });
+    expect([...selected]).toEqual(reused ? [["web", image]] : []);
+  }
+  // A receipt value that is not a reviewed policy refuses.
+  for (const invalid of [true, false, "native", null]) {
+    await expectClosedRefusal(
+      selectNativeRetainedImages({
+        ...options,
+        invoke: async () => withRetainedPolicy(observation(), invalid),
+      }),
+      "Native retained image identity is invalid; no images were resolved."
+    );
+  }
+});
 function activeObservation() {
   const baseline = observation();
   return {
@@ -117,6 +165,24 @@ test("active images use fresh native authority, including completed initializers
     "inspect",
     "run-selection",
   ]);
+});
+test("active images are not reused after a service's platform policy changed", async () => {
+  for (const [retained, current] of [
+    ["prefer-native", "amd64"],
+    ["amd64", "amd64"],
+  ] as const) {
+    const selected = await selectNativeActiveImages({
+      ...options,
+      amd64Emulation: { web: current },
+      invoke: async ({ args }) =>
+        args[1] === "inspect"
+          ? withRetainedPolicy(activeObservation(), retained)
+          : activeSelection(),
+    });
+    expect([...selected.images]).toEqual(
+      retained === current ? [["web", image]] : []
+    );
+  }
 });
 test("active edited or legacy input receives no old image pins", async () => {
   const legacy = activeObservation();

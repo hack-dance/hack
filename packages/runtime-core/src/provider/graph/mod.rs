@@ -235,10 +235,11 @@ pub struct Resource {
     pub id: Option<String>,
     pub image: Option<String>,
     pub phase: String,
-    /// The service opted in to running a `linux/amd64` image under Rosetta translation.
-    /// Admission still requires an amd64 image to come from a translation-enabled pool.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub amd64_emulation: bool,
+    /// The service's reviewed opt-in policy for running a `linux/amd64` image under Rosetta
+    /// translation. Admission still requires an amd64 image to come from a
+    /// translation-enabled pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amd64_emulation: Option<crate::project::Amd64Emulation>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2160,7 +2161,7 @@ pub(super) fn admitted_architecture(
     image["Os"] == "linux"
         && (image["Architecture"] == "arm64"
             || (image["Architecture"] == "amd64"
-                && resource.amd64_emulation
+                && resource.amd64_emulation.is_some()
                 && engine.guest().amd64_emulation()))
 }
 

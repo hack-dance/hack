@@ -1,6 +1,11 @@
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
+import {
+  type NativeEmulationPolicy,
+  nativeEmulationPolicy,
+  receiptEmulationPolicy,
+} from "./native-project-platform.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import {
   type NativeActiveReviewProof,
@@ -16,16 +21,27 @@ const SHA = /^[a-f0-9]{64}$/;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const SERVICE = /^[a-zA-Z0-9_.-]{1,128}$/;
 
+/** Opted-in services' current platform policies; every other service is native. */
+type CurrentEmulation =
+  | Readonly<Record<string, NativeEmulationPolicy>>
+  | undefined;
+
 /**
  * Restore unchanged declarations with their authenticated content IDs. Resolving
  * a mutable tag again could change compute around retained data. This observation
  * grants no restore authority: generation, input, source and resource checks still
  * run in native code at admission. Changed original input keeps normal resolution.
+ *
+ * A retained image is also bound to the platform policy it was selected under (the
+ * receipt's reviewed `amd64_emulation`): a service whose current policy differs is
+ * omitted, so it is selected again under the new policy instead of keeping, for
+ * example, an arm64 image after its policy changed to `amd64`.
  */
 export async function selectNativeRetainedImages(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly originalSha256: string;
+  readonly amd64Emulation?: CurrentEmulation;
   readonly restore?: NativeProjectRun;
   readonly invoke?: typeof invokeNativeRuntime;
 }): Promise<ReadonlyMap<string, string>> {
@@ -56,6 +72,7 @@ export async function selectNativeRetainedImages(opts: {
 
 function imagesFromReceipt(opts: {
   readonly originalSha256: string;
+  readonly amd64Emulation?: CurrentEmulation;
   readonly restore: NativeProjectRun;
   readonly receipt: Readonly<Record<string, unknown>>;
 }): ReadonlyMap<string, string> {
@@ -86,15 +103,23 @@ function imagesFromReceipt(opts: {
     if (!isRecord(resource) || resource.kind !== "container") {
       continue;
     }
+    const retainedPolicy = receiptEmulationPolicy(resource.amd64_emulation);
     if (
       typeof resource.key !== "string" ||
       key !== `container:${resource.key}` ||
       typeof resource.image !== "string" ||
-      !IMAGE.test(resource.image)
+      !IMAGE.test(resource.image) ||
+      retainedPolicy === null
     ) {
       throw new ClosedCliError(
         "Native retained image identity is invalid; no images were resolved."
       );
+    }
+    if (
+      retainedPolicy !==
+      nativeEmulationPolicy(opts.amd64Emulation, resource.key)
+    ) {
+      continue;
     }
     images.set(resource.key, resource.image);
   }
@@ -129,6 +154,8 @@ export async function selectNativeActiveImages(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly originalSha256: string;
+  /** Binds reuse to each service's current policy, as for retained images. */
+  readonly amd64Emulation?: CurrentEmulation;
   readonly restore: NativeProjectRun;
   readonly invoke?: typeof invokeNativeRuntime;
 }): Promise<{

@@ -201,7 +201,7 @@ pub(super) fn prepare_delivery(
             || service.image.as_deref().is_none_or(|v| !image_id(v))
             || service.platform.as_deref().is_some_and(|p| {
                 !(["linux/arm64", "linux/arm64/v8"].contains(&p)
-                    || (p == "linux/amd64" && service.amd64_emulation))
+                    || (p == "linux/amd64" && service.amd64_emulation.is_some()))
             })
         {
             return Err(unsupported());
@@ -319,7 +319,7 @@ pub(super) fn prepare_delivery(
                 id: None,
                 image: None,
                 phase: "reserved".into(),
-                amd64_emulation: false,
+                amd64_emulation: None,
             };
             resources.insert(format!("{}:{key}", kind.word()), resource);
         }

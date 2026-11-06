@@ -236,6 +236,18 @@ pub struct RoutingPlan {
     pub port: u16,
 }
 
+/// A service's reviewed `x-hack-amd64-emulation` policy. The value is part of the plan, so
+/// the two modes are distinct reviewed plans and retained images can be bound to one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Amd64Emulation {
+    /// Linux arm64 when the image publishes it, otherwise `linux/amd64` under translation.
+    #[serde(rename = "prefer-native")]
+    PreferNative,
+    /// `linux/amd64` under translation, even when the image also publishes arm64.
+    #[serde(rename = "amd64")]
+    Amd64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ServicePlan {
@@ -264,11 +276,12 @@ pub struct ServicePlan {
     pub working_dir: Option<String>,
     pub user: Option<RedactedText>,
     pub platform: Option<String>,
-    /// Explicit `x-hack-amd64-emulation: true` opt-in: this service may run a `linux/amd64`
-    /// image under the pool's Rosetta 2 translation, and may declare `platform: linux/amd64`.
-    /// Without it only Linux arm64 is admitted. It never applies to a declared arm64 platform.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub amd64_emulation: bool,
+    /// Explicit `x-hack-amd64-emulation` opt-in and its reviewed platform policy: this
+    /// service may run a `linux/amd64` image under the pool's Rosetta 2 translation, and may
+    /// declare `platform: linux/amd64`. Without it only Linux arm64 is admitted. It never
+    /// applies to a declared arm64 platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amd64_emulation: Option<Amd64Emulation>,
     pub labels: BTreeMap<String, RedactedText>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingPlan>,

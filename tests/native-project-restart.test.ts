@@ -1414,6 +1414,117 @@ test("active legacy restart preserves adapted labels and rechecks authenticated 
   }
 });
 
+test("active restart selects an image again when the service's emulation policy changed", async () => {
+  const oldImage = `sha256:${"7".repeat(64)}`;
+  const newImage = `sha256:${"8".repeat(64)}`;
+  for (const retainedPolicy of ["prefer-native", "amd64"] as const) {
+    const f = fixture();
+    const ensured: string[][] = [];
+    let reviewed: Record<string, Record<string, unknown>> = {};
+    const result = restartNativeProject({
+      ...f.options,
+      preflight: async () =>
+        await preflightNativeRestart({
+          runtime: { binary: "/unused", home: "/candidate" },
+          scope,
+          composeFile: "/fixture/.hack/docker-compose.yml",
+          run,
+          dependencies: {
+            // The adaptation now selects `amd64` for app; redis stays native.
+            prepare: async () => ({
+              originalSha256: "1".repeat(64),
+              environmentFiles: [],
+              serviceNames: ["app", "redis"],
+              normalizedComposeJson: JSON.stringify({
+                services: {
+                  app: {
+                    image: "app:latest",
+                    "x-hack-amd64-emulation": "amd64",
+                  },
+                  redis: { image: "redis:latest" },
+                },
+              }),
+              amd64Emulation: { app: "amd64" },
+              managedEnvironment: {},
+              lifecycleHostEnvironment: {},
+              effectiveEnvName: "qa",
+            }),
+            adapt: async ({ input }) => input,
+            dependencies: async () => [],
+            invoke: async ({ args }) => {
+              switch (args[1]) {
+                case "status":
+                  return { network: "internet" };
+                case "probe":
+                  return { admitted: true };
+                case "inspect": {
+                  const observed = activeImageObservation(oldImage);
+                  return {
+                    ...observed,
+                    receipt: {
+                      ...observed.receipt,
+                      resources: {
+                        "container:app": {
+                          ...observed.receipt.resources["container:app"],
+                          amd64_emulation: retainedPolicy,
+                        },
+                        "container:redis": {
+                          kind: "container",
+                          key: "redis",
+                          id: "4".repeat(64),
+                          image: oldImage,
+                        },
+                      },
+                    },
+                  };
+                }
+                case "run-selection":
+                  return { ok: true, ...activeImageFixture().proof };
+                case "ensure-image":
+                  ensured.push([...args]);
+                  return { image_id: newImage, platform: "linux/amd64" };
+                default:
+                  throw new Error("Unexpected effect");
+              }
+            },
+            review: async (options) => {
+              reviewed = JSON.parse(
+                options.input.normalizedComposeJson
+              ).services;
+              return await options.run({
+                planId: run.planId,
+                namespace: run.namespace,
+                report: {},
+                projectArgs: [],
+              });
+            },
+          },
+        }),
+    });
+    expect(await result).toBe(0);
+    // The image retained under `prefer-native` (possibly arm64) is not reused for the
+    // explicit amd64 request; the unchanged policy and the native service keep theirs.
+    const changed = retainedPolicy !== "amd64";
+    expect(reviewed.app?.image).toBe(changed ? newImage : oldImage);
+    expect(reviewed.redis?.image).toBe(oldImage);
+    expect(ensured).toEqual(
+      changed
+        ? [
+            [
+              "runtime",
+              "ensure-image",
+              "--reference",
+              "app:latest",
+              "--emulation",
+              "amd64",
+              "--json",
+            ],
+          ]
+        : []
+    );
+  }
+});
+
 test("active restart preserves admitted images despite moved tags and refuses changed input or generation before cleanup", async () => {
   const oldImage = `sha256:${"7".repeat(64)}`;
   const newImage = `sha256:${"8".repeat(64)}`;

@@ -162,7 +162,7 @@ fn configuration_with_source(
             id: None,
             image: None,
             phase: "reserved".into(),
-            amd64_emulation: false,
+            amd64_emulation: None,
         };
         network_names.insert(key.clone(), network.name.clone());
         resources.insert(format!("network:{key}"), network);
@@ -191,7 +191,7 @@ fn configuration_with_source(
             id: None,
             image: Some(workload.image.clone()),
             phase: "reserved".into(),
-            amd64_emulation: false,
+            amd64_emulation: None,
         };
         let mut config = config::container_base(&workload.image, labels(owner, review, &resource));
         if workload.source_mount.is_some() {

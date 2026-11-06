@@ -50,6 +50,7 @@ import {
   ensuredPlatformAccepted,
   type NativeEmulationPolicy,
   nativeAmd64EmulationUpArgs,
+  nativeEmulationPolicy,
   nativeEnsureImageArgs,
 } from "./native-project-platform.ts";
 import { serveNativeProjectGraph } from "./native-project-process.ts";
@@ -387,10 +388,7 @@ async function pinNativeProjectImages(opts: {
     if (IMAGE.test(image)) {
       continue;
     }
-    const policy =
-      opts.amd64Emulation && Object.hasOwn(opts.amd64Emulation, name)
-        ? opts.amd64Emulation[name]
-        : undefined;
+    const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
     const ensured = await opts.invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
@@ -1183,6 +1181,7 @@ export async function startNativeProject(opts: {
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       originalSha256: input.originalSha256,
+      amd64Emulation: input.amd64Emulation,
       restore,
       invoke: deps.invoke,
     });

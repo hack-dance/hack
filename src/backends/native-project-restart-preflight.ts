@@ -19,6 +19,7 @@ import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import {
   ensuredPlatformAccepted,
   type NativeEmulationPolicy,
+  nativeEmulationPolicy,
   nativeEnsureImageArgs,
 } from "./native-project-platform.ts";
 import {
@@ -299,10 +300,7 @@ async function pinRestartImages(opts: {
       continue;
     }
     // Owned cache acquisition grants no authority to stop the current graph.
-    const policy =
-      opts.amd64Emulation && Object.hasOwn(opts.amd64Emulation, name)
-        ? opts.amd64Emulation[name]
-        : undefined;
+    const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
     const pinned = await opts.invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
@@ -429,6 +427,7 @@ export async function preflightNativeRestart(opts: {
         runtime: opts.runtime,
         projectRoot: opts.scope.projectRoot,
         originalSha256: input.originalSha256,
+        amd64Emulation: input.amd64Emulation,
         restore: opts.run,
         invoke: deps.invoke,
       });
@@ -437,6 +436,7 @@ export async function preflightNativeRestart(opts: {
         runtime: opts.runtime,
         projectRoot: opts.scope.projectRoot,
         originalSha256: input.originalSha256,
+        amd64Emulation: input.amd64Emulation,
         restore: opts.run,
         invoke: deps.invoke,
       })

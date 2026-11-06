@@ -21,7 +21,9 @@ import { isRecord } from "../lib/guards.ts";
  *   images stay native; an amd64-only image runs under emulation.
  * - `amd64`: the amd64 variant under emulation, even when arm64 is published.
  *
- * An opted-in service gets the reviewed `x-hack-amd64-emulation: true` Compose field.
+ * An opted-in service gets the reviewed `x-hack-amd64-emulation` Compose field, whose
+ * value is its policy (`prefer-native` or `amd64`), so the two modes are distinct
+ * reviewed plans and retained images are bound to the mode they were selected under.
  * The runtime admits an amd64 image only for such a service and only in a pool booted
  * with x86_64 translation, so a missed selection fails closed instead of substituting.
  */
@@ -122,10 +124,34 @@ export function applyNativeAmd64Emulation(opts: {
     if (typeof spec.platform === "string" && ARM64.has(spec.platform)) {
       throw refused();
     }
-    spec[AMD64_EMULATION_FIELD] = true;
+    spec[AMD64_EMULATION_FIELD] = selected;
     policies[name] = selected;
   }
   return policies;
+}
+
+/** One service's policy from the adaptation's opted-in policies; `undefined` is native. */
+export function nativeEmulationPolicy(
+  policies: Readonly<Record<string, NativeEmulationPolicy>> | undefined,
+  service: string
+): NativeEmulationPolicy | undefined {
+  return policies && Object.hasOwn(policies, service)
+    ? policies[service]
+    : undefined;
+}
+
+/**
+ * The reviewed policy a graph receipt recorded for one container resource
+ * (`amd64_emulation`, absent for a native service), or `null` when the value is not a
+ * reviewed policy.
+ */
+export function receiptEmulationPolicy(
+  value: unknown
+): NativeEmulationPolicy | undefined | null {
+  if (value === undefined) {
+    return;
+  }
+  return value === "prefer-native" || value === "amd64" ? value : null;
 }
 
 /** `runtime ensure-image` arguments for one service's policy. */

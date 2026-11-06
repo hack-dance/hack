@@ -3074,8 +3074,8 @@ test("opted-in amd64 services boot a translation pool and pin with their own pla
     ["runtime", "ensure-image", "--reference", "redis", "--json"],
   ]);
   // Only opted-in services carry the reviewed runtime opt-in.
-  expect(reviewed.legacy?.["x-hack-amd64-emulation"]).toBe(true);
-  expect(reviewed.tool?.["x-hack-amd64-emulation"]).toBe(true);
+  expect(reviewed.legacy?.["x-hack-amd64-emulation"]).toBe("amd64");
+  expect(reviewed.tool?.["x-hack-amd64-emulation"]).toBe("prefer-native");
   expect(reviewed.cache?.["x-hack-amd64-emulation"]).toBeUndefined();
 });
 
@@ -3160,6 +3160,93 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
     return await review(request);
   };
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+});
+
+test("retained startup selects an image again when the service's emulation policy changed", async () => {
+  const saved = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+  };
+  const retained = `sha256:${"e".repeat(64)}`;
+  const selected = `sha256:${"9".repeat(64)}`;
+  for (const retainedPolicy of ["prefer-native", "amd64"] as const) {
+    const { opts } = await fixture(false);
+    const stopped = stoppedGraph(saved);
+    const observed = {
+      ...stopped,
+      receipt: {
+        ...stopped.receipt,
+        normalized_input: {
+          namespace: saved.namespace,
+          original_compose_sha256: "d".repeat(64),
+          normalized_compose_sha256: "f".repeat(64),
+        },
+        resources: {
+          "container:web": {
+            ...stopped.receipt.resources["container:web"],
+            image: retained,
+            amd64_emulation: retainedPolicy,
+          },
+        },
+      },
+    };
+    opts.dependencies.retainedImages = selectNativeRetainedImages;
+    const prepare = opts.dependencies.prepare!;
+    // The adaptation now selects `amd64` for web.
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: { image: "redis:latest", "x-hack-amd64-emulation": "amd64" },
+        },
+      }),
+      amd64Emulation: { web: "amd64" },
+    });
+    const invoke = opts.dependencies.invoke!;
+    const ensured: string[][] = [];
+    let beforeReview = true;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "ensure-image") {
+        ensured.push([...request.args]);
+        return { image_id: selected, platform: "linux/amd64" };
+      }
+      if (request.args[1] === "inspect" && beforeReview) {
+        return observed;
+      }
+      if (request.args[1] === "restore-selection") {
+        return { ...saved, plan: saved.planId, generation: "2".repeat(64) };
+      }
+      return await invoke(request);
+    };
+    const review = opts.dependencies.review!;
+    let reviewedImage: unknown;
+    opts.dependencies.review = async (request) => {
+      beforeReview = false;
+      reviewedImage = JSON.parse(request.input.normalizedComposeJson).services
+        .web.image;
+      return await review(request);
+    };
+    expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+    const changed = retainedPolicy !== "amd64";
+    expect(reviewedImage).toBe(changed ? selected : retained);
+    expect(ensured).toEqual(
+      changed
+        ? [
+            [
+              "runtime",
+              "ensure-image",
+              "--reference",
+              "redis:latest",
+              "--emulation",
+              "amd64",
+              "--json",
+            ],
+          ]
+        : []
+    );
+  }
 });
 
 test("failed HTTPS intent preserves startup classification when cleanup cannot find the endpoint", async () => {

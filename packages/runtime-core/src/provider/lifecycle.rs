@@ -431,11 +431,13 @@ impl<'a> OwnedGuest<'a> {
     }
 
     /// The pool's primary share. Device-rebind recovery is defined only for single-root
-    /// pools and refuses when additional shares exist.
+    /// pools and refuses when additional shares exist. That recovery is macOS-only.
+    #[cfg(target_os = "macos")]
     pub(super) fn project_share(&self) -> Option<&super::ProjectShareIntent> {
         self.owner.project_share.as_ref()
     }
     /// Whether the pool's additional shares are empty (a single-root pool).
+    #[cfg(target_os = "macos")]
     pub(super) fn single_project_share(&self) -> bool {
         self.owner.additional_project_shares.is_empty()
     }
@@ -2290,6 +2292,92 @@ mod tests {
             );
             fs::remove_file(&owner.short_home).unwrap();
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn running_pool_reuse_ignores_a_removed_primary_root_but_boot_refuses() {
+        let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-share-reuse-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            crate::next_test_scratch()
+        ));
+        state::private_directory(&directory).unwrap();
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove = Remove(directory.clone());
+        let approve = |name: &str| {
+            let project = directory.join(name);
+            state::private_directory(&project).unwrap();
+            fs::write(project.join("package.json"), "{}").unwrap();
+            super::super::ProjectShareIntent::approve(&project, true).unwrap()
+        };
+        let primary = approve("first-app");
+        let second = approve("second-app");
+        let pool = directory.join("pool");
+        state::private_directory(&pool).unwrap();
+        let candidate = Candidate::discover(&pool).unwrap();
+        let create = |candidate: &Candidate, share: &super::super::ProjectShareIntent| {
+            Owner::create_with_project_share(
+                candidate,
+                super::super::Profile::Development,
+                None,
+                super::super::NetworkIntent::Internet,
+                None,
+                Some(share.clone()),
+            )
+        };
+        let mut owner = create(&candidate, &primary).unwrap();
+        struct Unlink(std::path::PathBuf);
+        impl Drop for Unlink {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let _unlink = Unlink(owner.short_home.clone());
+        owner.additional_project_shares.push(second.clone());
+        owner.phase = "running".into();
+        owner.save(&candidate).unwrap();
+        let before = fs::read(root(&candidate).join("owner.json")).unwrap();
+
+        // The primary root disappears while the pool runs.
+        fs::remove_dir_all(&primary.project).unwrap();
+        let reused = create(&candidate, &primary).unwrap();
+        assert_eq!(reused.project_share.as_ref(), Some(&primary));
+        assert_eq!(reused.additional_project_shares, vec![second.clone()]);
+        assert_eq!(reused.phase, "running");
+        assert_eq!(
+            fs::read(root(&candidate).join("owner.json")).unwrap(),
+            before
+        );
+        // The second root is still admitted against the reused owner; its own project is
+        // not blocked by the stale neighbor.
+        assert!(
+            super::super::project_share::check_request(&reused.project_shares(), Some(&second))
+                .is_ok()
+        );
+        // Booting with the whole set still checks every root live.
+        assert_eq!(
+            super::super::project_share::check_boot(&reused.project_shares())
+                .unwrap_err()
+                .code,
+            "project_share_stale"
+        );
+
+        // A cold pool never records a share whose root is missing.
+        let cold_pool = directory.join("cold-pool");
+        state::private_directory(&cold_pool).unwrap();
+        let cold = Candidate::discover(&cold_pool).unwrap();
+        assert!(create(&cold, &primary).is_err());
+        assert!(!root(&cold).join("owner.json").exists());
     }
 
     #[test]

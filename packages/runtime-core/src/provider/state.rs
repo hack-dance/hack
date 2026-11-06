@@ -446,14 +446,18 @@ impl Owner {
         dependency_sockets: Option<super::DependencySocketIntent>,
         project_share: Option<super::ProjectShareIntent>,
     ) -> Result<Self, CandidateError> {
-        if let Some(share) = &project_share {
-            share.validate()?;
-        }
         super::dependency_socket::check_capacity(application_bridge, dependency_sockets)?;
         let root = candidate.state_root.join("run/smolvm");
         let owner_path = root.join("owner.json");
         if owner_path.try_exists().map_err(io)? {
+            // Reuse never live-checks the recorded primary root: callers compare the loaded
+            // share set with the one they read, the requested share is checked live by
+            // `check_request`, and boot checks every share live. A moved or deleted primary
+            // root must not block another project's share on a running pool.
             return Self::load(candidate);
+        }
+        if let Some(share) = &project_share {
+            share.validate()?;
         }
         for name in ["home", "tmp", "docker-config"] {
             private_directory(&root.join(name))?;

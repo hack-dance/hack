@@ -41,6 +41,9 @@ BeginRemove(p) == /\ phase = "stopped" /\ journal = Idle /\ p \in ownerSet
                   /\ (EnforceUnreferenced => graph[p] = "none")
                   /\ journal' = [op |-> "remove", p |-> p]
                   /\ UNCHANGED <<phase, ownerSet, recordSet, mounted, graph, bound>>
+\* An unfinished journal resumes from its own recorded share: no guard requires the
+\* root to still exist, so a moved or recreated root cannot fence the pool forever
+\* (share_update::addition). Boot's live check is outside this abstraction.
 CommitRecord == /\ phase = "stopped" /\ journal # Idle
                 /\ recordSet = ownerSet
                 /\ recordSet' = Apply(recordSet, journal)
@@ -61,7 +64,8 @@ StartGraph(p, s) == /\ phase = "running" /\ graph[p] \in {"none", "retained"}
                     /\ graph' = [graph EXCEPT ![p] = "live"]
                     /\ bound' = [bound EXCEPT ![p] = s]
                     /\ UNCHANGED <<phase, ownerSet, recordSet, journal, mounted>>
-\* Cleanup acts on one run's own labelled resources only.
+\* Cleanup acts on one run's own labelled resources only. A native receipt the
+\* pool owner proves `Removed` is "none" here: it no longer references its share.
 CleanGraph(p) == /\ graph[p] # "none"
                  /\ graph' = [graph EXCEPT ![p] = "none"]
                  /\ bound' = [bound EXCEPT ![p] = None]

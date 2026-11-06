@@ -11,7 +11,8 @@
 //! equals its own reviewed source (`project_share_for`), every bind path stays under
 //! that share's guest path, graph namespaces are derived from the canonical root, and
 //! cleanup acts on one run's labelled resources. Removing a share is refused while any
-//! retained graph receipt still names it.
+//! retained graph receipt still names it, unless that receipt is a native run this pool
+//! owner proves fully removed.
 use super::{
     ProjectShareIntent, config_audit, network_update,
     project_share::{self, MAX_PROJECT_SHARES},
@@ -186,9 +187,13 @@ const MAX_DEPTH: usize = 3;
 /// Conservative retained-graph reference check before a share is removed. Any graph
 /// record (normalized or native, any phase, including pending journals) that names the
 /// share's exact guest path or host root keeps the share; the caller cleans or archives
-/// that project's graphs first. A false positive or an unreadable inventory only refuses.
-fn require_unreferenced(
+/// that project's graphs first. The one exception is a native run of this pool owner
+/// whose journal proves it fully removed (`graph::native::retired`): cleanup keeps
+/// that receipt in place, and it no longer uses any share. A false positive or an
+/// unreadable inventory only refuses.
+pub(super) fn require_unreferenced(
     candidate: &Candidate,
+    owner: &str,
     share: &ProjectShareIntent,
 ) -> Result<(), CandidateError> {
     let needles = [
@@ -196,16 +201,29 @@ fn require_unreferenced(
         serde_json::to_vec(&share.project).map_err(|_| refused())?,
     ];
     let mut budget = MAX_ENTRIES;
-    for parent in ["run/graphs", "run/native-graphs"] {
+    for (parent, native) in [("run/graphs", false), ("run/native-graphs", true)] {
         let parent = candidate.state_root.join(parent);
         match fs::symlink_metadata(&parent) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Err(refused()),
             Ok(_) => state::check_private_directory(&parent)?,
         }
-        scan(&parent, 0, &needles, &mut budget)?;
+        let retired = |run: &Path| native && retired_native_run(candidate, owner, run);
+        scan(&parent, 0, &needles, &mut budget, &retired)?;
     }
     Ok(())
+}
+
+#[cfg(feature = "native-config-plan")]
+fn retired_native_run(candidate: &Candidate, owner: &str, run: &Path) -> bool {
+    run.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|run| super::graph::native::retired(candidate, run, owner).unwrap_or(false))
+}
+/// Without native support this build cannot prove a native run retired.
+#[cfg(not(feature = "native-config-plan"))]
+fn retired_native_run(_: &Candidate, _: &str, _: &Path) -> bool {
+    false
 }
 
 fn scan(
@@ -213,6 +231,7 @@ fn scan(
     depth: usize,
     needles: &[Vec<u8>],
     budget: &mut usize,
+    retired: &dyn Fn(&Path) -> bool,
 ) -> Result<(), CandidateError> {
     for entry in fs::read_dir(directory).map_err(|_| refused())? {
         *budget = budget.checked_sub(1).ok_or_else(refused)?;
@@ -222,10 +241,13 @@ fn scan(
             return Err(refused());
         }
         if metadata.is_dir() {
+            if depth == 0 && retired(&path) {
+                continue;
+            }
             if depth >= MAX_DEPTH {
                 return Err(refused());
             }
-            scan(&path, depth + 1, needles, budget)?;
+            scan(&path, depth + 1, needles, budget, retired)?;
             continue;
         }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -254,12 +276,44 @@ fn scan(
 
 /// Add one exactly approved project root to an owned, stopped development pool. The
 /// new share is mounted at the next boot; nothing is booted, restarted or replaced.
+/// `unfiltered_source` is the caller's explicit consent to share the whole root.
 pub fn add_project_share(
     candidate: &Candidate,
-    share: &ProjectShareIntent,
+    project: &Path,
+    unfiltered_source: bool,
 ) -> Result<Value, CandidateError> {
-    share.validate()?;
-    update(candidate, Operation::Add, share.clone())
+    let share = addition(candidate, project, unfiltered_source)?;
+    update(candidate, Operation::Add, share)
+}
+
+/// The share one add operates on. An interrupted addition names its own exact share:
+/// it resumes with that recorded receipt without checking the root live, because the
+/// root may since have moved, been deleted or been recreated with another identity.
+/// Completing it keeps the journal from fencing the pool forever; boot then refuses the
+/// stale share (`project_share_stale`) until it is removed explicitly. A new addition
+/// approves the root and checks it live.
+fn addition(
+    candidate: &Candidate,
+    project: &Path,
+    unfiltered_source: bool,
+) -> Result<ProjectShareIntent, CandidateError> {
+    reject_aliased_state(&root(candidate))?;
+    match fs::symlink_metadata(root(candidate).join(JOURNAL)) {
+        Ok(_) => {
+            let j: Journal = state::read(&root(candidate).join(JOURNAL))?;
+            if !unfiltered_source || j.operation != Operation::Add || j.share.project != project {
+                return Err(refused());
+            }
+            j.share.validate_receipt()?;
+            Ok(j.share)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let share = ProjectShareIntent::approve(project, unfiltered_source)?;
+            share.validate()?;
+            Ok(share)
+        }
+        Err(_) => Err(refused()),
+    }
 }
 
 /// Remove one additional project root from an owned, stopped development pool. The
@@ -316,7 +370,7 @@ fn update(
     }
     let _vm_lock = network_update::stopped_with(candidate, &owner, refused)?;
     if operation == Operation::Remove {
-        require_unreferenced(candidate, &share)?;
+        require_unreferenced(candidate, &owner.token, &share)?;
     }
     let db = network_update::database(candidate);
     let record = config_audit::read_database(&db, &owner.machine)?;

@@ -415,11 +415,10 @@ fn run() -> Result<(), CandidateError> {
             "--unfiltered-source",
             "--json",
         ] => {
-            let share =
-                hack_runtime_core::provider::ProjectShareIntent::approve(Path::new(project), true)?;
             print_json(&hack_runtime_core::provider::add_project_share(
                 &discover_candidate(&requested)?,
-                &share,
+                Path::new(project),
+                true,
             )?)?;
         }
         [

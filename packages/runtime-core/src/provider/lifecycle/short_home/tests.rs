@@ -678,6 +678,28 @@ fn a_squatted_alias_is_moved_before_start_reads_the_owner() {
 }
 
 #[test]
+fn public_up_moves_a_squatted_alias_before_its_profile_lookup() {
+    let pool = Pool::new().cleanly_stopped();
+    pool.remove_alias();
+    let decoy = Squatter::Link.place(&pool);
+    let squatted = pool.owner.short_home.clone();
+    let inode = pool.alias_inode();
+    // No provider artifacts exist in this fixture, so `up` stops after its strict owner
+    // reads; it must not stop at the squatted alias.
+    let error = crate::provider::up(&pool.candidate).unwrap_err();
+    assert_ne!(error.code, "foreign_state", "{}", error.message);
+    let restored = Owner::load(&pool.candidate).unwrap();
+    assert_ne!(restored.short_home, squatted);
+    assert_eq!(
+        fs::read_link(&restored.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
+    Squatter::Link.untouched(&squatted, inode, &decoy);
+    fs::remove_file(&restored.short_home).unwrap();
+    Squatter::remove(&squatted);
+}
+
+#[test]
 fn a_squatted_alias_of_a_pool_with_pinned_dependency_sockets_is_refused_unchanged() {
     let mut pool = Pool::new();
     pool.owner.dependency_sockets = Some(crate::provider::DependencySocketIntent::new(1).unwrap());

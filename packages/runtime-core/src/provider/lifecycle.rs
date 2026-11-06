@@ -823,6 +823,9 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
 
 pub fn up(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     reject_aliased_state(&root(candidate))?;
+    // The profile lookup below is a strict owner read; a squatted clean-stop alias must
+    // move to a fresh alias first, as in `start_pool`.
+    restore_released_short_home_before_use(candidate)?;
     let profile = if root(candidate)
         .join("owner.json")
         .try_exists()

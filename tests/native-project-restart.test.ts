@@ -858,7 +858,7 @@ test("frontend recovery on an active graph still requires live host listeners", 
           }),
       }),
       "E_CONFIG_INVALID",
-      "bounded explicit listener selection; values omitted"
+      "Native host dependencies refused for dependency #1"
     );
     expect(listener.calls).toEqual([
       "runtime status",
@@ -1225,7 +1225,7 @@ test("active restart still refuses absent or wrong-executable listeners before c
         },
       }),
       "E_CONFIG_INVALID",
-      "bounded explicit listener selection; values omitted"
+      "Native host dependencies refused for dependency #1"
     );
     expect(listener.calls).toEqual([
       "runtime status",

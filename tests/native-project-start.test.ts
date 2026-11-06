@@ -14,6 +14,7 @@ import {
   NativeHttpsLeaseAcquisitionError,
 } from "../src/backends/native-https-owner.ts";
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
+import { discardUnpublishedNativeStart } from "../src/backends/native-project-failed-start.ts";
 import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
@@ -57,6 +58,8 @@ async function fixture(withEnvironment = true) {
   const events: string[] = [];
   let run = "";
   let ready = false;
+  // A retained-data removal request makes later inspections report removal.
+  let dataRemoved = false;
   const planId = "a".repeat(64),
     namespace = "b".repeat(64),
     owner = "c".repeat(32);
@@ -118,7 +121,17 @@ async function fixture(withEnvironment = true) {
       if (opts.args[1] === "dependency-plan") {
         return { dependency_plan_id: "f".repeat(64) };
       }
+      if (opts.args[1] === "cleanup" && opts.args.includes("--remove-data")) {
+        dataRemoved = true;
+        return {};
+      }
       if (opts.args[1] === "inspect") {
+        let phase = "stopped-data-retained";
+        if (ready) {
+          phase = "ready-observed";
+        } else if (dataRemoved) {
+          phase = "removed";
+        }
         return {
           journal_incomplete: false,
           receipt: {
@@ -126,7 +139,7 @@ async function fixture(withEnvironment = true) {
             owner,
             namespace,
             plan_id: planId,
-            phase: ready ? "ready-observed" : "stopped-data-retained",
+            phase,
             resources: {
               "container:web": {
                 kind: "container",
@@ -377,6 +390,7 @@ test("failed startup recovers exact pending cleanup and still reports the startu
   const invoke = opts.dependencies.invoke!;
   let selectedRun = "";
   let recovered = false;
+  let removed = false;
   const requests: string[] = [];
   opts.dependencies.serve = async (request) => {
     selectedRun = request.run;
@@ -385,6 +399,11 @@ test("failed startup recovers exact pending cleanup and still reports the startu
     );
   };
   opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "cleanup") {
+      requests.push(request.args.join(" "));
+      removed = true;
+      return {};
+    }
     if (request.args[1] === "inspect-interrupted-start-cleanup") {
       requests.push(request.args[1]);
       return {
@@ -425,6 +444,9 @@ test("failed startup recovers exact pending cleanup and still reports the startu
           receipt: { ...value.receipt, relay_cleanup: { phase: "pending" } },
         };
       }
+      if (removed) {
+        value.receipt.phase = "removed";
+      }
       return value;
     }
     return invoke(request);
@@ -432,16 +454,127 @@ test("failed startup recovers exact pending cleanup and still reports the startu
   await expect(startNativeProject(opts)).rejects.toThrow(
     "Native graph startup failed (engine_rejected)"
   );
+  // The unpublished fresh graph's data is removed only after recovery
+  // confirmed compute cleanup; the startup failure is still reported.
   expect(requests).toEqual([
     "inspect",
     "inspect-interrupted-start-cleanup",
     "recover-interrupted-start-cleanup",
+    "inspect",
+    `graph cleanup --run-id ${selectedRun} --remove-data --json`,
     "inspect",
   ]);
   expect(events).not.toContain("ready");
   expect(events).not.toContain("save");
   expect(events.at(-1)).toBe("cleanup");
 });
+function failingFreshServe(
+  opts: Awaited<ReturnType<typeof fixture>>["opts"],
+  requests: string[]
+) {
+  const invoke = opts.dependencies.invoke!;
+  let selectedRun = "";
+  let removed = false;
+  opts.dependencies.serve = async (request) => {
+    selectedRun = request.run;
+    throw new Error(
+      "Native graph startup failed (graph_startup_application_failed); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "cleanup") {
+      requests.push(request.args.join(" "));
+      removed = true;
+      return {};
+    }
+    if (request.args[1] === "inspect") {
+      requests.push("inspect");
+      const value = stoppedGraph({
+        run: selectedRun,
+        owner: "c".repeat(32),
+        namespace: "b".repeat(64),
+        planId: "a".repeat(64),
+      });
+      value.receipt.phase = removed ? "removed" : "stopped-data-retained";
+      return value;
+    }
+    return await invoke(request);
+  };
+  return () => selectedRun;
+}
+
+test("a failed fresh start removes its unpublished graph data and keeps the startup failure", async () => {
+  const { opts, events } = await fixture();
+  const requests: string[] = [];
+  const selectedRun = failingFreshServe(opts, requests);
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "graph_startup_application_failed"
+  );
+  expect(requests).toEqual([
+    "inspect",
+    `graph cleanup --run-id ${selectedRun()} --remove-data --json`,
+    "inspect",
+  ]);
+  expect(events).not.toContain("save");
+  expect(events).not.toContain("remove");
+  expect(events.at(-1)).toBe("cleanup");
+});
+
+test("a failed fresh start whose data removal is unconfirmed still reports the startup failure", async () => {
+  const { opts } = await fixture();
+  const requests: string[] = [];
+  failingFreshServe(opts, requests);
+  const notices: string[] = [];
+  opts.dependencies.discardFailedStart = async (request) =>
+    await discardUnpublishedNativeStart({
+      ...request,
+      warn: (line) => notices.push(line),
+    });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "cleanup") {
+      throw new NativeRuntimeRequestError({
+        message: "synthetic-do-not-print",
+        nativeCode: "graph_cleanup_uncertain",
+      });
+    }
+    return await invoke(request);
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "graph_startup_application_failed"
+  );
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toContain("(graph_cleanup_uncertain)");
+  expect(notices[0]).toContain("--remove-data");
+  expect(notices[0]).not.toContain("synthetic-do-not-print");
+});
+
+test("published, attempted or retained runs never have their data removed", async () => {
+  // A successful start publishes its mapping before the graph stops.
+  const published = await fixture();
+  const seen: string[] = [];
+  const invoke = published.opts.dependencies.invoke!;
+  published.opts.dependencies.invoke = async (request) => {
+    seen.push(request.args.join(" "));
+    return await invoke(request);
+  };
+  expect(await startNativeProject(published.opts)).toBe(0);
+  // A mapping write with a lost reply may still have published the run.
+  const attempted = await fixture();
+  attempted.opts.dependencies.save = async () => {
+    throw new Error("synthetic lost mapping reply");
+  };
+  const attemptedInvoke = attempted.opts.dependencies.invoke!;
+  attempted.opts.dependencies.invoke = async (request) => {
+    seen.push(request.args.join(" "));
+    return await attemptedInvoke(request);
+  };
+  await expect(startNativeProject(attempted.opts)).rejects.toThrow(
+    "synthetic lost mapping reply"
+  );
+  expect(seen.some((args) => args.includes("--remove-data"))).toBe(false);
+});
+
 test("foreground partial shutdown is reported without selecting failed-start recovery", async () => {
   const { opts, events } = await fixture();
   const invoke = opts.dependencies.invoke!;
@@ -758,6 +891,63 @@ test("projects without managed values omit the private environment envelope", as
   expect(await startNativeProject(opts)).toBe(0);
   expect(events).toContain("save");
   expect(events).not.toContain("remove");
+});
+
+test("managed values are delivered only to reviewed profile-active services", async () => {
+  const { opts } = await fixture();
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    return {
+      ...input,
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: {
+            image: `sha256:${"e".repeat(64)}`,
+            environment: { GREETING: null },
+          },
+          extra: {
+            image: `sha256:${"e".repeat(64)}`,
+            profiles: ["extra"],
+            environment: { GREETING: null },
+          },
+        },
+      }),
+      managedEnvironment: {
+        web: { GREETING: "synthetic-secret" },
+        extra: { GREETING: "synthetic-inactive" },
+      },
+      serviceNames: ["web", "extra"],
+    };
+  };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) =>
+    await review({
+      ...request,
+      run: (reviewed) =>
+        request.run({
+          ...reviewed,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: { web: { active: true }, extra: { active: false } },
+            },
+          },
+        }),
+    });
+  let delivered: unknown;
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    delivered = JSON.parse(new TextDecoder().decode(request.privateInput));
+    return await serve(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(delivered).toMatchObject({
+    version: 1,
+    services: { web: { GREETING: "synthetic-secret" } },
+  });
+  expect(JSON.stringify(delivered)).not.toContain("extra");
+  expect(JSON.stringify(delivered)).not.toContain("synthetic-inactive");
 });
 
 test("AWS profile export follows native login hooks and precedes runtime effects", async () => {

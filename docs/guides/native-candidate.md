@@ -805,6 +805,19 @@ It acquires public images, privately supplies managed environment values, runs
 lifecycle hooks, and publishes the run mapping after native readiness. Ctrl-C waits
 for owned cleanup and keeps the stopped run mapping and named volumes after
 confirming cleanup. The VM remains available until explicit runtime shutdown.
+Managed values are declared on every authored service, so the reviewed plan is the
+same for every profile selection, but they are delivered only to the services the
+reviewed plan marks active. A service outside the selected profiles receives none.
+
+A fresh start that fails or is interrupted before it publishes its run mapping
+leaves no run that `ps`, `down` or a later `up` can select; the next fresh start
+creates a new run with new volumes. After confirming compute cleanup, `up` therefore
+removes that unpublished graph's volumes with `graph cleanup --remove-data` and
+confirms the removed receipt; shared dependency caches are only released. It still
+reports the original startup failure. A retained or restored run, and a run whose
+mapping write was attempted (its reply may have been lost), keep their data. When
+removal is not confirmed, `up` prints one line naming the run and the explicit
+`graph cleanup --run-id RUN --remove-data --json` request, and keeps the graph.
 
 Without that grant, `up` and `restart` refuse with `E_PERMISSION` before any stop or
 runtime request; set it and run the command again.
@@ -1210,7 +1223,12 @@ listener or inconsistent shared selection refuses before relay grants change.
 Startup allows up to 60 seconds total for persistent hooks to create all selected
 listeners, with cancellable waits and bounded read-only discovery requests. It
 retries only native endpoint-identity refusals; malformed selections and other
-failures stop immediately. A listener must pass the complete ownership checks
+failures stop immediately. A refusal is one `E_CONFIG_INVALID` line that names the
+reason and the affected entry by position, service, binding, aliases, guest port and
+host port, each shown only after it validates. For example, a listener that never
+appears on the selected port reports `no listener owned by host_executable answered
+on host_port before the discovery deadline`. Host PIDs, executable paths and the
+contents of unrecognized fields are never printed. A listener must pass the complete ownership checks
 before any VM or graph effects. Restart preflight does not wait or stop the graph
 when its current selection cannot be verified.
 

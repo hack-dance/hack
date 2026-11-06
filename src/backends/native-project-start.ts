@@ -29,6 +29,7 @@ import {
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
+import { discardUnpublishedNativeStart } from "./native-project-failed-start.ts";
 import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
@@ -39,6 +40,7 @@ import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
   type NativeProjectInput,
   prepareNativeProjectInput,
+  selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
@@ -265,6 +267,7 @@ type Dependencies = {
   finalization: typeof beginNativeProjectFinalization;
   captureFinalization: typeof captureNativeProjectFinalization;
   waitFinalization: typeof waitNativeProjectFinalization;
+  discardFailedStart: typeof discardUnpublishedNativeStart;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
@@ -286,6 +289,7 @@ const DEFAULTS: Dependencies = {
   finalization: beginNativeProjectFinalization,
   captureFinalization: captureNativeProjectFinalization,
   waitFinalization: waitNativeProjectFinalization,
+  discardFailedStart: discardUnpublishedNativeStart,
 };
 /** Fixed text of the native foreground configuration refusal. */
 export const NATIVE_CONFIGURATION_REFUSAL =
@@ -1223,6 +1227,8 @@ export async function startNativeProject(opts: {
         const directory = await mkdtemp(join(tmpdir(), "hack-native-start-"));
         const run = runSelection.run;
         let mapping: NativeProjectRun | undefined;
+        // Set before any mapping write: a lost reply may still have published it.
+        let mappingAttempted = false;
         let https:
           | Awaited<ReturnType<typeof acquireNativeHttpsLease>>
           | undefined;
@@ -1267,7 +1273,14 @@ export async function startNativeProject(opts: {
               run,
               invoke: deps.invoke,
             });
-          const delivery = environmentDelivery(input, review.planId, run);
+          const delivery = environmentDelivery(
+            selectActiveNativeProjectInput({
+              input,
+              reviewedPlan: review.report.plan,
+            }),
+            review.planId,
+            run
+          );
           let code = 1;
           let serveFailure: unknown;
           let nativeExitCode: string | undefined;
@@ -1345,6 +1358,7 @@ export async function startNativeProject(opts: {
                       httpsIntent = identity;
                       // This is an ownership mapping, not a readiness signal.
                       // Recovery must be able to select the run after a lost reply.
+                      mappingAttempted = true;
                       await deps.save({
                         ...opts.scope,
                         run: persistedMapping,
@@ -1383,6 +1397,7 @@ export async function startNativeProject(opts: {
                   throw httpsFailure;
                 }
                 if (!mapping) {
+                  mappingAttempted = true;
                   await deps.save({
                     ...opts.scope,
                     run: persistedMapping,
@@ -1435,6 +1450,16 @@ export async function startNativeProject(opts: {
             owned: confirmed.owned,
             scope: opts.scope,
             remove: deps.remove,
+          });
+          await deps.discardFailedStart({
+            runtime: opts.runtime,
+            projectRoot: opts.scope.projectRoot,
+            run,
+            owner: confirmed.owned.owner,
+            final,
+            restored: restore !== undefined,
+            mappingAttempted,
+            invoke: deps.invoke,
           });
           return foregroundExitCode({
             aborted: controller.signal.aborted,

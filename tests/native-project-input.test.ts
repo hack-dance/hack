@@ -11,7 +11,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareNativeProjectInput } from "../src/backends/native-project-input.ts";
+import {
+  nativeReviewedActiveServices,
+  prepareNativeProjectInput,
+  selectActiveNativeProjectInput,
+} from "../src/backends/native-project-input.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
@@ -206,4 +210,74 @@ test("linked worktree inherits primary local environment and observes checkout o
     restoreEnv("CI", oldCI);
     restoreEnv("HACK_EXECUTION_MODE", oldMode);
   }
+});
+
+test("managed values reach only the reviewed profile-active services", async () => {
+  // Synthetic shape: an always-on service and an optional profile service,
+  // both receiving one project-wide managed value.
+  const opts = await fixture({
+    services: {
+      app: { image: "alpine:3", entrypoint: ["/bin/sleep"], command: ["60"] },
+      extra: {
+        profiles: ["extra"],
+        image: "alpine:3",
+        entrypoint: ["/bin/sleep"],
+        command: ["60"],
+      },
+    },
+  });
+  await env(opts.projectDir, "default", {
+    global: { GREETING: "synthetic-hello" },
+  });
+  const input = await prepareNativeProjectInput(opts);
+  // Normalization still declares the key on every authored service, so the
+  // reviewed plan is identical whichever profiles are selected.
+  const parsed = JSON.parse(input.normalizedComposeJson);
+  expect(parsed.services.app.environment).toEqual({ GREETING: null });
+  expect(parsed.services.extra.environment).toEqual({ GREETING: null });
+  expect(Object.keys(input.managedEnvironment).sort()).toEqual([
+    "app",
+    "extra",
+  ]);
+
+  const inactive = selectActiveNativeProjectInput({
+    input,
+    reviewedPlan: {
+      services: { app: { active: true }, extra: { active: false } },
+    },
+  });
+  expect(inactive.managedEnvironment).toEqual({
+    app: { GREETING: "synthetic-hello" },
+  });
+  expect(inactive.normalizedComposeJson).toBe(input.normalizedComposeJson);
+  expect(inactive.serviceNames).toEqual(input.serviceNames);
+
+  const selected = selectActiveNativeProjectInput({
+    input,
+    reviewedPlan: {
+      services: { app: { active: true }, extra: { active: true } },
+    },
+  });
+  expect(Object.keys(selected.managedEnvironment).sort()).toEqual([
+    "app",
+    "extra",
+  ]);
+});
+
+test("an absent or malformed reviewed plan delivers no managed values", () => {
+  for (const reviewedPlan of [
+    undefined,
+    null,
+    {},
+    { services: [] },
+    { services: { app: { active: "true" } } },
+    { services: { app: null } },
+  ]) {
+    expect(nativeReviewedActiveServices(reviewedPlan).size).toBe(0);
+  }
+  expect([
+    ...nativeReviewedActiveServices({
+      services: { app: { active: true }, other: { active: false } },
+    }),
+  ]).toEqual(["app"]);
 });

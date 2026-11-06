@@ -284,7 +284,7 @@ test(
     });
     expectOneClosedLine(
       result,
-      "E_CONFIG_INVALID: Native host dependencies require a bounded explicit listener selection; values omitted."
+      "E_CONFIG_INVALID: Native host dependencies refused: the selection must be {version: 1, dependencies: [1..128 entries]} with no other fields; listener values omitted."
     );
     expect(await f.calls()).toEqual(["runtime check-project-share"]);
   },

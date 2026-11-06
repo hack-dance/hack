@@ -242,6 +242,10 @@ With it:
   interpolation, a list item without `=` (host variable inheritance), `null`, other
   build keys (`secrets`, `ssh`, `cache_from`, `platforms`, `network` and the rest),
   remote contexts and `image` together with `build` refuse. Values are never shown.
+- Build args are not secrets: as with Docker, the image records them in its history.
+  A build arg whose value equals a `hack env` secret value of this project and
+  environment refuses before any hook or VM effect, naming only the argument. Pass
+  secrets with BuildKit build secrets instead; native builds do not support them yet.
 - After the runtime is up, each distinct build runs once with
   `runtime build-image` (below), and its filtered output streams to your terminal.
   Every service with that build is then pinned to the built content ID, so review,
@@ -252,9 +256,11 @@ With it:
 - Restoring an unchanged retained run uses the retained images and never builds; if
   one is missing, `up` refuses and asks you to start fresh. `hack restart` also never
   builds: it reuses the running or retained image, or refuses before stopping anything.
-- Services in profiles you did not select are built too, because the native review
-  pins every declared service. Native builds are `linux/arm64` only;
-  `platform: linux/amd64` is still refused.
+- As with Compose `up`, only build services in the selected profiles are built and
+  pinned. A build service in a profile you did not select is not built, and restore
+  and restart need no image for it; selecting its profile in a later fresh `up` builds
+  it then. Native builds are `linux/arm64` only; `platform: linux/amd64` is still
+  refused.
 
 `hack doctor` reports the same features for the current project in its
 `compose backend features` check. With `--json`, the check's `composeBackend.features`

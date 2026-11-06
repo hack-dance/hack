@@ -27,6 +27,7 @@ import {
   type NativeBuildRequest,
   nativeBuildsEnabled,
   nativeRebuildRequested,
+  refuseManagedSecretBuildArguments,
 } from "./native-project-builds.ts";
 import {
   nativeSharedSourceFlags,
@@ -345,12 +346,17 @@ function admitStartBuilds(
     readonly composeFile: string;
   }
 ): ReadonlyMap<string, NativeBuildRequest> {
-  return admitNativeProjectBuilds({
+  const builds = admitNativeProjectBuilds({
     services: composeServices(input),
     projectRoot: opts.scope.projectRoot,
     composeFile: opts.composeFile,
     enabled: nativeBuildsEnabled(),
   });
+  refuseManagedSecretBuildArguments({
+    builds,
+    managedSecretValues: input.managedSecretValues ?? [],
+  });
+  return builds;
 }
 
 /** A service names an image, or is an admitted build that names none yet. */
@@ -431,6 +437,10 @@ async function pinNativeProjectImages(opts: {
     const retainedImage = opts.retainedImages.get(name);
     if (retainedImage) {
       spec.image = retainedImage;
+      continue;
+    }
+    // A build service left unbuilt here is outside the selected profiles.
+    if (spec.image === undefined && spec.build !== undefined) {
       continue;
     }
     const image = String(spec.image);
@@ -1240,6 +1250,7 @@ export async function startNativeProject(opts: {
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       branch: opts.scope.branch,
+      profiles,
       builds,
       specs,
       retainedImages,

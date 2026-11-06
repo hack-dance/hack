@@ -9,6 +9,7 @@ import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   admitNativeProjectBuilds,
   nativeBuildsEnabled,
+  nativeServiceActive,
 } from "./native-project-builds.ts";
 import {
   discoverNativeHostDependency,
@@ -282,6 +283,7 @@ async function stoppedRestartMode(opts: {
 async function pinRestartImages(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
+  readonly profiles: readonly string[];
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
   readonly invoke: typeof invokeNativeRuntime;
@@ -296,6 +298,11 @@ async function pinRestartImages(opts: {
       continue;
     }
     if (spec.image === undefined && spec.build !== undefined) {
+      // Outside the selected profiles a build service is never built or pinned
+      // (as at startup), so it keeps its build declaration.
+      if (!nativeServiceActive(spec, opts.profiles)) {
+        continue;
+      }
       throw new ClosedCliError(
         `Native restart reuses built images and never builds; no running or retained image was found for ${name}. Run hack up to build it; nothing was stopped.`
       );
@@ -461,6 +468,7 @@ export async function preflightNativeRestart(opts: {
   await pinRestartImages({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
+    profiles: selected.profiles ?? [],
     specs,
     retainedImages,
     invoke: deps.invoke,

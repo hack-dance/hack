@@ -421,6 +421,53 @@ function systemEnvironment(): Record<string, string> {
   return env;
 }
 
+/**
+ * Whether a service runs for the selected profiles, as in Compose `up`: a service with
+ * no `profiles` always runs; otherwise one of its profiles must be selected. A
+ * malformed `profiles` field counts as active, so it is built and reviewed.
+ */
+export function nativeServiceActive(
+  service: Readonly<Record<string, unknown>>,
+  profiles: readonly string[]
+): boolean {
+  const declared = service.profiles;
+  if (declared === undefined) {
+    return true;
+  }
+  if (!Array.isArray(declared) || declared.length === 0) {
+    return true;
+  }
+  return declared.some(
+    (profile) => typeof profile === "string" && profiles.includes(profile)
+  );
+}
+
+/**
+ * Refuse, before any hook, VM or build effect, a build argument whose value equals a
+ * secret value Hack manages for this project and environment. Build arguments are
+ * not secrets (an image records them in its history), so a managed secret must not
+ * travel as one. The comparison is in memory; no value is ever shown.
+ */
+export function refuseManagedSecretBuildArguments(opts: {
+  readonly builds: ReadonlyMap<string, NativeBuildRequest>;
+  readonly managedSecretValues: readonly string[];
+}): void {
+  if (opts.managedSecretValues.length === 0) {
+    return;
+  }
+  const secrets = new Set(opts.managedSecretValues.filter((v) => v !== ""));
+  for (const [service, request] of opts.builds) {
+    for (const [name, value] of Object.entries(request.args)) {
+      if (secrets.has(value)) {
+        throw new HackCliError({
+          code: "E_NATIVE_PROJECT_UNSUPPORTED",
+          message: `Native foreground up cannot build ${service}: build arg ${name} equals a hack env secret value. Build args are not secrets (images record them); pass secrets with BuildKit build secrets instead, which native builds do not support yet. Values were omitted; no hook, VM or build was started.`,
+        });
+      }
+    }
+  }
+}
+
 /** A refusal when a retained run's built image is gone: restore never builds. */
 function retainedMissing(service: string): ClosedCliError {
   return new ClosedCliError(
@@ -429,14 +476,18 @@ function retainedMissing(service: string): ClosedCliError {
 }
 
 /**
- * Build (or reuse) every admitted build service and pin it to its content ID.
- * Identical declarations build once. Retained content IDs always win, and a
- * restore with a missing retained image refuses instead of building.
+ * Build (or reuse) every admitted build service in the selected profiles and pin it to
+ * its content ID. As with Compose `up`, a build service outside the selected profiles
+ * is neither built nor pinned: it keeps its `build` declaration, which review accepts
+ * for inactive services, so restore and restart never need an image for it. Identical
+ * declarations build once. Retained content IDs always win, and a restore with a
+ * missing retained image refuses instead of building.
  */
 export async function buildNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly branch: string | null | undefined;
+  readonly profiles: readonly string[];
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
@@ -456,6 +507,7 @@ type PendingBuild = { request: NativeBuildRequest; services: string[] };
 
 /** Pin retained images, refuse a restore without one, and group identical builds. */
 function pendingBuilds(opts: {
+  readonly profiles: readonly string[];
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
@@ -468,6 +520,9 @@ function pendingBuilds(opts: {
       throw new ClosedCliError(
         "Native build services changed during startup; values omitted."
       );
+    }
+    if (!nativeServiceActive(spec, opts.profiles)) {
+      continue;
     }
     const retained = opts.retainedImages.get(service);
     if (retained !== undefined) {

@@ -947,12 +947,13 @@ test("stopped recovery reviews retained image IDs and resolves tags only after o
   }
 });
 
-test("restart pins a build service to its retained image and drops the build declaration", async () => {
+test("restart pins an active build service to its retained image, drops its build declaration and leaves inactive ones unbuilt", async () => {
   const listener = await listenerIntentFixture();
   const previous = process.env.HACK_NATIVE_BUILDS;
   process.env.HACK_NATIVE_BUILDS = "1";
   try {
     let reviewed: Record<string, unknown> | undefined;
+    let inactive: Record<string, unknown> | undefined;
     const builtImage = `sha256:${"7".repeat(64)}`;
     await preflightNativeRestart({
       ...listener.options,
@@ -965,7 +966,11 @@ test("restart pins a build service to its retained image and drops the build dec
           environmentFiles: [],
           serviceNames: ["app"],
           normalizedComposeJson: JSON.stringify({
-            services: { app: { build: { context: "..", args: { A: "1" } } } },
+            services: {
+              app: { build: { context: "..", args: { A: "1" } } },
+              // Outside the run's profiles: never built, pinned or required.
+              tools: { build: "..", profiles: ["tools"] },
+            },
           }),
           managedEnvironment: {},
           lifecycleHostEnvironment: {},
@@ -1001,8 +1006,11 @@ test("restart pins a build service to its retained image and drops the build dec
           return await listener.options.dependencies!.invoke!(options);
         },
         review: async (review) => {
-          reviewed = JSON.parse(review.input.normalizedComposeJson).services
-            .app;
+          const services = JSON.parse(
+            review.input.normalizedComposeJson
+          ).services;
+          reviewed = services.app;
+          inactive = services.tools;
           return await review.run({
             planId: run.planId,
             namespace: run.namespace,
@@ -1014,6 +1022,7 @@ test("restart pins a build service to its retained image and drops the build dec
     });
     expect(reviewed?.image).toBe(builtImage);
     expect(reviewed).not.toHaveProperty("build");
+    expect(inactive).toEqual({ build: "..", profiles: ["tools"] });
   } finally {
     if (previous === undefined) {
       Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");

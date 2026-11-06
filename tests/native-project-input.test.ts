@@ -12,6 +12,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareNativeProjectInput } from "../src/backends/native-project-input.ts";
+import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
+import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
@@ -82,6 +84,40 @@ test("modern values stay private while original contracts and exact input hash s
   expect(await readFile(opts.composeFile)).toEqual(before);
   expect(await readdir(opts.projectDir)).toEqual(names);
 });
+test("only values stored as secrets are reported as managed secret values", async () => {
+  const opts = await fixture({
+    services: { web: { image: "bun:1" }, worker: { image: "bun:1" } },
+  });
+  await writeFile(
+    join(opts.projectRoot, PROJECT_ENV_KEY_FILENAME),
+    "synthetic-key"
+  );
+  const set = async (
+    scope: string,
+    key: string,
+    value: string,
+    secret: boolean
+  ) =>
+    await setProjectEnvValue({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      envName: null,
+      scope,
+      key,
+      value,
+      secret,
+    });
+  await set("global", "TOKEN", "synthetic-global-secret", true);
+  await set("worker", "WORKER_KEY", "synthetic-worker-secret", true);
+  await set("web", "MODE", "production", false);
+  const result = await prepareNativeProjectInput(opts);
+  expect([...(result.managedSecretValues ?? [])].sort()).toEqual([
+    "synthetic-global-secret",
+    "synthetic-worker-secret",
+  ]);
+  expect(result.normalizedComposeJson).not.toContain("synthetic-");
+});
+
 test("fourteen services and 110 managed variables each preserve overlay selection", async () => {
   const services = Object.fromEntries(
     Array.from({ length: 14 }, (_, i) => [`service${i}`, { image: "bun:1" }])

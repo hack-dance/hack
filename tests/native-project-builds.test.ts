@@ -18,6 +18,8 @@ import {
   NATIVE_BUILDS_DISABLED_REFUSAL,
   type NativeBuildRequest,
   nativeBuildsEnabled,
+  nativeServiceActive,
+  refuseManagedSecretBuildArguments,
 } from "../src/backends/native-project-builds.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
@@ -190,6 +192,7 @@ test("identical builds run once, pin every service and keep the request private"
     runtime,
     projectRoot: project,
     branch: "feature",
+    profiles: [],
     builds: new Map([
       ["one", request()],
       ["two", request()],
@@ -238,6 +241,7 @@ test("retained images win, and restore never builds a missing one", async () => 
     runtime,
     projectRoot: project,
     branch: null,
+    profiles: [],
     rebuild: false,
     signal: new AbortController().signal,
     invoke,
@@ -274,6 +278,107 @@ test("retained images win, and restore never builds a missing one", async () => 
   expect(calls).toEqual(["build"]);
 });
 
+test("only build services in the selected profiles are built and pinned, as with Compose up", async () => {
+  const project = await root();
+  const built: string[] = [];
+  const invoke = async ({ requestFile }: { requestFile: string }) => {
+    built.push(JSON.parse(await readFile(requestFile, "utf8")).target ?? "");
+    return { imageId: IMAGE, buildKey: KEY, reused: false };
+  };
+  const declared = () => ({
+    web: { build: "app" } as Record<string, unknown>,
+    tools: { build: "app", profiles: ["tools"] } as Record<string, unknown>,
+  });
+  const builds = new Map([
+    ["web", request()],
+    ["tools", { ...request(), target: "tools" }],
+  ]);
+  const base = {
+    runtime,
+    projectRoot: project,
+    branch: null,
+    builds,
+    rebuild: false,
+    signal: new AbortController().signal,
+    invoke,
+  };
+  const specs = declared();
+  await buildNativeProjectImages({
+    ...base,
+    profiles: [],
+    specs,
+    retainedImages: new Map(),
+    restore: false,
+  });
+  expect(built).toEqual([""]);
+  expect(specs.web).toEqual({ image: IMAGE });
+  // The inactive service keeps its declaration: no image, no build, no pin.
+  expect(specs.tools).toEqual({ build: "app", profiles: ["tools"] });
+
+  // Restoring that run needs no image for the inactive service.
+  built.length = 0;
+  const restored = declared();
+  await buildNativeProjectImages({
+    ...base,
+    profiles: [],
+    specs: restored,
+    retainedImages: new Map([["web", RETAINED]]),
+    restore: true,
+  });
+  expect(built).toEqual([]);
+  expect(restored.web).toEqual({ image: RETAINED });
+  expect(restored.tools).toEqual({ build: "app", profiles: ["tools"] });
+
+  // Selecting the profile later builds that service then.
+  const selected = declared();
+  await buildNativeProjectImages({
+    ...base,
+    profiles: ["tools"],
+    specs: selected,
+    retainedImages: new Map(),
+    restore: false,
+  });
+  expect(built).toEqual(["", "tools"]);
+  expect(selected.tools).toEqual({ image: IMAGE, profiles: ["tools"] });
+});
+
+test("service activity follows Compose profiles", () => {
+  expect(nativeServiceActive({}, [])).toBe(true);
+  expect(nativeServiceActive({ profiles: ["a"] }, [])).toBe(false);
+  expect(nativeServiceActive({ profiles: ["a", "b"] }, ["b"])).toBe(true);
+  expect(nativeServiceActive({ profiles: [] }, [])).toBe(true);
+  expect(nativeServiceActive({ profiles: "a" }, [])).toBe(true);
+});
+
+test("a build arg equal to a managed secret value refuses without showing it", () => {
+  const secret = "managed-secret-value-not-shown";
+  const builds = new Map([
+    ["web", request({ TOKEN: secret, MODE: "production" })],
+  ]);
+  let refusal: unknown;
+  try {
+    refuseManagedSecretBuildArguments({
+      builds,
+      managedSecretValues: ["other", secret],
+    });
+  } catch (error) {
+    refusal = error;
+  }
+  expect(refusal).toBeInstanceOf(HackCliError);
+  const error = refusal as HackCliError;
+  expect(error.code).toBe("E_NATIVE_PROJECT_UNSUPPORTED");
+  expect(error.message).toContain(
+    "build arg TOKEN equals a hack env secret value"
+  );
+  expect(error.message).not.toContain(secret);
+  // Values that are not managed secrets pass; so does any build with no secrets.
+  refuseManagedSecretBuildArguments({
+    builds: new Map([["web", request({ MODE: "production" })]]),
+    managedSecretValues: [secret],
+  });
+  refuseManagedSecretBuildArguments({ builds, managedSecretValues: [] });
+});
+
 test("an explicit rebuild asks the runtime to build again", async () => {
   const project = await root();
   let policy: unknown;
@@ -281,6 +386,7 @@ test("an explicit rebuild asks the runtime to build again", async () => {
     runtime,
     projectRoot: project,
     branch: null,
+    profiles: [],
     builds: new Map([["web", request()]]),
     specs: { web: { build: "app" } },
     retainedImages: new Map(),

@@ -42,6 +42,14 @@ impl Fixture {
             project,
         }
     }
+    /// A fixture another process created at `root` (see `coordinator_child`).
+    fn at(root: PathBuf) -> Self {
+        Self {
+            candidate: Candidate::discover(&root.join("checkout")).unwrap(),
+            project: root.join("project"),
+            root,
+        }
+    }
     fn request(&self, policy: Policy) -> BuildRequest {
         BuildRequest {
             version: 1,
@@ -103,6 +111,7 @@ case {mode} in
   fail) exit 3 ;;
   nometa) ;;
   sleep) sleep 30 & echo $! > child.pending; mv child.pending child; wait ;;
+  hold) echo $$ > client-pid.pending; mv client-pid.pending client-pid; sleep 30 ;;
 esac
 "#
         );
@@ -494,6 +503,101 @@ fn an_interrupted_receipt_publication_does_not_block_the_key() {
     let rebuild = fixture.inputs(Policy::Rebuild);
     run(&fixture.candidate, &pool, &rebuild, &never).unwrap();
     assert_eq!(fixture.calls(&inputs), 2);
+}
+
+/// The environment variable naming the fixture root the coordinator child builds in.
+const COORDINATOR_ROOT: &str = "HACK_TEST_IMAGE_BUILD_COORDINATOR_ROOT";
+
+#[test]
+#[ignore = "coordinator process killed by a_killed_coordinator_leaves_its_client_fenced"]
+fn coordinator_child() {
+    let Some(root) = std::env::var_os(COORDINATOR_ROOT) else {
+        return;
+    };
+    // Never cleaned up here: the parent test owns the root, and this process is killed.
+    let fixture = std::mem::ManuallyDrop::new(Fixture::at(PathBuf::from(root)));
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    let _ = run(&fixture.candidate, &pool, &inputs, &never);
+}
+
+#[test]
+fn a_killed_coordinator_leaves_its_client_fenced() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    fixture.client(&inputs, "hold");
+    let scratch = fixture.scratch(&inputs);
+    let mut coordinator = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "provider::image_build::tests::coordinator_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(COORDINATOR_ROOT, &fixture.root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while !scratch.join("client-pid").exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the client never started"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SIGKILL: the coordinator drops nothing, as when hack-native itself is killed.
+    coordinator.kill().unwrap();
+    coordinator.wait().unwrap();
+    let client: libc::pid_t = fs::read_to_string(scratch.join("client-pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let root = builds_root(&fixture.candidate);
+    let key = root
+        .join(&inputs.namespace)
+        .join(format!("{}.lock", inputs.key));
+    let fence = root.join("active.lock");
+    let held = |path: &Path| {
+        Flock::try_lock(Flock::open(path).unwrap(), libc::LOCK_SH)
+            .unwrap()
+            .is_none()
+            || Flock::try_lock(Flock::open(path).unwrap(), libc::LOCK_EX)
+                .unwrap()
+                .is_none()
+    };
+    assert!(
+        held(&key),
+        "the key lock was released under a surviving client"
+    );
+    assert!(
+        held(&fence),
+        "the build fence was released under a surviving client"
+    );
+    assert!(require_no_active_build(&fixture.candidate).is_err());
+    let pool = FakePool::new("pool-1");
+    let busy = run(
+        &fixture.candidate,
+        &pool,
+        &fixture.inputs(Policy::Rebuild),
+        &never,
+    )
+    .unwrap_err();
+    assert_eq!(busy.code, "native_build_busy");
+    // SAFETY: the surviving client leads its own process group, created for it.
+    unsafe { libc::killpg(client, libc::SIGKILL) };
+    let started = Instant::now();
+    while held(&key) || held(&fence) {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "locks were never released"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(require_no_active_build(&fixture.candidate).is_ok());
 }
 
 #[test]

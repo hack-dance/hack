@@ -546,6 +546,10 @@ fn builds_root(candidate: &Candidate) -> PathBuf {
 }
 
 /// A cooperative `flock` on a private lock file, shared or exclusive, never blocking.
+///
+/// A `flock` belongs to the open file description, so a child that inherits the
+/// descriptor holds the lock for as long as it keeps it open if this process is
+/// killed before it drops the lock (see [`inherit_locks`]).
 struct Flock(File);
 impl Flock {
     fn open(path: &Path) -> Result<File, CandidateError> {
@@ -584,6 +588,10 @@ impl Flock {
 }
 impl Drop for Flock {
     fn drop(&mut self) {
+        // An orderly drop releases the lock for every holder of the description, so a
+        // transient copy in another thread's forked child cannot keep it. Only a
+        // process that dies without dropping (SIGKILL) leaves the lock with the
+        // descriptors its build client inherited.
         // SAFETY: the descriptor is live until this value drops.
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
@@ -691,7 +699,7 @@ pub(super) fn run<P: BuildPool>(
     let receipt_path = directory.join(format!("{}.json", inputs.key));
     // Step 1, under the lease: fence, key lock and the reuse decision.
     let (lease, identity) = pool.lease()?;
-    let _fence = Flock::try_lock(Flock::open(&root.join("active.lock"))?, libc::LOCK_SH)?
+    let fence = Flock::try_lock(Flock::open(&root.join("active.lock"))?, libc::LOCK_SH)?
         .ok_or_else(|| {
             refusal(
                 "provider_busy",
@@ -699,7 +707,7 @@ pub(super) fn run<P: BuildPool>(
             )
         })?;
     state::private_directory(&directory)?;
-    let _key_lock = Flock::try_lock(
+    let key_lock = Flock::try_lock(
         Flock::open(&directory.join(format!("{}.lock", inputs.key)))?,
         libc::LOCK_EX,
     )?
@@ -829,10 +837,12 @@ pub(super) fn run<P: BuildPool>(
     // outlives the client run.
     let _definition = RemoveOnDrop(scratch.join("definition").join(BAKE_DEFINITION));
     let _policy = RemoveOnDrop(scratch.join("definition").join(SOURCE_POLICY));
+    let mut client = command(
+        &builder, &scratch, &metadata, inputs, &identity, &pins, &expected,
+    )?;
+    inherit_locks(&mut client, &[&fence, &key_lock]);
     let ended = supervise(
-        command(
-            &builder, &scratch, &metadata, inputs, &identity, &pins, &expected,
-        )?,
+        client,
         deadline,
         canceled,
         output::Filter::new(inputs.args.values().map(String::as_str)),
@@ -1162,6 +1172,28 @@ impl Drop for CancelSignals {
                 libc::sigaction(*signal, previous, std::ptr::null_mut());
             }
         }
+    }
+}
+
+/// Let the client inherit the build fence and the key lock. If this process is killed
+/// while the client runs, both stay held until the client and everything it leaves
+/// running exit: `runtime down` keeps refusing, and a later attempt of the same key
+/// refuses with `native_build_busy` instead of sharing the surviving client's attempt
+/// files. An orderly return (after the client was reaped or stopped) releases them.
+fn inherit_locks(command: &mut std::process::Command, locks: &[&Flock]) {
+    let descriptors: Vec<libc::c_int> = locks.iter().map(|lock| lock.0.as_raw_fd()).collect();
+    // SAFETY: runs in the forked child before exec; fcntl is async-signal-safe and the
+    // descriptors are live (their owners outlive the spawn).
+    unsafe {
+        command.pre_exec(move || {
+            for &fd in &descriptors {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
     }
 }
 

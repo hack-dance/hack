@@ -35,6 +35,11 @@
 //!   bounds.
 //! - The client builds from a private copy of the Dockerfile and ignore bytes that were
 //!   scanned and hashed, never from the project paths again.
+//! - Build arguments are not secrets, as with Docker: an image records their values in
+//!   its history, and resolved base references (which an argument may select) are
+//!   reported in receipts and results. Hack still keeps values out of argv, the
+//!   client's environment and its own messages, and redacts them from forwarded output
+//!   as defense in depth. The caller refuses values equal to a managed secret.
 //! - Nothing here removes images, prunes caches or adopts an image whose labels differ.
 use super::{
     artifact,
@@ -144,7 +149,8 @@ pub struct BuildRequest {
     pub dockerfile: String,
     #[serde(default)]
     pub target: Option<String>,
-    /// Literal build arguments. Values are secrets for every output purpose.
+    /// Literal build arguments. They are not secrets (an image records them in its
+    /// history), but Hack keeps them out of argv and its own messages.
     #[serde(default)]
     pub args: BTreeMap<String, String>,
     pub policy: Policy,

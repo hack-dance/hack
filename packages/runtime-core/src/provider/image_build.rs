@@ -193,7 +193,8 @@ pub(super) struct Receipt {
     phase: Phase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_id: Option<String>,
-    /// Engine-reported size of the verified image, for the next cold build's admission.
+    /// Engine-reported size of the last verified image of this key, for the next cold
+    /// build's admission. Attempts that verify no image carry it forward unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_bytes: Option<u64>,
     base_pins: BTreeMap<String, String>,
@@ -806,7 +807,9 @@ pub(super) fn run<P: BuildPool>(
         engine_id: identity.engine_id.clone(),
         phase: Phase::Building,
         image_id: None,
-        image_bytes: None,
+        // Failed, canceled or interrupted attempts keep the last verified size, so a
+        // retry is admitted against it rather than the floor.
+        image_bytes: previous_bytes,
         base_pins: pins.clone(),
     };
     state::write(&receipt_path, &receipt)?;
@@ -902,7 +905,7 @@ pub(super) fn run<P: BuildPool>(
     };
     receipt.phase = Phase::ContentIdVerified;
     receipt.image_id = Some(id.clone());
-    receipt.image_bytes = image_bytes;
+    receipt.image_bytes = image_bytes.or(receipt.image_bytes);
     state::write(&receipt_path, &receipt)?;
     // The verified image is recorded first; a failed prune leaves only extra cache.
     let cache_reclaimed_bytes = pool.prune_cache(&lease, CACHE_BUDGET).ok();

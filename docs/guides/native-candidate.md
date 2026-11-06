@@ -501,7 +501,8 @@ linked, mode-`0600` file owned by you), because build-argument values are in it:
 same key replaced. It keeps every image a build receipt names as current, every image
 that any retained run's saved state mentions, every image a container still uses (the
 engine refuses those), and every image whose ownership labels are not exactly this
-runtime's. It refuses while a build runs, and removes nothing if it cannot read all
+runtime's. Each removal deletes that one image only, never its untagged parent
+images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
 
 Before startup, network-tool preparation additionally requires all four pinned

@@ -887,6 +887,18 @@ fn cold_builds_need_free_storage_and_successful_builds_prune_the_cache() {
     let reused = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
     assert!(reused.reused);
     assert_eq!(pool.prunes.borrow().len(), 1);
+
+    // A rebuild that fails verifies no image: the last verified size still applies.
+    *pool.available.borrow_mut() = 10 * GIB;
+    fixture.client(&rebuild, "fail");
+    let error = run(&fixture.candidate, &pool, &rebuild, &never).unwrap_err();
+    assert_eq!(error.code, "native_build_failed");
+    let receipt = fixture.receipt(&rebuild);
+    assert_eq!(receipt.phase, Phase::Failed);
+    assert_eq!(receipt.image_bytes, Some(5 * GIB));
+    *pool.available.borrow_mut() = 6 * GIB;
+    let error = run(&fixture.candidate, &pool, &rebuild, &never).unwrap_err();
+    assert_eq!(error.code, "native_build_storage");
 }
 
 impl reclaim::ReclaimPool for FakePool {

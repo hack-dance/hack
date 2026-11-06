@@ -324,6 +324,7 @@ impl Receipt {
                 || network.name != format!("hkn-{run}-network-{index}")
                 || network.image.is_some()
                 || network.routing.is_some()
+                || !network.loopback_ports.is_empty()
                 || network.networks.is_some()
                 || network.outbound == *internal
                 || network.cache.is_some()
@@ -393,6 +394,7 @@ impl Receipt {
                     .as_deref()
                     .is_none_or(|image| !image_id(image))
                 || resource.routing.is_some()
+                || !resource.loopback_ports.is_empty()
                 || resource.networks.as_ref() != Some(&expected_networks)
                 || resource.outbound
                 || resource.cache.is_some()

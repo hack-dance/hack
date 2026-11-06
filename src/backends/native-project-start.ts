@@ -68,6 +68,12 @@ import {
   recoverNativeInterruptedStartupCleanup,
 } from "./native-project-interrupted-cleanup.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
+import {
+  checkNativeLoopbackPorts,
+  nativeBridgeSocketCount,
+  nativePortPublicationCount,
+  reviewedNativeLoopbackPorts,
+} from "./native-project-ports.ts";
 import { serveNativeProjectGraph } from "./native-project-process.ts";
 import { selectNativeProjectRestore } from "./native-project-restore.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
@@ -386,7 +392,6 @@ export function prepareNativeProjectServices(
       typeof value.image !== "string" ||
       value.build !== undefined ||
       (value.extra_hosts !== undefined && !hasHostDependencies) ||
-      value.ports !== undefined ||
       value.logging !== undefined ||
       (value.restart !== undefined && value.restart !== "no") ||
       !hasOnlyNativeSupportedLabels(value.labels)
@@ -1316,7 +1321,10 @@ export async function startNativeProject(opts: {
     invoke: deps.invoke,
   });
   requireActiveStartup(opts.signal);
-  const bridgeCapacity = nativeBridgeCapacity(specs);
+  const bridgeCapacity = nativeBridgeSocketCount({
+    routes: nativeBridgeCapacity(specs),
+    ports: nativePortPublicationCount(specs),
+  });
   const artifact = join(dirname(opts.runtime.binary), "hack-relay-guest");
   const artifactFile = Bun.file(artifact);
   if (
@@ -1507,6 +1515,11 @@ export async function startNativeProject(opts: {
           specs,
           capacity: bridgeCapacity,
         });
+        // Refuse an occupied published host port before graph admission.
+        await checkNativeLoopbackPorts(
+          reviewedNativeLoopbackPorts(review.report.plan)
+        );
+        requireActiveStartup(controller.signal);
         const runSelection = await selectNativeProjectRestore({
           runtime: opts.runtime,
           projectRoot: opts.scope.projectRoot,

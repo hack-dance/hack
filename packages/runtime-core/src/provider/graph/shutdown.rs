@@ -404,6 +404,7 @@ mod tests {
 
     fn fixture() -> (Resource, Value) {
         let resource = Resource {
+            loopback_ports: Vec::new(),
             routing: None,
             networks: None,
             outbound: false,

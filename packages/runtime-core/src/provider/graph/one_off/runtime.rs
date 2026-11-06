@@ -47,6 +47,7 @@ pub fn begin(
     resource.id = None;
     resource.phase = "reserved".into();
     resource.routing = None;
+    resource.loopback_ports = Vec::new();
     let template = runtime.job_template(&selection.service)?;
     let config = config::prepare(&template, &original, &resource, argv, workdir)?;
     let mut configs = BTreeMap::from([(service.clone(), config)]);

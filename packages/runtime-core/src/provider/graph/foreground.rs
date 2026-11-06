@@ -266,6 +266,9 @@ fn serve_input<'a>(
     let receipt = match attempt {
         Ok(receipt) => receipt,
         Err(error) => {
+            // Read failed services' bounded output before cleanup removes their
+            // containers. It travels only in this reply and is never persisted.
+            let error = error.with_startup_logs(super::startup_logs::capture(candidate, &run_id));
             if fresh_generation.is_some() && !runtime.admission_started() {
                 let engine = Engine::connect_cleanup(candidate)?;
                 let (retained, root) = super::load(candidate, &engine, &run_id)?;

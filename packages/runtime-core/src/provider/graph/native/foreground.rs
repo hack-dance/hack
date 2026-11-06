@@ -397,7 +397,7 @@ pub fn serve_with_storage_tool(
         };
         let result = result.unwrap_or_else(|error| Outcome::Refused {
             code: error.code.into(),
-            stop_failures: error.stop_failures,
+            stop_failures: error.stop_failures.map(|detail| *detail),
         });
         let cleaned = matches!(result, Outcome::Cleaned { .. });
         let reply = Reply {
@@ -559,7 +559,7 @@ fn request_selected(
     } = reply.result
     {
         let mut error = refused().with_cause_code(code);
-        error.stop_failures = stop_failures;
+        error.stop_failures = stop_failures.map(Box::new);
         return Err(error);
     }
     serde_json::to_value(reply).map_err(|_| refused())

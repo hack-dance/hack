@@ -85,6 +85,7 @@ import {
   type NativeRuntimeMetadataSelection,
   verifyNativeRuntimeMetadataRoutes,
 } from "./native-runtime-metadata.ts";
+import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
 const OWNER = /^[a-f0-9]{32}$/;
@@ -602,6 +603,17 @@ function environmentDelivery(
       })
     ),
   };
+}
+/**
+ * Append the redacted output of failed services to the final startup failure
+ * report. Applied after diagnostics that parse the original closed message; the
+ * error keeps its class so recovery handling is unchanged.
+ */
+function withStartupLogReport(error: unknown, report: string): unknown {
+  if (report !== "" && error instanceof Error) {
+    error.message = `${error.message}\n${report}`;
+  }
+  return error;
 }
 const SAFE_STARTUP_DIAGNOSTIC =
   /^(Native (?:graph startup (?:failed|was interrupted or failed)|HTTPS verification failed)) \(([A-Za-z0-9_]{1,80})\); (?:inspect owned state before retrying\.|peer values omitted\.)$/;
@@ -1271,6 +1283,8 @@ export async function startNativeProject(opts: {
           let code = 1;
           let serveFailure: unknown;
           let nativeExitCode: string | undefined;
+          // Redacted at receipt; the raw tail is never retained or persisted.
+          let startupLogReport = "";
           try {
             code = await deps.serve({
               runtime: opts.runtime,
@@ -1305,6 +1319,12 @@ export async function startNativeProject(opts: {
               signal: controller.signal,
               onExitDiagnostic: (diagnostic) => {
                 nativeExitCode = diagnostic.nativeCode;
+              },
+              onStartupLogs: (logs) => {
+                startupLogReport = formatNativeStartupLogReport({
+                  logs,
+                  managedEnvironment: input.managedEnvironment,
+                });
               },
               onReady: async () => {
                 const readyMapping = authoritative(
@@ -1407,42 +1427,46 @@ export async function startNativeProject(opts: {
           } finally {
             delivery.payload?.fill(0);
           }
-          let final: unknown;
           try {
-            final = await invokeInspect();
-          } catch (inspectionFailure) {
-            throw cleanupUnconfirmed(
-              serveFailure ?? inspectionFailure,
-              nativeExitCode
-            );
+            let final: unknown;
+            try {
+              final = await invokeInspect();
+            } catch (inspectionFailure) {
+              throw cleanupUnconfirmed(
+                serveFailure ?? inspectionFailure,
+                nativeExitCode
+              );
+            }
+            const confirmed = await confirmForegroundCleanup({
+              final,
+              runtime: opts.runtime,
+              projectRoot: opts.scope.projectRoot,
+              run,
+              namespace: review.namespace,
+              planId: restore?.planId ?? review.planId,
+              invoke: deps.invoke,
+              startupFailure: serveFailure,
+              nativeCode: nativeExitCode,
+            });
+            final = confirmed.final;
+            graphCleanupConfirmed = true;
+            await retireRemovedMapping({
+              final,
+              mapping,
+              owned: confirmed.owned,
+              scope: opts.scope,
+              remove: deps.remove,
+            });
+            return foregroundExitCode({
+              aborted: controller.signal.aborted,
+              interruptedExit,
+              failure: serveFailure,
+              infrastructureFailure: httpsFailure,
+              code,
+            });
+          } catch (error) {
+            throw withStartupLogReport(error, startupLogReport);
           }
-          const confirmed = await confirmForegroundCleanup({
-            final,
-            runtime: opts.runtime,
-            projectRoot: opts.scope.projectRoot,
-            run,
-            namespace: review.namespace,
-            planId: restore?.planId ?? review.planId,
-            invoke: deps.invoke,
-            startupFailure: serveFailure,
-            nativeCode: nativeExitCode,
-          });
-          final = confirmed.final;
-          graphCleanupConfirmed = true;
-          await retireRemovedMapping({
-            final,
-            mapping,
-            owned: confirmed.owned,
-            scope: opts.scope,
-            remove: deps.remove,
-          });
-          return foregroundExitCode({
-            aborted: controller.signal.aborted,
-            interruptedExit,
-            failure: serveFailure,
-            infrastructureFailure: httpsFailure,
-            code,
-          });
         } finally {
           httpsClosing = true;
           try {

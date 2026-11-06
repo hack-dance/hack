@@ -1,4 +1,6 @@
-//! Shared value-free error contract for host runtime and guest adapters.
+//! Shared error contract for host runtime and guest adapters. Every field is
+//! value-free except the transient `startup_logs` of a foreground startup failure
+//! reply, which is application output and is never persisted.
 use serde::{Deserialize, Serialize};
 
 /// Value-free stop detail. Service names are admitted graph identifiers, never
@@ -29,14 +31,41 @@ pub struct StopFailuresDiagnostic {
     pub failures: Vec<StopFailureDiagnostic>,
 }
 
+/// Bounded application output of one failed service, captured before startup
+/// cleanup removes its container. It may contain managed values, so it is a
+/// transient part of the foreground failure reply only: never journaled, written
+/// to a receipt or copied into persisted failure evidence. Consumers must redact
+/// managed values before display. Each stream holds whole lines only.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupLogTail {
+    pub service: String,
+    pub stdout: String,
+    pub stderr: String,
+    /// Some of the requested tail lines were omitted to stay within the byte bound.
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupLogsDiagnostic {
+    pub version: u8,
+    pub services: Vec<StartupLogTail>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CandidateError {
     pub code: &'static str,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause_code: Option<String>,
+    /// Boxed, like `startup_logs`, to keep every `Result<_, CandidateError>` small.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_failures: Option<StopFailuresDiagnostic>,
+    pub stop_failures: Option<Box<StopFailuresDiagnostic>>,
+    /// Transient application output for a failed foreground startup; see
+    /// [`StartupLogTail`]. Never persist an error carrying it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup_logs: Option<Box<StartupLogsDiagnostic>>,
 }
 
 impl CandidateError {
@@ -46,6 +75,7 @@ impl CandidateError {
             message: message.into(),
             cause_code: None,
             stop_failures: None,
+            startup_logs: None,
         }
     }
 

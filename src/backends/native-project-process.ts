@@ -14,10 +14,11 @@ import {
   invokeNativeRuntime,
   NATIVE_EXIT_DRAIN_BOUND_MS,
   type NativeRuntimeSelection,
-  readNativeFailureCodes,
+  readNativeStartupFailure,
   rethrowNativeInputFailure,
   writeNativePrivateInput,
 } from "./native-runtime-client.ts";
+import type { NativeStartupLogTail } from "./native-startup-logs.ts";
 
 const RUN = /^[a-f0-9]{32}$/;
 const MAX_OUTPUT = 16 * 1024 * 1024;
@@ -38,6 +39,13 @@ type ProcessOptions = {
   readonly startupTimeoutMs: number;
   readonly signal?: AbortSignal;
   readonly onExitDiagnostic?: (diagnostic: NativeExitDiagnostic) => void;
+  /**
+   * Failed services' bounded output from a startup failure reply, before the
+   * failure is thrown. It may contain managed values: the callback must redact
+   * them before retaining or printing anything and must never persist it.
+   * Without a callback the output is discarded.
+   */
+  readonly onStartupLogs?: (logs: readonly NativeStartupLogTail[]) => void;
   /** Finite frontend hooks intercept the first stop; failed hooks retain the live owner. */
   readonly beforeStop?: () => Promise<boolean>;
   /** No-host frontend stop reuses this original foreground owner; no hook permit. */
@@ -339,7 +347,7 @@ async function serveGraphProcess(
       opts.exitDrainBoundMs ?? NATIVE_EXIT_DRAIN_BOUND_MS
     );
   });
-  const failureCodes = readNativeFailureCodes(child.stderr, drain.signal);
+  const failureCodes = readNativeStartupFailure(child.stderr, drain.signal);
   const failureCode = failureCodes.then((failure) => failure?.code);
   let ready = false;
   let canceled = false;
@@ -440,6 +448,7 @@ async function serveGraphProcess(
     });
     const code = await child.exited;
     const failure = await failureCode;
+    await reportStartupLogs(opts, ready, failureCodes);
     rethrowNativeInputFailure(inputFailure, {
       interrupted: timedOut || canceled,
       code,
@@ -482,6 +491,25 @@ async function serveGraphProcess(
       await requireGroupAbsent(child.pid);
     }
     await opts.onSettled?.();
+  }
+}
+
+/** Pass a failed startup's bounded output to the caller; ready owners report none. */
+async function reportStartupLogs(
+  opts: ProcessOptions,
+  ready: boolean,
+  failure: Promise<
+    { readonly startupLogs?: readonly NativeStartupLogTail[] } | undefined
+  >
+): Promise<void> {
+  const logs = (await failure)?.startupLogs;
+  if (ready || !logs) {
+    return;
+  }
+  try {
+    opts.onStartupLogs?.(logs);
+  } catch {
+    // Observation must never replace the startup result or cleanup authority.
   }
 }
 

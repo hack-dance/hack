@@ -1266,6 +1266,33 @@ exit observation before cleanup, including exit code zero. A successful
 no command, environment or application log values. Older bundles may refuse the
 new zero-exit evidence; use the owning bundle for diagnosis and retaining cleanup.
 
+Startup cleanup removes a failed service's container and its logs. Before that
+cleanup, the foreground owner reads a bounded tail of each failed service: the
+recorded startup failure first, then other failed services by name, at most three.
+Each tail holds Docker's last 64 lines of the service, with at most 4 KiB of
+whole lines per stream (stdout and stderr), so at most 8 KiB per service. A line
+is never cut; a single line over the bound is omitted and the report says lines
+were omitted. The tail travels only in the foreground failure reply. The runtime
+never writes it to the receipt, journal or any other file, so persisted failure
+evidence stays value-free.
+
+The frontend still holds the managed environment values it delivered. It redacts
+all of them, for every service, from the tail before printing it under the
+startup failure report, and it never saves the tail or the report:
+
+- Terminal escape sequences are removed first.
+- A value of four or more characters is replaced as `[REDACTED]` wherever it
+  occurs, even inside a longer word. Its JSON-escaped form and each line of a
+  multi-line value that is four or more characters long, with and without
+  surrounding whitespace, are replaced too.
+- A value of one to three characters is replaced only as a whole token: not next
+  to a letter, digit or underscore. Values like `1` or `on` therefore do not
+  shred unrelated output.
+- Other control characters except tab and newline are shown as U+FFFD.
+
+Redaction covers only managed values. Application output can still hold other
+sensitive data, such as values a service read from its own files.
+
 A Docker container can remain `created` with a nonzero error when its first start
 fails before a process runs. Retaining shutdown accepts this state only with
 verified ownership, no running PID, no pause/restart/dead state and no OOM flag.

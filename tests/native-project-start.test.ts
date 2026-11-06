@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import {
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -1156,6 +1157,73 @@ test("cancellation after successful listener discovery still prevents runtime ad
   ).rejects.toThrow();
   expect(runtimeAdmissions).toBe(0);
   expect(events).toEqual(["before", "cleanup"]);
+});
+
+async function filesUnder(path: string): Promise<string[]> {
+  const entries = await readdir(path, { withFileTypes: true, recursive: true });
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => join(entry.parentPath, entry.name));
+}
+
+test("failed services' output is printed with managed values redacted and never saved", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let selectedRun = "";
+  const saved: unknown[] = [];
+  opts.dependencies.save = async (request) => {
+    saved.push(request);
+  };
+  opts.dependencies.serve = async (request) => {
+    selectedRun = request.run;
+    request.onStartupLogs?.([
+      {
+        service: "web",
+        stdout: "listening",
+        stderr: "boot failed: rejected TOKEN=synthetic-secret",
+        truncated: false,
+      },
+    ]);
+    throw new ClosedCliError(
+      "Native graph startup was interrupted or failed (graph_startup_application_failed); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.invoke = async (request) =>
+    request.args[1] === "inspect"
+      ? stoppedGraph({
+          run: selectedRun,
+          owner: "c".repeat(32),
+          namespace: "b".repeat(64),
+          planId: "a".repeat(64),
+          effectiveEnvName: null,
+          profiles: [],
+          aws: null,
+        })
+      : invoke(request);
+  let message = "";
+  try {
+    await startNativeProject(opts);
+  } catch (error) {
+    expect(error).toBeInstanceOf(ClosedCliError);
+    message = (error as Error).message;
+  }
+  expect(message).toBe(
+    [
+      "Native graph startup was interrupted or failed (graph_startup_application_failed); inspect owned state before retrying.",
+      "Last output of failed services (at most 64 lines each; managed values redacted; not saved):",
+      "--- web stdout ---",
+      "listening",
+      "--- web stderr ---",
+      "boot failed: rejected TOKEN=[REDACTED]",
+    ].join("\n")
+  );
+  expect(events.at(-1)).toBe("cleanup");
+  expect(JSON.stringify(saved)).not.toContain("boot failed");
+  for (const file of await filesUnder(opts.scope.projectRoot)) {
+    const text = await readFile(file, "utf8");
+    expect(text).not.toContain("boot failed");
+    expect(text).not.toContain("synthetic-secret");
+  }
 });
 
 test("retained startup failure preserves its diagnostic and never removes the run mapping", async () => {

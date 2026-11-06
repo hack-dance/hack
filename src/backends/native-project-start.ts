@@ -71,6 +71,13 @@ import {
 } from "./native-project-interrupted-cleanup.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import {
+  ensuredPlatformAccepted,
+  type NativeEmulationPolicy,
+  nativeAmd64EmulationUpArgs,
+  nativeEmulationPolicy,
+  nativeEnsureImageArgs,
+} from "./native-project-platform.ts";
+import {
   checkNativeLoopbackPorts,
   nativeBridgeSocketCount,
   nativePortPublicationCount,
@@ -421,6 +428,8 @@ async function pinNativeProjectImages(opts: {
   readonly projectRoot: string;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
+  /** Opted-in services' platform policies; every other service resolves Linux arm64. */
+  readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
@@ -437,15 +446,17 @@ async function pinNativeProjectImages(opts: {
     if (IMAGE.test(image)) {
       continue;
     }
+    const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
     const ensured = await opts.invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
-      args: ["runtime", "ensure-image", "--reference", image, "--json"],
+      args: nativeEnsureImageArgs(image, policy),
     });
     if (
       !isRecord(ensured) ||
       typeof ensured.image_id !== "string" ||
-      !IMAGE.test(ensured.image_id)
+      !IMAGE.test(ensured.image_id) ||
+      !ensuredPlatformAccepted(ensured.platform, policy)
     ) {
       throw unconfirmed("the runtime image selection");
     }
@@ -1587,6 +1598,7 @@ export async function startNativeProject(opts: {
           ? allowedHosts.flatMap((host) => ["--allow-host", host])
           : ["--internet"]),
         ...preparedBaseArguments(opts.preparedBase),
+        ...nativeAmd64EmulationUpArgs(input.amd64Emulation),
         "--json",
       ],
       signal: controller.signal,
@@ -1633,6 +1645,7 @@ export async function startNativeProject(opts: {
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       originalSha256: input.originalSha256,
+      amd64Emulation: input.amd64Emulation,
       restore,
       invoke: deps.invoke,
     });
@@ -1642,6 +1655,7 @@ export async function startNativeProject(opts: {
       projectRoot: opts.scope.projectRoot,
       specs,
       retainedImages,
+      amd64Emulation: input.amd64Emulation,
       signal: controller.signal,
       invoke: deps.invoke,
     });

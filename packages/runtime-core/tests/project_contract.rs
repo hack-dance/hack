@@ -550,6 +550,64 @@ fn compose_capability_adjustments_are_reviewed_into_the_plan() {
     );
 }
 
+/// `x-hack-amd64-emulation` is a reviewed opt-in, not unexecuted extension metadata. Its
+/// policy (`prefer-native` or `amd64`) is recorded in the plan, so the two modes are distinct
+/// plans; it is absent otherwise, and it can never override a declared arm64 platform.
+#[test]
+fn amd64_emulation_opt_in_is_reviewed_and_never_overrides_declared_arm64() {
+    let plain = Fixture::new(BASIC).plan();
+    assert_eq!(plain.plan.services["web"].amd64_emulation, None);
+    let opted = Fixture::new(BASIC);
+    let mut plans = Vec::new();
+    for (mode, policy) in [
+        ("prefer-native", project::Amd64Emulation::PreferNative),
+        ("amd64", project::Amd64Emulation::Amd64),
+    ] {
+        fs::write(
+            opted.project.join("compose.yaml"),
+            format!("{BASIC}    platform: linux/amd64\n    x-hack-amd64-emulation: {mode}\n"),
+        )
+        .unwrap();
+        let report = opted.plan();
+        let service = &report.plan.services["web"];
+        assert_eq!(service.amd64_emulation, Some(policy));
+        assert_eq!(service.platform.as_deref(), Some("linux/amd64"));
+        assert_eq!(
+            serde_json::to_value(service).unwrap()["amd64_emulation"],
+            mode
+        );
+        assert!(
+            !report
+                .plan
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "compose_extension_metadata")
+        );
+        plans.push(report.plan_id);
+    }
+    // A changed policy is a changed reviewed plan of the same project.
+    assert_ne!(plans[0], plans[1]);
+    // Absent serializes nothing, so existing plan identities are unchanged.
+    let service = serde_json::to_value(&plain.plan.services["web"]).unwrap();
+    assert!(service.get("amd64_emulation").is_none());
+    for platform in ["linux/arm64", "linux/arm64/v8"] {
+        let conflicting = Fixture::new(&format!(
+            "{BASIC}    platform: {platform}\n    x-hack-amd64-emulation: amd64\n"
+        ));
+        assert_eq!(
+            project::plan(&conflicting.candidate, conflicting.options())
+                .unwrap_err()
+                .code,
+            "unsupported_platform"
+        );
+    }
+    // Only the two policies are reviewed values.
+    for value in ["yes", "true", "false", "native"] {
+        let invalid = Fixture::new(&format!("{BASIC}    x-hack-amd64-emulation: {value}\n"));
+        assert!(project::plan(&invalid.candidate, invalid.options()).is_err());
+    }
+}
+
 /// The candidate's own label review rejects Hack's ownership namespaces (the
 /// list `HACK_OWNERSHIP_LABEL_NAMESPACES` declares in TypeScript), so a
 /// project cannot carry ownership evidence even when the TypeScript classifier

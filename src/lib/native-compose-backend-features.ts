@@ -1,5 +1,9 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
+import {
+  type NativePlatformMode,
+  selectNativePlatformModes,
+} from "../backends/native-project-platform.ts";
 import { readNativeSelection } from "../backends/native-project-selection.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
@@ -59,8 +63,12 @@ function reservedNamespaceList(): string {
   return `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`;
 }
 
-/** The native VM runs Linux arm64; registry admission selects only this platform. */
+/**
+ * The native VM runs Linux arm64; registry admission selects only this platform unless
+ * a service opts in to `linux/amd64` emulation through the native adaptation.
+ */
 const NATIVE_PLATFORMS = new Set(["linux/arm64", "linux/arm64/v8"]);
+const EMULATED_PLATFORM = "linux/amd64";
 
 /** The same bound native image-project input applies to the Compose file. */
 const COMPOSE_LIMIT = 256 * 1024;
@@ -140,10 +148,18 @@ function isBasicBuild(service: Record<string, unknown>): boolean {
  * Compose takes an absent or `null` `platform` as unset, and native review
  * does the same, so only a declared value other than the native platform is
  * foreign. Environment defaults such as `DOCKER_DEFAULT_PLATFORM` are not read.
+ * `linux/amd64` is not foreign for a service the native adaptation opted in to
+ * emulation; every other value stays foreign.
  */
-function isForeignPlatform(service: Record<string, unknown>): boolean {
+function isForeignPlatform(
+  service: Record<string, unknown>,
+  emulated: boolean
+): boolean {
   const platform = service.platform;
   if (platform === undefined || platform === null) {
+    return false;
+  }
+  if (emulated && platform === EMULATED_PLATFORM) {
     return false;
   }
   return !(typeof platform === "string" && NATIVE_PLATFORMS.has(platform));
@@ -186,6 +202,11 @@ export function findComposeBackendFeatures(
      * {@link readAdaptedIsolatedNetworks}.
      */
     readonly isolatedNetworks?: ReadonlySet<string>;
+    /**
+     * Service names a valid native adaptation opts in to `linux/amd64`
+     * emulation; see {@link readAdaptedEmulatedServices}.
+     */
+    readonly emulatedServices?: ReadonlySet<string>;
   }
 ): ComposeBackendFeature[] {
   if (!isRecord(compose)) {
@@ -220,7 +241,16 @@ export function findComposeBackendFeatures(
   if (services.some(isUnsupportedBuild)) {
     found.add("unsupported_build");
   }
-  if (services.some(isForeignPlatform)) {
+  const emulated = opts?.emulatedServices ?? new Set<string>();
+  const named = isRecord(compose.services)
+    ? Object.entries(compose.services)
+    : [];
+  if (
+    named.some(
+      ([name, service]) =>
+        isRecord(service) && isForeignPlatform(service, emulated.has(name))
+    )
+  ) {
     found.add("foreign_platform");
   }
   return COMPOSE_BACKEND_FEATURES.filter((feature) => found.has(feature));
@@ -347,12 +377,46 @@ async function classifyAdapted(
   adaptationFile: string | undefined
 ): Promise<ComposeBackendFeature[]> {
   const features = findComposeBackendFeatures(compose);
-  if (adaptationFile === undefined || !features.includes("external_network")) {
+  const network = features.includes("external_network");
+  const platform = features.includes("foreign_platform");
+  if (adaptationFile === undefined || !(network || platform)) {
     return features;
   }
+  const services =
+    isRecord(compose) && isRecord(compose.services)
+      ? Object.keys(compose.services)
+      : [];
   return findComposeBackendFeatures(compose, {
-    isolatedNetworks: await readAdaptedIsolatedNetworks(adaptationFile),
+    isolatedNetworks: network
+      ? await readAdaptedIsolatedNetworks(adaptationFile)
+      : undefined,
+    emulatedServices: platform
+      ? await readAdaptedEmulatedServices(adaptationFile, services)
+      : undefined,
   });
+}
+
+/**
+ * Reads the service names a `HACK_NATIVE_ADAPTATION` selection opts in to
+ * `linux/amd64` emulation (`amd64Emulation`, with mode `prefer-native` or
+ * `amd64`). The same closed `E_CONFIG_INVALID` refusal applies as native start
+ * gives, including for a service name the Compose file does not declare.
+ */
+export async function readAdaptedEmulatedServices(
+  adaptationFile: string,
+  services: readonly string[]
+): Promise<ReadonlySet<string>> {
+  const selection = await readNativeSelection(adaptationFile);
+  if (!isRecord(selection) || selection.version !== 1) {
+    throw adaptationRefused();
+  }
+  const modes = selectNativePlatformModes({
+    selection: selection.amd64Emulation,
+    services,
+  });
+  return new Set(
+    [...modes].filter(([, mode]) => mode !== "native").map(([name]) => name)
+  );
 }
 
 /**
@@ -362,10 +426,10 @@ async function classifyAdapted(
  * existing native input refusal still reports it.
  *
  * `adaptationFile` is the `HACK_NATIVE_ADAPTATION` path native start applies.
- * It is read only when the unadapted file has an external network, so a
- * project without one keeps its existing order of refusals. An invalid
- * adaptation refuses with `E_CONFIG_INVALID` (see
- * {@link readAdaptedIsolatedNetworks}).
+ * It is read only when the unadapted file has an external network or a
+ * foreign platform, so a project without either keeps its existing order of
+ * refusals. An invalid adaptation refuses with `E_CONFIG_INVALID` (see
+ * {@link readAdaptedIsolatedNetworks} and {@link readAdaptedEmulatedServices}).
  */
 export async function readComposeBackendFeatures(
   composeFile: string,
@@ -373,6 +437,34 @@ export async function readComposeBackendFeatures(
 ): Promise<ComposeBackendFeature[]> {
   const compose = await readNativeComposeDocument(composeFile);
   return await classifyAdapted(compose, opts?.adaptationFile);
+}
+
+/**
+ * Each declared service's native platform mode after the `HACK_NATIVE_ADAPTATION`
+ * selection, for doctor reporting. Read-only. Without a selection every service is
+ * `native`; an unreadable Compose file has no services. An invalid selection refuses
+ * with the same `E_CONFIG_INVALID` native start gives.
+ */
+export async function readNativePlatformModes(opts: {
+  readonly composeFile: string;
+  readonly adaptationFile?: string;
+}): Promise<ReadonlyMap<string, NativePlatformMode>> {
+  const compose = await readNativeComposeDocument(opts.composeFile);
+  const services =
+    isRecord(compose) && isRecord(compose.services)
+      ? Object.keys(compose.services)
+      : [];
+  if (opts.adaptationFile === undefined) {
+    return selectNativePlatformModes({ selection: undefined, services });
+  }
+  const selection = await readNativeSelection(opts.adaptationFile);
+  if (!isRecord(selection) || selection.version !== 1) {
+    throw adaptationRefused();
+  }
+  return selectNativePlatformModes({
+    selection: selection.amd64Emulation,
+    services,
+  });
 }
 
 /** Value-free phrase list, such as "a and b" or "a, b and c". */

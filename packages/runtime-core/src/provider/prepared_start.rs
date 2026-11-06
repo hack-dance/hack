@@ -76,6 +76,9 @@ pub struct Start<'a> {
     pub retained: Option<(&'a str, &'a str)>,
     /// Prepared-base request for a fresh pool; `None` keeps the stock templates.
     pub prepared: Option<&'a Request>,
+    /// Require Rosetta 2 x86_64 translation (`runtime up --amd64-emulation`). A pool that
+    /// already has it keeps it either way.
+    pub amd64_emulation: bool,
 }
 
 /// Where a pool's first-start templates come from.

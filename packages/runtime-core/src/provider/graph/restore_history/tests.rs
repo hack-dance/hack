@@ -33,6 +33,7 @@ fn receipt(index: usize) -> Receipt {
                 id: Some(format!("{index:064x}")),
                 image: None,
                 phase: "absent".into(),
+                amd64_emulation: None,
             },
         )]),
     }

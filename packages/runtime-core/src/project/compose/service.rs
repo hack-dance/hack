@@ -704,6 +704,7 @@ pub(super) fn compile(
                 "working_dir",
                 "user",
                 "platform",
+                "x-hack-amd64-emulation",
                 "labels",
                 "logging",
                 "stop_grace_period",
@@ -923,6 +924,29 @@ pub(super) fn compile(
                 "Only Linux arm64/amd64 image platform declarations are modeled.",
             ));
         }
+        let amd64_emulation = match m.get("x-hack-amd64-emulation") {
+            None => None,
+            Some(value) => Some(match value.as_str() {
+                Some("prefer-native") => Amd64Emulation::PreferNative,
+                Some("amd64") => Amd64Emulation::Amd64,
+                _ => {
+                    return Err(problem(
+                        "invalid_compose_field",
+                        "x-hack-amd64-emulation must be prefer-native or amd64.",
+                    ));
+                }
+            }),
+        };
+        if amd64_emulation.is_some()
+            && platform
+                .as_deref()
+                .is_some_and(|v| ["linux/arm64", "linux/arm64/v8"].contains(&v))
+        {
+            return Err(problem(
+                "unsupported_platform",
+                "x-hack-amd64-emulation cannot apply to a service that declares a Linux arm64 platform.",
+            ));
+        }
         let stdin_open = boolean(m.get("stdin_open"), false)?;
         let tty = boolean(m.get("tty"), false)?;
         if tty {
@@ -1028,7 +1052,7 @@ pub(super) fn compile(
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,
-            platform,labels,routing,dependency_cache,one_shot,inert_route_labels,interactive,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,capabilities,
+            platform,amd64_emulation,labels,routing,dependency_cache,one_shot,inert_route_labels,interactive,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,capabilities,
         });
     }
     Ok(result)

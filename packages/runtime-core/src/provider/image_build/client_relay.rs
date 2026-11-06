@@ -188,20 +188,28 @@ fn failure(message: &str) -> CandidateError {
     CandidateError::new("native_build_client", message)
 }
 
-/// A new mode-0700 directory with a short path, owned by this user.
-fn private_directory() -> Result<PathBuf, CandidateError> {
-    let parent = if cfg!(target_os = "macos") {
+const DIRECTORY_PREFIX: &str = "hkb-";
+
+fn temporary_root() -> &'static Path {
+    if cfg!(target_os = "macos") {
         Path::new("/private/tmp")
     } else {
         Path::new("/tmp")
-    };
+    }
+}
+
+/// A new mode-0700 directory with a short path, owned by this user. Its name carries
+/// this process's PID, so a later relay can remove what a killed process left behind.
+fn private_directory() -> Result<PathBuf, CandidateError> {
+    let parent = temporary_root();
+    remove_abandoned(parent);
     for _ in 0..8 {
         let mut bytes = [0_u8; 6];
         File::open("/dev/urandom")
             .and_then(|mut random| random.read_exact(&mut bytes))
             .map_err(|_| failure("Cannot choose a private build client socket."))?;
         let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        let directory = parent.join(format!("hkb-{name}"));
+        let directory = parent.join(format!("{DIRECTORY_PREFIX}{}-{name}", std::process::id()));
         match fs::DirBuilder::new().mode(0o700).create(&directory) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
@@ -221,6 +229,49 @@ fn private_directory() -> Result<PathBuf, CandidateError> {
         return Ok(directory);
     }
     Err(failure("Cannot create a private build client socket."))
+}
+
+/// Remove relay directories whose creating process is gone (it was killed before it
+/// could clean up). Only a mode-0700 directory owned by this user, named for a PID that
+/// no longer exists and holding nothing but the relay socket, is removed; anything else
+/// is left alone. A reused PID only keeps a stale directory longer.
+fn remove_abandoned(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    // SAFETY: geteuid has no preconditions.
+    let user = unsafe { libc::geteuid() };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(DIRECTORY_PREFIX))
+            .and_then(|rest| rest.split_once('-'))
+            .and_then(|(pid, _)| pid.parse::<libc::pid_t>().ok())
+            .filter(|pid| *pid > 0)
+        else {
+            continue;
+        };
+        // SAFETY: signal 0 only checks for existence; no signal is delivered.
+        let gone = unsafe { libc::kill(pid, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        let directory = entry.path();
+        let private = fs::symlink_metadata(&directory).is_ok_and(|metadata| {
+            metadata.is_dir() && metadata.uid() == user && metadata.mode() & 0o777 == 0o700
+        });
+        if !gone || !private {
+            continue;
+        }
+        let socket = directory.join(SOCKET_NAME);
+        if fs::symlink_metadata(&socket).is_ok_and(|metadata| {
+            use std::os::unix::fs::FileTypeExt;
+            metadata.file_type().is_socket() && metadata.uid() == user
+        }) {
+            let _ = fs::remove_file(&socket);
+        }
+        // Fails, and keeps the directory, unless it is now empty.
+        let _ = fs::remove_dir(&directory);
+    }
 }
 
 fn accept(listener: &UnixListener, provider: &Path, shared: &Arc<Shared>) {

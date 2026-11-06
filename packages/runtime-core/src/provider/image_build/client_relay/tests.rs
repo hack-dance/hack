@@ -152,3 +152,39 @@ fn the_listening_socket_is_short_private_and_removed_when_the_relay_finishes() {
     assert_eq!(relay.finish(FINISH_GRACE), RelayReport::default());
     assert!(!directory.exists());
 }
+
+#[test]
+fn a_relay_left_by_a_killed_process_is_removed_and_a_live_one_is_kept() {
+    // A process that has exited: its PID names the abandoned directory.
+    let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+    let dead = exited.id();
+    exited.wait().unwrap();
+    let mut running = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let make = |pid: u32| {
+        let directory = temporary_root().join(format!("{DIRECTORY_PREFIX}{pid}-0123456789ab"));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        drop(UnixListener::bind(directory.join(SOCKET_NAME)).unwrap());
+        directory
+    };
+    let abandoned = make(dead);
+    let live = make(running.id());
+    // A directory holding anything besides the socket is never removed.
+    let kept = make(dead + 1_000_000);
+    fs::write(kept.join("other"), "x").unwrap();
+    let relay = ClientRelay::start(Path::new("/nonexistent/docker.sock")).unwrap();
+    assert!(!abandoned.exists());
+    assert!(live.join(SOCKET_NAME).exists());
+    assert!(kept.join("other").exists());
+    relay.finish(FINISH_GRACE);
+    running.kill().unwrap();
+    running.wait().unwrap();
+    for directory in [live, kept] {
+        let _ = fs::remove_dir_all(directory);
+    }
+}

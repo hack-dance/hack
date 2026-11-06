@@ -148,6 +148,12 @@ pub(super) fn prepare_delivery(
                 "Dependency cache initializers require successful completion readiness.",
             ));
         }
+        if service.one_shot && graph.services[name].ready != Condition::Completed {
+            return Err(error(
+                "graph_one_shot_readiness",
+                "One-shot services require successful completion readiness.",
+            ));
+        }
     }
     if graph.services.len() > MAX_SERVICES {
         return Err(error(
@@ -188,6 +194,7 @@ pub(super) fn prepare_delivery(
             || !service.ports.is_empty()
             || service.labels.keys().any(|key| {
                 !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
+                    && !(service.one_shot && key == "hack.service.one-shot")
                     && !(service.dependency_cache.is_some()
                         && matches!(
                             key.as_str(),

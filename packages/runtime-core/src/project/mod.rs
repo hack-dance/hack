@@ -278,6 +278,11 @@ pub struct ServicePlan {
     pub routing: Option<RoutingPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_cache: Option<DependencyCachePlan>,
+    /// The service declared Hack's exact `hack.service.one-shot: "true"` role
+    /// marker: it must finish successfully, so its readiness goal is completion.
+    /// Omitted when false, so plans without the marker keep their identity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub one_shot: bool,
     pub logging: Option<LoggingPlan>,
     pub stop_grace_period_nanos: Option<u64>,
     pub stop_signal: Option<String>,

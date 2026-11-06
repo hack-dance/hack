@@ -620,6 +620,102 @@ fn hack_ownership_label_namespaces_block_enrollment() {
     assert!(fixture.plan().plan.enrollment_compatible);
 }
 
+/// Hack's documented one-shot marker (`hack.service.one-shot: "true"`, the
+/// label `hack config import` maps to a native job) is a completion role, not
+/// an ownership or router label. Only that exact key and literal value are
+/// consumed; ownership namespaces next to it and every other `hack.*` key stay
+/// refused, so the marker never widens the `hack.*` reservation.
+#[test]
+fn hack_one_shot_marker_is_a_completion_role_not_an_owner_label() {
+    const INIT: &str = "services:\n  init:\n    image: alpine:3.20\n    command: [\"true\"]\n";
+    let owner_label = |fixture: &Fixture| {
+        fixture
+            .codes()
+            .iter()
+            .any(|code| code == "external_route_or_owner_label")
+    };
+    for labels in [
+        "    labels: {hack.service.one-shot: \"true\"}\n",
+        "    labels: ['hack.service.one-shot=true']\n",
+    ] {
+        let fixture = Fixture::new(&format!("{INIT}{labels}"));
+        let plan = fixture.plan();
+        assert!(!owner_label(&fixture), "{labels}");
+        assert!(plan.plan.enrollment_compatible, "{labels}");
+        assert!(plan.plan.services["init"].one_shot, "{labels}");
+    }
+    // Without the marker the plan carries no one-shot field, so existing plan
+    // identities are unchanged.
+    let plain = Fixture::new(INIT);
+    assert!(!plain.plan().plan.services["init"].one_shot);
+    assert!(
+        !serde_json::to_string(&plain.plan())
+            .unwrap()
+            .contains("one_shot")
+    );
+    // Ownership namespaces next to the marker are never exempt.
+    for key in [
+        "com.docker.compose.project",
+        "io.hack-local.owner",
+        "io.hack.native-config.owner",
+        "io.hack.native-file.token",
+        "io.hack.storage-witness.carrier",
+    ] {
+        let fixture = Fixture::new(&format!(
+            "{INIT}    labels:\n      hack.service.one-shot: 'true'\n      '{key}': owner-canary\n"
+        ));
+        let plan = fixture.plan();
+        assert!(owner_label(&fixture), "{key}");
+        assert!(!plan.plan.enrollment_compatible, "{key}");
+        assert!(
+            !serde_json::to_string(&plan)
+                .unwrap()
+                .contains("owner-canary")
+        );
+    }
+    // Any other `hack.*` key, including siblings of the marker, keeps the
+    // ownership refusal: only the exact marker key is recognized.
+    for key in [
+        "hack.x",
+        "hack.service.other",
+        "hack.service.one-shot.extra",
+        "hack.service",
+    ] {
+        let fixture = Fixture::new(&format!("{INIT}    labels: {{'{key}': 'true'}}\n"));
+        assert!(owner_label(&fixture), "{key}");
+        assert!(!fixture.plan().plan.services["init"].one_shot, "{key}");
+    }
+    // The marker only accepts the literal string `true`.
+    for labels in [
+        "    labels: {hack.service.one-shot: 'false'}\n",
+        "    labels: {hack.service.one-shot: true}\n",
+        "    labels: ['hack.service.one-shot']\n",
+    ] {
+        let fixture = Fixture::new(&format!("{INIT}{labels}"));
+        let plan = fixture.plan();
+        assert!(
+            fixture.codes().contains(&"invalid_one_shot_label".into()),
+            "{labels}"
+        );
+        assert!(!plan.plan.services["init"].one_shot, "{labels}");
+        assert!(!plan.plan.enrollment_compatible, "{labels}");
+    }
+    // A one-shot must be able to finish and cannot serve a route.
+    let restarting = Fixture::new(&format!(
+        "{INIT}    restart: always\n    labels: {{hack.service.one-shot: 'true'}}\n"
+    ));
+    assert!(
+        restarting
+            .codes()
+            .contains(&"nonterminating_one_shot".into())
+    );
+    let routed = Fixture::new(&format!(
+        "{INIT}    labels:\n      hack.service.one-shot: 'true'\n      caddy: init.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n"
+    ));
+    assert!(routed.codes().contains(&"one_shot_route_conflict".into()));
+    assert!(!routed.plan().plan.enrollment_compatible);
+}
+
 #[test]
 fn explicit_external_network_replacement_is_owned_internal_and_review_bound() {
     let original =

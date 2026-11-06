@@ -395,13 +395,24 @@ async function pinNativeProjectImages(opts: {
     spec.image = ensured.image_id;
   }
 }
+/** Services whose review carries Hack's exact one-shot marker as `one_shot: true`. */
+function reviewedOneShots(
+  reviewed: Readonly<Record<string, unknown>>
+): string[] {
+  return Object.entries(reviewed)
+    .filter(([, service]) => isRecord(service) && service.one_shot === true)
+    .map(([name]) => name);
+}
+
 /**
  * Build `--ready` goals for exactly the services the reviewed plan marks active.
  *
  * Compose services outside the selected profiles stay in the normalized specs (they are
  * still reviewed and pinned), but the runtime does not schedule them and refuses readiness
  * goals for inactive or unknown services. Dependency edges declared by inactive services
- * are ignored so they cannot raise an active service's readiness goal.
+ * are ignored so they cannot raise an active service's readiness goal. A service the
+ * review marks `one_shot` (Hack's exact `hack.service.one-shot: "true"` label) must
+ * finish successfully, so its goal is completion, as for dependency cache initializers.
  */
 export function nativeReadinessArgs(opts: {
   readonly specs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
@@ -440,7 +451,7 @@ export function nativeReadinessArgs(opts: {
       }
     }
   }
-  for (const name of opts.initializers) {
+  for (const name of [...reviewedOneShots(reviewed), ...opts.initializers]) {
     ready[name] = "completed";
   }
   for (const name of opts.routed) {

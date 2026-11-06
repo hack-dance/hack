@@ -243,9 +243,9 @@ With it:
   build keys (`secrets`, `ssh`, `cache_from`, `platforms`, `network` and the rest),
   remote contexts and `image` together with `build` refuse. Values are never shown.
 - After the runtime is up, each distinct build runs once with
-  `runtime build-image` (below), and its output streams to your terminal. Every
-  service with that build is then pinned to the built content ID, so review, readiness
-  and restore treat it like an image service.
+  `runtime build-image` (below), and its filtered output streams to your terminal.
+  Every service with that build is then pinned to the built content ID, so review,
+  readiness and restore treat it like an image service.
 - An existing image for the same build inputs is reused without building. Set
   `HACK_NATIVE_REBUILD=1` to build again; base-image tags then resolve again too.
   Edits to other files in the context do not trigger a rebuild, as with Compose.

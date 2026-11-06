@@ -290,6 +290,9 @@ async function pinRestartImages(opts: {
     const retainedImage = opts.retainedImages.get(name);
     if (retainedImage) {
       spec.image = retainedImage;
+      // Startup pins a built image the same way: the content ID replaces the build
+      // declaration, so the restart review matches the saved image-only plan.
+      Reflect.deleteProperty(spec, "build");
       continue;
     }
     if (spec.image === undefined && spec.build !== undefined) {

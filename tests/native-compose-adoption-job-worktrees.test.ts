@@ -263,6 +263,50 @@ test("ordinary capture refuses a still-present captured group even after leader 
   }
 });
 
+test("a captured group still being reaped after both EOFs settles once absent within the settlement budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completed-job-reaping-lag-"));
+  const captures = join(root, "capture");
+  const originalKill = process.kill.bind(process);
+  const groups: number[] = [];
+  let lagging = 3;
+  const signals = spyOn(process, "kill").mockImplementation((pid, signal) => {
+    // Pipe EOF precedes reaping of a reparented descendant: model a few
+    // present-group answers before the real (absent) probe result.
+    if (pid < 0 && signal === 0 && lagging > 0) {
+      lagging -= 1;
+      return true;
+    }
+    if (pid < 0 && signal !== 0) {
+      groups.push(pid);
+    }
+    return originalKill(pid, signal);
+  });
+  let unconfirmed = false;
+  try {
+    const result = await captureCompletedJobFixtureCommand({
+      argv: [process.execPath, "-e", "process.exit(0)"],
+      cwd: root,
+      env: {},
+      captures,
+      timeoutMs: 2000,
+      onUnconfirmed: () => {
+        unconfirmed = true;
+      },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(lagging).toBe(0);
+    const receipt = JSON.parse(
+      await Bun.file(`${captures}.settlement.json`).text()
+    );
+    expect(receipt.capturedGroupAbsent).toBe(true);
+    expect(groups).toEqual([]);
+    expect(unconfirmed).toBe(false);
+  } finally {
+    signals.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a delayed capture write cannot extend settlement or release teardown after late completion", async () => {
   const root = await mkdtemp(join(tmpdir(), "completed-job-delayed-write-"));
   const captures = join(root, "capture");

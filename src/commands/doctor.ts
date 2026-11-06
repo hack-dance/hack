@@ -7,6 +7,7 @@ import {
   checkLegacyProjectAgentArtifacts,
   checkLegacyUserAgentArtifacts,
 } from "../agents/legacy-artifacts.ts";
+import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import { runNativeProjectCleanupCommand } from "../backends/native-project-cleanup-command.ts";
 import {
   parseNativeRunMappingRecoveryOptions,
@@ -2945,10 +2946,14 @@ async function checkComposeBackendFeatures(opts: {
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
     };
   }
+  // The same build classification native up applies under HACK_NATIVE_BUILDS.
+  const buildsEnabled = nativeBuildsEnabled();
   return composeBackendCheckResult({
     backend: opts.backend,
+    buildsEnabled,
     features: await readComposeBackendFeatures(ctx.composeFile, {
       adaptationFile: opts.adaptationFile,
+      buildsEnabled,
     }),
   });
 }

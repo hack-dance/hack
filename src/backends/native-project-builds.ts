@@ -25,7 +25,18 @@ const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 const BUILD_KEY = /^[a-f0-9]{64}$/;
 const ARGUMENT = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const TARGET = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
-const BUILD_KEYS = new Set(["context", "dockerfile", "target", "args"]);
+/**
+ * The Compose `build` fields native builds implement. The Compose-backend feature
+ * gate admits exactly these fields when builds are enabled, so a build it lets
+ * through reaches this module's own admission and secret check.
+ */
+export const NATIVE_BUILD_FIELDS = [
+  "context",
+  "dockerfile",
+  "target",
+  "args",
+] as const;
+const BUILD_KEYS: ReadonlySet<string> = new Set(NATIVE_BUILD_FIELDS);
 const MAX_ARGS = 64;
 /** The runtime's own budget is 30 minutes; the client waits a little longer. */
 const BUILD_TIMEOUT_SECONDS = 30 * 60;
@@ -57,36 +68,48 @@ export interface NativeBuildRequest {
   readonly args: Readonly<Record<string, string>>;
 }
 
-/** Fixed refusal for a `build:` service while native builds are not enabled. */
-export const NATIVE_BUILDS_DISABLED_REFUSAL =
-  "Native foreground up builds Compose build services only with HACK_NATIVE_BUILDS=1; set it to build them in the native runtime. No hook, VM or build was started.";
+/** The refusal for the first `build:` service while native builds are not enabled. */
+export function nativeBuildsDisabledRefusal(service: string): string {
+  return `Native foreground up cannot build service ${service}: it builds Compose build services only with HACK_NATIVE_BUILDS=1; set it to build them in the native runtime. No hook, VM or build was started.`;
+}
 
-function refused(detail: string): HackCliError {
+/** "service a", or "services a and b", for build refusals. */
+function serviceList(services: readonly string[]): string {
+  if (services.length <= 1) {
+    return `service ${services[0] ?? ""}`;
+  }
+  return `services ${services.slice(0, -1).join(", ")} and ${services.at(-1)}`;
+}
+
+/** The admission refusal for one service. Authored values are never included. */
+function refused(service: string, detail: string): HackCliError {
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: `Native foreground up cannot build this service: ${detail} Values were omitted; no hook, VM or build was started.`,
+    message: `Native foreground up cannot build service ${service}: ${detail} Values were omitted; no hook, VM or build was started.`,
   });
 }
 
-function literal(value: unknown, what: string): string {
+function literal(service: string, value: unknown, what: string): string {
   if (typeof value !== "string" || value.length === 0 || value.includes("$")) {
     throw refused(
+      service,
       `${what} must be a literal non-empty string without Compose interpolation.`
     );
   }
   return value;
 }
 
-function argumentEntries(value: unknown): [string, unknown][] {
+function argumentEntries(service: string, value: unknown): [string, unknown][] {
   if (isRecord(value)) {
     return Object.entries(value);
   }
   if (!Array.isArray(value)) {
-    throw refused("build args must be a mapping or a list.");
+    throw refused(service, "build args must be a mapping or a list.");
   }
   return value.map((item: unknown): [string, unknown] => {
     if (typeof item !== "string" || !item.includes("=")) {
       throw refused(
+        service,
         "list-form build args must be KEY=VALUE literals; inheriting a host variable is not supported."
       );
     }
@@ -95,25 +118,29 @@ function argumentEntries(value: unknown): [string, unknown][] {
   });
 }
 
-function buildArguments(value: unknown): Record<string, string> {
+function buildArguments(
+  service: string,
+  value: unknown
+): Record<string, string> {
   if (value === undefined) {
     return {};
   }
-  const entries = argumentEntries(value);
+  const entries = argumentEntries(service, value);
   if (entries.length > MAX_ARGS) {
-    throw refused("a native build accepts at most 64 build args.");
+    throw refused(service, "a native build accepts at most 64 build args.");
   }
   // A null prototype keeps every admitted name an own property, `__proto__` included.
   const result: Record<string, string> = Object.create(null);
   for (const [name, raw] of entries) {
     if (!ARGUMENT.test(name) || Object.hasOwn(result, name)) {
-      throw refused("build arg names must be unique identifiers.");
+      throw refused(service, "build arg names must be unique identifiers.");
     }
     const text =
       typeof raw === "number" && Number.isFinite(raw) ? String(raw) : raw;
     if (typeof text !== "string" || text.includes("$")) {
       // Env-derived values would be baked into image history.
       throw refused(
+        service,
         "build arg values must be literal strings or numbers; interpolation and null values are not supported."
       );
     }
@@ -123,41 +150,42 @@ function buildArguments(value: unknown): Record<string, string> {
 }
 
 /** The declared build fields with Compose defaults, before path checks. */
-function buildFields(build: unknown): NativeBuildRequest {
+function buildFields(service: string, build: unknown): NativeBuildRequest {
   if (typeof build === "string") {
     return {
-      context: literal(build, "the build context"),
+      context: literal(service, build, "the build context"),
       dockerfile: "Dockerfile",
       target: null,
       args: {},
     };
   }
   if (!isRecord(build)) {
-    throw refused("build must be a context path or a mapping.");
+    throw refused(service, "build must be a context path or a mapping.");
   }
   if (Object.keys(build).some((key) => !BUILD_KEYS.has(key))) {
     throw refused(
+      service,
       "only build context, dockerfile, target and literal args are supported."
     );
   }
   const target =
     build.target === undefined
       ? null
-      : literal(build.target, "the build target");
+      : literal(service, build.target, "the build target");
   if (target !== null && !TARGET.test(target)) {
-    throw refused("the build target must be a stage name.");
+    throw refused(service, "the build target must be a stage name.");
   }
   return {
     context:
       build.context === undefined
         ? "."
-        : literal(build.context, "the build context"),
+        : literal(service, build.context, "the build context"),
     dockerfile:
       build.dockerfile === undefined
         ? "Dockerfile"
-        : literal(build.dockerfile, "the Dockerfile path"),
+        : literal(service, build.dockerfile, "the Dockerfile path"),
     target,
-    args: buildArguments(build.args),
+    args: buildArguments(service, build.args),
   };
 }
 
@@ -168,6 +196,8 @@ function buildFields(build: unknown): NativeBuildRequest {
  * runtime resolves it again without following symlinks.
  */
 export function admitNativeProjectBuild(opts: {
+  /** The Compose service name; every refusal names it. */
+  readonly name: string;
   readonly service: Readonly<Record<string, unknown>>;
   readonly projectRoot: string;
   readonly composeFile: string;
@@ -176,21 +206,25 @@ export function admitNativeProjectBuild(opts: {
   if (build === undefined) {
     return;
   }
+  const name = opts.name;
   if (Object.hasOwn(opts.service, "image")) {
-    throw refused("a service may not declare both image and build.");
+    throw refused(name, "a service may not declare both image and build.");
   }
-  const { context, dockerfile, target, args } = buildFields(build);
+  const { context, dockerfile, target, args } = buildFields(name, build);
   if (context.includes("://") || context.startsWith("git@")) {
-    throw refused("remote build contexts are not supported.");
+    throw refused(name, "remote build contexts are not supported.");
   }
   if (isAbsolute(dockerfile)) {
-    throw refused("the Dockerfile must be relative to the build context.");
+    throw refused(
+      name,
+      "the Dockerfile must be relative to the build context."
+    );
   }
   const absolute = resolve(dirname(opts.composeFile), context);
   const root = resolve(opts.projectRoot);
   const inside = relative(root, absolute);
   if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
-    throw refused("the build context must be inside the project.");
+    throw refused(name, "the build context must be inside the project.");
   }
   return { context: inside === "" ? "." : inside, dockerfile, target, args };
 }
@@ -209,14 +243,14 @@ export function admitNativeProjectBuilds(opts: {
 }): ReadonlyMap<string, NativeBuildRequest> {
   const builds = new Map<string, NativeBuildRequest>();
   for (const [name, service] of Object.entries(opts.services)) {
-    const request = admitNativeProjectBuild({ ...opts, service });
+    const request = admitNativeProjectBuild({ ...opts, name, service });
     if (request === undefined) {
       continue;
     }
     if (!opts.enabled) {
       throw new HackCliError({
         code: "E_NATIVE_PROJECT_UNSUPPORTED",
-        message: NATIVE_BUILDS_DISABLED_REFUSAL,
+        message: nativeBuildsDisabledRefusal(name),
       });
     }
     builds.set(name, request);
@@ -461,7 +495,7 @@ export function refuseManagedSecretBuildArguments(opts: {
       if (secrets.has(value)) {
         throw new HackCliError({
           code: "E_NATIVE_PROJECT_UNSUPPORTED",
-          message: `Native foreground up cannot build ${service}: build arg ${name} equals a hack env secret value. Build args are not secrets (images record them); pass secrets with BuildKit build secrets instead, which native builds do not support yet. Values were omitted; no hook, VM or build was started.`,
+          message: `Native foreground up cannot build service ${service}: build arg ${name} equals a hack env secret value. Build args are not secrets (images record them); pass secrets with BuildKit build secrets instead, which native builds do not support yet. Values were omitted; no hook, VM or build was started.`,
         });
       }
     }
@@ -591,6 +625,8 @@ async function runPendingBuilds(opts: {
         cwd: opts.projectRoot,
         requestFile,
         signal: opts.signal,
+      }).catch((error: unknown) => {
+        throw nameBuildFailure(services, error);
       });
       // The request carries argument values; remove it as soon as it is consumed.
       await rm(requestFile, { force: true });
@@ -604,6 +640,58 @@ async function runPendingBuilds(opts: {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+/**
+ * Runtime refusal codes from the native build source policy: what the runtime
+ * accepts as build input and as the built image, each with what to change. The
+ * runtime checks them before or right after the build; they are not failures of
+ * the build itself.
+ */
+const BUILD_SOURCE_POLICY: Readonly<Record<string, string>> = {
+  native_build_source:
+    "Keep the build context and Dockerfile inside the project as regular files reached without symlinks.",
+  native_build_dockerfile: "Change the Dockerfile line it names.",
+  native_build_base_image:
+    "Use public Docker Hub images in the Dockerfile's FROM and COPY --from.",
+  native_build_argument:
+    "Change the build args in the service's Compose build.",
+  native_build_reserved_label:
+    "Remove reserved ownership labels from the Dockerfile and its base images.",
+  native_build_image_volumes:
+    "Remove VOLUME from the Dockerfile and its base images; declare volumes in Compose instead.",
+};
+
+/**
+ * Name the services of a failed `runtime build-image`. A refusal from the build
+ * source policy says so and what to change; any other runtime failure keeps its
+ * message. The native code is kept for callers that classify failures.
+ * Cancellation and closed client errors carry no service-specific cause and pass
+ * through unchanged.
+ */
+function nameBuildFailure(
+  services: readonly string[],
+  error: unknown
+): unknown {
+  if (!(error instanceof NativeRuntimeRequestError)) {
+    return error;
+  }
+  const which = serviceList(services);
+  const code = error.nativeCode;
+  const change =
+    code !== undefined && Object.hasOwn(BUILD_SOURCE_POLICY, code)
+      ? BUILD_SOURCE_POLICY[code]
+      : undefined;
+  const message =
+    change === undefined
+      ? `Native foreground up could not build ${which}: ${error.message}`
+      : `Native foreground up cannot build ${which}: the native build source policy refused it. ${error.message} ${change} No image was adopted.`;
+  return new NativeRuntimeRequestError({
+    message,
+    nativeCode: error.nativeCode,
+    nativeCauseCode: error.nativeCauseCode,
+    nativeStopFailures: error.nativeStopFailures,
+  });
 }
 
 function pin(spec: Record<string, unknown>, image: string): void {

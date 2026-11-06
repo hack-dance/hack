@@ -340,7 +340,7 @@ fn removal_refuses_while_any_retained_graph_names_the_share() {
         .recursive(true)
         .create(candidate.state_root.join("run"))
         .unwrap();
-    assert!(require_unreferenced(&candidate, &f.second).is_ok());
+    assert!(require_unreferenced(&candidate, &f.owner.token, &f.second).is_ok());
     for parent in ["run/graphs", "run/native-graphs"] {
         let run = candidate.state_root.join(parent).join("a".repeat(32));
         fs::DirBuilder::new()
@@ -354,14 +354,14 @@ fn removal_refuses_while_any_retained_graph_names_the_share() {
             serde_json::to_vec(&json!({"source":{"shared": f.third}})).unwrap(),
         )
         .unwrap();
-        assert!(require_unreferenced(&candidate, &f.second).is_ok());
+        assert!(require_unreferenced(&candidate, &f.owner.token, &f.second).is_ok());
         fs::write(
             run.join("state.pending"),
             serde_json::to_vec(&json!({"source":{"shared": f.second}})).unwrap(),
         )
         .unwrap();
         assert_eq!(
-            require_unreferenced(&candidate, &f.second)
+            require_unreferenced(&candidate, &f.owner.token, &f.second)
                 .unwrap_err()
                 .code,
             "project_share_in_use"
@@ -371,7 +371,7 @@ fn removal_refuses_while_any_retained_graph_names_the_share() {
         fs::DirBuilder::new().mode(0o700).create(&nested).unwrap();
         fs::write(nested.join("binding.json"), f.second.guest_path.as_bytes()).unwrap();
         assert_eq!(
-            require_unreferenced(&candidate, &f.second)
+            require_unreferenced(&candidate, &f.owner.token, &f.second)
                 .unwrap_err()
                 .code,
             "project_share_in_use"
@@ -380,11 +380,86 @@ fn removal_refuses_while_any_retained_graph_names_the_share() {
         // An aliased record is never followed.
         symlink(run.join("state.json"), run.join("alias.json")).unwrap();
         assert_eq!(
-            require_unreferenced(&candidate, &f.second)
+            require_unreferenced(&candidate, &f.owner.token, &f.second)
                 .unwrap_err()
                 .code,
             "project_share_update"
         );
         fs::remove_file(run.join("alias.json")).unwrap();
     }
+}
+
+#[test]
+fn interrupted_addition_resumes_its_recorded_share_after_the_root_is_removed() {
+    let f = fixture();
+    let mut candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    candidate.state_root = f.directory.join("state");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(root(&candidate))
+        .unwrap();
+    // A new addition checks its root live.
+    assert_eq!(
+        addition(&candidate, &f.third.project, true).unwrap(),
+        f.third
+    );
+    assert!(addition(&candidate, &f.third.project, false).is_err());
+    let j = plan(
+        &f.owner,
+        f.record.clone(),
+        Operation::Add,
+        &f.second,
+        identity(&f),
+    )
+    .unwrap();
+    state::write(&root(&candidate).join(JOURNAL), &j).unwrap();
+    // The added root disappears before the interrupted update is repeated.
+    fs::remove_dir_all(&f.second.project).unwrap();
+    assert!(f.second.validate().is_err());
+    assert_eq!(
+        addition(&candidate, &f.second.project, true).unwrap(),
+        f.second
+    );
+    // A recreated directory has another identity; the recorded receipt still wins.
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&f.second.project)
+        .unwrap();
+    fs::write(f.second.project.join("package.json"), "{}").unwrap();
+    assert_ne!(
+        ProjectShareIntent::approve(&f.second.project, true).unwrap(),
+        f.second
+    );
+    assert_eq!(
+        addition(&candidate, &f.second.project, true).unwrap(),
+        f.second
+    );
+    // Only the journal's own root and consent resume it.
+    assert!(addition(&candidate, &f.third.project, true).is_err());
+    assert!(addition(&candidate, &f.second.project, false).is_err());
+    // The completed addition boots only after the stale share is removed, and that
+    // removal plans offline from the recorded receipt.
+    let (_, after) = validate(&j).unwrap();
+    assert_eq!(
+        project_share::check_boot(&after.project_shares())
+            .unwrap_err()
+            .code,
+        "project_share_stale"
+    );
+    let removal = plan(
+        &after,
+        j.record_after.clone(),
+        Operation::Remove,
+        &f.second,
+        identity(&f),
+    )
+    .unwrap();
+    let (_, removed) = validate(&removal).unwrap();
+    assert_eq!(removed, f.owner);
+    assert_eq!(removal.record_after, f.record);
+    // Without a journal, a missing root is never added.
+    fs::remove_file(root(&candidate).join(JOURNAL)).unwrap();
+    fs::remove_dir_all(&f.third.project).unwrap();
+    assert!(addition(&candidate, &f.third.project, true).is_err());
 }

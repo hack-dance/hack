@@ -1065,13 +1065,17 @@ states**. Four guard-removal controls must fail at the named action with the exa
 same-state witness: `negative` (a graph may select any mounted share) fails
 `OwnShareOnly` at `StartGraph`; `unfenced-boot` fails `RunningMountsAudited` at
 `Boot`; `owner-first` fails `OwnerNeverAhead` at `CommitOwner`; and
-`referenced-removal` fails `ReferencedSharesKept` at `CommitRecord`.
+`referenced-removal` fails `ReferencedSharesKept` at `CommitRecord`. The controls
+check two roots (`a`, `b`): with a third, symmetric root TLC's two workers may
+report the same violation for either additional root, so the exact witness would
+not be deterministic.
 
 | Model operation | Source boundary |
 | --- | --- |
-| `BeginAdd` / `BeginRemove` | `share_update::plan`: owned stopped pool (`network_update::stopped_with`), primary share kept, bounded set, removal refused while a graph record names the share (`require_unreferenced`). |
+| `BeginAdd` / `BeginRemove` | `share_update::plan`: owned stopped pool (`network_update::stopped_with`), primary share kept, bounded set, removal refused while a graph record names the share (`require_unreferenced`). An interrupted add resumes from its recorded share without a live root check (`addition`). |
 | `CommitRecord` / `CommitOwner` / `Finish` | `network_update::apply_record`, then the owner save, then journal removal; `validate_sides` refuses an owner ahead of its record. |
 | `Boot` | `share_update::require_complete`, `project_share::check_boot` and `config_audit` mount verification before `machine start`. |
+| `CleanGraph` | One run's own cleanup; a native receipt that the pool owner proves `Removed` (`graph::native::retired`) no longer counts as a reference. |
 | `StartGraph` | `OwnedGuest::project_share_for(plan.source)` in shared source selection; `ProjectShareIntent::bind_path` keeps every bind under that share. |
 
 The model does not cover provider behavior: that the pinned provider mounts an

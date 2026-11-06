@@ -685,6 +685,15 @@ pub(super) fn read_recovery(
         String::from_utf8(bytes).map_err(|_| refused())?,
     ))
 }
+/// Strict same-owner read of one run's journal, independent of the current boot:
+/// private ancestors, no pending staging file, the exact wire schema and owner.
+pub(super) fn load_owned(
+    candidate: &Candidate,
+    run: &str,
+    owner: &str,
+) -> Result<(Receipt, PathBuf), CandidateError> {
+    load_validated(candidate, run, Some(owner))
+}
 fn load_validated(
     candidate: &Candidate,
     run: &str,

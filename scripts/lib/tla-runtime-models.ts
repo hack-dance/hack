@@ -1080,8 +1080,8 @@ const contracts: readonly ModelContract[] = [
     invariant: "OwnShareOnly",
     action: "StartGraph",
     fields: [
-      'graph = [a |-> "none", b |-> "live", c |-> "none"]',
-      'bound = [a |-> "none", b |-> "a", c |-> "none"]',
+      'graph = [a |-> "none", b |-> "live"]',
+      'bound = [a |-> "none", b |-> "a"]',
       'mounted = {"a"}',
     ],
     additionalControls: [
@@ -1113,7 +1113,7 @@ const contracts: readonly ModelContract[] = [
         invariant: "ReferencedSharesKept",
         action: "CommitRecord",
         fields: [
-          'graph = [a |-> "none", b |-> "retained", c |-> "none"]',
+          'graph = [a |-> "none", b |-> "retained"]',
           'journal = [op |-> "remove", p |-> "b"]',
           'recordSet = {"a"}',
         ],

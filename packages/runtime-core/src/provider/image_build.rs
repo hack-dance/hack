@@ -27,8 +27,12 @@
 //!   is released only when its holder exits): it is recorded `indeterminate` and the
 //!   image is built again. Build outputs are content addressed and adoption always
 //!   rechecks labels and incarnation, so no operator action is needed.
-//! - Argument values never appear in argv, receipts, messages or output: the client
-//!   receives `--build-arg NAME` and reads the value from its private environment.
+//! - Argument values never appear in argv, receipts or messages: the client receives
+//!   `--build-arg NAME` and reads the value from its private environment. Its output
+//!   reaches the caller only through [`output::Filter`], which redacts every value and
+//!   strips terminal control sequences, within fixed bounds.
+//! - The client builds from a private copy of the Dockerfile and ignore bytes that were
+//!   scanned and hashed, never from the project paths again.
 //! - Nothing here removes images, prunes caches or adopts an image whose labels differ.
 use super::{
     artifact,
@@ -43,7 +47,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::Read,
+    io::{Read, Write},
     os::fd::AsRawFd,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     os::unix::process::CommandExt,
@@ -53,6 +57,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod output;
 #[cfg(test)]
 mod tests;
 
@@ -201,15 +206,24 @@ pub(super) trait BuildPool {
     fn resolve(&self, base: &BaseImage) -> Result<BuildBase, CandidateError>;
     /// The verified builder executable.
     fn builder(&self) -> Result<PathBuf, CandidateError>;
+    /// Where the client's filtered output goes.
+    fn output(&self) -> Box<dyn Write + Send>;
 }
 
 /// Validated local inputs and the build key derived from them.
+///
+/// The Dockerfile and its effective ignore file are held as the exact bytes that were
+/// scanned and hashed: the client builds from a private copy of them, never from the
+/// mutable project paths, so a file edited while bases resolve cannot reach BuildKit.
 #[derive(Debug)]
 pub(super) struct Inputs {
     namespace: String,
     key: String,
     context: PathBuf,
-    dockerfile: PathBuf,
+    dockerfile: Vec<u8>,
+    /// The ignore rules BuildKit applies: the Dockerfile-specific file if present, else
+    /// the context's `.dockerignore`, else empty (no exclusions).
+    ignore: Vec<u8>,
     target: Option<String>,
     args: BTreeMap<String, String>,
     images: Vec<BaseImage>,
@@ -395,17 +409,34 @@ fn read_bounded_file(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, Candida
 
 /// The ignore files BuildKit applies to this context: a Dockerfile-specific
 /// `<Dockerfile>.dockerignore` wins over the context's `.dockerignore`.
-fn ignore_digests(context: &Path, dockerfile: &Path) -> Result<Value, CandidateError> {
-    let mut specific = dockerfile.as_os_str().to_owned();
-    specific.push(".dockerignore");
-    let digest = |path: &Path| -> Result<Value, CandidateError> {
-        Ok(read_bounded_file(path, MAX_IGNORE_BYTES)?
-            .map_or(Value::Null, |bytes| Value::String(sha256_hex(&bytes))))
-    };
-    Ok(serde_json::json!({
-        "context": digest(&context.join(".dockerignore"))?,
-        "dockerfile": digest(Path::new(&specific))?,
-    }))
+struct IgnoreFiles {
+    context: Option<Vec<u8>>,
+    dockerfile: Option<Vec<u8>>,
+}
+impl IgnoreFiles {
+    fn read(context: &Path, dockerfile: &Path) -> Result<Self, CandidateError> {
+        let mut specific = dockerfile.as_os_str().to_owned();
+        specific.push(".dockerignore");
+        Ok(Self {
+            context: read_bounded_file(&context.join(".dockerignore"), MAX_IGNORE_BYTES)?,
+            dockerfile: read_bounded_file(Path::new(&specific), MAX_IGNORE_BYTES)?,
+        })
+    }
+    fn digests(&self) -> Value {
+        let digest = |bytes: &Option<Vec<u8>>| {
+            bytes
+                .as_deref()
+                .map_or(Value::Null, |bytes| Value::String(sha256_hex(bytes)))
+        };
+        serde_json::json!({
+            "context": digest(&self.context),
+            "dockerfile": digest(&self.dockerfile),
+        })
+    }
+    /// The rules in force. An empty file excludes nothing, exactly like an absent one.
+    fn effective(self) -> Vec<u8> {
+        self.dockerfile.or(self.context).unwrap_or_default()
+    }
 }
 
 /// Validate the request, resolve paths inside the project without following symlinks,
@@ -463,13 +494,14 @@ pub(super) fn prepare(request: BuildRequest) -> Result<Inputs, CandidateError> {
             (name.as_str(), format!("{:x}", digest.finalize()))
         })
         .collect();
+    let ignore = IgnoreFiles::read(&context, &dockerfile)?;
     let key_input = serde_json::json!({
         "v": 1,
         "namespace": namespace,
         "context": relative(&context, &root),
         "dockerfile": relative(&dockerfile, &context),
         "dockerfile_sha256": sha256_hex(&bytes),
-        "dockerignore": ignore_digests(&context, &dockerfile)?,
+        "dockerignore": ignore.digests(),
         "target": request.target,
         "args": salted_args,
         "platform": "linux/arm64",
@@ -482,7 +514,8 @@ pub(super) fn prepare(request: BuildRequest) -> Result<Inputs, CandidateError> {
         namespace,
         key,
         context,
-        dockerfile,
+        dockerfile: bytes,
+        ignore: ignore.effective(),
         target: request.target,
         args: request.args,
         images: scan.images,
@@ -759,6 +792,8 @@ pub(super) fn run<P: BuildPool>(
         )?,
         inputs.timeout,
         canceled,
+        output::Filter::new(inputs.args.values().map(String::as_str)),
+        pool.output(),
     );
     let ended = match ended {
         Ok(ended) => ended,
@@ -869,6 +904,37 @@ fn built_image_id(metadata: &Path) -> Result<String, CandidateError> {
     Ok(id.to_owned())
 }
 
+/// Write the scanned Dockerfile bytes and the effective ignore rules into a private
+/// directory the client reads them from. The client applies `<Dockerfile>.dockerignore`
+/// beside the Dockerfile in preference to the context's `.dockerignore`, so writing the
+/// effective rules there (empty when there are none) keeps the hashed ignore semantics
+/// without reading either project file again.
+fn stage_dockerfile(scratch: &Path, inputs: &Inputs) -> Result<PathBuf, CandidateError> {
+    let directory = scratch.join("dockerfile");
+    state::private_directory(&directory)?;
+    let dockerfile = directory.join("Dockerfile");
+    write_private(&dockerfile, &inputs.dockerfile)?;
+    write_private(&directory.join("Dockerfile.dockerignore"), &inputs.ignore)?;
+    Ok(dockerfile)
+}
+
+/// Replace one private file with exactly these bytes, never following a symlink.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), CandidateError> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(state::io(error)),
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(state::io)?;
+    file.write_all(bytes).map_err(state::io)
+}
+
 /// The client command: argv carries only paths, names and non-secret labels; argument
 /// values reach the client through its environment.
 fn command(
@@ -884,6 +950,7 @@ fn command(
     let buildx = scratch.join("buildx");
     state::private_directory(&config)?;
     state::private_directory(&buildx)?;
+    let dockerfile = stage_dockerfile(scratch, inputs)?;
     let mut command = super::process::clean_command(builder);
     command
         .current_dir(scratch)
@@ -902,7 +969,7 @@ fn command(
         .args(["build", "--progress=plain", "--platform", "linux/arm64"])
         .args(["--provenance=false", "--sbom=false", "--load"])
         .arg("--file")
-        .arg(&inputs.dockerfile)
+        .arg(&dockerfile)
         .arg("--metadata-file")
         .arg(metadata)
         .args(["--tag", &inputs.tag()]);
@@ -924,7 +991,8 @@ fn command(
         .arg(&inputs.context)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        // Output reaches the caller only through `output::Filter`.
+        .stderr(Stdio::piped())
         .process_group(0);
     Ok(command)
 }
@@ -979,10 +1047,14 @@ impl Drop for CancelSignals {
 /// Spawn the client and wait for it, honoring cancellation and the time budget. On
 /// either, the whole process group gets SIGTERM, then SIGKILL after a grace period.
 /// The group is signaled only while its leader is unreaped, so its ID is still ours.
+/// The client's stderr passes through `filter` to `sink`; forwarding ends, bounded,
+/// before this returns, so nothing from the client follows the operation's result.
 fn supervise(
     mut command: std::process::Command,
     timeout: Duration,
     canceled: &dyn Fn() -> bool,
+    filter: output::Filter,
+    sink: Box<dyn Write + Send>,
 ) -> Result<Ended, CandidateError> {
     let mut child = command.spawn().map_err(|_| {
         refusal(
@@ -990,6 +1062,10 @@ fn supervise(
             "The pinned build client could not be started.",
         )
     })?;
+    let _forwarder = child
+        .stderr
+        .take()
+        .map(|stderr| output::Forwarder::spawn(stderr, filter, sink));
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait().map_err(state::io)? {
@@ -1127,6 +1203,9 @@ impl<'a> BuildPool for LivePool<'a> {
     fn builder(&self) -> Result<PathBuf, CandidateError> {
         artifact::verify_builder(self.candidate)?;
         Ok(artifact::builder_executable(self.candidate))
+    }
+    fn output(&self) -> Box<dyn Write + Send> {
+        Box::new(std::io::stderr())
     }
 }
 

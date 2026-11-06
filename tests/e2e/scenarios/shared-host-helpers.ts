@@ -159,6 +159,10 @@ export const sharedHostHelpersScenario: Scenario = {
       readonly failCompose?: boolean;
       /** Compose fails after starting some services. */
       readonly failComposePartial?: boolean;
+      /** `docker ps` reports this container of the project still running. */
+      readonly orphan?: string;
+      /** `docker ps` fails. */
+      readonly failPs?: boolean;
     }): Promise<CliResult> =>
       ctx.cli({
         args: [
@@ -176,6 +180,8 @@ export const sharedHostHelpersScenario: Scenario = {
           ...(opts.failComposePartial
             ? { E2E_DOCKER_FAIL_UP_PARTIAL: "1" }
             : {}),
+          ...(opts.orphan ? { E2E_DOCKER_PS_ORPHAN: opts.orphan } : {}),
+          ...(opts.failPs ? { E2E_DOCKER_PS_FAIL: "1" } : {}),
         },
       });
 
@@ -551,11 +557,100 @@ export const sharedHostHelpersScenario: Scenario = {
         readClaim,
         ownedHelper,
       });
+      await runComposeOrphanPhases({
+        ctx,
+        port,
+        holder: holderA,
+        branch: branchA,
+        writeConfig,
+        cli,
+        readClaim,
+        ownedHelper,
+      });
     } finally {
       await cleanupScenario({ foreign, readClaim });
     }
   },
 };
+
+/**
+ * A successful `docker compose down` can leave orphans (containers of
+ * services the current Compose file no longer declares) running. Down keeps
+ * the sole holder and fails while `docker ps` lists a container of the
+ * project that may run or cannot list them, and a later down releases it
+ * (HACK-1864).
+ */
+async function runComposeOrphanPhases(opts: {
+  readonly ctx: Parameters<Scenario["run"]>[0];
+  readonly port: number;
+  readonly holder: string;
+  readonly branch: string;
+  readonly writeConfig: (opts: ConfigOptions) => Promise<void>;
+  readonly cli: (opts: {
+    readonly verb: "up" | "down" | "restart";
+    readonly branch: string;
+    readonly orphan?: string;
+    readonly failPs?: boolean;
+  }) => Promise<CliResult>;
+  readonly readClaim: () => Promise<ReturnType<
+    typeof parseSharedHostClaim
+  > | null>;
+  readonly ownedHelper: () => Promise<Identity>;
+}): Promise<void> {
+  const { ctx, branch } = opts;
+  const orphan = `${opts.holder}-removed-service-1`;
+  ctx.log(
+    "a surviving Compose orphan keeps the helper after a successful down"
+  );
+  await opts.writeConfig({ mode: "identity" });
+  expectExit({
+    result: await opts.cli({ verb: "up", branch }),
+    codes: [0],
+    message: "up before the orphan down",
+  });
+  const helper = await opts.ownedHelper();
+  const kept = async (): Promise<boolean> =>
+    (await isRunning(helper)) &&
+    (await served(opts.port)) === `served:${UPSTREAM}` &&
+    (await opts.readClaim())?.holders.join(",") === opts.holder;
+
+  const orphanDown = await opts.cli({ verb: "down", branch, orphan });
+  const orphanResult = parseEnvelope(orphanDown.stdout);
+  expect({
+    that:
+      orphanDown.exitCode !== 0 &&
+      orphanResult?.error?.code === "E_LIFECYCLE_FAILED" &&
+      JSON.stringify(orphanResult.error.detail ?? {}).includes(HELPER_NAME) &&
+      orphanDown.combined.includes(orphan) &&
+      (await kept()),
+    message:
+      "a down that left an orphan running released the helper underneath it",
+    result: orphanDown,
+  });
+
+  ctx.log("an unconfirmed container listing keeps the helper");
+  const unlisted = await opts.cli({ verb: "down", branch, failPs: true });
+  expect({
+    that:
+      unlisted.exitCode !== 0 &&
+      parseEnvelope(unlisted.stdout)?.error?.code === "E_LIFECYCLE_FAILED" &&
+      (await kept()),
+    message:
+      "a down that could not list the project's containers released the helper",
+    result: unlisted,
+  });
+
+  ctx.log("a later down once the orphan is gone releases the kept helper");
+  expectExit({
+    result: await opts.cli({ verb: "down", branch }),
+    codes: [0],
+    message: "down after the orphan stopped",
+  });
+  expect({
+    that: !(await isRunning(helper)) && (await opts.readClaim()) === null,
+    message: "the retried down must stop the kept helper",
+  });
+}
 
 /**
  * Helpers stay held while their containers run: a restart that preserves

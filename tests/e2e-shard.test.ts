@@ -219,7 +219,7 @@ describe("docker-e2e CI fan-in", () => {
     expect(fanIn?.needs).toBe("docker-e2e-shard");
     expect(fanIn?.if).toBe("${{ always() }}");
     const gate = fanIn?.steps.find(
-      (step) => step.name === "Require every docker-e2e shard to succeed"
+      (step) => step.name === "Reject failed or skipped docker-e2e shards"
     );
     expect(gate?.env?.SHARD_RESULT).toBe(
       "${{ needs.docker-e2e-shard.result }}"

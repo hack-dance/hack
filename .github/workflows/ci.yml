@@ -398,7 +398,7 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Require every docker-e2e shard to succeed
+      - name: Reject failed or skipped docker-e2e shards
         env:
           SHARD_RESULT: ${{ needs.docker-e2e-shard.result }}
         run: |
@@ -481,7 +481,7 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Require every test shard to succeed
+      - name: Reject failed or skipped test shards
         env:
           SHARD_RESULT: ${{ needs.test-shard.result }}
         run: |

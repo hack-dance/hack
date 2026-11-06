@@ -834,7 +834,7 @@ describe("hosted test CI fan-in", () => {
     expect(fanIn?.needs).toBe("test-shard");
     expect(fanIn?.if).toBe("${{ always() }}");
     const gate = fanIn?.steps.find(
-      (step) => step.name === "Require every test shard to succeed"
+      (step) => step.name === "Reject failed or skipped test shards"
     );
     expect(gate?.env?.SHARD_RESULT).toBe("${{ needs.test-shard.result }}");
     expect(gate?.run).toContain('if [ "$SHARD_RESULT" != "success" ]; then');

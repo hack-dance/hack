@@ -45,9 +45,13 @@ export function confirmedNativeRetainedGraph(
     }
     expected.add(key);
     const observed = observations[key];
+    // A `reserved` volume never received a create intent: it holds no data and
+    // must be absent. Every other volume is settled retained data.
+    const settledData =
+      resource.kind === "volume" && resource.phase !== "reserved";
     if (
       !isRecord(observed) ||
-      observed.state !== (resource.kind === "volume" ? "present" : "absent")
+      observed.state !== (settledData ? "present" : "absent")
     ) {
       return false;
     }

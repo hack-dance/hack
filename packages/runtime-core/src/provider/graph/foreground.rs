@@ -162,7 +162,8 @@ pub fn restore_selection(candidate: &Candidate, run: &str) -> Result<Value, Cand
     for resource in receipt.resources.values() {
         let observed = super::inspect_resource(&engine, &receipt, resource)?;
         if resource.kind == super::Kind::Volume {
-            if observed.is_none() {
+            // A never-created (`reserved`) volume must be absent; settled data present.
+            if observed.is_none() == super::plan_reconcile::retained_volume(resource) {
                 return Err(refused());
             }
         } else if resource.phase != "absent" || observed.is_some() {
@@ -276,6 +277,9 @@ fn serve_input<'a>(
     let receipt = match attempt {
         Ok(receipt) => receipt,
         Err(error) => {
+            // Read failed services' bounded output before cleanup removes their
+            // containers. It travels only in this reply and is never persisted.
+            let error = error.with_startup_logs(super::startup_logs::capture(candidate, &run_id));
             if fresh_generation.is_some() && !runtime.admission_started() {
                 let engine = Engine::connect_cleanup(candidate)?;
                 let (retained, root) = super::load(candidate, &engine, &run_id)?;

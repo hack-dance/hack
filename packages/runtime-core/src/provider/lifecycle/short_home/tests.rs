@@ -138,6 +138,13 @@ impl Pool {
 impl Drop for Pool {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.owner.short_home);
+        // A fresh alias a restore recorded, if the test did not reach its own cleanup.
+        let home = root(&self.candidate).join("home");
+        if let Ok(current) = state::read::<Owner>(&root(&self.candidate).join("owner.json"))
+            && fs::read_link(&current.short_home).is_ok_and(|target| target == home)
+        {
+            let _ = fs::remove_file(&current.short_home);
+        }
         fs::remove_dir_all(&self.directory).unwrap();
     }
 }
@@ -405,4 +412,391 @@ fn vm_lock_release_child() {
         drop(inherited);
         drop(listener);
     }
+}
+
+/// HACK-1916: a clean `down` keeps its temporary HOME alias reserved, so no other user can
+/// take the name while the pool is stopped. Host cleanup can still remove it; then the next
+/// mutating operation restores it, and a path another entry took meanwhile is never used:
+/// the receipt moves to a fresh alias instead.
+impl Pool {
+    /// The receipt `down` writes after a quiesced stop: `stopped` plus the clean-stop marker.
+    fn cleanly_stopped(mut self) -> Self {
+        self.owner.guest_boot_id = Some("00000000-0000-0000-0000-000000000000".into());
+        self.owner.daemon_pid = Some(1);
+        self.owner.daemon_start = Some(1);
+        self.owner.phase = "stopped".into();
+        self.owner.clean_stop = state::CleanStop::of(&self.owner);
+        assert!(self.owner.short_home_releasable());
+        self.owner.save(&self.candidate).unwrap();
+        self
+    }
+    fn alias_absent(&self) -> bool {
+        matches!(
+            fs::symlink_metadata(&self.owner.short_home),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+    fn alias_inode(&self) -> u64 {
+        fs::symlink_metadata(&self.owner.short_home).unwrap().ino()
+    }
+}
+
+/// The entry another user could leave at a released alias path, and how it is checked.
+#[derive(Clone, Copy, Debug)]
+enum Squatter {
+    File,
+    Directory,
+    Link,
+}
+impl Squatter {
+    const ALL: [Self; 3] = [Self::File, Self::Directory, Self::Link];
+    /// Place the entry, and a decoy directory a link points at.
+    fn place(self, pool: &Pool) -> PathBuf {
+        let decoy = pool.directory.join("decoy");
+        state::private_directory(&decoy).unwrap();
+        match self {
+            Self::File => fs::write(&pool.owner.short_home, b"foreign marker").unwrap(),
+            Self::Directory => fs::create_dir(&pool.owner.short_home).unwrap(),
+            Self::Link => std::os::unix::fs::symlink(&decoy, &pool.owner.short_home).unwrap(),
+        }
+        decoy
+    }
+    fn untouched(self, path: &std::path::Path, inode: u64, decoy: &std::path::Path) {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        assert_eq!(metadata.ino(), inode, "{self:?} entry was replaced");
+        match self {
+            Self::File => assert_eq!(fs::read(path).unwrap(), b"foreign marker"),
+            Self::Directory => assert_eq!(fs::read_dir(path).unwrap().count(), 0),
+            Self::Link => assert_eq!(fs::read_link(path).unwrap(), decoy),
+        }
+        // Nothing was created through the entry.
+        assert_eq!(fs::read_dir(decoy).unwrap().count(), 0);
+    }
+    fn remove(path: &std::path::Path) {
+        if fs::symlink_metadata(path).unwrap().is_dir() {
+            fs::remove_dir(path).unwrap();
+        } else {
+            fs::remove_file(path).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_clean_stop_keeps_its_alias_reserved_and_restart_reuses_it() {
+    let pool = Pool::new().cleanly_stopped();
+    let before = pool.receipt();
+    let inode = pool.alias_inode();
+    assert_eq!(Owner::load(&pool.candidate).unwrap(), pool.owner);
+    assert_eq!(status(&pool.candidate).unwrap().phase, "stopped");
+    // Holding the pool lock proves the pre-start check takes no lease for an owned alias.
+    let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+    super::super::restore_released_short_home_before_use(&pool.candidate).unwrap();
+    super::super::restore_released_short_home(&pool.candidate).unwrap();
+    drop(lock);
+    assert_eq!(pool.alias_inode(), inode);
+    assert_eq!(
+        fs::read_link(&pool.owner.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
+    assert_eq!(pool.receipt(), before);
+}
+
+#[test]
+fn a_clean_stop_removes_only_its_closed_sockets_and_keeps_the_alias() {
+    use std::os::unix::fs::FileTypeExt;
+    let pool = Pool::new().cleanly_stopped();
+    let inode = pool.alias_inode();
+    // A provider exit can leave its socket files behind after the listeners close. They
+    // are bound through the short alias, as the provider binds them.
+    for name in ["agent.sock", "docker.sock"] {
+        drop(UnixListener::bind(pool.owner.data_dir().join(name)).unwrap());
+        assert!(
+            fs::symlink_metadata(pool.data().join(name))
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+    }
+    super::super::remove_closed_sockets(&pool.candidate, &pool.owner).unwrap();
+    for name in ["agent.sock", "docker.sock"] {
+        assert!(!pool.data().join(name).exists());
+    }
+    assert_eq!(pool.alias_inode(), inode);
+    // Anything that is not an owned socket is kept, and a link is never followed.
+    let target = pool.owner.short_home.join("target.sock");
+    drop(UnixListener::bind(&target).unwrap());
+    std::os::unix::fs::symlink(&target, pool.data().join("agent.sock")).unwrap();
+    fs::write(pool.data().join("docker.sock"), b"not a socket").unwrap();
+    super::super::remove_closed_sockets(&pool.candidate, &pool.owner).unwrap();
+    assert_eq!(
+        fs::read_link(pool.data().join("agent.sock")).unwrap(),
+        target
+    );
+    assert!(
+        fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_socket()
+    );
+    assert_eq!(
+        fs::read(pool.data().join("docker.sock")).unwrap(),
+        b"not a socket"
+    );
+    assert_eq!(pool.alias_inode(), inode);
+}
+
+#[test]
+fn a_clean_stop_whose_alias_host_cleanup_removed_is_restored_exactly() {
+    let pool = Pool::new().cleanly_stopped();
+    pool.remove_alias();
+    let before = pool.receipt();
+    // Observation accepts the absent alias and creates nothing.
+    assert_eq!(Owner::load(&pool.candidate).unwrap(), pool.owner);
+    assert_eq!(status(&pool.candidate).unwrap().phase, "stopped");
+    assert!(pool.alias_absent());
+    // The pre-start check leaves an absent alias to the restore under the lease.
+    super::super::restore_released_short_home_before_use(&pool.candidate).unwrap();
+    assert!(pool.alias_absent());
+
+    let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+    super::super::restore_released_short_home(&pool.candidate).unwrap();
+    assert_eq!(
+        fs::read_link(&pool.owner.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
+    let inode = pool.alias_inode();
+    // A present exact alias is checked, never replaced.
+    super::super::restore_released_short_home(&pool.candidate).unwrap();
+    assert_eq!(pool.alias_inode(), inode);
+    assert_eq!(pool.receipt(), before);
+    drop(lock);
+}
+
+#[test]
+fn only_a_clean_stop_may_lack_its_alias() {
+    // Every other phase keeps the strict missing-HOME refusal and explicit recovery.
+    // `stopped` without the clean-stop marker is an unclean or uncertain stop.
+    for phase in ["stopped", "running", "stopping", "recovered-unclean"] {
+        let mut pool = Pool::new();
+        pool.owner.phase = phase.into();
+        pool.owner.save(&pool.candidate).unwrap();
+        pool.remove_alias();
+        let before = pool.receipt();
+        assert_eq!(
+            Owner::load(&pool.candidate).unwrap_err().code,
+            "provider_home_missing"
+        );
+        let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+        assert_eq!(
+            super::super::restore_released_short_home(&pool.candidate)
+                .unwrap_err()
+                .code,
+            "provider_home_missing"
+        );
+        drop(lock);
+        pool.unchanged(&before);
+    }
+    // A pending owner update keeps even a clean stop strict.
+    let pool = Pool::new().cleanly_stopped();
+    pool.remove_alias();
+    let pending = root(&pool.candidate).join("owner.pending");
+    fs::write(&pending, b"interrupted update").unwrap();
+    assert_eq!(
+        Owner::load(&pool.candidate).unwrap_err().code,
+        "provider_home_missing"
+    );
+    assert!(pool.alias_absent());
+    assert_eq!(fs::read(&pending).unwrap(), b"interrupted update");
+}
+
+#[test]
+fn a_squatted_alias_is_never_used_and_the_receipt_moves_to_a_fresh_alias() {
+    for squatter in Squatter::ALL {
+        let pool = Pool::new().cleanly_stopped();
+        pool.remove_alias();
+        let decoy = squatter.place(&pool);
+        let squatted = pool.owner.short_home.clone();
+        let inode = pool.alias_inode();
+        let before = pool.receipt();
+        // Strict reads refuse the entry and never follow it; observation changes nothing.
+        assert_eq!(
+            Owner::load(&pool.candidate).unwrap_err().code,
+            "foreign_state"
+        );
+        assert_eq!(status(&pool.candidate).unwrap_err().code, "foreign_state");
+        assert_eq!(pool.receipt(), before);
+
+        let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+        super::super::restore_released_short_home(&pool.candidate).unwrap();
+        drop(lock);
+        let restored = Owner::load(&pool.candidate).unwrap();
+        assert_ne!(restored.short_home, squatted, "{squatter:?}");
+        assert_eq!(restored.short_home.parent(), squatted.parent());
+        assert_eq!(
+            fs::read_link(&restored.short_home).unwrap(),
+            root(&pool.candidate).join("home")
+        );
+        // Only the alias changed: same clean stop, same disks, same machine.
+        let mut expected = pool.owner.clone();
+        expected.short_home = restored.short_home.clone();
+        assert_eq!(restored, expected);
+        assert!(restored.short_home_releasable());
+        assert_eq!(status(&pool.candidate).unwrap().phase, "stopped");
+        squatter.untouched(&squatted, inode, &decoy);
+        // The fresh alias is reused as the reserved alias from now on.
+        let reserved = fs::symlink_metadata(&restored.short_home).unwrap().ino();
+        let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+        super::super::restore_released_short_home(&pool.candidate).unwrap();
+        drop(lock);
+        assert_eq!(
+            fs::symlink_metadata(&restored.short_home).unwrap().ino(),
+            reserved
+        );
+        fs::remove_file(&restored.short_home).unwrap();
+        Squatter::remove(&squatted);
+    }
+}
+
+#[test]
+fn a_squatted_alias_is_moved_before_start_reads_the_owner() {
+    let pool = Pool::new().cleanly_stopped();
+    pool.remove_alias();
+    let decoy = Squatter::Link.place(&pool);
+    let squatted = pool.owner.short_home.clone();
+    let inode = pool.alias_inode();
+    // `runtime up` calls this before its first strict owner read, with no lease held.
+    super::super::restore_released_short_home_before_use(&pool.candidate).unwrap();
+    let restored = Owner::load(&pool.candidate).unwrap();
+    assert_ne!(restored.short_home, squatted);
+    assert_eq!(
+        fs::read_link(&restored.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
+    Squatter::Link.untouched(&squatted, inode, &decoy);
+    fs::remove_file(&restored.short_home).unwrap();
+    Squatter::remove(&squatted);
+}
+
+#[test]
+fn public_up_moves_a_squatted_alias_before_its_profile_lookup() {
+    let pool = Pool::new().cleanly_stopped();
+    pool.remove_alias();
+    let decoy = Squatter::Link.place(&pool);
+    let squatted = pool.owner.short_home.clone();
+    let inode = pool.alias_inode();
+    // No provider artifacts exist in this fixture, so `up` stops after its strict owner
+    // reads; it must not stop at the squatted alias.
+    let error = crate::provider::up(&pool.candidate).unwrap_err();
+    assert_ne!(error.code, "foreign_state", "{}", error.message);
+    let restored = Owner::load(&pool.candidate).unwrap();
+    assert_ne!(restored.short_home, squatted);
+    assert_eq!(
+        fs::read_link(&restored.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
+    Squatter::Link.untouched(&squatted, inode, &decoy);
+    fs::remove_file(&restored.short_home).unwrap();
+    Squatter::remove(&squatted);
+}
+
+#[test]
+fn a_squatted_alias_of_a_pool_with_pinned_dependency_sockets_is_refused_unchanged() {
+    let mut pool = Pool::new();
+    pool.owner.dependency_sockets = Some(crate::provider::DependencySocketIntent::new(1).unwrap());
+    let mut pool = pool.cleanly_stopped();
+    pool.remove_alias();
+    let decoy = Squatter::Link.place(&pool);
+    let inode = pool.alias_inode();
+    let before = pool.receipt();
+    let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+    assert_eq!(
+        super::super::restore_released_short_home(&pool.candidate)
+            .unwrap_err()
+            .code,
+        "socket_alias_collision"
+    );
+    drop(lock);
+    assert_eq!(pool.receipt(), before);
+    Squatter::Link.untouched(&pool.owner.short_home, inode, &decoy);
+    Squatter::remove(&pool.owner.short_home);
+    // Removing the entry lets the next restore create the original alias.
+    let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+    super::super::restore_released_short_home(&pool.candidate).unwrap();
+    drop(lock);
+    assert_eq!(
+        fs::read_link(&pool.owner.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
+    pool.owner = Owner::load(&pool.candidate).unwrap();
+    assert_eq!(pool.receipt(), before);
+}
+
+#[test]
+fn a_receipt_that_changed_after_it_was_observed_restores_nothing() {
+    let pool = Pool::new().cleanly_stopped();
+    pool.remove_alias();
+    let mut observed = pool.owner.clone();
+    let mut changed = pool.owner.clone();
+    changed.phase = "recovered-unclean".into();
+    changed.clean_stop = None;
+    changed.save(&pool.candidate).unwrap();
+    let changed_receipt = pool.receipt();
+    assert_eq!(
+        observed
+            .restore_released_short_home(&pool.candidate)
+            .unwrap_err()
+            .code,
+        "provider_home_missing"
+    );
+    assert!(pool.alias_absent());
+    assert_eq!(pool.receipt(), changed_receipt);
+}
+
+#[test]
+fn recovery_of_a_released_clean_stop_restores_the_alias_first() {
+    isolated("released_recovery_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by recovery_of_a_released_clean_stop_restores_the_alias_first"]
+fn released_recovery_child() {
+    let pool = Pool::new().cleanly_stopped();
+    pool.remove_alias();
+    let recovered = crate::provider::recover(&pool.candidate).unwrap();
+    assert_eq!(recovered.phase, "recovered-unclean");
+    assert_eq!(
+        fs::read_link(&pool.owner.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
+    // The recovered receipt needs its alias, and has it.
+    assert_eq!(
+        Owner::load(&pool.candidate).unwrap().phase,
+        "recovered-unclean"
+    );
+}
+
+#[test]
+fn recovery_of_a_squatted_clean_stop_uses_a_fresh_alias() {
+    isolated("squatted_recovery_child");
+}
+
+#[test]
+#[ignore = "isolated release-check fixture launched by recovery_of_a_squatted_clean_stop_uses_a_fresh_alias"]
+fn squatted_recovery_child() {
+    let pool = Pool::new().cleanly_stopped();
+    pool.remove_alias();
+    let decoy = Squatter::Link.place(&pool);
+    let squatted = pool.owner.short_home.clone();
+    let inode = pool.alias_inode();
+    let recovered = crate::provider::recover(&pool.candidate).unwrap();
+    assert_eq!(recovered.phase, "recovered-unclean");
+    let owner = Owner::load(&pool.candidate).unwrap();
+    assert_ne!(owner.short_home, squatted);
+    assert_eq!(
+        fs::read_link(&owner.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
+    Squatter::Link.untouched(&squatted, inode, &decoy);
+    fs::remove_file(&owner.short_home).unwrap();
+    Squatter::remove(&squatted);
 }

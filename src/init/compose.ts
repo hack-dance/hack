@@ -17,6 +17,30 @@ export const TODO_IMAGE_PLACEHOLDER = "alpine:3";
 
 export type PlannedServiceRole = "http" | "internal";
 
+/**
+ * Runtime backend an init scaffold targets. `compose` is the v4 Docker
+ * Compose output, unchanged. `native` writes the same services in the form
+ * the native backend starts: the shared ingress network becomes the reviewed
+ * `x-hack-isolated` replacement, and each routed service gets the native HTTP
+ * readiness probe its route requires. Docker Compose ignores both extension
+ * fields, so a native scaffold still starts on the Compose backend.
+ */
+export type InitComposeBackend = "compose" | "native";
+
+/**
+ * Starting values for a scaffolded native HTTP probe. They match the
+ * `HACK_NATIVE_ADAPTATION` `httpProbes` defaults: one-second samples, a
+ * two-second request timeout, 60 failed samples to unhealthy, and a
+ * two-minute start period for a dev server's first build.
+ */
+export const INIT_NATIVE_HTTP_PROBE = {
+  path: "/",
+  interval_ms: 1000,
+  timeout_ms: 2000,
+  retries: 60,
+  start_period_ms: 120_000,
+} as const;
+
 export interface PlannedService {
   readonly name: string; // docker compose service key
   readonly role: PlannedServiceRole;
@@ -26,6 +50,11 @@ export interface PlannedService {
   readonly env: ReadonlyMap<string, string>;
   readonly labels: ReadonlyMap<string, string>;
   readonly networks: readonly string[];
+  /**
+   * Container port the service's Caddy route proxies to. Set for routed
+   * (`http`) services; a native scaffold probes this port.
+   */
+  readonly httpPort?: number;
   /**
    * Comment lines injected immediately above this service's `  <name>:` key
    * in the rendered YAML (e.g. a runtime-mismatch TODO). Rendered as `# `
@@ -45,12 +74,19 @@ export interface ComposePlan {
    * for per-service comments.
    */
   readonly headerComments?: readonly string[];
+  /** Backend the scaffold targets (default `compose`). */
+  readonly backend?: InitComposeBackend;
 }
 
 export function renderCompose(plan: ComposePlan): string {
+  const native = plan.backend === "native";
   const services: Record<string, ComposeServiceSpec> = {};
+  const planned = native
+    ? plan.services.map(withNativeProbeComment)
+    : plan.services;
 
-  for (const svc of plan.services) {
+  for (const svc of planned) {
+    const probePort = native ? nativeProbePort(svc) : undefined;
     services[svc.name] = {
       image:
         svc.image === TODO_IMAGE_SENTINEL ? TODO_IMAGE_PLACEHOLDER : svc.image,
@@ -60,6 +96,13 @@ export function renderCompose(plan: ComposePlan): string {
       ...(svc.env.size > 0 ? { environment: recordFromMap(svc.env) } : {}),
       ...(svc.labels.size > 0 ? { labels: recordFromMap(svc.labels) } : {}),
       ...(svc.networks.length > 0 ? { networks: [...svc.networks] } : {}),
+      ...(probePort === undefined
+        ? {}
+        : {
+            healthcheck: {
+              "x-hack-http": { port: probePort, ...INIT_NATIVE_HTTP_PROBE },
+            },
+          }),
     };
   }
 
@@ -67,7 +110,11 @@ export function renderCompose(plan: ComposePlan): string {
     ...(plan.name ? { name: plan.name } : {}),
     services,
     networks: {
-      [DEFAULT_INGRESS_NETWORK]: { external: true },
+      // Native start refuses an external network it would have to join; the
+      // reviewed replacement creates an owned bridge under the same name.
+      [DEFAULT_INGRESS_NETWORK]: native
+        ? { external: true, "x-hack-isolated": true }
+        : { external: true },
     },
   };
 
@@ -76,13 +123,39 @@ export function renderCompose(plan: ComposePlan): string {
 
   const withServiceComments = injectServiceComments({
     yaml: cleaned,
-    services: plan.services,
+    services: planned,
   });
 
   return injectHeaderComments({
     yaml: withServiceComments,
     headerComments: plan.headerComments ?? [],
   });
+}
+
+/**
+ * The port a native scaffold probes: the routed service's proxied port. A
+ * service without a route port gets no probe, because native requires probes
+ * only for routes and never invents one for an unrouted service.
+ */
+function nativeProbePort(svc: PlannedService): number | undefined {
+  return svc.role === "http" && svc.httpPort !== undefined
+    ? svc.httpPort
+    : undefined;
+}
+
+function withNativeProbeComment(svc: PlannedService): PlannedService {
+  const port = nativeProbePort(svc);
+  if (port === undefined) {
+    return svc;
+  }
+  return {
+    ...svc,
+    comments: [
+      ...(svc.comments ?? []),
+      `Native readiness: GET ${INIT_NATIVE_HTTP_PROBE.path} on port ${port} inside the container must return 2xx.`,
+      "Point healthcheck.x-hack-http.path at your app's health endpoint if / does not.",
+    ],
+  };
 }
 
 /**
@@ -164,12 +237,18 @@ type ComposeServiceSpec = {
   readonly environment?: Record<string, string>;
   readonly labels?: Record<string, string>;
   readonly networks?: readonly string[];
+  readonly healthcheck?: {
+    readonly "x-hack-http": Readonly<Record<string, number | string>>;
+  };
 };
 
 type ComposeFileSpec = {
   readonly name?: string;
   readonly services: Record<string, ComposeServiceSpec>;
-  readonly networks: Record<string, { readonly external: boolean }>;
+  readonly networks: Record<
+    string,
+    { readonly external: boolean; readonly "x-hack-isolated"?: boolean }
+  >;
 };
 
 function recordFromMap(

@@ -157,7 +157,15 @@ impl Publishers {
         executable: &Path,
     ) -> Result<(), CandidateError> {
         check_deadline(signals, deadline)?;
-        let reserved = super::super::bridges::reserve_loopback_ports(candidate, receipt)?;
+        // `started` readiness can finish while an image healthcheck is still
+        // starting; wait for those endpoints within the same startup deadline.
+        let reserved = retry_pending_endpoint(
+            || super::super::bridges::reserve_loopback_ports(candidate, receipt),
+            || {
+                std::thread::sleep(PENDING_ENDPOINT_POLL);
+                check_deadline(signals, deadline)
+            },
+        )?;
         for (port, selected) in reserved {
             check_deadline(signals, deadline)?;
             let assignment = &selected.assignment;
@@ -300,6 +308,23 @@ impl Publishers {
     }
 }
 
+const PENDING_ENDPOINT_POLL: Duration = Duration::from_millis(100);
+
+/// Repeats `attempt` only while it refuses with `bridge_endpoint_pending`; each
+/// refusal wrote nothing. `wait` bounds the loop: its error ends it unchanged.
+/// Every other outcome, success or refusal, returns at once.
+fn retry_pending_endpoint<T>(
+    mut attempt: impl FnMut() -> Result<T, CandidateError>,
+    mut wait: impl FnMut() -> Result<(), CandidateError>,
+) -> Result<T, CandidateError> {
+    loop {
+        match attempt() {
+            Err(refusal) if refusal.code == "bridge_endpoint_pending" => wait()?,
+            outcome => return outcome,
+        }
+    }
+}
+
 fn check_deadline(signals: &signals::Events, deadline: Instant) -> Result<(), CandidateError> {
     if signals.pending() || Instant::now() >= deadline {
         Err(refused())
@@ -432,5 +457,53 @@ mod tests {
             ]
         );
         assert_eq!(command.get_envs().count(), 0);
+    }
+
+    #[test]
+    fn pending_endpoint_waits_within_the_bound_but_other_refusals_do_not() {
+        let pending = || CandidateError::new("bridge_endpoint_pending", "pending");
+        let mut attempts = 0;
+        let mut waits = 0;
+        let reserved = retry_pending_endpoint(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(pending())
+                } else {
+                    Ok(attempts)
+                }
+            },
+            || {
+                waits += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!((reserved, waits), (3, 2));
+
+        let mut waits = 0;
+        let expired = retry_pending_endpoint(
+            || Err::<(), _>(pending()),
+            || {
+                waits += 1;
+                if waits < 2 { Ok(()) } else { Err(refused()) }
+            },
+        )
+        .unwrap_err();
+        assert_eq!((expired.code, waits), ("graph_route_publisher", 2));
+
+        let mut attempts = 0;
+        let unavailable = retry_pending_endpoint(
+            || {
+                attempts += 1;
+                Err::<(), _>(CandidateError::new("bridge_endpoint_unavailable", "gone"))
+            },
+            || panic!("a permanent refusal must not wait"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (unavailable.code, attempts),
+            ("bridge_endpoint_unavailable", 1)
+        );
     }
 }

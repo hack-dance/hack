@@ -415,31 +415,49 @@ pub(in crate::provider::graph) fn reserve_loopback_ports(
         candidate,
         store,
         capacity,
-        &snapshot,
+        &snapshot.receipt,
+        &snapshot.port_endpoints,
+        &snapshot.observations,
         engine.guest().boot_id(),
     )
 }
 
+/// A container whose own healthcheck is still `starting` has no committed port
+/// endpoint yet, but may still become ready within the caller's startup deadline;
+/// `started` readiness does not wait for health. Every other missing endpoint is
+/// a refusal the caller must not wait out.
+#[cfg(any(test, target_os = "macos"))]
+fn loopback_endpoint_pending(observation: Option<&Value>) -> bool {
+    observation.and_then(|value| serde_json::from_value::<Observation>(value.clone()).ok())
+        == Some(Observation::Running {
+            health: Health::Starting,
+        })
+}
+
+/// Keys of `port_endpoints` are [`port_endpoint_key`]s; `observations` are keyed
+/// like `receipt.resources`. Refusal writes no assignments. A missing endpoint
+/// is `bridge_endpoint_pending` only while its container's health is starting.
 #[cfg(any(test, target_os = "macos"))]
 fn reserve_loopback_selected(
     candidate: &Candidate,
     mut store: Store,
     capacity: u8,
-    snapshot: &Snapshot,
+    receipt: &Receipt,
+    port_endpoints: &BTreeMap<String, GuestEndpoint>,
+    observations: &BTreeMap<String, Value>,
     boot_id: &str,
 ) -> Result<BTreeMap<u16, ReservedRoute>, CandidateError> {
-    let run = &snapshot.receipt.run;
+    let run = &receipt.run;
     let mut used = store
         .slots
         .keys()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
     let mut reserved = BTreeMap::new();
-    for resource in snapshot
-        .receipt
+    for (key, resource) in receipt
         .resources
-        .values()
-        .filter(|r| r.kind == Kind::Container)
+        .iter()
+        .filter(|(_, r)| r.kind == Kind::Container)
     {
         for port in &resource.loopback_ports {
             if store.slots.values().any(|a| {
@@ -452,14 +470,20 @@ fn reserve_loopback_selected(
                     "The published port is already reserved; no reassignment was attempted.",
                 ));
             }
-            let endpoint = snapshot
-                .port_endpoints
+            let endpoint = port_endpoints
                 .get(&port_endpoint_key(&resource.key, port.target))
                 .ok_or_else(|| {
-                    error(
-                        "bridge_endpoint_unavailable",
-                        "A published port requires a running, ready owned container endpoint.",
-                    )
+                    if loopback_endpoint_pending(observations.get(key)) {
+                        error(
+                            "bridge_endpoint_pending",
+                            "A published port waits for its container's healthcheck; no ports were reserved.",
+                        )
+                    } else {
+                        error(
+                            "bridge_endpoint_unavailable",
+                            "A published port requires a running, ready owned container endpoint.",
+                        )
+                    }
                 })?;
             let slot = (0..capacity).find(|slot| !used.contains(slot)).ok_or_else(|| {
                 error(
@@ -1107,6 +1131,88 @@ mod tests {
             fs::read(root(&candidate).join("state.json")).unwrap(),
             before
         );
+    }
+    #[test]
+    fn loopback_reservation_waits_only_for_starting_health_and_commits_atomically() {
+        let fixture_root = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&fixture_root.0).unwrap();
+        let owner = "a".repeat(32);
+        let run = "f".repeat(32);
+        let boot = "12345678-1234-1234-1234-123456789abc";
+        initialize_registry(&candidate, &owner, 3).unwrap();
+        let mut store = fixture();
+        store.owner = owner.clone();
+        save(&candidate, &store).unwrap();
+        let before = fs::read(root(&candidate).join("state.json")).unwrap();
+        let receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":run,"owner":owner,
+            "namespace":"c".repeat(64),"plan_id":"d".repeat(64),
+            "phase":"ready-observed","readiness":{"web":"started"},
+            "resources":{"container:web":{
+                "kind":"container","key":"web","name":"owned-web","id":"d".repeat(64),
+                "phase":"started","loopback_ports":[{"host_port":8787,"target":3000}]
+            }}
+        }))
+        .unwrap();
+        let reserve = |endpoints: &BTreeMap<String, GuestEndpoint>, observation: Value| {
+            reserve_loopback_selected(
+                &candidate,
+                read_owner_registry(&candidate, &owner, 3, false).unwrap(),
+                3,
+                &receipt,
+                endpoints,
+                &BTreeMap::from([("container:web".to_owned(), observation)]),
+                boot,
+            )
+        };
+        let none = BTreeMap::new();
+        // `started` readiness can complete while an image healthcheck is starting:
+        // that is the one refusal the foreground publisher waits out.
+        for (observation, code) in [
+            (
+                json!({"state":"running","health":"starting"}),
+                "bridge_endpoint_pending",
+            ),
+            (
+                json!({"state":"running","health":"unhealthy"}),
+                "bridge_endpoint_unavailable",
+            ),
+            (
+                json!({"state":"exited","code":1}),
+                "bridge_endpoint_unavailable",
+            ),
+            (json!({"state":"absent"}), "bridge_endpoint_unavailable"),
+        ] {
+            assert_eq!(reserve(&none, observation).unwrap_err().code, code);
+            assert_eq!(
+                fs::read(root(&candidate).join("state.json")).unwrap(),
+                before
+            );
+        }
+        let endpoints = BTreeMap::from([(
+            port_endpoint_key("web", 3000),
+            GuestEndpoint {
+                generation: "c".repeat(64),
+                container_id: "d".repeat(64),
+                network_id: "e".repeat(64),
+                address: "172.17.0.2".parse().unwrap(),
+                port: 3000,
+                scope: "guest-only",
+                reachability: "not-probed",
+            },
+        )]);
+        let reserved = reserve(&endpoints, json!({"state":"running","health":"healthy"})).unwrap();
+        assert_eq!(reserved[&8787].slot, 1);
+        let persisted = read_owner_registry(&candidate, &owner, 3, false).unwrap();
+        assert_eq!(
+            persisted.slots[&1].loopback_port,
+            Some(LoopbackPort {
+                host_port: 8787,
+                target: 3000
+            })
+        );
+        assert_eq!(persisted.slots[&1].run, run);
+        assert_eq!(persisted.slots[&0].run, "b".repeat(32));
     }
     #[test]
     fn batch_commit_is_atomic_across_late_endpoint_failure_and_success() {

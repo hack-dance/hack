@@ -36,8 +36,9 @@ const LOAD_BASE_TIMEOUT: Duration = Duration::from_secs(40);
 const LOAD_BYTES_PER_SECOND: u64 = 8 * 1024 * 1024;
 /// Ceiling for one load request, so `ensure-image` stays inside its caller's bound.
 const LOAD_MAX_TIMEOUT: Duration = Duration::from_secs(220);
-/// Bytes the upload reader withholds until the whole archive has hashed correctly.
-const HELD_TAIL: usize = 64 * 1024;
+/// Validation records a SHA-256 per block of this many archive bytes; the upload releases
+/// a block only after it matches. Archives are at most 8 GiB, so at most 8192 digests.
+const VERIFY_BLOCK: usize = 1024 * 1024;
 
 fn error(message: &str) -> CandidateError {
     CandidateError::new("image_archive", message)
@@ -80,12 +81,41 @@ fn verify_digest(
     Ok(total)
 }
 
-/// Hashes and counts every byte read through it, refusing more than `limit`.
+/// Hashes and counts every byte read through it, refusing more than `limit`, and records
+/// one SHA-256 per [`VERIFY_BLOCK`] bytes.
 struct Hashing<R> {
     inner: R,
     digest: Sha256,
     total: u64,
     limit: u64,
+    block: Sha256,
+    block_len: usize,
+    blocks: Vec<[u8; 32]>,
+}
+impl<R> Hashing<R> {
+    fn new(inner: R, limit: u64) -> Self {
+        Self {
+            inner,
+            digest: Sha256::new(),
+            total: 0,
+            limit,
+            block: Sha256::new(),
+            block_len: 0,
+            blocks: Vec::new(),
+        }
+    }
+
+    /// The digests of every complete block and the final partial block.
+    fn finish(mut self) -> (String, u64, Vec<[u8; 32]>) {
+        if self.block_len > 0 {
+            self.blocks.push(self.block.finalize().into());
+        }
+        (
+            format!("{:x}", self.digest.finalize()),
+            self.total,
+            self.blocks,
+        )
+    }
 }
 impl<R: Read> Read for Hashing<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
@@ -95,33 +125,93 @@ impl<R: Read> Read for Hashing<R> {
             return Err(std::io::Error::other("archive limit"));
         }
         self.digest.update(&buffer[..n]);
+        let mut rest = &buffer[..n];
+        while !rest.is_empty() {
+            let take = rest.len().min(VERIFY_BLOCK - self.block_len);
+            self.block.update(&rest[..take]);
+            self.block_len += take;
+            rest = &rest[take..];
+            if self.block_len == VERIFY_BLOCK {
+                self.blocks
+                    .push(std::mem::take(&mut self.block).finalize().into());
+                self.block_len = 0;
+            }
+        }
         Ok(n)
     }
 }
 
-/// The upload side of an import: releases bytes only while at least [`HELD_TAIL`] bytes
-/// remain withheld, and releases the tail only after the complete stream has the expected
-/// length and SHA-256. A changed file therefore fails the upload before its tar ends.
+/// A validated archive: its length and the SHA-256 of each [`VERIFY_BLOCK`] of it.
+pub(super) struct Validated {
+    pub(super) length: u64,
+    blocks: Vec<[u8; 32]>,
+}
+
+/// The upload side of an import. Every byte it releases was validated: a block is read
+/// in full and released only after it matches the digest validation recorded for that
+/// position, and the final block is released only after the stream has ended at the
+/// validated length with the expected whole-archive SHA-256. A file changed after
+/// validation therefore fails the upload before any changed byte, and before any end of
+/// archive, reaches the consumer; trailing padding cannot expose a changed tar early.
 struct HeldTail<R> {
     inner: R,
     digest: Sha256,
     total: u64,
     expected_len: u64,
     expected: String,
+    blocks: Vec<[u8; 32]>,
+    next_block: usize,
     held: Vec<u8>,
+    offset: usize,
     verified: bool,
 }
 impl<R: Read> HeldTail<R> {
-    fn new(inner: R, expected_len: u64, expected: &str) -> Self {
+    fn new(inner: R, validated: &Validated, expected: &str) -> Self {
         Self {
             inner,
             digest: Sha256::new(),
             total: 0,
-            expected_len,
+            expected_len: validated.length,
             expected: expected.to_owned(),
-            held: Vec::new(),
+            blocks: validated.blocks.clone(),
+            next_block: 0,
+            held: Vec::with_capacity(VERIFY_BLOCK),
+            offset: 0,
             verified: false,
         }
+    }
+
+    /// Read and check the next block; on the last block, also check the stream end.
+    fn load(&mut self) -> std::io::Result<()> {
+        let changed = || std::io::Error::other("image archive changed");
+        self.held.clear();
+        self.offset = 0;
+        (&mut self.inner)
+            .take(VERIFY_BLOCK as u64)
+            .read_to_end(&mut self.held)?;
+        self.total += self.held.len() as u64;
+        let expected = self.blocks.get(self.next_block).ok_or_else(changed)?;
+        if self.held.is_empty() || Sha256::digest(&self.held).as_slice() != expected {
+            return Err(changed());
+        }
+        self.digest.update(&self.held);
+        self.next_block += 1;
+        if self.next_block == self.blocks.len() {
+            let mut extra = [0_u8; 1];
+            let longer = loop {
+                match self.inner.read(&mut extra) {
+                    Ok(n) => break n > 0,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            };
+            let actual = format!("{:x}", std::mem::take(&mut self.digest).finalize());
+            if longer || self.total != self.expected_len || actual != self.expected {
+                return Err(changed());
+            }
+            self.verified = true;
+        }
+        Ok(())
     }
 }
 impl<R: Read> Read for HeldTail<R> {
@@ -129,38 +219,16 @@ impl<R: Read> Read for HeldTail<R> {
         if out.is_empty() {
             return Ok(0);
         }
-        loop {
-            let releasable = if self.verified {
-                self.held.len()
-            } else {
-                self.held.len().saturating_sub(HELD_TAIL)
-            };
-            if releasable > 0 {
-                let n = releasable.min(out.len());
-                out[..n].copy_from_slice(&self.held[..n]);
-                self.held.drain(..n);
-                return Ok(n);
-            }
+        if self.offset == self.held.len() {
             if self.verified {
                 return Ok(0);
             }
-            let mut buffer = [0_u8; 64 * 1024];
-            let n = self.inner.read(&mut buffer)?;
-            if n == 0 {
-                let actual = format!("{:x}", std::mem::take(&mut self.digest).finalize());
-                if self.total != self.expected_len || actual != self.expected {
-                    return Err(std::io::Error::other("image archive changed"));
-                }
-                self.verified = true;
-                continue;
-            }
-            self.total += n as u64;
-            if self.total > self.expected_len {
-                return Err(std::io::Error::other("image archive changed"));
-            }
-            self.digest.update(&buffer[..n]);
-            self.held.extend_from_slice(&buffer[..n]);
+            self.load()?;
         }
+        let n = (self.held.len() - self.offset).min(out.len());
+        out[..n].copy_from_slice(&self.held[self.offset..self.offset + n]);
+        self.offset += n;
+        Ok(n)
     }
 }
 
@@ -253,11 +321,6 @@ struct Member {
 }
 
 /// Validate one single-image tarball in a single streaming pass and return its length.
-///
-/// The stream must hash to `expected_sha` within `archive_limit` bytes. Members must be
-/// a flat set of unique regular files named by exactly one `manifest.json` entry; the
-/// config must hash to `image` and target Linux ARM64; each layer's decoded content
-/// must match the config's `diff_ids`; total decoded bytes stay within `expanded_limit`.
 fn validate_stream(
     reader: impl Read,
     expected_sha: &str,
@@ -265,15 +328,27 @@ fn validate_stream(
     archive_limit: u64,
     expanded_limit: u64,
 ) -> Result<u64, CandidateError> {
+    validated(reader, expected_sha, image, archive_limit, expanded_limit).map(|v| v.length)
+}
+
+/// Validate one single-image tarball in a single streaming pass, recording its length
+/// and per-block digests for a verified re-read.
+///
+/// The stream must hash to `expected_sha` within `archive_limit` bytes. Members must be
+/// a flat set of unique regular files named by exactly one `manifest.json` entry; the
+/// config must hash to `image` and target Linux ARM64; each layer's decoded content
+/// must match the config's `diff_ids`; total decoded bytes stay within `expanded_limit`.
+fn validated(
+    reader: impl Read,
+    expected_sha: &str,
+    image: &str,
+    archive_limit: u64,
+    expanded_limit: u64,
+) -> Result<Validated, CandidateError> {
     if !image.strip_prefix("sha256:").is_some_and(hex) || !hex(expected_sha) {
         return Err(error("Invalid image identity or archive size."));
     }
-    let mut hashing = Hashing {
-        inner: reader,
-        digest: Sha256::new(),
-        total: 0,
-        limit: archive_limit,
-    };
+    let mut hashing = Hashing::new(reader, archive_limit);
     let mut members = BTreeMap::new();
     let mut expanded = 0_u64;
     let mut retained_total = 0_usize;
@@ -352,7 +427,8 @@ fn validate_stream(
     // Bytes after the end-of-archive marker are hashed too; the expected digest covers them.
     std::io::copy(&mut hashing, &mut std::io::sink())
         .map_err(|_| error("Image archive exceeds its byte limit."))?;
-    if format!("{:x}", hashing.digest.finalize()) != expected_sha {
+    let (actual, length, blocks) = hashing.finish();
+    if actual != expected_sha {
         return Err(error("Image archive digest mismatch."));
     }
     let metadata = |name: &str, limit: usize| {
@@ -410,7 +486,7 @@ fn validate_stream(
             return Err(error("Expanded image layer identity is incorrect."));
         }
     }
-    Ok(hashing.total)
+    Ok(Validated { length, blocks })
 }
 
 /// Validate an archive file the caller just wrote, under the policy's budgets.
@@ -606,16 +682,18 @@ fn load_waiting(
         }
     }
     // Validate exactly the bytes that hash to the expected value, then stream the same file;
-    // the upload withholds its tail until the re-read stream hashes identically.
+    // the upload releases only re-read blocks that match the validated ones, and its final
+    // block only once the re-read stream hashes identically.
     file.rewind()
         .map_err(|_| error("Cannot rewind the image archive."))?;
-    let length = validate_stream(
+    let validated = validated(
         &mut file,
         expected_sha,
         image,
         policy.archive_limit,
         policy.expanded_limit,
     )?;
+    let length = validated.length;
     if length != metadata.len() {
         return Err(error("Image archive size changed during verification."));
     }
@@ -627,7 +705,7 @@ fn load_waiting(
             .map_err(|_| error("Cannot read the image archive."))?;
         state::write(&path, &receipt)?;
         let result = engine.load_image_archive(
-            reqwest::blocking::Body::sized(HeldTail::new(upload, length, expected_sha), length),
+            reqwest::blocking::Body::sized(HeldTail::new(upload, &validated, expected_sha), length),
             load_timeout(length),
         );
         // A lost response is reconciled only by independent content-ID readback.
@@ -806,38 +884,103 @@ pub(super) mod tests {
         );
     }
 
+    /// Block digests for `bytes`, as validation records them.
+    fn recorded(bytes: &[u8]) -> Validated {
+        let mut hashing = Hashing::new(Cursor::new(bytes), u64::MAX);
+        std::io::copy(&mut hashing, &mut std::io::sink()).unwrap();
+        let (_, length, blocks) = hashing.finish();
+        Validated { length, blocks }
+    }
+
+    /// Everything a consumer receives from `reader` before it fails.
+    fn drain_until_failure(mut reader: impl Read) -> (Vec<u8>, std::io::Error) {
+        let mut released = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => panic!("a changed stream must not end cleanly"),
+                Ok(n) => released.extend_from_slice(&buffer[..n]),
+                Err(e) => return (released, e),
+            }
+        }
+    }
+
     #[test]
-    fn upload_withholds_its_tail_until_the_whole_stream_hashes_as_expected() {
-        let bytes: Vec<u8> = (0..300_000_u32).map(|n| n as u8).collect();
+    fn upload_releases_only_verified_blocks_and_withholds_its_end_until_verified() {
+        let bytes: Vec<u8> = (0..(2 * VERIFY_BLOCK + 300_000) as u32)
+            .map(|n| (n % 253) as u8)
+            .collect();
         let expected = hash(&bytes);
+        let validated = recorded(&bytes);
+        assert_eq!(validated.blocks.len(), 3);
         let mut uploaded = Vec::new();
-        HeldTail::new(Cursor::new(&bytes), bytes.len() as u64, &expected)
+        HeldTail::new(Cursor::new(&bytes), &validated, &expected)
             .read_to_end(&mut uploaded)
             .unwrap();
         assert_eq!(uploaded, bytes);
-        for changed in [
-            {
-                let mut changed = bytes.clone();
-                changed[299_999] ^= 1;
-                changed
-            },
-            bytes[..299_000].to_vec(),
-            [bytes.as_slice(), b"x"].concat(),
+        let flip = |at: usize| {
+            let mut changed = bytes.clone();
+            changed[at] ^= 1;
+            changed
+        };
+        for (changed, released_blocks) in [
+            (flip(10), 0),
+            (flip(VERIFY_BLOCK + 5), 1),
+            (flip(bytes.len() - 1), 2),
+            (bytes[..bytes.len() - 1000].to_vec(), 2),
+            ([bytes.as_slice(), b"x"].concat(), 2),
+            (bytes[..VERIFY_BLOCK].to_vec(), 1),
         ] {
-            let mut reader = HeldTail::new(Cursor::new(&changed), bytes.len() as u64, &expected);
-            let mut released = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            let failure = loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => panic!("a changed stream must not end cleanly"),
-                    Ok(n) => released.extend_from_slice(&buffer[..n]),
-                    Err(e) => break e,
-                }
-            };
+            let (released, failure) =
+                drain_until_failure(HeldTail::new(Cursor::new(&changed), &validated, &expected));
             assert_eq!(failure.to_string(), "image archive changed");
-            // The withheld tail, which holds the tar end-of-archive blocks, never left.
-            assert!(released.len() + HELD_TAIL <= changed.len().max(bytes.len()));
+            // Only whole validated blocks left, never a changed byte, and never the final
+            // block before the stream end was verified.
+            assert_eq!(released, bytes[..released_blocks * VERIFY_BLOCK]);
         }
+    }
+
+    #[test]
+    fn trailing_padding_cannot_expose_a_changed_archive_before_verification() {
+        let (archive, image) = fixture("arm64", false, false);
+        // More padding after the end-of-archive marker than one block, so the marker is
+        // far from the physical end of the file.
+        let mut padded = archive.clone();
+        padded.resize(archive.len() + 2 * VERIFY_BLOCK, 0);
+        let expected = hash(&padded);
+        let validated =
+            validated(Cursor::new(&padded), &expected, &image, 1 << 30, 1 << 20).unwrap();
+        assert_eq!(validated.length, padded.len() as u64);
+        // Unchanged, a tar consumer reads the archive to its end.
+        let reader = HeldTail::new(Cursor::new(&padded), &validated, &expected);
+        let names: Vec<String> = tar::Archive::new(reader)
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().display().to_string())
+            .collect();
+        assert_eq!(names, ["config.json", "layer", "manifest.json"]);
+        // A member changed after validation: the consumer sees no byte and no end.
+        let mut changed = padded.clone();
+        changed[1024 + 600] ^= 1;
+        let (released, failure) =
+            drain_until_failure(HeldTail::new(Cursor::new(&changed), &validated, &expected));
+        assert_eq!(failure.to_string(), "image archive changed");
+        assert!(released.is_empty());
+        let reader = HeldTail::new(Cursor::new(&changed), &validated, &expected);
+        let mut consumer = tar::Archive::new(reader);
+        let failed = consumer
+            .entries()
+            .map_or(true, |mut entries| entries.any(|entry| entry.is_err()));
+        assert!(failed, "a tar consumer must fail, not end cleanly");
+        // A change only in the trailing padding releases just validated bytes (the
+        // original tar and its marker) and then fails instead of ending.
+        let mut changed = padded.clone();
+        let last = changed.len() - 1;
+        changed[last] = 1;
+        let (released, failure) =
+            drain_until_failure(HeldTail::new(Cursor::new(&changed), &validated, &expected));
+        assert_eq!(failure.to_string(), "image archive changed");
+        assert_eq!(released, padded[..2 * VERIFY_BLOCK]);
     }
 
     #[test]

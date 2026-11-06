@@ -41,8 +41,13 @@ pub(crate) fn restore_with_environment_until(
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     deadline: std::time::Instant,
 ) -> Result<Receipt, CandidateError> {
-    let (inputs, environments) =
-        compile_environment_inputs_until(candidate, &options, managed, deadline)?;
+    let (inputs, environments) = compile_environment_inputs_until(
+        candidate,
+        &options,
+        managed,
+        &ManagedFiles::new(),
+        deadline,
+    )?;
     restore_inputs(candidate, options, inputs, environments, true, None, None)
 }
 /// Retains the existing control-only foreground driver for owner checks at every
@@ -52,11 +57,12 @@ pub(super) fn restore_with_foreground(
     candidate: &Candidate,
     options: RunOptions<'_>,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
+    files: &ManagedFiles,
     deadline: std::time::Instant,
     runtime: &mut HostRelayRuntime,
 ) -> Result<Receipt, CandidateError> {
     let (inputs, environments) =
-        compile_environment_inputs_until(candidate, &options, managed, deadline)?;
+        compile_environment_inputs_until(candidate, &options, managed, files, deadline)?;
     restore_inputs(
         candidate,
         options,
@@ -78,12 +84,13 @@ pub(super) struct FreshOwnerRestore<'a> {
 pub(super) fn restore_normalized_foreground(
     candidate: &Candidate,
     options: NormalizedRunOptions<'_>,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    managed: ManagedInput<'_>,
     deadline: std::time::Instant,
     runtime: &mut HostRelayRuntime,
     generation: &str,
     verify_publication: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<Receipt, CandidateError> {
+    let (managed, files) = (managed.values, managed.files);
     startup::Driver::check_cancelled(runtime)?;
     check_environment_deadline(deadline)?;
     let compiled = compile_normalized_inputs(candidate, &options, managed)?;
@@ -92,14 +99,7 @@ pub(super) fn restore_normalized_foreground(
         original_compose_sha256: options.compose.expected_compose_sha256.into(),
         normalized_compose_sha256: compiled.executable.review.plan.compose_sha256.clone(),
     };
-    let environments = compiled
-        .managed_environment
-        .iter()
-        .map(|(name, values)| {
-            super::super::environment::PendingEnvironment::until(name, values, deadline)
-                .map(|pending| (name.clone(), pending))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let environments = pending_environments(&compiled, files, deadline)?;
     check_environment_deadline(deadline)?;
     restore_inputs(
         candidate,
@@ -405,11 +405,13 @@ fn restore_inputs(
     if !environments.is_empty() {
         super::super::environment::preflight_capacity(engine.guest(), environments.len())?;
     }
+    let (wrapped, file_owners) = private_services(&environments);
     let expected_environment = verify_images(
         &engine,
         &prepared.resources,
         &mut prepared.configs,
-        &environments.keys().cloned().collect(),
+        &wrapped,
+        &file_owners,
     )?;
     for resource in receipt.resources.values() {
         let present = inspect_resource(&engine, &receipt, resource)?.is_some();
@@ -434,9 +436,7 @@ fn restore_inputs(
             }
         }
     }
-    for name in environments.keys() {
-        launcher::validate(&prepared.configs[name])?;
-    }
+    validate_private_delivery(&prepared.configs, &environments)?;
     if let Some(fresh) = &fresh {
         check_environment_deadline(fresh.deadline)?;
         #[cfg(target_os = "macos")]

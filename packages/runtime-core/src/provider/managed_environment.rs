@@ -2,11 +2,15 @@
 use super::private_deadline::Deadline;
 use crate::{
     CandidateError,
-    provider::environment::{MAX_ENVIRONMENT_KEYS, MAX_MANAGED_SERVICES, PendingEnvironment},
+    provider::environment::{
+        MAX_ENVIRONMENT_FILES, MAX_ENVIRONMENT_KEYS, MAX_MANAGED_SERVICES, ManagedFile,
+        ManagedFiles, PendingEnvironment,
+    },
 };
 use serde::{
-    Deserialize, Deserializer, Serialize,
-    de::{self, MapAccess, Visitor},
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, MapAccess, SeqAccess, Visitor},
+    ser::{SerializeMap, SerializeSeq, SerializeStruct},
 };
 use std::{
     collections::BTreeMap,
@@ -25,13 +29,24 @@ enum Scope<'a> {
     OneOff(&'a str),
 }
 impl Scope<'_> {
-    fn accepts(self, services: &Services) -> bool {
+    /// One-off delivery never carries file members until that path is qualified.
+    fn accepts(self, services: &Services, files: Option<&FileServices>) -> bool {
         match self {
-            Self::Application => !services.0.is_empty(),
+            Self::Application => !services.0.is_empty() || files.is_some(),
             Self::OneOff(service) => {
-                super::environment::name(service) && services.0.keys().all(|name| name == service)
+                files.is_none()
+                    && super::environment::name(service)
+                    && services.0.keys().all(|name| name == service)
             }
         }
+    }
+}
+/// Version 1 carries values only. Version 2 additionally requires a nonempty `files`
+/// map, so a v1-only receiver refuses file delivery instead of dropping it.
+fn version_matches(version: u8, files: Option<&FileServices>) -> bool {
+    match files {
+        None => version == 1,
+        Some(_) => version == 2,
     }
 }
 fn refused() -> CandidateError {
@@ -58,11 +73,16 @@ pub struct Managed {
     plan: String,
     run: String,
     values: Values,
+    files: ManagedFiles,
     deadline: Instant,
 }
 impl Managed {
     pub fn values(&self) -> &Values {
         &self.values
+    }
+    /// Service-scoped private file members (envelope version 2); empty for version 1.
+    pub fn files(&self) -> &ManagedFiles {
+        &self.files
     }
     pub fn deadline(&self) -> Instant {
         self.deadline
@@ -155,6 +175,120 @@ impl<'de> Deserialize<'de> for Services {
         deserializer.deserialize_map(Entries)
     }
 }
+/// `{name, target, mode: "0400", content_b64}`; unknown or duplicate fields refuse.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireFile {
+    name: String,
+    target: String,
+    mode: String,
+    content_b64: Secret,
+}
+fn decode_file<E: de::Error>(wire: WireFile) -> Result<ManagedFile, E> {
+    use base64::Engine as _;
+    let invalid = || E::custom("invalid file member");
+    if wire.mode != "0400" {
+        return Err(invalid());
+    }
+    let text = wire.content_b64.0.as_bytes();
+    // Decode into fixed zeroized storage so no unerased partial copy is left behind.
+    let mut bytes = Zeroizing::new(vec![0; text.len() / 4 * 3 + 3]);
+    let used = base64::engine::general_purpose::STANDARD
+        .decode_slice(text, bytes.as_mut_slice())
+        .map_err(|_| invalid())?;
+    bytes.truncate(used);
+    ManagedFile::new(&wire.name, &wire.target, bytes).map_err(|_| invalid())
+}
+#[derive(Default)]
+struct ServiceFiles(Vec<ManagedFile>);
+impl<'de> Deserialize<'de> for ServiceFiles {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Members;
+        impl<'de> Visitor<'de> for Members {
+            type Value = ServiceFiles;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a bounded nonempty file member list")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut files = ServiceFiles::default();
+                while let Some(wire) = seq.next_element::<WireFile>()? {
+                    if files.0.len() >= MAX_ENVIRONMENT_FILES {
+                        return Err(de::Error::custom("invalid file members"));
+                    }
+                    files.0.push(decode_file(wire)?);
+                }
+                if files.0.is_empty() {
+                    return Err(de::Error::custom("invalid file members"));
+                }
+                Ok(files)
+            }
+        }
+        deserializer.deserialize_seq(Members)
+    }
+}
+/// A present `files` map must be nonempty with unique, bounded service names.
+struct FileServices(ManagedFiles);
+impl<'de> Deserialize<'de> for FileServices {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Entries;
+        impl<'de> Visitor<'de> for Entries {
+            type Value = FileServices;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a bounded nonempty unique service file map")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut files = ManagedFiles::new();
+                while let Some((name, members)) = map.next_entry::<String, ServiceFiles>()? {
+                    if files.len() >= MAX_MANAGED_SERVICES || files.contains_key(&name) {
+                        return Err(de::Error::custom("invalid service file map"));
+                    }
+                    files.insert(name, members.0);
+                }
+                if files.is_empty() {
+                    return Err(de::Error::custom("invalid service file map"));
+                }
+                Ok(FileServices(files))
+            }
+        }
+        deserializer.deserialize_map(Entries)
+    }
+}
+/// Serializes members with zeroized base64 text for authenticated forwarding only.
+struct WireFiles<'a>(&'a ManagedFiles);
+impl Serialize for WireFiles<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        struct Members<'a>(&'a [ManagedFile]);
+        struct Member<'a>(&'a ManagedFile);
+        impl Serialize for Member<'_> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use base64::Engine as _;
+                let text = Zeroizing::new(
+                    base64::engine::general_purpose::STANDARD.encode(self.0.content()),
+                );
+                let mut member = serializer.serialize_struct("WireFile", 4)?;
+                member.serialize_field("name", self.0.name())?;
+                member.serialize_field("target", self.0.target())?;
+                member.serialize_field("mode", "0400")?;
+                member.serialize_field("content_b64", text.as_str())?;
+                member.end()
+            }
+        }
+        impl Serialize for Members<'_> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+                for file in self.0 {
+                    seq.serialize_element(&Member(file))?;
+                }
+                seq.end()
+            }
+        }
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (service, files) in self.0 {
+            map.serialize_entry(service, &Members(files))?;
+        }
+        map.end()
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Envelope {
@@ -163,6 +297,8 @@ struct Envelope {
     run: String,
     lifetime_seconds: u64,
     services: Services,
+    #[serde(default)]
+    files: Option<FileServices>,
 }
 fn hex(value: &str, length: usize) -> bool {
     value.len() == length
@@ -181,13 +317,13 @@ fn parse_scoped(
         return Err(refused());
     }
     let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| refused())?;
-    if envelope.version != 1
+    if !version_matches(envelope.version, envelope.files.as_ref())
         || !hex(&envelope.plan, 64)
         || envelope.plan != expected_plan
         || !hex(&envelope.run, 32)
         || envelope.run != run
         || !(1..=300).contains(&envelope.lifetime_seconds)
-        || !scope.accepts(&envelope.services)
+        || !scope.accepts(&envelope.services, envelope.files.as_ref())
     {
         return Err(refused());
     }
@@ -198,21 +334,42 @@ fn parse_scoped(
         .checked_duration_since(Instant::now())
         .filter(|d| !d.is_zero())
         .ok_or_else(refused)?;
-    finish(envelope.services, deadline, envelope.plan, envelope.run)
+    finish(
+        envelope.services,
+        envelope.files,
+        deadline,
+        envelope.plan,
+        envelope.run,
+    )
 }
 fn finish(
     mut services: Services,
+    files: Option<FileServices>,
     deadline: Instant,
     plan: String,
     run: String,
 ) -> Result<Managed, CandidateError> {
-    for (service, values) in &services.0 {
-        PendingEnvironment::until(service, &values.0, deadline).map_err(|_| refused())?;
+    let files = files.map(|files| files.0).unwrap_or_default();
+    let empty = BTreeMap::new();
+    let names: std::collections::BTreeSet<&String> =
+        services.0.keys().chain(files.keys()).collect();
+    if names.len() > MAX_MANAGED_SERVICES {
+        return Err(refused());
+    }
+    for service in names {
+        PendingEnvironment::until_with_files(
+            service,
+            services.0.get(service).map_or(&empty, |values| &values.0),
+            files.get(service).map_or(&[], Vec::as_slice),
+            deadline,
+        )
+        .map_err(|_| refused())?;
     }
     let mut managed = Managed {
         plan,
         run,
         values: BTreeMap::new(),
+        files,
         deadline,
     };
     for (service, values) in &mut services.0 {
@@ -232,6 +389,8 @@ struct Forwarded {
     run: String,
     deadline_nanos: u64,
     services: Services,
+    #[serde(default)]
+    files: Option<FileServices>,
 }
 
 impl Managed {
@@ -253,15 +412,19 @@ impl Managed {
             run: &'a str,
             deadline_nanos: u64,
             services: &'a Values,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            files: Option<WireFiles<'a>>,
         }
+        let files = (!self.files.is_empty()).then_some(WireFiles(&self.files));
         let document = Borrowed {
-            version: 1,
+            version: if files.is_some() { 2 } else { 1 },
             plan,
             run,
             deadline_nanos: Deadline::from_instant(self.deadline)
                 .map_err(|_| refused())?
                 .nanos(),
             services: &self.values,
+            files,
         };
         // Fixed storage prevents serializer growth from leaving prior secret copies.
         let mut bytes = Zeroizing::new(vec![0; MAX_INPUT_BYTES]);
@@ -305,19 +468,25 @@ fn receive_forwarded_scoped(
         return Err(refused());
     }
     let envelope: Forwarded = serde_json::from_slice(bytes).map_err(|_| refused())?;
-    if envelope.version != 1
+    if !version_matches(envelope.version, envelope.files.as_ref())
         || !hex(&envelope.plan, 64)
         || envelope.plan != expected_plan
         || !hex(&envelope.run, 32)
         || envelope.run != run
-        || !scope.accepts(&envelope.services)
+        || !scope.accepts(&envelope.services, envelope.files.as_ref())
     {
         return Err(refused());
     }
     let deadline = Deadline::from_nanos(envelope.deadline_nanos)
         .and_then(|deadline| deadline.to_instant())
         .map_err(|_| refused())?;
-    finish(envelope.services, deadline, envelope.plan, envelope.run)
+    finish(
+        envelope.services,
+        envelope.files,
+        deadline,
+        envelope.plan,
+        envelope.run,
+    )
 }
 
 pub fn receive(fd: OwnedFd, expected_plan: &str, run: &str) -> Result<Managed, CandidateError> {
@@ -371,14 +540,14 @@ fn parse_native(
         || !hex(&input.run, 32)
         || input.run != run
         || !(1..=300).contains(&input.lifetime_seconds)
-        || !Scope::Application.accepts(&input.services)
+        || !Scope::Application.accepts(&input.services, None)
     {
         return Err(refused());
     }
     let deadline = started
         .checked_add(Duration::from_secs(input.lifetime_seconds))
         .ok_or_else(refused)?;
-    finish(input.services, deadline, input.review, input.run).map(NativeManaged)
+    finish(input.services, None, deadline, input.review, input.run).map(NativeManaged)
 }
 /// Receive bounded private native values against their exact native review/run and original ingress clock.
 #[cfg(feature = "native-config-plan")]
@@ -758,6 +927,7 @@ mod tests {
         let managed = Managed {
             plan: "a".repeat(64),
             run: "b".repeat(32),
+            files: ManagedFiles::new(),
             values: (0..32)
                 .map(|n| {
                     (
@@ -885,6 +1055,151 @@ mod tests {
                 .collect::<BTreeMap<_, _>>()
         );
         rejected(&serde_json::to_vec(&value).unwrap());
+    }
+    fn file_document() -> serde_json::Value {
+        // base64 of {"k":"synthetic-file-canary"}
+        let mut value = document();
+        value["version"] = json!(2);
+        value["files"] = json!({
+            "web": [{"name":"credential.json","target":"/config/credential.json","mode":"0400","content_b64":"eyJrIjoic3ludGhldGljLWZpbGUtY2FuYXJ5In0="}],
+            "proxy": [{"name":"adc.json","target":"/config/adc.json","mode":"0400","content_b64":"eyJrIjoic3ludGhldGljLWZpbGUtY2FuYXJ5In0="}],
+        });
+        value
+    }
+    fn file_rejected(value: &serde_json::Value) {
+        let error = decode(&serde_json::to_vec(value).unwrap(), Instant::now())
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "graph_environment_input");
+        assert!(!error.message.contains("synthetic"));
+    }
+    #[test]
+    fn version_two_delivers_file_members_including_files_only_services() {
+        let managed = decode(
+            &serde_json::to_vec(&file_document()).unwrap(),
+            Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(managed.values()["web"]["TOKEN"], "synthetic-private-canary");
+        assert!(!managed.values().contains_key("proxy"));
+        let web = &managed.files()["web"][0];
+        assert_eq!(web.name(), "credential.json");
+        assert_eq!(web.target(), "/config/credential.json");
+        assert_eq!(web.content(), br#"{"k":"synthetic-file-canary"}"#);
+        assert_eq!(managed.files()["proxy"][0].target(), "/config/adc.json");
+        let mut only = file_document();
+        only["services"] = json!({});
+        let managed = decode(&serde_json::to_vec(&only).unwrap(), Instant::now()).unwrap();
+        assert!(managed.values().is_empty());
+        assert_eq!(managed.files().len(), 2);
+    }
+    #[test]
+    fn file_members_require_version_two_and_exact_member_shape() {
+        let mut v1 = file_document();
+        v1["version"] = json!(1);
+        file_rejected(&v1);
+        let mut v2 = document();
+        v2["version"] = json!(2);
+        file_rejected(&v2);
+        let member = file_document()["files"]["web"][0].clone();
+        for (key, value) in [
+            ("mode", json!("0444")),
+            ("mode", json!(256)),
+            ("content_b64", json!("not base64!")),
+            ("content_b64", json!("")),
+            (
+                "content_b64",
+                json!("eyJrIjoic3ludGhldGljLWZpbGUtY2FuYXJ5In0"),
+            ),
+            ("name", json!("../escape")),
+            ("target", json!("/run/hack-environment.json")),
+            ("target", json!("relative")),
+            ("unknown", json!("synthetic")),
+        ] {
+            let mut changed = file_document();
+            let mut bad = member.clone();
+            bad[key] = value;
+            changed["files"]["web"] = json!([bad]);
+            file_rejected(&changed);
+        }
+        let mut missing = file_document();
+        missing["files"]["web"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("mode");
+        file_rejected(&missing);
+        for files in [
+            json!({}),
+            json!({"web": []}),
+            json!({"web": (0..5).map(|n| { let mut m = member.clone(); m["name"] = json!(format!("f{n}")); m["target"] = json!(format!("/config/f{n}")); m }).collect::<Vec<_>>()}),
+            json!({"web": [member.clone(), member.clone()]}),
+            json!({"unknown service!": [member.clone()]}),
+            json!({"web": {"credential.json": member.clone()}}),
+        ] {
+            let mut changed = file_document();
+            changed["files"] = files;
+            file_rejected(&changed);
+        }
+        let text = serde_json::to_string(&file_document()).unwrap();
+        let duplicate = text.replacen("\"files\":", "\"files\":{},\"files\":", 1);
+        rejected(duplicate.as_bytes());
+        let duplicate_field = text.replacen(
+            "\"mode\":\"0400\"",
+            "\"mode\":\"0400\",\"mode\":\"0400\"",
+            1,
+        );
+        rejected(duplicate_field.as_bytes());
+        let mut oversized = file_document();
+        oversized["files"]["web"][0]["content_b64"] = json!(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            vec![b'x'; super::super::environment::MAX_ENVIRONMENT_FILE_BYTES + 1]
+        ));
+        file_rejected(&oversized);
+    }
+    #[test]
+    fn one_off_scope_refuses_file_members() {
+        let mut value = file_document();
+        value["files"] = json!({"web": value["files"]["web"].clone()});
+        assert!(
+            decode_one_off(&serde_json::to_vec(&value).unwrap(), "web")
+                .err()
+                .is_some_and(|error| error.code == "graph_environment_input")
+        );
+    }
+    #[test]
+    #[cfg(feature = "environment-launcher")]
+    fn forwarded_file_members_round_trip_as_version_two_only() {
+        let plan = "a".repeat(64);
+        let run = "b".repeat(32);
+        let managed = decode(
+            &serde_json::to_vec(&file_document()).unwrap(),
+            Instant::now(),
+        )
+        .unwrap();
+        let bytes = managed.forward(&plan, &run).unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(wire["version"], 2);
+        assert_eq!(wire["files"]["web"][0]["mode"], "0400");
+        let received = receive_forwarded(&bytes, &plan, &run).unwrap();
+        assert_eq!(received.values(), managed.values());
+        for (service, files) in managed.files() {
+            let other = &received.files()[service];
+            assert_eq!(files.len(), other.len());
+            for (left, right) in files.iter().zip(other) {
+                assert_eq!(left.name(), right.name());
+                assert_eq!(left.target(), right.target());
+                assert_eq!(left.content(), right.content());
+            }
+        }
+        let mut downgraded = wire.clone();
+        downgraded["version"] = json!(1);
+        assert!(receive_forwarded(&serde_json::to_vec(&downgraded).unwrap(), &plan, &run).is_err());
+        assert!(receive_forwarded_for_one_off(&bytes, &plan, &run, "web").is_err());
+        let plain = decode(&serde_json::to_vec(&document()).unwrap(), Instant::now()).unwrap();
+        let wire: serde_json::Value =
+            serde_json::from_slice(&plain.forward(&plan, &run).unwrap()).unwrap();
+        assert_eq!(wire["version"], 1);
+        assert!(wire.get("files").is_none());
     }
     #[test]
     fn malformed_and_excessive_service_values_refuse() {

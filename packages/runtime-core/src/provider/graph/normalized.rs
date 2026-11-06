@@ -99,7 +99,14 @@ pub fn run_normalized(
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     deadline: Instant,
 ) -> Result<Receipt, CandidateError> {
-    run_until(candidate, options, managed, deadline, None)
+    run_until(
+        candidate,
+        options,
+        managed,
+        &ManagedFiles::new(),
+        deadline,
+        None,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -108,15 +115,17 @@ pub fn run_normalized_with_host_dependencies_until(
     options: NormalizedRunOptions<'_>,
     runtime: &mut HostRelayRuntime,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
+    files: &ManagedFiles,
     deadline: Instant,
 ) -> Result<Receipt, CandidateError> {
-    run_until(candidate, options, managed, deadline, Some(runtime))
+    run_until(candidate, options, managed, files, deadline, Some(runtime))
 }
 
 fn run_until(
     candidate: &Candidate,
     options: NormalizedRunOptions<'_>,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
+    files: &ManagedFiles,
     deadline: Instant,
     startup: Option<&mut dyn startup::Driver>,
 ) -> Result<Receipt, CandidateError> {
@@ -125,20 +134,15 @@ fn run_until(
     }
     check_environment_deadline(deadline)?;
     let compiled = compile_normalized_inputs(candidate, &options, managed)?;
-    if !compiled.managed_environment.is_empty() && !cfg!(feature = "environment-launcher") {
+    if (!compiled.managed_environment.is_empty() || !files.is_empty())
+        && !cfg!(feature = "environment-launcher")
+    {
         return Err(error(
             "environment_launcher_disabled",
             "Build with environment-launcher for private input delivery.",
         ));
     }
-    let environments = compiled
-        .managed_environment
-        .iter()
-        .map(|(name, values)| {
-            super::super::environment::PendingEnvironment::until(name, values, deadline)
-                .map(|v| (name.clone(), v))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let environments = pending_environments(&compiled, files, deadline)?;
     let identity = NormalizedInputIdentity {
         namespace: compiled.executable.review.plan.namespace.clone(),
         original_compose_sha256: options.compose.expected_compose_sha256.into(),

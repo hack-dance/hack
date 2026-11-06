@@ -508,7 +508,9 @@ retain their phase and receipts. Recovery preserves disks and labels an unclean 
 When the guest agent stops responding (three pings over about 13 seconds start no reply),
 `runtime down` and `runtime recover` stop this home's recorded provider after verifying its PID,
 start time, user and executable, without guest quiescence, and record `recovered-unclean`; a
-guest that answers keeps the normal clean stop, and `recover` still refuses it.
+guest that answers keeps the normal clean stop, and `recover` still refuses it. Both refuse with
+`provider_busy` while a native image build holds its fence; finishing or canceling that build
+(Ctrl-C its `hack up`) releases the fence, also when a build process was killed.
 
 SmolVM seeds a machine's disks during its first start (`machine create` makes none) from expanded
 `*-template.ext4` files that it creates from the verified compressed templates and then reuses.

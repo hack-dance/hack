@@ -987,6 +987,19 @@ pub(super) fn run<P: BuildPool>(
     })
 }
 
+/// Hold the shared build fence as an admitted build does, for lifecycle tests.
+#[cfg(test)]
+pub(super) fn hold_build_fence_for_test(candidate: &Candidate) -> impl Drop {
+    let root = builds_root(candidate);
+    state::private_directory(&root).unwrap();
+    Flock::try_lock(
+        Flock::open(&root.join("active.lock")).unwrap(),
+        libc::LOCK_SH,
+    )
+    .unwrap()
+    .unwrap()
+}
+
 /// The image config digest the client reports for the built image.
 fn built_image_id(metadata: &Path) -> Result<String, CandidateError> {
     let bytes = read_bounded_file(metadata, MAX_METADATA_BYTES)?.ok_or_else(|| {

@@ -1901,6 +1901,9 @@ fn agent_silent_at(path: &Path) -> bool {
 /// only this home's recorded provider, rechecked by PID, start time, user and executable
 /// immediately before it is sent. A provider that already exited is only recorded.
 fn stop_silent_guest(candidate: &Candidate, owner: &mut Owner) -> Result<(), CandidateError> {
+    // Checked again at the effect: the caller holds the operation lease, but a running
+    // build holds only its shared fence while its client runs.
+    require_no_build_for_silent_stop(candidate)?;
     let process = owner.process.clone().ok_or_else(|| {
         CandidateError::new("process_identity_unavailable", "No recorded provider.")
     })?;
@@ -1909,6 +1912,25 @@ fn stop_silent_guest(candidate: &Candidate, owner: &mut Owner) -> Result<(), Can
         stop_verified_provider(&process, &binary(candidate))?;
     }
     finish_stopped(candidate, owner, "recovered-unclean")
+}
+
+/// Refuse to stop a silent guest while a native image build is admitted. A build releases
+/// the operation lease while its client runs and keeps only the shared build fence
+/// (`run/image-builds/active.lock`), so the lease alone does not prove the engine is idle.
+/// The fence is a `flock`: it is released when the build's processes exit, including on
+/// SIGKILL, so a refusal lasts only while a build process is alive. Callers hold the
+/// operation lease, under which no new build can take the fence.
+fn require_no_build_for_silent_stop(candidate: &Candidate) -> Result<(), CandidateError> {
+    super::image_build::require_no_active_build(candidate).map_err(|error| {
+        if error.code == "provider_busy" {
+            CandidateError::new(
+                "provider_busy",
+                "A native image build is running against this guest. Finish or cancel it first (Ctrl-C the `hack up` that started it); the next attempt then stops the guest that stopped responding.",
+            )
+        } else {
+            error
+        }
+    })
 }
 
 /// `down`'s guest-facing part: quiesce the engine, ask the guest to flush and shut down,
@@ -2216,6 +2238,8 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     if identity::alive(process.pid)? {
         // A live provider is stopped here only when its identity verifies and its guest
         // agent stopped responding; a responsive guest is stopped cleanly by `down`.
+        // Refuse first, without probing, while a build is admitted.
+        require_no_build_for_silent_stop(candidate)?;
         verify_live(candidate, &owner)?;
         if !agent_silent(candidate, &owner)? {
             return Err(CandidateError::new(
@@ -2855,6 +2879,47 @@ printf 'verified-cache\n'
         });
         assert!(agent_silent_at(&path));
         closing.join().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_silent_guest_is_not_stopped_under_an_admitted_build() {
+        let root = crate::test_root::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-silent-stop-build",
+        );
+        let checkout = root.join("checkout");
+        state::private_directory(&checkout).unwrap();
+        let candidate = Candidate::discover(&checkout).unwrap();
+        // A live process stands in for the recorded provider; it must not be signalled.
+        let mut provider = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut owner: Owner = serde_json::from_value(json!({
+            "version":1,"checkout":"/fixture","token":"fixture","machine":"fixture",
+            "short_home":"/fixture","created":true,"phase":"running","process":null,
+            "storage":null,"overlay":null,"guest_boot_id":null,
+            "daemon_pid":null,"daemon_start":null,"rootfs_digest":null
+        }))
+        .unwrap();
+        owner.process = Some(identity::observe(provider.id() as i32).unwrap());
+        // An admitted build holds the shared fence, as `image_build::run` does.
+        let fence = super::super::image_build::hold_build_fence_for_test(&candidate);
+        let refused = stop_silent_guest(&candidate, &mut owner).unwrap_err();
+        assert_eq!(refused.code, "provider_busy");
+        assert!(refused.message.contains("Ctrl-C"));
+        assert!(
+            provider.try_wait().unwrap().is_none(),
+            "provider was signalled"
+        );
+        assert_eq!(owner.phase, "running");
+        drop(fence);
+        // Without a build, the check passes and the stop proceeds to identity checks.
+        assert!(require_no_build_for_silent_stop(&candidate).is_ok());
+        provider.kill().unwrap();
+        provider.wait().unwrap();
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(target_os = "macos")]

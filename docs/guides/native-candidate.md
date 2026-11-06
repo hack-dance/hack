@@ -1684,8 +1684,11 @@ Stop failures can also include `stop_failures` version 1 with at most 32 distinc
 admitted service names and fixed stages: `connect_timeout`, `connect`, `timeout`,
 `response`, `worker`, `transport` or `deadline`. `response` covers a rejected or
 unreadable response; these stages describe the request failure, not whether the
-container stopped. Every dispatched stop worker is joined before the failure is
-returned. Container IDs, response bodies, transport messages and credentials are
+container stopped. A batch sends at most four stops at a time and joins every
+stop worker before the failure is returned. Only `connect` and `connect_timeout`
+are retried inside the batch, because no request reached the engine; these stages
+mean the engine stayed unreachable for that stop's 30-second retry window or the
+batch deadline. Container IDs, response bodies, transport messages and credentials are
 omitted. The authenticated foreground client validates the private receipt and
 checks matching service membership and container generations before and after
 the request. Detail never grants retry or deletion authority.

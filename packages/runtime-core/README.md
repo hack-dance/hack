@@ -245,7 +245,13 @@ retire frontend start/ready/source artifacts or enable ordinary `up` takeover.
 
 Guarded native cleanup checks its retained authority before and after every
 engine observation, removal request and admitted stop batch, including failed
-calls. The existing stop batch retains its concurrent HTTP-stop semantics. Cleanup
+calls. The stop batch sends at most four HTTP stops at a time from one shared
+queue and joins every worker, so 14 or more services do not open one engine
+connection each at once. A connect that fails or times out sent no request, so the
+batch retries it with capped backoff inside the batch deadline and a 30-second
+window from that stop's first connect failure. Once one stop exhausts the window,
+the batch treats the engine as unreachable and later connect failures return at
+once. Any other stop failure is never retried. Cleanup
 checks authority before each journal publication. It also
 checks each private-environment absence and retirement call. A lost guard refuses
 before the next request or journal transition; an already attempted effect remains

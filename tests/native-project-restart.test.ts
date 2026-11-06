@@ -297,7 +297,11 @@ test("legacy unknown selections refuse and omitted flags preserve saved values",
     envName: "qa",
     profiles: ["app"],
     aws: undefined,
+    gcloud: undefined,
   });
+  expect(
+    nativeRestartSelection({ run: { ...run, gcloud: { mode: "file" } } }).gcloud
+  ).toEqual({ mode: "file" });
   expect(() =>
     nativeRestartSelection({ run: { ...run, profiles: undefined } })
   ).toThrow("legacy");

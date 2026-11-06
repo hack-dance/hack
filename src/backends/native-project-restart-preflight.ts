@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import { adaptNativeGcloudEnvironment } from "./native-gcloud-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   discoverNativeHostDependency,
@@ -55,6 +56,7 @@ const DEFAULTS = {
   prepare: prepareNativeProjectInput,
   adapt: prepareNativeProjectAdaptation,
   aws: adaptNativeAwsEnvironment,
+  gcloud: adaptNativeGcloudEnvironment,
   dependencies: readNativeHostDependencies,
   invoke: invokeNativeRuntime,
   review: withNativeProjectReview,
@@ -224,6 +226,7 @@ export function nativeRestartSelection(opts: {
     envName: run.effectiveEnvName,
     profiles: run.profiles,
     aws: run.aws ?? undefined,
+    gcloud: run.gcloud ?? undefined,
   };
 }
 
@@ -380,6 +383,9 @@ export async function preflightNativeRestart(opts: {
   const reviewIdentity = reviewedBranch.identity;
   if (selected.aws) {
     input = (await deps.aws({ input, ...selected.aws })).input;
+  }
+  if (selected.gcloud) {
+    input = (await deps.gcloud({ input, mode: selected.gcloud.mode })).input;
   }
   const metadata = runtimeMetadata
     ? applyNativeRuntimeMetadata({

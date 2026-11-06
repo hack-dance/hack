@@ -9,6 +9,11 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
+import {
+  adaptNativeGcloudEnvironment,
+  type NativeGcloudSelection,
+} from "./native-gcloud-environment.ts";
 import {
   acquireNativeHttpsLease,
   NativeHttpsLeaseAcquisitionError,
@@ -253,6 +258,9 @@ type Dependencies = {
   prepare: typeof prepareNativeProjectInput;
   prepareStorage: typeof prepareNativeProjectRunStorage;
   adaptAws: typeof adaptNativeAwsEnvironment;
+  adaptGcloud: typeof adaptNativeGcloudEnvironment;
+  /** Value-free operator notices (for example credential expiry); stderr by default. */
+  warn: (line: string) => void;
   review: typeof withNativeProjectReview;
   selectReview: typeof selectNativeProjectReviewIdentity;
   retainedImages: typeof selectNativeRetainedImages;
@@ -274,6 +282,10 @@ const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
   prepareStorage: prepareNativeProjectRunStorage,
   adaptAws: adaptNativeAwsEnvironment,
+  adaptGcloud: adaptNativeGcloudEnvironment,
+  warn: (line) => {
+    process.stderr.write(`${line}\n`);
+  },
   review: withNativeProjectReview,
   selectReview: selectNativeProjectReviewIdentity,
   retainedImages: selectNativeRetainedImages,
@@ -598,23 +610,115 @@ function foregroundExitCode(opts: {
   }
   return opts.code;
 }
-function environmentDelivery(
-  input: NativeProjectInput,
-  plan: string,
-  run: string
-): { flags: string[]; payload?: Buffer } {
-  if (Object.keys(input.managedEnvironment).length === 0) {
+/**
+ * Credential adapters run after lifecycle hooks so a login hook can refresh
+ * host credentials first. Returns the same input object when none is selected.
+ * AWS values are a startup snapshot, so expiry warnings are scheduled; the
+ * caller cancels them when the foreground exits.
+ */
+async function adaptNativeCredentials(opts: {
+  readonly input: NativeProjectInput;
+  readonly selection: {
+    readonly aws?: { readonly profile: string; readonly region?: string };
+    readonly gcloud?: NativeGcloudSelection;
+  };
+  readonly deps: Pick<Dependencies, "adaptAws" | "adaptGcloud" | "warn">;
+}): Promise<{
+  readonly input: NativeProjectInput;
+  readonly cancelExpiry?: () => void;
+}> {
+  let { input } = opts;
+  let cancelExpiry: (() => void) | undefined;
+  if (opts.selection.aws) {
+    const adapted = await opts.deps.adaptAws({
+      input,
+      ...opts.selection.aws,
+    });
+    input = adapted.input;
+    cancelExpiry = scheduleNativeAwsExpiryWarnings({
+      expiry: adapted.receipt.expiry,
+      services: adapted.receipt.services.length,
+      write: opts.deps.warn,
+    });
+  }
+  if (opts.selection.gcloud) {
+    try {
+      input = (
+        await opts.deps.adaptGcloud({
+          input,
+          mode: opts.selection.gcloud.mode,
+        })
+      ).input;
+    } catch (error) {
+      cancelExpiry?.();
+      throw error;
+    }
+  }
+  return { input, ...(cancelExpiry ? { cancelExpiry } : {}) };
+}
+
+/**
+ * Private envelope for `graph serve --environment-stdin`. Version 1 carries values
+ * only; version 2 adds service-scoped file members and is sent only when files
+ * exist, so a runtime without file support refuses instead of dropping them.
+ *
+ * Adapters normalize every authored service, including those outside the selected
+ * profiles, so public Compose stays identical across profile selections. File
+ * members are delivered only for services the reviewed plan marks active: the
+ * runtime refuses file ownership for inactive services, so an optional disabled
+ * service must not block the selected graph.
+ */
+export function nativeEnvironmentDelivery(opts: {
+  readonly input: NativeProjectInput;
+  readonly planId: string;
+  readonly reviewedPlan: unknown;
+  readonly run: string;
+}): { flags: string[]; payload?: Buffer } {
+  const { input, planId: plan, run } = opts;
+  const reviewed =
+    isRecord(opts.reviewedPlan) && isRecord(opts.reviewedPlan.services)
+      ? opts.reviewedPlan.services
+      : {};
+  const files = Object.entries(input.managedFiles ?? {}).filter(
+    ([service, members]) => {
+      const reviewedService = reviewed[service];
+      return (
+        members.length > 0 &&
+        isRecord(reviewedService) &&
+        reviewedService.active === true
+      );
+    }
+  );
+  if (
+    Object.keys(input.managedEnvironment).length === 0 &&
+    files.length === 0
+  ) {
     return { flags: [] };
   }
   return {
     flags: ["--environment-stdin"],
     payload: Buffer.from(
       JSON.stringify({
-        version: 1,
+        version: files.length > 0 ? 2 : 1,
         plan,
         run,
         lifetime_seconds: 300,
         services: input.managedEnvironment,
+        ...(files.length > 0
+          ? {
+              files: Object.fromEntries(
+                files.map(([service, members]) => [
+                  service,
+                  members.map((member) => ({
+                    name: member.name,
+                    target: member.target,
+                    mode: "0400",
+                    content_b64: member.content.toString("base64"),
+                  })),
+                ])
+              ),
+            }
+          : {}),
       })
     ),
   };
@@ -816,6 +920,7 @@ function retainedStartupSelection(opts: {
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly gcloud?: NativeGcloudSelection;
 }) {
   const { run } = opts;
   if (
@@ -828,16 +933,20 @@ function retainedStartupSelection(opts: {
         JSON.stringify(run.profiles)) ||
     (opts.aws !== undefined &&
       (opts.aws.profile !== run.aws?.profile ||
-        opts.aws.region !== run.aws?.region))
+        opts.aws.region !== run.aws?.region)) ||
+    // Like the AWS selector, an omitted gcloud selection keeps the retained one
+    // (which delivers a fresh file); a different explicit selection refuses.
+    (opts.gcloud !== undefined && opts.gcloud.mode !== run.gcloud?.mode)
   ) {
     throw new ClosedCliError(
-      "Native up cannot change the retained run's environment, profiles or AWS profile; data was not replaced."
+      "Native up cannot change the retained run's environment, profiles, AWS profile or gcloud selection; data was not replaced."
     );
   }
   return {
     envName: run.effectiveEnvName,
     profiles: run.profiles,
     aws: run.aws ?? undefined,
+    gcloud: run.gcloud ?? undefined,
   };
 }
 async function selectNativeStartup(opts: {
@@ -848,6 +957,7 @@ async function selectNativeStartup(opts: {
   readonly profiles?: readonly string[];
   readonly requestedProfiles: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly gcloud?: NativeGcloudSelection;
   readonly load: typeof loadNativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
   readonly signal?: AbortSignal;
@@ -860,11 +970,13 @@ async function selectNativeStartup(opts: {
           envName: opts.envName,
           profiles: opts.profiles,
           aws: opts.aws,
+          gcloud: opts.gcloud,
         })
       : {
           envName: opts.envName,
           profiles: opts.requestedProfiles,
           aws: opts.aws,
+          gcloud: opts.gcloud,
         };
   let retainedFlags: string[] = [];
   if (retained) {
@@ -910,6 +1022,7 @@ function selectedMapping(opts: {
   readonly effectiveEnvName: string | null;
   readonly profiles: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly gcloud?: NativeGcloudSelection;
   readonly runtimeMetadata: boolean;
 }): NativeProjectRun {
   return {
@@ -922,6 +1035,9 @@ function selectedMapping(opts: {
           ...(opts.aws.region ? { region: opts.aws.region } : {}),
         }
       : null,
+    // Written only when selected, so mappings without it stay readable by
+    // earlier candidates; a mapping that carries it refuses there.
+    ...(opts.gcloud ? { gcloud: { mode: opts.gcloud.mode } } : {}),
     ...(opts.runtimeMetadata ? { runtimeMetadata: true as const } : {}),
   };
 }
@@ -1026,6 +1142,8 @@ export async function startNativeProject(opts: {
   readonly preparedBase?: NativePreparedBase;
   readonly https?: NativeHttpsSelection;
   readonly aws?: { readonly profile: string; readonly region?: string };
+  /** Explicit gcloud Application Default Credentials adapter selection. */
+  readonly gcloud?: NativeGcloudSelection;
   /** Public instance identity delivered as runtime host metadata; omitted delivers none. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
   readonly before: (input: NativeProjectInput) => Promise<Hooks>;
@@ -1064,6 +1182,7 @@ export async function startNativeProject(opts: {
       profiles: opts.profiles,
       requestedProfiles,
       aws: opts.aws,
+      gcloud: opts.gcloud,
       load: deps.load,
       invoke: deps.invoke,
       signal: opts.signal,
@@ -1176,14 +1295,21 @@ export async function startNativeProject(opts: {
   let graphCleanupConfirmed = false;
   let httpsCleanupConfirmed = false;
   let httpsAcquisitionFailure: unknown;
+  let cancelAwsExpiry: (() => void) | undefined;
   try {
     if (opts.signal?.aborted) {
       cancel();
     }
     requireActiveStartup(controller.signal);
     hooks = await opts.before(input);
-    if (selection.aws) {
-      input = (await deps.adaptAws({ input, ...selection.aws })).input;
+    const credentials = await adaptNativeCredentials({
+      input,
+      selection,
+      deps,
+    });
+    cancelAwsExpiry = credentials.cancelExpiry;
+    if (credentials.input !== input) {
+      input = credentials.input;
       specs = prepareNativeProjectServices(
         input,
         opts.dependencyFile !== undefined
@@ -1390,14 +1516,15 @@ export async function startNativeProject(opts: {
               run,
               invoke: deps.invoke,
             });
-          const delivery = environmentDelivery(
-            selectActiveNativeProjectInput({
+          const delivery = nativeEnvironmentDelivery({
+            input: selectActiveNativeProjectInput({
               input,
               reviewedPlan: review.report.plan,
             }),
-            review.planId,
-            run
-          );
+            planId: review.planId,
+            reviewedPlan: review.report.plan,
+            run,
+          });
           let code = 1;
           let serveFailure: unknown;
           let nativeExitCode: string | undefined;
@@ -1453,6 +1580,7 @@ export async function startNativeProject(opts: {
                   effectiveEnvName: input.effectiveEnvName,
                   profiles,
                   aws: selection.aws,
+                  gcloud: selection.gcloud,
                   runtimeMetadata: metadata !== undefined,
                 });
                 // Enrollment must exist before taking a shared lease: release
@@ -1622,6 +1750,7 @@ export async function startNativeProject(opts: {
   } catch (error) {
     throw httpsCleanupFailure(httpsAcquisitionFailure, error);
   } finally {
+    cancelAwsExpiry?.();
     process.off("SIGINT", cancel);
     process.off("SIGTERM", terminate);
     opts.signal?.removeEventListener("abort", cancel);

@@ -1,11 +1,10 @@
-import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveUserHomeDir } from "../lib/home-dir.ts";
+import { runNativePrivateCli } from "./native-private-cli.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
 
-const MAX_OUTPUT = 64 * 1024;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PROFILE = /^[A-Za-z0-9_+=,.@-]{1,128}$/;
 const REGION = /^[a-z]{2}(?:-[a-z]+)+-\d+$/;
@@ -31,72 +30,22 @@ export type NativeAwsExportSource = (opts: {
 }) => Promise<{ readonly credentials: unknown; readonly region?: string }>;
 
 /** Only stdout is captured privately; AWS diagnostics and ambient AWS values are omitted. */
-function awsCommand(args: readonly string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const env: Record<string, string> = {
+async function awsCommand(args: readonly string[]): Promise<string> {
+  const output = await runNativePrivateCli({
+    executable: "aws",
+    args,
+    environment: {
       AWS_EC2_METADATA_DISABLED: "true",
       AWS_CLI_AUTO_PROMPT: "off",
       AWS_PAGER: "",
-    };
-    for (const key of ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"]) {
-      const value = process.env[key];
-      if (value !== undefined) {
-        env[key] = value;
-      }
-    }
-    const child = spawn("aws", [...args], {
-      env,
-      detached: true,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let settled = false;
-    const stop = () => {
-      // The unreaped direct child starts a new POSIX group owned by this request.
-      if (
-        child.pid !== undefined &&
-        child.exitCode === null &&
-        child.signalCode === null
-      ) {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          // Already exited; never use a persisted PID or retry the AWS request.
-        }
-      }
-      child.stdout?.destroy();
-    };
-    const finish = (ok: boolean) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      stop();
-      if (ok) {
-        resolve(Buffer.concat(chunks).toString("utf8"));
-      } else {
-        reject(refused());
-      }
-      for (const chunk of chunks) {
-        chunk.fill(0);
-      }
-    };
-    const timer = setTimeout(() => finish(false), 30_000);
-    child.on("error", () => finish(false));
-    child.stdout?.on("error", () => finish(false));
-    child.stdout?.on("data", (chunk: Buffer) => {
-      size += chunk.byteLength;
-      if (size > MAX_OUTPUT) {
-        chunk.fill(0);
-        finish(false);
-        return;
-      }
-      chunks.push(chunk);
-    });
-    child.on("close", (code) => finish(code === 0));
+    },
+    refused,
   });
+  try {
+    return output.toString("utf8");
+  } finally {
+    output.fill(0);
+  }
 }
 
 const exportAwsProfile: NativeAwsExportSource = async ({

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::Read;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -261,6 +261,151 @@ pub fn verify_engine(candidate: &Candidate) -> Result<Artifact, CandidateError> 
     Ok(artifact)
 }
 
+/// Pinned standalone BuildKit client for native image builds.
+///
+/// The release asset is a single Developer ID signed `darwin-arm64` executable that runs
+/// on the host against the guest engine's forwarded private socket. Its bytes are pinned
+/// by SHA-256 in `provider-pins.json`; preparation copies it into owned private state, so
+/// the caller's file is never executed, and every later use re-verifies the prepared tree.
+pub const BUILDER_SHA256: &str = "e5040acdaac1a349de84c0e7a80c861a368e0d141bf7260e1fd9a74b16749477";
+pub const BUILDER_VERSION: &str = "0.34.1";
+const BUILDER: BinaryPin = BinaryPin {
+    label: "BuildKit client",
+    version: BUILDER_VERSION,
+    sha256: BUILDER_SHA256,
+    directory: "buildx-0.34.1-darwin-arm64",
+    executable: "docker-buildx",
+    record: "buildx.json",
+    staging: "buildx-installing",
+    verify_signature: true,
+};
+
+/// One pinned single-file provider executable and where its prepared tree lives.
+struct BinaryPin {
+    label: &'static str,
+    version: &'static str,
+    sha256: &'static str,
+    directory: &'static str,
+    executable: &'static str,
+    record: &'static str,
+    staging: &'static str,
+    verify_signature: bool,
+}
+
+fn binary_root(candidate: &Candidate, pin: &BinaryPin) -> PathBuf {
+    candidate.state_root.join("providers").join(pin.directory)
+}
+
+/// Prepare the pinned BuildKit client from a caller-supplied copy of its release asset.
+///
+/// No state is created unless the file matches the pin. An existing prepared tree is
+/// re-verified and reused, never overwritten. An interrupted preparation leaves its
+/// private staging directory in place and refuses until it is inspected.
+pub fn prepare_builder(candidate: &Candidate, binary: &Path) -> Result<Artifact, CandidateError> {
+    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return Err(CandidateError::new(
+            "unsupported_host",
+            "This pinned artifact requires Apple Silicon macOS.",
+        ));
+    }
+    prepare_binary(candidate, binary, &BUILDER)
+}
+
+/// Verify the prepared BuildKit client before any use.
+pub fn verify_builder(candidate: &Candidate) -> Result<Artifact, CandidateError> {
+    verify_binary(candidate, &BUILDER)
+}
+
+fn binary_mismatch(pin: &BinaryPin, detail: &str) -> CandidateError {
+    CandidateError::new(
+        "artifact_digest_mismatch",
+        format!("{} {detail}", pin.label),
+    )
+}
+
+fn prepare_binary(
+    candidate: &Candidate,
+    source: &Path,
+    pin: &BinaryPin,
+) -> Result<Artifact, CandidateError> {
+    // A FIFO or device would block or stream; only a regular file is hashed.
+    if !fs::metadata(source).map_err(io)?.is_file() || digest(source)? != pin.sha256 {
+        return Err(binary_mismatch(
+            pin,
+            "file does not match the pinned SHA-256.",
+        ));
+    }
+    let _lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm"))?;
+    let providers = candidate.state_root.join("providers");
+    state::private_directory(&providers)?;
+    if binary_root(candidate, pin).try_exists().map_err(io)? {
+        return verify_binary(candidate, pin);
+    }
+    let staging = providers.join(pin.staging);
+    state::private_directory(&staging)?;
+    let prepared = staging.join(pin.directory);
+    // Non-recursive and exclusive: a leftover from an interrupted run is retained, not reused.
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&prepared)
+        .map_err(io)?;
+    let owned = prepared.join(pin.executable);
+    let mut input = File::open(source).map_err(io)?;
+    let mut output = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o700)
+        .open(&owned)
+        .map_err(io)?;
+    std::io::copy(&mut input, &mut output).map_err(io)?;
+    output.sync_all().map_err(io)?;
+    drop(output);
+    // Rehash the owned copy to close source replacement between the check and the copy.
+    if digest(&owned)? != pin.sha256 {
+        return Err(binary_mismatch(
+            pin,
+            "file changed during preparation; staging retained.",
+        ));
+    }
+    fs::set_permissions(&owned, fs::Permissions::from_mode(0o700)).map_err(io)?;
+    if pin.verify_signature {
+        run(
+            clean_command(Path::new("/usr/bin/codesign"))
+                .args(["--verify", "--strict"])
+                .arg(&owned),
+            Duration::from_secs(10),
+        )?;
+    }
+    let artifact = Artifact {
+        version: pin.version.into(),
+        archive_sha256: pin.sha256.into(),
+        tree_sha256: tree_digest(&prepared)?,
+    };
+    fs::rename(&prepared, binary_root(candidate, pin)).map_err(io)?;
+    state::write(&providers.join(pin.record), &artifact)?;
+    // Only the now-empty staging directory; never recursive.
+    let _ = fs::remove_dir(&staging);
+    Ok(artifact)
+}
+
+fn verify_binary(candidate: &Candidate, pin: &BinaryPin) -> Result<Artifact, CandidateError> {
+    let root = binary_root(candidate, pin);
+    reject_aliased_state(&root)?;
+    let artifact: Artifact = state::read(&candidate.state_root.join("providers").join(pin.record))?;
+    let executable = fs::symlink_metadata(root.join(pin.executable)).map_err(io)?;
+    if artifact.version != pin.version
+        || artifact.archive_sha256 != pin.sha256
+        || !executable.is_file()
+        || artifact.tree_sha256 != tree_digest(&root)?
+    {
+        return Err(binary_mismatch(
+            pin,
+            "prepared tree changed; refusing execution.",
+        ));
+    }
+    Ok(artifact)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +431,171 @@ mod tests {
         assert_eq!(pins["smolvm"]["archive_sha256"], ARCHIVE_SHA256);
         assert_eq!(pins["docker"]["version"], ENGINE_VERSION);
         assert_eq!(pins["docker"]["archive_sha256"], ENGINE_SHA256);
+        const PLATFORM: &str = "darwin-arm64";
+        assert_eq!(pins["buildx"]["version"], BUILDER_VERSION);
+        assert_eq!(pins["buildx"]["platform"], PLATFORM);
+        assert_eq!(pins["buildx"]["archive_sha256"], BUILDER_SHA256);
+        assert_eq!(
+            pins["buildx"]["url"],
+            format!(
+                "https://github.com/docker/buildx/releases/download/v{BUILDER_VERSION}/buildx-v{BUILDER_VERSION}.{PLATFORM}"
+            )
+        );
+        assert_eq!(
+            BUILDER.directory,
+            format!("buildx-{BUILDER_VERSION}-{PLATFORM}")
+        );
+        assert_eq!(BUILDER.version, BUILDER_VERSION);
+        assert_eq!(BUILDER.sha256, BUILDER_SHA256);
+    }
+    fn test_pin(bytes: &[u8]) -> BinaryPin {
+        let sha256: &'static str =
+            Box::leak(format!("{:x}", Sha256::digest(bytes)).into_boxed_str());
+        BinaryPin {
+            label: "Test client",
+            version: "1.2.3",
+            sha256,
+            directory: "test-client-1.2.3",
+            executable: "test-client",
+            record: "test-client.json",
+            staging: "test-client-installing",
+            verify_signature: false,
+        }
+    }
+    #[test]
+    fn a_builder_binary_that_misses_the_pin_creates_no_state() {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        let untrusted = root.join("untrusted-client");
+        fs::write(&untrusted, b"not the pinned client").unwrap();
+        let error = prepare_binary(&candidate, &untrusted, &BUILDER).unwrap_err();
+        assert_eq!(error.code, "artifact_digest_mismatch");
+        let directory = root.join("not-a-file");
+        fs::create_dir(&directory).unwrap();
+        let error = prepare_binary(&candidate, &directory, &BUILDER).unwrap_err();
+        assert_eq!(error.code, "artifact_digest_mismatch");
+        assert!(!candidate.state_root.exists());
+        assert!(verify_builder(&candidate).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_prepared_pinned_binary_is_reused_and_any_tree_change_refuses_execution() {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        let bytes = b"#!/bin/sh\nexit 0\n";
+        let pin = test_pin(bytes);
+        let source = root.join("release-asset");
+        fs::write(&source, bytes).unwrap();
+        let prepared = prepare_binary(&candidate, &source, &pin).unwrap();
+        assert_eq!(prepared.version, "1.2.3");
+        assert_eq!(prepared.archive_sha256, pin.sha256);
+        let executable = binary_root(&candidate, &pin).join(pin.executable);
+        let metadata = fs::symlink_metadata(&executable).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        assert_eq!(fs::read(&executable).unwrap(), bytes);
+        // The caller's file is copied, never moved or linked.
+        assert_eq!(fs::read(&source).unwrap(), bytes);
+        assert_ne!(metadata.ino(), fs::metadata(&source).unwrap().ino());
+        assert!(
+            !candidate
+                .state_root
+                .join("providers")
+                .join(pin.staging)
+                .exists()
+        );
+        // Preparing again verifies and reuses the existing tree.
+        let again = prepare_binary(&candidate, &source, &pin).unwrap();
+        assert_eq!(again.tree_sha256, prepared.tree_sha256);
+        assert_eq!(
+            verify_binary(&candidate, &pin).unwrap().tree_sha256,
+            prepared.tree_sha256
+        );
+
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = verify_binary(&candidate, &pin).unwrap_err();
+        assert_eq!(error.code, "artifact_digest_mismatch");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        verify_binary(&candidate, &pin).unwrap();
+
+        fs::write(&executable, b"#!/bin/sh\nexit 1\n").unwrap();
+        assert_eq!(
+            verify_binary(&candidate, &pin).unwrap_err().code,
+            "artifact_digest_mismatch"
+        );
+        // A changed tree is never repaired by a later prepare.
+        assert_eq!(
+            prepare_binary(&candidate, &source, &pin).unwrap_err().code,
+            "artifact_digest_mismatch"
+        );
+        fs::write(&executable, bytes).unwrap();
+        verify_binary(&candidate, &pin).unwrap();
+
+        let extra = binary_root(&candidate, &pin).join("plugin");
+        fs::write(&extra, b"extra").unwrap();
+        assert!(verify_binary(&candidate, &pin).is_err());
+        fs::remove_file(&extra).unwrap();
+
+        let other_version = BinaryPin {
+            version: "1.2.4",
+            ..test_pin(bytes)
+        };
+        assert_eq!(
+            verify_binary(&candidate, &other_version).unwrap_err().code,
+            "artifact_digest_mismatch"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_replaced_prepared_executable_or_aliased_root_refuses() {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        let bytes = b"pinned client";
+        let pin = test_pin(bytes);
+        let source = root.join("release-asset");
+        fs::write(&source, bytes).unwrap();
+        prepare_binary(&candidate, &source, &pin).unwrap();
+        let prepared = binary_root(&candidate, &pin);
+        let executable = prepared.join(pin.executable);
+        fs::remove_file(&executable).unwrap();
+        std::os::unix::fs::symlink(&source, &executable).unwrap();
+        assert!(verify_binary(&candidate, &pin).is_err());
+        fs::remove_file(&executable).unwrap();
+        fs::write(&executable, bytes).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        verify_binary(&candidate, &pin).unwrap();
+
+        let moved = root.join("moved");
+        fs::rename(&prepared, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &prepared).unwrap();
+        assert_eq!(
+            verify_binary(&candidate, &pin).unwrap_err().code,
+            "aliased_state"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn an_interrupted_preparation_is_retained_and_refused() {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        let bytes = b"pinned client";
+        let pin = test_pin(bytes);
+        let source = root.join("release-asset");
+        fs::write(&source, bytes).unwrap();
+        let leftover = candidate
+            .state_root
+            .join("providers")
+            .join(pin.staging)
+            .join(pin.directory);
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&leftover)
+            .unwrap();
+        fs::write(leftover.join(pin.executable), b"partial").unwrap();
+        assert!(prepare_binary(&candidate, &source, &pin).is_err());
+        assert_eq!(fs::read(leftover.join(pin.executable)).unwrap(), b"partial");
+        assert!(!binary_root(&candidate, &pin).exists());
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn unexpected_large_sparse_files_are_rejected_before_hashing_gigabytes() {

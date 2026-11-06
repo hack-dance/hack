@@ -2145,6 +2145,63 @@ fn endpoint_selects_service_primary_not_unrelated_first_graph_network() {
 }
 
 #[test]
+fn reviewed_network_aliases_and_compose_container_names_reach_endpoints() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let document = json!({
+        "name": "app--b",
+        "services": {
+            "queue": {"image": image, "read_only": true, "command": ["true"],
+                "networks": {"back": {"aliases": ["queue.internal"]}, "front": null}},
+            "web": {"image": image, "read_only": true,
+                "command": ["echo", "${COMPOSE_PROJECT_NAME}-queue-1"], "networks": ["back"]}
+        },
+        "networks": {"back": {"internal": true}, "front": {"internal": true}}
+    });
+    state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    assert!(review.plan.enrollment_compatible);
+    let inputs = project::inputs::compile(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        inputs.services["web"].command.as_deref(),
+        Some(&["echo".to_owned(), "app--b-queue-1".to_owned()][..])
+    );
+    let prepared = config::prepare(
+        inputs,
+        &BTreeMap::from([
+            ("queue".into(), Condition::Completed),
+            ("web".into(), Condition::Completed),
+        ]),
+        &"a".repeat(32),
+        &"b".repeat(32),
+        None,
+    )
+    .unwrap();
+    let physical = |key: &str| prepared.resources[&format!("network:{key}")].name.clone();
+    let endpoints = &prepared.configs["queue"]["NetworkingConfig"]["EndpointsConfig"];
+    assert_eq!(
+        endpoints[physical("back")]["Aliases"],
+        json!(["queue", "app--b-queue-1", "queue.internal"])
+    );
+    assert_eq!(
+        endpoints[physical("front")]["Aliases"],
+        json!(["queue", "app--b-queue-1"])
+    );
+    assert_eq!(
+        prepared.configs["web"]["NetworkingConfig"]["EndpointsConfig"][physical("back")]["Aliases"],
+        json!(["web", "app--b-web-1"])
+    );
+}
+
+#[test]
 fn declared_networks_survive_compile_and_bind_restore_identity() {
     for count in [2, MAX_NETWORKS] {
         let fixture = Fixture::new();

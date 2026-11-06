@@ -361,7 +361,26 @@ pub(super) fn prepare_delivery(
             .filter(|resource| resource.kind == Kind::Network)
             .map(|resource| (resource.key.clone(), resource.name.clone()))
             .collect();
-        let (network, endpoints) = network_config(name, &service.networks, &network_names)?;
+        let (network, mut endpoints) = network_config(name, &service.networks, &network_names)?;
+        add_network_aliases(
+            name,
+            &mut endpoints,
+            &service.network_aliases,
+            &network_names,
+        )?;
+        // Resolved extra_hosts entries shadow DNS inside this container; a
+        // name the service also owns as a network alias would have two owners.
+        if values.extra_hosts.keys().any(|host| {
+            service
+                .network_aliases
+                .values()
+                .any(|aliases| aliases.contains(host))
+        }) {
+            return Err(error(
+                "graph_network_alias",
+                "A network alias cannot also be one of the service's extra_hosts names; values omitted.",
+            ));
+        }
         let mounts: Vec<_> = service.mounts.iter().map(|m| {
             if m.kind == "bind" {
                 let source = source.expect("validated source");
@@ -583,6 +602,47 @@ pub(super) fn network_config(
     Ok((primary, Value::Object(endpoints)))
 }
 
+/// Append a service's reviewed extra aliases after its service-name alias on
+/// each declared attachment. Review already enforced one owner per name; this
+/// refuses a plan whose aliases name an undeclared attachment or exceed the
+/// reviewed bound rather than publishing a partial alias set.
+pub(super) fn add_network_aliases(
+    service: &str,
+    endpoints: &mut Value,
+    aliases: &BTreeMap<String, Vec<String>>,
+    names: &BTreeMap<String, String>,
+) -> Result<(), CandidateError> {
+    for (key, extra) in aliases {
+        if extra.is_empty()
+            || extra.len() > crate::project::MAX_NETWORK_ALIASES
+            || extra.iter().any(|alias| alias == service)
+            || extra.iter().collect::<BTreeSet<_>>().len() != extra.len()
+        {
+            return Err(unsupported());
+        }
+        let name = names.get(key).ok_or_else(unsupported)?;
+        let entry = endpoints.get_mut(name).ok_or_else(unsupported)?;
+        entry["Aliases"] = json!(
+            std::iter::once(service)
+                .chain(extra.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(())
+}
+
+/// Identity check for one owned attachment: the observed endpoint must still
+/// answer to the service name and to every alias compiled for it. Engines may
+/// add their own aliases (such as a short container ID); those are ignored.
+pub(super) fn endpoint_aliases_present(service: &str, compiled: &Value, observed: &Value) -> bool {
+    observed["Aliases"].as_array().is_some_and(|observed| {
+        observed.iter().any(|alias| alias == service)
+            && compiled["Aliases"]
+                .as_array()
+                .is_some_and(|compiled| compiled.iter().all(|alias| observed.contains(alias)))
+    })
+}
+
 #[cfg(test)]
 mod network_tests {
     use super::*;
@@ -604,6 +664,68 @@ mod network_tests {
             network_config("search", &[], &names).unwrap(),
             ("none".into(), json!({}))
         );
+    }
+
+    #[test]
+    fn appends_reviewed_aliases_only_on_their_attachment() {
+        let names = BTreeMap::from([
+            ("back".into(), "owned-back".into()),
+            ("front".into(), "owned-front".into()),
+        ]);
+        let (_, mut endpoints) =
+            network_config("search", &["front".into(), "back".into()], &names).unwrap();
+        let aliases = BTreeMap::from([(
+            "back".into(),
+            vec!["index.internal".into(), "search-app-1".into()],
+        )]);
+        add_network_aliases("search", &mut endpoints, &aliases, &names).unwrap();
+        assert_eq!(
+            endpoints,
+            json!({
+                "owned-back":{"Aliases":["search","index.internal","search-app-1"]},
+                "owned-front":{"Aliases":["search"]}
+            })
+        );
+        let (_, mut endpoints) = network_config("search", &["front".into()], &names).unwrap();
+        for invalid in [
+            BTreeMap::from([("back".into(), vec!["other".into()])]),
+            BTreeMap::from([("front".into(), vec![])]),
+            BTreeMap::from([("front".into(), vec!["search".into()])]),
+            BTreeMap::from([("front".into(), vec!["a".into(), "a".into()])]),
+            BTreeMap::from([(
+                "front".into(),
+                (0..=crate::project::MAX_NETWORK_ALIASES)
+                    .map(|i| format!("a{i}"))
+                    .collect(),
+            )]),
+        ] {
+            assert!(add_network_aliases("search", &mut endpoints, &invalid, &names).is_err());
+        }
+        assert_eq!(endpoints, json!({"owned-front":{"Aliases":["search"]}}));
+    }
+
+    #[test]
+    fn identity_requires_every_compiled_alias() {
+        let compiled = json!({"Aliases":["search","index.internal"]});
+        assert!(endpoint_aliases_present(
+            "search",
+            &compiled,
+            &json!({"Aliases":["search","index.internal","0123456789ab"]})
+        ));
+        for observed in [
+            json!({"Aliases":["search"]}),
+            json!({"Aliases":["index.internal"]}),
+            json!({"Aliases":null}),
+            json!({}),
+        ] {
+            assert!(!endpoint_aliases_present("search", &compiled, &observed));
+        }
+        // Graphs compiled before extra aliases expect only the service name.
+        assert!(endpoint_aliases_present(
+            "search",
+            &json!({"Aliases":["search"]}),
+            &json!({"Aliases":["search","0123456789ab"]})
+        ));
     }
 
     #[test]

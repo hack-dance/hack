@@ -1066,9 +1066,12 @@ same-state witness: `negative` (a graph may select any mounted share) fails
 `OwnShareOnly` at `StartGraph`; `unfenced-boot` fails `RunningMountsAudited` at
 `Boot`; `owner-first` fails `OwnerNeverAhead` at `CommitOwner`; and
 `referenced-removal` fails `ReferencedSharesKept` at `CommitRecord`. The controls
-check two roots (`a`, `b`): with a third, symmetric root TLC's two workers may
-report the same violation for either additional root, so the exact witness would
-not be deterministic.
+check two roots (`a`, `b`), so no symmetric third root can stand in for `b`.
+TLC's two-worker search also does not always report the shortest trace, so each
+control accepts exactly the first violations its model can reach (9, 12, 4 and 2
+complete states). They were enumerated from each control's complete state graph,
+restricted to steps from states that still satisfy the invariant, and are listed in
+`scripts/lib/tla-runtime-models.ts`.
 
 | Model operation | Source boundary |
 | --- | --- |

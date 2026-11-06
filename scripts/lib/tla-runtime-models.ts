@@ -39,6 +39,93 @@ const laterIncompleteMissingLockStages = [
   "socket",
   "owner",
 ] as const;
+// TLC's two-worker search does not always report the shortest trace: a deeper
+// first violation can be checked first. Each multi-root-share control therefore
+// accepts exactly the first violations its model can reach, as complete states
+// (graph a/b, bound a/b, recordSet, ownerSet, mounted, journal op/p, phase; a set
+// is written as its sorted members). The lists were enumerated from each control's
+// complete state graph restricted to steps from states that still satisfy the
+// invariant. The first entry is the shortest witness.
+type SharesFirstViolation = readonly [
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+];
+const sharesSet = (members: string): string =>
+  `{${[...members].map((member) => `"${member}"`).join(", ")}}`;
+const sharesFields = ([
+  graphA,
+  graphB,
+  boundA,
+  boundB,
+  recordSet,
+  ownerSet,
+  mounted,
+  op,
+  p,
+  phase,
+]: SharesFirstViolation): readonly string[] => [
+  `graph = [a |-> "${graphA}", b |-> "${graphB}"]`,
+  `recordSet = ${sharesSet(recordSet)}`,
+  `journal = [op |-> "${op}", p |-> "${p}"]`,
+  `bound = [a |-> "${boundA}", b |-> "${boundB}"]`,
+  `phase = "${phase}"`,
+  `mounted = ${sharesSet(mounted)}`,
+  `ownerSet = ${sharesSet(ownerSet)}`,
+];
+const sharesWitnesses = (
+  action: string,
+  [first, ...others]: readonly [SharesFirstViolation, ...SharesFirstViolation[]]
+) => ({
+  action,
+  fields: sharesFields(first),
+  alternativeWitnesses: others.map((state) => ({
+    action,
+    fields: sharesFields(state),
+  })),
+});
+const sharesOwnShareViolations = [
+  ["none", "live", "none", "a", "a", "a", "a", "idle", "a", "running"],
+  ["live", "live", "a", "a", "ab", "ab", "ab", "idle", "a", "running"],
+  ["live", "live", "b", "b", "ab", "ab", "ab", "idle", "a", "running"],
+  ["live", "live", "a", "a", "a", "a", "a", "idle", "a", "running"],
+  ["live", "none", "b", "none", "ab", "ab", "ab", "idle", "a", "running"],
+  ["live", "retained", "b", "b", "ab", "ab", "ab", "idle", "a", "running"],
+  ["none", "live", "none", "a", "ab", "ab", "ab", "idle", "a", "running"],
+  ["retained", "live", "a", "a", "ab", "ab", "ab", "idle", "a", "running"],
+  ["retained", "live", "a", "a", "a", "a", "a", "idle", "a", "running"],
+] as const;
+const sharesUnfencedBootViolations = [
+  ["none", "none", "none", "none", "a", "a", "a", "add", "b", "running"],
+  ["none", "none", "none", "none", "ab", "ab", "ab", "add", "b", "running"],
+  ["none", "none", "none", "none", "ab", "a", "ab", "add", "b", "running"],
+  ["none", "none", "none", "none", "ab", "ab", "ab", "remove", "b", "running"],
+  ["none", "none", "none", "none", "a", "ab", "a", "remove", "b", "running"],
+  ["none", "none", "none", "none", "a", "a", "a", "remove", "b", "running"],
+  ["retained", "none", "a", "none", "ab", "ab", "ab", "add", "b", "running"],
+  ["retained", "none", "a", "none", "ab", "a", "ab", "add", "b", "running"],
+  ["retained", "none", "a", "none", "ab", "ab", "ab", "remove", "b", "running"],
+  ["retained", "none", "a", "none", "a", "a", "a", "add", "b", "running"],
+  ["retained", "none", "a", "none", "a", "ab", "a", "remove", "b", "running"],
+  ["retained", "none", "a", "none", "a", "a", "a", "remove", "b", "running"],
+] as const;
+const sharesOwnerFirstViolations = [
+  ["none", "none", "none", "none", "a", "ab", "", "add", "b", "stopped"],
+  ["none", "none", "none", "none", "ab", "a", "", "remove", "b", "stopped"],
+  ["retained", "none", "a", "none", "ab", "a", "", "remove", "b", "stopped"],
+  ["retained", "none", "a", "none", "a", "ab", "", "add", "b", "stopped"],
+] as const;
+const sharesReferencedRemovalViolations = [
+  ["none", "retained", "none", "b", "a", "ab", "", "remove", "b", "stopped"],
+  ["retained", "retained", "a", "b", "a", "ab", "", "remove", "b", "stopped"],
+] as const;
 const contracts: readonly ModelContract[] = [
   {
     name: "pre-ready-retirement",
@@ -1078,45 +1165,25 @@ const contracts: readonly ModelContract[] = [
     module: "Shares",
     states: 55,
     invariant: "OwnShareOnly",
-    action: "StartGraph",
-    fields: [
-      'graph = [a |-> "none", b |-> "live"]',
-      'bound = [a |-> "none", b |-> "a"]',
-      'mounted = {"a"}',
-    ],
+    ...sharesWitnesses("StartGraph", sharesOwnShareViolations),
     additionalControls: [
       {
         name: "unfenced-boot",
         negative: true,
         invariant: "RunningMountsAudited",
-        action: "Boot",
-        fields: [
-          'journal = [op |-> "add", p |-> "b"]',
-          'phase = "running"',
-          'mounted = {"a"}',
-        ],
+        ...sharesWitnesses("Boot", sharesUnfencedBootViolations),
       },
       {
         name: "owner-first",
         negative: true,
         invariant: "OwnerNeverAhead",
-        action: "CommitOwner",
-        fields: [
-          'journal = [op |-> "add", p |-> "b"]',
-          'recordSet = {"a"}',
-          'ownerSet = {"a", "b"}',
-        ],
+        ...sharesWitnesses("CommitOwner", sharesOwnerFirstViolations),
       },
       {
         name: "referenced-removal",
         negative: true,
         invariant: "ReferencedSharesKept",
-        action: "CommitRecord",
-        fields: [
-          'graph = [a |-> "none", b |-> "retained"]',
-          'journal = [op |-> "remove", p |-> "b"]',
-          'recordSet = {"a"}',
-        ],
+        ...sharesWitnesses("CommitRecord", sharesReferencedRemovalViolations),
       },
     ],
   },

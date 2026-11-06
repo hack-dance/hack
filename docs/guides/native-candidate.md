@@ -256,6 +256,12 @@ With it:
 - Restoring an unchanged retained run uses the retained images and never builds; if
   one is missing, `up` refuses and asks you to start fresh. `hack restart` also never
   builds: it reuses the running or retained image, or refuses before stopping anything.
+- "Unchanged" means the same Compose bytes. A run that mounts no project source and
+  uses no dependency cache still restores after its Compose file was edited and put
+  back, or after any project file was touched; build-context edits do not rebuild it.
+  Its review then differs only in the project source inventory (file sizes and
+  modification times), which such a run never reads, and restore keeps the retained
+  ownership plan, images and data.
 - As with Compose `up`, only build services in the selected profiles are built and
   pinned. A build service in a profile you did not select is not built, and restore
   and restart need no image for it; selecting its profile in a later fresh `up` builds
@@ -444,6 +450,11 @@ the mapping, inspect the exact instance with the current bundle:
 
 Omitting `--branch` uses the same linked-worktree default as project commands;
 detached linked worktrees require an explicit instance. Inspection writes nothing.
+A mapping that still matches the checkout reports `state: "current"` with its run,
+the native graph phase (or `null` while the pool is stopped), whether the graph's
+run, owner, namespace and plan match the mapping, and `repairRequired: false`.
+Only a mapping whose scope no longer matches goes through the legacy device-rebind
+inspection below, which returns the `selectionSha256` that repair requires.
 Repair requires the exact selection and explicit acceptance of unproven original
 filesystem volume continuity. It changes only the three scope directory device
 numbers, preserving canonical paths, inodes, branch, run, owner, plan, environment

@@ -858,6 +858,99 @@ export async function inspectNativeProjectRunFilesystemRecovery(opts: {
   return (await recoverySelection(opts)).inspection;
 }
 
+export type NativeProjectRunCurrentInspection = {
+  readonly schema: typeof CURRENT_SCHEMA;
+  readonly state: "current";
+  readonly mappingSha256: string;
+  readonly run: NativeProjectRun;
+  /** Absent when the native graph cannot be read, for example while the pool is stopped. */
+  readonly graph: {
+    readonly phase: string;
+    readonly ownershipMatches: boolean;
+  } | null;
+  readonly repairRequired: false;
+};
+
+const CURRENT_SCHEMA = "hack.native-project-run-mapping-inspection/v1";
+const GRAPH_PHASE = /^[a-z][a-z-]{0,63}$/;
+
+async function currentGraph(opts: {
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly runtime: NativeRuntimeSelection;
+  readonly invoke?: typeof invokeNativeRuntime;
+}): Promise<NativeProjectRunCurrentInspection["graph"]> {
+  let observed: unknown;
+  try {
+    observed = await inspectNativeProjectGraph({
+      runtime: opts.runtime,
+      projectRoot: opts.projectRoot,
+      run: opts.run.run,
+      invoke: opts.invoke ?? invokeNativeRuntime,
+    });
+  } catch {
+    return null;
+  }
+  const receipt = isRecord(observed) ? observed.receipt : undefined;
+  if (
+    !(
+      isRecord(receipt) &&
+      typeof receipt.phase === "string" &&
+      GRAPH_PHASE.test(receipt.phase)
+    )
+  ) {
+    return null;
+  }
+  return {
+    phase: receipt.phase,
+    ownershipMatches:
+      isRecord(observed) &&
+      observed.journal_incomplete === false &&
+      receipt.run === opts.run.run &&
+      receipt.owner === opts.run.owner &&
+      receipt.namespace === opts.run.namespace &&
+      receipt.plan_id === opts.run.planId,
+  };
+}
+
+/**
+ * Read-only Doctor inspection of the saved run mapping. A mapping that still
+ * matches this checkout is reported with its native graph phase and whether the
+ * graph's ownership matches it; nothing needs repair. Only a mapping whose scope
+ * no longer matches falls through to the explicit legacy device-rebind
+ * inspection, which refuses every other difference.
+ */
+export async function inspectNativeProjectRunMapping(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly runtime: NativeRuntimeSelection;
+  readonly invoke?: typeof invokeNativeRuntime;
+}): Promise<
+  NativeProjectRunCurrentInspection | NativeProjectRunFilesystemInspection
+> {
+  const p = await paths(opts.scope, false);
+  await recoveryDirectories(p);
+  const { bytes, value } = await readRecoveryFile(p.file);
+  let run: NativeProjectRun;
+  try {
+    run = record(value, p.identity);
+  } catch {
+    return await inspectNativeProjectRunFilesystemRecovery(opts);
+  }
+  return {
+    schema: CURRENT_SCHEMA,
+    state: "current",
+    mappingSha256: createHash("sha256").update(bytes).digest("hex"),
+    run,
+    graph: await currentGraph({
+      projectRoot: p.identity.projectRoot,
+      run,
+      runtime: opts.runtime,
+      invoke: opts.invoke,
+    }),
+    repairRequired: false,
+  };
+}
+
 /** Explicitly rebind only three mapping device numbers; graph history is untouched. */
 export async function recoverNativeProjectRunFilesystem(opts: {
   readonly scope: NativeProjectRunScope;

@@ -1529,7 +1529,9 @@ pub fn source_compatibility(
     if needs_source && revision.is_none() {
         return Err(refused());
     }
-    if !unchanged_normalized_review(&receipt, plan_id, normalized) {
+    if !unchanged_normalized_review(&receipt, plan_id, normalized)
+        && !normalized::source_independent_review(&receipt, plan)
+    {
         let revision = revision.ok_or_else(refused)?;
         if hostname_change::prepare(&engine, plan, source_receipt, normalized)?.is_none() {
             source::prepare_shared_changed(

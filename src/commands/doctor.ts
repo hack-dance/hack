@@ -326,7 +326,7 @@ const doctorOptions = [
     long: "--native-run-mapping",
     valueHint: "inspect|repair",
     description:
-      "Inspect or explicitly repair a native run mapping after filesystem device renumbering",
+      "Inspect a native run mapping, or explicitly repair it after filesystem device renumbering",
   } as const),
   defineOption({
     name: "expectSelection",

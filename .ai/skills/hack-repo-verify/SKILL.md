@@ -131,7 +131,9 @@ Read [CI](../../../.github/workflows/ci.yml) for current hosted gates. A local p
 does not mean CI ran.
 
 Hosted CI runs the `bun run test` file set on four `test shard i/4` jobs;
-the required `test` check is their fan-in and passes only when every shard did.
+the required `test` check is their fan-in. It accepts success and cancelled-only
+results; failure or skipped shard results still fail. Prerelease gates separately
+require every shard to succeed.
 [`scripts/test-shard-plan.ts`](../../../scripts/test-shard-plan.ts) splits the files
 by the durations in `scripts/test-shard-durations.json`. A file with no recorded
 duration is planned at 5 s. Each shard runs each of its files in its own

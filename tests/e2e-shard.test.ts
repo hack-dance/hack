@@ -212,7 +212,7 @@ describe("docker-e2e CI fan-in", () => {
     }
   });
 
-  test("docker-e2e passes only when every shard succeeded and never skips", async () => {
+  test("docker-e2e accepts success or cancellation and never skips failures", async () => {
     const workflow = await ciWorkflow();
     const fanIn = workflow.jobs["docker-e2e"];
     expect(fanIn?.name ?? "docker-e2e").toBe("docker-e2e");
@@ -226,6 +226,23 @@ describe("docker-e2e CI fan-in", () => {
     );
     expect(gate?.run).toContain('if [ "$SHARD_RESULT" != "success" ]; then');
     expect(gate?.run).toContain("exit 1");
+    if (!gate?.run) {
+      throw new Error("Missing aggregate shell gate");
+    }
+    for (const [result, exitCode] of [
+      ["success", 0],
+      ["cancelled", 0],
+      ["failure", 1],
+      ["skipped", 1],
+      ["", 1],
+      ["unexpected", 1],
+    ] as const) {
+      const run = Bun.spawnSync(["bash", "-e", "-c", gate.run], {
+        env: { ...process.env, SHARD_RESULT: result },
+        timeout: 5000,
+      });
+      expect(run.exitCode).toBe(exitCode);
+    }
     // No other job may claim the docker-e2e name.
     const named = Object.entries(workflow.jobs).filter(
       ([key, job]) => (job.name ?? key) === "docker-e2e"

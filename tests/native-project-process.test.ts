@@ -520,3 +520,75 @@ test(
   },
   CASE_TIMEOUT_MS
 );
+
+test("a stop request after readiness runs beforeStop before the detached owner is asked to stop", async () => {
+  const opts = await fixture(`
+    process.on("SIGTERM", async () => {
+      const seen = await Bun.file(${JSON.stringify("BEFORE")}).exists();
+      await Bun.write(${JSON.stringify("MARKER")}, seen ? "before-seen" : "before-missing");
+      process.exit(0);
+    });
+    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    await Bun.sleep(30000);
+  `);
+  const before = join(opts.projectRoot, "before-ran");
+  const marker = join(opts.projectRoot, "owner-stopped");
+  const file = join(opts.projectRoot, "fake.ts");
+  await Bun.write(
+    file,
+    (await Bun.file(file).text())
+      .replace("BEFORE", before)
+      .replace("MARKER", marker)
+  );
+  const controller = new AbortController();
+  const force = new AbortController();
+  const code = await serveNativeProjectGraph({
+    ...opts,
+    signal: controller.signal,
+    forceSignal: force.signal,
+    requireGroupSettlement: false,
+    beforeStop: async () => {
+      await Bun.write(before, "ran");
+      return true;
+    },
+    onReady: async () => {
+      setTimeout(() => controller.abort(), 20);
+    },
+  });
+  expect(code).toBe(0);
+  expect(await Bun.file(marker).text()).toBe("before-seen");
+}, 15_000);
+
+test("a second stop request during beforeStop forces the owner to stop", async () => {
+  const opts = await fixture(`
+    process.on("SIGTERM", () => process.exit(0));
+    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    await Bun.sleep(30000);
+  `);
+  const controller = new AbortController();
+  const force = new AbortController();
+  let canceled = false;
+  await expectClosedRefusal(
+    serveNativeProjectGraph({
+      ...opts,
+      signal: controller.signal,
+      forceSignal: force.signal,
+      requireGroupSettlement: false,
+      beforeStop: async () => {
+        setTimeout(() => force.abort(), 20);
+        await new Promise<void>((resolve) =>
+          force.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          })
+        );
+        canceled = true;
+        return true;
+      },
+      onReady: async () => {
+        setTimeout(() => controller.abort(), 20);
+      },
+    }),
+    "interrupted"
+  );
+  expect(canceled).toBe(true);
+}, 15_000);

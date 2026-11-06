@@ -908,6 +908,43 @@ mapping write was attempted (its reply may have been lost), keep their data. Whe
 removal is not confirmed, `up` prints one line naming the run and the explicit
 `graph cleanup --run-id RUN --remove-data --json` request, and keeps the graph.
 
+Ctrl-C (or SIGTERM) on a ready graph whose `up.after` completed stops the project the
+way `hack down` does on the Compose backend: `down.before` runs first, then graph
+cleanup, then lifecycle-process retirement, then `down.after`. Hooks use the
+environment selection of the running `up`. A second Ctrl-C cancels a running down
+hook and proceeds to cleanup; a canceled `down.before` is not followed by
+`down.after`. A failed `down.before` still stops the graph, because you asked to
+exit, and the command reports `E_LIFECYCLE_FAILED`; a failed `down.after` reports
+the same after cleanup was confirmed. Ctrl-C while `up.after` is still running stops
+the graph without any down hook. With down hooks declared, the graph owner runs in
+its own process group, so the terminal's interrupt reaches only the `hack` frontend,
+which decides when the owner stops. Each down hook run by Ctrl-C also runs in its own
+process group with stdin closed. Canceling it signals the whole group (SIGTERM, then
+SIGKILL once the hook's shell exits or after a two-second grace), and output from a
+canceled hook is drained for at most that grace, so a child such as `sleep` in
+`sleep 600; echo finished` cannot keep the stop waiting. The frontend keeps handling
+interrupts until `down.after` and its finalization acknowledgement are settled.
+
+A private, value-free journal beside the run mapping records an intent before each
+down hook starts and its known completion after the hook's process exits. It holds
+only the run identity, a random writer identity and a phase, never commands, values
+or output. A later `hack down` reads it: completed (or failed) phases are not rerun;
+phases still owed, for example after the frontend was killed before or between the
+hooks, run once; a phase that started but whose completion is unknown (the frontend
+or `down` died while it ran) refuses with `E_LIFECYCLE_FAILED` "Native down hook
+completion is unknown; inspect before retrying." and nothing is replayed. That
+refusal also blocks the next `up` before any hook. After checking what the
+interrupted hook did, remove `.hack/.internal/native-runs/*.down-hooks.json` to
+clear it. A `hack down` from another terminal and the frontend's Ctrl-C claim the
+same journal record, so concurrent stops run each hook at most once. If that `hack
+down` is still running `down.before` when you press Ctrl-C, the frontend says so and
+waits for the hook to finish before it stops the graph; it runs `down.before` itself
+only if the other attempt failed and handed the record back. Press Ctrl-C again to
+stop without waiting. A new `up`
+supersedes any other leftover record; it does not run an earlier generation's owed
+hooks. Projects without down hooks keep the previous stop behavior and write no
+journal.
+
 Without that grant, `up` and `restart` refuse with `E_PERMISSION` before any stop or
 runtime request; set it and run the command again.
 
@@ -939,9 +976,11 @@ HTTPS. A normal `restart` kept its run and Redis data after a source edit. This 
 not establish every application workflow, crash recovery or comparative performance.
 Native `down` requests retaining cleanup from the graph owner and verifies container
 absence while keeping the exact run mapping. It then retires that branch's owned host
-lifecycle processes before running after hooks. A previously recovered stopped graph
-also retires remaining owned host processes without replaying hooks or guest cleanup;
-uncertain ownership refuses retirement and leaves the retained mapping intact.
+lifecycle processes before running after hooks. A stopped graph (after a foreground
+stop or a previous recovery) also retires remaining owned host processes without
+replaying guest cleanup; it runs only down hooks the journal above still owes, once,
+after the original frontend's finalization is acknowledged. Uncertain ownership
+refuses retirement and leaves the retained mapping intact.
 Before capturing live bridge helpers for cleanup, the owner retires an exited
 helper only after confirming its current guest boot, run, container, network and
 reservation. An interrupted retirement requires a fresh exit observation or an

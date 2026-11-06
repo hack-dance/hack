@@ -25,8 +25,10 @@
 //! unknown instructions or flags. Every image must be a public Docker Hub reference.
 //!
 //! Messages carry line numbers only; they never echo Dockerfile text or argument
-//! values. Not covered here: `ONBUILD` triggers stored in a base image's own
-//! configuration, which the build step must inspect on the pinned base images.
+//! values. `ADD` sources the engine would fetch remotely (URLs, git refs, variables
+//! that could become either) refuse. Not covered here: `ONBUILD` triggers stored in
+//! a base image's own configuration. The build step closes that with the source
+//! policy in [`super::build_policy`], which denies network sources at solve time.
 use super::image_reference::{ImageReference, NamedReference, normalize};
 use crate::CandidateError;
 use std::collections::{BTreeMap, BTreeSet};
@@ -565,13 +567,8 @@ fn instruction_uses(
 /// This refuses a superset: after dropping quotes and escapes, any source with
 /// `://`, with `@` followed by `:`, or with a `$` that could expand to either.
 fn refuse_remote_add_sources(args: &str, escape: char, line: usize) -> Result<(), CandidateError> {
-    let words: Vec<String> = if json_form(args, line)? {
-        serde_json::from_str::<Vec<String>>(args.trim_start()).map_err(|_| {
-            refusal(
-                Some(line),
-                "a JSON-form argument list must contain strings.",
-            )
-        })?
+    let words: Vec<String> = if let Some(words) = json_words(args, line)? {
+        words
     } else {
         args.split(is_frontend_whitespace)
             .filter(|word| !word.is_empty())
@@ -599,19 +596,40 @@ fn refuse_remote_add_sources(args: &str, escape: char, line: usize) -> Result<()
     Ok(())
 }
 
-/// Whether the frontend parses these arguments as a JSON string array (exec form).
-fn json_form(args: &str, line: usize) -> Result<bool, CandidateError> {
+/// The words of a JSON-form (exec-form) argument list, or `None` for shell form.
+///
+/// The frontend's `parseJSON` trims leading whitespace, requires `[`, and decodes
+/// with Go's `json.Decoder`: it reads only the first value and ignores what
+/// follows, and it decodes lone UTF-16 surrogate escapes leniently to U+FFFD. Its
+/// result decides whether heredocs apply and which words are `ADD` sources, so a
+/// disagreement could hide instructions or sources. The first value is decoded the
+/// same way, trailing text included. Where the strict decoder fails on text that
+/// has a `\u` escape, the frontend may still accept it, so that refuses.
+fn json_words(args: &str, line: usize) -> Result<Option<Vec<String>>, CandidateError> {
     let args = args.trim_start();
     if !args.starts_with('[') {
-        return Ok(false);
+        return Ok(None);
     }
-    match serde_json::from_str::<Vec<serde_json::Value>>(args) {
-        Ok(values) if values.iter().all(serde_json::Value::is_string) => Ok(true),
-        Ok(_) => Err(refusal(
+    let first = serde_json::Deserializer::from_str(args)
+        .into_iter::<serde_json::Value>()
+        .next();
+    match first {
+        Some(Ok(serde_json::Value::Array(values))) => values
+            .into_iter()
+            .map(|value| match value {
+                serde_json::Value::String(word) => Ok(word),
+                _ => Err(refusal(
+                    Some(line),
+                    "a JSON-form argument list must contain strings.",
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        _ if args.contains("\\u") => Err(refusal(
             Some(line),
-            "a JSON-form argument list must contain strings.",
+            "a JSON-form argument list must be strict JSON without lone surrogate escapes.",
         )),
-        Err(_) => Ok(false),
+        _ => Ok(None),
     }
 }
 
@@ -736,7 +754,7 @@ fn heredoc_capable(
     };
     Ok(
         matches!(instruction.command.as_str(), "run" | "copy" | "add")
-            && !json_form(&instruction.args, line)?,
+            && json_words(&instruction.args, line)?.is_none(),
     )
 }
 

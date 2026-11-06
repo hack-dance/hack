@@ -608,6 +608,50 @@ fn add_refuses_remote_sources() {
 }
 
 #[test]
+fn json_form_is_read_as_the_frontend_reads_it() {
+    // Go's decoder maps a lone surrogate to U+FFFD where strict JSON fails, so the
+    // frontend would see a JSON-form remote source: refuse.
+    for add in [
+        "ADD [\"\\uD800https://x/y\", \"/z\"]",
+        "ADD [\"\\udfff\", \"https://x/y\", \"/z\"]",
+        "COPY [\"\\uD800\", \"/z\"]",
+        "RUN [\"\\uD800\"]",
+    ] {
+        let dockerfile = format!("FROM alpine:3.22\n{add}\n");
+        assert_eq!(code(&dockerfile), "native_build_dockerfile", "{add}");
+    }
+    // The decoder reads only the first value: text after it does not make this
+    // shell form, so the decoded words are the sources.
+    assert_eq!(
+        code("FROM alpine:3.22\nADD [\"https://x/y\", \"/z\"] trailing\n"),
+        "native_build_dockerfile"
+    );
+    // Only the first value counts, so a malformed second one is ignored there too.
+    assert_eq!(
+        images("FROM alpine:3.22\nADD [\"a\", \"/z\"] [\"\\uD800\"]\n"),
+        ["alpine:3.22"]
+    );
+    // ...and no heredoc starts there, so the next lines are instructions.
+    let dockerfile =
+        "FROM alpine:3.22\nRUN [\"echo\"] <<EOF\nFROM --platform=linux/amd64 busybox:1.37\nEOF\n";
+    assert_eq!(code(dockerfile), "native_build_dockerfile");
+    // Escapes strict JSON accepts decode to the words the frontend sees.
+    assert_eq!(
+        code("FROM alpine:3.22\nADD [\"https\\u003a//x/y\", \"/z\"]\n"),
+        "native_build_dockerfile"
+    );
+    assert_eq!(
+        images("FROM alpine:3.22\nADD [\"\\u00e9t\\u00e9.txt\", \"/z\"]\n"),
+        ["alpine:3.22"]
+    );
+    // Brackets that are not JSON stay shell form, as in the frontend.
+    assert_eq!(
+        images("FROM alpine:3.22\nRUN [ -d /x ] || mkdir /x\n"),
+        ["alpine:3.22"]
+    );
+}
+
+#[test]
 fn only_public_docker_hub_references_are_admitted() {
     for reference in [
         "ghcr.io/example/app:1",

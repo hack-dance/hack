@@ -3,6 +3,7 @@ pub mod admission;
 mod agent;
 mod artifact;
 mod bridge;
+pub mod build_policy;
 pub mod build_scan;
 mod config_audit;
 mod dependency_socket;

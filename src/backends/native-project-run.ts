@@ -10,7 +10,7 @@ import {
   rmdir,
   unlink,
 } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -50,7 +50,46 @@ export type NativeProjectRun = {
    * Retained restores must add it again; absent legacy graphs never gain it.
    */
   readonly runtimeMetadata?: true;
+  /**
+   * Present only when startup selected a named env while the project had no managed
+   * env file, so that env selected only the per-env native files. Absent mappings
+   * started with managed env files (or are legacy): a later missing file refuses.
+   */
+  readonly unmanagedEnvironment?: true;
 };
+/**
+ * Whether the managed env files a run's recorded selection needs are still present.
+ * A base selection needs none. A named selection needs its overlay
+ * (`hack.env.<env>.yaml` or `hack.env.<env>.local.yaml`), except for a run recorded
+ * as started without any managed env file while there still is none. A legacy
+ * mapping without a recorded selection never qualifies.
+ */
+export function nativeRunEnvironmentAvailable(opts: {
+  readonly run: Pick<
+    NativeProjectRun,
+    "effectiveEnvName" | "unmanagedEnvironment"
+  >;
+  readonly environmentFiles: readonly string[];
+}): boolean {
+  const selected = opts.run.effectiveEnvName;
+  if (selected === undefined) {
+    return false;
+  }
+  if (selected === null) {
+    return true;
+  }
+  if (
+    opts.run.unmanagedEnvironment === true &&
+    opts.environmentFiles.length === 0
+  ) {
+    return true;
+  }
+  return opts.environmentFiles.some((path) =>
+    [`hack.env.${selected}.yaml`, `hack.env.${selected}.local.yaml`].includes(
+      basename(path)
+    )
+  );
+}
 export type NativeProjectRunScope = {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -129,10 +168,17 @@ function valid(value: unknown): value is NativeProjectRun {
       "aws,effectiveEnvName,namespace,owner,planId,profiles,run,runtimeMetadata",
       "aws,effectiveEnvName,gcloud,namespace,owner,planId,profiles,run",
       "aws,effectiveEnvName,gcloud,namespace,owner,planId,profiles,run,runtimeMetadata",
+      "aws,effectiveEnvName,namespace,owner,planId,profiles,run,unmanagedEnvironment",
+      "aws,effectiveEnvName,namespace,owner,planId,profiles,run,runtimeMetadata,unmanagedEnvironment",
+      "aws,effectiveEnvName,gcloud,namespace,owner,planId,profiles,run,unmanagedEnvironment",
+      "aws,effectiveEnvName,gcloud,namespace,owner,planId,profiles,run,runtimeMetadata,unmanagedEnvironment",
     ].includes(Object.keys(value).sort().join()) &&
     (!Object.hasOwn(value, "gcloud") || validGcloud(value.gcloud)) &&
     (!Object.hasOwn(value, "runtimeMetadata") ||
       value.runtimeMetadata === true) &&
+    (!Object.hasOwn(value, "unmanagedEnvironment") ||
+      (value.unmanagedEnvironment === true &&
+        typeof value.effectiveEnvName === "string")) &&
     (!Object.hasOwn(value, "aws") || validAws(value.aws)) &&
     (!Object.hasOwn(value, "profiles") || validProfiles(value.profiles)) &&
     (!Object.hasOwn(value, "effectiveEnvName") ||

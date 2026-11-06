@@ -22,7 +22,10 @@ import {
   captureNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
-import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
+import {
+  type NativeProjectInput,
+  prepareNativeProjectInput,
+} from "../src/backends/native-project-input.ts";
 import { nativeProjectPs } from "../src/backends/native-project-observe.ts";
 import {
   nativeRestartSelection,
@@ -50,6 +53,7 @@ import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -3798,6 +3802,206 @@ test("startup and restart review use identical branch routes after adaptation", 
     JSON.parse(observed[0]?.normalizedComposeJson ?? "{}").services.web.labels
       .caddy
   ).toBe("feature-a.app.hack.local, feature-a.app.hack.gy");
+});
+
+test("startup applies the per-env adaptation for the run's effective env, else the base", async () => {
+  for (const [effectiveEnvName, expected] of [
+    ["qa", "app.hack.local, qa.example.test"],
+    [null, "app.hack.local, base.example.test"],
+  ] as const) {
+    const { opts } = await fixture(false);
+    const prepare = opts.dependencies.prepare!;
+    const base = join(opts.scope.projectRoot, "adaptation.json");
+    const qa = join(opts.scope.projectRoot, "adaptation.qa.json");
+    await writeFile(opts.composeFile, "services: {}\n");
+    await writeFile(
+      base,
+      JSON.stringify({
+        version: 1,
+        additionalHostnames: { web: ["base.example.test"] },
+      })
+    );
+    await writeFile(
+      qa,
+      JSON.stringify({
+        version: 1,
+        additionalHostnames: { web: ["qa.example.test"] },
+      })
+    );
+    opts.dependencies.prepare = async (request) => {
+      const input = await prepare(request);
+      const compose = JSON.parse(input.normalizedComposeJson);
+      compose.services.web.labels = {
+        caddy: "app.hack.local",
+        "caddy.tls": "internal",
+        "caddy.reverse_proxy": "{{upstreams 3000}}",
+      };
+      return {
+        ...input,
+        effectiveEnvName,
+        normalizedComposeJson: JSON.stringify(compose),
+      };
+    };
+    let caddy: unknown;
+    const before = async (input: NativeProjectInput) => {
+      caddy = JSON.parse(input.normalizedComposeJson).services.web.labels.caddy;
+      return await opts.before();
+    };
+    expect(
+      await startNativeProject({
+        ...opts,
+        adaptationFile: base,
+        adaptationFileByEnv: { qa },
+        before,
+      })
+    ).toBe(0);
+    expect(caddy).toBe(expected);
+  }
+});
+
+test("startup records the requested or default env and marks runs without managed env files", async () => {
+  for (const [envName, defaultOverlay, managed] of [
+    ["qa", undefined, false],
+    [undefined, "qa", false],
+    ["qa", undefined, true],
+  ] as const) {
+    const { opts } = await fixture(false);
+    if (managed) {
+      // Value-free managed env files: the run is recorded as managed.
+      for (const name of ["default", "qa"]) {
+        await writeFile(
+          join(opts.scope.projectDir, `hack.env.${name}.yaml`),
+          JSON.stringify({
+            version: 1,
+            environment: name,
+            secretsprovider: "project_key",
+            values: { global: {} },
+          })
+        );
+      }
+    }
+    const base = join(opts.scope.projectRoot, "adaptation.json");
+    const qa = join(opts.scope.projectRoot, "adaptation.qa.json");
+    await writeFile(
+      opts.composeFile,
+      JSON.stringify({
+        services: {
+          web: {
+            image: `sha256:${"e".repeat(64)}`,
+            labels: {
+              caddy: "app.hack.local",
+              "caddy.tls": "internal",
+              "caddy.reverse_proxy": "{{upstreams 3000}}",
+            },
+          },
+        },
+      })
+    );
+    await writeFile(
+      join(opts.scope.projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "fixture",
+        ...(defaultOverlay === undefined ? {} : { env: { defaultOverlay } }),
+      })
+    );
+    for (const [file, host] of [
+      [base, "base.example.test"],
+      [qa, "qa.example.test"],
+    ] as const) {
+      await writeFile(
+        file,
+        JSON.stringify({ version: 1, additionalHostnames: { web: [host] } })
+      );
+    }
+    // The real input preparation, so the unmanaged runs have no hack.env.* file.
+    opts.dependencies.prepare = prepareNativeProjectInput;
+    const save = opts.dependencies.save!;
+    const recorded: unknown[] = [];
+    opts.dependencies.save = async (request) => {
+      recorded.push({
+        effectiveEnvName: request.run.effectiveEnvName,
+        unmanagedEnvironment: request.run.unmanagedEnvironment,
+      });
+      return await save(request);
+    };
+    let caddy: unknown;
+    const before = async (input: NativeProjectInput) => {
+      caddy = JSON.parse(input.normalizedComposeJson).services.web.labels.caddy;
+      return await opts.before();
+    };
+    expect(
+      await startNativeProject({
+        ...opts,
+        ...(envName === undefined ? {} : { envName }),
+        adaptationFile: base,
+        adaptationFileByEnv: { qa },
+        before,
+      })
+    ).toBe(0);
+    expect(caddy).toBe("app.hack.local, qa.example.test");
+    expect(recorded.length).toBeGreaterThan(0);
+    for (const mapping of recorded) {
+      expect(mapping).toEqual({
+        effectiveEnvName: "qa",
+        unmanagedEnvironment: managed ? undefined : true,
+      });
+    }
+  }
+});
+
+test("a retained run that started with managed env files refuses before hooks once they are gone", async () => {
+  const qaFile = "/fixture/.hack/hack.env.qa.yaml";
+  for (const [unmanaged, environmentFiles, expected] of [
+    [false, [], "refused"],
+    [true, [], "unmanaged"],
+    [false, [qaFile], "managed"],
+  ] as const) {
+    const { opts, events } = await fixture(false);
+    const restore: NativeProjectRun = {
+      run: "1".repeat(32),
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      planId: "a".repeat(64),
+      effectiveEnvName: "qa",
+      profiles: [],
+      aws: null,
+      ...(unmanaged ? { unmanagedEnvironment: true as const } : {}),
+    };
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      effectiveEnvName: "qa",
+      environmentFiles,
+    });
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.invoke = async (request) =>
+      request.args[1] === "restore-selection"
+        ? { ...restore, plan: restore.planId, generation: "2".repeat(64) }
+        : await invoke(request);
+    const saved: NativeProjectRun[] = [];
+    opts.dependencies.save = async (request) => {
+      saved.push(request.run);
+    };
+    const started = startNativeProject({ ...opts, restore });
+    if (expected === "refused") {
+      await expectClosedRefusal(
+        started,
+        "Native retained environment selection changed; data was not replaced."
+      );
+      expect(events).not.toContain("before");
+      expect(saved).toEqual([]);
+      continue;
+    }
+    expect(await started).toBe(0);
+    expect(events).toContain("before");
+    expect(saved.length).toBeGreaterThan(0);
+    for (const mapping of saved) {
+      // A managed run is never relabeled unmanaged; an unmanaged one keeps its marker.
+      expect(mapping.unmanagedEnvironment).toBe(
+        expected === "unmanaged" ? true : undefined
+      );
+    }
+  }
 });
 
 test("startup and restart review identical branch runtime metadata; legacy runs get none", async () => {

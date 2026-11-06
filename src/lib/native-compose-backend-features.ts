@@ -363,36 +363,85 @@ export type ComposeBackendReading = {
  */
 export async function readComposeBackendReading(
   composeFile: string,
-  opts?: { readonly adaptationFile?: string }
+  opts?: {
+    readonly adaptationFile?: string;
+    /** See {@link readComposeBackendFeatures}; replaces `adaptationFile`. */
+    readonly adaptationCandidates?: readonly (string | undefined)[];
+  }
 ): Promise<ComposeBackendReading> {
   const compose = await readNativeComposeDocument(composeFile);
   return {
-    features: await classifyAdapted(compose, opts?.adaptationFile),
+    features: await classifyAdapted(compose, adaptationCandidates(opts)),
     basicBuild: hasBasicComposeBuild(compose),
   };
 }
 
+/** The adaptation candidates a reading applies: explicit candidates, else the one file. */
+function adaptationCandidates(opts?: {
+  readonly adaptationFile?: string;
+  readonly adaptationCandidates?: readonly (string | undefined)[];
+}): readonly (string | undefined)[] {
+  return (
+    opts?.adaptationCandidates ??
+    (opts?.adaptationFile === undefined ? [] : [opts.adaptationFile])
+  );
+}
+
+function intersect(
+  left: ReadonlySet<string> | undefined,
+  right: ReadonlySet<string>
+): ReadonlySet<string> {
+  return left === undefined
+    ? right
+    : new Set([...left].filter((name) => right.has(name)));
+}
+
+/**
+ * Classify after adaptation. With several candidates (the effective env is not yet
+ * known), a network counts as isolated and a service as emulated only when every
+ * candidate says so; `undefined` is "no adaptation". This never passes a project
+ * that the selected adaptation would leave unsupported.
+ */
 async function classifyAdapted(
   compose: unknown,
-  adaptationFile: string | undefined
+  candidates: readonly (string | undefined)[]
 ): Promise<ComposeBackendFeature[]> {
   const features = findComposeBackendFeatures(compose);
   const network = features.includes("external_network");
   const platform = features.includes("foreign_platform");
-  if (adaptationFile === undefined || !(network || platform)) {
+  if (
+    candidates.every((candidate) => candidate === undefined) ||
+    !(network || platform)
+  ) {
     return features;
   }
   const services =
     isRecord(compose) && isRecord(compose.services)
       ? Object.keys(compose.services)
       : [];
+  let isolated: ReadonlySet<string> | undefined;
+  let emulated: ReadonlySet<string> | undefined;
+  for (const candidate of new Set(candidates)) {
+    if (network) {
+      isolated = intersect(
+        isolated,
+        candidate === undefined
+          ? new Set()
+          : await readAdaptedIsolatedNetworks(candidate)
+      );
+    }
+    if (platform) {
+      emulated = intersect(
+        emulated,
+        candidate === undefined
+          ? new Set()
+          : await readAdaptedEmulatedServices(candidate, services)
+      );
+    }
+  }
   return findComposeBackendFeatures(compose, {
-    isolatedNetworks: network
-      ? await readAdaptedIsolatedNetworks(adaptationFile)
-      : undefined,
-    emulatedServices: platform
-      ? await readAdaptedEmulatedServices(adaptationFile, services)
-      : undefined,
+    isolatedNetworks: isolated,
+    emulatedServices: emulated,
   });
 }
 
@@ -433,10 +482,19 @@ export async function readAdaptedEmulatedServices(
  */
 export async function readComposeBackendFeatures(
   composeFile: string,
-  opts?: { readonly adaptationFile?: string }
+  opts?: {
+    readonly adaptationFile?: string;
+    /**
+     * Every adaptation that could apply when the effective env is not yet known
+     * (`undefined` is "no adaptation"). A network counts as isolated only when
+     * every candidate isolates it, so the check never passes a project that the
+     * selected adaptation would leave external. Replaces `adaptationFile`.
+     */
+    readonly adaptationCandidates?: readonly (string | undefined)[];
+  }
 ): Promise<ComposeBackendFeature[]> {
   const compose = await readNativeComposeDocument(composeFile);
-  return await classifyAdapted(compose, opts?.adaptationFile);
+  return await classifyAdapted(compose, adaptationCandidates(opts));
 }
 
 /**
@@ -519,10 +577,13 @@ export async function refuseNativeComposeBackendFeatures(opts: {
   readonly composeFile: string;
   /** The `HACK_NATIVE_ADAPTATION` path native start applies, if any. */
   readonly adaptationFile?: string;
+  /** Every adaptation native start could apply; see {@link readComposeBackendFeatures}. */
+  readonly adaptationCandidates?: readonly (string | undefined)[];
   readonly restart: boolean;
 }): Promise<void> {
   const features = await readComposeBackendFeatures(opts.composeFile, {
     adaptationFile: opts.adaptationFile,
+    adaptationCandidates: opts.adaptationCandidates,
   });
   if (features.length > 0) {
     throw composeBackendRefusal({ features, restart: opts.restart });

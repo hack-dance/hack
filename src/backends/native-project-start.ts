@@ -111,11 +111,13 @@ import {
   loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  nativeRunEnvironmentAvailable,
   normalizeNativeProfiles,
   prepareNativeProjectRunStorage,
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "./native-project-run.ts";
+import { selectNativeEnvFile } from "./native-project-selection.ts";
 import { preflightNativeProjectSource } from "./native-project-source-preflight.ts";
 import {
   invokeNativeRuntime,
@@ -427,7 +429,7 @@ export function prepareNativeProjectServices(
 }
 /** Fixed text of the refusal when the project share was not granted. */
 export const NATIVE_SHARED_SOURCE_REFUSAL =
-  "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 to share this exact project, including ignored files. Set it to grant that share and run the command again.";
+  "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings to share this exact project, including ignored files. Grant that share and run the command again.";
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -1134,6 +1136,38 @@ async function selectNativeStartup(opts: {
   const restore = opts.restore ?? retained ?? undefined;
   return { retained, restore, selection, retainedFlags };
 }
+/**
+ * Before any hook, refuse a retained run whose recorded env selection changed: its
+ * env must resolve the same, and it keeps the managed env files it started with. Only
+ * a run recorded as started without them may still find none, and a retained run never
+ * becomes unmanaged after the fact. A legacy restore without a recorded selection keeps
+ * its earlier behavior. Returns whether the new mapping records no managed env files.
+ */
+function requireRetainedEnvironment(opts: {
+  /** The retained env a resumed (not restored) run must still resolve to. */
+  readonly retainedSelection: string | null | undefined;
+  readonly restore: NativeProjectRun | undefined;
+  readonly input: NativeProjectInput;
+}): boolean {
+  const { restore, input } = opts;
+  if (
+    (opts.retainedSelection !== undefined &&
+      input.effectiveEnvName !== opts.retainedSelection) ||
+    (restore?.effectiveEnvName !== undefined &&
+      !nativeRunEnvironmentAvailable({
+        run: restore,
+        environmentFiles: input.environmentFiles,
+      }))
+  ) {
+    throw new ClosedCliError(
+      "Native retained environment selection changed; data was not replaced."
+    );
+  }
+  return (
+    input.environmentFiles.length === 0 &&
+    (restore === undefined || restore.unmanagedEnvironment === true)
+  );
+}
 function selectedMapping(opts: {
   readonly ready: NativeProjectRun;
   readonly effectiveEnvName: string | null;
@@ -1141,6 +1175,8 @@ function selectedMapping(opts: {
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly gcloud?: NativeGcloudSelection;
   readonly runtimeMetadata: boolean;
+  /** Startup found no managed env file at all. */
+  readonly unmanagedEnvironment: boolean;
 }): NativeProjectRun {
   return {
     ...opts.ready,
@@ -1156,6 +1192,10 @@ function selectedMapping(opts: {
     // earlier candidates; a mapping that carries it refuses there.
     ...(opts.gcloud ? { gcloud: { mode: opts.gcloud.mode } } : {}),
     ...(opts.runtimeMetadata ? { runtimeMetadata: true as const } : {}),
+    // Only a named env needs the distinction; a base selection delivers no values either way.
+    ...(opts.unmanagedEnvironment && opts.effectiveEnvName !== null
+      ? { unmanagedEnvironment: true as const }
+      : {}),
   };
 }
 /**
@@ -1327,12 +1367,16 @@ export async function startNativeProject(opts: {
   readonly restore?: NativeProjectRun;
   readonly onReady?: () => Promise<void>;
   readonly dependencyFile?: string;
+  /** Per-env dependency files; the entry for the run's effective env replaces `dependencyFile`. */
+  readonly dependencyFileByEnv?: Readonly<Record<string, string>>;
   /**
    * Resolves `host_lifecycle` / `host_shared_helper` owners after lifecycle
    * hooks; without it such selections refuse.
    */
   readonly dependencyOwners?: NativeDependencyOwnerResolver;
   readonly adaptationFile?: string;
+  /** Per-env adaptations; the entry for the run's effective env replaces `adaptationFile`. */
+  readonly adaptationFileByEnv?: Readonly<Record<string, string>>;
   /**
    * Effective project-wide host aliases (`internal.extra_hosts` and
    * checkout-local entries). Declared on every service like the Compose
@@ -1437,18 +1481,31 @@ export async function startNativeProject(opts: {
         envByService: input.managedEnvironment,
       })
     : undefined;
-  if (
-    retained &&
-    !opts.restore &&
-    input.effectiveEnvName !== selection.envName
-  ) {
-    throw new ClosedCliError(
-      "Native retained environment selection changed; data was not replaced."
-    );
-  }
+  const unmanagedEnvironment = requireRetainedEnvironment({
+    retainedSelection:
+      retained && !opts.restore ? selection.envName : undefined,
+    restore,
+    input,
+  });
+  // The effective env (requested, retained or project default) picks the per-env
+  // files, so a fresh start, a retained start and a restart select the same ones.
+  const selectedAdaptationFile = selectNativeEnvFile({
+    selection: {
+      file: opts.adaptationFile,
+      fileByEnv: opts.adaptationFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
+  const selectedDependencyFile = selectNativeEnvFile({
+    selection: {
+      file: opts.dependencyFile,
+      fileByEnv: opts.dependencyFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
   input = await prepareNativeProjectAdaptation({
     input,
-    path: opts.adaptationFile,
+    path: selectedAdaptationFile,
   });
   input = applyNativeInternalHostAliases({
     input,
@@ -1467,7 +1524,7 @@ export async function startNativeProject(opts: {
   ).input;
   let specs = prepareNativeProjectServices(
     input,
-    opts.dependencyFile !== undefined
+    selectedDependencyFile !== undefined
   );
   // Refuse malformed or unacquirable references before hooks, VM or provider start.
   await admitNativeProjectImages({
@@ -1527,7 +1584,7 @@ export async function startNativeProject(opts: {
       input = credentials.input;
       specs = prepareNativeProjectServices(
         input,
-        opts.dependencyFile !== undefined
+        selectedDependencyFile !== undefined
       );
     }
     const dependencyDiscoveryDeadline = performance.now() + 60_000;
@@ -1536,7 +1593,7 @@ export async function startNativeProject(opts: {
       profiles,
     });
     const hostDependencies = await readNativeHostDependencies({
-      path: opts.dependencyFile,
+      path: selectedDependencyFile,
       services: Object.keys(specs),
       hostAliases,
       discover: (selection) =>
@@ -1645,7 +1702,7 @@ export async function startNativeProject(opts: {
     requireActiveStartup(controller.signal);
     specs = prepareNativeProjectServices(
       input,
-      opts.dependencyFile !== undefined
+      selectedDependencyFile !== undefined
     );
     prepareNativeDependencyServices({
       dependencies: hostDependencies,
@@ -1853,6 +1910,7 @@ export async function startNativeProject(opts: {
                   aws: selection.aws,
                   gcloud: selection.gcloud,
                   runtimeMetadata: metadata !== undefined,
+                  unmanagedEnvironment,
                 });
                 // Enrollment must exist before taking a shared lease: release
                 // requires independent proof of this exact graph's cleanup.
@@ -1985,6 +2043,7 @@ export async function startNativeProject(opts: {
                 aws: selection.aws,
                 gcloud: selection.gcloud,
                 runtimeMetadata: metadata !== undefined,
+                unmanagedEnvironment,
               },
               finalization,
               deps,

@@ -592,6 +592,31 @@ test("down environment preserves explicit base and named overlay while legacy re
     "legacy"
   );
 });
+test("down environment is empty only for a run recorded without managed env files", async () => {
+  const opts = await fixture(false);
+  // No managed env file exists. A named selection recorded as managed (or legacy)
+  // means its overlay disappeared.
+  await expectClosedRefusal(
+    nativeDownEnvironment({
+      scope: opts.scope,
+      run: { ...run, effectiveEnvName: "qa" },
+      serviceNames: ["web"],
+    }),
+    "unavailable"
+  );
+  for (const selected of [
+    { effectiveEnvName: "qa", unmanagedEnvironment: true as const },
+    { effectiveEnvName: null },
+  ]) {
+    expect(
+      await nativeDownEnvironment({
+        scope: opts.scope,
+        run: { ...run, ...selected },
+        serviceNames: ["web"],
+      })
+    ).toEqual({});
+  }
+});
 test("before failure prevents cleanup; after failure retains the stopped mapping", async () => {
   for (const phase of ["before", "after"] as const) {
     const opts = await fixture();

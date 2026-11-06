@@ -53,9 +53,13 @@ import {
 import {
   type NativeProjectRun,
   type NativeProjectRunScope,
+  nativeRunEnvironmentAvailable,
   normalizeNativeProfiles,
 } from "./native-project-run.ts";
-import { readNativeSelection } from "./native-project-selection.ts";
+import {
+  readNativeSelection,
+  selectNativeEnvFile,
+} from "./native-project-selection.ts";
 import {
   nativeRuntimeMetadataSelected,
   prepareNativeProjectServices,
@@ -343,7 +347,11 @@ export async function preflightNativeRestart(opts: {
   /** Explicit frontend recovery may encounter a graph stopped before an intent was saved. */
   readonly recoverStopped?: boolean;
   readonly adaptationFile?: string;
+  /** Per-env adaptations; the retained run's effective env selects as start does. */
+  readonly adaptationFileByEnv?: Readonly<Record<string, string>>;
   readonly dependencyFile?: string;
+  /** Per-env dependency files; the retained run's effective env selects as start does. */
+  readonly dependencyFileByEnv?: Readonly<Record<string, string>>;
   /** Same project-wide host aliases the replacement startup declares. */
   readonly internalExtraHosts?: Readonly<Record<string, string>>;
   /** Resolves owner-scoped dependency selections against the running instance. */
@@ -387,9 +395,33 @@ export async function preflightNativeRestart(opts: {
     composeFile: opts.composeFile,
     envName: selected.envName,
   });
+  if (
+    !nativeRunEnvironmentAvailable({
+      run: opts.run,
+      environmentFiles: input.environmentFiles,
+    })
+  ) {
+    throw new ClosedCliError(
+      "Native restart environment selection changed since startup; restart was refused. The current graph was not stopped."
+    );
+  }
+  const adaptationFile = selectNativeEnvFile({
+    selection: {
+      file: opts.adaptationFile,
+      fileByEnv: opts.adaptationFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
+  const dependencyFile = selectNativeEnvFile({
+    selection: {
+      file: opts.dependencyFile,
+      fileByEnv: opts.dependencyFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
   input = await deps.adapt({
     input,
-    path: opts.adaptationFile,
+    path: adaptationFile,
   });
   input = applyNativeInternalHostAliases({
     input,
@@ -426,7 +458,7 @@ export async function preflightNativeRestart(opts: {
   input = metadata?.input ?? input;
   const specs = prepareNativeProjectServices(
     input,
-    opts.dependencyFile !== undefined
+    dependencyFile !== undefined
   );
   const hostAliases = nativeServiceHostAliases({
     services: specs,
@@ -434,12 +466,12 @@ export async function preflightNativeRestart(opts: {
   });
   const dependencies = stoppedRetry
     ? await readNativeRestartDependencyIntent({
-        path: opts.dependencyFile,
+        path: dependencyFile,
         services: Object.keys(specs),
         hostAliases,
       })
     : await deps.dependencies({
-        path: opts.dependencyFile,
+        path: dependencyFile,
         services: Object.keys(specs),
         hostAliases,
         discover: (selection) =>

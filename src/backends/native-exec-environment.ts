@@ -1,11 +1,11 @@
-import { basename } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { adaptNativeGcloudEnvironment } from "./native-gcloud-environment.ts";
 import { prepareNativeProjectInput } from "./native-project-input.ts";
-import type {
-  NativeProjectRun,
-  NativeProjectRunScope,
+import {
+  type NativeProjectRun,
+  type NativeProjectRunScope,
+  nativeRunEnvironmentAvailable,
 } from "./native-project-run.ts";
 
 /** Marks a selection that no longer matches the run's recorded startup selection. */
@@ -56,15 +56,11 @@ export async function prepareNativeExecEnvironment(opts: {
     ) {
       throw new SelectionChanged();
     }
-    const selected = opts.run.effectiveEnvName;
     if (
-      selected !== null &&
-      !input.environmentFiles.some((path) =>
-        [
-          `hack.env.${selected}.yaml`,
-          `hack.env.${selected}.local.yaml`,
-        ].includes(basename(path))
-      )
+      !nativeRunEnvironmentAvailable({
+        run: opts.run,
+        environmentFiles: input.environmentFiles,
+      })
     ) {
       throw new SelectionChanged();
     }

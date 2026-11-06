@@ -41,6 +41,8 @@ const run = {
   effectiveEnvName: "qa",
   profiles: ["app"],
   aws: null,
+  // The stubbed input preparation reports no managed env file.
+  unmanagedEnvironment: true as const,
 };
 const token = {
   version: 1 as const,
@@ -397,6 +399,147 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
     }),
     "compatibility changed"
   );
+});
+
+test("preflight selects the per-env adaptation and dependency files by the retained env", async () => {
+  const { preflightNativeRestart } = await import(
+    "../src/backends/native-project-restart-preflight.ts"
+  );
+  const image = `sha256:${"9".repeat(64)}`;
+  const selected: Record<string, string | undefined> = {};
+  const preflight = (effectiveEnvName: string | null) =>
+    preflightNativeRestart({
+      runtime: { binary: "/unused", home: "/candidate" },
+      scope,
+      composeFile: "/fixture/.hack/docker-compose.yml",
+      run,
+      adaptationFile: "/fixture/.hack/native/adaptation.json",
+      adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
+      dependencyFile: "/machine/dependencies.json",
+      dependencyFileByEnv: { qa: "/machine/dependencies.qa.json" },
+      dependencies: {
+        activeImages: async () => activeImageFixture(),
+        prepare: async () => ({
+          originalSha256: "1".repeat(64),
+          environmentFiles: [],
+          serviceNames: ["app"],
+          normalizedComposeJson: JSON.stringify({
+            services: { app: { image } },
+          }),
+          managedEnvironment: {},
+          lifecycleHostEnvironment: {},
+          effectiveEnvName,
+        }),
+        adapt: async ({ input: prepared, path }) => {
+          selected.adaptation = path;
+          return prepared;
+        },
+        dependencies: async ({ path }) => {
+          selected.dependencies = path;
+          throw new ClosedCliError("stop after dependency selection");
+        },
+        invoke: async ({ args }) =>
+          args[1] === "probe" ? { admitted: true } : { network: "internet" },
+        review: async (options) =>
+          await options.run({
+            planId: run.planId,
+            namespace: run.namespace,
+            report: {},
+            projectArgs: [],
+          }),
+      },
+    });
+  await expectClosedRefusal(preflight("qa"), "stop after dependency selection");
+  expect(selected).toEqual({
+    adaptation: "/fixture/.hack/native/adaptation.qa.json",
+    dependencies: "/machine/dependencies.qa.json",
+  });
+  await expectClosedRefusal(preflight(null), "stop after dependency selection");
+  expect(selected).toEqual({
+    adaptation: "/fixture/.hack/native/adaptation.json",
+    dependencies: "/machine/dependencies.json",
+  });
+});
+
+test("preflight keeps the retained env's per-env files without managed env files", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-restart-env-"))
+  );
+  try {
+    const projectDir = join(root, ".hack");
+    await mkdir(projectDir);
+    const composeFile = join(projectDir, "docker-compose.yml");
+    await writeFile(
+      composeFile,
+      JSON.stringify({
+        services: { app: { image: `sha256:${"9".repeat(64)}` } },
+      })
+    );
+    const selected: Record<string, string | undefined> = {};
+    const preflight = (
+      effectiveEnvName: string | null,
+      startedWithManagedFiles = false
+    ) =>
+      preflightNativeRestart({
+        runtime: { binary: "/unused", home: "/candidate" },
+        scope: { ...scope, projectRoot: root, projectDir },
+        composeFile,
+        run: {
+          ...run,
+          effectiveEnvName,
+          unmanagedEnvironment: startedWithManagedFiles ? undefined : true,
+        },
+        adaptationFile: "/fixture/.hack/native/adaptation.json",
+        adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
+        dependencyFile: "/machine/dependencies.json",
+        dependencyFileByEnv: { qa: "/machine/dependencies.qa.json" },
+        dependencies: {
+          activeImages: async () => activeImageFixture(),
+          adapt: async ({ input: prepared, path }) => {
+            selected.adaptation = path;
+            selected.env = prepared.effectiveEnvName ?? undefined;
+            return prepared;
+          },
+          dependencies: async ({ path }) => {
+            selected.dependencies = path;
+            throw new ClosedCliError("stop after dependency selection");
+          },
+          invoke: async ({ args }) =>
+            args[1] === "probe" ? { admitted: true } : { network: "internet" },
+        },
+      });
+    // The project has no hack.env.* file, so the recorded env names only the files.
+    await expectClosedRefusal(
+      preflight("qa"),
+      "stop after dependency selection"
+    );
+    expect(selected).toEqual({
+      adaptation: "/fixture/.hack/native/adaptation.qa.json",
+      env: "qa",
+      dependencies: "/machine/dependencies.qa.json",
+    });
+    await expectClosedRefusal(
+      preflight(null),
+      "stop after dependency selection"
+    );
+    expect(selected).toEqual({
+      adaptation: "/fixture/.hack/native/adaptation.json",
+      env: undefined,
+      dependencies: "/machine/dependencies.json",
+    });
+    // A run that started with managed env files refuses once they are all gone,
+    // before any adaptation, dependency or cleanup step.
+    for (const key of Object.keys(selected)) {
+      delete selected[key];
+    }
+    await expectClosedRefusal(
+      preflight("qa", true),
+      "Native restart environment selection changed since startup; restart was refused. The current graph was not stopped."
+    );
+    expect(selected).toEqual({});
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("preflight refuses a stale host listener before restart cleanup", async () => {

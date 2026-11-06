@@ -35,6 +35,10 @@
 //!   bounds.
 //! - The client builds from a private copy of the Dockerfile and ignore bytes that were
 //!   scanned and hashed, never from the project paths again.
+//! - Every build runs under [`build_policy::document`] for its pins, a BuildKit source
+//!   policy the client sends with the solve: only the pinned base references resolve as
+//!   images, and network sources (`ADD` URLs, git, image blobs) are denied, including
+//!   ones a base image's stored `ONBUILD` triggers add.
 //! - Build arguments are not secrets, as with Docker: an image records their values in
 //!   its history, and resolved base references (which an argument may select) are
 //!   reported in receipts and results. Hack still keeps values out of argv, the
@@ -42,7 +46,7 @@
 //!   as defense in depth. The caller refuses values equal to a managed secret.
 //! - Nothing here removes images, prunes caches or adopts an image whose labels differ.
 use super::{
-    artifact,
+    artifact, build_policy,
     build_scan::{self, BaseImage},
     registry_image::{self, BuildBase},
     state,
@@ -849,8 +853,10 @@ pub(super) fn run<P: BuildPool>(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(state::io(error)),
     }
-    // The definition carries argument values; it never outlives the client run.
+    // Neither the definition (it carries argument values) nor the source policy
+    // outlives the client run.
     let _definition = RemoveOnDrop(scratch.join("definition").join(BAKE_DEFINITION));
+    let _policy = RemoveOnDrop(scratch.join("definition").join(SOURCE_POLICY));
     let ended = supervise(
         command(
             &builder, &scratch, &metadata, inputs, &identity, &pins, &expected,
@@ -1007,6 +1013,8 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), CandidateError> {
 /// The one bake target a build defines; its metadata is keyed by this name.
 const BAKE_TARGET: &str = "build";
 const BAKE_DEFINITION: &str = "definition.json";
+/// The BuildKit source policy file beside the definition (see [`build_policy`]).
+const SOURCE_POLICY: &str = "source-policy.json";
 
 /// Removes one private file when dropped, on every exit path.
 struct RemoveOnDrop(PathBuf);
@@ -1088,6 +1096,13 @@ fn command(
     let encoded = serde_json::to_vec(&bake_definition(inputs, &dockerfile, pins, labels))
         .map_err(|_| invalid("Cannot encode the build definition."))?;
     write_private(&definition, &encoded)?;
+    // The policy allows exactly the pinned references the definition names as
+    // contexts, and denies every other image and network source.
+    let policy = bake.join(SOURCE_POLICY);
+    let policy_bytes =
+        serde_json::to_vec(&build_policy::document(pins.values().map(String::as_str))?)
+            .map_err(|_| invalid("Cannot encode the build source policy."))?;
+    write_private(&policy, &policy_bytes)?;
     let mut command = super::process::clean_command(builder);
     command
         .current_dir(scratch)
@@ -1103,6 +1118,10 @@ fn command(
         .env("BUILDX_CONFIG", &buildx)
         .env("BUILDX_NO_DEFAULT_ATTESTATIONS", "1")
         .env("DOCKER_CLI_HINTS", "false")
+        // The client sends this policy with the solve, so BuildKit evaluates every
+        // source of the build against it, including ones a base image's ONBUILD
+        // triggers add.
+        .env("EXPERIMENTAL_BUILDKIT_SOURCE_POLICY", &policy)
         .args([
             "bake",
             "--progress=plain",

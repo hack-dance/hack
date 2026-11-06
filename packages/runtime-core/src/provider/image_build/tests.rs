@@ -81,6 +81,9 @@ count=$(cat calls 2>/dev/null || echo 0)
 echo $((count + 1)) > calls
 printf '%s\n' "$@" > argv
 env > env
+[ -n "${{EXPERIMENTAL_BUILDKIT_SOURCE_POLICY-}}" ] || exit 9
+cat "$EXPERIMENTAL_BUILDKIT_SOURCE_POLICY" > seen-policy.json
+printf '%s' "$EXPERIMENTAL_BUILDKIT_SOURCE_POLICY" > seen-policy-path
 meta=
 file=
 previous=
@@ -285,6 +288,30 @@ fn cold_build_passes_values_only_through_the_private_definition_and_records_the_
     assert_eq!(target["tags"], serde_json::json!([inputs.tag()]));
     // The definition carries argument values; it is gone once the client has run.
     assert!(!scratch.join("definition").join(BAKE_DEFINITION).exists());
+    // The client ran under the source policy for exactly these pins, from a private
+    // file removed with the definition.
+    let policy_path = PathBuf::from(fs::read_to_string(scratch.join("seen-policy-path")).unwrap());
+    assert_eq!(policy_path, scratch.join("definition").join(SOURCE_POLICY));
+    assert!(!policy_path.exists(), "the source policy outlived the run");
+    let policy: Value =
+        serde_json::from_slice(&fs::read(scratch.join("seen-policy.json")).unwrap()).unwrap();
+    let pinned = format!("docker.io/library/alpine@{PIN}");
+    assert_eq!(policy, build_policy::document([pinned.as_str()]).unwrap());
+    assert_eq!(
+        policy_decision(&policy, &format!("docker-image://{pinned}")),
+        "ALLOW"
+    );
+    for denied in [
+        "docker-image://docker.io/library/alpine:3.20",
+        "docker-image://docker.io/library/busybox:latest",
+        "oci-layout://store@sha256:x",
+        "https://example.test/archive.tgz",
+        "git://example.test/repo.git",
+        "docker-image+blob://docker.io/library/alpine@sha256:x",
+    ] {
+        assert_eq!(policy_decision(&policy, denied), "DENY", "{denied}");
+    }
+    assert_eq!(policy_decision(&policy, "local://context"), "ALLOW");
     let receipt = fixture.receipt(&inputs);
     assert_eq!(receipt.phase, Phase::ContentIdVerified);
     assert_eq!(receipt.image_id.as_deref(), Some(IMAGE));
@@ -337,6 +364,7 @@ fn environment_names_are_plain_arguments_that_never_reach_the_client_environment
         "BUILDX_CONFIG",
         "BUILDX_NO_DEFAULT_ATTESTATIONS",
         "DOCKER_CLI_HINTS",
+        "EXPERIMENTAL_BUILDKIT_SOURCE_POLICY",
         "PWD",
         "OLDPWD",
         "SHLVL",
@@ -362,6 +390,45 @@ fn environment_names_are_plain_arguments_that_never_reach_the_client_environment
             format!("{SECRET}-{name}")
         );
     }
+}
+
+/// BuildKit's evaluation of a source identifier: the last matching rule wins and an
+/// unmatched source is allowed. `WILDCARD` patterns here use only a trailing `*`.
+fn policy_decision(policy: &Value, identifier: &str) -> &'static str {
+    let mut decision = "ALLOW";
+    for rule in policy["rules"].as_array().unwrap() {
+        let pattern = rule["selector"]["identifier"].as_str().unwrap();
+        let matched = match rule["selector"]["match_type"].as_str().unwrap() {
+            "EXACT" => identifier == pattern,
+            "WILDCARD" => identifier.starts_with(pattern.strip_suffix('*').unwrap()),
+            other => panic!("unexpected match type {other}"),
+        };
+        if matched {
+            decision = if rule["action"] == "DENY" {
+                "DENY"
+            } else {
+                "ALLOW"
+            };
+        }
+    }
+    decision
+}
+
+#[test]
+fn private_build_files_are_removed_even_when_the_client_fails() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    fixture.client(&inputs, "fail");
+    let error = run(&fixture.candidate, &pool, &inputs, &never).unwrap_err();
+    assert_eq!(error.code, "native_build_failed");
+    let scratch = fixture.scratch(&inputs);
+    assert!(
+        scratch.join("seen-policy.json").exists(),
+        "the client did not run"
+    );
+    assert!(!scratch.join("definition").join(BAKE_DEFINITION).exists());
+    assert!(!scratch.join("definition").join(SOURCE_POLICY).exists());
 }
 
 #[test]

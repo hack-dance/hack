@@ -549,9 +549,104 @@ fn unknown_instructions_flags_and_preamble_refuse() {
     // Known flags are accepted.
     assert_eq!(
         images(
-            "FROM alpine:3.22\nADD --link --checksum=sha256:00 --exclude=*.md https://example.com/a /a\n\
+            "FROM alpine:3.22\nADD --link --chown=1:1 --chmod=644 --unpack --exclude=*.md app.tar.gz /a\n\
              RUN --network=none --security=sandbox true\n"
         ),
+        ["alpine:3.22"]
+    );
+}
+
+#[test]
+fn add_refuses_remote_sources() {
+    // The engine fetches ADD URLs and git refs outside the build network's
+    // isolation, so only local build context sources are allowed.
+    for add in [
+        "ADD http://example.com/a /a",
+        "ADD https://example.com/a.tar.gz /a",
+        "ADD git://example.com/repo.git /src",
+        "ADD ssh://git@example.com/repo.git /src",
+        "ADD git@github.com:org/repo.git /src",
+        "ADD https://example.com/repo.git#main /src",
+        "ADD HTTPS://example.com/a /a",
+        "ADD \"https://example.com/a\" /a",
+        "ADD https\\://example.com/a /a",
+        "ADD [\"https://example.com/a\", \"/a\"]",
+        "ADD [\"local.txt\", \"git@github.com:org/repo.git\", \"/a/\"]",
+        "ADD local.txt https://example.com/b /a/",
+        "ADD --link --chown=1:1 https://example.com/a /a",
+        "ADD $URL /a",
+        "ADD ${SRC}/file /a",
+        "ADD --checksum=sha256:00 local.txt /a",
+        "ADD --keep-git-dir local.txt /a",
+        "ADD --keep-git-dir=false local.txt /a",
+    ] {
+        let dockerfile = format!("FROM alpine:3.22\n{add}\n");
+        assert_eq!(code(&dockerfile), "native_build_dockerfile", "{add}");
+    }
+    // ONBUILD triggers too.
+    assert_eq!(
+        code("FROM alpine:3.22\nONBUILD ADD https://example.com/a /a\n"),
+        "native_build_dockerfile"
+    );
+    // Local sources, archives, heredocs and a destination with a variable are fine.
+    for add in [
+        "ADD app.tar.gz /srv/",
+        "ADD a.txt b.txt /dst/",
+        "ADD [\"a b.txt\", \"/dst/\"]",
+        "ADD github.com/org/repo /src",
+        "ADD local.txt $HOME/",
+        "ADD <<EOF /etc/conf\nhttps://example.com/not-a-source\nEOF",
+    ] {
+        let dockerfile = format!("FROM alpine:3.22\n{add}\n");
+        assert_eq!(images(&dockerfile), ["alpine:3.22"], "{add}");
+    }
+    // COPY is unchanged.
+    assert_eq!(
+        images("FROM alpine:3.22\nCOPY local.txt $HOME/\n"),
+        ["alpine:3.22"]
+    );
+}
+
+#[test]
+fn json_form_is_read_as_the_frontend_reads_it() {
+    // Go's decoder maps a lone surrogate to U+FFFD where strict JSON fails, so the
+    // frontend would see a JSON-form remote source: refuse.
+    for add in [
+        "ADD [\"\\uD800https://x/y\", \"/z\"]",
+        "ADD [\"\\udfff\", \"https://x/y\", \"/z\"]",
+        "COPY [\"\\uD800\", \"/z\"]",
+        "RUN [\"\\uD800\"]",
+    ] {
+        let dockerfile = format!("FROM alpine:3.22\n{add}\n");
+        assert_eq!(code(&dockerfile), "native_build_dockerfile", "{add}");
+    }
+    // The decoder reads only the first value: text after it does not make this
+    // shell form, so the decoded words are the sources.
+    assert_eq!(
+        code("FROM alpine:3.22\nADD [\"https://x/y\", \"/z\"] trailing\n"),
+        "native_build_dockerfile"
+    );
+    // Only the first value counts, so a malformed second one is ignored there too.
+    assert_eq!(
+        images("FROM alpine:3.22\nADD [\"a\", \"/z\"] [\"\\uD800\"]\n"),
+        ["alpine:3.22"]
+    );
+    // ...and no heredoc starts there, so the next lines are instructions.
+    let dockerfile =
+        "FROM alpine:3.22\nRUN [\"echo\"] <<EOF\nFROM --platform=linux/amd64 busybox:1.37\nEOF\n";
+    assert_eq!(code(dockerfile), "native_build_dockerfile");
+    // Escapes strict JSON accepts decode to the words the frontend sees.
+    assert_eq!(
+        code("FROM alpine:3.22\nADD [\"https\\u003a//x/y\", \"/z\"]\n"),
+        "native_build_dockerfile"
+    );
+    assert_eq!(
+        images("FROM alpine:3.22\nADD [\"\\u00e9t\\u00e9.txt\", \"/z\"]\n"),
+        ["alpine:3.22"]
+    );
+    // Brackets that are not JSON stay shell form, as in the frontend.
+    assert_eq!(
+        images("FROM alpine:3.22\nRUN [ -d /x ] || mkdir /x\n"),
         ["alpine:3.22"]
     );
 }

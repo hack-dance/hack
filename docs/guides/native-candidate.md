@@ -508,6 +508,11 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   the resolved base references that the receipt and the result report. Never pass a
   secret as a build argument. BuildKit build secrets are the right mechanism for
   secrets; native builds do not support them yet.
+- Every build runs under a BuildKit source policy: only the pinned base images
+  resolve as images, and network sources (`ADD` of an `http`, `https` or git URL, and
+  image blob sources) are denied. The engine would otherwise fetch those from outside
+  the isolated build network. The policy also covers sources that a base image's
+  stored `ONBUILD` triggers add; such bases refuse before the build anyway.
 - Argument values reach the client only through a private definition file (mode
   `0600`, removed after the build), never its command line or its environment; the
   client's environment is a fixed list of its own settings. Names must be plain

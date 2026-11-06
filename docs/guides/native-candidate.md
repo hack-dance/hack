@@ -294,19 +294,23 @@ complete bundle to change the candidate.
 
 The provider runs with a short temporary HOME alias, `/private/tmp/hkl-<owner>`, a
 symlink to `<home>/.hack-local/run/smolvm/home` that keeps its Unix socket paths
-within the macOS length limit. A clean `runtime down` removes this alias after it
-records the stopped pool, so a stopped pool leaves nothing outside its candidate
-home. `runtime down` on a cleanly stopped pool that still has its alias (for example,
-one stopped by an earlier version) removes it too. The next `runtime up`, `runtime
-recover` or approved-host update restores the exact alias under the pool lock before
-using it; an existing path at that name is checked and never replaced. Observation
-commands such as `runtime status` accept the released alias and create nothing.
-Other stop results, such as a failed boot's stop, keep the alias as before.
+within the macOS length limit. A clean `runtime down` keeps this alias, so no other
+local user can take its name while the pool is stopped. It removes only the provider
+socket files the stop proved closed, through the real data directory.
 
-Host cleanup or a reboot can also remove the alias. For a clean stop this is the same
-released state. For any other receipt, normal commands
-report `provider_home_missing`; they do not initialize another pool or recreate the
-alias during observation. Explicit `runtime recover --json` can restore only that
+Host cleanup or a reboot can still remove the alias. For a clean stop, observation
+commands such as `runtime status` accept the absent alias and create nothing, and the
+next `runtime up`, `runtime recover` or approved-host update restores the exact alias
+under the pool lock before using it. If another entry (a file, a directory, another
+user's link) holds that path by then, it is never followed, replaced or removed: the
+pool records a fresh random `/private/tmp/hkl-*` alias in its receipt and creates
+that one instead. A pool with dependency sockets refuses a fresh alias with
+`socket_alias_collision`, because its provider record pins those socket paths under the
+original alias; remove the entry at that path and retry.
+
+For any other receipt with an absent alias, normal commands report
+`provider_home_missing`; they do not initialize another pool or recreate the alias
+during observation. Explicit `runtime recover --json` can restore only that
 absent exact alias, after verifying the receipt-bound dead provider, both recorded
 disks, free VM lock, closed disk handles, and no active provider command. Existing
 files, directories, foreign links, a live or reused PID, and uncertain ownership

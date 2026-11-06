@@ -1058,6 +1058,9 @@ fn start_pool(
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    // A clean stop whose alias path another entry holds is moved to a fresh alias before
+    // any strict owner read below refuses it.
+    restore_released_short_home_before_use(candidate)?;
     let retained = start.retained;
     #[cfg(target_os = "macos")]
     let retained_guard = retained
@@ -1167,8 +1170,8 @@ fn start_pool(
         || admission_pool::probe(candidate, profile, &admission_owner),
     )?;
     samples.extend(fresh_samples);
-    // A clean stop released its temporary HOME alias; restore it under the lease before the
-    // release checks probe its sockets or the provider runs with it as HOME.
+    // Recheck a clean stop's alias under the lease before the release checks probe its
+    // sockets or the provider runs with it as HOME.
     restore_released_short_home(candidate)?;
     // Under the lease: the selection is rechecked. A stopped pool keeps the reserve only if
     // a sample needs it, and then its provider release (VM lock, disk handles, listeners,
@@ -1833,11 +1836,7 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         && initial.process_alive != Some(true)
     {
         // These phases are written only before a start or after proven absence; no recorded
-        // provider (`None`) is as stopped as a dead one. A clean stop left by an earlier
-        // `down` that kept its alias releases it now.
-        if owner.short_home_releasable() {
-            owner.release_short_home(candidate)?;
-        }
+        // provider (`None`) is as stopped as a dead one.
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
@@ -1940,15 +1939,18 @@ sync"#,
         finish_stopped(candidate, &mut owner, "stopped-after-engine-failure")?;
     } else {
         finish_quiesced_stop(candidate, &mut owner)?;
-        // The stopped receipt is written; the temporary `/private/tmp` HOME alias is not
-        // needed again until the next start restores it.
-        owner.release_short_home(candidate)?;
+        // The stopped receipt is written. The `/private/tmp` HOME alias stays reserved for
+        // this pool, so no other user can take its name; only the provider sockets the
+        // stop proved closed are removed.
+        remove_closed_sockets(candidate, &owner)?;
     }
     status(candidate)
 }
 
-/// Restore the HOME alias a clean `down` released, under the caller's pool lock. Any other
-/// receipt, or one whose alias is present, is left as [`Owner::load`] checked it.
+/// Restore a clean stop's HOME alias under the caller's pool lock, when host cleanup removed
+/// it or another entry holds its path (see [`Owner::restore_released_short_home`]). Any
+/// other receipt, or one whose alias is present and owned, is left as [`Owner::load`]
+/// checks it.
 pub(super) fn restore_released_short_home(candidate: &Candidate) -> Result<(), CandidateError> {
     if !root(candidate)
         .join("owner.json")
@@ -1957,9 +1959,73 @@ pub(super) fn restore_released_short_home(candidate: &Candidate) -> Result<(), C
     {
         return Ok(());
     }
-    let owner = Owner::load(candidate)?;
+    let mut owner = Owner::load_for_alias_restore(candidate)?;
     if owner.short_home_releasable() {
         owner.restore_released_short_home(candidate)?;
+    }
+    Ok(())
+}
+
+/// Before a mutating operation's first strict owner read: a clean stop whose alias path
+/// another entry holds, which [`Owner::load`] refuses, moves to a fresh alias under the
+/// startup lease, which is then released. Every other state takes no lease here and is
+/// left to the operation's own checks; an absent alias is restored later under its lock.
+fn restore_released_short_home_before_use(candidate: &Candidate) -> Result<(), CandidateError> {
+    reject_aliased_state(&root(candidate))?;
+    if !root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?
+    {
+        return Ok(());
+    }
+    let Ok(owner) = Owner::load_for_alias_restore(candidate) else {
+        // Refusals are reported by the operation's strict read.
+        return Ok(());
+    };
+    if !owner.short_home_releasable() || Owner::load(candidate).is_ok() {
+        return Ok(());
+    }
+    let _lease = startup_lease(&root(candidate), STARTUP_LEASE_WAIT)?;
+    restore_released_short_home(candidate)
+}
+
+/// The provider sockets [`sockets_absent`] checks, by file name in the data directory.
+fn owned_socket_names(owner: &Owner) -> Vec<String> {
+    let mut sockets = vec!["agent.sock".to_owned(), "docker.sock".to_owned()];
+    if let Some(bridge) = owner.application_bridge {
+        sockets.extend(bridge.guest_paths().into_iter().map(|path| {
+            Path::new(&path)
+                .file_name()
+                .expect("fixed socket name")
+                .to_string_lossy()
+                .into_owned()
+        }));
+    }
+    sockets
+}
+
+/// After a clean stop proved that no owned provider socket accepts connections, remove the
+/// socket files left in the private data directory. The path is the real data directory,
+/// never the alias. Only sockets owned by this user are removed; any other entry is kept.
+fn remove_closed_sockets(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
+    use std::os::unix::fs::FileTypeExt;
+    let data = owner.real_data_dir(candidate)?;
+    for name in owned_socket_names(owner) {
+        let path = data.join(name);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io(error)),
+        };
+        // SAFETY: geteuid has no preconditions.
+        if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(io(error)),
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -2110,17 +2176,7 @@ fn finish_absent_locked(
 
 /// No owned provider socket accepts connections. Read-only: connecting never creates one.
 fn sockets_absent(owner: &Owner) -> Result<(), CandidateError> {
-    let mut sockets = vec!["agent.sock".to_owned(), "docker.sock".to_owned()];
-    if let Some(bridge) = owner.application_bridge {
-        sockets.extend(bridge.guest_paths().into_iter().map(|path| {
-            Path::new(&path)
-                .file_name()
-                .expect("fixed socket name")
-                .to_string_lossy()
-                .into_owned()
-        }));
-    }
-    for name in sockets {
+    for name in owned_socket_names(owner) {
         match UnixStream::connect(owner.data_dir().join(name)) {
             Ok(_) => {
                 return Err(CandidateError::new(
@@ -2143,6 +2199,7 @@ fn sockets_absent(owner: &Owner) -> Result<(), CandidateError> {
 }
 
 pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+    restore_released_short_home_before_use(candidate)?;
     let initial = match status(candidate) {
         Ok(initial) => initial,
         Err(error) if error.code == "provider_home_missing" => {
@@ -2154,7 +2211,7 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return Ok(initial);
     }
     let lock = state::Lock::acquire(&root(candidate))?;
-    // Recovery rewrites the phase, which needs the alias a clean stop released.
+    // Recovery rewrites the phase, which needs a clean stop's alias restored.
     restore_released_short_home(candidate)?;
     let mut owner = Owner::load(candidate)?;
     let Some(process) = owner.process.as_ref() else {

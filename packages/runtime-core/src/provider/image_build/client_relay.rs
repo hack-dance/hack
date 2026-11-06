@@ -322,7 +322,9 @@ fn connect(provider: &Path) -> std::io::Result<UnixStream> {
     Ok(stream)
 }
 
-/// Pending bytes for one direction.
+/// Pending bytes for one direction. Storage follows the bytes still pending, not the
+/// traffic: the delivered prefix is dropped before it outgrows what remains, so the
+/// buffer stays within about twice the pending bytes plus one read.
 #[derive(Default)]
 struct Pending {
     bytes: Vec<u8>,
@@ -337,8 +339,10 @@ impl Pending {
         self.len() == 0
     }
     fn push(&mut self, bytes: &[u8]) {
-        if self.start == self.bytes.len() {
-            self.bytes.clear();
+        // Dropping the delivered prefix once it is at least half the buffer moves each
+        // byte at most once more, so the cost stays linear in the traffic.
+        if self.start > 0 && self.start >= self.bytes.len() / 2 {
+            self.bytes.drain(..self.start);
             self.start = 0;
         }
         self.bytes.extend_from_slice(bytes);
@@ -348,7 +352,7 @@ impl Pending {
         self.start = 0;
     }
     /// Write what `stream` accepts now. `Err` means the peer can take no more.
-    fn flush(&mut self, stream: &mut UnixStream) -> Result<(), ()> {
+    fn flush(&mut self, stream: &mut impl Write) -> Result<(), ()> {
         while !self.is_empty() {
             match stream.write(&self.bytes[self.start..]) {
                 Ok(0) => return Err(()),
@@ -357,6 +361,9 @@ impl Pending {
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 Err(_) => return Err(()),
             }
+        }
+        if self.start == self.bytes.len() {
+            self.clear();
         }
         Ok(())
     }

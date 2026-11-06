@@ -188,3 +188,61 @@ fn a_relay_left_by_a_killed_process_is_removed_and_a_live_one_is_kept() {
         let _ = fs::remove_dir_all(directory);
     }
 }
+
+/// A peer that takes a little at a time and then reports a full buffer, checking that the
+/// bytes arrive in order.
+struct SlowPeer {
+    received: u64,
+    calls: u64,
+}
+impl Write for SlowPeer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.calls += 1;
+        if self.calls % 3 == 0 {
+            return Err(ErrorKind::WouldBlock.into());
+        }
+        let count = bytes.len().min(1500);
+        for byte in &bytes[..count] {
+            assert_eq!(*byte, (self.received % 251) as u8, "bytes out of order");
+            self.received += 1;
+        }
+        Ok(count)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn pending_storage_follows_the_queued_bytes_not_the_whole_transfer() {
+    // Sustained backpressure: the queue is topped up to its limit while a slow peer
+    // takes partial writes, for 128 times the limit in total.
+    let total = 128 * TO_PROVIDER_LIMIT as u64;
+    let mut pending = Pending::default();
+    let mut peer = SlowPeer {
+        received: 0,
+        calls: 0,
+    };
+    let mut sent = 0_u64;
+    let mut largest = 0;
+    let mut chunk = vec![0_u8; CHUNK];
+    while peer.received < total {
+        if pending.len() < TO_PROVIDER_LIMIT && sent < total {
+            let count = CHUNK.min((total - sent) as usize);
+            for (offset, byte) in chunk[..count].iter_mut().enumerate() {
+                *byte = ((sent + offset as u64) % 251) as u8;
+            }
+            pending.push(&chunk[..count]);
+            sent += count as u64;
+        }
+        pending.flush(&mut peer).unwrap();
+        largest = largest.max(pending.bytes.capacity());
+    }
+    assert!(pending.is_empty());
+    assert_eq!(peer.received, total);
+    // Delivered bytes are dropped: storage stays within a small multiple of the limit.
+    assert!(
+        largest <= 4 * (TO_PROVIDER_LIMIT + CHUNK),
+        "buffer grew to {largest} bytes for a {TO_PROVIDER_LIMIT}-byte limit"
+    );
+}

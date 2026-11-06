@@ -2151,18 +2151,34 @@ fn check_cache_capacity(engine: &Engine<'_>, owner: &str) -> Result<(), Candidat
     Ok(())
 }
 
-/// An image is admitted for exactly the platform its service may run: Linux arm64, or Linux
-/// amd64 only for an opted-in service in a pool whose audited boot enabled x86_64 translation.
+/// An image is admitted for exactly the platform its service's reviewed policy may run:
+/// Linux arm64 for a native or `prefer-native` service, and Linux amd64 for an opted-in
+/// service (either policy) only in a pool whose audited boot enabled x86_64 translation. An
+/// `amd64` service never runs an arm64 image natively, even a local content ID.
 pub(super) fn admitted_architecture(
     engine: &Engine<'_>,
     resource: &Resource,
     image: &Value,
 ) -> bool {
+    admitted_platform(
+        image,
+        resource.amd64_emulation,
+        engine.guest().amd64_emulation(),
+    )
+}
+
+fn admitted_platform(
+    image: &Value,
+    policy: Option<crate::project::Amd64Emulation>,
+    translation: bool,
+) -> bool {
+    use crate::project::Amd64Emulation;
     image["Os"] == "linux"
-        && (image["Architecture"] == "arm64"
-            || (image["Architecture"] == "amd64"
-                && resource.amd64_emulation.is_some()
-                && engine.guest().amd64_emulation()))
+        && match (image["Architecture"].as_str(), policy) {
+            (Some("arm64"), None | Some(Amd64Emulation::PreferNative)) => true,
+            (Some("amd64"), Some(_)) => translation,
+            _ => false,
+        }
 }
 
 fn verify_images(

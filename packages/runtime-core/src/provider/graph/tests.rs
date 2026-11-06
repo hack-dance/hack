@@ -157,6 +157,39 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     assert!(!candidate.state_root.exists());
 }
 #[test]
+fn image_architecture_admission_follows_the_reviewed_emulation_policy() {
+    use crate::project::Amd64Emulation::{Amd64, PreferNative};
+    let arm64 = json!({"Os": "linux", "Architecture": "arm64"});
+    let amd64 = json!({"Os": "linux", "Architecture": "amd64"});
+    for translation in [false, true] {
+        // arm64 runs natively unless the reviewed policy requires amd64, whatever the
+        // image's origin (a pinned or an already-local content ID).
+        assert!(admitted_platform(&arm64, None, translation));
+        assert!(admitted_platform(&arm64, Some(PreferNative), translation));
+        assert!(!admitted_platform(&arm64, Some(Amd64), translation));
+        // amd64 needs an opted-in service and a translation pool.
+        assert!(!admitted_platform(&amd64, None, translation));
+        assert_eq!(
+            admitted_platform(&amd64, Some(PreferNative), translation),
+            translation
+        );
+        assert_eq!(
+            admitted_platform(&amd64, Some(Amd64), translation),
+            translation
+        );
+    }
+    for other in [
+        json!({"Os": "darwin", "Architecture": "arm64"}),
+        json!({"Os": "linux", "Architecture": "riscv64"}),
+        json!({"Os": "linux"}),
+    ] {
+        for policy in [None, Some(PreferNative), Some(Amd64)] {
+            assert!(!admitted_platform(&other, policy, true));
+        }
+    }
+}
+
+#[test]
 fn declared_amd64_requires_the_explicit_emulation_opt_in() {
     let fixture = Fixture::new();
     let home = Fixture::new();

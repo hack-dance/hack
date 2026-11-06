@@ -27,8 +27,9 @@
 //! Messages carry line numbers only; they never echo Dockerfile text or argument
 //! values. `ADD` sources the engine would fetch remotely (URLs, git refs, variables
 //! that could become either) refuse. Not covered here: `ONBUILD` triggers stored in
-//! a base image's own configuration. The build step closes that with the source
-//! policy in [`super::build_policy`], which denies network sources at solve time.
+//! a base image's own configuration. They are not enforced until the build step
+//! applies the source policy in [`super::build_policy`], which denies network
+//! sources and unpinned images at solve time.
 use super::image_reference::{ImageReference, NamedReference, normalize};
 use crate::CandidateError;
 use std::collections::{BTreeMap, BTreeSet};

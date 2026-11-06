@@ -8,9 +8,13 @@
 //! is not detected.
 use std::{
     io::{Read, Write},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex, TryLockError,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub(super) const REDACTED: &str = "[redacted]";
@@ -23,6 +27,9 @@ const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 /// How long forwarding may continue after the client exits (a process outside its group
 /// can hold the pipe open). After that, nothing more is written.
 const DRAIN_WAIT: Duration = Duration::from_secs(2);
+/// How long closing waits for a write already in progress. A caller stream that stops
+/// draining must not hold the operation (and its build fence) open.
+const CLOSE_WAIT: Duration = Duration::from_secs(1);
 
 /// Line filter: redaction, terminal sanitizing and bounds.
 pub(super) struct Filter {
@@ -158,12 +165,14 @@ impl Filter {
     }
 }
 
-type Sink = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
-
 /// Forwards one pipe through a [`Filter`] on its own thread. Dropping it waits a
-/// bounded time for the pipe to close, then closes the sink so no later write lands.
+/// bounded time for the pipe to close, then marks the sink closed. Each write checks
+/// that mark while holding the sink lock, and dropping waits (bounded) for that lock,
+/// so no write starts after the drop returns. A write already blocked on a caller
+/// stream that stopped draining is abandoned after [`CLOSE_WAIT`] rather than awaited.
 pub(super) struct Forwarder {
-    sink: Sink,
+    sink: Arc<Mutex<Box<dyn Write + Send>>>,
+    closed: Arc<AtomicBool>,
     done: mpsc::Receiver<()>,
     thread: Option<JoinHandle<()>>,
 }
@@ -174,15 +183,16 @@ impl Forwarder {
         mut filter: Filter,
         sink: Box<dyn Write + Send>,
     ) -> Self {
-        let sink: Sink = Arc::new(Mutex::new(Some(sink)));
-        let shared = Arc::clone(&sink);
+        let sink = Arc::new(Mutex::new(sink));
+        let closed = Arc::new(AtomicBool::new(false));
+        let (shared, stop) = (Arc::clone(&sink), Arc::clone(&closed));
         let (sender, done) = mpsc::channel();
         let thread = std::thread::spawn(move || {
             filter.pump(source, |bytes| {
-                let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(sink) = guard.as_mut() else {
+                let mut sink = shared.lock().unwrap_or_else(|e| e.into_inner());
+                if stop.load(Ordering::Acquire) {
                     return false;
-                };
+                }
                 // A failing caller stream must not stall the client; keep draining.
                 let _ = sink.write_all(bytes).and_then(|()| sink.flush());
                 true
@@ -191,6 +201,7 @@ impl Forwarder {
         });
         Self {
             sink,
+            closed,
             done,
             thread: Some(thread),
         }
@@ -200,7 +211,14 @@ impl Forwarder {
 impl Drop for Forwarder {
     fn drop(&mut self) {
         let finished = self.done.recv_timeout(DRAIN_WAIT).is_ok();
-        self.sink.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.closed.store(true, Ordering::Release);
+        // Never block on the lock: a writer stuck on a full caller pipe holds it.
+        let deadline = Instant::now() + CLOSE_WAIT;
+        while matches!(self.sink.try_lock(), Err(TryLockError::WouldBlock))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         if let Some(thread) = self.thread.take().filter(|_| finished) {
             let _ = thread.join();
         }
@@ -274,6 +292,48 @@ mod tests {
         assert!(out.len() <= MAX_OUTPUT_BYTES + OUTPUT_CUT.len());
         assert!(out.ends_with(OUTPUT_CUT));
         assert_eq!(out.matches(OUTPUT_CUT).count(), 1);
+    }
+
+    #[test]
+    fn a_caller_stream_that_stops_draining_cannot_hold_shutdown() {
+        let (release, blocked) = mpsc::channel::<()>();
+        let writes = Arc::new(Mutex::new(0_usize));
+        struct Stuck(mpsc::Receiver<()>, Arc<Mutex<usize>>);
+        impl Write for Stuck {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                *self.1.lock().unwrap() += 1;
+                // Like a full pipe whose reader stopped consuming.
+                let _ = self.0.recv();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let forwarder = Forwarder::spawn(
+            reader,
+            Filter::new([]),
+            Box::new(Stuck(blocked, Arc::clone(&writes))),
+        );
+        (&writer).write_all(b"one\n").unwrap();
+        let started = Instant::now();
+        while *writes.lock().unwrap() == 0 {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (&writer).write_all(b"two\n").unwrap();
+        let started = Instant::now();
+        drop(forwarder);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < DRAIN_WAIT + CLOSE_WAIT + Duration::from_secs(2),
+            "shutdown waited {elapsed:?} on a blocked writer"
+        );
+        // The blocked write completes later; no further line is written after close.
+        release.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(*writes.lock().unwrap(), 1);
     }
 
     #[test]

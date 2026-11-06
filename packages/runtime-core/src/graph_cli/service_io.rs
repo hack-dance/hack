@@ -158,6 +158,17 @@ pub(super) fn command(
     } else {
         None
     };
+    // File members already live in the running container's allocation; exec never
+    // re-delivers or renews them, so an exec envelope carrying files is refused.
+    if managed
+        .as_ref()
+        .is_some_and(|managed| !managed.files().is_empty())
+    {
+        return Err(CandidateError::new(
+            "graph_environment_input",
+            "Private graph environment input is invalid, expired, or unavailable; values omitted.",
+        ));
+    }
     let selection = graph::service_selection(candidate, options.run, options.service)?;
     if action == "exec-selection" {
         return serde_json::to_value(selection).map_err(|_| invalid());

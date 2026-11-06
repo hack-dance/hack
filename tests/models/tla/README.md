@@ -281,6 +281,57 @@ Implementation regressions and the registered `native-config-routing` Docker
 scenario supply separate evidence. The model does not prove those checks,
 browser access, performance or whole NC03 completion.
 
+## Native foreground down hooks
+
+`native-foreground-down-hooks/DownHooks.tla` checks the value-free down-hook journal
+that a native Compose-import foreground `up` shares with `hack down`. One generation
+whose project declares down hooks starts with the frontend running `up.after`. The
+frontend owes the hooks, publishes readiness, and on the first interrupt claims its
+owed record, runs `down.before`, stops the graph, retires lifecycle processes and runs
+`down.after`. A second interrupt cancels a running `down.before` (known, unsuccessful
+completion). The graph can also end by itself. One `hack down` client may run, and be
+retried once, from another terminal: on a live graph it claims an owed record, or no
+record (an older frontend, or one still in `up.after`); on a stopped graph it waits for
+the frontend's finalization and runs only what is still owed. A known `down.before`
+failure of `down` restores the claimed record so an explicit retry may run it, as on
+Compose. Either process may crash at any step; a crash keeps the durable record, so a
+started phase becomes unknown. A later `up` (`NewUp`) supersedes any record except a
+started one. The journal is one record replaced by compare-and-swap; the model treats
+each replacement as atomic.
+
+The positive configuration explores **1,246 distinct states**. `Safe` requires that
+`down.before` never starts while another start is running or unknown, or after a known
+success; that `down.after` starts once, only after the graph stopped and a known
+successful `down.before`; that a started-unknown phase blocks a new generation; and
+that an interrupt during `up.after` never runs, or leaves owed, the frontend's down
+hooks. No fairness or eventual cleanup is asserted.
+
+The main negative control removes the journal guard (claims ignore the record) and
+must fail `Safe` when `DStart` or `FInterrupt` starts a second concurrent
+`down.before`. `unknown-generation` removes the started-phase refusal and must fail at
+`NewUp` with `unsafeGen = TRUE`. `owed-after-interrupt` removes the owe withdrawal and
+must fail at `FInterruptAtPublish` with the frontend's owed record left behind.
+`complete-reachable` and `recovery-reachable` assert `NeverComplete` and
+`NeverRecovered` and must fail at a safe `FAfterDone`/`DAfterDone`, and at `DAfterDone`
+after a frontend crash: the positive model does not pass by disabling the stop or the
+crash-recovery path.
+
+| Model action | Implementation boundary under `src/backends/` |
+| --- | --- |
+| `FOwe` / `FPublish` / `FInterruptAtPublish` | `native-project-start.ts` calls the journal's `owe` as the last step of readiness publication; `native-project-down-hooks.ts` withdraws it when an interrupt was observed. |
+| `FUpAfterInterrupted` | `native-project-process.ts` takes the forced stop path for a stop request before readiness; no `beforeStop`. |
+| `FInterrupt` / `FBeforeFinish` / `FCancelBefore` | `beforeStop` from `native-project-foreground-stop.ts`; the second interrupt aborts the force signal that cancels the hook (`runLifecycleCommands` in `src/commands/project.ts`). |
+| `FCleanup` / `FAfter` / `FAfterDone` | Confirmed foreground cleanup, `hooks.cleanup` and then the journal's `after`, before the finalization acknowledgement. |
+| `DStart` / `DBeforeFinish` / `DCleanup` / `DAfter` / `DAfterDone` | `openNativeDownHookSession` in `native-project-down-hooks.ts`, used by `native-project-down.ts`; the stopped path reads the journal only after `waitNativeProjectFinalization`. |
+| `NewUp` | `admitNativeDownHookGeneration`, called before `up.before`. |
+| `FCrash` / `DCrash` / `OrphanStops` | Process death leaves the record; a detached graph owner may finish stopping or be stopped by recovery. |
+
+The model does not cover real fsync or power-loss durability, a journal lock left by a
+crash inside the lock (it refuses closed and needs inspection), multiple generations,
+more than two `down` invocations, environment resolution, or the graph owner's process
+group on a real host. Ordinary tests map its counterexamples: concurrent claim,
+second-interrupt cancellation, failure, crash recovery and unknown refusal.
+
 ## Projects registry writer ownership
 
 `registry-writer/RegistryWriter.tla` models two one-shot writers, two independent

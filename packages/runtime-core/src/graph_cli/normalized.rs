@@ -121,7 +121,11 @@ pub(super) fn command(
             None
         };
         let empty = BTreeMap::new();
+        let no_files = graph::ManagedFiles::new();
         let values = managed.as_ref().map_or(&empty, |managed| managed.values());
+        let files = managed
+            .as_ref()
+            .map_or(&no_files, |managed| managed.files());
         let inputs = graph::compile_normalized_inputs(candidate, &options, values)?;
         if let Some(managed) = &managed {
             managed.remaining()?;
@@ -147,7 +151,7 @@ pub(super) fn command(
                 candidate,
                 options,
                 runtime,
-                values,
+                graph::ManagedInput { values, files },
                 deadline,
                 route_slots,
                 generation,
@@ -157,7 +161,7 @@ pub(super) fn command(
                 candidate,
                 options,
                 runtime,
-                values,
+                graph::ManagedInput { values, files },
                 deadline,
                 route_slots,
             )?)

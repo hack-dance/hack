@@ -76,6 +76,7 @@ pub(super) fn restore(
         candidate,
         &replay,
         managed.values(),
+        managed.files(),
         managed.deadline(),
     )?;
     {
@@ -115,6 +116,7 @@ pub(super) fn restore(
         candidate,
         replay,
         managed.values(),
+        managed.files(),
         managed.deadline(),
         runtime,
     )

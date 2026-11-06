@@ -342,6 +342,90 @@ fn omitted_service_limits_share_pool_and_explicit_caps_remain_enforced() {
     assert!(!candidate.state_root.exists());
 }
 #[test]
+fn lowered_named_volume_covers_image_volume_and_subpath_or_missing_cover_refuses() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let declared = json!({"/var/lib/data":{}});
+    for (mounts, admitted) in [
+        (json!(["state:/var/lib/data/"]), true),
+        (json!(["state:/var/lib/other"]), false),
+        (json!(["state:/var/lib/data:ro"]), false),
+        (
+            json!([{"type":"volume","source":"state","target":"/var/lib/data","volume":{"subpath":"db"}}]),
+            false,
+        ),
+    ] {
+        state::write(
+            &fixture.0.join("compose.yaml"),
+            &json!({"services":{"db":{"image":image,"user":"999:999","network_mode":"none","volumes":mounts}},"volumes":{"state":{}}}),
+        )
+        .unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let goals = BTreeMap::from([("db".to_string(), Condition::Started)]);
+        let prepared =
+            config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None).unwrap();
+        assert_eq!(prepared.configs["db"]["User"], "999:999");
+        let result = image_volumes::admit(&declared, &prepared.configs["db"], &prepared.resources);
+        if admitted {
+            result.unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().code, image_volumes::UNCOVERED);
+        }
+    }
+    assert!(!candidate.state_root.exists());
+}
+#[test]
+fn graph_volume_budget_admits_sixteen_named_volumes_and_refuses_seventeen() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    for (count, accepted) in [(MAX_VOLUMES, true), (MAX_VOLUMES + 1, false)] {
+        assert_eq!(MAX_VOLUMES, 16);
+        let mounts: Vec<String> = (0..count).map(|i| format!("data-{i}:/data/{i}")).collect();
+        let volumes: serde_json::Map<String, Value> = (0..count)
+            .map(|i| (format!("data-{i}"), json!({})))
+            .collect();
+        state::write(
+            &fixture.0.join("compose.yaml"),
+            &json!({"services":{"job":{"image":image,"network_mode":"none","command":["true"],"volumes":mounts}},"volumes":volumes}),
+        )
+        .unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let goals = BTreeMap::from([("job".to_string(), Condition::Completed)]);
+        let result = config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None);
+        if !accepted {
+            assert_eq!(result.err().unwrap().code, "graph_budget");
+            continue;
+        }
+        let prepared = result.unwrap();
+        let owned = prepared
+            .resources
+            .values()
+            .filter(|resource| resource.kind == Kind::Volume)
+            .count();
+        assert_eq!(owned, count);
+        assert!(resource_counts_fit(&prepared.resources));
+    }
+    assert!(!candidate.state_root.exists());
+}
+#[test]
 fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
     let fixture = Fixture::new();
     let candidate_root = Fixture::new();
@@ -1826,6 +1910,122 @@ fn public_environment_composes_with_private_delivery_without_metadata_leakage() 
             &collision
         )
         .is_err()
+    );
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
+fn private_file_members_need_active_services_and_bind_beside_compiled_mounts() {
+    use crate::provider::environment::ManagedFile;
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let document = json!({"services":{
+        "web":{"image":format!("sha256:{}", "a".repeat(64)),"read_only":true,"network_mode":"none",
+            "user":"1001:1002","entrypoint":["/bin/app"],"environment":{"TOKEN":null,
+            "CREDENTIAL_FILE":"/config/credential.json"}},
+        "proxy":{"image":format!("sha256:{}", "b".repeat(64)),"read_only":true,"network_mode":"none",
+            "user":"65532","environment":{"CREDENTIAL_FILE":"/config/credential.json"}},
+        "idle":{"image":format!("sha256:{}", "c".repeat(64)),"network_mode":"none","profiles":["later"]}
+    }});
+    state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    let managed = BTreeMap::from([(
+        "web".into(),
+        BTreeMap::from([("TOKEN".into(), "synthetic-private-canary".into())]),
+    )]);
+    let scoped = project::inputs::compile_scoped(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+        &managed,
+    )
+    .unwrap();
+    let member = || {
+        ManagedFile::new(
+            "credential.json",
+            "/config/credential.json",
+            zeroize::Zeroizing::new(b"synthetic-file-canary".to_vec()),
+        )
+        .unwrap()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let files = ManagedFiles::from([
+        ("web".into(), vec![member()]),
+        ("proxy".into(), vec![member()]),
+    ]);
+    let environments = pending_environments(&scoped, &files, deadline).unwrap();
+    assert_eq!(
+        environments.keys().collect::<Vec<_>>(),
+        vec!["proxy", "web"]
+    );
+    assert!(environments["web"].wraps_process());
+    assert!(!environments["proxy"].wraps_process());
+    let (wrapped, owners) = private_services(&environments);
+    assert_eq!(wrapped, BTreeSet::from(["web".to_owned()]));
+    assert_eq!(owners, BTreeSet::from(["proxy".to_owned()]));
+    for absent in ["idle", "unknown"] {
+        let error = pending_environments(
+            &scoped,
+            &ManagedFiles::from([(absent.into(), vec![member()])]),
+            deadline,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "execution_environment_owner");
+    }
+    let mut prepared = config::prepare_delivery(
+        scoped.executable,
+        &BTreeMap::from([
+            ("web".into(), Condition::Started),
+            ("proxy".into(), Condition::Started),
+        ]),
+        &token(),
+        &token(),
+        None,
+        config::DeliveryOptions {
+            environment: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // Files-only services need only a numeric owner, not launcher admission.
+    validate_private_delivery(&prepared.configs, &environments).unwrap();
+    let proxy = prepared.configs.get_mut("proxy").unwrap();
+    let process = (proxy["Entrypoint"].clone(), proxy["Cmd"].clone());
+    launcher::attach_files(
+        proxy,
+        &[(
+            "/run/slot/files/credential.json".into(),
+            "/config/credential.json".into(),
+        )],
+    )
+    .unwrap();
+    assert_eq!((proxy["Entrypoint"].clone(), proxy["Cmd"].clone()), process);
+    assert!(
+        proxy["Env"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("CREDENTIAL_FILE=/config/credential.json"))
+    );
+    assert!(
+        !serde_json::to_string(&prepared.configs)
+            .unwrap()
+            .contains("synthetic")
+    );
+    // A compiled mount at or around a declared target refuses before any effect.
+    let web = prepared.configs.get_mut("web").unwrap();
+    web["HostConfig"]["Mounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"Type":"volume","Target":"/config"}));
+    assert_eq!(
+        validate_private_delivery(&prepared.configs, &environments)
+            .err()
+            .unwrap()
+            .code,
+        "environment_file_mount"
     );
     assert!(!candidate.state_root.exists());
 }

@@ -232,7 +232,9 @@ export function findComposeBackendFeatures(
  * oversized, a symlink or not parseable returns `undefined`, so the existing
  * native input refusal still reports it.
  */
-async function readComposeDocument(composeFile: string): Promise<unknown> {
+export async function readNativeComposeDocument(
+  composeFile: string
+): Promise<unknown> {
   let text: string;
   try {
     const file = await open(
@@ -333,7 +335,7 @@ export async function readComposeBackendReading(
   composeFile: string,
   opts?: { readonly adaptationFile?: string }
 ): Promise<ComposeBackendReading> {
-  const compose = await readComposeDocument(composeFile);
+  const compose = await readNativeComposeDocument(composeFile);
   return {
     features: await classifyAdapted(compose, opts?.adaptationFile),
     basicBuild: hasBasicComposeBuild(compose),
@@ -369,7 +371,7 @@ export async function readComposeBackendFeatures(
   composeFile: string,
   opts?: { readonly adaptationFile?: string }
 ): Promise<ComposeBackendFeature[]> {
-  const compose = await readComposeDocument(composeFile);
+  const compose = await readNativeComposeDocument(composeFile);
   return await classifyAdapted(compose, opts?.adaptationFile);
 }
 

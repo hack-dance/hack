@@ -9,6 +9,11 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
+import {
+  adaptNativeGcloudEnvironment,
+  type NativeGcloudSelection,
+} from "./native-gcloud-environment.ts";
 import {
   acquireNativeHttpsLease,
   NativeHttpsLeaseAcquisitionError,
@@ -29,12 +34,22 @@ import {
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
+import {
+  admitNativeDownHookGeneration,
+  createNativeForegroundDownHooks,
+} from "./native-project-down-hooks.ts";
 import { discardUnpublishedNativeStart } from "./native-project-failed-start.ts";
 import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
+import {
+  createNativeForegroundStop,
+  type NativeForegroundStop,
+  type NativeForegroundStopCommands,
+  nativeForegroundStopSignals,
+} from "./native-project-foreground-stop.ts";
 import { isNativeHttpsProbePath } from "./native-project-https.ts";
 import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
@@ -43,6 +58,11 @@ import {
   selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
+import {
+  applyNativeInternalHostAliases,
+  nativeServiceHostAliases,
+  requireNativeHostAliasBindings,
+} from "./native-project-internal-hosts.ts";
 import {
   NativePartialShutdownError,
   recoverNativeInterruptedStartupCleanup,
@@ -248,11 +268,20 @@ export function reviewedNativeHttpsRoutes(
 type Hooks = {
   readonly cleanup: () => Promise<void>;
   readonly ready?: () => Promise<void>;
+  /**
+   * The project's `down.before`/`down.after` commands, present only when it
+   * declares them. Each resolves to the exit status after its child exited;
+   * the signal cancels a running phase (a second interrupt).
+   */
+  readonly stop?: NativeForegroundStopCommands;
 };
 type Dependencies = {
   prepare: typeof prepareNativeProjectInput;
   prepareStorage: typeof prepareNativeProjectRunStorage;
   adaptAws: typeof adaptNativeAwsEnvironment;
+  adaptGcloud: typeof adaptNativeGcloudEnvironment;
+  /** Value-free operator notices (for example credential expiry); stderr by default. */
+  warn: (line: string) => void;
   review: typeof withNativeProjectReview;
   selectReview: typeof selectNativeProjectReviewIdentity;
   retainedImages: typeof selectNativeRetainedImages;
@@ -269,11 +298,17 @@ type Dependencies = {
   captureFinalization: typeof captureNativeProjectFinalization;
   waitFinalization: typeof waitNativeProjectFinalization;
   discardFailedStart: typeof discardUnpublishedNativeStart;
+  admitDownHooks: typeof admitNativeDownHookGeneration;
+  downHooks: typeof createNativeForegroundDownHooks;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
   prepareStorage: prepareNativeProjectRunStorage,
   adaptAws: adaptNativeAwsEnvironment,
+  adaptGcloud: adaptNativeGcloudEnvironment,
+  warn: (line) => {
+    process.stderr.write(`${line}\n`);
+  },
   review: withNativeProjectReview,
   selectReview: selectNativeProjectReviewIdentity,
   retainedImages: selectNativeRetainedImages,
@@ -291,6 +326,8 @@ const DEFAULTS: Dependencies = {
   captureFinalization: captureNativeProjectFinalization,
   waitFinalization: waitNativeProjectFinalization,
   discardFailedStart: discardUnpublishedNativeStart,
+  admitDownHooks: admitNativeDownHookGeneration,
+  downHooks: createNativeForegroundDownHooks,
 };
 /** Fixed text of the native foreground configuration refusal. */
 export const NATIVE_CONFIGURATION_REFUSAL =
@@ -598,23 +635,115 @@ function foregroundExitCode(opts: {
   }
   return opts.code;
 }
-function environmentDelivery(
-  input: NativeProjectInput,
-  plan: string,
-  run: string
-): { flags: string[]; payload?: Buffer } {
-  if (Object.keys(input.managedEnvironment).length === 0) {
+/**
+ * Credential adapters run after lifecycle hooks so a login hook can refresh
+ * host credentials first. Returns the same input object when none is selected.
+ * AWS values are a startup snapshot, so expiry warnings are scheduled; the
+ * caller cancels them when the foreground exits.
+ */
+async function adaptNativeCredentials(opts: {
+  readonly input: NativeProjectInput;
+  readonly selection: {
+    readonly aws?: { readonly profile: string; readonly region?: string };
+    readonly gcloud?: NativeGcloudSelection;
+  };
+  readonly deps: Pick<Dependencies, "adaptAws" | "adaptGcloud" | "warn">;
+}): Promise<{
+  readonly input: NativeProjectInput;
+  readonly cancelExpiry?: () => void;
+}> {
+  let { input } = opts;
+  let cancelExpiry: (() => void) | undefined;
+  if (opts.selection.aws) {
+    const adapted = await opts.deps.adaptAws({
+      input,
+      ...opts.selection.aws,
+    });
+    input = adapted.input;
+    cancelExpiry = scheduleNativeAwsExpiryWarnings({
+      expiry: adapted.receipt.expiry,
+      services: adapted.receipt.services.length,
+      write: opts.deps.warn,
+    });
+  }
+  if (opts.selection.gcloud) {
+    try {
+      input = (
+        await opts.deps.adaptGcloud({
+          input,
+          mode: opts.selection.gcloud.mode,
+        })
+      ).input;
+    } catch (error) {
+      cancelExpiry?.();
+      throw error;
+    }
+  }
+  return { input, ...(cancelExpiry ? { cancelExpiry } : {}) };
+}
+
+/**
+ * Private envelope for `graph serve --environment-stdin`. Version 1 carries values
+ * only; version 2 adds service-scoped file members and is sent only when files
+ * exist, so a runtime without file support refuses instead of dropping them.
+ *
+ * Adapters normalize every authored service, including those outside the selected
+ * profiles, so public Compose stays identical across profile selections. File
+ * members are delivered only for services the reviewed plan marks active: the
+ * runtime refuses file ownership for inactive services, so an optional disabled
+ * service must not block the selected graph.
+ */
+export function nativeEnvironmentDelivery(opts: {
+  readonly input: NativeProjectInput;
+  readonly planId: string;
+  readonly reviewedPlan: unknown;
+  readonly run: string;
+}): { flags: string[]; payload?: Buffer } {
+  const { input, planId: plan, run } = opts;
+  const reviewed =
+    isRecord(opts.reviewedPlan) && isRecord(opts.reviewedPlan.services)
+      ? opts.reviewedPlan.services
+      : {};
+  const files = Object.entries(input.managedFiles ?? {}).filter(
+    ([service, members]) => {
+      const reviewedService = reviewed[service];
+      return (
+        members.length > 0 &&
+        isRecord(reviewedService) &&
+        reviewedService.active === true
+      );
+    }
+  );
+  if (
+    Object.keys(input.managedEnvironment).length === 0 &&
+    files.length === 0
+  ) {
     return { flags: [] };
   }
   return {
     flags: ["--environment-stdin"],
     payload: Buffer.from(
       JSON.stringify({
-        version: 1,
+        version: files.length > 0 ? 2 : 1,
         plan,
         run,
         lifetime_seconds: 300,
         services: input.managedEnvironment,
+        ...(files.length > 0
+          ? {
+              files: Object.fromEntries(
+                files.map(([service, members]) => [
+                  service,
+                  members.map((member) => ({
+                    name: member.name,
+                    target: member.target,
+                    mode: "0400",
+                    content_b64: member.content.toString("base64"),
+                  })),
+                ])
+              ),
+            }
+          : {}),
       })
     ),
   };
@@ -816,6 +945,7 @@ function retainedStartupSelection(opts: {
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly gcloud?: NativeGcloudSelection;
 }) {
   const { run } = opts;
   if (
@@ -828,16 +958,20 @@ function retainedStartupSelection(opts: {
         JSON.stringify(run.profiles)) ||
     (opts.aws !== undefined &&
       (opts.aws.profile !== run.aws?.profile ||
-        opts.aws.region !== run.aws?.region))
+        opts.aws.region !== run.aws?.region)) ||
+    // Like the AWS selector, an omitted gcloud selection keeps the retained one
+    // (which delivers a fresh file); a different explicit selection refuses.
+    (opts.gcloud !== undefined && opts.gcloud.mode !== run.gcloud?.mode)
   ) {
     throw new ClosedCliError(
-      "Native up cannot change the retained run's environment, profiles or AWS profile; data was not replaced."
+      "Native up cannot change the retained run's environment, profiles, AWS profile or gcloud selection; data was not replaced."
     );
   }
   return {
     envName: run.effectiveEnvName,
     profiles: run.profiles,
     aws: run.aws ?? undefined,
+    gcloud: run.gcloud ?? undefined,
   };
 }
 async function selectNativeStartup(opts: {
@@ -848,6 +982,7 @@ async function selectNativeStartup(opts: {
   readonly profiles?: readonly string[];
   readonly requestedProfiles: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly gcloud?: NativeGcloudSelection;
   readonly load: typeof loadNativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
   readonly signal?: AbortSignal;
@@ -860,11 +995,13 @@ async function selectNativeStartup(opts: {
           envName: opts.envName,
           profiles: opts.profiles,
           aws: opts.aws,
+          gcloud: opts.gcloud,
         })
       : {
           envName: opts.envName,
           profiles: opts.requestedProfiles,
           aws: opts.aws,
+          gcloud: opts.gcloud,
         };
   let retainedFlags: string[] = [];
   if (retained) {
@@ -910,6 +1047,7 @@ function selectedMapping(opts: {
   readonly effectiveEnvName: string | null;
   readonly profiles: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly gcloud?: NativeGcloudSelection;
   readonly runtimeMetadata: boolean;
 }): NativeProjectRun {
   return {
@@ -922,6 +1060,9 @@ function selectedMapping(opts: {
           ...(opts.aws.region ? { region: opts.aws.region } : {}),
         }
       : null,
+    // Written only when selected, so mappings without it stay readable by
+    // earlier candidates; a mapping that carries it refuses there.
+    ...(opts.gcloud ? { gcloud: { mode: opts.gcloud.mode } } : {}),
     ...(opts.runtimeMetadata ? { runtimeMetadata: true as const } : {}),
   };
 }
@@ -1022,10 +1163,18 @@ export async function startNativeProject(opts: {
   readonly onReady?: () => Promise<void>;
   readonly dependencyFile?: string;
   readonly adaptationFile?: string;
+  /**
+   * Effective project-wide host aliases (`internal.extra_hosts` and
+   * checkout-local entries). Declared on every service like the Compose
+   * override; each active pair then requires a reviewed dependency binding.
+   */
+  readonly internalExtraHosts?: Readonly<Record<string, string>>;
   readonly allowedHosts?: readonly string[];
   readonly preparedBase?: NativePreparedBase;
   readonly https?: NativeHttpsSelection;
   readonly aws?: { readonly profile: string; readonly region?: string };
+  /** Explicit gcloud Application Default Credentials adapter selection. */
+  readonly gcloud?: NativeGcloudSelection;
   /** Public instance identity delivered as runtime host metadata; omitted delivers none. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
   readonly before: (input: NativeProjectInput) => Promise<Hooks>;
@@ -1041,6 +1190,8 @@ export async function startNativeProject(opts: {
     readonly fingerprint: ComposeEnvFingerprintRecord;
   }) => Promise<void>;
   readonly signal?: AbortSignal;
+  /** A second stop request: cancels a running down hook and forces cleanup. */
+  readonly forceSignal?: AbortSignal;
   readonly dependencies?: Partial<Dependencies>;
 }): Promise<number> {
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
@@ -1064,6 +1215,7 @@ export async function startNativeProject(opts: {
       profiles: opts.profiles,
       requestedProfiles,
       aws: opts.aws,
+      gcloud: opts.gcloud,
       load: deps.load,
       invoke: deps.invoke,
       signal: opts.signal,
@@ -1087,6 +1239,9 @@ export async function startNativeProject(opts: {
     });
     requireActiveStartup(opts.signal);
   }
+  // A down hook of an earlier generation with unknown completion blocks this
+  // one before any hook runs; any other leftover record is superseded.
+  await deps.admitDownHooks(opts.scope);
   const profiles = selection.profiles;
   await preflightNativeProjectSource({
     runtime: opts.runtime,
@@ -1120,6 +1275,11 @@ export async function startNativeProject(opts: {
   input = await prepareNativeProjectAdaptation({
     input,
     path: opts.adaptationFile,
+  });
+  input = applyNativeInternalHostAliases({
+    input,
+    hosts: opts.internalExtraHosts,
+    hasDependencySelection: opts.dependencyFile !== undefined,
   });
   input = (
     await prepareNativeReviewBranch({
@@ -1159,40 +1319,44 @@ export async function startNativeProject(opts: {
   const artifactHash = createHash("sha256")
     .update(new Uint8Array(await artifactFile.arrayBuffer()))
     .digest("hex");
-  const controller = new AbortController();
-  let interruptedExit = 130;
-  const cancel = () => controller.abort();
-  const terminate = () => {
-    interruptedExit = 143;
-    cancel();
-  };
-  process.on("SIGINT", cancel);
-  process.on("SIGTERM", terminate);
-  opts.signal?.addEventListener("abort", cancel, { once: true });
+  const stopSignals = nativeForegroundStopSignals(opts);
+  const controller = stopSignals.controller;
   let hooks: Hooks | undefined;
+  let foregroundStop: NativeForegroundStop | undefined;
+  let failed = false;
   let finalization:
     | Awaited<ReturnType<typeof beginNativeProjectFinalization>>
     | undefined;
   let graphCleanupConfirmed = false;
   let httpsCleanupConfirmed = false;
   let httpsAcquisitionFailure: unknown;
+  let cancelAwsExpiry: (() => void) | undefined;
   try {
-    if (opts.signal?.aborted) {
-      cancel();
-    }
+    stopSignals.admitPending();
     requireActiveStartup(controller.signal);
     hooks = await opts.before(input);
-    if (selection.aws) {
-      input = (await deps.adaptAws({ input, ...selection.aws })).input;
+    const credentials = await adaptNativeCredentials({
+      input,
+      selection,
+      deps,
+    });
+    cancelAwsExpiry = credentials.cancelExpiry;
+    if (credentials.input !== input) {
+      input = credentials.input;
       specs = prepareNativeProjectServices(
         input,
         opts.dependencyFile !== undefined
       );
     }
     const dependencyDiscoveryDeadline = performance.now() + 60_000;
+    const hostAliases = nativeServiceHostAliases({
+      services: specs,
+      profiles,
+    });
     const hostDependencies = await readNativeHostDependencies({
       path: opts.dependencyFile,
       services: Object.keys(specs),
+      hostAliases,
       discover: (selection) =>
         discoverNativeHostDependency({
           runtime: opts.runtime,
@@ -1207,6 +1371,10 @@ export async function startNativeProject(opts: {
         }),
     });
     requireActiveStartup(controller.signal);
+    requireNativeHostAliasBindings({
+      dependencies: hostDependencies,
+      hostAliases,
+    });
     prepareNativeDependencyServices({
       dependencies: hostDependencies,
       services: specs,
@@ -1343,6 +1511,16 @@ export async function startNativeProject(opts: {
         });
         const directory = await mkdtemp(join(tmpdir(), "hack-native-start-"));
         const run = runSelection.run;
+        const stop = hooks?.stop
+          ? createNativeForegroundStop({
+              scope: opts.scope,
+              run,
+              commands: hooks.stop,
+              force: stopSignals.force,
+              journal: deps.downHooks,
+            })
+          : undefined;
+        foregroundStop = stop;
         let mapping: NativeProjectRun | undefined;
         // Set before any mapping write: a lost reply may still have published it.
         let mappingAttempted = false;
@@ -1390,14 +1568,15 @@ export async function startNativeProject(opts: {
               run,
               invoke: deps.invoke,
             });
-          const delivery = environmentDelivery(
-            selectActiveNativeProjectInput({
+          const delivery = nativeEnvironmentDelivery({
+            input: selectActiveNativeProjectInput({
               input,
               reviewedPlan: review.report.plan,
             }),
-            review.planId,
-            run
-          );
+            planId: review.planId,
+            reviewedPlan: review.report.plan,
+            run,
+          });
           let code = 1;
           let serveFailure: unknown;
           let nativeExitCode: string | undefined;
@@ -1433,6 +1612,8 @@ export async function startNativeProject(opts: {
               privateInput: delivery.payload,
               startupTimeoutMs: 300_000,
               signal: controller.signal,
+              // Down hooks run on the first stop request of a ready graph.
+              ...stop?.serve,
               onExitDiagnostic: (diagnostic) => {
                 nativeExitCode = diagnostic.nativeCode;
               },
@@ -1453,6 +1634,7 @@ export async function startNativeProject(opts: {
                   effectiveEnvName: input.effectiveEnvName,
                   profiles,
                   aws: selection.aws,
+                  gcloud: selection.gcloud,
                   runtimeMetadata: metadata !== undefined,
                 });
                 // Enrollment must exist before taking a shared lease: release
@@ -1532,6 +1714,8 @@ export async function startNativeProject(opts: {
                 }
                 await hooks?.ready?.();
                 await opts.onReady?.();
+                // Last: only microtasks separate this from readiness.
+                await stop?.owe(() => controller.signal.aborted);
               },
             });
           } catch (error) {
@@ -1566,6 +1750,7 @@ export async function startNativeProject(opts: {
               effectiveEnvName: input.effectiveEnvName,
               profiles,
               aws: selection.aws,
+              gcloud: selection.gcloud,
               runtimeMetadata: metadata !== undefined,
             },
             finalization,
@@ -1596,7 +1781,7 @@ export async function startNativeProject(opts: {
           });
           return foregroundExitCode({
             aborted: controller.signal.aborted,
-            interruptedExit,
+            interruptedExit: stopSignals.interruptedExit(),
             failure: serveFailure,
             infrastructureFailure: httpsFailure,
             code,
@@ -1620,20 +1805,37 @@ export async function startNativeProject(opts: {
       },
     });
   } catch (error) {
+    failed = true;
     throw httpsCleanupFailure(httpsAcquisitionFailure, error);
   } finally {
-    process.off("SIGINT", cancel);
-    process.off("SIGTERM", terminate);
-    opts.signal?.removeEventListener("abort", cancel);
-    await hooks?.cleanup().catch((error: unknown) => {
-      throw httpsCleanupFailure(httpsAcquisitionFailure, error);
-    });
-    await acknowledgeFinalization(
-      finalization,
-      graphCleanupConfirmed,
-      httpsCleanupConfirmed
-    ).catch((error: unknown) => {
-      throw httpsCleanupFailure(httpsAcquisitionFailure, error);
-    });
+    cancelAwsExpiry?.();
+    // The stop listeners stay installed until down.after and the finalization
+    // acknowledgement settle: a further interrupt then cancels the running
+    // hook through the force signal instead of terminating this frontend
+    // with the hook's journal record or the acknowledgement unsettled.
+    try {
+      await hooks?.cleanup().catch((error: unknown) => {
+        throw httpsCleanupFailure(httpsAcquisitionFailure, error);
+      });
+      // down.after follows confirmed cleanup and lifecycle-process retirement,
+      // and precedes the finalization acknowledgement `down` waits for.
+      const stopFailure = await foregroundStop?.finish(graphCleanupConfirmed);
+      await acknowledgeFinalization(
+        finalization,
+        graphCleanupConfirmed,
+        httpsCleanupConfirmed
+      ).catch((error: unknown) => {
+        throw httpsCleanupFailure(httpsAcquisitionFailure, error);
+      });
+      reportForegroundStopFailure(stopFailure, failed);
+    } finally {
+      stopSignals.dispose();
+    }
+  }
+}
+/** A failed stop hook replaces the interrupted status, never a startup error. */
+function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
+  if (failure !== undefined && !failed) {
+    throw failure;
   }
 }

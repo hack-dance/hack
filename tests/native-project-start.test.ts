@@ -22,7 +22,10 @@ import {
 } from "../src/backends/native-project-finalization.ts";
 import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
 import { nativeProjectPs } from "../src/backends/native-project-observe.ts";
-import { preflightNativeRestart } from "../src/backends/native-project-restart-preflight.ts";
+import {
+  nativeRestartSelection,
+  preflightNativeRestart,
+} from "../src/backends/native-project-restart-preflight.ts";
 import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
 import {
   loadNativeProjectRun,
@@ -579,6 +582,29 @@ test("a post-start failure whose cleanup is unconfirmed records the run for ps a
   expect(ps.items).toEqual([
     expect.objectContaining({ service: "web", state: "running" }),
   ]);
+});
+
+test("a failed gcloud start's recorded owner keeps the ADC mode for restart", async () => {
+  const value = await fixture(false);
+  const { opts } = value;
+  opts.dependencies.adaptGcloud = async ({ input, mode }) => ({
+    input,
+    receipt: { mode, types: ["authorized_user"], services: ["web"] },
+  });
+  const selected = failedStartupFixture(value);
+  const failure = await startNativeProject({
+    ...opts,
+    gcloud: { mode: "file" },
+  }).catch((error: unknown) => error);
+  expect((failure as Error).message).toContain(
+    `The failed run ${selected.run} is recorded as this project's run mapping`
+  );
+  const recorded = await loadNativeProjectRun(opts.scope);
+  expect(recorded?.gcloud).toEqual({ mode: "file" });
+  // Restart re-applies the recorded ADC adapter instead of dropping it.
+  expect(nativeRestartSelection({ run: recorded! }).gcloud).toEqual({
+    mode: "file",
+  });
 });
 
 test("a post-start failure with an unauthenticated receipt records no owner", async () => {
@@ -1171,6 +1197,99 @@ test("AWS profile export follows native login hooks and precedes runtime effects
     startNativeProject({ ...opts, aws: { profile: "qa-test" } })
   ).rejects.toThrow("expired profile");
   expect(events).toEqual(["before", "cleanup"]);
+});
+
+test("gcloud ADC delivery follows hooks, sends file members privately and persists only the mode", async () => {
+  const { opts, events } = await fixture();
+  opts.dependencies.adaptGcloud = async ({ input, mode }) => {
+    expect(mode).toBe("file");
+    events.push("gcloud");
+    return {
+      input: {
+        ...input,
+        managedFiles: {
+          web: [
+            {
+              name: "gcloud-adc.json",
+              target: "/config/adc.json",
+              content: Buffer.from("synthetic-adc-bytes"),
+            },
+          ],
+        },
+      },
+      receipt: { mode, types: ["authorized_user"], services: ["web"] },
+    };
+  };
+  const serve = opts.dependencies.serve;
+  let envelope: Record<string, unknown> | undefined;
+  opts.dependencies.serve = async (call) => {
+    envelope = JSON.parse(new TextDecoder().decode(call.privateInput));
+    expect(call.args.join(" ")).not.toContain("synthetic-adc-bytes");
+    return await serve!(call);
+  };
+  let saved: NativeProjectRun | undefined;
+  opts.dependencies.save = async ({ run }) => {
+    saved = run;
+  };
+  opts.dependencies.remove = async ({ expected }) => {
+    expect(saved).toBe(expected);
+  };
+  expect(await startNativeProject({ ...opts, gcloud: { mode: "file" } })).toBe(
+    0
+  );
+  expect(events.indexOf("gcloud")).toBeGreaterThan(events.indexOf("before"));
+  expect(events.indexOf("gcloud")).toBeLessThan(events.indexOf("runtime up"));
+  expect(envelope?.version).toBe(2);
+  expect(envelope?.files).toEqual({
+    web: [
+      {
+        name: "gcloud-adc.json",
+        target: "/config/adc.json",
+        mode: "0400",
+        content_b64: Buffer.from("synthetic-adc-bytes").toString("base64"),
+      },
+    ],
+  });
+  expect(saved?.gcloud).toEqual({ mode: "file" });
+  expect(JSON.stringify(saved)).not.toContain("synthetic");
+  // A retained graph without a gcloud selection cannot gain one.
+  events.length = 0;
+  opts.dependencies.load = async () => ({
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+  });
+  await expect(
+    startNativeProject({ ...opts, gcloud: { mode: "file" } })
+  ).rejects.toThrow("cannot change the retained run");
+  expect(events).toEqual([]);
+});
+
+test("AWS delivery warns value-free before expiry and clears its timers on exit", async () => {
+  const { opts } = await fixture();
+  const lines: string[] = [];
+  opts.dependencies.warn = (line) => lines.push(line);
+  opts.dependencies.adaptAws = async ({ input, profile }) => ({
+    input,
+    receipt: {
+      profile,
+      // Already inside the warning window, so the notice is immediate.
+      expiry: new Date(Date.now() + 5 * 60_000).toISOString(),
+      services: ["web", "worker"],
+    },
+  });
+  expect(
+    await startNativeProject({ ...opts, aws: { profile: "qa-test" } })
+  ).toBe(0);
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toMatch(
+    /^AWS credentials delivered to 2 services expire at \d\d:\d\d; run hack restart to renew\.$/
+  );
+  expect(lines[0]).not.toContain("qa-test");
 });
 
 test("reviewed dependency caches bind published source and successful completion readiness", async () => {
@@ -1776,6 +1895,44 @@ test("a reviewed one-shot service waits for successful completion", () => {
       ).sort()
     ).toEqual(["init=healthy", "web=started"]);
   }
+});
+
+test("an optional dependency on an inactive service adds no readiness goal", () => {
+  const image = `sha256:${"e".repeat(64)}`;
+  const specs = {
+    app: {
+      image,
+      depends_on: { db: { condition: "service_healthy", required: false } },
+    },
+    db: {
+      image,
+      profiles: ["database"],
+      healthcheck: { test: ["CMD", "true"] },
+    },
+  };
+  const plan = (database: boolean) => ({
+    enrollment_compatible: true,
+    services: { app: { active: true }, db: { active: database } },
+  });
+  expect(
+    nativeReadinessArgs({
+      specs,
+      plan: plan(false),
+      initializers: new Set(),
+      routed: new Set(),
+    })
+  ).toEqual(["--ready", "app=started"]);
+  // An active optional target is waited for like a required one.
+  expect(
+    readyGoals(
+      nativeReadinessArgs({
+        specs,
+        plan: plan(true),
+        initializers: new Set(),
+        routed: new Set(),
+      })
+    ).sort()
+  ).toEqual(["app=started", "db=healthy"]);
 });
 
 async function profileStartup(profiles: readonly string[] | undefined) {
@@ -3828,4 +3985,179 @@ test("restart preflight refuses runtime host metadata that differs from reviewed
   await expect(preflight(["other.example.com"])).rejects.toThrow(
     "Native runtime metadata"
   );
+});
+
+async function internalHostsFixture() {
+  const { opts, events } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.worker = { ...compose.services.web };
+    compose.services.later = { ...compose.services.web, profiles: ["later"] };
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  const path = join(opts.scope.projectRoot, "host-selection.json");
+  const internalExtraHosts = { "api.example.test": "host-gateway" };
+  return { opts, events, path, internalExtraHosts };
+}
+
+test("project-wide host aliases are declared like Compose and bound by one declarative selection", async () => {
+  const { opts, path, internalExtraHosts } = await internalHostsFixture();
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 2,
+      dependencies: [
+        {
+          binding: "api",
+          aliases: ["api.example.test"],
+          guest_port: 443,
+          host_port: 8443,
+          host_pid: 123,
+        },
+      ],
+    })
+  );
+  const reviewed: NativeProjectInput[] = [];
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) => {
+    reviewed.push(request.input);
+    return await review(request);
+  };
+  const plans: unknown[] = [];
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "dependency-plan") {
+      plans.push(
+        JSON.parse(await readFile(String(request.args[3]), "utf8")).dependencies
+      );
+    }
+    return await invoke(request);
+  };
+  expect(
+    await startNativeProject({
+      ...opts,
+      dependencyFile: path,
+      internalExtraHosts,
+    })
+  ).toBe(0);
+  const services = JSON.parse(reviewed[0]?.normalizedComposeJson ?? "{}")
+    .services as Record<string, Record<string, unknown>>;
+  for (const name of ["web", "worker", "later"]) {
+    expect(services[name]?.extra_hosts).toEqual([
+      "api.example.test:host-gateway",
+    ]);
+  }
+  // The inactive profile service is declared but never bound.
+  const binding = {
+    binding: "api",
+    slot: 0,
+    guest_port: 443,
+    host_port: 8443,
+    host_pid: 123,
+    aliases: ["api.example.test"],
+  };
+  expect(plans).toEqual([
+    [
+      { ...binding, service: "web" },
+      { ...binding, service: "worker" },
+    ],
+  ]);
+  expect(services.web?.init).toBe(true);
+  expect(services.later?.init).toBeUndefined();
+
+  reviewed.length = 0;
+  await preflightNativeRestart({
+    runtime: opts.runtime,
+    scope: opts.scope,
+    composeFile: opts.composeFile,
+    dependencyFile: path,
+    internalExtraHosts,
+    run: {
+      run: "1".repeat(32),
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      planId: "a".repeat(64),
+      effectiveEnvName: null,
+      profiles: [],
+      aws: null,
+    },
+    dependencies: {
+      prepare: opts.dependencies.prepare,
+      review: opts.dependencies.review,
+      invoke: async (request) => {
+        if (request.args[1] === "dependency-plan") {
+          plans.push(
+            JSON.parse(await readFile(String(request.args[3]), "utf8"))
+              .dependencies
+          );
+          return {
+            plan_id: "a".repeat(64),
+            dependency_plan_id: "f".repeat(64),
+          };
+        }
+        return await restartPreflightInvoke(request);
+      },
+    },
+  });
+  expect(reviewed).toHaveLength(1);
+  // Restart reviews the same declarations and bindings startup admitted.
+  expect(
+    JSON.parse(reviewed[0]?.normalizedComposeJson ?? "{}").services
+  ).toEqual(services);
+  expect(plans[1]).toEqual(plans[0]);
+});
+
+test("a project-wide alias without a binding for every active service refuses before runtime effects", async () => {
+  const { opts, events, path, internalExtraHosts } =
+    await internalHostsFixture();
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [
+        {
+          service: "web",
+          binding: "api",
+          aliases: ["api.example.test"],
+          guest_port: 443,
+          host_port: 8443,
+          host_pid: 123,
+        },
+      ],
+    })
+  );
+  const error = await startNativeProject({
+    ...opts,
+    dependencyFile: path,
+    internalExtraHosts,
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(HackCliError);
+  expect(error).toHaveProperty("code", "E_NATIVE_PROJECT_UNSUPPORTED");
+  expect(String((error as Error).message)).toContain(
+    "Native host alias has no reviewed host dependency binding"
+  );
+  expect(String((error as Error).message)).not.toContain("example");
+  expect(events).toContain("before");
+  expect(events).toContain("cleanup");
+  expect(events).not.toContain("runtime up");
+  expect(events).not.toContain("graph dependency-plan");
+});
+
+test("project-wide aliases without a dependency selection refuse before hooks instead of being ignored", async () => {
+  const { opts, events, internalExtraHosts } = await internalHostsFixture();
+  const error = await startNativeProject({
+    ...opts,
+    internalExtraHosts,
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(HackCliError);
+  expect(error).toHaveProperty("code", "E_NATIVE_PROJECT_UNSUPPORTED");
+  expect(String((error as Error).message)).toContain(
+    "configuration was not dropped"
+  );
+  expect(events).not.toContain("before");
+  expect(events).not.toContain("runtime up");
+  // Without project-wide aliases the same project still starts unchanged.
+  expect(await startNativeProject({ ...opts, internalExtraHosts: {} })).toBe(0);
 });

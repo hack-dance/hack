@@ -12,12 +12,26 @@ import {
 const LIMIT = 256 * 1024;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/**
+ * One private file member delivered into a service's environment allocation and
+ * bound read-only at `target`. `content` is private; never log or persist it.
+ */
+export type NativeManagedFile = {
+  readonly name: string;
+  readonly target: string;
+  readonly content: Buffer;
+};
+
 export type NativeProjectInput = {
   readonly originalSha256: string;
   readonly normalizedComposeJson: string;
   /** Private in-memory transport only. Never log or write this map to Compose. */
   readonly managedEnvironment: Readonly<
     Record<string, Readonly<Record<string, string>>>
+  >;
+  /** Private file members by service (credential adapters only); never logged. */
+  readonly managedFiles?: Readonly<
+    Record<string, readonly NativeManagedFile[]>
   >;
   /** Private lifecycle environment; not container environment. */
   readonly lifecycleHostEnvironment: Readonly<Record<string, string>>;

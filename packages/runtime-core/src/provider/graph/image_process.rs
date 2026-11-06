@@ -114,9 +114,39 @@ pub(super) fn apply_private(create: &mut Value, image: &Value) -> Result<(), Can
     Ok(())
 }
 
+/// Files-only private delivery keeps the selected process unchanged and only pins the
+/// numeric owner that staged mode-0400 members must match. Validation precedes mutation.
+pub(super) fn apply_file_owner(create: &mut Value, image: &Value) -> Result<(), CandidateError> {
+    if !image.is_object() || !create.is_object() {
+        return Err(malformed());
+    }
+    let user = selected_user(image, create)?;
+    create["User"] = json!(user);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_owner_pins_numeric_image_user_without_changing_process() {
+        let image = json!({"Entrypoint":["entry"],"Cmd":["serve"],"User":"65532"});
+        let mut create = json!({"Cmd":["serve","--flag"]});
+        apply_file_owner(&mut create, &image).unwrap();
+        assert_eq!(create, json!({"Cmd":["serve","--flag"],"User":"65532"}));
+        let mut explicit = json!({"User":"1001:1002"});
+        apply_file_owner(&mut explicit, &image).unwrap();
+        assert_eq!(explicit["User"], "1001:1002");
+        let mut root = json!({});
+        apply_file_owner(&mut root, &json!({})).unwrap();
+        assert_eq!(root["User"], "");
+        for user in ["app", "1:staff", "-1"] {
+            let mut create = json!({});
+            assert!(apply_file_owner(&mut create, &json!({"User":user})).is_err());
+            assert!(create.get("User").is_none());
+        }
+    }
 
     #[test]
     fn inherits_image_entrypoint_but_keeps_actual_compose_command() {

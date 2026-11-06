@@ -41,11 +41,16 @@ import {
 } from "../agents/onboarding-handoff.ts";
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
+import { parseNativeGcloudSelection } from "../backends/native-gcloud-environment.ts";
 import { parseNativePreparedBase } from "../backends/native-prepared-base.ts";
 import {
   nativeDownEnvironment,
   nativeProjectDown,
 } from "../backends/native-project-down.ts";
+import {
+  requireNativeProjectInternalExtraHostsUnchanged,
+  resolveNativeInternalExtraHosts,
+} from "../backends/native-project-internal-hosts.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
 import {
@@ -219,6 +224,7 @@ import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
+import { runLifecycleCommandChild } from "../lib/lifecycle-command-child.ts";
 import {
   appendLifecycleLogRecord,
   readLifecycleState,
@@ -1756,6 +1762,36 @@ async function maybePromptToFixMissingEnv(opts: {
   return true;
 }
 
+/**
+ * One finite lifecycle command with its output logged. The signal cancels the
+ * command's whole owned process group (see {@link runLifecycleCommandChild}).
+ */
+function runLifecycleChild(opts: {
+  readonly command: string;
+  readonly cwd: string;
+  readonly env: Record<string, string>;
+  readonly output: "stdout" | "stderr";
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly service: string;
+  readonly signal?: AbortSignal;
+}): Promise<number> {
+  return runLifecycleCommandChild({
+    command: opts.command,
+    cwd: opts.cwd,
+    env: opts.env,
+    signal: opts.signal,
+    drain: (stream, source) =>
+      streamLifecycleCommandOutput({
+        stream,
+        output: source === "stdout" ? opts.output : "stderr",
+        projectDir: opts.projectDir,
+        composeProject: opts.composeProject,
+        service: opts.service,
+      }),
+  });
+}
+
 async function runLifecycleCommands(opts: {
   readonly title: string;
   readonly commands: readonly ProjectLifecycleCommand[] | undefined;
@@ -1769,6 +1805,11 @@ async function runLifecycleCommands(opts: {
     readonly index: number;
     readonly serviceName: string;
   }) => Promise<void>;
+  /**
+   * Cancels the running command's owned process group and the rest; the
+   * result is then 130.
+   */
+  readonly signal?: AbortSignal;
 }): Promise<number> {
   const commands = opts.commands ?? [];
   for (const [index, cmd] of commands.entries()) {
@@ -1819,31 +1860,16 @@ async function runLifecycleCommands(opts: {
       },
     });
 
-    const proc = Bun.spawn(["sh", "-c", cmd.command], {
+    const exitCode = await runLifecycleChild({
+      command: cmd.command,
       cwd,
       env: await mergeLifecycleCommandEnv(opts.env),
-      stdin: "inherit",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    const stdoutTask = streamLifecycleCommandOutput({
-      stream: proc.stdout,
       output: opts.routeStdoutToStderr ? "stderr" : "stdout",
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
       service: serviceName,
+      signal: opts.signal,
     });
-    const stderrTask = streamLifecycleCommandOutput({
-      stream: proc.stderr,
-      output: "stderr",
-      projectDir: opts.projectDir,
-      composeProject: opts.composeProject,
-      service: serviceName,
-    });
-
-    const exitCode = await proc.exited;
-    await Promise.all([stdoutTask, stderrTask]);
 
     await appendLifecycleLogRecord({
       projectDir: opts.projectDir,
@@ -5785,6 +5811,10 @@ async function handleNativeUp({
   };
   const envFingerprints =
     createNativeEnvFingerprintSession(envFingerprintScope);
+  const internalExtraHosts = await resolveNativeInternalExtraHosts({
+    project,
+    cfg,
+  });
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -5799,6 +5829,7 @@ async function handleNativeUp({
     sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
     dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
     adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
+    internalExtraHosts,
     allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
     preparedBase: parseNativePreparedBase(process.env),
     https: parseNativeHttpsSelection(process.env),
@@ -5808,6 +5839,7 @@ async function handleNativeUp({
           region: process.env.HACK_NATIVE_AWS_REGION,
         }
       : undefined,
+    gcloud: parseNativeGcloudSelection(process.env.HACK_NATIVE_GCLOUD_ADC),
     runtimeMetadata: {
       devHost,
       aliasHost: resolveBranchAliasHost({ devHost, cfg }),
@@ -5836,11 +5868,33 @@ async function handleNativeUp({
           message: "Native up lifecycle preparation failed; values omitted.",
         });
       }
+      // Native declares these before review; a hook cannot change them now.
+      // This re-reads hack.config.json, not the pre-hook `cfg` snapshot.
+      await requireNativeProjectInternalExtraHostsUnchanged({
+        project,
+        reviewed: internalExtraHosts,
+        cleanup,
+      });
       // The native backend launches services after this returns: refuse when a
       // concurrent down already released this instance's shared helpers.
       await assertNativeSharedHelpersCurrent({ lifecycle, cleanup });
+      // Ctrl-C runs these as `hack down` would (journaled, never replayed).
+      const down = cfg.lifecycle?.down;
+      const stopPhase = (phase: "before" | "after") => (signal: AbortSignal) =>
+        runLifecycleCommands({
+          title: `Lifecycle (native down ${phase})`,
+          commands: down?.[phase],
+          projectRoot: project.projectRoot,
+          env: input.lifecycleHostEnvironment,
+          projectDir: project.projectDir,
+          composeProject,
+          signal,
+        });
       return {
         cleanup,
+        ...(down?.before?.length || down?.after?.length
+          ? { stop: { before: stopPhase("before"), after: stopPhase("after") } }
+          : {}),
         ready: async () => {
           await assertNativeSharedHelpersCurrent({
             lifecycle,
@@ -5977,6 +6031,7 @@ async function restartNativeImageProject({
         composeFile: startup.composeFile,
         adaptationFile: startup.adaptationFile,
         dependencyFile: startup.dependencyFile,
+        internalExtraHosts: startup.internalExtraHosts,
         allowedHosts: startup.allowedHosts,
         runtimeMetadata: startup.runtimeMetadata,
         httpsPort: startup.https?.httpsPort ?? null,
@@ -6720,7 +6775,7 @@ async function handleDown({
       nativeHome: native.home,
       branch,
     };
-    let lifecycleEnv: Readonly<Record<string, string>> = {};
+    let lifecycleEnv: Readonly<Record<string, string>> | undefined;
     const hasHooks = Boolean(
       cfg.lifecycle?.down?.before?.length || cfg.lifecycle?.down?.after?.length
     );
@@ -6731,19 +6786,19 @@ async function handleDown({
       projectName,
       branch,
     });
-    const hook = async (phase: "before" | "after") => {
+    const hook = async (phase: "before" | "after", graphStopped: boolean) => {
       const code = await runLifecycleCommands({
         title: `Lifecycle (native down ${phase})`,
         commands: cfg.lifecycle?.down?.[phase],
         projectRoot: project.projectRoot,
         projectDir: project.projectDir,
         composeProject,
-        env: lifecycleEnv,
+        env: lifecycleEnv ?? {},
         routeStdoutToStderr: args.options.json === true,
       });
       if (code !== 0) {
         throw new Error(
-          `Native down ${phase} hook failed (exit ${code})${phase === "after" ? "; native graph cleanup was confirmed and data retained" : "; cleanup was not requested"}.`
+          `Native down ${phase} hook failed (exit ${code})${graphStopped ? "; native graph cleanup was confirmed and data retained" : "; cleanup was not requested"}.`
         );
       }
     };
@@ -6760,26 +6815,26 @@ async function handleDown({
           composeProject,
         });
       },
-      before: async (run) => {
-        if (!hasHooks) {
-          return;
-        }
-        lifecycleEnv = await nativeDownEnvironment({
-          scope,
-          run,
-          serviceNames: await readComposeServiceNames(project.composeFile),
-        });
-        await hook("before");
+      // Journaled: a foreground Ctrl-C may already have run them, or left
+      // them owed after a crash; unknown completion refuses.
+      hooks: {
+        configured: hasHooks,
+        run: async ({ phase, run, graphStopped }) => {
+          if (!hasHooks) {
+            return;
+          }
+          lifecycleEnv ??= await nativeDownEnvironment({
+            scope,
+            run,
+            serviceNames: await readComposeServiceNames(project.composeFile),
+          });
+          await hook(phase, graphStopped);
+        },
       },
       // Only a committed down (its before hook succeeded and the ownership
       // and finalization rechecks passed) may supersede a concurrent up.
       beforeCleanup: () =>
         markLifecycleSharedHelpersStopping({ cfg, composeProject }),
-      after: async () => {
-        if (hasHooks) {
-          await hook("after");
-        }
-      },
     });
     if (args.options.json) {
       process.stdout.write(`${JSON.stringify(result)}\n`);

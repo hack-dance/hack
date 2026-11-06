@@ -679,6 +679,21 @@ layer. Removing the owned container discards that layer; use named volumes for
 durable data. Source bind mounts still require read-only publication. Writable
 container layers do not imply writable source synchronization.
 
+An image that declares `VOLUME` (for example a database image) runs natively only
+when the service mounts a named volume at each declared path, as in
+`db-data:/var/lib/postgresql/data`. Hack never creates an anonymous volume: a declared
+path without exactly one whole named volume of the project refuses with
+`graph_image_volume_uncovered`, and a read-only (`:ro`) mount, a bind mount, a
+`volume.subpath` mount or a dependency-cache volume at that path does not count. On first use the engine copies
+the image directory's contents, owner and mode into the new, empty volume; later runs
+mount the retained data unchanged. Native containers drop all capabilities, so an
+image entrypoint that starts as root and hands the data directory to another user
+(`chown` and then a user switch) fails. Set an explicit numeric `user:` that matches
+the image's data user (look it up in the image's `/etc/passwd`); the entrypoint then
+skips the handoff. `hack doctor` warns about this case and about data services on
+mutable image tags. A native graph can own at most 16 named volumes, dependency
+caches included.
+
 The normal-CLI integration helpers prepare modern environment overlays and
 worktree inheritance in memory, with null declarations in public normalized
 configuration. An explicit AWS profile adapter can replace the recognized
@@ -687,6 +702,43 @@ credentials. It preserves unrelated mounts and refuses custom credential-file
 selectors. Credentials are not written to Compose or the project snapshot, and
 are not automatically renewed after expiry. Normal native foreground `hack up`
 uses these adapters within the capability limits described below.
+
+### Compose fields with a native meaning
+
+Native review accepts these Compose fields. Where the native result differs from
+Compose, review reports a warning; nothing is dropped silently. A plan that does not
+use a field keeps its earlier plan ID. A plan or receipt that does use one is refused
+by an older bundle, so clean up such a graph with the bundle that started it.
+
+- `depends_on.<service>.required: false`. When the selected profiles disable the
+  target, the edge is skipped with the warning `optional_dependency_inactive`, as in
+  Compose. When the target is active, native waits for its `condition` exactly as for
+  a required dependency and fails startup if the condition is never met. Compose may
+  only warn there, so review reports `optional_dependency_enforced`. A target that
+  does not exist is still `missing_dependency`, and `restart: true` is still refused.
+- `stdin_open: true` keeps the container's stdin open, so it never reaches EOF.
+  No host input is attached, as with `hack up` on Compose. `tty: true` is accepted
+  but no pseudo-terminal is allocated: stdout and stderr stay separate, and review
+  reports `terminal_not_allocated`. Programs that need a real terminal (colors,
+  prompts) stay on the Compose backend.
+- A `caddy` hostname label with `caddy.tls: internal` and no `caddy.reverse_proxy`
+  proxies nothing, so native treats it as inert: no route, hostname claim or relay is
+  created, and review reports `inert_route_declaration`. The hostnames still appear
+  in [runtime host metadata](../cli.md#runtime-host-metadata), as on Compose. Any
+  other partial or extra `caddy*` label set is still refused. Inert hostnames are
+  ordinary literals for a retaining hostname change, and
+  `HACK_NATIVE_ADAPTATION` `additionalHostnames` refuses an inert service.
+- Nested interpolation defaults such as `${A:-${B:-fallback}}` resolve inner
+  expressions first, as Compose does, up to four levels and within the shared 1 MiB
+  expanded budget. Only the `:-` and `:+` operators are supported at every level;
+  `?`, unbraced `$NAME` and `$(...)` inside a default word are refused. A word that
+  is not selected is still checked, but its inputs are not required.
+- A reference to a Hack-managed value of the same service, for example
+  `${TOKEN:-fallback}` when Hack delivers `TOKEN` to that service, refuses with
+  `execution_environment_owner`. Managed values are delivered privately and are
+  never interpolated into commands, users, health checks or other values, and a
+  default is never used in their place. Declare the key bare (`TOKEN:` or `- TOKEN`)
+  to receive the managed value.
 
 ## Public image acquisition without Docker
 
@@ -856,6 +908,43 @@ mapping write was attempted (its reply may have been lost), keep their data. Whe
 removal is not confirmed, `up` prints one line naming the run and the explicit
 `graph cleanup --run-id RUN --remove-data --json` request, and keeps the graph.
 
+Ctrl-C (or SIGTERM) on a ready graph whose `up.after` completed stops the project the
+way `hack down` does on the Compose backend: `down.before` runs first, then graph
+cleanup, then lifecycle-process retirement, then `down.after`. Hooks use the
+environment selection of the running `up`. A second Ctrl-C cancels a running down
+hook and proceeds to cleanup; a canceled `down.before` is not followed by
+`down.after`. A failed `down.before` still stops the graph, because you asked to
+exit, and the command reports `E_LIFECYCLE_FAILED`; a failed `down.after` reports
+the same after cleanup was confirmed. Ctrl-C while `up.after` is still running stops
+the graph without any down hook. With down hooks declared, the graph owner runs in
+its own process group, so the terminal's interrupt reaches only the `hack` frontend,
+which decides when the owner stops. Each down hook run by Ctrl-C also runs in its own
+process group with stdin closed. Canceling it signals the whole group (SIGTERM, then
+SIGKILL once the hook's shell exits or after a two-second grace), and output from a
+canceled hook is drained for at most that grace, so a child such as `sleep` in
+`sleep 600; echo finished` cannot keep the stop waiting. The frontend keeps handling
+interrupts until `down.after` and its finalization acknowledgement are settled.
+
+A private, value-free journal beside the run mapping records an intent before each
+down hook starts and its known completion after the hook's process exits. It holds
+only the run identity, a random writer identity and a phase, never commands, values
+or output. A later `hack down` reads it: completed (or failed) phases are not rerun;
+phases still owed, for example after the frontend was killed before or between the
+hooks, run once; a phase that started but whose completion is unknown (the frontend
+or `down` died while it ran) refuses with `E_LIFECYCLE_FAILED` "Native down hook
+completion is unknown; inspect before retrying." and nothing is replayed. That
+refusal also blocks the next `up` before any hook. After checking what the
+interrupted hook did, remove `.hack/.internal/native-runs/*.down-hooks.json` to
+clear it. A `hack down` from another terminal and the frontend's Ctrl-C claim the
+same journal record, so concurrent stops run each hook at most once. If that `hack
+down` is still running `down.before` when you press Ctrl-C, the frontend says so and
+waits for the hook to finish before it stops the graph; it runs `down.before` itself
+only if the other attempt failed and handed the record back. Press Ctrl-C again to
+stop without waiting. A new `up`
+supersedes any other leftover record; it does not run an earlier generation's owed
+hooks. Projects without down hooks keep the previous stop behavior and write no
+journal.
+
 Without that grant, `up` and `restart` refuse with `E_PERMISSION` before any stop or
 runtime request; set it and run the command again.
 
@@ -887,9 +976,11 @@ HTTPS. A normal `restart` kept its run and Redis data after a source edit. This 
 not establish every application workflow, crash recovery or comparative performance.
 Native `down` requests retaining cleanup from the graph owner and verifies container
 absence while keeping the exact run mapping. It then retires that branch's owned host
-lifecycle processes before running after hooks. A previously recovered stopped graph
-also retires remaining owned host processes without replaying hooks or guest cleanup;
-uncertain ownership refuses retirement and leaves the retained mapping intact.
+lifecycle processes before running after hooks. A stopped graph (after a foreground
+stop or a previous recovery) also retires remaining owned host processes without
+replaying guest cleanup; it runs only down hooks the journal above still owes, once,
+after the original frontend's finalization is acknowledged. Uncertain ownership
+refuses retirement and leaves the retained mapping intact.
 Before capturing live bridge helpers for cleanup, the owner retires an exited
 helper only after confirming its current guest boot, run, container, network and
 reservation. An interrupted retirement requires a fresh exit observation or an
@@ -1057,7 +1148,58 @@ service-scoped AWS adapter after the normal login hook. It removes only recogniz
 AWS mounts/selectors and supplies temporary credentials through private stdin.
 Expired or unsupported profiles fail startup; credentials are not persisted or
 refreshed automatically. Unrecognized mounts and other unsupported bindings still
-refuse admission.
+refuse admission. Because the exported credentials are a startup snapshot, the
+foreground prints one value-free line to stderr ten minutes before they expire and
+another at expiry: `AWS credentials delivered to N services expire at HH:MM; run
+hack restart to renew.` `hack exec` keeps exporting fresh values for each request.
+
+### gcloud Application Default Credentials (file mode)
+
+For a project whose services bind the gcloud ADC file read-only, for example
+`~/.config/gcloud/application_default_credentials.json:/config/adc.json:ro`,
+explicit `HACK_NATIVE_GCLOUD_ADC=file` applies the gcloud adapter after the normal
+login hook, beside the AWS adapter. Accepted sources are that path written with
+`~`, `${HOME}`, `$HOME` or the absolute home directory, in short syntax with `:ro`
+or long syntax `{type: bind, source, target, read_only: true}` with no other keys.
+The target must be an absolute container file path outside `/proc`, `/sys`, `/dev`,
+`/run` and `/var/run` that no other mount or tmpfs of the service equals, contains
+or sits under. Writable or directory mounts, other gcloud paths and two matches in
+one service refuse; so does selecting the adapter when no service matches.
+`GOOGLE_APPLICATION_CREDENTIALS`, when declared, must equal the mount target and
+stays public. `CLOUDSDK_CONFIG`, `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`,
+`CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, `GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES`,
+`GCE_METADATA_HOST` and `GCE_METADATA_IP` in a selected service refuse. Ambient
+`GOOGLE_APPLICATION_CREDENTIALS` and `CLOUDSDK_CONFIG` on the host are not consulted.
+
+The adapter reads only `<home>/.config/gcloud/application_default_credentials.json`:
+a regular file (not a symlink) owned by you, not group- or world-writable, 1 to 16 KiB
+of UTF-8 JSON, unchanged during the read. It admits `authorized_user` credentials and
+`impersonated_service_account` credentials whose source is `authorized_user`.
+`service_account` key files are refused, as are `external_account` types and any
+`credential_source`, whose host files, URLs or executables do not exist in the guest.
+It then runs `gcloud auth application-default print-access-token` once with prompts
+disabled, a clean environment and a 30-second limit, and discards the token unread.
+A missing `gcloud` refuses with a message naming the CLI; a failed mint or an ADC
+file that changed during startup refuses. Other refusals use one closed line with
+values omitted.
+
+Each selected service then loses the bind mount from public Compose and receives
+the same bytes as a private file member through the version 2 private envelope. The
+runtime stages it mode 0400 for the container's numeric user in that container's
+environment allocation and binds it read-only at the authored target. A service
+with no other private values keeps its own entrypoint and health check; only a
+numeric image or Compose user is required.
+
+File mode places the ADC refresh token inside the VM for the container's lifetime.
+That is no wider than the Compose bind mount it replaces: only the selected services
+receive it, as a read-only snapshot owned by the container user, retired with the
+container. Google client libraries refresh access tokens from it over normal
+egress. Host re-login or revocation is not propagated; run `hack restart` to deliver
+a fresh snapshot. The run mapping records only `gcloud: {"mode": "file"}`; restart
+and retained restore keep that selection and deliver a fresh copy into new
+allocations. `hack exec` delivers nothing new: the file is already in the
+container, and exec only rechecks the mount and selectors. One-off `run` does not
+apply the adapter. A mapping with a gcloud selection refuses on earlier candidates.
 
 New immutable source captures use manifest schema 2: the revision binds both
 selected content and its selection receipt. This prevents an ignored mountpoint
@@ -1400,6 +1542,55 @@ changes between preflight and startup still refuses without adopting it; the
 stopped run and its volumes remain available for a corrected retry.
 Selected services receive `init: true` when omitted because the guest relay launcher
 requires a reaping init process. An explicit `init: false` is refused, not replaced.
+
+Project-wide host aliases from `internal.extra_hosts` in `hack.config.json`, plus
+checkout-local `hack internal extra-hosts` entries, follow the Compose backend:
+native `up` and `restart` declare each one on every service as a `host-gateway`
+extra host. Native has no general host gateway, so every profile-active service
+must then have a selected binding for each alias it declares. A missing binding
+refuses with `E_NATIVE_PROJECT_UNSUPPORTED` ("Native host alias has no reviewed
+host dependency binding; configuration was not dropped."), before any runtime
+work; with no dependency selection at all it refuses before lifecycle hooks.
+An entry whose target is not `host-gateway` (for example a fixed address), a name
+that is not an exact lowercase DNS name, or a service that already maps the name
+to a different target also refuses. Service-declared names are matched in the
+form native review compiles them to (one trailing dot removed, lowercased), so a
+service that declares `API.Example.` is covered by a binding for `api.example` and
+does not receive a second spelling. Earlier native builds ignored these entries,
+which let a container resolve the public name instead of the local listener.
+Native reads these aliases before lifecycle hooks, because they are part of the
+reviewed configuration; unlike the Compose backend, a hook that changes them makes
+`up` refuse after hook cleanup. The check after hooks reads `hack.config.json` and
+the checkout-local alias map again, so an edit to either is caught. A local alias map
+that exists but cannot be read refuses with `E_CONFIG_INVALID` instead of being
+treated as empty. Projects without project-wide aliases are unchanged.
+Unlike a Compose host gateway, which reaches every host port, a service reaches
+each alias only on the one guest port its binding selects.
+
+To avoid repeating one listener for every service, a version 2 selection names
+each binding once:
+
+```json
+{
+  "version": 2,
+  "dependencies": [{
+    "binding": "search",
+    "aliases": ["search.example.com"],
+    "guest_port": 443,
+    "host_port": 8443,
+    "host_executable": "/absolute/path/to/the/listener-binary"
+  }]
+}
+```
+
+Without `services`, the entry applies to every profile-active service that
+declares one of its aliases, and each service receives only the aliases it
+declares. `"services": ["web", "worker"]` limits it to those services, each of
+which must declare at least one of the aliases. The CLI expands the entry into
+the version 1 bindings shown above before discovery and review. The same listener
+authority applies to every expanded binding, and the 128-binding and 32-transport
+limits apply after expansion. A repeated binding name, an alias no selected service
+declares, a per-entry `service` key or an unknown or inactive service refuses.
 
 Fresh pools reserve the number of distinct dependency transports from that
 selection. Existing pool capacity cannot be silently widened. The selection is copied into the temporary exact-plan

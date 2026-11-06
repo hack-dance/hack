@@ -1043,6 +1043,32 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-startup-owner",
+    module: "Owner",
+    states: 32,
+    invariant: "NoUnownedResources",
+    action: "ExitUnconfirmed",
+    fields: [
+      'mapping = "none"',
+      'phase = "exited"',
+      'receipt = "authenticated"',
+      'resources = "present"',
+    ],
+    additionalControls: [
+      {
+        name: "refused-inspection",
+        negative: true,
+        invariant: "NoUnrecordedRefusal",
+        fields: [
+          'mapping = "none"',
+          'phase = "exited"',
+          'receipt = "refused"',
+          'resources = "present"',
+        ],
+      },
+    ],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,

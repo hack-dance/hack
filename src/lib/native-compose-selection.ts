@@ -64,15 +64,22 @@ async function selectRegisteredNativeInputs(opts: {
   });
 }
 
-/** Authored format and runtime selection are independent; no implicit fallback. */
+/**
+ * Authored format and runtime selection are independent; no implicit fallback.
+ * The refusal names the explicit selection to rerun with. `command`, when given,
+ * is a public example command line (no user values) shown after that selection.
+ */
 export function requireNativeComposeBackend(opts: {
   readonly backend: string | undefined;
+  readonly command?: string;
 }): void {
   if (opts.backend !== undefined && opts.backend !== "compose") {
+    const rerun = opts.command
+      ? `, for example: HACK_RUNTIME_BACKEND=compose ${opts.command}`
+      : ".";
     throw new HackCliError({
       code: "E_NATIVE_PROJECT_UNSUPPORTED",
-      message:
-        "Native project configuration currently requires the Compose backend. The selected runtime was not changed.",
+      message: `Native project configuration currently requires the Compose backend. The selected runtime was not changed. Rerun with HACK_RUNTIME_BACKEND=compose${rerun}`,
     });
   }
 }

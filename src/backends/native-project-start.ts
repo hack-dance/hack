@@ -29,6 +29,7 @@ import {
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
+import { discardUnpublishedNativeStart } from "./native-project-failed-start.ts";
 import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
@@ -39,6 +40,7 @@ import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
   type NativeProjectInput,
   prepareNativeProjectInput,
+  selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
@@ -88,6 +90,7 @@ import {
 
 const SHA = /^[a-f0-9]{64}$/;
 const OWNER = /^[a-f0-9]{32}$/;
+const RUN = OWNER;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const BOOT_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 export type NativeHttpsSelection = {
@@ -265,6 +268,7 @@ type Dependencies = {
   finalization: typeof beginNativeProjectFinalization;
   captureFinalization: typeof captureNativeProjectFinalization;
   waitFinalization: typeof waitNativeProjectFinalization;
+  discardFailedStart: typeof discardUnpublishedNativeStart;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
@@ -286,6 +290,7 @@ const DEFAULTS: Dependencies = {
   finalization: beginNativeProjectFinalization,
   captureFinalization: captureNativeProjectFinalization,
   waitFinalization: waitNativeProjectFinalization,
+  discardFailedStart: discardUnpublishedNativeStart,
 };
 /** Fixed text of the native foreground configuration refusal. */
 export const NATIVE_CONFIGURATION_REFUSAL =
@@ -394,13 +399,24 @@ async function pinNativeProjectImages(opts: {
     spec.image = ensured.image_id;
   }
 }
+/** Services whose review carries Hack's exact one-shot marker as `one_shot: true`. */
+function reviewedOneShots(
+  reviewed: Readonly<Record<string, unknown>>
+): string[] {
+  return Object.entries(reviewed)
+    .filter(([, service]) => isRecord(service) && service.one_shot === true)
+    .map(([name]) => name);
+}
+
 /**
  * Build `--ready` goals for exactly the services the reviewed plan marks active.
  *
  * Compose services outside the selected profiles stay in the normalized specs (they are
  * still reviewed and pinned), but the runtime does not schedule them and refuses readiness
  * goals for inactive or unknown services. Dependency edges declared by inactive services
- * are ignored so they cannot raise an active service's readiness goal.
+ * are ignored so they cannot raise an active service's readiness goal. A service the
+ * review marks `one_shot` (Hack's exact `hack.service.one-shot: "true"` label) must
+ * finish successfully, so its goal is completion, as for dependency cache initializers.
  */
 export function nativeReadinessArgs(opts: {
   readonly specs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
@@ -439,7 +455,7 @@ export function nativeReadinessArgs(opts: {
       }
     }
   }
-  for (const name of opts.initializers) {
+  for (const name of [...reviewedOneShots(reviewed), ...opts.initializers]) {
     ready[name] = "completed";
   }
   for (const name of opts.routed) {
@@ -608,7 +624,8 @@ const SAFE_STARTUP_DIAGNOSTIC =
 /** Preserve only the fixed diagnostic envelope emitted by the native clients. */
 function cleanupUnconfirmed(
   startupFailure?: unknown,
-  nativeCode?: string
+  nativeCode?: string,
+  recordedRun?: string
 ): Error {
   const message = startupFailure instanceof Error ? startupFailure.message : "";
   const diagnostic = SAFE_STARTUP_DIAGNOSTIC.exec(message);
@@ -616,8 +633,12 @@ function cleanupUnconfirmed(
     startupFailure === undefined
       ? ""
       : ` Startup diagnostic: ${diagnostic ? `${diagnostic[1]} (${diagnostic[2]})` : "STARTUP_FAILURE (details omitted)"}.`;
+  const recorded =
+    recordedRun !== undefined && RUN.test(recordedRun)
+      ? ` The failed run ${recordedRun} is recorded as this project's run mapping; hack ps, hack down and hack doctor --native-cleanup inspect select it.`
+      : "";
   return new ClosedCliError(
-    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startup}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}`
+    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startup}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
   );
 }
 function requireConfirmedCleanup(
@@ -677,6 +698,106 @@ async function confirmForegroundCleanup(opts: {
   }
   requireConfirmedCleanup(final, opts.startupFailure, opts.nativeCode);
   return { final, owned };
+}
+
+/**
+ * HACK-1917: a fresh startup that failed after the graph started resources, and
+ * whose cleanup this frontend cannot confirm, must not leave them without a
+ * project owner. Publish the authenticated receipt identity as the project's
+ * run mapping, with a frontend finalization lifetime exactly as readiness
+ * publishes one, so ps, down and `doctor --native-cleanup inspect` select the
+ * retained run instead of reporting the project as not started. Nothing is
+ * stopped or replayed here. A receipt that cannot be authenticated, an existing
+ * or retained mapping, or any refusal records nothing and keeps the original
+ * failure; the runtime journal still holds the graph for explicit recovery.
+ */
+async function recordFailedStartupOwner(opts: {
+  readonly final: unknown;
+  readonly run: string;
+  readonly namespace: string;
+  readonly planId: string;
+  readonly scope: NativeProjectRunScope;
+  readonly selection: Omit<Parameters<typeof selectedMapping>[0], "ready">;
+  readonly finalization:
+    | Awaited<ReturnType<typeof beginNativeProjectFinalization>>
+    | undefined;
+  readonly deps: Pick<Dependencies, "finalization" | "save">;
+}): Promise<
+  | {
+      readonly mapping: NativeProjectRun;
+      readonly finalization: Awaited<
+        ReturnType<typeof beginNativeProjectFinalization>
+      >;
+    }
+  | undefined
+> {
+  let owned: NativeProjectRun;
+  try {
+    owned = authoritative(opts.final, opts.run, opts.namespace, opts.planId);
+  } catch {
+    return undefined;
+  }
+  const mapping = selectedMapping({ ...opts.selection, ready: owned });
+  try {
+    const finalization =
+      opts.finalization ??
+      (await opts.deps.finalization({
+        scope: opts.scope,
+        run: mapping,
+        httpsPort: null,
+      }));
+    await opts.deps.save({ ...opts.scope, run: mapping });
+    return { mapping, finalization };
+  } catch {
+    return undefined;
+  }
+}
+
+type FailedStartupOwner = NonNullable<
+  Awaited<ReturnType<typeof recordFailedStartupOwner>>
+>;
+/** Confirm foreground cleanup; when it is unconfirmed, record an unowned fresh run. */
+async function confirmCleanupOrRecordOwner(opts: {
+  readonly confirm: Parameters<typeof confirmForegroundCleanup>[0];
+  /** A published or retained mapping already owns the run; nothing is recorded. */
+  readonly existing: NativeProjectRun | undefined;
+  readonly scope: NativeProjectRunScope;
+  readonly selection: Parameters<
+    typeof recordFailedStartupOwner
+  >[0]["selection"];
+  readonly finalization: Parameters<
+    typeof recordFailedStartupOwner
+  >[0]["finalization"];
+  readonly deps: Pick<Dependencies, "finalization" | "save">;
+  readonly onRecorded: (recorded: FailedStartupOwner) => void;
+}): Promise<Awaited<ReturnType<typeof confirmForegroundCleanup>>> {
+  try {
+    return await confirmForegroundCleanup(opts.confirm);
+  } catch (cleanupFailure) {
+    const recorded = opts.existing
+      ? undefined
+      : await recordFailedStartupOwner({
+          final: opts.confirm.final,
+          run: opts.confirm.run,
+          namespace: opts.confirm.namespace,
+          planId: opts.confirm.planId,
+          scope: opts.scope,
+          selection: opts.selection,
+          finalization: opts.finalization,
+          deps: opts.deps,
+        });
+    if (!recorded) {
+      throw cleanupFailure;
+    }
+    opts.onRecorded(recorded);
+    throw cleanupFailure instanceof NativePartialShutdownError
+      ? cleanupFailure
+      : cleanupUnconfirmed(
+          opts.confirm.startupFailure,
+          opts.confirm.nativeCode,
+          opts.confirm.run
+        );
+  }
 }
 
 async function refusePendingFreshStart(
@@ -1223,6 +1344,8 @@ export async function startNativeProject(opts: {
         const directory = await mkdtemp(join(tmpdir(), "hack-native-start-"));
         const run = runSelection.run;
         let mapping: NativeProjectRun | undefined;
+        // Set before any mapping write: a lost reply may still have published it.
+        let mappingAttempted = false;
         let https:
           | Awaited<ReturnType<typeof acquireNativeHttpsLease>>
           | undefined;
@@ -1267,7 +1390,14 @@ export async function startNativeProject(opts: {
               run,
               invoke: deps.invoke,
             });
-          const delivery = environmentDelivery(input, review.planId, run);
+          const delivery = environmentDelivery(
+            selectActiveNativeProjectInput({
+              input,
+              reviewedPlan: review.report.plan,
+            }),
+            review.planId,
+            run
+          );
           let code = 1;
           let serveFailure: unknown;
           let nativeExitCode: string | undefined;
@@ -1345,6 +1475,7 @@ export async function startNativeProject(opts: {
                       httpsIntent = identity;
                       // This is an ownership mapping, not a readiness signal.
                       // Recovery must be able to select the run after a lost reply.
+                      mappingAttempted = true;
                       await deps.save({
                         ...opts.scope,
                         run: persistedMapping,
@@ -1383,6 +1514,7 @@ export async function startNativeProject(opts: {
                   throw httpsFailure;
                 }
                 if (!mapping) {
+                  mappingAttempted = true;
                   await deps.save({
                     ...opts.scope,
                     run: persistedMapping,
@@ -1416,16 +1548,32 @@ export async function startNativeProject(opts: {
               nativeExitCode
             );
           }
-          const confirmed = await confirmForegroundCleanup({
-            final,
-            runtime: opts.runtime,
-            projectRoot: opts.scope.projectRoot,
-            run,
-            namespace: review.namespace,
-            planId: restore?.planId ?? review.planId,
-            invoke: deps.invoke,
-            startupFailure: serveFailure,
-            nativeCode: nativeExitCode,
+          const confirmed = await confirmCleanupOrRecordOwner({
+            confirm: {
+              final,
+              runtime: opts.runtime,
+              projectRoot: opts.scope.projectRoot,
+              run,
+              namespace: review.namespace,
+              planId: restore?.planId ?? review.planId,
+              invoke: deps.invoke,
+              startupFailure: serveFailure,
+              nativeCode: nativeExitCode,
+            },
+            existing: mapping ?? expectedMapping,
+            scope: opts.scope,
+            selection: {
+              effectiveEnvName: input.effectiveEnvName,
+              profiles,
+              aws: selection.aws,
+              runtimeMetadata: metadata !== undefined,
+            },
+            finalization,
+            deps,
+            onRecorded: (recorded) => {
+              mapping = recorded.mapping;
+              finalization = recorded.finalization;
+            },
           });
           final = confirmed.final;
           graphCleanupConfirmed = true;
@@ -1435,6 +1583,16 @@ export async function startNativeProject(opts: {
             owned: confirmed.owned,
             scope: opts.scope,
             remove: deps.remove,
+          });
+          await deps.discardFailedStart({
+            runtime: opts.runtime,
+            projectRoot: opts.scope.projectRoot,
+            run,
+            owner: confirmed.owned.owner,
+            final,
+            restored: restore !== undefined,
+            mappingAttempted,
+            invoke: deps.invoke,
           });
           return foregroundExitCode({
             aborted: controller.signal.aborted,

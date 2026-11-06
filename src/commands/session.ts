@@ -30,6 +30,7 @@ import {
 import {
   assertValidProjectEnvScopeName,
   discoverComposeServiceNames,
+  finishImplicitLegacyEnvMigration,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
@@ -1070,10 +1071,13 @@ async function maybeMigrateLegacySessionEnv(opts: {
     serviceNames,
     materialize: false,
   });
-  if (migrated.wroteFiles.length > 0) {
-    logger.info({
-      message: `Migrated legacy env config to ${migrated.wroteFiles.join(", ")}`,
-    });
+  const report = await finishImplicitLegacyEnvMigration({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    migrated,
+  });
+  for (const line of report.lines) {
+    logger.info({ message: line });
   }
 }
 

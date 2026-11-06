@@ -597,6 +597,21 @@ drain/revocation; this model checks the later commit-before-new-grant boundary.
 
 ## Stopped retained-pool startup
 
+`native-startup-owner/Owner.tla` checks project ownership after a foreground
+Compose startup fails (HACK-1917). The positive control explores 32 states.
+Readiness publishes the run mapping. A failure before readiness lets the graph
+owner's retaining cleanup either complete or be refused; the frontend then makes
+one read-only inspection that authenticates the exact receipt or is refused.
+`NoUnownedResources` requires resources that outlive the frontend under an
+authenticated receipt to have a published mapping; the `negative` control (no
+recording on failure) violates it with an unowned started graph. `NoUnprovenOwner`
+allows only readiness or an authenticated receipt to publish. The
+`refused-inspection` control violates `NoUnrecordedRefusal` to keep the remaining
+gap explicit: when inspection itself is refused, nothing can be authenticated and
+only the runtime journal retains the graph. The model does not cover crashes
+between finalization registration and mapping publication, concurrent starts, or
+the later dead-owner recovery, which other models and runtime tests own.
+
 `stopped-pool-startup/Resume.tla` checks one explicit startup from shape-valid
 stopped owner/retained receipt evidence. The positive control explores 71 states.
 Offline preflight records owner and receipt generations without granting graph

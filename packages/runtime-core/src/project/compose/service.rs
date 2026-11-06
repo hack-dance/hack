@@ -237,6 +237,10 @@ fn port_scalar(value: &Value) -> Result<u16, CandidateError> {
         _ => Err(problem("invalid_port", "Invalid port value.")),
     }
 }
+/// Review every declared port entry. An entry outside the modeled subset becomes
+/// an `invalid_port` error diagnostic that points at `services.<name>.ports[<i>]`
+/// (messages never echo the authored value), so one unsupported port neither
+/// hides the rest of the review nor makes the plan enrollment compatible.
 fn ports(
     value: Option<&Value>,
     field: &str,
@@ -245,90 +249,115 @@ fn ports(
     let Some(value) = value else {
         return Ok(vec![]);
     };
+    let Some(values) = value.as_array() else {
+        diagnostics.push(Diagnostic::error(
+            "invalid_port",
+            field,
+            "Ports must be a list.",
+        ));
+        return Ok(vec![]);
+    };
     let mut result = Vec::new();
-    for value in value
-        .as_array()
-        .ok_or_else(|| problem("invalid_port", "Ports must be a list."))?
-    {
-        let (target, published, protocol, host) = if let Value::Object(m) = value {
-            keys(
-                m,
-                &["target", "published", "protocol", "host_ip"],
-                field,
-                diagnostics,
-            );
-            (
-                port_scalar(
-                    m.get("target")
-                        .ok_or_else(|| problem("invalid_port", "Port target is required."))?,
-                )?,
-                m.get("published").map(port_scalar).transpose()?,
-                m.get("protocol")
-                    .map(string)
-                    .transpose()?
-                    .unwrap_or("tcp")
-                    .to_owned(),
-                m.get("host_ip")
-                    .map(string)
-                    .transpose()?
-                    .unwrap_or("0.0.0.0")
-                    .to_owned(),
-            )
-        } else {
-            let text = match value {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                _ => return Err(problem("invalid_port", "Invalid port form.")),
-            };
-            let (binding, protocol) = text.split_once('/').unwrap_or((&text, "tcp"));
-            let parts: Vec<_> = binding.split(':').collect();
-            match parts.as_slice() {
-                [target] => (
-                    port_number(target)?,
-                    None,
-                    protocol.into(),
-                    "0.0.0.0".into(),
-                ),
-                [published, target] => (
-                    port_number(target)?,
-                    Some(port_number(published)?),
-                    protocol.into(),
-                    "0.0.0.0".into(),
-                ),
-                [host, published, target] => (
-                    port_number(target)?,
-                    Some(port_number(published)?),
-                    protocol.into(),
-                    host.to_string(),
-                ),
-                _ => return Err(problem("invalid_port", "Unsupported port syntax.")),
-            }
-        };
-        if !["tcp", "udp"].contains(&protocol.as_str()) {
-            return Err(problem(
+    for (index, value) in values.iter().enumerate() {
+        match port(value, field, diagnostics) {
+            Ok(plan) => result.push(plan),
+            Err(error) if error.code == "invalid_port" => diagnostics.push(Diagnostic::error(
                 "invalid_port",
-                "Only TCP and UDP ports are modeled.",
-            ));
+                &format!("{field}[{index}]"),
+                &error.message,
+            )),
+            Err(error) => return Err(error),
         }
-        if !["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
-            diagnostics.push(Diagnostic::error("unsupported_host_binding",field,"Only explicit IPv4 loopback or an explicit proposal to restrict an all-interface binding is supported."));
-        }
-        if host == "0.0.0.0" {
-            diagnostics.push(Diagnostic::warning("proposed_loopback_binding",field,"Enrollment proposes restricting the declared all-interface publication to 127.0.0.1. No port is bound by this checkpoint."));
-        }
-        result.push(PortPlan {
-            target,
-            published,
-            protocol,
-            declared_host_ip: if ["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
-                host
-            } else {
-                "[unsupported]".into()
-            },
-            proposed_host_ip: "127.0.0.1".into(),
-        });
     }
     Ok(result)
+}
+fn port(
+    value: &Value,
+    field: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<PortPlan, CandidateError> {
+    let (target, published, protocol, host) = if let Value::Object(m) = value {
+        keys(
+            m,
+            &["target", "published", "protocol", "host_ip"],
+            field,
+            diagnostics,
+        );
+        (
+            port_scalar(
+                m.get("target")
+                    .ok_or_else(|| problem("invalid_port", "Port target is required."))?,
+            )?,
+            m.get("published").map(port_scalar).transpose()?,
+            m.get("protocol")
+                .map(string)
+                .transpose()?
+                .unwrap_or("tcp")
+                .to_owned(),
+            m.get("host_ip")
+                .map(string)
+                .transpose()?
+                .unwrap_or("0.0.0.0")
+                .to_owned(),
+        )
+    } else {
+        let text = match value {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => return Err(problem("invalid_port", "Invalid port form.")),
+        };
+        let (binding, protocol) = text.split_once('/').unwrap_or((&text, "tcp"));
+        let parts: Vec<_> = binding.split(':').collect();
+        match parts.as_slice() {
+            [target] => (
+                port_number(target)?,
+                None,
+                protocol.into(),
+                "0.0.0.0".into(),
+            ),
+            [published, target] => (
+                port_number(target)?,
+                Some(port_number(published)?),
+                protocol.into(),
+                "0.0.0.0".into(),
+            ),
+            [host, published, target] => (
+                port_number(target)?,
+                Some(port_number(published)?),
+                protocol.into(),
+                host.to_string(),
+            ),
+            _ => {
+                return Err(problem(
+                    "invalid_port",
+                    "Unsupported port syntax. Use a literal [host_ip:]published:target[/protocol] entry; interpolation, ranges and IPv6 bindings are not supported.",
+                ));
+            }
+        }
+    };
+    if !["tcp", "udp"].contains(&protocol.as_str()) {
+        return Err(problem(
+            "invalid_port",
+            "Only TCP and UDP ports are modeled.",
+        ));
+    }
+    if !["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
+        diagnostics.push(Diagnostic::error("unsupported_host_binding",field,"Only explicit IPv4 loopback or an explicit proposal to restrict an all-interface binding is supported."));
+    }
+    if host == "0.0.0.0" {
+        diagnostics.push(Diagnostic::warning("proposed_loopback_binding",field,"Enrollment proposes restricting the declared all-interface publication to 127.0.0.1. No port is bound by this checkpoint."));
+    }
+    Ok(PortPlan {
+        target,
+        published,
+        protocol,
+        declared_host_ip: if ["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
+            host
+        } else {
+            "[unsupported]".into()
+        },
+        proposed_host_ip: "127.0.0.1".into(),
+    })
 }
 fn dependencies(
     value: Option<&Value>,
@@ -908,13 +937,43 @@ pub(super) fn compile(
             }
             diagnostics.push(Diagnostic::warning("dependency_cache_binding_required", &format!("{field}.labels"), "Dependency cache execution requires a verified source revision, pinned installer image and shared cache binding; declaration alone is not a completed install."));
         }
+        // Hack's own one-shot marker is a completion role, not ownership: only
+        // its exact key is exempt below, and only its literal `true` value is a
+        // declaration. Other `hack.*` keys keep the ownership refusal.
+        let one_shot = match super::one_shot::parse(m.get("labels")) {
+            super::one_shot::Declaration::Absent => false,
+            super::one_shot::Declaration::OneShot => true,
+            super::one_shot::Declaration::Invalid => {
+                diagnostics.push(Diagnostic::error(
+                    "invalid_one_shot_label",
+                    &format!("{field}.labels"),
+                    "The one-shot label accepts only the literal string value true; values omitted.",
+                ));
+                false
+            }
+        };
+        if one_shot && ["always", "unless-stopped"].contains(&restart.as_str()) {
+            diagnostics.push(Diagnostic::error(
+                "nonterminating_one_shot",
+                &format!("{field}.restart"),
+                "A one-shot service cannot use an unconditional restart policy.",
+            ));
+        }
+        if one_shot && routing.is_some() {
+            diagnostics.push(Diagnostic::error(
+                "one_shot_route_conflict",
+                &format!("{field}.labels"),
+                "A one-shot service finishes, so it cannot also declare local HTTPS routing.",
+            ));
+        }
         if routing_invalid
             || labels.keys().any(|key| {
-                // Hack's ownership namespaces are never exempt: no routing or
-                // dependency cache declaration may carry ownership evidence.
+                // Hack's ownership namespaces are never exempt: no routing,
+                // dependency cache or one-shot declaration may carry ownership evidence.
                 super::ownership_labels::is_hack_ownership_label(key)
                     || (!(dependency_cache.is_some() && super::dependency_cache::recognized(key))
                         && !(routing.is_some() && super::routing::recognized(key))
+                        && !super::one_shot::recognized(key)
                         && ["caddy", "traefik", "hack", "com.docker.compose"]
                             .iter()
                             .any(|prefix| key == prefix || key.starts_with(&format!("{prefix}."))))
@@ -966,12 +1025,25 @@ pub(super) fn compile(
                 "Only Linux arm64/amd64 image platform declarations are modeled.",
             ));
         }
-        let exposed_ports = strings(m.get("expose"))?;
-        for value in &exposed_ports {
-            let (port, protocol) = value.split_once('/').unwrap_or((value, "tcp"));
-            port_number(port)?;
-            if !["tcp", "udp"].contains(&protocol) {
-                return Err(problem("invalid_port", "Invalid exposed port protocol."));
+        // Invalid entries are reported by pointer and omitted from the plan so
+        // authored text (including interpolation defaults) is never echoed.
+        let mut exposed_ports = Vec::new();
+        for (index, value) in strings(m.get("expose"))?.into_iter().enumerate() {
+            let (port, protocol) = value.split_once('/').unwrap_or((&value, "tcp"));
+            let message = match port_number(port) {
+                Err(error) => Some(error.message),
+                Ok(_) if !["tcp", "udp"].contains(&protocol) => {
+                    Some("Invalid exposed port protocol.".into())
+                }
+                Ok(_) => None,
+            };
+            match message {
+                Some(message) => diagnostics.push(Diagnostic::error(
+                    "invalid_port",
+                    &format!("{field}.expose[{index}]"),
+                    &message,
+                )),
+                None => exposed_ports.push(value),
             }
         }
         let stop_signal = optional_text(m.get("stop_signal"))?;
@@ -1048,7 +1120,7 @@ pub(super) fn compile(
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,
-            platform,labels,routing,dependency_cache,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
+            platform,labels,routing,dependency_cache,one_shot,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
         });
     }
     Ok(result)

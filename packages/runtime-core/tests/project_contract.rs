@@ -620,6 +620,102 @@ fn hack_ownership_label_namespaces_block_enrollment() {
     assert!(fixture.plan().plan.enrollment_compatible);
 }
 
+/// Hack's documented one-shot marker (`hack.service.one-shot: "true"`, the
+/// label `hack config import` maps to a native job) is a completion role, not
+/// an ownership or router label. Only that exact key and literal value are
+/// consumed; ownership namespaces next to it and every other `hack.*` key stay
+/// refused, so the marker never widens the `hack.*` reservation.
+#[test]
+fn hack_one_shot_marker_is_a_completion_role_not_an_owner_label() {
+    const INIT: &str = "services:\n  init:\n    image: alpine:3.20\n    command: [\"true\"]\n";
+    let owner_label = |fixture: &Fixture| {
+        fixture
+            .codes()
+            .iter()
+            .any(|code| code == "external_route_or_owner_label")
+    };
+    for labels in [
+        "    labels: {hack.service.one-shot: \"true\"}\n",
+        "    labels: ['hack.service.one-shot=true']\n",
+    ] {
+        let fixture = Fixture::new(&format!("{INIT}{labels}"));
+        let plan = fixture.plan();
+        assert!(!owner_label(&fixture), "{labels}");
+        assert!(plan.plan.enrollment_compatible, "{labels}");
+        assert!(plan.plan.services["init"].one_shot, "{labels}");
+    }
+    // Without the marker the plan carries no one-shot field, so existing plan
+    // identities are unchanged.
+    let plain = Fixture::new(INIT);
+    assert!(!plain.plan().plan.services["init"].one_shot);
+    assert!(
+        !serde_json::to_string(&plain.plan())
+            .unwrap()
+            .contains("one_shot")
+    );
+    // Ownership namespaces next to the marker are never exempt.
+    for key in [
+        "com.docker.compose.project",
+        "io.hack-local.owner",
+        "io.hack.native-config.owner",
+        "io.hack.native-file.token",
+        "io.hack.storage-witness.carrier",
+    ] {
+        let fixture = Fixture::new(&format!(
+            "{INIT}    labels:\n      hack.service.one-shot: 'true'\n      '{key}': owner-canary\n"
+        ));
+        let plan = fixture.plan();
+        assert!(owner_label(&fixture), "{key}");
+        assert!(!plan.plan.enrollment_compatible, "{key}");
+        assert!(
+            !serde_json::to_string(&plan)
+                .unwrap()
+                .contains("owner-canary")
+        );
+    }
+    // Any other `hack.*` key, including siblings of the marker, keeps the
+    // ownership refusal: only the exact marker key is recognized.
+    for key in [
+        "hack.x",
+        "hack.service.other",
+        "hack.service.one-shot.extra",
+        "hack.service",
+    ] {
+        let fixture = Fixture::new(&format!("{INIT}    labels: {{'{key}': 'true'}}\n"));
+        assert!(owner_label(&fixture), "{key}");
+        assert!(!fixture.plan().plan.services["init"].one_shot, "{key}");
+    }
+    // The marker only accepts the literal string `true`.
+    for labels in [
+        "    labels: {hack.service.one-shot: 'false'}\n",
+        "    labels: {hack.service.one-shot: true}\n",
+        "    labels: ['hack.service.one-shot']\n",
+    ] {
+        let fixture = Fixture::new(&format!("{INIT}{labels}"));
+        let plan = fixture.plan();
+        assert!(
+            fixture.codes().contains(&"invalid_one_shot_label".into()),
+            "{labels}"
+        );
+        assert!(!plan.plan.services["init"].one_shot, "{labels}");
+        assert!(!plan.plan.enrollment_compatible, "{labels}");
+    }
+    // A one-shot must be able to finish and cannot serve a route.
+    let restarting = Fixture::new(&format!(
+        "{INIT}    restart: always\n    labels: {{hack.service.one-shot: 'true'}}\n"
+    ));
+    assert!(
+        restarting
+            .codes()
+            .contains(&"nonterminating_one_shot".into())
+    );
+    let routed = Fixture::new(&format!(
+        "{INIT}    labels:\n      hack.service.one-shot: 'true'\n      caddy: init.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n"
+    ));
+    assert!(routed.codes().contains(&"one_shot_route_conflict".into()));
+    assert!(!routed.plan().plan.enrollment_compatible);
+}
+
 #[test]
 fn explicit_external_network_replacement_is_owned_internal_and_review_bound() {
     let original =
@@ -823,8 +919,6 @@ fn invalid_limits_ports_commands_and_conflicting_owners_are_rejected() {
         "    cpus: -1\n",
         "    mem_limit: -1\n",
         "    pids_limit: 0\n",
-        "    ports: ['70000:80']\n",
-        "    ports: ['8000-8001:80']\n",
         "    environment: [A=one, A=two]\n",
     ] {
         let fixture = Fixture::new(&format!("{BASIC}{extra}"));
@@ -833,6 +927,24 @@ fn invalid_limits_ports_commands_and_conflicting_owners_are_rejected() {
             "{extra}"
         );
     }
+    for extra in [
+        "    ports: ['70000:80']\n",
+        "    ports: ['8000-8001:80']\n",
+        "    ports: ['80/sctp']\n",
+        "    ports: ['[::1]:8080:80']\n",
+    ] {
+        let fixture = Fixture::new(&format!("{BASIC}{extra}"));
+        let plan = fixture.plan().plan;
+        assert!(!plan.enrollment_compatible, "{extra}");
+        assert!(
+            plan.diagnostics.iter().any(|d| d.severity == "error"
+                && d.code == "invalid_port"
+                && d.field == "services.web.ports[0]"),
+            "{extra}: {:?}",
+            plan.diagnostics
+        );
+        assert!(plan.services["web"].ports.is_empty(), "{extra}");
+    }
     let fixture = Fixture::new(
         "services:\n  web:\n    image: alpine:3.21\n    command: echo hello\n    network_mode: none\n    networks: [default]\n    cpus: 1\n    deploy: {resources: {limits: {cpus: '2'}}}\n",
     );
@@ -840,6 +952,58 @@ fn invalid_limits_ports_commands_and_conflicting_owners_are_rejected() {
     for code in ["conflicting_network_owners", "conflicting_limits"] {
         assert!(codes.contains(&code.into()));
     }
+}
+
+/// An unsupported port is one located review finding, not a whole-review abort:
+/// the review still reports every other problem, names the service and entry,
+/// and never echoes the authored text (including interpolation defaults).
+#[test]
+fn unsupported_ports_are_located_diagnostics_collected_with_the_rest_of_the_review() {
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    privileged: true\n    ports: ['8080:80']\n    expose: ['3000', '${EXPOSED:-4000}']\n  debug:\n    image: alpine:3.21\n    profiles: [debug]\n    ports: ['${BIND:-127.0.0.1}:9090:80', '9091:81', '${OTHER_BIND:-10.9.8.7}:9092:82']\n",
+    );
+    let report = project::plan(&fixture.candidate, fixture.options()).unwrap();
+    let plan = &report.plan;
+    assert!(!plan.enrollment_compatible);
+    let located: Vec<_> = plan
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "invalid_port")
+        .map(|d| (d.severity.as_str(), d.field.as_str()))
+        .collect();
+    assert_eq!(
+        located,
+        vec![
+            ("error", "services.debug.ports[0]"),
+            ("error", "services.debug.ports[2]"),
+            ("error", "services.web.expose[1]"),
+        ]
+    );
+    assert!(
+        plan.diagnostics
+            .iter()
+            .any(|d| d.code == "privileged_service" && d.field == "services.web")
+    );
+    assert!(!plan.services["debug"].active);
+    assert_eq!(plan.services["debug"].ports.len(), 1);
+    assert_eq!(plan.services["debug"].ports[0].published, Some(9091));
+    assert_eq!(plan.services["web"].ports[0].published, Some(8080));
+    assert_eq!(plan.services["web"].exposed_ports, vec!["3000"]);
+    let serialized = serde_json::to_string(&report).unwrap();
+    for authored in ["10.9.8.7", "OTHER_BIND", "EXPOSED", "${EXPOSED:-4000}"] {
+        assert!(!serialized.contains(authored), "{authored}");
+    }
+    // Report paths and hashes may contain numeric substrings by coincidence.
+    // The authored default must stay out of diagnostic text specifically.
+    let diagnostics = serde_json::to_string(&plan.diagnostics).unwrap();
+    assert!(!diagnostics.contains("4000"));
+    assert_eq!(
+        project::enroll(&fixture.candidate, fixture.options(), &report.plan_id)
+            .unwrap_err()
+            .code,
+        "incompatible_compose"
+    );
+    assert!(!fixture.candidate.state_root.exists());
 }
 
 #[test]

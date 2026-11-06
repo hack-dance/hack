@@ -273,6 +273,7 @@ import {
   discoverComposeServiceNames,
   ensureHackDirGitignore,
   findUnmigratedLegacyDotenv,
+  finishImplicitLegacyEnvMigration,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   hasUnmigratedLegacyDotenv,
   migrateLegacyProjectEnv,
@@ -1324,10 +1325,13 @@ async function maybePromptLegacyProjectEnvMigration(opts: {
     serviceNames: opts.serviceNames,
     materialize: false,
   });
-  if (migrated.wroteFiles.length > 0) {
-    logger.info({
-      message: `Migrated env config: ${migrated.wroteFiles.join(", ")}`,
-    });
+  const report = await finishImplicitLegacyEnvMigration({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    migrated,
+  });
+  for (const line of report.lines) {
+    logger.info({ message: line });
   }
   return migrated.legacyDetected;
 }

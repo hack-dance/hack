@@ -681,6 +681,44 @@ test("dollar syntax outside command and entrypoint remains refused", () => {
   }
 });
 
+test.each([
+  [
+    "mapping",
+    { PLAIN: "1", FROM_ENV: `\${SOME_VAR:-${CANARY}}` },
+    "/services/web/environment/PLAIN",
+    "/services/web/environment/FROM_ENV",
+  ],
+  [
+    "list",
+    ["PLAIN=1", `FROM_ENV=\${SOME_VAR:-${CANARY}}`],
+    "/services/web/environment/0",
+    "/services/web/environment/1",
+  ],
+])("environment %s refuses only the interpolated entry by its pointer", (_form, environment, literal, interpolated) => {
+  const result = map(
+    { name: "fixture" },
+    { services: { web: { image: "fixture", environment } } }
+  );
+  code(result, "invalid_or_ambiguous_value");
+  const refused = result.report.fields.filter(
+    (field) => field.status === "refused"
+  );
+  expect(refused.map((field) => [field.pointer, field.code])).toEqual([
+    [interpolated, "invalid_or_ambiguous_value"],
+  ]);
+  const byPointer = (pointer: string) =>
+    result.report.fields.find((field) => field.pointer === pointer);
+  expect(byPointer(literal)).toMatchObject({
+    status: "normalized",
+    code: "managed_fallback",
+    target: "/services/web/environment",
+  });
+  expect(byPointer("/services/web/environment")).toMatchObject({
+    status: "normalized",
+    code: "managed_fallback",
+  });
+});
+
 test("raw provenance retains original spelling, escaped pointers and line positions", () => {
   const result = mapLegacyNativeImport({
     configText: '{\n  "name": "fixture",\n  "defaultEnvConfig": "QA"\n}',

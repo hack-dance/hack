@@ -228,7 +228,27 @@ selection; see [Test both backends](https://github.com/hack-dance/hack/blob/next
 
 Other labels keep their native behavior. Routing (`caddy*`) and dependency cache
 (`hack.dependencies.*`) labels are reviewed as before, and other ordinary labels
-are refused with the general native configuration refusal. A basic build is also
+are refused with the general native configuration refusal.
+
+Hack's own one-shot marker is not an ownership label. A service labeled exactly
+`hack.service.one-shot: "true"` (or `hack.service.one-shot=true` in list form),
+the label [`hack config import --dry-run`](../reference/native-config-import.md)
+reports as `compose_one_shot_job`, is reviewed natively as a one-shot: the review
+plan marks it `one_shot`, and native `up` waits for it to exit successfully
+instead of waiting for it to keep running. The marker adds no container label.
+Only that exact key is recognized. Any other `hack.*` key, including another
+`hack.service.*` key, is still refused (`external_route_or_owner_label` in the
+native review), and a marker next to a reserved ownership label does not exempt
+it. The native review also refuses a marker whose value is not the string
+`true` (`invalid_one_shot_label`), a one-shot with `restart: always` or
+`unless-stopped` (`nonterminating_one_shot`), and a one-shot that also declares
+routing labels (`one_shot_route_conflict`).
+
+`hack config adopt`, including `--dry-run`, still requires the Compose backend,
+because it reads and adopts the Compose backend's existing containers and
+volumes. On the native backend it refuses before reading anything and names the
+rerun: `HACK_RUNTIME_BACKEND=compose hack config adopt --dry-run`. See
+[Legacy Compose adoption](../reference/native-compose-adoption.md). A basic build is also
 refused by native image-project `up`, with the general refusal: it needs the
 authored native format.
 
@@ -237,7 +257,16 @@ authored native format.
 lists the closed names `external_network`, `external_volume`, `reserved_label`,
 `unsupported_build` and `foreign_platform`. On the native backend a found feature
 is a warning; on the Compose backend it is informational. Native doctor applies
-the same `HACK_NATIVE_ADAPTATION` selection before it reports.
+the same `HACK_NATIVE_ADAPTATION` selection before it reports. When it finds an
+external network, the message also names the `isolatedNetworks` selection above,
+which keeps that network's project on native.
+
+A basic build is not one of these features, but native image-project `up` still
+refuses it, so doctor does not report it as ok. On the native backend the check
+warns, names the general configuration refusal and the next step (preview the
+authored native conversion with `hack config import --dry-run`, or select the
+Compose backend), and its JSON adds `composeBackend.nativeUpRefusals:
+["basic_build"]`. On the Compose backend the same note is informational.
 
 Publication control tokens are delivered to the relay through a one-shot inherited
 pipe (`--control-fd 0`), never through process arguments. The relay reads exactly
@@ -805,6 +834,27 @@ It acquires public images, privately supplies managed environment values, runs
 lifecycle hooks, and publishes the run mapping after native readiness. Ctrl-C waits
 for owned cleanup and keeps the stopped run mapping and named volumes after
 confirming cleanup. The VM remains available until explicit runtime shutdown.
+If startup fails after the graph started resources and the frontend cannot
+confirm their cleanup, it publishes the authenticated failed run as the project's
+run mapping before exiting, so `hack ps`, `hack down` and
+`hack doctor --native-cleanup inspect` select that run instead of reporting the
+project as not started; nothing is stopped or replayed to do so. When the
+receipt itself cannot be authenticated, nothing is recorded and the runtime
+journal keeps the graph for explicit recovery.
+
+Managed values are declared on every authored service, so the reviewed plan is the
+same for every profile selection, but they are delivered only to the services the
+reviewed plan marks active. A service outside the selected profiles receives none.
+
+A fresh start that fails or is interrupted before it publishes its run mapping,
+and whose compute cleanup is confirmed, leaves no run that `ps`, `down` or a later `up` can select; the next fresh start
+creates a new run with new volumes. After confirming compute cleanup, `up` therefore
+removes that unpublished graph's volumes with `graph cleanup --remove-data` and
+confirms the removed receipt; shared dependency caches are only released. It still
+reports the original startup failure. A retained or restored run, and a run whose
+mapping write was attempted (its reply may have been lost), keep their data. When
+removal is not confirmed, `up` prints one line naming the run and the explicit
+`graph cleanup --run-id RUN --remove-data --json` request, and keeps the graph.
 
 Without that grant, `up` and `restart` refuse with `E_PERMISSION` before any stop or
 runtime request; set it and run the command again.
@@ -1210,7 +1260,12 @@ listener or inconsistent shared selection refuses before relay grants change.
 Startup allows up to 60 seconds total for persistent hooks to create all selected
 listeners, with cancellable waits and bounded read-only discovery requests. It
 retries only native endpoint-identity refusals; malformed selections and other
-failures stop immediately. A listener must pass the complete ownership checks
+failures stop immediately. A refusal is one `E_CONFIG_INVALID` line that names the
+reason and the affected entry by position, service, binding, aliases, guest port and
+host port, each shown only after it validates. For example, a listener that never
+appears on the selected port reports `no listener owned by host_executable answered
+on host_port before the discovery deadline`. Host PIDs, executable paths and the
+contents of unrecognized fields are never printed. A listener must pass the complete ownership checks
 before any VM or graph effects. Restart preflight does not wait or stop the graph
 when its current selection cannot be verified.
 
@@ -1677,8 +1732,11 @@ Stop failures can also include `stop_failures` version 1 with at most 32 distinc
 admitted service names and fixed stages: `connect_timeout`, `connect`, `timeout`,
 `response`, `worker`, `transport` or `deadline`. `response` covers a rejected or
 unreadable response; these stages describe the request failure, not whether the
-container stopped. Every dispatched stop worker is joined before the failure is
-returned. Container IDs, response bodies, transport messages and credentials are
+container stopped. A batch sends at most four stops at a time and joins every
+stop worker before the failure is returned. Only `connect` and `connect_timeout`
+are retried inside the batch, because no request reached the engine; these stages
+mean the engine stayed unreachable for that stop's 30-second retry window or the
+batch deadline. Container IDs, response bodies, transport messages and credentials are
 omitted. The authenticated foreground client validates the private receipt and
 checks matching service membership and container generations before and after
 the request. Detail never grants retry or deletion authority.

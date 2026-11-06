@@ -1255,6 +1255,48 @@ fn owned_graph_process_loss_live() -> Result<(), CandidateError> {
     result
 }
 
+/// Hack's exact one-shot marker reaches the driver as a completion role: it is
+/// admitted only with completion readiness and adds no authored container label.
+#[test]
+fn driver_admits_one_shot_marker_only_with_completion_readiness() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let mut document = compose(&image, "marker", false);
+    document["services"]["init"]["labels"] = json!({"hack.service.one-shot": "true"});
+    state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    assert!(review.plan.services["init"].one_shot);
+    let prepare = |ready: Condition| {
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mut goals = goals();
+        goals.insert("init".into(), ready);
+        config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None)
+    };
+    assert_eq!(
+        prepare(Condition::Started).err().unwrap().code,
+        "graph_one_shot_readiness"
+    );
+    let prepared = prepare(Condition::Completed).unwrap();
+    let labels = prepared.configs["init"]["Labels"].as_object().unwrap();
+    assert!(!labels.contains_key("hack.service.one-shot"));
+    assert!(labels.keys().all(|key| key.starts_with("io.hack-local.")));
+    // Another `hack.service.*` key is not the marker and stays outside the driver.
+    document["services"]["init"]["labels"] =
+        json!({"hack.service.one-shot": "true", "hack.service.other": "true"});
+    state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    assert!(!review.plan.enrollment_compatible);
+    assert!(!candidate.state_root.exists());
+}
+
 #[test]
 fn driver_refuses_managed_inputs_even_when_public_environment_is_empty() {
     let fixture = Fixture::new();

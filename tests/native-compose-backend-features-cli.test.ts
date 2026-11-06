@@ -548,6 +548,33 @@ test(
 );
 
 test(
+  "native doctor warns for a basic build that native up refuses",
+  async () => {
+    const f = await fixture({ services: { web: { build: ".." } } });
+    const result = await cli(f, ["doctor", "--json"], {});
+    const envelope: unknown = JSON.parse(
+      result.output.slice(result.output.indexOf("{"))
+    );
+    expect(envelope).toMatchObject({
+      data: {
+        checks: expect.arrayContaining([
+          expect.objectContaining({
+            id: "compose backend features",
+            status: "warn",
+            composeBackend: {
+              features: [],
+              nativeUpRefusals: ["basic_build"],
+            },
+          }),
+        ]),
+      },
+    });
+    expect(result.output).toContain("hack config import --dry-run");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
   "native up --detach keeps its one-line foreground-only refusal",
   async () => {
     const f = await fixture({ services: { web: { image: IMAGE } } });

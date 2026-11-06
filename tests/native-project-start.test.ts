@@ -14,15 +14,21 @@ import {
   NativeHttpsLeaseAcquisitionError,
 } from "../src/backends/native-https-owner.ts";
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
+import { discardUnpublishedNativeStart } from "../src/backends/native-project-failed-start.ts";
 import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
 import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
+import { nativeProjectPs } from "../src/backends/native-project-observe.ts";
 import { preflightNativeRestart } from "../src/backends/native-project-restart-preflight.ts";
 import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
-import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
+import {
+  loadNativeProjectRun,
+  type NativeProjectRun,
+  saveNativeProjectRun,
+} from "../src/backends/native-project-run.ts";
 import {
   NATIVE_CONFIGURATION_REFUSAL,
   NATIVE_SHARED_SOURCE_REFUSAL,
@@ -57,6 +63,8 @@ async function fixture(withEnvironment = true) {
   const events: string[] = [];
   let run = "";
   let ready = false;
+  // A retained-data removal request makes later inspections report removal.
+  let dataRemoved = false;
   const planId = "a".repeat(64),
     namespace = "b".repeat(64),
     owner = "c".repeat(32);
@@ -118,7 +126,17 @@ async function fixture(withEnvironment = true) {
       if (opts.args[1] === "dependency-plan") {
         return { dependency_plan_id: "f".repeat(64) };
       }
+      if (opts.args[1] === "cleanup" && opts.args.includes("--remove-data")) {
+        dataRemoved = true;
+        return {};
+      }
       if (opts.args[1] === "inspect") {
+        let phase = "stopped-data-retained";
+        if (ready) {
+          phase = "ready-observed";
+        } else if (dataRemoved) {
+          phase = "removed";
+        }
         return {
           journal_incomplete: false,
           receipt: {
@@ -126,7 +144,7 @@ async function fixture(withEnvironment = true) {
             owner,
             namespace,
             plan_id: planId,
-            phase: ready ? "ready-observed" : "stopped-data-retained",
+            phase,
             resources: {
               "container:web": {
                 kind: "container",
@@ -377,6 +395,7 @@ test("failed startup recovers exact pending cleanup and still reports the startu
   const invoke = opts.dependencies.invoke!;
   let selectedRun = "";
   let recovered = false;
+  let removed = false;
   const requests: string[] = [];
   opts.dependencies.serve = async (request) => {
     selectedRun = request.run;
@@ -385,6 +404,11 @@ test("failed startup recovers exact pending cleanup and still reports the startu
     );
   };
   opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "cleanup") {
+      requests.push(request.args.join(" "));
+      removed = true;
+      return {};
+    }
     if (request.args[1] === "inspect-interrupted-start-cleanup") {
       requests.push(request.args[1]);
       return {
@@ -425,6 +449,9 @@ test("failed startup recovers exact pending cleanup and still reports the startu
           receipt: { ...value.receipt, relay_cleanup: { phase: "pending" } },
         };
       }
+      if (removed) {
+        value.receipt.phase = "removed";
+      }
       return value;
     }
     return invoke(request);
@@ -432,16 +459,279 @@ test("failed startup recovers exact pending cleanup and still reports the startu
   await expect(startNativeProject(opts)).rejects.toThrow(
     "Native graph startup failed (engine_rejected)"
   );
+  // The unpublished fresh graph's data is removed only after recovery
+  // confirmed compute cleanup; the startup failure is still reported.
   expect(requests).toEqual([
     "inspect",
     "inspect-interrupted-start-cleanup",
     "recover-interrupted-start-cleanup",
+    "inspect",
+    `graph cleanup --run-id ${selectedRun} --remove-data --json`,
     "inspect",
   ]);
   expect(events).not.toContain("ready");
   expect(events).not.toContain("save");
   expect(events.at(-1)).toBe("cleanup");
 });
+/** A started graph whose foreground failed before Ready and could not clean up. */
+function failedStartupFixture(
+  fixtureValue: Awaited<ReturnType<typeof fixture>>,
+  receipt: { readonly journalIncomplete?: boolean } = {}
+) {
+  const { opts, events } = fixtureValue;
+  const invoke = opts.dependencies.invoke!;
+  const selected = { run: "" };
+  opts.dependencies.serve = async (request) => {
+    selected.run = request.run;
+    throw new Error(
+      "Native graph startup was interrupted or failed (unaudited_provider_config); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.save = async (request) => {
+    events.push("save");
+    await saveNativeProjectRun(request);
+  };
+  opts.dependencies.finalization = async (request) => {
+    events.push("finalization");
+    const lifetime = await beginNativeProjectFinalization(request);
+    return {
+      ...lifetime,
+      complete: async () => {
+        events.push("finalization-complete");
+        await lifetime.complete();
+      },
+    };
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "inspect") {
+      events.push("graph inspect");
+      return {
+        journal_incomplete: receipt.journalIncomplete === true,
+        receipt: {
+          run: selected.run,
+          owner: "c".repeat(32),
+          namespace: "b".repeat(64),
+          plan_id: "a".repeat(64),
+          phase: "ready-observed",
+          relay_startup: { control_only: true },
+          resources: {
+            "container:web": {
+              kind: "container",
+              key: "web",
+              id: "f".repeat(64),
+              phase: "started",
+            },
+          },
+        },
+        observations: { "container:web": { state: "running" } },
+      };
+    }
+    if (request.args[1] === "owner-status") {
+      throw new Error("synthetic dead foreground owner");
+    }
+    return await invoke(request);
+  };
+  return selected;
+}
+
+test("a post-start failure whose cleanup is unconfirmed records the run for ps and down", async () => {
+  const value = await fixture(false);
+  const { opts, events } = value;
+  const selected = failedStartupFixture(value);
+  const failure = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect(failure).toBeInstanceOf(ClosedCliError);
+  const message = (failure as Error).message;
+  expect(message).toContain("cleanup is unconfirmed");
+  expect(message).toContain("(unaudited_provider_config)");
+  expect(message).toContain(
+    `The failed run ${selected.run} is recorded as this project's run mapping`
+  );
+  // Readiness never happened: no hooks ran, and nothing claims finalization.
+  expect(events).not.toContain("ready");
+  expect(events).not.toContain("remove");
+  expect(events).not.toContain("finalization-complete");
+  expect(events.indexOf("finalization")).toBeGreaterThan(-1);
+  expect(events.indexOf("finalization")).toBeLessThan(events.indexOf("save"));
+  expect(events.at(-1)).toBe("cleanup");
+  const mapping = {
+    run: selected.run,
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+  };
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(mapping);
+  // ps selects the recorded run and reports its stale owner instead of "not started".
+  const ps = await nativeProjectPs({
+    runtime: opts.runtime,
+    scope: opts.scope,
+    invoke: opts.dependencies.invoke,
+  });
+  expect(ps).toMatchObject({
+    status: "owner_unconfirmed",
+    run: selected.run,
+    phase: "ready-observed",
+  });
+  expect(ps.items).toEqual([
+    expect.objectContaining({ service: "web", state: "running" }),
+  ]);
+});
+
+test("a post-start failure with an unauthenticated receipt records no owner", async () => {
+  const value = await fixture(false);
+  const { opts, events } = value;
+  failedStartupFixture(value, { journalIncomplete: true });
+  const failure = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).not.toContain("is recorded");
+  expect(events).not.toContain("finalization");
+  expect(events).not.toContain("save");
+  expect(await loadNativeProjectRun(opts.scope)).toBeNull();
+});
+
+test("a retained run's post-start failure keeps its existing mapping unchanged", async () => {
+  const { opts, events, saved } = await retainedFinalizationFixture();
+  await acknowledgeRetainedFrontend(opts.scope, saved);
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.serve = async () => {
+    throw new Error(
+      "Native graph startup failed (engine_rejected); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (
+      request.args[1] === "inspect" &&
+      events.includes("graph dependency-plan")
+    ) {
+      return {
+        ...stoppedGraph(saved),
+        observations: { "container:web": { state: "running" } },
+      };
+    }
+    return await invoke(request);
+  };
+  opts.dependencies.save = async () => {
+    events.push("save");
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "cleanup is unconfirmed"
+  );
+  expect(events).not.toContain("save");
+});
+
+function failingFreshServe(
+  opts: Awaited<ReturnType<typeof fixture>>["opts"],
+  requests: string[]
+) {
+  const invoke = opts.dependencies.invoke!;
+  let selectedRun = "";
+  let removed = false;
+  opts.dependencies.serve = async (request) => {
+    selectedRun = request.run;
+    throw new Error(
+      "Native graph startup failed (graph_startup_application_failed); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "cleanup") {
+      requests.push(request.args.join(" "));
+      removed = true;
+      return {};
+    }
+    if (request.args[1] === "inspect") {
+      requests.push("inspect");
+      const value = stoppedGraph({
+        run: selectedRun,
+        owner: "c".repeat(32),
+        namespace: "b".repeat(64),
+        planId: "a".repeat(64),
+      });
+      value.receipt.phase = removed ? "removed" : "stopped-data-retained";
+      return value;
+    }
+    return await invoke(request);
+  };
+  return () => selectedRun;
+}
+
+test("a failed fresh start removes its unpublished graph data and keeps the startup failure", async () => {
+  const { opts, events } = await fixture();
+  const requests: string[] = [];
+  const selectedRun = failingFreshServe(opts, requests);
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "graph_startup_application_failed"
+  );
+  expect(requests).toEqual([
+    "inspect",
+    `graph cleanup --run-id ${selectedRun()} --remove-data --json`,
+    "inspect",
+  ]);
+  expect(events).not.toContain("save");
+  expect(events).not.toContain("remove");
+  expect(events.at(-1)).toBe("cleanup");
+});
+
+test("a failed fresh start whose data removal is unconfirmed still reports the startup failure", async () => {
+  const { opts } = await fixture();
+  const requests: string[] = [];
+  failingFreshServe(opts, requests);
+  const notices: string[] = [];
+  opts.dependencies.discardFailedStart = async (request) =>
+    await discardUnpublishedNativeStart({
+      ...request,
+      warn: (line) => notices.push(line),
+    });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "cleanup") {
+      throw new NativeRuntimeRequestError({
+        message: "synthetic-do-not-print",
+        nativeCode: "graph_cleanup_uncertain",
+      });
+    }
+    return await invoke(request);
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "graph_startup_application_failed"
+  );
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toContain("(graph_cleanup_uncertain)");
+  expect(notices[0]).toContain("--remove-data");
+  expect(notices[0]).not.toContain("synthetic-do-not-print");
+});
+
+test("published, attempted or retained runs never have their data removed", async () => {
+  // A successful start publishes its mapping before the graph stops.
+  const published = await fixture();
+  const seen: string[] = [];
+  const invoke = published.opts.dependencies.invoke!;
+  published.opts.dependencies.invoke = async (request) => {
+    seen.push(request.args.join(" "));
+    return await invoke(request);
+  };
+  expect(await startNativeProject(published.opts)).toBe(0);
+  // A mapping write with a lost reply may still have published the run.
+  const attempted = await fixture();
+  attempted.opts.dependencies.save = async () => {
+    throw new Error("synthetic lost mapping reply");
+  };
+  const attemptedInvoke = attempted.opts.dependencies.invoke!;
+  attempted.opts.dependencies.invoke = async (request) => {
+    seen.push(request.args.join(" "));
+    return await attemptedInvoke(request);
+  };
+  await expect(startNativeProject(attempted.opts)).rejects.toThrow(
+    "synthetic lost mapping reply"
+  );
+  expect(seen.some((args) => args.includes("--remove-data"))).toBe(false);
+});
+
 test("foreground partial shutdown is reported without selecting failed-start recovery", async () => {
   const { opts, events } = await fixture();
   const invoke = opts.dependencies.invoke!;
@@ -498,6 +788,47 @@ test.each([
       prepareNativeProjectServices({
         normalizedComposeJson: JSON.stringify({
           services: { web: { image: "busybox", ...setting } },
+        }),
+      } as NativeProjectInput);
+    } catch (error: unknown) {
+      return error;
+    }
+  })();
+  expect(refusal).toBeInstanceOf(HackCliError);
+  expect(refusal).toMatchObject({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: NATIVE_CONFIGURATION_REFUSAL,
+  });
+});
+
+test.each([
+  { labels: { "hack.service.one-shot": "true" } },
+  { labels: ["hack.service.one-shot=true"] },
+])("native admission accepts Hack's exact one-shot marker %j", ({ labels }) => {
+  const specs = prepareNativeProjectServices({
+    normalizedComposeJson: JSON.stringify({
+      services: { init: { image: "busybox", command: ["true"], labels } },
+    }),
+  } as NativeProjectInput);
+  // The label is preserved for the native review; it is not rewritten here.
+  expect(specs.init?.labels).toEqual(labels);
+});
+
+test.each([
+  { labels: { "hack.service.one-shot": "false" } },
+  { labels: { "hack.service.one-shot": true } },
+  { labels: { "hack.service.one-shot.extra": "true" } },
+  { labels: { "hack.service.other": "true" } },
+  { labels: ["hack.service.one-shot"] },
+  { labels: ["hack.service.one-shot=yes"] },
+])("a near-miss one-shot label %j is a coded configuration refusal", ({
+  labels,
+}) => {
+  const refusal = (() => {
+    try {
+      prepareNativeProjectServices({
+        normalizedComposeJson: JSON.stringify({
+          services: { init: { image: "busybox", labels } },
         }),
       } as NativeProjectInput);
     } catch (error: unknown) {
@@ -758,6 +1089,63 @@ test("projects without managed values omit the private environment envelope", as
   expect(await startNativeProject(opts)).toBe(0);
   expect(events).toContain("save");
   expect(events).not.toContain("remove");
+});
+
+test("managed values are delivered only to reviewed profile-active services", async () => {
+  const { opts } = await fixture();
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    return {
+      ...input,
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: {
+            image: `sha256:${"e".repeat(64)}`,
+            environment: { GREETING: null },
+          },
+          extra: {
+            image: `sha256:${"e".repeat(64)}`,
+            profiles: ["extra"],
+            environment: { GREETING: null },
+          },
+        },
+      }),
+      managedEnvironment: {
+        web: { GREETING: "synthetic-secret" },
+        extra: { GREETING: "synthetic-inactive" },
+      },
+      serviceNames: ["web", "extra"],
+    };
+  };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) =>
+    await review({
+      ...request,
+      run: (reviewed) =>
+        request.run({
+          ...reviewed,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: { web: { active: true }, extra: { active: false } },
+            },
+          },
+        }),
+    });
+  let delivered: unknown;
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    delivered = JSON.parse(new TextDecoder().decode(request.privateInput));
+    return await serve(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(delivered).toMatchObject({
+    version: 1,
+    services: { web: { GREETING: "synthetic-secret" } },
+  });
+  expect(JSON.stringify(delivered)).not.toContain("extra");
+  expect(JSON.stringify(delivered)).not.toContain("synthetic-inactive");
 });
 
 test("AWS profile export follows native login hooks and precedes runtime effects", async () => {
@@ -1348,6 +1736,48 @@ test("readiness goals cover only services the reviewed plan marks active", () =>
   ).toEqual([]);
 });
 
+test("a reviewed one-shot service waits for successful completion", () => {
+  const image = `sha256:${"e".repeat(64)}`;
+  const specs = {
+    init: { image, healthcheck: { test: ["CMD", "true"] } },
+    seed: { image, profiles: ["debug"] },
+    web: { image },
+  };
+  const plan = (oneShot: unknown) => ({
+    enrollment_compatible: true,
+    services: {
+      init: { active: true, one_shot: oneShot },
+      // An inactive one-shot gets no goal: the runtime refuses inactive goals.
+      seed: { active: false, one_shot: true },
+      web: { active: true },
+    },
+  });
+  // The review's typed `one_shot`, not the label text, selects completion;
+  // it overrides the healthcheck default a long-running service would get.
+  expect(
+    readyGoals(
+      nativeReadinessArgs({
+        specs,
+        plan: plan(true),
+        initializers: new Set(),
+        routed: new Set(),
+      })
+    ).sort()
+  ).toEqual(["init=completed", "web=started"]);
+  for (const value of [false, "true", undefined]) {
+    expect(
+      readyGoals(
+        nativeReadinessArgs({
+          specs,
+          plan: plan(value),
+          initializers: new Set(),
+          routed: new Set(),
+        })
+      ).sort()
+    ).toEqual(["init=healthy", "web=started"]);
+  }
+});
+
 async function profileStartup(profiles: readonly string[] | undefined) {
   const { opts } = await fixture(false);
   const prepare = opts.dependencies.prepare!;
@@ -1395,6 +1825,56 @@ async function profileStartup(profiles: readonly string[] | undefined) {
     bridges,
   };
 }
+
+test.each([
+  { labels: { "hack.service.one-shot": "true" } },
+  { labels: ["hack.service.one-shot=true"] },
+])("native up admits a labeled one-shot and waits for its completion %j", async ({
+  labels,
+}) => {
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  const review = opts.dependencies.review!;
+  const serve = opts.dependencies.serve!;
+  const image = `sha256:${"e".repeat(64)}`;
+  let serveArgs: readonly string[] = [];
+  opts.dependencies.prepare = async (call) => ({
+    ...(await prepare(call)),
+    normalizedComposeJson: JSON.stringify({
+      services: {
+        init: { image, command: ["true"], labels },
+        web: { image },
+      },
+    }),
+    serviceNames: ["init", "web"],
+  });
+  opts.dependencies.review = async (call) =>
+    await review({
+      ...call,
+      run: async (checked) =>
+        call.run({
+          ...checked,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: {
+                init: { active: true, one_shot: true },
+                web: { active: true },
+              },
+            },
+          },
+        }),
+    });
+  opts.dependencies.serve = async (call) => {
+    serveArgs = call.args;
+    return await serve(call);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(readyGoals(serveArgs).sort()).toEqual([
+    "init=completed",
+    "web=started",
+  ]);
+});
 
 test("native up omits routed and unrouted inactive-profile services from readiness", async () => {
   const started = await profileStartup(undefined);

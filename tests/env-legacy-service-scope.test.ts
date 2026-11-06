@@ -4547,7 +4547,10 @@ test("in git, a tracked local layer still in the working tree gets the tracked-l
 test("cleanup keeps a legacy file holding a value its env doesn't receive, naming the key, and offers one it does", async () => {
   const repo = await writeTeammateCheckout();
   const envPath = resolve(repo.projectDir, ".env");
-  const collect = (delivered: string | null) =>
+  const collect = (
+    delivered: string | null,
+    interpolated: readonly string[] = []
+  ) =>
     collectLegacyProjectEnvCleanupCandidates({
       projectRoot: repo.projectRoot,
       projectDir: repo.projectDir,
@@ -4561,11 +4564,12 @@ test("cleanup keeps a legacy file holding a value its env doesn't receive, namin
       ]),
       configCleanupCandidates: [],
       composeEnvFileReferences: [],
+      composeInterpolatedKeys: new Map([[envPath, new Set(interpolated)]]),
     });
 
   const undelivered = await collect(null);
   expect(undelivered.retainedEnvFiles).toEqual([
-    { path: envPath, keys: ["KEPT_SETTING"] },
+    { path: envPath, keys: ["KEPT_SETTING"], reason: "undelivered" },
   ]);
   expect(undelivered.allowed).not.toContain(envPath);
   expect(undelivered.blocked).not.toContain(envPath);
@@ -4573,12 +4577,20 @@ test("cleanup keeps a legacy file holding a value its env doesn't receive, namin
 
   const different = await collect("another-value");
   expect(different.retainedEnvFiles).toEqual([
-    { path: envPath, keys: ["KEPT_SETTING"] },
+    { path: envPath, keys: ["KEPT_SETTING"], reason: "undelivered" },
   ]);
 
   const delivered = await collect(KEPT_VALUE);
   expect(delivered.retainedEnvFiles).toEqual([]);
   expect(delivered.allowed).toContain(envPath);
+
+  // Delivered only to a service, a key Compose interpolates still needs the file.
+  const interpolated = await collect(KEPT_VALUE, ["KEPT_SETTING"]);
+  expect(interpolated.retainedEnvFiles).toEqual([
+    { path: envPath, keys: ["KEPT_SETTING"], reason: "compose_interpolation" },
+  ]);
+  expect(interpolated.allowed).not.toContain(envPath);
+  expect(JSON.stringify(interpolated)).not.toContain(KEPT_VALUE);
 });
 
 test("a migrated legacy file whose values its env now receives isn't retained, and waits on its Compose listing", async () => {

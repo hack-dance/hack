@@ -225,12 +225,16 @@ pub(super) fn prepare_mode(
     if !shared {
         return prepare(candidate, engine, plan, revision, live);
     }
-    let share = engine.guest().project_share().ok_or_else(|| {
-        error(
-            "graph_shared_source",
-            "Runtime has no approved project share.",
-        )
-    })?;
+    // Select only this plan's own root: a pool may share other projects' roots too.
+    let share = engine
+        .guest()
+        .project_share_for(&plan.source)
+        .ok_or_else(|| {
+            error(
+                "graph_shared_source",
+                "Runtime has no approved project share for this project root.",
+            )
+        })?;
     let selected = shared_paths(engine, plan, share)?;
     let (manifest, archive_sha256) = if let Some(revision) = revision {
         let publication =
@@ -519,7 +523,7 @@ fn prepare_shared_review(
         .shared
         .as_ref()
         .ok_or_else(|| error("graph_shared_source", "Retained project share is missing."))?;
-    if engine.guest().project_share() != Some(share) {
+    if !engine.guest().has_project_share(share) {
         return Err(error(
             "graph_shared_source",
             "Retained project share changed.",

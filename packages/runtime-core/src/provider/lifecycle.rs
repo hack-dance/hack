@@ -344,6 +344,7 @@ impl<'a> ObservedGuest<'a> {
             || current.guest_boot_id != self.owner.guest_boot_id
             || current.network != self.owner.network
             || current.project_share != self.owner.project_share
+            || current.additional_project_shares != self.owner.additional_project_shares
             || current.application_bridge != self.owner.application_bridge
             || current.dependency_sockets != self.owner.dependency_sockets
             || current.process != self.owner.process
@@ -429,8 +430,25 @@ impl<'a> OwnedGuest<'a> {
         })
     }
 
+    /// The pool's primary share. Device-rebind recovery is defined only for single-root
+    /// pools and refuses when additional shares exist. That recovery is macOS-only.
+    #[cfg(target_os = "macos")]
     pub(super) fn project_share(&self) -> Option<&super::ProjectShareIntent> {
         self.owner.project_share.as_ref()
+    }
+    /// Whether the pool's additional shares are empty (a single-root pool).
+    #[cfg(target_os = "macos")]
+    pub(super) fn single_project_share(&self) -> bool {
+        self.owner.additional_project_shares.is_empty()
+    }
+    /// The exact share this pool approved for one project root. A graph binds only its
+    /// own root's share; another project's share is never selected for it.
+    pub(super) fn project_share_for(&self, project: &Path) -> Option<&super::ProjectShareIntent> {
+        self.owner.project_share_for(project)
+    }
+    /// Exact membership of one retained share in the pool's current share set.
+    pub(super) fn has_project_share(&self, share: &super::ProjectShareIntent) -> bool {
+        self.owner.project_shares().contains(&share)
     }
     pub(super) fn before_effect(&self) -> Result<(), CandidateError> {
         if let Some(guard) = &self.guard {
@@ -654,7 +672,7 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
         )?;
     owner.network.verify_resources(&config["resources"])?;
     let mut mounts = json!([{"source":artifact::engine_root(candidate),"target":"/opt/hack-engine","read_only":true,"staged":false}]);
-    if let Some(share) = &owner.project_share {
+    for share in owner.project_shares() {
         share.validate_receipt()?;
         mounts
             .as_array_mut()
@@ -723,13 +741,14 @@ pub fn check_project_share(
     requested.validate()?;
     reject_aliased_state(&root(candidate))?;
     super::network_update::require_complete(candidate)?;
+    super::share_update::require_complete(candidate)?;
     let initialized = root(candidate)
         .join("owner.json")
         .try_exists()
         .map_err(io)?;
     if initialized {
         let owner = Owner::load(candidate)?;
-        super::project_share::check_request(owner.project_share.as_ref(), Some(requested))?;
+        super::project_share::check_request(&owner.project_shares(), Some(requested))?;
     } else {
         require_fresh_source_pool(candidate)?;
     }
@@ -1081,6 +1100,7 @@ fn start_pool(
     let requested = bridge_request.initial();
     let dependencies = dependency_request.initial();
     super::network_update::require_complete(candidate)?;
+    super::share_update::require_complete(candidate)?;
     if let Some(share) = &project_share {
         share.validate()?;
     }
@@ -1095,30 +1115,33 @@ fn start_pool(
         super::BridgeIntent::new(intent.slots)?;
     }
     reject_aliased_state(&root(candidate))?;
-    let (existing, existing_network, existing_dependencies, existing_share) = if root(candidate)
-        .join("owner.json")
-        .try_exists()
-        .map_err(io)?
-    {
-        let owner = Owner::load(candidate)?;
-        super::project_share::check_request(owner.project_share.as_ref(), project_share.as_ref())?;
-        bridge_request.check(owner.application_bridge)?;
-        super::network_intent::check_request(&owner.network, network.as_ref())?;
-        dependency_request.check(owner.dependency_sockets)?;
-        (
-            owner.application_bridge,
-            owner.network.clone(),
-            owner.dependency_sockets,
-            owner.project_share.clone(),
-        )
-    } else {
-        (
-            requested,
-            network.unwrap_or_default(),
-            dependencies,
-            project_share.clone(),
-        )
-    };
+    let (existing, existing_network, existing_dependencies, existing_share, existing_additional) =
+        if root(candidate)
+            .join("owner.json")
+            .try_exists()
+            .map_err(io)?
+        {
+            let owner = Owner::load(candidate)?;
+            super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
+            bridge_request.check(owner.application_bridge)?;
+            super::network_intent::check_request(&owner.network, network.as_ref())?;
+            dependency_request.check(owner.dependency_sockets)?;
+            (
+                owner.application_bridge,
+                owner.network.clone(),
+                owner.dependency_sockets,
+                owner.project_share.clone(),
+                owner.additional_project_shares.clone(),
+            )
+        } else {
+            (
+                requested,
+                network.unwrap_or_default(),
+                dependencies,
+                project_share.clone(),
+                Vec::new(),
+            )
+        };
     super::dependency_socket::check_capacity(existing, existing_dependencies)?;
     if existing.is_some() && !cfg!(feature = "native-stream-relay") {
         return Err(CandidateError::new(
@@ -1185,6 +1208,7 @@ fn start_pool(
         guard.verify(candidate)?;
     }
     super::network_update::require_complete(candidate)?;
+    super::share_update::require_complete(candidate)?;
     let fresh_owner = match fs::symlink_metadata(root(candidate).join("owner.json")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Ok(_) => false,
@@ -1203,8 +1227,10 @@ fn start_pool(
         existing_dependencies,
         existing_share.clone(),
     )?;
-    super::project_share::check_request(owner.project_share.as_ref(), existing_share.as_ref())?;
-    if owner.project_share != existing_share {
+    super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
+    if owner.project_share != existing_share
+        || owner.additional_project_shares != existing_additional
+    {
         return Err(CandidateError::new(
             "project_share",
             "Project share changed before the operation lock.",
@@ -1275,6 +1301,8 @@ fn start_pool(
         }
         verify_disks(candidate, &owner)?;
     }
+    // The provider mounts every share at boot: each must still be its exact approved root.
+    super::project_share::check_boot(&owner.project_shares())?;
     prepare_rootfs(candidate, &mut owner)?;
     if !owner.created {
         // A reserve-qualified start never reaches `machine create`.
@@ -1308,7 +1336,7 @@ fn start_pool(
             "--volume".into(),
             mount,
         ];
-        if let Some(share) = &owner.project_share {
+        for share in owner.project_shares() {
             share.validate()?;
             arguments.extend(["--volume".into(), share.argument()]);
         }
@@ -2341,7 +2369,7 @@ mod tests {
             let other = super::super::ProjectShareIntent::approve(&second, true).unwrap();
             assert_eq!(
                 check_project_share(&candidate, &other).unwrap_err().code,
-                "project_share"
+                "project_share_extension_required"
             );
             assert_eq!(
                 fs::read(root(&candidate).join("owner.json")).unwrap(),
@@ -2353,6 +2381,92 @@ mod tests {
             );
             fs::remove_file(&owner.short_home).unwrap();
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn running_pool_reuse_ignores_a_removed_primary_root_but_boot_refuses() {
+        let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-share-reuse-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            crate::next_test_scratch()
+        ));
+        state::private_directory(&directory).unwrap();
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove = Remove(directory.clone());
+        let approve = |name: &str| {
+            let project = directory.join(name);
+            state::private_directory(&project).unwrap();
+            fs::write(project.join("package.json"), "{}").unwrap();
+            super::super::ProjectShareIntent::approve(&project, true).unwrap()
+        };
+        let primary = approve("first-app");
+        let second = approve("second-app");
+        let pool = directory.join("pool");
+        state::private_directory(&pool).unwrap();
+        let candidate = Candidate::discover(&pool).unwrap();
+        let create = |candidate: &Candidate, share: &super::super::ProjectShareIntent| {
+            Owner::create_with_project_share(
+                candidate,
+                super::super::Profile::Development,
+                None,
+                super::super::NetworkIntent::Internet,
+                None,
+                Some(share.clone()),
+            )
+        };
+        let mut owner = create(&candidate, &primary).unwrap();
+        struct Unlink(std::path::PathBuf);
+        impl Drop for Unlink {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let _unlink = Unlink(owner.short_home.clone());
+        owner.additional_project_shares.push(second.clone());
+        owner.phase = "running".into();
+        owner.save(&candidate).unwrap();
+        let before = fs::read(root(&candidate).join("owner.json")).unwrap();
+
+        // The primary root disappears while the pool runs.
+        fs::remove_dir_all(&primary.project).unwrap();
+        let reused = create(&candidate, &primary).unwrap();
+        assert_eq!(reused.project_share.as_ref(), Some(&primary));
+        assert_eq!(reused.additional_project_shares, vec![second.clone()]);
+        assert_eq!(reused.phase, "running");
+        assert_eq!(
+            fs::read(root(&candidate).join("owner.json")).unwrap(),
+            before
+        );
+        // The second root is still admitted against the reused owner; its own project is
+        // not blocked by the stale neighbor.
+        assert!(
+            super::super::project_share::check_request(&reused.project_shares(), Some(&second))
+                .is_ok()
+        );
+        // Booting with the whole set still checks every root live.
+        assert_eq!(
+            super::super::project_share::check_boot(&reused.project_shares())
+                .unwrap_err()
+                .code,
+            "project_share_stale"
+        );
+
+        // A cold pool never records a share whose root is missing.
+        let cold_pool = directory.join("cold-pool");
+        state::private_directory(&cold_pool).unwrap();
+        let cold = Candidate::discover(&cold_pool).unwrap();
+        assert!(create(&cold, &primary).is_err());
+        assert!(!root(&cold).join("owner.json").exists());
     }
 
     #[test]

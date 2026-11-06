@@ -63,6 +63,8 @@ pub use dependency_hosts::dependency_address;
 pub mod foreground;
 mod startup;
 mod startup_failure;
+#[cfg(any(target_os = "macos", test))]
+mod startup_logs;
 #[cfg(target_os = "macos")]
 pub use startup::{Dependency, HostRelayRuntime, RefreshPolicy};
 mod archive;

@@ -23,7 +23,7 @@ impl StopFailuresDiagnostic {
 impl CandidateError {
     pub(crate) fn with_stop_failures(mut self, detail: StopFailuresDiagnostic) -> Self {
         if detail.valid() {
-            self.stop_failures = Some(detail);
+            self.stop_failures = Some(Box::new(detail));
         }
         self
     }

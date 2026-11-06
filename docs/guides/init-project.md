@@ -37,6 +37,20 @@ Notes:
 - `hack open` resolves the routed URL via the global proxy and prefers the OAuth alias when
   `oauth.enabled` is true. Set `open.prefer` or pass `--prefer auto|alias|dev` to override.
 
+With the native backend selected (`HACK_RUNTIME_BACKEND=native`, which the
+`hack-next` launcher sets), `hack init` writes a scaffold native `hack up` starts:
+- The shared `hack-dev` network keeps `external: true` and adds
+  `x-hack-isolated: true`. Docker Compose still joins the external network; native
+  creates an owned bridge under that name instead.
+- Each routed service gets a `healthcheck.x-hack-http` probe on its route port with
+  path `/`. Change the path to your app's health endpoint if `/` does not answer
+  `2xx`. See [Native HTTP readiness probe](native-candidate.md#native-http-readiness-probe).
+- The next steps it prints are native ones: `HACK_NATIVE_SHARED_SOURCE=1 hack up`
+  in the foreground (native refuses `--detach`), then `hack open` from another
+  terminal. It does not suggest `hack global install`, which native refuses.
+
+Without that selection, the Compose scaffold and its next steps are unchanged.
+
 Optional:
 - `hack logs --pretty` for log tailing.
 - `hack tui` for the interactive dashboard.

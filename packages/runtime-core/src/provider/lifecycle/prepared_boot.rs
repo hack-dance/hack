@@ -156,8 +156,14 @@ impl Work {
                             &["machine", "delete", "--name", &owner.machine, "--force"],
                         )?;
                     }
-                    // `Owner::load` proved the alias points at this root's home.
-                    fs::remove_file(&owner.short_home).map_err(state::io)?;
+                    // `Owner::load` proved the alias points at this root's home, or that a
+                    // clean stop already released it.
+                    match fs::remove_file(&owner.short_home) {
+                        Err(error) if error.kind() != ErrorKind::NotFound => {
+                            return Err(state::io(error));
+                        }
+                        _ => {}
+                    }
                 }
                 Err(failure) => {
                     // The receipt is saved just before its alias is created, and nothing external

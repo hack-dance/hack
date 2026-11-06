@@ -103,6 +103,16 @@ function imagesFromReceipt(opts: {
 
 function activeReceipt(value: unknown, saved: NativeProjectRun) {
   if (
+    isRecord(value) &&
+    isRecord(value.receipt) &&
+    value.receipt.phase === "stopped-data-retained" &&
+    value.receipt.run === saved.run
+  ) {
+    throw new ClosedCliError(
+      "Native restart needs an active graph; this project is stopped with data retained. Run hack up to start it, including after Compose edits."
+    );
+  }
+  if (
     !isRecord(value) ||
     value.journal_incomplete !== false ||
     !isRecord(value.receipt) ||

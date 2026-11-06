@@ -136,6 +136,76 @@ test("structured startup failure exposes its code without stderr values", async 
   expect(failure).not.toContain("synthetic-private-detail");
 });
 
+test("a startup failure passes failed services' bounded output only to its callback", async () => {
+  const reply = JSON.stringify({
+    code: "graph_startup_application_failed",
+    message: "synthetic-private-detail",
+    startup_logs: {
+      version: 1,
+      services: [
+        {
+          service: "web",
+          stdout: "",
+          stderr: "boot failed: synthetic-secret\u001b[31m",
+          truncated: false,
+        },
+      ],
+    },
+  });
+  const opts = await fixture(
+    `console.error(${JSON.stringify(reply)}); process.exit(2);`
+  );
+  const received: unknown[] = [];
+  let failure = "";
+  try {
+    await serveNativeProjectGraph({
+      ...opts,
+      onStartupLogs: (logs) => {
+        received.push(logs);
+      },
+      onReady: async () => {
+        throw new Error("must not become ready");
+      },
+    });
+  } catch (error) {
+    failure = String(error);
+  }
+  expect(received).toEqual([
+    [
+      {
+        service: "web",
+        stdout: "",
+        stderr: "boot failed: synthetic-secret\u001b[31m",
+        truncated: false,
+      },
+    ],
+  ]);
+  // The thrown message keeps its closed form; display is the caller's job.
+  expect(failure).toContain("graph_startup_application_failed");
+  expect(failure).not.toContain("synthetic");
+  expect(failure).not.toContain("boot failed");
+
+  const malformed = await fixture(
+    `console.error(${JSON.stringify(
+      JSON.stringify({
+        code: "graph_budget",
+        startup_logs: { version: 1, services: [{ service: "web" }] },
+      })
+    )}); process.exit(2);`
+  );
+  const ignored: unknown[] = [];
+  await expect(
+    serveNativeProjectGraph({
+      ...malformed,
+      onStartupLogs: (logs) => {
+        ignored.push(logs);
+      },
+      onReady: async () => {},
+    })
+  ).rejects.toThrow("graph_budget");
+  expect(ignored).toEqual([]);
+});
+
 test("cancellation preserves the owner's graceful cleanup beyond five seconds", async () => {
   const opts = await fixture(`
     process.on("SIGTERM", async () => {

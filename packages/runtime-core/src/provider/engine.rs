@@ -397,6 +397,26 @@ impl<'a> Engine<'a> {
         }
         self.logs_with_tail(id, &tail.to_string())
     }
+    /// Raw multiplexed frames of a container's last `tail` lines, within the 4 MiB
+    /// response bound. Unlike [`Self::logs_tail`] this keeps the end of each stream;
+    /// the caller decodes and bounds it and must never persist the bytes.
+    #[cfg(target_os = "macos")]
+    pub(super) fn logs_tail_frames(&self, id: &str, tail: u16) -> Result<Vec<u8>, CandidateError> {
+        if !(1..=1000).contains(&tail) {
+            return Err(failure("Container log tail must be from 1 to 1000."));
+        }
+        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(failure("Invalid container log identity."));
+        }
+        self.guest.verify()?;
+        let bytes = self.transport.request_bytes(
+            Method::GET,
+            &format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail={tail}"),
+            None,
+        )?;
+        self.guest.verify()?;
+        Ok(bytes)
+    }
     fn logs_with_tail(
         &self,
         id: &str,

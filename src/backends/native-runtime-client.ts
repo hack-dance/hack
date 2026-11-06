@@ -3,6 +3,11 @@ import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import {
+  NATIVE_STARTUP_FAILURE_REPLY_BYTES,
+  type NativeStartupLogTail,
+  readNativeStartupLogs,
+} from "./native-startup-logs.ts";
+import {
   type NativeStopFailure,
   nativeStopFailureSummary,
   readNativeStopFailures,
@@ -17,6 +22,7 @@ interface NativeFailure {
   readonly code: string;
   readonly causeCode?: string;
   readonly stopFailures?: readonly NativeStopFailure[];
+  readonly startupLogs?: readonly NativeStartupLogTail[];
 }
 
 /**
@@ -604,10 +610,46 @@ function nativeFailureCause(input: {
     : undefined;
 }
 
+/** Validate a parsed stderr reply; bounded startup logs only when the caller accepts them. */
+function nativeFailureFromReply(
+  value: unknown,
+  startupLogs: boolean
+): NativeFailure | undefined {
+  if (
+    !(
+      isRecord(value) &&
+      typeof value.code === "string" &&
+      ERROR_CODE.test(value.code)
+    )
+  ) {
+    return;
+  }
+  const causeCode = nativeFailureCause({
+    code: value.code,
+    cause: value.cause_code,
+  });
+  return {
+    code: value.code,
+    ...(causeCode ? { causeCode } : {}),
+    ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
+      value.code === "graph_owner_recovery" &&
+        typeof value.cause_code === "string"
+        ? value.cause_code
+        : value.code
+    )
+      ? { stopFailures: readNativeStopFailures(value.stop_failures) }
+      : {}),
+    ...(startupLogs && value.startup_logs !== undefined
+      ? { startupLogs: readNativeStartupLogs(value.startup_logs) }
+      : {}),
+  };
+}
+
 /** Only bounded native error codes leave this boundary, never stderr messages. */
 async function readNativeFailure(
   stream: ReadableStream<Uint8Array>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  limit = 8192
 ): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
   const cancel = () => {
@@ -627,36 +669,17 @@ async function readNativeFailure(
         break;
       }
       bytes += result.value.byteLength;
-      if (bytes <= 8192) {
+      if (bytes <= limit) {
         text += decoder.decode(result.value, { stream: true });
       }
     }
-    if (bytes > 8192) {
+    if (bytes > limit) {
       return;
     }
-    const value: unknown = JSON.parse(text + decoder.decode());
-    if (
-      isRecord(value) &&
-      typeof value.code === "string" &&
-      ERROR_CODE.test(value.code)
-    ) {
-      const causeCode = nativeFailureCause({
-        code: value.code,
-        cause: value.cause_code,
-      });
-      return {
-        code: value.code,
-        ...(causeCode ? { causeCode } : {}),
-        ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
-          value.code === "graph_owner_recovery" &&
-            typeof value.cause_code === "string"
-            ? value.cause_code
-            : value.code
-        )
-          ? { stopFailures: readNativeStopFailures(value.stop_failures) }
-          : {}),
-      };
-    }
+    return nativeFailureFromReply(
+      JSON.parse(text + decoder.decode()),
+      limit > 8192
+    );
   } catch {
     return;
   } finally {
@@ -683,6 +706,36 @@ export async function readNativeFailureCodes(
     : {
         code: failure.code,
         ...(failure.causeCode ? { causeCode: failure.causeCode } : {}),
+      };
+}
+
+/**
+ * Like {@link readNativeFailureCodes} for a foreground startup reply, which may
+ * also carry failed services' bounded output. That output can contain managed
+ * values: the caller must redact it before display and never persist it.
+ */
+export async function readNativeStartupFailure(
+  stream: ReadableStream<Uint8Array>,
+  signal?: AbortSignal
+): Promise<
+  | {
+      readonly code: string;
+      readonly causeCode?: string;
+      readonly startupLogs?: readonly NativeStartupLogTail[];
+    }
+  | undefined
+> {
+  const failure = await readNativeFailure(
+    stream,
+    signal,
+    NATIVE_STARTUP_FAILURE_REPLY_BYTES
+  );
+  return failure === undefined
+    ? undefined
+    : {
+        code: failure.code,
+        ...(failure.causeCode ? { causeCode: failure.causeCode } : {}),
+        ...(failure.startupLogs ? { startupLogs: failure.startupLogs } : {}),
       };
 }
 

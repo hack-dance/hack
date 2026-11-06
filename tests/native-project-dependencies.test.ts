@@ -484,3 +484,138 @@ test("logical grant bounds and endpoint identity remain independent of transport
     ]).map((entry) => entry.slot)
   ).toEqual([0, 1]);
 });
+
+function refusalMessage(action: () => unknown): string {
+  try {
+    action();
+  } catch (error: unknown) {
+    expect(error).toHaveProperty("code", "E_CONFIG_INVALID");
+    return (error as Error).message;
+  }
+  throw new Error("expected a refusal");
+}
+
+test("selection refusals name the binding, alias, port and reason without listener values", () => {
+  const cases: [unknown[], string][] = [
+    [
+      [{ ...binding(), guest_port: 70_000 }],
+      "dependency #1 (service web, binding search, aliases search.example.com, host port 8443): guest_port must be an integer 1..65535",
+    ],
+    [
+      [{ ...binding(), host_port: 0 }],
+      "dependency #1 (service web, binding search, aliases search.example.com, guest port 443): host_port must be an integer 1..65535",
+    ],
+    [
+      [binding(), { ...binding("missing", "db") }],
+      "dependency #2 (service missing, binding db, aliases db.example.com, guest port 443, host port 8443): service is not declared in the Compose file",
+    ],
+    [
+      [binding(), binding()],
+      "dependency #2 (service web, binding search, aliases search.example.com, guest port 443, host port 8443): the binding is declared twice for this service",
+    ],
+    [
+      [{ ...binding(), aliases: ["localhost"] }],
+      "dependency #1 (service web, binding search, guest port 443, host port 8443): aliases must list 1..8 lowercase DNS hostnames",
+    ],
+    [
+      [{ ...binding(), host_pid: 1 }],
+      "host_pid must be a process ID greater than 1",
+    ],
+    [
+      [{ ...binding(), token: "synthetic-do-not-print" }],
+      "unsupported field token",
+    ],
+    [
+      [{ ...binding(), "synthetic do-not-print": 1 }],
+      "): unsupported field; listener values omitted.",
+    ],
+  ];
+  for (const [entries, expected] of cases) {
+    const message = refusalMessage(() => parse(entries));
+    expect(message).toStartWith("Native host dependencies refused for ");
+    expect(message).toContain(expected);
+    expect(message).toEndWith("; listener values omitted.");
+    expect(message).not.toContain("synthetic-do-not-print");
+    expect(message).not.toContain("do-not-print");
+    // Host process identity is never echoed.
+    expect(message).not.toContain("123");
+  }
+  expect(
+    refusalMessage(() =>
+      parseNativeHostDependencies({
+        value: { version: 2, dependencies: [binding()] },
+        services: ["web"],
+      })
+    )
+  ).toBe(
+    "Native host dependencies refused: the selection must be {version: 1, dependencies: [1..128 entries]} with no other fields; listener values omitted."
+  );
+});
+
+test("a listener missing past the discovery deadline names its binding and port", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-dependencies-"));
+  roots.push(root);
+  const path = join(root, "selection.json");
+  const { host_pid: _pid, ...selected } = binding();
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [
+        { ...selected, host_executable: "/synthetic/private-tunnel" },
+      ],
+    })
+  );
+  const wait = {
+    deadlineMs: performance.now() + 20,
+    signal: new AbortController().signal,
+  };
+  const failure = await readNativeHostDependencies({
+    path,
+    services: ["web"],
+    discover: async ({ executable, hostPort }) =>
+      await discoverNativeHostDependency({
+        ...discovery,
+        executable,
+        hostPort,
+        wait,
+        invoke: async () => {
+          throw unavailableListener();
+        },
+      }),
+  }).catch((error: unknown) => error);
+  expect(failure).toHaveProperty("code", "E_CONFIG_INVALID");
+  expect((failure as Error).message).toBe(
+    "Native host dependencies refused for dependency #1 (service web, binding search, aliases search.example.com, guest port 443, host port 8443): no listener owned by host_executable answered on host_port before the discovery deadline; listener values omitted."
+  );
+  expect((failure as Error).message).not.toContain("private-tunnel");
+
+  const coded = await readNativeHostDependencies({
+    path,
+    services: ["web"],
+    discover: async () => {
+      throw new NativeRuntimeRequestError({
+        message: "synthetic-do-not-print",
+        nativeCode: "candidate_ownership",
+      });
+    },
+  }).catch((error: unknown) => error);
+  expect((coded as Error).message).toContain(
+    "host port 8443): listener discovery failed (candidate_ownership); listener values omitted."
+  );
+  expect((coded as Error).message).not.toContain("synthetic-do-not-print");
+});
+
+test("an unreadable selection file is named without echoing its contents", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-dependencies-"));
+  roots.push(root);
+  const path = join(root, "selection.json");
+  await writeFile(path, "synthetic-do-not-print");
+  const failure = await readNativeHostDependencies({
+    path,
+    services: ["web"],
+  }).catch((error: unknown) => error);
+  expect((failure as Error).message).toBe(
+    "Native host dependencies refused: HACK_NATIVE_DEPENDENCIES must name an absolute path to a bounded, unchanged regular JSON file; listener values omitted."
+  );
+});

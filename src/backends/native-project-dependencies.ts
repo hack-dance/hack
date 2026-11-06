@@ -60,13 +60,153 @@ export function prepareNativeDependencyServices(opts: {
   }
 }
 
-/** The private listener selection (or its discovery) did not validate. */
-function refused(): Error {
-  return new HackCliError({
+const SAFE_FIELD = /^[A-Za-z0-9_]{1,64}$/;
+const SAFE_NATIVE_CODE = /^[a-z0-9_]{1,80}$/;
+
+const OWN_REFUSALS = new WeakSet<Error>();
+/**
+ * The private listener selection (or its discovery) did not validate. The
+ * message names the problem and the public parts of the affected binding
+ * (service, binding, aliases and ports) only after they validate; host PIDs,
+ * executables and unrecognized field contents are never echoed.
+ */
+function refused(reason: string, context?: string): Error {
+  const error = new HackCliError({
     code: "E_CONFIG_INVALID",
-    message:
-      "Native host dependencies require a bounded explicit listener selection; values omitted.",
+    message: `Native host dependencies refused${context ? ` for ${context}` : ""}: ${reason}; listener values omitted.`,
   });
+  OWN_REFUSALS.add(error);
+  return error;
+}
+/** Discovery refusals keep their reason so a caller can add the binding context. */
+const DISCOVERY_REASONS = new WeakMap<Error, string>();
+function refusedDiscovery(reason: string): Error {
+  const error = refused(reason);
+  DISCOVERY_REASONS.set(error, reason);
+  return error;
+}
+function discoveryReason(error: unknown): string | undefined {
+  if (error instanceof Error && DISCOVERY_REASONS.has(error)) {
+    return DISCOVERY_REASONS.get(error);
+  }
+  if (error instanceof NativeRuntimeRequestError) {
+    return error.nativeCode && SAFE_NATIVE_CODE.test(error.nativeCode)
+      ? `listener discovery failed (${error.nativeCode})`
+      : "listener discovery request failed";
+  }
+  return undefined;
+}
+const FILE_REASON =
+  "HACK_NATIVE_DEPENDENCIES must name an absolute path to a bounded, unchanged regular JSON file";
+const MISSING_LISTENER_REASON =
+  "no listener owned by host_executable answered on host_port before the discovery deadline";
+const SHAPE_REASON =
+  "the selection must be {version: 1, dependencies: [1..128 entries]} with no other fields";
+
+/** Value-free label of one selection entry: only validated public fields. */
+function describeEntry(entry: unknown, index: number): string {
+  const parts: string[] = [];
+  if (isRecord(entry)) {
+    if (typeof entry.service === "string" && SERVICE.test(entry.service)) {
+      parts.push(`service ${entry.service}`);
+    }
+    if (typeof entry.binding === "string" && BINDING.test(entry.binding)) {
+      parts.push(`binding ${entry.binding}`);
+    }
+    if (Array.isArray(entry.aliases)) {
+      const aliases = entry.aliases.filter(hostname).slice(0, 8);
+      if (aliases.length > 0) {
+        parts.push(`aliases ${aliases.join(",")}`);
+      }
+    }
+    if (port(entry.guest_port)) {
+      parts.push(`guest port ${entry.guest_port}`);
+    }
+    if (port(entry.host_port)) {
+      parts.push(`host port ${entry.host_port}`);
+    }
+  }
+  return `dependency #${index + 1}${parts.length > 0 ? ` (${parts.join(", ")})` : ""}`;
+}
+
+function hostPidProblem(entry: Record<string, unknown>): string | undefined {
+  if (
+    typeof entry.host_pid === "number" &&
+    Number.isSafeInteger(entry.host_pid) &&
+    entry.host_pid > 1 &&
+    entry.host_pid <= 2_147_483_647
+  ) {
+    return undefined;
+  }
+  return entry.host_pid === undefined
+    ? "host_pid or host_executable is required"
+    : "host_pid must be a process ID greater than 1";
+}
+
+function hostExecutableProblem(
+  entry: Record<string, unknown>
+): string | undefined {
+  if (
+    entry.host_executable !== undefined &&
+    !(
+      typeof entry.host_executable === "string" &&
+      isAbsolute(entry.host_executable) &&
+      entry.host_executable.length <= 1024 &&
+      !entry.host_executable.includes("\0")
+    )
+  ) {
+    return "host_executable must be an absolute path of at most 1024 bytes";
+  }
+  if (!validSupervisorDepth(entry)) {
+    return "host_supervisor_depth must be an integer 1..8 and requires host_executable";
+  }
+  return undefined;
+}
+
+/** First structural problem of one entry, in declaration order, or undefined. */
+function entryProblem(
+  entry: unknown,
+  services: readonly string[]
+): string | undefined {
+  if (!isRecord(entry)) {
+    return "each dependency must be an object";
+  }
+  const unknown = Object.keys(entry).find((key) => !FIELDS.has(key));
+  if (unknown !== undefined) {
+    return SAFE_FIELD.test(unknown)
+      ? `unsupported field ${unknown}`
+      : "unsupported field";
+  }
+  if (typeof entry.service !== "string" || !SERVICE.test(entry.service)) {
+    return "service must name a Compose service";
+  }
+  if (!services.includes(entry.service)) {
+    return "service is not declared in the Compose file";
+  }
+  if (typeof entry.binding !== "string" || !BINDING.test(entry.binding)) {
+    return "binding must be 1..128 characters of a-z, 0-9, '.', '_' or '-'";
+  }
+  if (!port(entry.guest_port)) {
+    return "guest_port must be an integer 1..65535";
+  }
+  if (!port(entry.host_port)) {
+    return "host_port must be an integer 1..65535";
+  }
+  const host = hostPidProblem(entry) ?? hostExecutableProblem(entry);
+  if (host !== undefined) {
+    return host;
+  }
+  if (
+    !(
+      Array.isArray(entry.aliases) &&
+      entry.aliases.length > 0 &&
+      entry.aliases.length <= 8 &&
+      entry.aliases.every(hostname)
+    )
+  ) {
+    return "aliases must list 1..8 lowercase DNS hostnames that are not localhost or numeric";
+  }
+  return undefined;
 }
 function port(value: unknown): value is number {
   return (
@@ -111,6 +251,7 @@ function requireSameEndpointPolicy(opts: {
   readonly policies: Map<string, string>;
   readonly endpoint: string;
   readonly authority: ReturnType<typeof hostAuthority>;
+  readonly context: string;
 }): void {
   const policy = JSON.stringify(
     opts.authority.host_executable === undefined
@@ -122,7 +263,10 @@ function requireSameEndpointPolicy(opts: {
   );
   const prior = opts.policies.get(opts.endpoint);
   if (prior !== undefined && prior !== policy) {
-    throw refused();
+    throw refused(
+      "the same host listener is selected with different host_executable policies",
+      opts.context
+    );
   }
   opts.policies.set(opts.endpoint, policy);
 }
@@ -145,7 +289,7 @@ export function parseNativeHostDependencies(opts: {
       value.dependencies.length <= 128
     )
   ) {
-    throw refused();
+    throw refused(SHAPE_REASON);
   }
   const keys = new Set<string>();
   const aliases = new Set<string>();
@@ -155,45 +299,29 @@ export function parseNativeHostDependencies(opts: {
   >();
   const endpointPolicies = new Map<string, string>();
   let nextSlot = 0;
-  return value.dependencies.map((entry) => {
-    if (
-      !(
-        isRecord(entry) &&
-        Object.keys(entry).every((key) => FIELDS.has(key)) &&
-        typeof entry.service === "string" &&
-        SERVICE.test(entry.service) &&
-        opts.services.includes(entry.service) &&
-        typeof entry.binding === "string" &&
-        BINDING.test(entry.binding) &&
-        port(entry.guest_port) &&
-        port(entry.host_port) &&
-        typeof entry.host_pid === "number" &&
-        Number.isSafeInteger(entry.host_pid) &&
-        entry.host_pid > 1 &&
-        entry.host_pid <= 2_147_483_647 &&
-        (entry.host_executable === undefined ||
-          (typeof entry.host_executable === "string" &&
-            isAbsolute(entry.host_executable) &&
-            entry.host_executable.length <= 1024 &&
-            !entry.host_executable.includes("\0"))) &&
-        validSupervisorDepth(entry) &&
-        Array.isArray(entry.aliases) &&
-        entry.aliases.length > 0 &&
-        entry.aliases.length <= 8 &&
-        entry.aliases.every(hostname)
-      )
-    ) {
-      throw refused();
+  return value.dependencies.map((candidate: unknown, index) => {
+    const context = describeEntry(candidate, index);
+    const problem = entryProblem(candidate, opts.services);
+    if (problem !== undefined) {
+      throw refused(problem, context);
     }
+    const entry = candidate as Record<string, unknown> & {
+      readonly service: string;
+      readonly binding: string;
+      readonly guest_port: number;
+      readonly host_port: number;
+      readonly host_pid: number;
+      readonly aliases: string[];
+    };
     const key = `${entry.service}:${entry.binding}`;
     if (keys.has(key)) {
-      throw refused();
+      throw refused("the binding is declared twice for this service", context);
     }
     keys.add(key);
     for (const alias of entry.aliases) {
       const selected = `${entry.service}:${alias}`;
       if (aliases.has(selected)) {
-        throw refused();
+        throw refused("an alias is declared twice for this service", context);
       }
       aliases.add(selected);
     }
@@ -205,6 +333,7 @@ export function parseNativeHostDependencies(opts: {
       policies: endpointPolicies,
       endpoint,
       authority,
+      context,
     });
     const selectedService = entry.service;
     const available = transports.get(endpoint) ?? [];
@@ -213,7 +342,10 @@ export function parseNativeHostDependencies(opts: {
     );
     if (!transport) {
       if (nextSlot >= 32) {
-        throw refused();
+        throw refused(
+          "the selection needs more than 32 distinct host listener slots",
+          context
+        );
       }
       transport = { slot: nextSlot++, services: new Set() };
       available.push(transport);
@@ -249,59 +381,89 @@ export async function readNativeHostDependencies(opts: {
     return [];
   }
   try {
-    const value = await readNativeSelection(opts.path);
-    if (!(isRecord(value) && Array.isArray(value.dependencies))) {
-      throw refused();
+    return await readSelectedHostDependencies({ ...opts, path: opts.path });
+  } catch (error) {
+    if (error instanceof Error && OWN_REFUSALS.has(error)) {
+      throw error;
     }
-    // Validate the complete intent before invoking native process discovery.
-    const provisional = {
-      ...value,
-      dependencies: value.dependencies.map((entry) =>
-        isRecord(entry) && entry.host_executable !== undefined
-          ? { ...entry, host_pid: entry.host_pid ?? 2 }
-          : entry
-      ),
-    };
-    parseNativeHostDependencies({
-      value: provisional,
-      services: opts.services,
-    });
-    const resolved = new Map<string, number>();
-    const dependencies: unknown[] = [];
-    for (const entry of value.dependencies) {
-      if (!isRecord(entry) || entry.host_executable === undefined) {
-        dependencies.push(entry);
-        continue;
-      }
-      if (!opts.discover) {
-        throw refused();
-      }
-      const executable = String(entry.host_executable);
-      const hostPort = Number(entry.host_port);
-      const key = `${executable}\0${hostPort}`;
-      let hostPid = resolved.get(key);
-      if (hostPid === undefined) {
-        const discovered = await opts.discover({ executable, hostPort });
-        if (
-          !Number.isSafeInteger(discovered.host_pid) ||
-          discovered.host_pid <= 1 ||
-          discovered.host_pid > 2_147_483_647 ||
-          !FINGERPRINT.test(discovered.endpoint_fingerprint)
-        ) {
-          throw refused();
-        }
-        hostPid = discovered.host_pid;
-        resolved.set(key, hostPid);
-      }
-      dependencies.push({ ...entry, host_pid: hostPid });
-    }
-    return parseNativeHostDependencies({
-      value: { ...value, dependencies },
-      services: opts.services,
-    });
-  } catch {
-    throw refused();
+    throw refused("the selection could not be validated");
   }
+}
+
+async function readSelectedHostDependencies(opts: {
+  readonly path: string;
+  readonly services: readonly string[];
+  readonly discover?: Parameters<
+    typeof readNativeHostDependencies
+  >[0]["discover"];
+}): Promise<NativeHostDependency[]> {
+  let value: unknown;
+  try {
+    value = await readNativeSelection(opts.path);
+  } catch {
+    throw refused(FILE_REASON);
+  }
+  if (!(isRecord(value) && Array.isArray(value.dependencies))) {
+    throw refused(SHAPE_REASON);
+  }
+  // Validate the complete intent before invoking native process discovery.
+  const provisional = {
+    ...value,
+    dependencies: value.dependencies.map((entry) =>
+      isRecord(entry) && entry.host_executable !== undefined
+        ? { ...entry, host_pid: entry.host_pid ?? 2 }
+        : entry
+    ),
+  };
+  parseNativeHostDependencies({
+    value: provisional,
+    services: opts.services,
+  });
+  const resolved = new Map<string, number>();
+  const dependencies: unknown[] = [];
+  for (const [index, entry] of value.dependencies.entries()) {
+    if (!isRecord(entry) || entry.host_executable === undefined) {
+      dependencies.push(entry);
+      continue;
+    }
+    const context = describeEntry(entry, index);
+    if (!opts.discover) {
+      throw refused(
+        "host_executable selection needs listener discovery, which this command does not perform; select host_pid instead",
+        context
+      );
+    }
+    const executable = String(entry.host_executable);
+    const hostPort = Number(entry.host_port);
+    const key = `${executable}\0${hostPort}`;
+    let hostPid = resolved.get(key);
+    if (hostPid === undefined) {
+      let discovered: Awaited<ReturnType<NonNullable<typeof opts.discover>>>;
+      try {
+        discovered = await opts.discover({ executable, hostPort });
+      } catch (error) {
+        throw refused(
+          discoveryReason(error) ?? "listener discovery failed",
+          context
+        );
+      }
+      if (
+        !Number.isSafeInteger(discovered.host_pid) ||
+        discovered.host_pid <= 1 ||
+        discovered.host_pid > 2_147_483_647 ||
+        !FINGERPRINT.test(discovered.endpoint_fingerprint)
+      ) {
+        throw refused("listener discovery returned an invalid reply", context);
+      }
+      hostPid = discovered.host_pid;
+      resolved.set(key, hostPid);
+    }
+    dependencies.push({ ...entry, host_pid: hostPid });
+  }
+  return parseNativeHostDependencies({
+    value: { ...value, dependencies },
+    services: opts.services,
+  });
 }
 
 type NativeDependencyWait = {
@@ -316,8 +478,11 @@ function remainingDiscoveryTime(
     return undefined;
   }
   const remaining = wait.deadlineMs - performance.now();
-  if (wait.signal.aborted || !Number.isFinite(remaining) || remaining <= 0) {
-    throw refused();
+  if (wait.signal.aborted) {
+    throw refusedDiscovery("listener discovery was cancelled");
+  }
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    throw refusedDiscovery(MISSING_LISTENER_REASON);
   }
   return remaining;
 }
@@ -340,7 +505,7 @@ async function waitForNextDiscovery(opts: {
       signal: opts.wait.signal,
     });
   } catch {
-    throw refused();
+    throw refusedDiscovery("listener discovery was cancelled");
   }
   return true;
 }
@@ -386,7 +551,7 @@ export async function discoverNativeHostDependency(opts: {
         typeof result.host_pid !== "number" ||
         typeof result.endpoint_fingerprint !== "string"
       ) {
-        throw refused();
+        throw refusedDiscovery("listener discovery returned an invalid reply");
       }
       return {
         host_pid: result.host_pid,

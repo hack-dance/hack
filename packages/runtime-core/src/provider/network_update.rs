@@ -372,6 +372,8 @@ fn update_network(
     hosts.sort();
     reject_aliased_state(&root(candidate))?;
     let _lock = state::Lock::acquire(&root(candidate))?;
+    // The update stages owner writes, which need the alias a clean stop released.
+    lifecycle::restore_released_short_home(candidate)?;
     let owner = Owner::load(candidate)?;
     let _vm_lock = stopped(candidate, &owner)?;
     let path = root(candidate).join("network-update.json");

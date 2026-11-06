@@ -360,10 +360,25 @@ complete bundle to change the candidate.
    binary refusing newer state is an unsupported downgrade, not a successful rollback.
    Preserve that state; do not rewrite receipts or adopt another home's data.
 
-Host cleanup or a reboot can remove the temporary `/private/tmp/hkl-<owner>` HOME
-alias while the private candidate home and disks remain intact. Normal commands
-report `provider_home_missing`; they do not initialize another pool or recreate the
-alias during observation. Explicit `runtime recover --json` can restore only that
+The provider runs with a short temporary HOME alias, `/private/tmp/hkl-<owner>`, a
+symlink to `<home>/.hack-local/run/smolvm/home` that keeps its Unix socket paths
+within the macOS length limit. A clean `runtime down` keeps this alias, so no other
+local user can take its name while the pool is stopped. It removes only the provider
+socket files the stop proved closed, through the real data directory.
+
+Host cleanup or a reboot can still remove the alias. For a clean stop, observation
+commands such as `runtime status` accept the absent alias and create nothing, and the
+next `runtime up`, `runtime recover` or approved-host update restores the exact alias
+under the pool lock before using it. If another entry (a file, a directory, another
+user's link) holds that path by then, it is never followed, replaced or removed: the
+pool records a fresh random `/private/tmp/hkl-*` alias in its receipt and creates
+that one instead. A pool with dependency sockets refuses a fresh alias with
+`socket_alias_collision`, because its provider record pins those socket paths under the
+original alias; remove the entry at that path and retry.
+
+For any other receipt with an absent alias, normal commands report
+`provider_home_missing`; they do not initialize another pool or recreate the alias
+during observation. Explicit `runtime recover --json` can restore only that
 absent exact alias, after verifying the receipt-bound dead provider, both recorded
 disks, free VM lock, closed disk handles, and no active provider command. Existing
 files, directories, foreign links, a live or reused PID, and uncertain ownership
@@ -514,7 +529,12 @@ Provider setup is separate and explicit. Obtain the exact archives identified in
 Before startup, network-tool preparation additionally requires all four pinned
 Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), with
 regular, singly linked mode-`0600` files. Acquire the matching public package bytes;
-the command never downloads packages or accepts substitute versions:
+the command never downloads packages or accepts substitute versions.
+
+The pinned files come from the Alpine **v3.19** `main` repository for `aarch64`
+(`https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/`). Other Alpine
+releases, such as v3.20, publish packages with the same file names but different
+bytes; those fail the hash check below.
 
 | File | SHA-256 |
 | --- | --- |
@@ -1271,7 +1291,8 @@ an exact capacity or a minimum. The combined physical transport limit still appl
 to the pool's actual capacities, including any spare slots. A minimum does not resize
 an existing pool or guarantee that enough slots are currently free.
 Each routed service
-must already declare a matching `healthcheck.x-hack-http`; command healthchecks
+must already declare a matching `healthcheck.x-hack-http` (see
+[Native HTTP readiness probe](#native-http-readiness-probe)); command healthchecks
 and missing probes are not replaced or inferred. Native review still validates
 hostnames, ports, networks and labels. Foreground graph ownership supervises and
 retires Unix route publishers. Without explicit HTTPS selection, this enrollment does not start a hostname authority
@@ -1631,6 +1652,52 @@ selection. Existing pool capacity cannot be silently widened. The selection is c
 dependency request and removed when foreground startup exits. No durable listener
 authority is inferred from a saved selection file. Image-only services omit graph
 shared-source mode; active project bind mounts still use the explicit project share.
+
+#### Native HTTP readiness probe
+
+`healthcheck.x-hack-http` declares the readiness probe native startup uses for a
+service. It must be the only key in that service's `healthcheck`: it cannot be
+combined with `test`, `disable`, `interval`, `timeout`, `start_period`,
+`start_interval` or `retries`. Docker Compose ignores the extension field. All six
+fields are required, and no other field is accepted:
+
+| Field | Type and range | Meaning |
+| --- | --- | --- |
+| `port` | integer, 1–65535 | Container port the probe connects to on the container's loopback address (`127.0.0.1`). For a routed service it must equal the port in `caddy.reverse_proxy: "{{upstreams PORT}}"`. |
+| `path` | string, starts with `/`, at most 512 bytes | Request path. Only printable ASCII without spaces is accepted; `#` is refused. The probe sends `GET <path>` with `Host: 127.0.0.1:<port>`. |
+| `interval_ms` | integer, 10–3600000 | Time from the start of one request to the start of the next. |
+| `timeout_ms` | integer, 1–60000 | Limit for connecting, sending the request and reading the response headers. |
+| `retries` | integer, 1–100 | Consecutive failed samples that make the service unhealthy. |
+| `start_period_ms` | integer, 0–3600000 | Startup grace. Failures in this period do not count until the first success. |
+
+A sample succeeds only when the response status line is `HTTP/1.1` or `HTTP/1.0`
+with a `2xx` status. A redirect (`3xx`) or any other status is a failure, so point
+`path` at an endpoint that answers `2xx` without a redirect. A service is starting
+until its first success, healthy after a success, and unhealthy after `retries`
+consecutive counted failures. Failures count once the service has succeeded once or
+the start period has ended; one success resets the count. A sample older than
+`interval_ms + timeout_ms + 1000` milliseconds counts as unhealthy.
+
+```yaml
+services:
+  web:
+    labels:
+      caddy: web.hack.local
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+      caddy.tls: internal
+    healthcheck:
+      x-hack-http:
+        port: 3000
+        path: /health
+        interval_ms: 1000
+        timeout_ms: 2000
+        retries: 60
+        start_period_ms: 120000
+```
+
+`hack init` writes this probe with path `/` and the values above for each routed
+service when the native backend is selected. The `httpProbes` adaptation below
+accepts only `port` and `path` and fills the other four fields with the same values.
 
 For projects whose checked-in Compose file needs explicit native health probes,
 `HACK_NATIVE_ADAPTATION` selects an absolute JSON file. This leaves the source file

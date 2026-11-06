@@ -22,7 +22,10 @@ import {
 } from "../src/backends/native-project-finalization.ts";
 import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
 import { nativeProjectPs } from "../src/backends/native-project-observe.ts";
-import { preflightNativeRestart } from "../src/backends/native-project-restart-preflight.ts";
+import {
+  nativeRestartSelection,
+  preflightNativeRestart,
+} from "../src/backends/native-project-restart-preflight.ts";
 import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
 import {
   loadNativeProjectRun,
@@ -579,6 +582,29 @@ test("a post-start failure whose cleanup is unconfirmed records the run for ps a
   expect(ps.items).toEqual([
     expect.objectContaining({ service: "web", state: "running" }),
   ]);
+});
+
+test("a failed gcloud start's recorded owner keeps the ADC mode for restart", async () => {
+  const value = await fixture(false);
+  const { opts } = value;
+  opts.dependencies.adaptGcloud = async ({ input, mode }) => ({
+    input,
+    receipt: { mode, types: ["authorized_user"], services: ["web"] },
+  });
+  const selected = failedStartupFixture(value);
+  const failure = await startNativeProject({
+    ...opts,
+    gcloud: { mode: "file" },
+  }).catch((error: unknown) => error);
+  expect((failure as Error).message).toContain(
+    `The failed run ${selected.run} is recorded as this project's run mapping`
+  );
+  const recorded = await loadNativeProjectRun(opts.scope);
+  expect(recorded?.gcloud).toEqual({ mode: "file" });
+  // Restart re-applies the recorded ADC adapter instead of dropping it.
+  expect(nativeRestartSelection({ run: recorded! }).gcloud).toEqual({
+    mode: "file",
+  });
 });
 
 test("a post-start failure with an unauthenticated receipt records no owner", async () => {

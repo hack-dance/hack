@@ -1750,6 +1750,7 @@ export async function startNativeProject(opts: {
               effectiveEnvName: input.effectiveEnvName,
               profiles,
               aws: selection.aws,
+              gcloud: selection.gcloud,
               runtimeMetadata: metadata !== undefined,
             },
             finalization,

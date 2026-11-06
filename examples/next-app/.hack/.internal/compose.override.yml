@@ -5,7 +5,7 @@ services:
     extra_hosts:
       examples-next-app.hack: 172.30.0.3
     volumes:
-      - /Users/hack/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro
+      - /Users/example/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro
     environment:
       SSL_CERT_FILE: /etc/hack/ca/caddy-local-authority.crt
       SSL_CERT_DIR: /etc/hack/ca
@@ -19,7 +19,7 @@ services:
     extra_hosts:
       examples-next-app.hack: 172.30.0.3
     volumes:
-      - /Users/hack/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro
+      - /Users/example/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro
     environment:
       SSL_CERT_FILE: /etc/hack/ca/caddy-local-authority.crt
       SSL_CERT_DIR: /etc/hack/ca
@@ -33,7 +33,7 @@ services:
     extra_hosts:
       examples-next-app.hack: 172.30.0.3
     volumes:
-      - /Users/hack/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro
+      - /Users/example/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro
     environment:
       SSL_CERT_FILE: /etc/hack/ca/caddy-local-authority.crt
       SSL_CERT_DIR: /etc/hack/ca
@@ -47,7 +47,7 @@ services:
     extra_hosts:
       examples-next-app.hack: 172.30.0.3
     volumes:
-      - /Users/hack/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro
+      - /Users/example/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro
     environment:
       SSL_CERT_FILE: /etc/hack/ca/caddy-local-authority.crt
       SSL_CERT_DIR: /etc/hack/ca
@@ -61,7 +61,7 @@ services:
     extra_hosts:
       examples-next-app.hack: 172.30.0.3
     volumes:
-      - /Users/hack/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro
+      - /Users/example/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro
     environment:
       SSL_CERT_FILE: /etc/hack/ca/caddy-local-authority.crt
       SSL_CERT_DIR: /etc/hack/ca

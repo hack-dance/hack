@@ -149,7 +149,7 @@
 
 ## <small>3.3.3 (2026-07-09)</small>
 
-* Merge pull request #61 from hack-dance/codex/event-agent-runtime-repair ([f1de71e](https://github.com/hack-dance/hack/commit/f1de71e)), closes [#61](https://github.com/hack-dance/hack/issues/61)
+* Merge pull request #61 from hack-dance/codex/app-runtime-repair ([f1de71e](https://github.com/hack-dance/hack/commit/f1de71e)), closes [#61](https://github.com/hack-dance/hack/issues/61)
 * fix(cli): preserve usage code for lifecycle json ([f50f408](https://github.com/hack-dance/hack/commit/f50f408))
 * fix(runtime): clean descendant lifecycle groups ([57f2358](https://github.com/hack-dance/hack/commit/57f2358))
 * fix(runtime): isolate detached worktrees and recover orphan groups ([80a8dd2](https://github.com/hack-dance/hack/commit/80a8dd2))
@@ -864,7 +864,7 @@
 
 ## <small>1.10.1 (2026-02-19)</small>
 
-* Fix gateway 502 for livenation ([a1bb858](https://github.com/hack-dance/hack/commit/a1bb858))
+* Fix gateway 502 for a project host ([a1bb858](https://github.com/hack-dance/hack/commit/a1bb858))
 * Improve dashboard header and groups ([1e58826](https://github.com/hack-dance/hack/commit/1e58826))
 * Merge branch 'main' into squircle ([f06f84c](https://github.com/hack-dance/hack/commit/f06f84c))
 * Merge pull request #10 from hack-dance/squircle ([4539e92](https://github.com/hack-dance/hack/commit/4539e92)), closes [#10](https://github.com/hack-dance/hack/issues/10)

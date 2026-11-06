@@ -326,8 +326,8 @@ export interface ProjectInternalConfig {
    *
    * Example:
    * {
-   *   "content.staging.livenationapi.com": "host-gateway",
-   *   "loyalty.staging.livenationapi.com": "host-gateway"
+   *   "content.staging.example.test": "host-gateway",
+   *   "api.staging.example.test": "host-gateway"
    * }
    */
   readonly extraHosts?: Record<string, string>;

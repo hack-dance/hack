@@ -15,15 +15,15 @@ const definitionHash = resolveLifecycleDefinitionHash({
 });
 const session: MuxSession = {
   backend: "tmux",
-  name: "event-agent--lifecycle",
+  name: "example-app--lifecycle",
   attached: false,
-  path: "/tmp/event-agent",
+  path: "/tmp/example-app",
   windows: 2,
   createdAt: "2026-07-09T12:00:00.000Z",
 };
 const entry: LifecycleStateEntry = {
-  composeProject: "event-agent",
-  projectName: "event-agent",
+  composeProject: "example-app",
+  projectName: "example-app",
   branch: null,
   sessionName: session.name,
   backend: "tmux",
@@ -34,7 +34,7 @@ const entry: LifecycleStateEntry = {
     {
       name: "proxy",
       windowName: "proxy",
-      logPath: "/tmp/event-agent.log",
+      logPath: "/tmp/example-app.log",
     },
   ],
 };
@@ -81,7 +81,7 @@ test("classifyLifecycleSession creates when the expected session is absent", () 
     observedOwnershipToken: null,
     expectedBackend: "tmux",
     expectedSessionName: session.name,
-    expectedProjectRoot: "/tmp/event-agent",
+    expectedProjectRoot: "/tmp/example-app",
     expectedDefinitionHash: definitionHash,
     liveWindowNames: null,
   });
@@ -97,7 +97,7 @@ test("classifyLifecycleSession adopts a token-owned healthy session", () => {
     observedOwnershipToken: ownershipToken,
     expectedBackend: "tmux",
     expectedSessionName: session.name,
-    expectedProjectRoot: "/tmp/event-agent",
+    expectedProjectRoot: "/tmp/example-app",
     expectedDefinitionHash: definitionHash,
     liveWindowNames: new Set(["shell", "proxy"]),
   });
@@ -113,7 +113,7 @@ test("classifyLifecycleSession replaces a token-owned stale session", () => {
     observedOwnershipToken: ownershipToken,
     expectedBackend: "tmux",
     expectedSessionName: session.name,
-    expectedProjectRoot: "/tmp/event-agent",
+    expectedProjectRoot: "/tmp/example-app",
     expectedDefinitionHash: definitionHash,
     liveWindowNames: new Set(["shell"]),
   });
@@ -130,7 +130,7 @@ test("classifyLifecycleSession replaces a legacy tmux session only with path and
     observedOwnershipToken: null,
     expectedBackend: "tmux",
     expectedSessionName: session.name,
-    expectedProjectRoot: "/tmp/event-agent",
+    expectedProjectRoot: "/tmp/example-app",
     expectedDefinitionHash: definitionHash,
     liveWindowNames: new Set(["shell", "proxy"]),
   });
@@ -146,7 +146,7 @@ test("classifyLifecycleSession blocks same-name sessions without ownership proof
     observedOwnershipToken: null,
     expectedBackend: "tmux",
     expectedSessionName: session.name,
-    expectedProjectRoot: "/tmp/event-agent",
+    expectedProjectRoot: "/tmp/example-app",
     expectedDefinitionHash: definitionHash,
     liveWindowNames: new Set(["shell", "proxy"]),
   });

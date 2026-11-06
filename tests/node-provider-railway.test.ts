@@ -11,7 +11,7 @@ test("deriveRailwayServiceName normalizes user-facing names", () => {
 test("parseRailwayJsonOutput extracts payload from noisy CLI output", () => {
   const output = [
     "> Select a workspace Hack Dance",
-    "> Select a project Omega",
+    "> Select a project Example",
     '{ "projectId": "proj-1", "serviceName": "hack-node" }',
   ].join("\n");
   const parsed = __testOnlyNodeRailway.parseRailwayJsonOutput({ output });

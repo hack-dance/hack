@@ -3,9 +3,12 @@
 //! The client's stderr is a pipe read here, never inherited. Each line is redacted of
 //! every build-argument value (the request treats them all as secrets), stripped of
 //! terminal control characters and escape sequences, cut at a fixed length, and counted
-//! against a fixed budget before it is written to the caller's stream. Redaction is
-//! literal: a Dockerfile that transforms a value before printing it (encoding, slicing)
-//! is not detected.
+//! against a fixed budget before it is written to the caller's stream. Each value is
+//! matched raw and in the forms the client prints it in: Go `%q` quoting, JSON string
+//! escaping (with and without Go's HTML escaping), and the bake definition's own
+//! encoding, which the client quotes in its parse errors. Redaction is otherwise literal:
+//! a Dockerfile that transforms a value before printing it (encoding, slicing) is not
+//! detected.
 use std::{
     io::{Read, Write},
     sync::{
@@ -49,6 +52,88 @@ fn sanitize(bytes: &[u8]) -> Vec<u8> {
         .into_bytes()
 }
 
+/// The body of Go's `strconv.Quote` (without the surrounding quotes). Printability
+/// follows Rust's control and whitespace classes, a close approximation of Go's
+/// `unicode.IsPrint`.
+fn go_quoted(value: &str) -> String {
+    let mut out = String::new();
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{7}' => out.push_str("\\a"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{b}' => out.push_str("\\v"),
+            c if (c as u32) < 0x80 && c.is_control() => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c if c.is_control() || (c.is_whitespace() && c != ' ') => {
+                if (c as u32) < 0x10000 {
+                    out.push_str(&format!("\\u{:04x}", c as u32));
+                } else {
+                    out.push_str(&format!("\\U{:08x}", c as u32));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The body of a JSON string. `html` adds Go `encoding/json`'s default escaping of
+/// `<`, `>`, `&`, U+2028 and U+2029.
+fn json_escaped(value: &str, html: bool) -> String {
+    let mut out = String::new();
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            '<' | '>' | '&' | '\u{2028}' | '\u{2029}' if html => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Every form of one value the filter redacts.
+fn value_forms(value: &str) -> Vec<String> {
+    let mut forms = vec![
+        value.to_owned(),
+        go_quoted(value),
+        json_escaped(value, false),
+        json_escaped(value, true),
+        json_escaped(&super::bake_literal(value), false),
+    ];
+    // A raw value spanning lines is also caught line by line.
+    forms.extend(value.split(['\n', '\r']).map(str::to_owned));
+    forms
+}
+
+/// The length of the longest suffix of `bytes` that is a proper prefix of a needle.
+fn partial_tail(bytes: &[u8], needles: &[Vec<u8>]) -> usize {
+    needles
+        .iter()
+        .filter_map(|needle| {
+            (1..needle.len().min(bytes.len() + 1))
+                .rev()
+                .find(|k| bytes.ends_with(&needle[..*k]))
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 fn redact(bytes: &[u8], needles: &[Vec<u8>]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut at = 0;
@@ -67,15 +152,15 @@ fn redact(bytes: &[u8], needles: &[Vec<u8>]) -> Vec<u8> {
 }
 
 impl Filter {
-    /// Redact each value and each of its lines, raw and as sanitizing would leave them,
-    /// so a value spanning lines or containing control characters is still caught.
+    /// Redact every form of each value (see [`value_forms`]), raw and as sanitizing
+    /// would leave it, so a value containing quotes, escapes, control characters or line
+    /// breaks is still caught.
     pub(super) fn new<'a>(values: impl IntoIterator<Item = &'a str>) -> Self {
         let mut needles = Vec::new();
         for value in values {
-            let parts = std::iter::once(value).chain(value.split(['\n', '\r']));
-            for part in parts {
-                needles.push(part.as_bytes().to_vec());
-                needles.push(sanitize(part.as_bytes()));
+            for form in value_forms(value) {
+                needles.push(sanitize(form.as_bytes()));
+                needles.push(form.into_bytes());
             }
         }
         needles.retain(|needle| !needle.is_empty());
@@ -88,30 +173,24 @@ impl Filter {
         }
     }
 
-    /// The bytes to forward for one line (without its terminator). `cut` marks a line
-    /// longer than the line bound whose remainder is dropped: a trailing partial match
-    /// of any value is removed too, so no prefix of a value survives the cut.
+    /// The bytes to forward for one line (without its terminator). Values are redacted
+    /// in the raw bytes (catching values that contain control characters), the result
+    /// is sanitized, and redacted again in the sanitized bytes that are forwarded. `cut`
+    /// marks a line longer than the line bound whose remainder is dropped: a trailing
+    /// partial match of any value is then trimmed from the sanitized bytes, the ones
+    /// actually forwarded, so no prefix of a value survives the cut.
     pub(super) fn line(&mut self, line: &[u8], cut: bool) -> Vec<u8> {
         if self.exhausted {
             return Vec::new();
         }
-        let mut raw = line;
+        let mut clean = sanitize(&redact(line, &self.needles));
         let mut partial = false;
         if cut {
-            let tail = self
-                .needles
-                .iter()
-                .filter_map(|needle| {
-                    (1..needle.len().min(raw.len() + 1))
-                        .rev()
-                        .find(|k| raw.ends_with(&needle[..*k]))
-                })
-                .max()
-                .unwrap_or(0);
-            raw = &raw[..raw.len() - tail];
+            let tail = partial_tail(&clean, &self.needles);
+            clean.truncate(clean.len() - tail);
             partial = tail > 0;
         }
-        let mut out = redact(&sanitize(&redact(raw, &self.needles)), &self.needles);
+        let mut out = redact(&clean, &self.needles);
         if partial {
             out.extend_from_slice(REDACTED.as_bytes());
         }
@@ -249,6 +328,44 @@ mod tests {
         assert_eq!(out.matches(REDACTED).count(), 5, "{out}");
         assert!(!out.contains("esc"), "{out}");
         assert!(!out.contains('\x1b'));
+    }
+
+    #[test]
+    fn quoted_and_escaped_forms_of_values_are_redacted() {
+        let value = "p\"a\\s<s>&\nw\u{1b}d";
+        let forms = [
+            // Go %q, as buildx prints values in errors.
+            "p\\\"a\\\\s<s>&\\nw\\x1bd",
+            // JSON, and Go's HTML-escaped JSON.
+            "p\\\"a\\\\s<s>&\\nw\\u001bd",
+            "p\\\"a\\\\s\\u003cs\\u003e\\u0026\\nw\\u001bd",
+        ];
+        for form in forms {
+            let out = filtered(&[value], format!("err: \"{form}\" done\n").as_bytes());
+            assert_eq!(out, format!("err: \"{REDACTED}\" done\n"), "{form}");
+        }
+        // The bake definition encodes `${`, and the client quotes it in parse errors.
+        let out = filtered(&["a${b}c"], b"1 | {\"args\":{\"X\":\"a$${b}c\"}}\n");
+        assert_eq!(out, format!("1 | {{\"args\":{{\"X\":\"{REDACTED}\"}}}}\n"));
+        assert_eq!(
+            go_quoted("\u{2028}\u{1f600}\u{7f}"),
+            "\\u2028\u{1f600}\\x7f"
+        );
+    }
+
+    #[test]
+    fn a_value_split_by_a_cut_after_sanitizing_leaves_no_prefix() {
+        // Raw bytes end in ESC, so only the sanitized (forwarded) bytes end in a prefix.
+        let mut input = vec![b'x'; MAX_LINE_BYTES - 4];
+        input.extend_from_slice(b"abc\x1bdefgh tail\n");
+        let out = filtered(&["abcdefgh"], &input);
+        let first = out.lines().next().unwrap();
+        assert!(
+            first.ends_with(&format!("x{REDACTED}{LINE_CUT}")),
+            "{:?}",
+            &first[first.len() - 40..]
+        );
+        assert!(!out.contains("abc"));
     }
 
     #[test]

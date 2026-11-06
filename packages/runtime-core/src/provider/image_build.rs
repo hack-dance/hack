@@ -736,6 +736,14 @@ pub(super) fn run<P: BuildPool>(
             "Another operation is building this image; wait for it and retry.",
         )
     })?;
+    // `state::write` publishes through `<key>.pending` and a rename. A process that
+    // died between the two left that file; the key lock proves no writer is live, so
+    // the leftover is discarded (the committed receipt, if any, is unaffected).
+    match fs::remove_file(receipt_path.with_extension("pending")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(state::io(error)),
+    }
     let expected = labels(inputs, &identity);
     let previous = read_receipt(&receipt_path)?;
     if let Some(previous) = &previous {

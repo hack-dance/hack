@@ -490,6 +490,29 @@ fn remote_add_sources_refuse_before_any_build_effect() {
 }
 
 #[test]
+fn an_interrupted_receipt_publication_does_not_block_the_key() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let directory = builds_root(&fixture.candidate).join(&inputs.namespace);
+    state::private_directory(&directory).unwrap();
+    let receipt = directory.join(format!("{}.json", inputs.key));
+    // A process died after creating the temporary file and before renaming it, with
+    // no committed receipt yet.
+    fs::write(receipt.with_extension("pending"), b"{\"partial").unwrap();
+    let pool = FakePool::new("pool-1");
+    fixture.client(&inputs, "ok");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    assert_eq!(fixture.receipt(&inputs).phase, Phase::ContentIdVerified);
+    assert!(!receipt.with_extension("pending").exists());
+    // The same with a committed receipt present: a rebuild still proceeds.
+    fs::write(receipt.with_extension("pending"), b"{").unwrap();
+    let rebuild = fixture.inputs(Policy::Rebuild);
+    run(&fixture.candidate, &pool, &rebuild, &never).unwrap();
+    assert_eq!(fixture.calls(&inputs), 2);
+}
+
+#[test]
 fn bake_definitions_never_evaluate_project_text() {
     assert_eq!(bake_literal("${HOME}"), "$${HOME}");
     assert_eq!(

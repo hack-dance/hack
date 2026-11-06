@@ -219,7 +219,13 @@ pub(super) trait BuildPool {
     /// Inspect one image by content ID or tag; `None` when the engine reports it absent.
     fn inspect(&self, lease: &Self::Lease, image: &str) -> Result<Option<Value>, CandidateError>;
     /// Resolve one base image to its pinned manifest. Network only; no lease is held.
-    fn resolve(&self, base: &BaseImage) -> Result<BuildBase, CandidateError>;
+    /// Returns, with an error, by `deadline` or soon after `canceled` reports true.
+    fn resolve(
+        &self,
+        base: &BaseImage,
+        deadline: Instant,
+        canceled: &dyn Fn() -> bool,
+    ) -> Result<BuildBase, CandidateError>;
     /// The verified builder executable.
     fn builder(&self) -> Result<PathBuf, CandidateError>;
     /// Where the client's filtered output goes.
@@ -674,17 +680,25 @@ fn owned_image(
 
 /// Run one build operation end to end. See the module documentation for the protocol.
 /// `canceled` reports a pending cancellation request; it is checked before each
-/// unleased step and while the client runs.
+/// unleased step, during base resolution and while the client runs. The time budget
+/// starts here: base resolution and the client share it.
 pub(super) fn run<P: BuildPool>(
     candidate: &Candidate,
     pool: &P,
     inputs: &Inputs,
     canceled: &dyn Fn() -> bool,
 ) -> Result<BuildOutcome, CandidateError> {
+    let deadline = Instant::now() + inputs.timeout;
     let canceled_early = || {
         refusal(
             "native_build_canceled",
             "The image build was canceled before the build client started; no image was adopted.",
+        )
+    };
+    let expired_early = || {
+        refusal(
+            "native_build_timeout",
+            "The image build exceeded its time budget before the build client started; no image was adopted.",
         )
     };
     let root = builds_root(candidate);
@@ -765,7 +779,10 @@ pub(super) fn run<P: BuildPool>(
         if canceled() {
             return Err(canceled_early());
         }
-        let resolved = pool.resolve(base)?;
+        if Instant::now() >= deadline {
+            return Err(expired_early());
+        }
+        let resolved = pool.resolve(base, deadline, canceled)?;
         if !image_id(&resolved.source_digest)
             || !resolved
                 .pinned_reference
@@ -781,6 +798,9 @@ pub(super) fn run<P: BuildPool>(
     let builder = pool.builder()?;
     if canceled() {
         return Err(canceled_early());
+    }
+    if Instant::now() >= deadline {
+        return Err(expired_early());
     }
 
     // Step 3, under the lease: same pool, then record the attempt.
@@ -828,7 +848,7 @@ pub(super) fn run<P: BuildPool>(
         command(
             &builder, &scratch, &metadata, inputs, &identity, &pins, &expected,
         )?,
-        inputs.timeout,
+        deadline,
         canceled,
         output::Filter::new(inputs.args.values().map(String::as_str)),
         pool.output(),
@@ -1093,7 +1113,7 @@ impl Drop for CancelSignals {
 /// before this returns, so nothing from the client follows the operation's result.
 fn supervise(
     mut command: std::process::Command,
-    timeout: Duration,
+    deadline: Instant,
     canceled: &dyn Fn() -> bool,
     filter: output::Filter,
     sink: Box<dyn Write + Send>,
@@ -1108,7 +1128,6 @@ fn supervise(
         .stderr
         .take()
         .map(|stderr| output::Forwarder::spawn(stderr, filter, sink));
-    let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait().map_err(state::io)? {
             return Ok(Ended::Exited(status.success()));
@@ -1239,8 +1258,18 @@ impl<'a> BuildPool for LivePool<'a> {
             Err(error) => Err(error),
         }
     }
-    fn resolve(&self, base: &BaseImage) -> Result<BuildBase, CandidateError> {
-        registry_image::resolve_build_base(&base.reference)
+    fn resolve(
+        &self,
+        base: &BaseImage,
+        deadline: Instant,
+        canceled: &dyn Fn() -> bool,
+    ) -> Result<BuildBase, CandidateError> {
+        let reference = base.reference.clone();
+        interruptible(
+            move || registry_image::resolve_build_base(&reference, deadline),
+            deadline,
+            canceled,
+        )
     }
     fn builder(&self) -> Result<PathBuf, CandidateError> {
         artifact::verify_builder(self.candidate)?;
@@ -1296,6 +1325,44 @@ pub(super) fn prune_build_cache(
             "The engine reported no reclaimed build-cache size.",
         )
     })
+}
+
+/// Run a blocking, effect-free network step on its own thread and wait for it until
+/// `deadline` or a cancellation request. An abandoned step ends by its own deadline;
+/// its result is discarded and it changes no local state.
+fn interruptible<T: Send + 'static>(
+    step: impl FnOnce() -> Result<T, CandidateError> + Send + 'static,
+    deadline: Instant,
+    canceled: &dyn Fn() -> bool,
+) -> Result<T, CandidateError> {
+    let (sender, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(step());
+    });
+    loop {
+        match result.recv_timeout(POLL) {
+            Ok(outcome) => return outcome,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(refusal(
+                    "native_build_base_image",
+                    "Base-image resolution ended without a result.",
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if canceled() {
+            return Err(refusal(
+                "native_build_canceled",
+                "The image build was canceled before the build client started; no image was adopted.",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(refusal(
+                "native_build_timeout",
+                "The image build exceeded its time budget before the build client started; no image was adopted.",
+            ));
+        }
+    }
 }
 
 /// `runtime build-image --request <private-file>`: build or reuse one native image.

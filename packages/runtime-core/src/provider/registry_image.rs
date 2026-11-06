@@ -245,7 +245,10 @@ pub struct AcquiredImage {
     pub archive_sha256: String,
     pub archive_bytes: u64,
 }
-fn authenticated_fetch(repo: &str) -> Result<Fetch, CandidateError> {
+/// The complete-acquisition bound for one registry resolution or fetch.
+const ACQUISITION_BUDGET: Duration = Duration::from_secs(300);
+
+fn authenticated_fetch(repo: &str, deadline: Instant) -> Result<Fetch, CandidateError> {
     let mut fetch = Fetch {
         client: Client::builder()
             .https_only(true)
@@ -255,7 +258,7 @@ fn authenticated_fetch(repo: &str) -> Result<Fetch, CandidateError> {
             .build()
             .map_err(|_| error("Cannot initialize registry TLS client."))?,
         token: Zeroizing::new(String::new()),
-        deadline: Instant::now() + Duration::from_secs(300),
+        deadline: deadline.min(Instant::now() + ACQUISITION_BUDGET),
     };
     let mut token_url =
         Url::parse("https://auth.docker.io/token").map_err(|_| error("Invalid token endpoint."))?;
@@ -336,7 +339,8 @@ pub struct ResolvedImage {
 /// fetch must use pinned_reference: reusing the original tag would discard this review.
 pub fn resolve(reference_text: &str) -> Result<ResolvedImage, CandidateError> {
     let (repo, tag) = tagged_reference(reference_text)?;
-    resolve_manifest(&repo, &tag, None).map(|(resolved, _)| resolved)
+    resolve_manifest(&repo, &tag, None, Instant::now() + ACQUISITION_BUDGET)
+        .map(|(resolved, _)| resolved)
 }
 
 /// Resolve one repository at a tag or digest to a Linux ARM64 image and its config bytes.
@@ -345,8 +349,9 @@ fn resolve_manifest(
     repo: &str,
     reference: &str,
     expected_source: Option<&str>,
+    deadline: Instant,
 ) -> Result<(ResolvedImage, Vec<u8>), CandidateError> {
-    let fetch = authenticated_fetch(repo)?;
+    let fetch = authenticated_fetch(repo, deadline)?;
     let url = Url::parse(&format!(
         "https://registry-1.docker.io/v2/{repo}/manifests/{reference}"
     ))
@@ -401,7 +406,11 @@ pub struct BuildBase {
 /// Either way the image must offer exactly one Linux ARM64 image, and its configuration
 /// must declare no `ONBUILD` triggers: a stored trigger could pull images the Dockerfile
 /// scan never saw. No layers, credentials or runtime state are touched.
-pub fn resolve_build_base(named: &NamedReference) -> Result<BuildBase, CandidateError> {
+/// `deadline` bounds the whole resolution (never beyond the usual acquisition budget).
+pub fn resolve_build_base(
+    named: &NamedReference,
+    deadline: Instant,
+) -> Result<BuildBase, CandidateError> {
     let repo = named.docker_hub_repository().ok_or_else(|| {
         error("Only public Docker Hub [namespace/]repository[:tag][@sha256] references are supported.")
     })?;
@@ -410,7 +419,7 @@ pub fn resolve_build_base(named: &NamedReference) -> Result<BuildBase, Candidate
         (None, Some(tag)) => (tag.as_str(), None),
         (None, None) => ("latest", None),
     };
-    let (resolved, config) = resolve_manifest(repo, reference, expected)?;
+    let (resolved, config) = resolve_manifest(repo, reference, expected, deadline)?;
     if declares_onbuild(&config)? {
         return Err(CandidateError::new(
             "native_build_base_image",
@@ -458,7 +467,7 @@ pub fn acquire(reference_text: &str, output: &Path) -> Result<AcquiredImage, Can
     if output.exists() {
         return Err(error("Image archive output already exists."));
     }
-    let fetch = authenticated_fetch(repo)?;
+    let fetch = authenticated_fetch(repo, Instant::now() + ACQUISITION_BUDGET)?;
     let url = Url::parse(&format!(
         "https://registry-1.docker.io/v2/{repo}/manifests/{pin}"
     ))
@@ -585,7 +594,8 @@ mod tests {
             ImageReference::Named(named) => named,
             ImageReference::ImageId(_) => unreachable!(),
         };
-        let error = resolve_build_base(&named("ghcr.io/example/app:1")).unwrap_err();
+        let error =
+            resolve_build_base(&named("ghcr.io/example/app:1"), Instant::now()).unwrap_err();
         assert_eq!(error.code, "registry_image");
     }
 

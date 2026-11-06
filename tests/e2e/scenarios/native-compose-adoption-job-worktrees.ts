@@ -851,7 +851,19 @@ type CompletedJobCaptureOptions = {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
   readonly captures: string;
+  /**
+   * Capture budget. Without `ready` it starts at admission (before spawn); with
+   * `ready` it starts only once the ready file exists, so child startup is never
+   * charged to it.
+   */
   readonly timeoutMs: number;
+  /**
+   * Optional startup barrier: the captured child (or its descendant) creates
+   * `path` once it is ready. Until then only `budgetMs` applies; exceeding it
+   * expires the capture exactly like the main deadline (owned group stop,
+   * withheld settlement), so a child that never becomes ready stays bounded.
+   */
+  readonly ready?: { readonly path: string; readonly budgetMs: number };
   readonly stdin?: Uint8Array;
   readonly signal?: AbortSignal;
   readonly maxStreamBytes?: number;
@@ -896,7 +908,14 @@ async function captureCompletedJobFixtureChild(
     maxStreamBytes: opts.maxStreamBytes,
     beforeInterrupt: opts.beforeInterrupt,
     onUnconfirmed: opts.onUnconfirmed,
-    deadline: Date.now() + opts.timeoutMs,
+    ready:
+      opts.ready === undefined
+        ? undefined
+        : Object.freeze({
+            path: opts.ready.path,
+            budgetMs: opts.ready.budgetMs,
+          }),
+    admittedAt: started,
   });
   const [executable, ...argv] = snapshot.argv;
   requireValue(
@@ -905,6 +924,11 @@ async function captureCompletedJobFixtureChild(
       Number.isSafeInteger(snapshot.timeoutMs) &&
       snapshot.timeoutMs > 0 &&
       snapshot.timeoutMs <= TIMEOUT &&
+      (snapshot.ready === undefined ||
+        (snapshot.ready.path.startsWith("/") &&
+          Number.isSafeInteger(snapshot.ready.budgetMs) &&
+          snapshot.ready.budgetMs > 0 &&
+          snapshot.ready.budgetMs <= TIMEOUT)) &&
       !snapshot.signal?.aborted &&
       (snapshot.stdin === undefined || snapshot.stdin.byteLength <= 8192) &&
       (snapshot.maxStreamBytes === undefined ||
@@ -917,9 +941,13 @@ async function captureCompletedJobFixtureChild(
   try {
     const errors = await open(`${snapshot.captures}.stderr`, "wx", 0o600);
     try {
-      requireValue(snapshot.deadline > Date.now() && !snapshot.signal?.aborted);
+      requireValue(
+        (snapshot.ready !== undefined ||
+          snapshot.admittedAt + snapshot.timeoutMs > Date.now()) &&
+          !snapshot.signal?.aborted
+      );
       ownerStarted = true;
-      const exitCode = await captureInterruptedPipes({
+      const { exitCode, deadline } = await captureInterruptedPipes({
         ...snapshot,
         executable,
         args: argv,
@@ -928,7 +956,7 @@ async function captureCompletedJobFixtureChild(
       });
       const stdout = await readFile(`${snapshot.captures}.stdout`, "utf8"),
         stderr = await readFile(`${snapshot.captures}.stderr`, "utf8");
-      requireValue(snapshot.deadline > Date.now());
+      requireValue(deadline > Date.now());
       return {
         command: "owned completed-job fixture command",
         exitCode,
@@ -950,15 +978,36 @@ async function captureCompletedJobFixtureChild(
   }
 }
 
+/**
+ * Pipe EOF precedes reaping: an exited descendant reparented to the subreaper
+ * still answers the group probe until it is reaped. Re-probe only within the
+ * caller's settlement budget; presence at its end still refuses.
+ */
+async function awaitCapturedAbsence(identity: number, deadline: number) {
+  for (;;) {
+    try {
+      // Read-only existence probe; an exited leader grants no former-group signal authority.
+      process.kill(identity, 0);
+    } catch (error: unknown) {
+      if (isRecord(error) && error.code === "ESRCH") {
+        return;
+      }
+      throw error;
+    }
+    requireValue(deadline > Date.now());
+    await Bun.sleep(5);
+  }
+}
+
 async function captureInterruptedPipes(
   opts: CompletedJobCaptureOptions & {
-    readonly deadline: number;
+    readonly admittedAt: number;
     readonly executable: string;
     readonly args: readonly string[];
     readonly output: Awaited<ReturnType<typeof open>>;
     readonly errors: Awaited<ReturnType<typeof open>>;
   }
-): Promise<number> {
+): Promise<{ readonly exitCode: number; readonly deadline: number }> {
   const child = spawn(opts.executable, [...opts.args], {
     cwd: opts.cwd,
     env: { ...opts.env },
@@ -1083,21 +1132,36 @@ async function captureInterruptedPipes(
   if (opts.signal?.aborted) {
     cancel();
   }
-  const timer = setTimeout(
-    () => {
-      timedOut = true;
-      admission.abort();
-      stopOwned();
-      expire?.();
-    },
-    Math.max(0, opts.deadline - Date.now())
-  );
+  // Without a ready barrier the capture deadline runs from admission. With one, a
+  // separate startup budget bounds spawn-to-ready and the capture deadline is armed
+  // only after readiness is observed; both expire through the same owned stop.
+  let deadline =
+    opts.ready === undefined
+      ? opts.admittedAt + opts.timeoutMs
+      : Date.now() + opts.ready.budgetMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = (at: number) => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+    deadline = at;
+    timer = setTimeout(
+      () => {
+        timedOut = true;
+        admission.abort();
+        stopOwned();
+        expire?.();
+      },
+      Math.max(0, at - Date.now())
+    );
+  };
+  arm(deadline);
   const beforeDeadline = async (work: () => Promise<unknown>) => {
-    requireValue(!admission.signal.aborted && opts.deadline > Date.now());
+    requireValue(!admission.signal.aborted && deadline > Date.now());
     outstandingPhase += 1;
     const pending = Promise.resolve()
       .then(() => {
-        requireValue(!admission.signal.aborted && opts.deadline > Date.now());
+        requireValue(!admission.signal.aborted && deadline > Date.now());
         return work();
       })
       .finally(() => {
@@ -1125,18 +1189,7 @@ async function captureInterruptedPipes(
           );
           requireValue(child.pid !== undefined);
           for (const identity of [child.pid, -child.pid]) {
-            let absent = false;
-            try {
-              // Read-only existence probe; an exited leader grants no former-group signal authority.
-              process.kill(identity, 0);
-            } catch (error: unknown) {
-              if (isRecord(error) && error.code === "ESRCH") {
-                absent = true;
-              } else {
-                throw error;
-              }
-            }
-            requireValue(absent);
+            await awaitCapturedAbsence(identity, settlementDeadline);
           }
           // Flush/close the capture handles inside the same settlement budget.
           await Promise.all([opts.output.close(), opts.errors.close()]);
@@ -1194,10 +1247,27 @@ async function captureInterruptedPipes(
   let code: number | undefined;
   try {
     requireValue(child.pid !== undefined);
+    const ready = opts.ready;
+    if (ready !== undefined) {
+      // An owned bounded poll, not caller work: it stops within one tick of expiry.
+      const observed = (async () => {
+        while (
+          !(admission.signal.aborted || (await Bun.file(ready.path).exists()))
+        ) {
+          await Bun.sleep(5);
+        }
+      })();
+      await Promise.race([observed, expired]);
+      requireValue(
+        !(timedOut || oversized || admission.signal.aborted) &&
+          deadline > Date.now()
+      );
+      arm(Date.now() + opts.timeoutMs);
+    }
     const readAdmission = Object.freeze({
       pid: child.pid,
       signal: admission.signal,
-      deadline: opts.deadline,
+      deadline,
     });
     await beforeDeadline(
       async () =>
@@ -1222,7 +1292,7 @@ async function captureInterruptedPipes(
           timedOut ||
           oversized ||
           admission.signal.aborted
-        ) && opts.deadline > Date.now()
+        ) && deadline > Date.now()
       );
       child.kill("SIGINT");
     }
@@ -1249,9 +1319,9 @@ async function captureInterruptedPipes(
       !oversized &&
       !cancelled &&
       !opts.signal?.aborted &&
-      opts.deadline > Date.now()
+      deadline > Date.now()
   );
-  return code;
+  return { exitCode: code, deadline };
 }
 
 async function interruptedStart(h: Runtime, instance: Instance) {

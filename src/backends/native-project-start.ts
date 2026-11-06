@@ -22,6 +22,10 @@ import {
   recoverNativeHttpsLease,
 } from "./native-https-owner.ts";
 import {
+  NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+  nativeImagePolicyArgs,
+} from "./native-image-policy.ts";
+import {
   type NativePreparedBase,
   preparedBaseArguments,
 } from "./native-prepared-base.ts";
@@ -452,7 +456,11 @@ async function pinNativeProjectImages(opts: {
     const ensured = await opts.invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
-      args: nativeEnsureImageArgs(image, policy),
+      args: [
+        ...nativeEnsureImageArgs(image, policy),
+        ...nativeImagePolicyArgs(),
+      ],
+      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
     });
     if (
       !isRecord(ensured) ||

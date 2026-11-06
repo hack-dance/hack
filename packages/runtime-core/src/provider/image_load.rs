@@ -1,22 +1,45 @@
 //! Explicit, bounded local image archives; no registry credentials or Docker contexts.
-use super::{engine::Engine, image_platform::ImagePlatform, state};
+//!
+//! An archive is validated in one streaming pass that also hashes every byte, so the
+//! validated bytes are exactly the bytes whose SHA-256 the caller expected. The upload
+//! to the engine re-reads the file through a reader that withholds its final bytes until
+//! the complete stream has hashed to the same value; a file changed after validation
+//! cannot complete an import. Memory use is bounded by small metadata members, not by
+//! archive size.
+use super::{engine::Engine, image_platform::ImagePlatform, image_policy::ImagePolicy, state};
 use crate::{Candidate, CandidateError};
 use flate2::read::MultiGzDecoder;
 use reqwest::Method;
+use ruzstd::decoding::{
+    StreamingDecoder,
+    errors::{FrameDecoderError, ReadFrameHeaderError},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
-    io::{Cursor, Read, Seek},
+    io::{BufRead, BufReader, Read, Seek},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf},
     time::Duration,
 };
 
-const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
-const MAX_EXPANDED: u64 = 2 * 1024 * 1024 * 1024;
+/// Members at most this large whose content is raw JSON are retained for metadata checks.
+const MAX_METADATA_MEMBER: u64 = 1024 * 1024;
+/// Total retained metadata bytes per archive.
+const MAX_RETAINED_METADATA: usize = 4 * 1024 * 1024;
+/// Upload and import time allowed beyond the size-scaled transfer time.
+const LOAD_BASE_TIMEOUT: Duration = Duration::from_secs(40);
+/// Assumed slowest acceptable engine import rate when scaling the load timeout.
+const LOAD_BYTES_PER_SECOND: u64 = 8 * 1024 * 1024;
+/// Ceiling for one load request, so `ensure-image` stays inside its caller's bound.
+const LOAD_MAX_TIMEOUT: Duration = Duration::from_secs(220);
+/// Validation records a SHA-256 per block of this many archive bytes; the upload releases
+/// a block only after it matches. Archives are at most 8 GiB, so at most 8192 digests.
+const VERIFY_BLOCK: usize = 1024 * 1024;
+
 fn error(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("image_archive", message)
 }
@@ -58,22 +81,155 @@ fn verify_digest(
     Ok(total)
 }
 
-fn read_verified_archive(
-    file: &mut (impl Read + Seek),
-    expected: &str,
-) -> Result<Vec<u8>, CandidateError> {
-    file.rewind()
-        .map_err(|_| error("Cannot rewind the image archive."))?;
-    let mut bytes = Vec::new();
-    file.take(MAX_ARCHIVE + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| error("Cannot read the image archive."))?;
-    // Retain the original descriptor and verify the bytes actually being validated/imported.
-    // A changed file between the streaming check and this read cannot reuse the earlier hash.
-    if bytes.len() as u64 > MAX_ARCHIVE || hash(&bytes) != expected {
-        return Err(error("Image archive digest mismatch."));
+/// Hashes and counts every byte read through it, refusing more than `limit`, and records
+/// one SHA-256 per [`VERIFY_BLOCK`] bytes.
+struct Hashing<R> {
+    inner: R,
+    digest: Sha256,
+    total: u64,
+    limit: u64,
+    block: Sha256,
+    block_len: usize,
+    blocks: Vec<[u8; 32]>,
+}
+impl<R> Hashing<R> {
+    fn new(inner: R, limit: u64) -> Self {
+        Self {
+            inner,
+            digest: Sha256::new(),
+            total: 0,
+            limit,
+            block: Sha256::new(),
+            block_len: 0,
+            blocks: Vec::new(),
+        }
     }
-    Ok(bytes)
+
+    /// The digests of every complete block and the final partial block.
+    fn finish(mut self) -> (String, u64, Vec<[u8; 32]>) {
+        if self.block_len > 0 {
+            self.blocks.push(self.block.finalize().into());
+        }
+        (
+            format!("{:x}", self.digest.finalize()),
+            self.total,
+            self.blocks,
+        )
+    }
+}
+impl<R: Read> Read for Hashing<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buffer)?;
+        self.total += n as u64;
+        if self.total > self.limit {
+            return Err(std::io::Error::other("archive limit"));
+        }
+        self.digest.update(&buffer[..n]);
+        let mut rest = &buffer[..n];
+        while !rest.is_empty() {
+            let take = rest.len().min(VERIFY_BLOCK - self.block_len);
+            self.block.update(&rest[..take]);
+            self.block_len += take;
+            rest = &rest[take..];
+            if self.block_len == VERIFY_BLOCK {
+                self.blocks
+                    .push(std::mem::take(&mut self.block).finalize().into());
+                self.block_len = 0;
+            }
+        }
+        Ok(n)
+    }
+}
+
+/// A validated archive: its length and the SHA-256 of each [`VERIFY_BLOCK`] of it.
+pub(super) struct Validated {
+    pub(super) length: u64,
+    blocks: Vec<[u8; 32]>,
+}
+
+/// The upload side of an import. Every byte it releases was validated: a block is read
+/// in full and released only after it matches the digest validation recorded for that
+/// position, and the final block is released only after the stream has ended at the
+/// validated length with the expected whole-archive SHA-256. A file changed after
+/// validation therefore fails the upload before any changed byte, and before any end of
+/// archive, reaches the consumer; trailing padding cannot expose a changed tar early.
+struct HeldTail<R> {
+    inner: R,
+    digest: Sha256,
+    total: u64,
+    expected_len: u64,
+    expected: String,
+    blocks: Vec<[u8; 32]>,
+    next_block: usize,
+    held: Vec<u8>,
+    offset: usize,
+    verified: bool,
+}
+impl<R: Read> HeldTail<R> {
+    fn new(inner: R, validated: &Validated, expected: &str) -> Self {
+        Self {
+            inner,
+            digest: Sha256::new(),
+            total: 0,
+            expected_len: validated.length,
+            expected: expected.to_owned(),
+            blocks: validated.blocks.clone(),
+            next_block: 0,
+            held: Vec::with_capacity(VERIFY_BLOCK),
+            offset: 0,
+            verified: false,
+        }
+    }
+
+    /// Read and check the next block; on the last block, also check the stream end.
+    fn load(&mut self) -> std::io::Result<()> {
+        let changed = || std::io::Error::other("image archive changed");
+        self.held.clear();
+        self.offset = 0;
+        (&mut self.inner)
+            .take(VERIFY_BLOCK as u64)
+            .read_to_end(&mut self.held)?;
+        self.total += self.held.len() as u64;
+        let expected = self.blocks.get(self.next_block).ok_or_else(changed)?;
+        if self.held.is_empty() || Sha256::digest(&self.held).as_slice() != expected {
+            return Err(changed());
+        }
+        self.digest.update(&self.held);
+        self.next_block += 1;
+        if self.next_block == self.blocks.len() {
+            let mut extra = [0_u8; 1];
+            let longer = loop {
+                match self.inner.read(&mut extra) {
+                    Ok(n) => break n > 0,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            };
+            let actual = format!("{:x}", std::mem::take(&mut self.digest).finalize());
+            if longer || self.total != self.expected_len || actual != self.expected {
+                return Err(changed());
+            }
+            self.verified = true;
+        }
+        Ok(())
+    }
+}
+impl<R: Read> Read for HeldTail<R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if self.offset == self.held.len() {
+            if self.verified {
+                return Ok(0);
+            }
+            self.load()?;
+        }
+        let n = (self.held.len() - self.offset).min(out.len());
+        out[..n].copy_from_slice(&self.held[self.offset..self.offset + n]);
+        self.offset += n;
+        Ok(n)
+    }
 }
 
 #[derive(Deserialize)]
@@ -84,80 +240,217 @@ struct Manifest {
     repo_tags: Option<Vec<String>>,
 }
 
-fn archive_member(bytes: &[u8], name: &str, limit: u64) -> Result<Vec<u8>, CandidateError> {
-    let mut archive = tar::Archive::new(Cursor::new(bytes));
-    for entry in archive
-        .entries()
-        .map_err(|_| error("Invalid image tar archive."))?
-    {
-        let entry = entry.map_err(|_| error("Invalid image tar entry."))?;
-        if entry
-            .path()
-            .map_err(|_| error("Invalid image archive path."))?
-            .as_ref()
-            == Path::new(name)
-        {
-            if entry.size() > limit {
-                return Err(error("Image metadata exceeds its limit."));
-            }
-            let mut result = Vec::new();
-            entry
-                .take(limit + 1)
-                .read_to_end(&mut result)
-                .map_err(|_| error("Cannot read image metadata."))?;
-            if result.len() as u64 > limit {
-                return Err(error("Image metadata exceeds its limit."));
-            }
-            return Ok(result);
+/// Feed the decoded content of one member to `sink`, detecting compression from its
+/// first bytes as the engine's loader does: gzip, zstd (including multiple and skippable
+/// frames) or an uncompressed tar. Returns true when the member was not compressed.
+fn decode_member(
+    mut member: impl Read,
+    mut sink: impl FnMut(&[u8]) -> Result<(), CandidateError>,
+) -> Result<bool, CandidateError> {
+    // The magic is read in full even when the member arrives in short reads.
+    let mut magic = [0_u8; 4];
+    let mut filled = 0;
+    while filled < magic.len() {
+        match member.read(&mut magic[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(error("Cannot read an image archive member.")),
         }
     }
-    Err(error("Image archive member is missing."))
+    let head = &magic[..filled];
+    let mut member = BufReader::with_capacity(64 * 1024, head.chain(member));
+    let gzip = head.starts_with(&[0x1f, 0x8b]);
+    // A zstd stream starts with a frame or a skippable frame (magic 0x184D2A50 through
+    // 0x184D2A5F); both are little-endian.
+    let zstd = head.first_chunk::<4>().is_some_and(|magic| {
+        let magic = u32::from_le_bytes(*magic);
+        magic == 0xFD2F_B528 || (0x184D_2A50..=0x184D_2A5F).contains(&magic)
+    });
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut pump = |mut reader: Box<dyn Read + '_>| -> Result<(), CandidateError> {
+        loop {
+            let n = reader
+                .read(&mut buffer)
+                .map_err(|_| error("Cannot decode the image layer."))?;
+            if n == 0 {
+                return Ok(());
+            }
+            sink(&buffer[..n])?;
+        }
+    };
+    if gzip {
+        return pump(Box::new(MultiGzDecoder::new(member))).map(|()| false);
+    }
+    if !zstd {
+        return pump(Box::new(member)).map(|()| true);
+    }
+    loop {
+        if member
+            .fill_buf()
+            .map_err(|_| error("Cannot read an image archive member."))?
+            .is_empty()
+        {
+            return Ok(false);
+        }
+        match StreamingDecoder::new(&mut member) {
+            Ok(decoder) => pump(Box::new(decoder))?,
+            Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
+                length,
+                ..
+            })) => {
+                let skipped = std::io::copy(
+                    &mut (&mut member).take(u64::from(length)),
+                    &mut std::io::sink(),
+                )
+                .map_err(|_| error("Cannot decode the image layer."))?;
+                if skipped != u64::from(length) {
+                    return Err(error("Cannot decode the image layer."));
+                }
+            }
+            Err(_) => return Err(error("Cannot decode the image layer.")),
+        }
+    }
 }
 
+/// One validated member: the SHA-256 of its decoded content and, for small raw JSON
+/// members, the content itself.
+struct Member {
+    decoded: String,
+    retained: Option<Vec<u8>>,
+}
+
+/// Validate one single-image Linux ARM64 tarball in a single streaming pass and return its
+/// length.
 #[cfg(test)]
-fn validate_archive(bytes: &[u8], image: &str, max_expanded: u64) -> Result<(), CandidateError> {
-    validate_archive_for(bytes, image, max_expanded, ImagePlatform::LinuxArm64)
+fn validate_stream(
+    reader: impl Read,
+    expected_sha: &str,
+    image: &str,
+    archive_limit: u64,
+    expanded_limit: u64,
+) -> Result<u64, CandidateError> {
+    validated(
+        reader,
+        expected_sha,
+        image,
+        archive_limit,
+        expanded_limit,
+        ImagePlatform::LinuxArm64,
+    )
+    .map(|v| v.length)
 }
 
-/// Validates one flat image archive whose configuration targets exactly `platform`.
-fn validate_archive_for(
-    bytes: &[u8],
+/// Validate one single-image tarball in a single streaming pass, recording its length
+/// and per-block digests for a verified re-read.
+///
+/// The stream must hash to `expected_sha` within `archive_limit` bytes. Members must be
+/// a flat set of unique regular files named by exactly one `manifest.json` entry; the
+/// config must hash to `image` and target exactly `platform`; each layer's decoded content
+/// must match the config's `diff_ids`; total decoded bytes stay within `expanded_limit`.
+fn validated(
+    reader: impl Read,
+    expected_sha: &str,
     image: &str,
-    max_expanded: u64,
+    archive_limit: u64,
+    expanded_limit: u64,
     platform: ImagePlatform,
-) -> Result<(), CandidateError> {
-    if !image.strip_prefix("sha256:").is_some_and(hex) || bytes.len() as u64 > MAX_ARCHIVE {
+) -> Result<Validated, CandidateError> {
+    if !image.strip_prefix("sha256:").is_some_and(hex) || !hex(expected_sha) {
         return Err(error("Invalid image identity or archive size."));
     }
-    let mut names = BTreeSet::new();
-    let mut archive = tar::Archive::new(Cursor::new(bytes));
-    for entry in archive
-        .entries()
-        .map_err(|_| error("Invalid image archive."))?
+    let mut hashing = Hashing::new(reader, archive_limit);
+    let mut members = BTreeMap::new();
+    let mut expanded = 0_u64;
+    let mut retained_total = 0_usize;
     {
-        let entry = entry.map_err(|_| error("Invalid image tar entry."))?;
-        let path = entry
-            .path()
-            .map_err(|_| error("Invalid image archive path."))?;
-        let name = path
-            .to_str()
-            .ok_or_else(|| error("Image archive paths must be UTF-8."))?;
-        if !entry.header().entry_type().is_file()
-            || name.len() > 256
-            || name.chars().any(char::is_control)
-            || path.components().count() != 1
-            || !path.components().all(|p| matches!(p, Component::Normal(_)))
-            || !names.insert(name.to_owned())
-            || names.len() > 130
+        let mut archive = tar::Archive::new(&mut hashing);
+        for entry in archive
+            .entries()
+            .map_err(|_| error("Invalid image archive."))?
         {
-            return Err(error(
-                "Only a flat, single-image tarball with unique regular members is supported.",
-            ));
+            let entry = entry.map_err(|_| error("Invalid image tar entry."))?;
+            let path = entry
+                .path()
+                .map_err(|_| error("Invalid image archive path."))?
+                .into_owned();
+            let name = path
+                .to_str()
+                .ok_or_else(|| error("Image archive paths must be UTF-8."))?
+                .to_owned();
+            if !entry.header().entry_type().is_file()
+                || name.len() > 256
+                || name.chars().any(char::is_control)
+                || path.components().count() != 1
+                || !path.components().all(|p| matches!(p, Component::Normal(_)))
+                || members.contains_key(&name)
+                || members.len() >= 130
+            {
+                return Err(error(
+                    "Only a flat, single-image tarball with unique regular members is supported.",
+                ));
+            }
+            let small = entry.size() <= MAX_METADATA_MEMBER;
+            let mut digest = Sha256::new();
+            let mut retained = small.then(Vec::new);
+            // Decided by the first byte that is not JSON whitespace, in whichever chunk it
+            // arrives; the original bytes, whitespace included, are retained for identity.
+            let mut raw_json: Option<bool> = None;
+            let uncompressed = decode_member(entry, |bytes| {
+                expanded += bytes.len() as u64;
+                if expanded > expanded_limit {
+                    return Err(error("Image expansion exceeds its configured budget."));
+                }
+                digest.update(bytes);
+                if raw_json.is_none() {
+                    raw_json = bytes
+                        .iter()
+                        .find(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                        .map(|b| matches!(b, b'{' | b'['));
+                }
+                if raw_json == Some(false) {
+                    retained = None;
+                }
+                if let Some(kept) = retained.as_mut() {
+                    kept.extend_from_slice(bytes);
+                    if kept.len() as u64 > MAX_METADATA_MEMBER {
+                        retained = None;
+                    }
+                }
+                Ok(())
+            })?;
+            let retained = retained.filter(|_| uncompressed && raw_json == Some(true));
+            if let Some(kept) = &retained {
+                retained_total += kept.len();
+                if retained_total > MAX_RETAINED_METADATA {
+                    return Err(error("Image archive metadata exceeds its limit."));
+                }
+            }
+            members.insert(
+                name,
+                Member {
+                    decoded: format!("sha256:{:x}", digest.finalize()),
+                    retained,
+                },
+            );
         }
     }
-    let manifest: Vec<Manifest> =
-        serde_json::from_slice(&archive_member(bytes, "manifest.json", 64 * 1024)?)
-            .map_err(|_| error("Invalid image manifest."))?;
+    // Bytes after the end-of-archive marker are hashed too; the expected digest covers them.
+    std::io::copy(&mut hashing, &mut std::io::sink())
+        .map_err(|_| error("Image archive exceeds its byte limit."))?;
+    let (actual, length, blocks) = hashing.finish();
+    if actual != expected_sha {
+        return Err(error("Image archive digest mismatch."));
+    }
+    let metadata = |name: &str, limit: usize| {
+        members
+            .get(name)
+            .and_then(|m| m.retained.as_deref())
+            .filter(|bytes| bytes.len() <= limit)
+            .ok_or_else(|| error("Image archive metadata member is missing or too large."))
+    };
+    let manifest: Vec<Manifest> = serde_json::from_slice(metadata("manifest.json", 64 * 1024)?)
+        .map_err(|_| error("Invalid image manifest."))?;
     let [manifest] = manifest.as_slice() else {
         return Err(error("An archive must contain exactly one image."));
     };
@@ -170,21 +463,26 @@ fn validate_archive_for(
     {
         return Err(error("Image manifest exceeds its limits."));
     }
-    let expected: BTreeSet<_> = std::iter::once("manifest.json".to_owned())
-        .chain(std::iter::once(manifest.config.clone()))
-        .chain(manifest.layers.iter().cloned())
+    let expected: BTreeSet<_> = std::iter::once("manifest.json")
+        .chain(std::iter::once(manifest.config.as_str()))
+        .chain(manifest.layers.iter().map(String::as_str))
         .collect();
-    if expected != names || expected.len() != manifest.layers.len() + 2 {
+    if expected.len() != manifest.layers.len() + 2
+        || !expected
+            .iter()
+            .copied()
+            .eq(members.keys().map(String::as_str))
+    {
         return Err(error("Image manifest membership is inconsistent."));
     }
-    let config_bytes = archive_member(bytes, &manifest.config, 1024 * 1024)?;
-    if format!("sha256:{}", hash(&config_bytes)) != image {
+    let config_bytes = metadata(&manifest.config, MAX_METADATA_MEMBER as usize)?;
+    if format!("sha256:{}", hash(config_bytes)) != image {
         return Err(error(
             "Image configuration does not match the expected content ID.",
         ));
     }
     let config: Value =
-        serde_json::from_slice(&config_bytes).map_err(|_| error("Invalid image configuration."))?;
+        serde_json::from_slice(config_bytes).map_err(|_| error("Invalid image configuration."))?;
     if config["architecture"] != platform.architecture() || config["os"] != "linux" {
         return Err(error(
             "Image architecture is incompatible with this provider.",
@@ -194,61 +492,53 @@ fn validate_archive_for(
         .as_array()
         .filter(|v| v.len() == manifest.layers.len())
         .ok_or_else(|| error("Image layer identities are missing."))?;
-    let mut expanded = 0_u64;
-    let mut archive = tar::Archive::new(Cursor::new(bytes));
-    for entry in archive
-        .entries()
-        .map_err(|_| error("Invalid image archive."))?
-    {
-        let entry = entry.map_err(|_| error("Invalid image layer."))?;
-        let path = entry
-            .path()
-            .map_err(|_| error("Invalid image layer path."))?;
-        let Some(index) = manifest
-            .layers
-            .iter()
-            .position(|p| Path::new(p) == path.as_ref())
-        else {
-            continue;
-        };
-        let remaining = max_expanded
-            .checked_sub(expanded)
-            .ok_or_else(|| error("Image expansion exceeds 2 GiB."))?;
-        // This narrow loader accepts the compressed layers emitted by crane tarball.
-        let mut decoder = MultiGzDecoder::new(entry).take(remaining + 1);
-        let mut digest = Sha256::new();
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let n = decoder
-                .read(&mut buffer)
-                .map_err(|_| error("Cannot decode the image layer."))?;
-            if n == 0 {
-                break;
-            }
-            expanded += n as u64;
-            if expanded > max_expanded {
-                return Err(error("Image expansion exceeds 2 GiB."));
-            }
-            digest.update(&buffer[..n]);
-        }
-        if diffs[index] != format!("sha256:{:x}", digest.finalize()) {
+    for (layer, diff) in manifest.layers.iter().zip(diffs) {
+        if members.get(layer).map(|m| m.decoded.as_str()) != diff.as_str() {
             return Err(error("Expanded image layer identity is incorrect."));
         }
     }
-    Ok(())
+    Ok(Validated { length, blocks })
 }
 
+/// Validate a Linux ARM64 archive file the caller just wrote, under the policy's budgets.
 #[cfg(test)]
-pub(super) fn validate_download(bytes: &[u8], image: &str) -> Result<(), CandidateError> {
-    validate_download_for(bytes, image, ImagePlatform::LinuxArm64)
+pub(super) fn validate_file(
+    path: &Path,
+    expected_sha: &str,
+    image: &str,
+    policy: &ImagePolicy,
+) -> Result<u64, CandidateError> {
+    validate_file_for(path, expected_sha, image, policy, ImagePlatform::LinuxArm64)
 }
 
-pub(super) fn validate_download_for(
-    bytes: &[u8],
+/// Validate an archive file the caller just wrote, whose configuration targets exactly
+/// `platform`, under the policy's budgets.
+pub(super) fn validate_file_for(
+    path: &Path,
+    expected_sha: &str,
     image: &str,
+    policy: &ImagePolicy,
     platform: ImagePlatform,
-) -> Result<(), CandidateError> {
-    validate_archive_for(bytes, image, MAX_EXPANDED, platform)
+) -> Result<u64, CandidateError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| error("Cannot open the image archive."))?;
+    validated(
+        file,
+        expected_sha,
+        image,
+        policy.archive_limit,
+        policy.expanded_limit,
+        platform,
+    )
+    .map(|v| v.length)
+}
+
+/// The bound for one engine load request of `bytes`.
+fn load_timeout(bytes: u64) -> Duration {
+    (LOAD_BASE_TIMEOUT + Duration::from_secs(bytes / LOAD_BYTES_PER_SECOND)).min(LOAD_MAX_TIMEOUT)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -316,29 +606,49 @@ fn connect_for_import(
     Engine::connect(candidate)
 }
 
+/// Import one explicit archive under the default image budgets.
 pub fn load(
     candidate: &Candidate,
     path: &Path,
     expected_sha: &str,
     image: &str,
 ) -> Result<ImageReceipt, CandidateError> {
+    load_with(
+        candidate,
+        path,
+        expected_sha,
+        image,
+        &ImagePolicy::default(),
+    )
+}
+
+/// Import one explicit Linux ARM64 archive whose size and expansion fit `policy`'s budgets.
+pub fn load_with(
+    candidate: &Candidate,
+    path: &Path,
+    expected_sha: &str,
+    image: &str,
+    policy: &ImagePolicy,
+) -> Result<ImageReceipt, CandidateError> {
     load_for(
         candidate,
         path,
         expected_sha,
         image,
+        policy,
         ImagePlatform::LinuxArm64,
     )
 }
 
-/// [`load`] for an archive of `platform`. An emulated platform imports only into a pool
-/// whose audited boot enabled x86_64 translation; the archive and readback are both bound to
-/// that platform.
+/// [`load_with`] for an archive of `platform`. An emulated platform imports only into a
+/// pool whose audited boot enabled x86_64 translation; the archive and readback are both
+/// bound to that platform.
 pub(super) fn load_for(
     candidate: &Candidate,
     path: &Path,
     expected_sha: &str,
     image: &str,
+    policy: &ImagePolicy,
     platform: ImagePlatform,
 ) -> Result<ImageReceipt, CandidateError> {
     load_waiting(
@@ -346,6 +656,7 @@ pub(super) fn load_for(
         path,
         expected_sha,
         image,
+        policy,
         IMPORT_LEASE_WAIT,
         platform,
     )
@@ -356,6 +667,7 @@ fn load_waiting(
     path: &Path,
     expected_sha: &str,
     image: &str,
+    policy: &ImagePolicy,
     lease_wait: Duration,
     platform: ImagePlatform,
 ) -> Result<ImageReceipt, CandidateError> {
@@ -370,12 +682,12 @@ fn load_waiting(
     let metadata = file
         .metadata()
         .map_err(|_| error("Cannot inspect the image archive."))?;
-    if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > MAX_ARCHIVE {
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > policy.archive_limit {
         return Err(error(
-            "Image input must be a singly linked regular file no larger than 256 MiB.",
+            "Image input must be a singly linked regular file within the configured image budget.",
         ));
     }
-    if verify_digest(&mut file, expected_sha, MAX_ARCHIVE)? != metadata.len() {
+    if verify_digest(&mut file, expected_sha, policy.archive_limit)? != metadata.len() {
         return Err(error("Image archive size changed during verification."));
     }
     let engine = connect_for_import(candidate, lease_wait)?;
@@ -425,11 +737,34 @@ fn load_waiting(
             ));
         }
     }
-    let bytes = read_verified_archive(&mut file, expected_sha)?;
-    validate_archive_for(&bytes, image, MAX_EXPANDED, platform)?;
+    // Validate exactly the bytes that hash to the expected value, then stream the same file;
+    // the upload releases only re-read blocks that match the validated ones, and its final
+    // block only once the re-read stream hashes identically.
+    file.rewind()
+        .map_err(|_| error("Cannot rewind the image archive."))?;
+    let validated = validated(
+        &mut file,
+        expected_sha,
+        image,
+        policy.archive_limit,
+        policy.expanded_limit,
+        platform,
+    )?;
+    let length = validated.length;
+    if length != metadata.len() {
+        return Err(error("Image archive size changed during verification."));
+    }
     if !inspect(&engine, image, platform)? {
+        file.rewind()
+            .map_err(|_| error("Cannot rewind the image archive."))?;
+        let upload = file
+            .try_clone()
+            .map_err(|_| error("Cannot read the image archive."))?;
         state::write(&path, &receipt)?;
-        let result = engine.load_image_archive(bytes);
+        let result = engine.load_image_archive(
+            reqwest::blocking::Body::sized(HeldTail::new(upload, &validated, expected_sha), length),
+            load_timeout(length),
+        );
         // A lost response is reconciled only by independent content-ID readback.
         if !inspect(&engine, image, platform)? {
             result?;
@@ -442,19 +777,64 @@ fn load_waiting(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Cursor, Write};
 
-    fn fixture(architecture: &str, extra: bool, incorrect_diff: bool) -> (Vec<u8>, String) {
-        let payload = vec![b'x'; 2048];
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        encoder.write_all(&payload).unwrap();
-        let layer = encoder.finish().unwrap();
+    #[derive(Clone, Copy)]
+    pub(crate) enum Layer {
+        Gzip,
+        Zstd,
+        /// Two zstd frames with a skippable frame between them.
+        ZstdFrames,
+        /// A skippable frame before the first zstd frame.
+        ZstdLeadingSkippable,
+        Uncompressed,
+    }
+
+    pub(crate) fn compress(kind: Layer, payload: &[u8]) -> Vec<u8> {
+        use ruzstd::encoding::{CompressionLevel, compress_to_vec};
+        match kind {
+            Layer::Gzip => {
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                encoder.write_all(payload).unwrap();
+                encoder.finish().unwrap()
+            }
+            Layer::Zstd => compress_to_vec(payload, CompressionLevel::Fastest),
+            Layer::ZstdFrames => {
+                let (first, second) = payload.split_at(payload.len() / 2);
+                let mut bytes = compress_to_vec(first, CompressionLevel::Fastest);
+                bytes.extend_from_slice(&0x184D_2A50_u32.to_le_bytes());
+                bytes.extend_from_slice(&3_u32.to_le_bytes());
+                bytes.extend_from_slice(b"pad");
+                bytes.extend(compress_to_vec(second, CompressionLevel::Uncompressed));
+                bytes
+            }
+            Layer::ZstdLeadingSkippable => {
+                let mut bytes = 0x184D_2A5F_u32.to_le_bytes().to_vec();
+                bytes.extend_from_slice(&4_u32.to_le_bytes());
+                bytes.extend_from_slice(b"meta");
+                bytes.extend(compress_to_vec(payload, CompressionLevel::Fastest));
+                bytes
+            }
+            Layer::Uncompressed => payload.to_vec(),
+        }
+    }
+
+    /// A docker-archive tarball with one layer. Returns the archive and its config content ID.
+    pub(crate) fn archive(
+        kind: Layer,
+        payload: &[u8],
+        architecture: &str,
+        extra: bool,
+        incorrect_diff: bool,
+    ) -> (Vec<u8>, String) {
+        let layer = compress(kind, payload);
         let diff = if incorrect_diff {
             "0".repeat(64)
         } else {
-            hash(&payload)
+            hash(payload)
         };
         let config = serde_json::to_vec(
             &serde_json::json!({"architecture":architecture,"os":"linux",
@@ -463,31 +843,40 @@ mod tests {
         .unwrap();
         let image = format!("sha256:{}", hash(&config));
         let manifest = serde_json::to_vec(
-            &serde_json::json!([{"Config":"config.json","Layers":["layer.tar.gz"],"RepoTags":[]}]),
+            &serde_json::json!([{"Config":"config.json","Layers":["layer"],"RepoTags":[]}]),
         )
         .unwrap();
         let mut archive = tar::Builder::new(Vec::new());
-        for (name, bytes) in [
+        let mut members = vec![
             ("config.json", config.as_slice()),
-            ("layer.tar.gz", layer.as_slice()),
+            ("layer", layer.as_slice()),
             ("manifest.json", manifest.as_slice()),
-        ] {
+        ];
+        if extra {
+            members.push(("extra", b"x".as_slice()));
+        }
+        for (name, bytes) in members {
             let mut header = tar::Header::new_gnu();
             header.set_size(bytes.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
             archive.append_data(&mut header, name, bytes).unwrap();
         }
-        if extra {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(1);
-            header.set_mode(0o644);
-            header.set_cksum();
-            archive
-                .append_data(&mut header, "extra", b"x".as_slice())
-                .unwrap();
-        }
         (archive.into_inner().unwrap(), image)
+    }
+
+    fn fixture(architecture: &str, extra: bool, incorrect_diff: bool) -> (Vec<u8>, String) {
+        archive(
+            Layer::Gzip,
+            &[b'x'; 2048],
+            architecture,
+            extra,
+            incorrect_diff,
+        )
+    }
+
+    fn validate(bytes: &[u8], image: &str, expanded: u64) -> Result<u64, CandidateError> {
+        validate_stream(Cursor::new(bytes), &hash(bytes), image, 1 << 30, expanded)
     }
 
     #[test]
@@ -516,21 +905,252 @@ mod tests {
         assert!(reader.largest_request <= 64 * 1024);
         assert!(verify_digest(&mut Cursor::new(&bytes), &expected, 199_999).is_err());
         assert!(verify_digest(&mut Cursor::new(&bytes), &"0".repeat(64), 200_000).is_err());
-        let mut cursor = reader.inner;
-        assert_eq!(
-            read_verified_archive(&mut cursor, &expected).unwrap(),
-            bytes
-        );
-        cursor.get_mut()[0] = 8;
-        assert!(read_verified_archive(&mut cursor, &expected).is_err());
-        cursor.get_mut().truncate(10);
-        assert!(read_verified_archive(&mut cursor, &expected).is_err());
+        // Validation hashes the very bytes it validates: a changed or oversized stream
+        // refuses even when its members are individually valid.
         let (archive, image) = fixture("arm64", false, false);
         let expected = hash(&archive);
-        let mut input = Cursor::new(archive);
-        verify_digest(&mut input, &expected, MAX_ARCHIVE).unwrap();
-        let verified = read_verified_archive(&mut input, &expected).unwrap();
-        validate_archive(&verified, &image, MAX_EXPANDED).unwrap();
+        let length = archive.len() as u64;
+        assert_eq!(
+            validate_stream(Cursor::new(&archive), &expected, &image, length, 1 << 20).unwrap(),
+            length
+        );
+        assert!(
+            validate_stream(
+                Cursor::new(&archive),
+                &expected,
+                &image,
+                length - 1,
+                1 << 20
+            )
+            .is_err()
+        );
+        let mut trailing = archive.clone();
+        trailing.extend_from_slice(&[0; 512]);
+        assert!(
+            validate_stream(Cursor::new(&trailing), &expected, &image, 1 << 20, 1 << 20).is_err()
+        );
+        assert!(
+            validate_stream(
+                Cursor::new(&archive),
+                &"0".repeat(64),
+                &image,
+                length,
+                1 << 20
+            )
+            .is_err()
+        );
+    }
+
+    /// Block digests for `bytes`, as validation records them.
+    fn recorded(bytes: &[u8]) -> Validated {
+        let mut hashing = Hashing::new(Cursor::new(bytes), u64::MAX);
+        std::io::copy(&mut hashing, &mut std::io::sink()).unwrap();
+        let (_, length, blocks) = hashing.finish();
+        Validated { length, blocks }
+    }
+
+    /// Everything a consumer receives from `reader` before it fails.
+    fn drain_until_failure(mut reader: impl Read) -> (Vec<u8>, std::io::Error) {
+        let mut released = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => panic!("a changed stream must not end cleanly"),
+                Ok(n) => released.extend_from_slice(&buffer[..n]),
+                Err(e) => return (released, e),
+            }
+        }
+    }
+
+    #[test]
+    fn upload_releases_only_verified_blocks_and_withholds_its_end_until_verified() {
+        let bytes: Vec<u8> = (0..(2 * VERIFY_BLOCK + 300_000) as u32)
+            .map(|n| (n % 253) as u8)
+            .collect();
+        let expected = hash(&bytes);
+        let validated = recorded(&bytes);
+        assert_eq!(validated.blocks.len(), 3);
+        let mut uploaded = Vec::new();
+        HeldTail::new(Cursor::new(&bytes), &validated, &expected)
+            .read_to_end(&mut uploaded)
+            .unwrap();
+        assert_eq!(uploaded, bytes);
+        let flip = |at: usize| {
+            let mut changed = bytes.clone();
+            changed[at] ^= 1;
+            changed
+        };
+        for (changed, released_blocks) in [
+            (flip(10), 0),
+            (flip(VERIFY_BLOCK + 5), 1),
+            (flip(bytes.len() - 1), 2),
+            (bytes[..bytes.len() - 1000].to_vec(), 2),
+            ([bytes.as_slice(), b"x"].concat(), 2),
+            (bytes[..VERIFY_BLOCK].to_vec(), 1),
+        ] {
+            let (released, failure) =
+                drain_until_failure(HeldTail::new(Cursor::new(&changed), &validated, &expected));
+            assert_eq!(failure.to_string(), "image archive changed");
+            // Only whole validated blocks left, never a changed byte, and never the final
+            // block before the stream end was verified.
+            assert_eq!(released, bytes[..released_blocks * VERIFY_BLOCK]);
+        }
+    }
+
+    #[test]
+    fn trailing_padding_cannot_expose_a_changed_archive_before_verification() {
+        let (archive, image) = fixture("arm64", false, false);
+        // More padding after the end-of-archive marker than one block, so the marker is
+        // far from the physical end of the file.
+        let mut padded = archive.clone();
+        padded.resize(archive.len() + 2 * VERIFY_BLOCK, 0);
+        let expected = hash(&padded);
+        let validated = validated(
+            Cursor::new(&padded),
+            &expected,
+            &image,
+            1 << 30,
+            1 << 20,
+            ImagePlatform::LinuxArm64,
+        )
+        .unwrap();
+        assert_eq!(validated.length, padded.len() as u64);
+        // Unchanged, a tar consumer reads the archive to its end.
+        let reader = HeldTail::new(Cursor::new(&padded), &validated, &expected);
+        let names: Vec<String> = tar::Archive::new(reader)
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().display().to_string())
+            .collect();
+        assert_eq!(names, ["config.json", "layer", "manifest.json"]);
+        // A member changed after validation: the consumer sees no byte and no end.
+        let mut changed = padded.clone();
+        changed[1024 + 600] ^= 1;
+        let (released, failure) =
+            drain_until_failure(HeldTail::new(Cursor::new(&changed), &validated, &expected));
+        assert_eq!(failure.to_string(), "image archive changed");
+        assert!(released.is_empty());
+        let reader = HeldTail::new(Cursor::new(&changed), &validated, &expected);
+        let mut consumer = tar::Archive::new(reader);
+        let failed = consumer
+            .entries()
+            .map_or(true, |mut entries| entries.any(|entry| entry.is_err()));
+        assert!(failed, "a tar consumer must fail, not end cleanly");
+        // A change only in the trailing padding releases just validated bytes (the
+        // original tar and its marker) and then fails instead of ending.
+        let mut changed = padded.clone();
+        let last = changed.len() - 1;
+        changed[last] = 1;
+        let (released, failure) =
+            drain_until_failure(HeldTail::new(Cursor::new(&changed), &validated, &expected));
+        assert_eq!(failure.to_string(), "image archive changed");
+        assert_eq!(released, padded[..2 * VERIFY_BLOCK]);
+    }
+
+    #[test]
+    fn gzip_zstd_multi_frame_and_uncompressed_layers_validate_by_decoded_identity() {
+        let payload: Vec<u8> = (0..20_000_u32).map(|n| (n % 251) as u8).collect();
+        for kind in [
+            Layer::Gzip,
+            Layer::Zstd,
+            Layer::ZstdFrames,
+            Layer::ZstdLeadingSkippable,
+            Layer::Uncompressed,
+        ] {
+            let (bytes, image) = archive(kind, &payload, "arm64", false, false);
+            validate(&bytes, &image, 1 << 20).unwrap();
+            let (bytes, image) = archive(kind, &payload, "arm64", false, true);
+            assert!(validate(&bytes, &image, 1 << 20).is_err());
+        }
+        // A leading skippable frame marks the member as zstd: it decodes to the payload
+        // instead of being hashed as raw bytes.
+        let mut decoded = Vec::new();
+        let uncompressed = decode_member(
+            Cursor::new(compress(Layer::ZstdLeadingSkippable, &payload)),
+            |bytes| {
+                decoded.extend_from_slice(bytes);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(!uncompressed);
+        assert_eq!(decoded, payload);
+        // A corrupt zstd frame refuses instead of being treated as raw content.
+        let mut corrupt = compress(Layer::Zstd, &payload);
+        let last = corrupt.len() - 2;
+        corrupt[last] ^= 0xff;
+        corrupt.truncate(corrupt.len() - 1);
+        assert!(decode_member(Cursor::new(corrupt), |_| Ok(())).is_err());
+    }
+
+    /// Reads at most `step` bytes per call, so members arrive in many small chunks.
+    struct Trickle<'a> {
+        bytes: &'a [u8],
+        step: usize,
+    }
+    impl Read for Trickle<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let n = buffer.len().min(self.step).min(self.bytes.len());
+            buffer[..n].copy_from_slice(&self.bytes[..n]);
+            self.bytes = &self.bytes[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn metadata_with_leading_json_whitespace_is_retained_with_its_original_bytes() {
+        let payload: Vec<u8> = (0..4096_u32).map(|n| (n % 7) as u8).collect();
+        let layer = compress(Layer::Gzip, &payload);
+        let mut config = b" \t\r\n  ".to_vec();
+        config.extend(
+            serde_json::to_vec(&serde_json::json!({"architecture":"arm64","os":"linux",
+                "rootfs":{"type":"layers","diff_ids":[format!("sha256:{}", hash(&payload))]}}))
+            .unwrap(),
+        );
+        config.extend_from_slice(b"\n");
+        // The content ID covers the whitespace: identity uses the original bytes.
+        let image = format!("sha256:{}", hash(&config));
+        let mut manifest = b"\n\n".to_vec();
+        manifest.extend(
+            serde_json::to_vec(
+                &serde_json::json!([{"Config":"config.json","Layers":["layer"],"RepoTags":[]}]),
+            )
+            .unwrap(),
+        );
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, bytes) in [
+            ("config.json", config.as_slice()),
+            ("layer", layer.as_slice()),
+            ("manifest.json", manifest.as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, bytes).unwrap();
+        }
+        let bytes = builder.into_inner().unwrap();
+        assert_eq!(
+            validate(&bytes, &image, 1 << 20).unwrap(),
+            bytes.len() as u64
+        );
+        // One- and three-byte reads split the whitespace and the compression magic
+        // across chunk boundaries.
+        for step in [1, 3] {
+            let reader = Trickle {
+                bytes: &bytes,
+                step,
+            };
+            assert_eq!(
+                validate_stream(reader, &hash(&bytes), &image, 1 << 30, 1 << 20).unwrap(),
+                bytes.len() as u64,
+                "step {step}"
+            );
+        }
+        // The identity is still exact: the same JSON without the whitespace is a
+        // different content ID.
+        let trimmed = format!("sha256:{}", hash(config.trim_ascii()));
+        assert!(validate(&bytes, &trimmed, 1 << 20).is_err());
     }
 
     #[test]
@@ -572,28 +1192,40 @@ mod tests {
     #[test]
     fn archive_rejects_extra_members_wrong_architecture_digest_and_expansion() {
         let (bytes, image) = fixture("arm64", false, false);
-        assert!(validate_archive(&bytes, &image, 2048).is_ok());
-        assert!(validate_archive(&bytes, &image, 1024).is_err());
-        assert!(validate_archive(&bytes, &format!("sha256:{}", "0".repeat(64)), 4096).is_err());
+        // Every decoded member counts: the 2048-byte layer plus its small metadata.
+        assert!(validate(&bytes, &image, 4096).is_ok());
+        assert!(validate(&bytes, &image, 2048).is_err());
+        assert!(validate(&bytes, &format!("sha256:{}", "0".repeat(64)), 4096).is_err());
         for (bytes, image) in [
             fixture("amd64", false, false),
             fixture("arm64", true, false),
             fixture("arm64", false, true),
         ] {
-            assert!(validate_archive(&bytes, &image, 4096).is_err());
+            assert!(validate(&bytes, &image, 4096).is_err());
         }
     }
 
     #[test]
     fn an_amd64_archive_validates_only_for_the_selected_amd64_platform() {
         let amd64 = ImagePlatform::LinuxAmd64;
+        let check = |bytes: &[u8], image: &str, platform| {
+            validated(
+                Cursor::new(bytes),
+                &hash(bytes),
+                image,
+                1 << 30,
+                4096,
+                platform,
+            )
+            .map(drop)
+        };
         let (bytes, image) = fixture("amd64", false, false);
-        assert!(validate_archive_for(&bytes, &image, 4096, amd64).is_ok());
-        assert!(validate_download_for(&bytes, &image, ImagePlatform::LinuxArm64).is_err());
+        assert!(check(&bytes, &image, amd64).is_ok());
+        assert!(check(&bytes, &image, ImagePlatform::LinuxArm64).is_err());
         let (bytes, image) = fixture("arm64", false, false);
-        assert!(validate_archive_for(&bytes, &image, 4096, amd64).is_err());
+        assert!(check(&bytes, &image, amd64).is_err());
         let (bytes, image) = fixture("amd64", false, true);
-        assert!(validate_archive_for(&bytes, &image, 4096, amd64).is_err());
+        assert!(check(&bytes, &image, amd64).is_err());
     }
 
     /// A candidate whose provider looks running to every check before the lease. Its recorded
@@ -671,6 +1303,7 @@ mod tests {
             &path,
             &sha,
             &image,
+            &ImagePolicy::default(),
             Duration::from_millis(300),
             ImagePlatform::LinuxArm64,
         )
@@ -694,6 +1327,7 @@ mod tests {
             &path,
             &sha,
             &image,
+            &ImagePolicy::default(),
             Duration::from_secs(5),
             ImagePlatform::LinuxArm64,
         )

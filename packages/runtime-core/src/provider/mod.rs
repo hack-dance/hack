@@ -36,6 +36,7 @@ mod identity;
 pub mod image_ensure;
 mod image_load;
 pub mod image_platform;
+pub mod image_policy;
 pub mod image_reference;
 pub mod managed_environment;
 #[cfg(feature = "native-config-plan")]
@@ -44,6 +45,7 @@ mod native_environment;
 pub mod native_input;
 pub mod private_deadline;
 pub mod private_input;
+mod registry_credentials;
 pub mod registry_image;
 pub mod relay_auth;
 pub mod relay_client;
@@ -74,7 +76,7 @@ pub mod storage_usage;
 mod test_executable;
 #[cfg(all(test, unix))]
 mod test_socket;
-pub use image_load::load as load_image;
+pub use image_load::{load as load_image, load_with as load_image_with};
 mod lifecycle;
 pub use lifecycle::host_filesystem;
 mod network_intent;

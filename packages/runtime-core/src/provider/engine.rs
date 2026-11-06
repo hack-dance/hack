@@ -256,7 +256,13 @@ impl<'a> Engine<'a> {
         serde_json::from_slice(&bytes)
             .map_err(|_| failure("Malformed engine response; values omitted."))
     }
-    pub(super) fn load_image_archive(&self, archive: Vec<u8>) -> Result<(), CandidateError> {
+    /// Stream one verified archive to the engine's loader. `timeout` bounds the whole
+    /// upload and import; callers scale it with the archive size.
+    pub(super) fn load_image_archive(
+        &self,
+        archive: reqwest::blocking::Body,
+        timeout: Duration,
+    ) -> Result<(), CandidateError> {
         if self.cleanup_only {
             return Err(failure("A cleanup connection cannot load images."));
         }
@@ -267,6 +273,7 @@ impl<'a> Engine<'a> {
             .client
             .post("http://hack-local/v1.53/images/load?quiet=true")
             .header("Content-Type", "application/x-tar")
+            .timeout(timeout)
             .body(archive)
             .send()
             .map_err(|_| {

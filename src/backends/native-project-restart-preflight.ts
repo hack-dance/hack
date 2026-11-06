@@ -7,6 +7,10 @@ import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import { adaptNativeGcloudEnvironment } from "./native-gcloud-environment.ts";
+import {
+  NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+  nativeImagePolicyArgs,
+} from "./native-image-policy.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   compileNativeHostDependencySelection,
@@ -309,7 +313,11 @@ async function pinRestartImages(opts: {
     const pinned = await opts.invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
-      args: nativeEnsureImageArgs(image, policy),
+      args: [
+        ...nativeEnsureImageArgs(image, policy),
+        ...nativeImagePolicyArgs(),
+      ],
+      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
     });
     if (
       !isRecord(pinned) ||

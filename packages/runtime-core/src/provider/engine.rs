@@ -388,16 +388,18 @@ impl<'a> Engine<'a> {
         self.logs_with_tail(id, "all")
     }
     /// Bounded per-stream tail for callers that keep the streams apart. Built from
-    /// the same whole-line, newest-first selection as [`Self::logs_tail_lines`].
-    #[cfg(feature = "native-config-plan")]
+    /// the same whole-line, newest-first selection as [`Self::logs_tail_lines`];
+    /// each stream also stays within [`LOG_STREAM_BUDGET`] (see [`stream_tail`]).
+    #[cfg(all(feature = "native-config-plan", any(target_os = "macos", test)))]
     pub(super) fn logs_tail(
         &self,
         id: &str,
         tail: u16,
     ) -> Result<(String, String, bool), CandidateError> {
-        let tail = self.logs_tail_lines(id, tail)?;
-        let (stdout, stderr) = tail.split();
-        Ok((stdout, stderr, tail.truncated))
+        if !(1..=1000).contains(&tail) {
+            return Err(failure("Container log tail must be from 1 to 1000."));
+        }
+        stream_tail(&self.logs_bytes(id, &tail.to_string())?)
     }
     /// Bounded tail in engine order, which interleaves stdout and stderr by time.
     /// Whole lines are kept newest first; see [`LogTail`].
@@ -594,11 +596,14 @@ impl<'a> Observer<'a> {
         Ok(Self { guest, transport })
     }
 
+    /// Only the lease-free graph observation uses these, and it is macOS-only.
+    #[cfg(target_os = "macos")]
     pub(super) fn incarnation(&self) -> &str {
         self.guest.incarnation()
     }
 
     /// One read-only engine GET, with runtime identity verified on both sides.
+    #[cfg(target_os = "macos")]
     pub(super) fn get(&self, path: &str) -> Result<Value, CandidateError> {
         self.guest.verify()?;
         let value = self.transport.request(Method::GET, path, None)?;
@@ -840,6 +845,51 @@ fn decode_log_lines(bytes: &[u8]) -> Result<LogTail, CandidateError> {
     Ok(LogTail { lines, truncated })
 }
 
+/// JSON-encoded budget of one stream's text in the per-stream logs contract,
+/// including its quotes. The authored logs validators refuse a larger stream.
+#[cfg(any(test, all(feature = "native-config-plan", target_os = "macos")))]
+pub const LOG_STREAM_BUDGET: usize = 16 * 1024 + 2;
+
+/// Per-stream tail: the whole-line, newest-first selection of [`decode_log_lines`],
+/// with each stream bounded to [`LOG_STREAM_BUDGET`] by [`newest_stream_text`].
+#[cfg(any(test, all(feature = "native-config-plan", target_os = "macos")))]
+pub(in crate::provider) fn stream_tail(
+    bytes: &[u8],
+) -> Result<(String, String, bool), CandidateError> {
+    let tail = decode_log_lines(bytes)?;
+    let (stdout, stderr) = tail.split();
+    let mut truncated = tail.truncated;
+    let stdout = newest_stream_text(&stdout, &mut truncated);
+    let stderr = newest_stream_text(&stderr, &mut truncated);
+    Ok((stdout, stderr, truncated))
+}
+
+/// Keep the newest text of one stream within [`LOG_STREAM_BUDGET`]. Older whole
+/// lines are dropped first; only a newest line that alone exceeds the budget is
+/// cut, keeping its most recent characters. Any drop sets `truncated`.
+#[cfg(any(test, all(feature = "native-config-plan", target_os = "macos")))]
+fn newest_stream_text(text: &str, truncated: &mut bool) -> String {
+    let mut encoded = 2;
+    let mut start = text.len();
+    for (index, character) in text.char_indices().rev() {
+        encoded += json_text_cost(character);
+        if encoded > LOG_STREAM_BUDGET {
+            *truncated = true;
+            let kept = &text[start..];
+            // Start at a line boundary when a whole newer line follows the cut.
+            if !text[..start].ends_with('\n')
+                && let Some(newline) = kept.find('\n')
+                && newline + 1 < kept.len()
+            {
+                return kept[newline + 1..].to_owned();
+            }
+            return kept.to_owned();
+        }
+        start = index;
+    }
+    text.to_owned()
+}
+
 fn bounded_log_text(bytes: &[u8], truncated: &mut bool) -> String {
     let text = String::from_utf8_lossy(bytes);
     // JSON escaping and invalid UTF-8 replacement must not overflow the node frame.
@@ -1013,6 +1063,61 @@ mod tests {
         let tail = decode_log_lines(&frame(2, &vec![0; 20_000])).unwrap();
         assert!(tail.truncated);
         assert!(serde_json::to_vec(&tail.lines).unwrap().len() <= LOG_TAIL_BUDGET);
+    }
+
+    #[test]
+    fn per_stream_tails_stay_within_the_authored_logs_stream_bound() {
+        let frame = |stream: u8, payload: &[u8]| {
+            let mut bytes = vec![stream, 0, 0, 0];
+            bytes.extend((payload.len() as u32).to_be_bytes());
+            bytes.extend(payload);
+            bytes
+        };
+        let encoded = |text: &str| serde_json::to_vec(text).unwrap().len();
+        // One 20,000-byte stdout line interleaved with stderr fits the combined tail
+        // but not one stream: it keeps its most recent bytes, exactly at the bound.
+        let mut line = vec![b'x'; 20_000];
+        line.push(b'\n');
+        let mut bytes = frame(2, b"warn one\n");
+        bytes.extend(frame(1, &line[..7_000]));
+        bytes.extend(frame(2, b"warn two\n"));
+        bytes.extend(frame(1, &line[7_000..]));
+        assert!(!decode_log_lines(&bytes).unwrap().truncated);
+        let (stdout, stderr, truncated) = stream_tail(&bytes).unwrap();
+        assert!(truncated);
+        assert_eq!(stdout, format!("{}\n", "x".repeat(16_382)));
+        assert_eq!(encoded(&stdout), LOG_STREAM_BUDGET);
+        assert_eq!(stderr, "warn one\nwarn two\n");
+
+        // A newer whole line follows: the older line that no longer fits is dropped.
+        bytes.extend(frame(1, b"done\n"));
+        let (stdout, stderr, truncated) = stream_tail(&bytes).unwrap();
+        assert!(truncated);
+        assert_eq!(
+            (stdout.as_str(), stderr.as_str()),
+            ("done\n", "warn one\nwarn two\n")
+        );
+
+        // Escaping and multi-byte text are budgeted as encoded JSON on char boundaries.
+        let mut text = "é".repeat(5_000).into_bytes();
+        text.extend(vec![0; 2_000]);
+        text.extend("ü".repeat(5_000).into_bytes());
+        let (stdout, _, truncated) = stream_tail(&frame(1, &text)).unwrap();
+        assert!(truncated && stdout.ends_with('ü'));
+        assert!(
+            encoded(&stdout) <= LOG_STREAM_BUDGET,
+            "{}",
+            encoded(&stdout)
+        );
+
+        // Within the bound, both streams are unchanged and not marked truncated.
+        let mut bytes = frame(1, b"one\n");
+        bytes.extend(frame(2, b"err\n"));
+        bytes.extend(frame(1, b"two"));
+        assert_eq!(
+            stream_tail(&bytes).unwrap(),
+            ("one\ntwo".into(), "err\n".into(), false)
+        );
     }
 
     #[test]

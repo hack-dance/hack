@@ -362,6 +362,7 @@ impl<'a> ObservedGuest<'a> {
     }
 
     /// The observed runtime incarnation; receipts name the incarnation that owns them.
+    #[cfg(target_os = "macos")]
     pub(super) fn incarnation(&self) -> &str {
         &self.owner.token
     }

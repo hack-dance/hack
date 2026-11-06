@@ -579,7 +579,10 @@ and ownership before reading or executing. Logs include exited services, default
 time; `stdout` and `stderr` hold the same lines per stream. Retention keeps whole
 lines, newest first, within 32 KiB of JSON text and sets `truncated` when older lines
 were dropped. Only a single line longer than that budget is cut. `hack logs SERVICE
---no-follow` prints `lines` in that order, each to its own stream.
+--no-follow` prints `lines` in that order, each to its own stream. Authored projects
+return only `stdout` and `stderr`, and each stream also stays within 16 KiB of JSON
+text: older whole lines go first, and a newest line longer than that keeps its most
+recent bytes.
 
 `graph observe --run-id RUN_ID --json` reports each service container's current state
 (`running` with the engine's health, `exited` with its code, `dead`, `created`,

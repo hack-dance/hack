@@ -251,6 +251,24 @@ test.each([
     ).rejects.toThrow();
   });
 });
+test("the runtime per-stream tail of one long line stays within the stream bound", async () => {
+  return owned(async () => {
+    const f = await fixture();
+    const value = structuredClone(f.reply);
+    // The runtime keeps the newest 16,382 bytes of a 20,000-byte line (16,386
+    // JSON bytes), interleaved with a short stderr tail.
+    const bounded = `${"x".repeat(16_382)}\n`;
+    value.result.logs.stdout = bounded;
+    value.result.logs.stderr = "warn one\nwarn two\n";
+    expect(parseNativeAuthoredLogs(value, f.receipt, "web")).toMatchObject({
+      stdout: bounded,
+      stderr: "warn one\nwarn two\n",
+      truncated: true,
+    });
+    value.result.logs.stdout = `x${bounded}`;
+    expect(() => parseNativeAuthoredLogs(value, f.receipt, "web")).toThrow();
+  });
+});
 test.each([
   "container",
   "service",

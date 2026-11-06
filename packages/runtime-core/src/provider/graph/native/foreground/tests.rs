@@ -999,6 +999,38 @@ fn finite_logs_wire_authenticates_the_live_native_owner_and_exact_member() {
                 .validate(&receipt, Action::Status, None, None, None)
                 .is_err()
         );
+        // The engine's per-stream tail of one 20,000-byte line is a valid reply;
+        // one more retained byte on a stream is refused.
+        let mut long = Vec::from([1, 0, 0, 0]);
+        long.extend(20_001_u32.to_be_bytes());
+        long.extend([b'x'; 20_000]);
+        long.push(b'\n');
+        let (stdout, stderr, truncated) = crate::provider::engine::stream_tail(&long).unwrap();
+        let tail_reply = |stdout: String| Reply {
+            version: 2,
+            kind: ReplyKind::NativeGraphControlReply,
+            run: RUN.into(),
+            review: receipt.review.review_id().into(),
+            result: Outcome::Logs {
+                logs: runtime::ServiceLogs {
+                    receipt: receipt.clone(),
+                    service: "web".into(),
+                    container: receipt.resources["container:web"].id.clone().unwrap(),
+                    stdout,
+                    stderr: stderr.clone(),
+                    truncated,
+                },
+            },
+        };
+        assert!(truncated);
+        tail_reply(stdout.clone())
+            .validate(&receipt, Action::Logs, input.logs.as_ref(), None, None)
+            .unwrap();
+        assert!(
+            tail_reply(format!("x{stdout}"))
+                .validate(&receipt, Action::Logs, input.logs.as_ref(), None, None)
+                .is_err()
+        );
         transport::write(&mut stream, &reply, Duration::from_secs(2)).unwrap();
         assert_eq!(caller.join().unwrap()["result"]["logs"]["stdout"], "line\n");
     });

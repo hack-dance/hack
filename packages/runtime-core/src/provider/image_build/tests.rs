@@ -417,6 +417,63 @@ fn private_build_files_are_removed_even_when_the_client_fails() {
 }
 
 #[test]
+fn receipts_with_the_most_and_longest_accepted_pins_stay_readable() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let mut receipt = Receipt {
+        version: 1,
+        checkout: fixture.candidate.checkout.clone(),
+        namespace: inputs.namespace.clone(),
+        build_key: inputs.key.clone(),
+        provider_incarnation: "i".repeat(128),
+        provider_boot_id: "b".repeat(128),
+        engine_id: "e".repeat(128),
+        phase: Phase::ContentIdVerified,
+        image_id: Some(IMAGE.into()),
+        base_pins: BTreeMap::new(),
+    };
+    // The scanner's bounds: 32 images, Docker Hub paths up to 200 bytes, tags up to
+    // 128, each with a digest; the pinned reference keeps the name and adds the pin.
+    for index in 0..build_scan::MAX_IMAGE_REFERENCES {
+        let repository = format!("{index:03}{}/{}", "r".repeat(96), "p".repeat(100));
+        let name = format!("{repository}:{}@{PIN}", "t".repeat(128));
+        receipt
+            .base_pins
+            .insert(name.clone(), format!("docker.io/{name}"));
+    }
+    let directory = builds_root(&fixture.candidate).join(&inputs.namespace);
+    state::private_directory(&directory).unwrap();
+    let path = directory.join(format!("{}.json", inputs.key));
+    state::write(&path, &receipt).unwrap();
+    assert!(fs::metadata(&path).unwrap().len() > 16 * 1024);
+    let read = read_receipt(&path).unwrap().unwrap();
+    assert_eq!(read.base_pins.len(), build_scan::MAX_IMAGE_REFERENCES);
+}
+
+#[test]
+fn remote_add_sources_refuse_before_any_build_effect() {
+    let fixture = Fixture::new();
+    for dockerfile in [
+        "FROM alpine:3.20\nADD http://100.96.0.1:8080/secret /secret\n",
+        "FROM alpine:3.20\nADD https://example.test/a.tgz /a\n",
+        "FROM alpine:3.20\nADD git@example.test:org/repo.git /src\n",
+        "FROM alpine:3.20\nARG SRC\nADD $SRC /src\n",
+        "FROM alpine:3.20 AS base\nONBUILD ADD https://example.test/a /a\n",
+    ] {
+        fs::write(fixture.project.join("app/Dockerfile"), dockerfile).unwrap();
+        let error = prepare(fixture.request(Policy::Missing)).unwrap_err();
+        assert_eq!(error.code, "native_build_dockerfile", "{dockerfile}");
+        assert!(!error.message.contains("100.96.0.1") && !error.message.contains("example.test"));
+    }
+    fs::write(
+        fixture.project.join("app/Dockerfile"),
+        "FROM alpine:3.20\nADD main.txt /main.txt\n",
+    )
+    .unwrap();
+    assert!(prepare(fixture.request(Policy::Missing)).is_ok());
+}
+
+#[test]
 fn bake_definitions_never_evaluate_project_text() {
     assert_eq!(bake_literal("${HOME}"), "$${HOME}");
     assert_eq!(

@@ -84,7 +84,9 @@ const CANCEL_GRACE: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(50);
 const LEASE_WAIT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: u64 = 192 * 1024;
-const MAX_RECEIPT_BYTES: u64 = 16 * 1024;
+/// Covers a receipt with the most base pins the scanner accepts at their longest
+/// (about 32 KiB pretty-printed), so a receipt the build writes is always readable.
+const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_IGNORE_BYTES: u64 = 1024 * 1024;
 const MAX_ARGS: usize = 64;

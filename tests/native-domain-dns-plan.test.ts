@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import {
+  describeNativeDnsPreview,
+  findDnsmasqIncludeArgument,
   type NativeDnsFileSnapshot,
   type NativeDnsPlanOptions,
   planNativeDomainDns,
@@ -213,6 +215,113 @@ test("requires the live dnsmasq include argument", () => {
   expect(() =>
     planNativeDomainDns(options({ dnsmasqArgs: ["dnsmasq", "--no-daemon"] }))
   ).toThrow("does not load");
+});
+
+// Synthetic dnsmasq.conf fixtures modeled on the stock example file, whose
+// conf-dir examples ship commented out.
+const COMMENTED_CONF_DIR = `${V4_CONFIG}#conf-dir=${INCLUDE_DIR}/,*.conf\n`;
+const ACTIVE_CONF_DIR = `${V4_CONFIG}conf-dir=${INCLUDE_DIR},*.conf\n`;
+const SERVICE_ARGS = [
+  "/opt/homebrew/opt/dnsmasq/sbin/dnsmasq",
+  "--keep-in-foreground",
+  "-C",
+  MAIN_CONFIG,
+  "-7",
+  `${INCLUDE_DIR},*.conf`,
+];
+const NEXT_STEP = `Next: restart dnsmasq through its Homebrew service, which passes -7 ${INCLUDE_DIR},*.conf (sudo brew services restart dnsmasq), then rerun hack global dns preview --domain project.example.test.`;
+
+test("a commented-out conf-dir is fine when the service argument loads the include", () => {
+  const plan = planNativeDomainDns(
+    options({
+      mainConfig: file(MAIN_CONFIG, COMMENTED_CONF_DIR),
+      dnsmasqArgs: SERVICE_ARGS,
+    })
+  );
+  expect(plan.status).toBe("available");
+  expect(plan.includeArgument).toBe(`-7 ${INCLUDE_DIR},*.conf`);
+  expect(
+    describeNativeDnsPreview({ plan, receiptPath: "/private/receipt.json" })
+  ).toContain(
+    `include: ${INCLUDE_DIR} (loaded by running dnsmasq -7 ${INCLUDE_DIR},*.conf)`
+  );
+});
+
+test("refuses with a next step when neither the process nor dnsmasq.conf loads the include", () => {
+  const args = ["/opt/homebrew/sbin/dnsmasq", "--keep-in-foreground"];
+  expect(() =>
+    planNativeDomainDns(
+      options({
+        mainConfig: file(MAIN_CONFIG, COMMENTED_CONF_DIR),
+        dnsmasqArgs: args,
+      })
+    )
+  ).toThrow(
+    `Native domain DNS plan refused: running dnsmasq does not load the managed include directory ${INCLUDE_DIR}: the process has no -7 ${INCLUDE_DIR},*.conf argument and ${MAIN_CONFIG} line 7 has its conf-dir commented out. ${NEXT_STEP}`
+  );
+  expect(() =>
+    planNativeDomainDns(
+      options({ mainConfig: file(MAIN_CONFIG, V4_CONFIG), dnsmasqArgs: args })
+    )
+  ).toThrow(
+    `the process has no -7 ${INCLUDE_DIR},*.conf argument and ${MAIN_CONFIG} has no conf-dir line for it. ${NEXT_STEP}`
+  );
+  // A conf-dir for another directory is not this include directory.
+  expect(() =>
+    planNativeDomainDns(
+      options({
+        mainConfig: file(
+          MAIN_CONFIG,
+          `${V4_CONFIG}#conf-dir=${INCLUDE_DIR}-other,*.conf\n`
+        ),
+        dnsmasqArgs: args,
+      })
+    )
+  ).toThrow(`${MAIN_CONFIG} has no conf-dir line for it.`);
+});
+
+test("an active conf-dir alone does not satisfy the supported service job", () => {
+  expect(() =>
+    planNativeDomainDns(
+      options({
+        mainConfig: file(
+          MAIN_CONFIG,
+          `#conf-dir=${INCLUDE_DIR},*.conf\n${ACTIVE_CONF_DIR}`
+        ),
+        dnsmasqArgs: ["/opt/homebrew/sbin/dnsmasq", "-C", MAIN_CONFIG],
+      })
+    )
+  ).toThrow(
+    `running dnsmasq was not started with -7 ${INCLUDE_DIR},*.conf; ${MAIN_CONFIG} line 8 names the include directory, but native activation restarts dnsmasq only through its Homebrew service job. ${NEXT_STEP}`
+  );
+});
+
+test("finds the include argument in every getopt spelling and nothing looser", () => {
+  const value = `${INCLUDE_DIR},*.conf`;
+  for (const [args, expected] of [
+    [["dnsmasq", "-7", value], `-7 ${value}`],
+    [["dnsmasq", `-7${value}`], `-7${value}`],
+    [["dnsmasq", `--conf-dir=${value}`], `--conf-dir=${value}`],
+    [["dnsmasq", "--conf-dir", value], `--conf-dir ${value}`],
+  ] as const) {
+    expect(findDnsmasqIncludeArgument({ args, includeDir: INCLUDE_DIR })).toBe(
+      expected
+    );
+    expect(
+      planNativeDomainDns(options({ dnsmasqArgs: args })).includeArgument
+    ).toBe(expected);
+  }
+  for (const args of [
+    ["dnsmasq", "-7", `${INCLUDE_DIR}/,*.conf`],
+    ["dnsmasq", "-7", INCLUDE_DIR],
+    ["dnsmasq", "-7", `${INCLUDE_DIR},*.conf,*.local`],
+    ["dnsmasq", "--conf-dir"],
+    ["dnsmasq", value],
+  ]) {
+    expect(findDnsmasqIncludeArgument({ args, includeDir: INCLUDE_DIR })).toBe(
+      null
+    );
+  }
 });
 
 test("refuses uninspected dnsmasq configuration sources", () => {

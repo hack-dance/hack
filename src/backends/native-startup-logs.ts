@@ -1,4 +1,5 @@
 import { isRecord } from "../lib/guards.ts";
+import type { NativeManagedFile } from "./native-project-input.ts";
 
 /**
  * Bounded output of one failed service from a native foreground startup failure
@@ -150,24 +151,101 @@ export function redactNativeStartupLog(
   return result.replace(CONTROL, "�");
 }
 
+/** String leaves of a parsed JSON document, depth-first, without keys. */
+function jsonStrings(value: unknown, out: string[]): void {
+  if (typeof value === "string") {
+    out.push(value);
+  } else if (Array.isArray(value)) {
+    for (const item of value) {
+      jsonStrings(item, out);
+    }
+  } else if (isRecord(value)) {
+    for (const item of Object.values(value)) {
+      jsonStrings(item, out);
+    }
+  }
+}
+
+/**
+ * Redaction values of private credential file members. Every file contributes
+ * its whole text (whose lines are matched too) and, when it is JSON, each string
+ * value long enough to match as a substring, such as a refresh token, client
+ * secret or private key. A service whose file is not UTF-8 text, or looks like
+ * JSON but does not parse, cannot be redacted reliably: it is reported so its
+ * output is withheld.
+ */
+function credentialFileValues(
+  managedFiles: Readonly<Record<string, readonly NativeManagedFile[]>>
+): {
+  readonly values: readonly string[];
+  readonly withheld: ReadonlySet<string>;
+} {
+  const values: string[] = [];
+  const withheld = new Set<string>();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (const [service, files] of Object.entries(managedFiles)) {
+    for (const file of files) {
+      let text: string;
+      try {
+        text = decoder.decode(file.content);
+      } catch {
+        withheld.add(service);
+        continue;
+      }
+      values.push(text);
+      const trimmed = text.trim();
+      if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) {
+        continue;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        withheld.add(service);
+        continue;
+      }
+      const strings: string[] = [];
+      jsonStrings(parsed, strings);
+      values.push(
+        ...strings.filter(
+          (value) => value.length >= NATIVE_STARTUP_LOG_SUBSTRING_MIN
+        )
+      );
+    }
+  }
+  return { values, withheld };
+}
+
 /**
  * Render failed services' last output for the startup failure report, with every
- * managed value of every service redacted. Returns an empty string when there is
- * nothing to show. The result is for display only; callers must not persist it.
+ * managed value and every private credential file value of every service
+ * redacted. A service holding a credential file that cannot be turned into
+ * redaction values has its output withheld. Returns an empty string when there
+ * is nothing to show. The result is for display only; callers must not persist it.
  */
 export function formatNativeStartupLogReport(opts: {
   readonly logs: readonly NativeStartupLogTail[];
   readonly managedEnvironment: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
+  readonly managedFiles?: Readonly<
+    Record<string, readonly NativeManagedFile[]>
+  >;
 }): string {
   if (opts.logs.length === 0) {
     return "";
   }
-  const values = Object.values(opts.managedEnvironment).flatMap((service) =>
-    Object.values(service)
-  );
+  const credentials = credentialFileValues(opts.managedFiles ?? {});
+  const values = [
+    ...Object.values(opts.managedEnvironment).flatMap((service) =>
+      Object.values(service)
+    ),
+    ...credentials.values,
+  ];
   const sections = opts.logs.map((tail) => {
+    if (credentials.withheld.has(tail.service)) {
+      return `--- ${tail.service} ---\n(output withheld: this service received credential files that could not be redacted; run hack logs ${tail.service} to read it)`;
+    }
     const streams = (["stdout", "stderr"] as const)
       .filter((stream) => tail[stream] !== "")
       .map(

@@ -1741,6 +1741,87 @@ test("failed services' output is printed with managed values redacted and never 
   }
 });
 
+// Built at runtime so the synthetic PEM framing is not a key-shaped literal.
+const PEM_BEGIN = ["-----BEGIN", "PRIVATE", "KEY-----"].join(" ");
+const PEM_END = ["-----END", "PRIVATE", "KEY-----"].join(" ");
+test("a failed gcloud start redacts echoed ADC credentials and saves none of them", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  // Synthetic dummy credential material only.
+  const refreshToken = "1//synthetic-adc-refresh-token";
+  const keyLine = "U1lOVEhFVElDLURVTU1ZLVBSSVZBVEUtS0VZ";
+  const adc = {
+    type: "authorized_user",
+    client_secret: "synthetic-adc-client-secret",
+    refresh_token: refreshToken,
+    private_key: `${PEM_BEGIN}\n${keyLine}\n${PEM_END}\n`,
+  };
+  opts.dependencies.adaptGcloud = async ({ input, mode }) => ({
+    input: {
+      ...input,
+      managedFiles: {
+        web: [
+          {
+            name: "gcloud-adc.json",
+            target: "/config/adc.json",
+            content: Buffer.from(JSON.stringify(adc)),
+          },
+        ],
+      },
+    },
+    receipt: { mode, types: ["authorized_user"], services: ["web"] },
+  });
+  let selectedRun = "";
+  const saved: unknown[] = [];
+  opts.dependencies.save = async (request) => {
+    saved.push(request);
+  };
+  opts.dependencies.serve = async (request) => {
+    selectedRun = request.run;
+    request.onStartupLogs?.([
+      {
+        service: "web",
+        stdout: `token ${refreshToken}`,
+        stderr: `${keyLine}\nsecret=${adc.client_secret}`,
+        truncated: false,
+      },
+    ]);
+    throw new ClosedCliError(
+      "Native graph startup was interrupted or failed (graph_startup_application_failed); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.invoke = async (request) =>
+    request.args[1] === "inspect"
+      ? stoppedGraph({
+          run: selectedRun,
+          owner: "c".repeat(32),
+          namespace: "b".repeat(64),
+          planId: "a".repeat(64),
+          effectiveEnvName: null,
+          profiles: [],
+          aws: null,
+        })
+      : invoke(request);
+  const failure = await startNativeProject({
+    ...opts,
+    gcloud: { mode: "file" },
+  }).catch((error: unknown) => error);
+  const message = (failure as Error).message;
+  expect(message).toContain("token [REDACTED]");
+  expect(message).toContain("secret=[REDACTED]");
+  for (const secret of [refreshToken, keyLine, adc.client_secret]) {
+    expect(message).not.toContain(secret);
+    expect(JSON.stringify(saved)).not.toContain(secret);
+  }
+  expect(events.at(-1)).toBe("cleanup");
+  for (const file of await filesUnder(opts.scope.projectRoot)) {
+    const text = await readFile(file, "utf8");
+    for (const secret of [refreshToken, keyLine, adc.client_secret]) {
+      expect(text).not.toContain(secret);
+    }
+  }
+});
+
 test("retained startup failure preserves its diagnostic and never removes the run mapping", async () => {
   const { opts, events } = await fixture(false);
   const serve = opts.dependencies.serve!;

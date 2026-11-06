@@ -300,6 +300,9 @@ Bun 1.4.2 artifact still parse, so saved stop, inspection and explicit recovery 
 available. That artifact is no longer cataloged: storage enrolled under it refuses
 verification as artifact drift. It is never relabeled, re-seeded or adopted by the
 new helper; succession for such storage needs its own qualified contract.
+This refusal is expected on the candidate channel: each candidate version starts
+with fresh native homes, so storage prepared under the 1.4.2 helper is not carried
+forward. Prepare that storage again under the current helper.
 Maintain the packaged source with
 `bun scripts/generate-native-storage-witness-helper.ts --check` or `--write`;
 the generator refuses a changed artifact pin rather than approving new bytes.

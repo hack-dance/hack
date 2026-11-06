@@ -490,7 +490,8 @@ linked, mode-`0600` file owned by you), because build-argument values are in it:
   `native_build_runtime_restart`: stop it and start it again.
 - `runtime down` refuses while a build runs. Ctrl-C or SIGTERM cancels the build and
   stops the client's whole process group; so does the time budget (default 30 minutes,
-  at most 2 hours).
+  at most 2 hours). Both also apply while base images resolve, before the client
+  starts: the budget covers the whole operation.
 
 Before startup, network-tool preparation additionally requires all four pinned
 Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), with

@@ -131,6 +131,8 @@ struct FakePool {
     images: RefCell<BTreeMap<String, Value>>,
     leases: RefCell<u32>,
     resolve_error: bool,
+    resolve_delay: Duration,
+    resolve_deadlines: RefCell<Vec<Instant>>,
     output: Arc<Mutex<Vec<u8>>>,
 }
 impl FakePool {
@@ -140,6 +142,8 @@ impl FakePool {
             images: RefCell::new(BTreeMap::new()),
             leases: RefCell::new(0),
             resolve_error: false,
+            resolve_delay: Duration::ZERO,
+            resolve_deadlines: RefCell::new(Vec::new()),
             output: Arc::default(),
         }
     }
@@ -171,7 +175,14 @@ impl BuildPool for FakePool {
     fn inspect(&self, _: &(), image: &str) -> Result<Option<Value>, CandidateError> {
         Ok(self.images.borrow().get(image).cloned())
     }
-    fn resolve(&self, base: &BaseImage) -> Result<BuildBase, CandidateError> {
+    fn resolve(
+        &self,
+        base: &BaseImage,
+        deadline: Instant,
+        _: &dyn Fn() -> bool,
+    ) -> Result<BuildBase, CandidateError> {
+        self.resolve_deadlines.borrow_mut().push(deadline);
+        std::thread::sleep(self.resolve_delay);
         if self.resolve_error {
             return Err(CandidateError::new("registry_image", "offline"));
         }
@@ -322,6 +333,44 @@ fn the_client_builds_the_scanned_dockerfile_and_ignore_rules_not_later_edits() {
     assert_eq!(
         fs::read(fixture.scratch(&inputs).join("seen-dockerignore")).unwrap(),
         b""
+    );
+}
+
+#[test]
+fn the_time_budget_starts_before_base_resolution() {
+    let fixture = Fixture::new();
+    let mut inputs = fixture.inputs(Policy::Missing);
+    inputs.timeout = Duration::from_millis(300);
+    let mut pool = FakePool::new("pool-1");
+    pool.resolve_delay = Duration::from_millis(400);
+    fixture.client(&inputs, "ok");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    let started = Instant::now();
+    let error = run(&fixture.candidate, &pool, &inputs, &never).unwrap_err();
+    let finished = Instant::now();
+    assert_eq!(error.code, "native_build_timeout");
+    assert_eq!(fixture.calls(&inputs), 0, "the client ran after the budget");
+    // Resolution got the operation's deadline, which had passed when it returned.
+    let deadlines = pool.resolve_deadlines.borrow();
+    assert_eq!(deadlines.len(), 1);
+    assert!(deadlines[0] >= started + inputs.timeout && deadlines[0] < finished);
+}
+
+#[test]
+fn blocking_resolution_yields_to_the_deadline_and_to_cancellation() {
+    let slow = || {
+        std::thread::sleep(Duration::from_secs(3));
+        Ok(())
+    };
+    let started = Instant::now();
+    let error = interruptible(slow, started + Duration::from_millis(100), &never).unwrap_err();
+    assert_eq!(error.code, "native_build_timeout");
+    let error = interruptible(slow, started + Duration::from_secs(60), &|| true).unwrap_err();
+    assert_eq!(error.code, "native_build_canceled");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(
+        interruptible(|| Ok(7), Instant::now() + Duration::from_secs(5), &never).unwrap(),
+        7
     );
 }
 

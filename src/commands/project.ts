@@ -47,6 +47,10 @@ import {
   nativeDownEnvironment,
   nativeProjectDown,
 } from "../backends/native-project-down.ts";
+import {
+  requireNativeProjectInternalExtraHostsUnchanged,
+  resolveNativeInternalExtraHosts,
+} from "../backends/native-project-internal-hosts.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
 import {
@@ -5807,6 +5811,10 @@ async function handleNativeUp({
   };
   const envFingerprints =
     createNativeEnvFingerprintSession(envFingerprintScope);
+  const internalExtraHosts = await resolveNativeInternalExtraHosts({
+    project,
+    cfg,
+  });
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -5821,6 +5829,7 @@ async function handleNativeUp({
     sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
     dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
     adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
+    internalExtraHosts,
     allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
     preparedBase: parseNativePreparedBase(process.env),
     https: parseNativeHttpsSelection(process.env),
@@ -5859,6 +5868,13 @@ async function handleNativeUp({
           message: "Native up lifecycle preparation failed; values omitted.",
         });
       }
+      // Native declares these before review; a hook cannot change them now.
+      // This re-reads hack.config.json, not the pre-hook `cfg` snapshot.
+      await requireNativeProjectInternalExtraHostsUnchanged({
+        project,
+        reviewed: internalExtraHosts,
+        cleanup,
+      });
       // The native backend launches services after this returns: refuse when a
       // concurrent down already released this instance's shared helpers.
       await assertNativeSharedHelpersCurrent({ lifecycle, cleanup });
@@ -6015,6 +6031,7 @@ async function restartNativeImageProject({
         composeFile: startup.composeFile,
         adaptationFile: startup.adaptationFile,
         dependencyFile: startup.dependencyFile,
+        internalExtraHosts: startup.internalExtraHosts,
         allowedHosts: startup.allowedHosts,
         runtimeMetadata: startup.runtimeMetadata,
         httpsPort: startup.https?.httpsPort ?? null,

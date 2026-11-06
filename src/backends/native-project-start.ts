@@ -59,6 +59,11 @@ import {
 } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
+  applyNativeInternalHostAliases,
+  nativeServiceHostAliases,
+  requireNativeHostAliasBindings,
+} from "./native-project-internal-hosts.ts";
+import {
   NativePartialShutdownError,
   recoverNativeInterruptedStartupCleanup,
 } from "./native-project-interrupted-cleanup.ts";
@@ -1158,6 +1163,12 @@ export async function startNativeProject(opts: {
   readonly onReady?: () => Promise<void>;
   readonly dependencyFile?: string;
   readonly adaptationFile?: string;
+  /**
+   * Effective project-wide host aliases (`internal.extra_hosts` and
+   * checkout-local entries). Declared on every service like the Compose
+   * override; each active pair then requires a reviewed dependency binding.
+   */
+  readonly internalExtraHosts?: Readonly<Record<string, string>>;
   readonly allowedHosts?: readonly string[];
   readonly preparedBase?: NativePreparedBase;
   readonly https?: NativeHttpsSelection;
@@ -1265,6 +1276,11 @@ export async function startNativeProject(opts: {
     input,
     path: opts.adaptationFile,
   });
+  input = applyNativeInternalHostAliases({
+    input,
+    hosts: opts.internalExtraHosts,
+    hasDependencySelection: opts.dependencyFile !== undefined,
+  });
   input = (
     await prepareNativeReviewBranch({
       runtime: opts.runtime,
@@ -1333,9 +1349,14 @@ export async function startNativeProject(opts: {
       );
     }
     const dependencyDiscoveryDeadline = performance.now() + 60_000;
+    const hostAliases = nativeServiceHostAliases({
+      services: specs,
+      profiles,
+    });
     const hostDependencies = await readNativeHostDependencies({
       path: opts.dependencyFile,
       services: Object.keys(specs),
+      hostAliases,
       discover: (selection) =>
         discoverNativeHostDependency({
           runtime: opts.runtime,
@@ -1350,6 +1371,10 @@ export async function startNativeProject(opts: {
         }),
     });
     requireActiveStartup(controller.signal);
+    requireNativeHostAliasBindings({
+      dependencies: hostDependencies,
+      hostAliases,
+    });
     prepareNativeDependencyServices({
       dependencies: hostDependencies,
       services: specs,

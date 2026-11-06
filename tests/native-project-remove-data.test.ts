@@ -381,7 +381,7 @@ async function child(source: string, input: unknown) {
   const script = join(dir, "child.ts");
   await writeFile(script, source);
   const proc = Bun.spawn([process.execPath, script, JSON.stringify(input)], {
-    env: { ...process.env, HACK_DAEMON_AUTOSTART_DISABLE: "1" },
+    env: privateCliEnv({ root: dir }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

@@ -897,6 +897,7 @@ mod tests {
                     cache_provenance: None,
                     disposable_caches: Vec::new(),
                     amd64_emulation: None,
+                    restart_policy: None,
                 },
             )]),
         };

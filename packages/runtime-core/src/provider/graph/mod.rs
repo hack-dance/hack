@@ -113,6 +113,7 @@ pub use host_relay::{
     HostRelayService, cleanup_with_relay, confirm_relay_cleanup, resume_relay_cleanup,
 };
 mod relay;
+mod restart_policy;
 pub use bridges::{
     ReserveBridgeOptions, RouteSlot, inspect_bridges, publish_bridge, reconcile_bridges,
     release_bridge, reserve_bridge, start_bridge,
@@ -251,6 +252,10 @@ pub struct Resource {
     /// Fixed at admission; only these exact paths may be explicitly quarantined.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disposable_caches: Vec<String>,
+    /// Admitted engine restart policy of a container; absent means `no`.
+    /// Only this receipt field authorizes engine restart states during stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_policy: Option<restart_policy::RestartPolicy>,
     pub kind: Kind,
     pub key: String,
     pub name: String,
@@ -423,6 +428,15 @@ fn verify_resource_identity(
 }
 fn observation(value: &Value) -> Result<Observation, CandidateError> {
     let state = &value["State"];
+    // A restarting container keeps its previous exit facts (including OOM) while
+    // the engine waits to start the next incarnation. Callers decide whether the
+    // receipt admits this state; see `probes::observe`.
+    if state["Restarting"] == true {
+        if state["Running"] != true || state["Pid"] != 0 || state["Dead"] == true {
+            return Err(error("graph_state", "Unexpected owned service state."));
+        }
+        return Ok(Observation::Restarting);
+    }
     if state["Dead"] == true || state["OOMKilled"] == true {
         return Ok(Observation::Dead);
     }
@@ -483,6 +497,7 @@ fn same_resource_bindings(
                     && old.outbound == resource.outbound
                     && old.routing == resource.routing
                     && old.loopback_ports == resource.loopback_ports
+                    && old.restart_policy == resource.restart_policy
                     && (old.networks == resource.networks
                         // Old receipts predate attachment persistence and admitted at most
                         // one network. The caller also requires the unchanged plan identity.
@@ -494,6 +509,21 @@ fn same_resource_bindings(
 
 /// Receipt-load bound for loopback publication intent: containers only, unique
 /// non-zero host ports graph-wide, and the admission budget.
+/// Restart authority exists only on containers, never alongside an
+/// incarnation-bound route, loopback publication, cache or probe, or a completion
+/// goal that cannot retry. A resource without a policy is always valid here.
+fn restart_policy_valid(resource: &Resource, probed: bool, readiness: Option<&Condition>) -> bool {
+    resource.restart_policy.as_ref().is_none_or(|policy| {
+        resource.kind == Kind::Container
+            && policy.valid()
+            && resource.routing.is_none()
+            && resource.loopback_ports.is_empty()
+            && resource.cache.is_none()
+            && !probed
+            && (readiness != Some(&Condition::Completed)
+                || matches!(policy, restart_policy::RestartPolicy::OnFailure { .. }))
+    })
+}
 fn loopback_ports_valid(resources: &BTreeMap<String, Resource>) -> bool {
     let mut host_ports = BTreeSet::new();
     resources.values().all(|resource| {
@@ -605,6 +635,13 @@ fn load_at(
             })
         })
         || !loopback_ports_valid(&receipt.resources)
+        || !receipt.resources.values().all(|resource| {
+            restart_policy_valid(
+                resource,
+                receipt.probes.contains_key(&resource.key),
+                receipt.readiness.get(&resource.key),
+            )
+        })
         || ![
             "preparing",
             "ready-observed",
@@ -1636,13 +1673,7 @@ pub fn observe(candidate: &Candidate, run: &str) -> Result<Value, CandidateError
             Some(id) => match observer.get(&format!("/v1.53/containers/{id}/json")) {
                 Ok(value) => {
                     verify_resource_identity(&receipt, resource, &value)?;
-                    match observation(&value) {
-                        Ok(observed) => serde_json::to_value(observed).map_err(|_| {
-                            error("graph_output", "Cannot encode graph observation.")
-                        })?,
-                        // A restarting or paused container is neither running nor stopped.
-                        Err(_) => json!({"state":"unknown"}),
-                    }
+                    observed_service_state(resource, &value)?
                 }
                 Err(error) if error.code == "engine_not_found" => json!({"state":"absent"}),
                 Err(error) => return Err(error),
@@ -1651,6 +1682,23 @@ pub fn observe(candidate: &Candidate, run: &str) -> Result<Value, CandidateError
         services.insert(resource.key.clone(), state);
     }
     Ok(json!({"run":receipt.run,"phase":receipt.phase,"services":services}))
+}
+
+/// One lock-free service state. A pending engine restart is reported as
+/// `restarting` only when the receipt admitted a restart policy; it is never a
+/// stopped state, so exit observers keep the foreground graph up. Any other
+/// state the graph does not model (an unadmitted restart, a paused container)
+/// is `unknown`, which is neither running nor stopped.
+#[cfg(any(test, target_os = "macos"))]
+fn observed_service_state(resource: &Resource, value: &Value) -> Result<Value, CandidateError> {
+    match observation(value) {
+        Ok(Observation::Restarting) if !restart_policy::admits_restarting(resource) => {
+            Ok(json!({"state":"unknown"}))
+        }
+        Ok(observed) => serde_json::to_value(observed)
+            .map_err(|_| error("graph_output", "Cannot encode graph observation.")),
+        Err(_) => Ok(json!({"state":"unknown"})),
+    }
 }
 
 /// A foreground start binds its publication before it creates the journal, so

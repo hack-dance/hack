@@ -137,3 +137,62 @@ test("foreign, non-ready or malformed observations are ignored and abort stops p
   await pending;
   expect(performance.now() - started).toBeLessThan(5000);
 });
+
+test("a pending engine restart is neither an exit nor a stopped service", async () => {
+  const { invoke } = replies([
+    observed({
+      init: { state: "exited", code: 0 },
+      worker: { state: "running" },
+    }),
+    // An admitted restart policy: the engine waits to start a new incarnation.
+    observed({
+      init: { state: "exited", code: 0 },
+      worker: { state: "restarting" },
+    }),
+    observed({
+      init: { state: "exited", code: 0 },
+      worker: { state: "running" },
+    }),
+    observed({
+      init: { state: "exited", code: 0 },
+      worker: { state: "restarting" },
+    }),
+    // The policy ran out of retries: an ordinary exit ends `up`.
+    observed({
+      init: { state: "exited", code: 0 },
+      worker: { state: "exited", code: 1 },
+    }),
+  ]);
+  const exits: NativeServiceExit[] = [];
+  const seen: string[] = [];
+  let stopped = 0;
+  await monitorNativeServiceExits({
+    runtime,
+    projectRoot: "/fixture",
+    run,
+    signal: new AbortController().signal,
+    intervalMs: 1,
+    invoke: async (request) => {
+      const reply = (await invoke(request)) as {
+        services: Record<string, { state: string }>;
+      };
+      seen.push(reply.services.worker?.state ?? "");
+      return reply;
+    },
+    onExit: (exit) => exits.push(exit),
+    onAllStopped: () => stopped++,
+  });
+  // Every restarting observation was read without ending `up`.
+  expect(seen).toEqual([
+    "running",
+    "restarting",
+    "running",
+    "restarting",
+    "exited",
+  ]);
+  expect(exits).toEqual([
+    { service: "init", state: "exited", code: 0 },
+    { service: "worker", state: "exited", code: 1 },
+  ]);
+  expect(stopped).toBe(1);
+});

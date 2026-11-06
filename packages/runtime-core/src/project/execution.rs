@@ -27,9 +27,17 @@ pub enum Health {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Observation {
     Created,
-    Running { health: Health },
-    Exited { code: i64 },
+    Running {
+        health: Health,
+    },
+    Exited {
+        code: i64,
+    },
     Dead,
+    /// The engine will start a new incarnation under an admitted restart policy.
+    /// It satisfies no readiness goal and is not a failure: an exhausted policy
+    /// is observed later as an ordinary exit.
+    Restarting,
 }
 impl Observation {
     fn satisfies(self, condition: Condition) -> bool {

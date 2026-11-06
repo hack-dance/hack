@@ -126,6 +126,20 @@ const sharesReferencedRemovalViolations = [
   ["none", "retained", "none", "b", "a", "ab", "", "remove", "b", "stopped"],
   ["retained", "retained", "a", "b", "a", "ab", "", "remove", "b", "stopped"],
 ] as const;
+// TLC's two-worker search does not always report the shortest trace, so the
+// restart-policy controls accept every first violation the model can reach.
+// A stale use is a bound incarnation that is older than the current one, or
+// equal to it while the engine is no longer running.
+const restartPolicyStaleUses = [
+  { engine: "restarting", bound: 1 },
+  { engine: "exited", bound: 1 },
+  { engine: "running", bound: 1 },
+  { engine: "restarting", bound: 2 },
+  { engine: "exited", bound: 2 },
+  { engine: "running", bound: 2 },
+  { engine: "restarting", bound: 3 },
+  { engine: "exited", bound: 3 },
+] as const;
 const contracts: readonly ModelContract[] = [
   {
     name: "native-plan-reconcile",
@@ -1733,6 +1747,92 @@ const contracts: readonly ModelContract[] = [
             action: "Publish",
             fields: ['session = "alive"', 'token = "b"', 'entry = "a"'],
           },
+        ],
+      },
+    ],
+  },
+  {
+    name: "service-restart-policy",
+    module: "RestartPolicy",
+    states: 134,
+    invariant: "NoIncarnationAfterStop",
+    action: "DaemonRestart",
+    fields: [
+      'phase = "stopping"',
+      'policy = "armed"',
+      'engine = "running"',
+      "lateStart = TRUE",
+    ],
+    // DaemonRestart needs a present container, so a stop-requested phase is
+    // either stopping or, after terminal proof, stopped.
+    alternativeWitnesses: [
+      {
+        action: "DaemonRestart",
+        fields: [
+          'phase = "stopped"',
+          'policy = "armed"',
+          'engine = "running"',
+          "lateStart = TRUE",
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "unproved-terminal",
+        negative: true,
+        invariant: "TerminalProof",
+        action: "ObserveTerminal",
+        fields: [
+          'phase = "stopped"',
+          'engine = "running"',
+          "cancelled = TRUE",
+          "unsafeTerminal = TRUE",
+        ],
+        // A non-terminal engine is either running or has a pending restart.
+        alternativeWitnesses: [
+          {
+            action: "ObserveTerminal",
+            fields: [
+              'phase = "stopped"',
+              'engine = "restarting"',
+              "cancelled = TRUE",
+              "unsafeTerminal = TRUE",
+            ],
+          },
+        ],
+      },
+      {
+        name: "stale-generation",
+        negative: true,
+        invariant: "NoStaleIncarnation",
+        action: "Use",
+        fields: [
+          'phase = "serving"',
+          'engine = "restarting"',
+          "bound = 1",
+          "staleUse = TRUE",
+        ],
+        alternativeWitnesses: restartPolicyStaleUses.slice(1).map((use) => ({
+          action: "Use",
+          fields: [
+            'phase = "serving"',
+            `engine = "${use.engine}"`,
+            `bound = ${use.bound}`,
+            "staleUse = TRUE",
+          ],
+        })),
+      },
+      {
+        name: "completion-reachable",
+        negative: true,
+        invariant: "NeverRemoved",
+        action: "Remove",
+        fields: [
+          'phase = "removed"',
+          'engine = "absent"',
+          'policy = "no"',
+          "unsafeTerminal = FALSE",
+          "lateStart = FALSE",
         ],
       },
     ],

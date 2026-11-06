@@ -234,16 +234,20 @@ pub fn ensure_with(
         };
         (resolved.pinned_reference, exact)
     };
-    ensure_pinned(
+    ensure_pinned_resolving(
         candidate,
         &pinned,
         policy,
+        registry_image::pinned_platform,
         registry_image::acquire_with,
         |candidate, path, sha, image, platform| {
             image_load::load_for(candidate, path, sha, image, platform).map(|_| ())
         },
     )
 }
+/// [`ensure_pinned_resolving`] for a cache that must never need to resolve the published
+/// platform: every case it covers has its preferred entry cached, or none.
+#[cfg(test)]
 fn ensure_pinned(
     candidate: &Candidate,
     reference: &str,
@@ -255,19 +259,60 @@ fn ensure_pinned(
     ) -> Result<registry_image::AcquiredImage, CandidateError>,
     load: impl FnOnce(&Candidate, &Path, &str, &str, ImagePlatform) -> Result<(), CandidateError>,
 ) -> Result<EnsuredImage, CandidateError> {
+    ensure_pinned_resolving(
+        candidate,
+        reference,
+        policy,
+        |_, _| panic!("must not resolve the published platform"),
+        acquire,
+        load,
+    )
+}
+/// Ensure one pinned reference under `policy`. `resolve` names the platform the pinned image
+/// itself selects under a policy; it is consulted only when the cache holds a later
+/// preference but not an earlier one.
+fn ensure_pinned_resolving(
+    candidate: &Candidate,
+    reference: &str,
+    policy: PlatformPolicy,
+    mut resolve: impl FnMut(&str, PlatformPolicy) -> Result<ImagePlatform, CandidateError>,
+    acquire: impl FnOnce(
+        &str,
+        &Path,
+        PlatformPolicy,
+    ) -> Result<registry_image::AcquiredImage, CandidateError>,
+    load: impl FnOnce(&Candidate, &Path, &str, &str, ImagePlatform) -> Result<(), CandidateError>,
+) -> Result<EnsuredImage, CandidateError> {
     let reference = canonical(reference)?;
     let root = candidate.state_root.join("artifacts/images");
     let _lock = state::Lock::acquire(&root)?;
     let (count, bytes) = usage(candidate, &root)?;
-    // The first complete entry in policy order is reused: a published arm64 entry always
-    // wins over an emulated one under `PreferNative`.
+    // A cached entry is reused only for the platform the pinned image itself selects under
+    // the policy. The first preference is published whenever its entry exists. A later
+    // preference's entry (amd64 under `PreferNative`, perhaps left by an explicit `Amd64`
+    // acquisition) does not show the earlier one is absent, so the published platform is
+    // resolved first; a published arm64 image is then acquired natively instead.
+    let mut policy = policy;
     let mut existing = None;
-    for platform in policy.candidates() {
+    for (preference, platform) in policy.candidates().iter().enumerate() {
         let dir = root.join(entry_key(&reference, *platform));
-        if dir.try_exists().map_err(state::io)? {
-            existing = Some((dir, *platform));
-            break;
+        if !dir.try_exists().map_err(state::io)? {
+            continue;
         }
+        if preference > 0 {
+            let published = resolve(&reference, policy)?;
+            if !policy.candidates().contains(&published) {
+                return Err(refused(
+                    "Resolved image platform is outside the requested platform policy.",
+                ));
+            }
+            if published != *platform {
+                policy = PlatformPolicy::exact(published);
+                break;
+            }
+        }
+        existing = Some((dir, *platform));
+        break;
     }
     let reused = existing.is_some();
     let (dir, receipt) = if let Some((dir, platform)) = existing {
@@ -636,6 +681,102 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn prefer_native_resolves_the_published_platform_before_reusing_a_cached_amd64_entry() {
+        let f = Fixture::new();
+        let root = f.1.state_root.join("artifacts/images");
+        // An explicit amd64 acquisition of a multi-platform index caches only amd64.
+        let amd64 = ensure_pinned(
+            &f.1,
+            &pin(1),
+            PlatformPolicy::Amd64,
+            acquire,
+            |_, _, _, _, platform| {
+                assert_eq!(platform, ImagePlatform::LinuxAmd64);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(amd64.platform, ImagePlatform::LinuxAmd64);
+        assert!(!root.join(key(&pin(1))).exists());
+        // PreferNative resolves the index first: it publishes arm64, which is acquired
+        // natively instead of reusing the emulated entry.
+        let resolved = Cell::new(0);
+        let asked = Cell::new(None);
+        let preferred = ensure_pinned_resolving(
+            &f.1,
+            &pin(1),
+            PlatformPolicy::PreferNative,
+            |reference, policy| {
+                resolved.set(resolved.get() + 1);
+                assert_eq!(reference, pin(1));
+                assert_eq!(policy, PlatformPolicy::PreferNative);
+                Ok(ImagePlatform::LinuxArm64)
+            },
+            |reference, path, policy| {
+                asked.set(Some(policy));
+                acquire(reference, path, policy)
+            },
+            |_, _, _, _, platform| {
+                assert_eq!(platform, ImagePlatform::LinuxArm64);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved.get(), 1);
+        assert_eq!(asked.get(), Some(PlatformPolicy::Native));
+        assert!(!preferred.archive_reused);
+        assert_eq!(preferred.platform, ImagePlatform::LinuxArm64);
+        assert_eq!(usage(&f.1, &root).unwrap().0, 2);
+        // With arm64 cached, nothing needs resolving.
+        let warm = ensure_pinned(
+            &f.1,
+            &pin(1),
+            PlatformPolicy::PreferNative,
+            |_, _, _| panic!("reuse complete archive"),
+            |_, _, _, _, _| Ok(()),
+        )
+        .unwrap();
+        assert!(warm.archive_reused);
+        assert_eq!(warm.platform, ImagePlatform::LinuxArm64);
+
+        // An amd64-only image resolves to amd64, so its cached entry is reused.
+        ensure_pinned(
+            &f.1,
+            &pin(2),
+            PlatformPolicy::Amd64,
+            acquire,
+            |_, _, _, _, _| Ok(()),
+        )
+        .unwrap();
+        let reused = ensure_pinned_resolving(
+            &f.1,
+            &pin(2),
+            PlatformPolicy::PreferNative,
+            |_, _| Ok(ImagePlatform::LinuxAmd64),
+            |_, _, _| panic!("reuse complete archive"),
+            |_, _, _, _, platform| {
+                assert_eq!(platform, ImagePlatform::LinuxAmd64);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(reused.archive_reused);
+        assert_eq!(reused.platform, ImagePlatform::LinuxAmd64);
+        // A failed resolution refuses before any acquisition or load.
+        assert!(
+            ensure_pinned_resolving(
+                &f.1,
+                &pin(2),
+                PlatformPolicy::PreferNative,
+                |_, _| Err(refused("synthetic resolution failure")),
+                |_, _, _| panic!("no acquire"),
+                |_, _, _, _, _| panic!("no load"),
+            )
+            .is_err()
+        );
+        assert_eq!(usage(&f.1, &root).unwrap().0, 3);
     }
     #[test]
     fn invalid_input_or_absent_runtime_never_allocates_archive_cache() {

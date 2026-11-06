@@ -100,6 +100,14 @@ impl PlatformPolicy {
     pub fn may_emulate(self) -> bool {
         self != Self::Native
     }
+
+    /// The policy that admits exactly `platform`.
+    pub fn exact(platform: ImagePlatform) -> Self {
+        match platform {
+            ImagePlatform::LinuxArm64 => Self::Native,
+            ImagePlatform::LinuxAmd64 => Self::Amd64,
+        }
+    }
 }
 
 #[cfg(test)]

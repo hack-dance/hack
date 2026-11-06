@@ -428,6 +428,31 @@ fn config_platform(
         })
 }
 
+/// The platform `policy` selects for one pinned reference: the index entry it prefers, or a
+/// single-image manifest's configured platform. Only metadata is fetched; no layer or
+/// archive is read, and acquisition still confirms the selection against the configuration.
+pub(super) fn pinned_platform(
+    reference_text: &str,
+    policy: PlatformPolicy,
+) -> Result<ImagePlatform, CandidateError> {
+    let (repo, pin) = reference(reference_text)?;
+    let (repo, pin) = (repo.as_str(), pin.as_str());
+    let fetch = authenticated_fetch(repo)?;
+    let url = Url::parse(&format!(
+        "https://registry-1.docker.io/v2/{repo}/manifests/{pin}"
+    ))
+    .map_err(|_| error("Invalid manifest address."))?;
+    let manifest = parse_manifest(&fetch.bytes(url, MAX_METADATA, true)?, pin)?;
+    if !manifest.manifests.is_empty() {
+        return select(&manifest, policy).map(|(_, platform)| platform);
+    }
+    let config = manifest
+        .config
+        .ok_or_else(|| error("Image config descriptor is missing."))?;
+    let config_bytes = fetch.object(repo, "blobs", &config, MAX_METADATA)?;
+    config_platform(&config_bytes, policy, None)
+}
+
 /// Acquire one public pinned Linux ARM64 image into a new explicit archive. The output
 /// must not exist. A failure never imports an image or changes candidate runtime state.
 /// HTTPS requests have a 60s bound and the complete acquisition a 300s deadline.

@@ -478,6 +478,18 @@ The default private build includes native HTTP graph probes (local `_docs/docs/p
 and requires Zig 0.15.2 plus a host C compiler.
 [Provider pins](provider-pins.json) record the exact package inputs; the engine runs inside the VM.
 
+Three Cargo features build guest helpers with Zig: `native-http-probe`,
+`native-stream-relay` and `environment-launcher`. For each one, [`build.rs`](build.rs)
+runs `zig version` and fails the build unless it prints exactly `0.15.2`; any other
+release, newer ones included, is refused. The HTTP probe and stream relay also build
+a host test driver with `cc`. `--all-features` turns on all three, so every
+all-features `cargo clippy` or `cargo test` run needs Zig 0.15.2 on `PATH`. That
+includes CI's optional-feature lint and test steps and the toolchain service's `rust`
+and `rust-check` tasks. The default `bun run check:local` and `bun run test:local`
+turn on no features and do not need Zig. Root `mise.toml` and `.tool-versions` pin
+Zig 0.15.2. The toolchain image installs the `mise.toml` pins and runs its tasks
+under `mise exec`. CI downloads a checksum-verified 0.15.2 archive.
+
 Source binaries embed their build checkout. If a copied Cargo target directory
 retains a different checkout identity, use a fresh `--target-dir` for checks and
 tests; Cargo reporting a cached binary as fresh does not qualify that identity.
@@ -593,6 +605,62 @@ identity and named data remain outside history retirement. Archive/export retain
 the bounded window rather than a complete lifetime log. Use the current candidate
 for migrated private state; older experimental candidates do not understand this
 history format. Stable v4 uses its separate state and is unaffected.
+
+## Provider owner receipt compatibility
+
+The provider owner receipt is `<state root>/run/smolvm/owner.json`, the `Owner`
+struct in [`src/provider/state.rs`](src/provider/state.rs). This section describes
+what the code does today. There is no migration step, schema negotiation or
+compatibility window beyond what follows.
+
+- **Unknown fields refuse.** `Owner` and every receipt type nested in it (`CleanStop`,
+  `ReclamationPolicy`, `ProcessIdentity`, `DiskIdentity`, `NetworkIntent`,
+  `BridgeIntent`, `DependencySocketIntent` and `ProjectShareIntent`) use
+  `#[serde(deny_unknown_fields)]`. A binary also cannot read an enum value it does not
+  know, such as a new `Profile` or network mode. `state::read_bounded` turns any
+  decode failure into `invalid_receipt` ("Invalid provider receipt; refusing
+  adoption.") and changes nothing. Every runtime command that loads the owner goes
+  through this read, `runtime recover` included.
+- **Missing fields are accepted.** Every field added after the first prerelease is an
+  `Option` or has `#[serde(default)]`, so a newer binary reads an older receipt.
+- **`version` does not change.** Fields were added while `version` stayed `1`. Any
+  other value refuses as `foreign_state`. The version number does not tell a reader
+  whether it understands a receipt.
+- **Some fields are always written.** `previous_guest_boot_id`, `reclamation`,
+  `profile` and `network` are written on every save, as `null` or their default
+  value when unset. `clean_stop`, `project_share`, `application_bridge` and
+  `dependency_sockets` are written only when set.
+
+Schema history: every current field except `clean_stop` was present in
+`v5.0.0-next.1`. `clean_stop` was added by
+[#344](https://github.com/hack-dance/hack/pull/344) and first shipped in
+`v5.0.0-next.6`. The owner schema is unchanged from `v5.0.0-next.6` through
+`v5.0.0-next.8` and the current `next` branch. What this means in practice:
+
+- **Upgrade works.** A `next.6` or later binary reads receipts written by `next.1`
+  through `next.5`. Those receipts have no clean-stop marker, so their stopped pools
+  do not get reserve-aware restart admission until the next clean `down` (see
+  [Stopped normalized foreground restoration](#stopped-normalized-foreground-restoration)).
+- **Downgrade after a clean `down` is refused.** A `down` that completes cleanly
+  records `clean_stop` (`finish_quiesced_stop` in
+  [`src/provider/lifecycle.rs`](src/provider/lifecycle.rs)). After that, `next.1`
+  through `next.5` refuse every runtime command that loads this receipt with
+  `invalid_receipt`, `runtime recover` included. Only a newer binary removes the
+  marker: by writing any phase other than `stopped` (`phase`) or by starting a new
+  boot (`Owner::begin_boot`). A later clean `down` writes it again. Those older
+  binaries can read a receipt without the marker, such as a running pool's or one
+  whose last stop was not a completed clean `down`. The [candidate guide](../../docs/guides/native-candidate.md#manual-candidate-upgrade-and-rollback)
+  treats a prior binary refusing newer state as an unsupported downgrade. Keep that
+  state as it is and do not edit the receipt.
+- **Future fields follow the same rule.** Under this code, adding an always-written
+  field means every earlier binary refuses every receipt the new binary saves. Adding
+  a field that is written only when set means earlier binaries refuse only the
+  receipts where it is set.
+
+The prerelease installer gives each versioned selection its own home, so those
+versions never share an owner receipt. These rules apply when one home is shared
+across builds: a manual bundle selected with the same `HACK_NATIVE_HOME`, or
+successive builds of one checkout, which share its `.hack-local`.
 
 ## Named-volume integrity qualification
 

@@ -387,7 +387,9 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
   - `schemas/hack.branches.schema.json`
   - `certs/` (mkcert output for non-Caddy services)
   - `projects.json` (best-effort registry; `hack projects prune` removes stale entries and stops
-    orphaned containers)
+    orphaned containers). A missing file is an empty registry. A file that exists but cannot be
+    read refuses with `E_PERMISSION` (or `E_CONFIG_INVALID` for other read faults) instead of
+    being listed, targeted or rewritten as empty.
 
 - `<repo>/.hack/`
   - `docker-compose.yml`

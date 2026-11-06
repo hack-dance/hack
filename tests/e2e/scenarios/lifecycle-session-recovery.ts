@@ -714,7 +714,13 @@ export async function writeFakeDocker(opts: {
       "  esac",
       "fi",
       'if [ "$1" = "info" ]; then exit 0; fi',
-      'if [ "$1" = "ps" ]; then exit 0; fi',
+      // Plain `docker ps` (the label listing behind hack down's helper
+      // release): empty unless a surviving orphan or a failure is injected.
+      'if [ "$1" = "ps" ]; then',
+      '  if [ "${E2E_DOCKER_PS_FAIL:-}" = "1" ]; then exit 1; fi',
+      '  if [ -n "${E2E_DOCKER_PS_ORPHAN:-}" ]; then printf \'{"name":"%s","state":"running"}\\n\' "$E2E_DOCKER_PS_ORPHAN"; fi',
+      "  exit 0",
+      "fi",
       "exit 1",
       "",
     ].join("\n")

@@ -122,6 +122,32 @@ fn validate_start_phase(resource_phase: &str, graph_phase: &str) -> Result<(), C
     }
     Ok(())
 }
+/// Upper bound for the engine to record a container's own exit after its relay
+/// transport has already reported exit. A container still running after this
+/// window has genuinely lost its listener.
+const LISTENER_EXIT_SETTLE: Duration = Duration::from_secs(10);
+const LISTENER_EXIT_POLL: Duration = Duration::from_millis(25);
+
+/// The relay transport is never container-death evidence: when the service's
+/// main process exits, the relay inside the container ends with it, but the
+/// engine can record the container's own exit only afterwards, which can take
+/// seconds on a loaded VM.
+/// Re-inspect while the container still reports running, up to `deadline`, so a
+/// completed initializer or a crashing service is classified by its own exit
+/// instead of as a lost listener. Each inspection is read-only and checks
+/// cancellation first; the last observation is returned either way.
+fn settle_exited_transport(
+    mut observed: Value,
+    deadline: Instant,
+    poll: Duration,
+    mut inspect: impl FnMut() -> Result<Value, CandidateError>,
+) -> Result<Value, CandidateError> {
+    while observed["State"]["Running"] == true && Instant::now() < deadline {
+        std::thread::sleep(poll.min(deadline.saturating_duration_since(Instant::now())));
+        observed = inspect()?;
+    }
+    Ok(observed)
+}
 fn verify_exited_listener(
     condition: Option<&Condition>,
     observed: &Value,
@@ -691,6 +717,7 @@ impl Driver for HostRelayRuntime {
                 }
             }
         }
+        let cancelled = self.startup_cancelled;
         for ((name, _), child) in &mut self.children {
             if child.poll_exit()?.is_some() {
                 let resource = receipt
@@ -698,6 +725,20 @@ impl Driver for HostRelayRuntime {
                     .get(&format!("container:{name}"))
                     .ok_or_else(refused)?;
                 let observed = inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
+                let observed = settle_exited_transport(
+                    observed,
+                    Instant::now() + LISTENER_EXIT_SETTLE,
+                    LISTENER_EXIT_POLL,
+                    || {
+                        if cancelled.is_some_and(|check| check()) {
+                            return Err(error(
+                                "graph_cancelled",
+                                "Foreground startup was cancelled; owned cleanup is required.",
+                            ));
+                        }
+                        inspect_resource(engine, receipt, resource)?.ok_or_else(refused)
+                    },
+                )?;
                 let observation = probes::observe(engine, receipt, name, &observed)?;
                 if observation.failed() {
                     // The relay often exits with its application. Preserve the owned
@@ -1067,6 +1108,90 @@ mod route_tests {
             "guest_tool_artifact"
         );
         assert!(!absent.exists());
+    }
+    #[test]
+    fn transport_exit_waits_for_the_container_to_record_its_own_exit() {
+        // A quick-exit initializer: its relay transport ends first, and the
+        // engine still reports the container running for a few inspections.
+        let running = json!({"State":{"Running":true,"ExitCode":0,"OOMKilled":false}});
+        let exited = json!({"State":{"Running":false,"ExitCode":0,"OOMKilled":false}});
+        let mut inspections = 0;
+        let settled = settle_exited_transport(
+            running.clone(),
+            Instant::now() + Duration::from_secs(30),
+            Duration::from_millis(1),
+            || {
+                inspections += 1;
+                Ok(if inspections < 3 {
+                    running.clone()
+                } else {
+                    exited.clone()
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(inspections, 3);
+        verify_exited_listener(Some(&Condition::Completed), &settled).unwrap();
+        // Without settling, the same first observation is a lost listener.
+        assert_eq!(
+            verify_exited_listener(Some(&Condition::Completed), &running)
+                .unwrap_err()
+                .code,
+            "graph_startup_running_listener_lost"
+        );
+        // A crashing service is classified by its own exit, not as lost.
+        let crashed = json!({"State":{"Running":false,"ExitCode":3,"OOMKilled":false}});
+        let settled = settle_exited_transport(
+            running.clone(),
+            Instant::now() + Duration::from_secs(30),
+            Duration::from_millis(1),
+            || Ok(crashed.clone()),
+        )
+        .unwrap();
+        assert_eq!(settled["State"]["ExitCode"], 3);
+    }
+    #[test]
+    fn transport_exit_with_a_container_that_keeps_running_is_still_lost() {
+        let running = json!({"State":{"Running":true,"ExitCode":0,"OOMKilled":false}});
+        let mut inspections = 0;
+        let started = Instant::now();
+        let settled = settle_exited_transport(
+            running.clone(),
+            Instant::now() + Duration::from_millis(60),
+            Duration::from_millis(5),
+            || {
+                inspections += 1;
+                Ok(running.clone())
+            },
+        )
+        .unwrap();
+        assert!(inspections >= 1);
+        assert!(started.elapsed() >= Duration::from_millis(60));
+        assert_eq!(
+            verify_exited_listener(Some(&Condition::Completed), &settled)
+                .unwrap_err()
+                .code,
+            "graph_startup_running_listener_lost"
+        );
+        // An already exited container is never re-inspected.
+        let exited = json!({"State":{"Running":false,"ExitCode":0,"OOMKilled":false}});
+        let settled = settle_exited_transport(
+            exited.clone(),
+            Instant::now() + Duration::from_secs(30),
+            Duration::from_millis(1),
+            || panic!("an exited container needs no further inspection"),
+        )
+        .unwrap();
+        assert_eq!(settled, exited);
+        // Cancellation and inspection refusals stop the wait.
+        let refused = settle_exited_transport(
+            running,
+            Instant::now() + Duration::from_secs(30),
+            Duration::from_millis(1),
+            || Err(error("graph_cancelled", "cancelled")),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "graph_cancelled");
     }
     #[test]
     fn exited_listener_accepts_only_successful_completed_service() {

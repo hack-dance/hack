@@ -1266,6 +1266,13 @@ exit observation before cleanup, including exit code zero. A successful
 no command, environment or application log values. Older bundles may refuse the
 new zero-exit evidence; use the owning bundle for diagnosis and retaining cleanup.
 
+A host-dependency listener's transport usually ends before the engine records the
+container's own exit, for example when a quick initializer finishes. Startup then
+re-inspects the container for up to 10 seconds before it classifies the exit, so a
+`completed` service that exits 0 is accepted and a crashing service reports its own
+exit. Only a container that still runs after that window reports
+`graph_startup_running_listener_lost`.
+
 A Docker container can remain `created` with a nonzero error when its first start
 fails before a process runs. Retaining shutdown accepts this state only with
 verified ownership, no running PID, no pause/restart/dead state and no OOM flag.

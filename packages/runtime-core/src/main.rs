@@ -105,6 +105,7 @@ Usage:
   hack-local runtime prepared-base status --profile research|development [--store <absolute-private-store>] [--json]
   hack-local runtime prepared-base remove --base-id <id> [--store <absolute-private-store>] [--json]
   hack-local runtime admit-image --reference <[registry/]repository[:tag][@sha256:digest]|sha256:image-id> --json [IMAGE-POLICY]
+  hack-local runtime build-image --request <private-0600-request.json> --json
   hack-local runtime ensure-image --reference <[registry/]repository[:tag]|[registry/]repository@sha256:digest> [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
   hack-local runtime up ... --amd64-emulation [--json]
   hack-local runtime resolve-image --reference <[registry/]repository[:tag]> --json [IMAGE-POLICY]
@@ -1012,6 +1013,13 @@ fn run() -> Result<(), CandidateError> {
                 reference,
                 &image_policy(policy)?,
                 emulation,
+            )?)?;
+        }
+        ["runtime", "build-image", "--request", request, "--json"] => {
+            // Build output streams to stderr; only the result is printed on stdout.
+            print_json(&hack_runtime_core::provider::image_build::build_image(
+                &discover_candidate(&requested)?,
+                Path::new(request),
             )?)?;
         }
         [

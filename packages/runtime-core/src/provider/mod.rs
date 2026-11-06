@@ -35,6 +35,7 @@ pub mod hostname_authority;
 pub mod http_probe;
 pub mod https_recovery;
 mod identity;
+pub mod image_build;
 pub mod image_ensure;
 mod image_load;
 pub mod image_platform;

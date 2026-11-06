@@ -622,6 +622,53 @@ state and checks its code signature. If a prepared client exists, the command ch
 it again and does not replace it. If the prepared tree changes, `runtime probe`
 refuses; it reports `builder_prepared` when the client is present and unchanged.
 
+`runtime build-image --request <file> --json` builds one image in the running
+runtime's engine with that client. It is a building block: native `up` still refuses
+`build:` services and does not call it. The request is a private JSON file (a singly
+linked, mode-`0600` file owned by you):
+
+```json
+{"version": 1, "project_root": "/absolute/project", "context": "app",
+ "dockerfile": "Dockerfile", "target": null, "args": {"NAME": "literal"},
+ "policy": "missing", "timeout_seconds": 1800}
+```
+
+- The context and Dockerfile must be inside the project and reached without symlinks.
+  The Dockerfile is read, never run, to find every image it can pull. Each image must
+  be a public Docker Hub reference; it is pinned to a digest before the build starts.
+  Base images with stored `ONBUILD` triggers refuse. The client builds from a private
+  copy of the Dockerfile and ignore rules that were scanned, so editing either file
+  during the build has no effect on it.
+- Build arguments are not secrets, exactly as with Docker: the built image records
+  their values in its history, and an argument that selects a base image appears in
+  the resolved base references that the receipt and the result report. Never pass a
+  secret as a build argument. BuildKit build secrets are the right mechanism for
+  secrets; native builds do not support them yet.
+- Every build runs under a BuildKit source policy: only the pinned base images
+  resolve as images, and network sources (`ADD` of an `http`, `https` or git URL, and
+  image blob sources) are denied. The engine would otherwise fetch those from outside
+  the isolated build network. The policy also covers sources that a base image's
+  stored `ONBUILD` triggers add; such bases refuse before the build anyway.
+- Argument values reach the client only through a private definition file (mode
+  `0600`, removed after the build), never its command line or its environment; the
+  client's environment is a fixed list of its own settings. Names must be plain
+  identifiers. Names BuildKit or buildx interpret themselves (`BUILDKIT_*`,
+  `BUILDX_*`, `SOURCE_DATE_EPOCH`) and the platform arguments refuse.
+- Build output is shown on stderr after filtering, as defense in depth: every
+  argument value is replaced with `[redacted]`, also when quoted or escaped the way
+  the client prints values, terminal control characters are removed, lines are cut at
+  16 KiB and output stops after 4 MiB.
+- `missing` reuses a verified image for the same build key without running the client;
+  `rebuild` always builds. The key covers the Dockerfile and `.dockerignore` bytes,
+  target, arguments and versions, not the context's other files (as with Compose).
+- The runtime must have network egress and the isolated build network that a runtime
+  started by this version sets up. An older runtime refuses with
+  `native_build_runtime_restart`: stop it and start it again.
+- `runtime down` refuses while a build runs. Ctrl-C or SIGTERM cancels the build and
+  stops the client's whole process group; so does the time budget (default 30 minutes,
+  at most 2 hours). Both also apply while base images resolve, before the client
+  starts: the budget covers the whole operation.
+
 Before startup, network-tool preparation additionally requires all four pinned
 Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), with
 regular, singly linked mode-`0600` files. Acquire the matching public package bytes;

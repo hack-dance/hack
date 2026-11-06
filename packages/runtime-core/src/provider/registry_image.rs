@@ -1307,6 +1307,80 @@ pub(super) fn pinned_platform(
     config_platform(&config_bytes, platform, None)
 }
 
+/// A base image a native build may pull, pinned to the exact manifest the registry
+/// served when the build was admitted.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BuildBase {
+    /// `docker.io/<repository>@<source digest>`: the only form handed to the builder.
+    pub pinned_reference: String,
+    /// Digest of the manifest or index the reference resolved to.
+    pub source_digest: String,
+    /// Content ID of the selected Linux ARM64 image.
+    pub image_id: String,
+}
+
+/// Resolve one normalized base-image reference for a native build, through the same
+/// guarded, origin-bound client and address policy as acquisition. A tag resolves once
+/// to its current manifest; a digest-pinned reference must resolve to exactly that pin.
+/// Builds stay Docker Hub and Linux ARM64 only (the Dockerfile scan and the build source
+/// policy admit nothing else), and the configuration must declare no `ONBUILD`
+/// triggers: a stored trigger could pull images the Dockerfile scan never saw. Only
+/// bounded metadata is fetched. `deadline` bounds the whole resolution, never beyond
+/// the acquisition deadline.
+pub fn resolve_build_base(
+    named: &NamedReference,
+    deadline: Instant,
+) -> Result<BuildBase, CandidateError> {
+    if named.docker_hub_repository().is_none() {
+        return Err(error(
+            "Only public Docker Hub [namespace/]repository[:tag][@sha256] references are supported.",
+        ));
+    }
+    let policy = ImagePolicy::default();
+    let registry = registry(named, &policy)?;
+    let mut fetch = Fetch::new(&registry, &named.path, &policy)?;
+    fetch.deadline = fetch.deadline.min(deadline);
+    let (reference, expected) = match (&named.digest, &named.tag) {
+        (Some(pin), _) => (pin.as_str(), Some(pin.as_str())),
+        (None, Some(tag)) => (tag.as_str(), None),
+        (None, None) => ("latest", None),
+    };
+    let initial = fetch.manifest(reference)?;
+    let source_digest = digest(&initial);
+    if expected.is_some_and(|expected| expected != source_digest) {
+        return Err(error("Registry manifest digest or size mismatch."));
+    }
+    let (manifest, _, indexed) =
+        select(&mut fetch, &initial, &source_digest, PlatformPolicy::Native)?;
+    let config = manifest
+        .config
+        .ok_or_else(|| error("Image config descriptor is missing."))?;
+    let config_bytes = fetch.object("blobs", &config)?;
+    config_platform(&config_bytes, PlatformPolicy::Native, indexed)?;
+    if declares_onbuild(&config_bytes)? {
+        return Err(CandidateError::new(
+            "native_build_base_image",
+            "A build base image declares ONBUILD triggers; native builds refuse stored triggers.",
+        ));
+    }
+    Ok(BuildBase {
+        pinned_reference: format!("{}/{}@{source_digest}", registry.domain, named.path),
+        source_digest,
+        image_id: config.digest,
+    })
+}
+
+/// Whether an image configuration carries stored `ONBUILD` triggers.
+fn declares_onbuild(config_bytes: &[u8]) -> Result<bool, CandidateError> {
+    let config: serde_json::Value =
+        serde_json::from_slice(config_bytes).map_err(|_| error("Invalid image configuration."))?;
+    Ok(match &config["config"]["OnBuild"] {
+        serde_json::Value::Null => false,
+        serde_json::Value::Array(triggers) => !triggers.is_empty(),
+        _ => return Err(error("Invalid image configuration.")),
+    })
+}
+
 fn layer_extension(media_type: &str) -> Result<&'static str, CandidateError> {
     match media_type {
         "application/vnd.oci.image.layer.v1.tar+gzip"

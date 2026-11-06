@@ -1597,3 +1597,29 @@ fn pinned_bun_node_image_downloads_without_docker() {
     .unwrap();
     println!("{}", serde_json::to_string(&receipt).unwrap());
 }
+
+#[test]
+fn stored_onbuild_triggers_are_detected_and_malformed_configs_refuse() {
+    assert!(!declares_onbuild(br#"{"config":{}}"#).unwrap());
+    assert!(!declares_onbuild(br#"{"config":{"OnBuild":null}}"#).unwrap());
+    assert!(!declares_onbuild(br#"{"config":{"OnBuild":[]}}"#).unwrap());
+    assert!(declares_onbuild(br#"{"config":{"OnBuild":["COPY --from=x / /"]}}"#).unwrap());
+    assert!(declares_onbuild(br#"{"config":{"OnBuild":"RUN x"}}"#).is_err());
+    assert!(declares_onbuild(b"not json").is_err());
+}
+
+#[test]
+fn build_bases_accept_only_docker_hub_references() {
+    let named = |value: &str| match normalize(value).unwrap() {
+        ImageReference::Named(named) => named,
+        ImageReference::ImageId(_) => unreachable!(),
+    };
+    for value in [
+        "ghcr.io/example/app:1",
+        "registry.test:5000/app:1",
+        "localhost/app:1",
+    ] {
+        let error = resolve_build_base(&named(value), Instant::now()).unwrap_err();
+        assert_eq!(error.code, "registry_image", "{value}");
+    }
+}

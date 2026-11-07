@@ -3991,21 +3991,39 @@ test("startup records the requested or default env and marks runs without manage
 });
 
 test("a retained run that started with managed env files refuses before hooks once they are gone", async () => {
-  const qaFile = "/fixture/.hack/hack.env.qa.yaml";
-  const baseFile = "/fixture/.hack/hack.env.default.yaml";
-  for (const [marker, environmentFiles, expected] of [
-    [undefined, [], "refused"],
+  const removed =
+    "Native up refused: .hack/hack.env.qa.yaml or .hack/hack.env.qa.local.yaml was removed since this run started. Restore it and run hack up again, or run hack down (with it restored if the project has down hooks), then hack up, to start without it; retained data was not replaced.";
+  const appeared = (file: string) =>
+    `Native up refused: .hack/${file} appeared since this run started. Run hack down, then hack up, to start with it; retained data was not replaced.`;
+  for (const [marker, files, expected] of [
+    [undefined, [], removed],
     ["unmanagedEnvironment", [], "unmanaged"],
-    [undefined, [qaFile], "managed"],
+    [undefined, ["hack.env.qa.yaml"], "managed"],
     // A base-only start survives while the overlay stays absent.
-    ["baseOnlyEnvironment", [baseFile], "baseOnly"],
-    // An overlay appearing after a base-only or unmanaged start is a change.
-    ["baseOnlyEnvironment", [baseFile, qaFile], "refused"],
-    ["unmanagedEnvironment", [qaFile], "refused"],
+    ["baseOnlyEnvironment", ["hack.env.default.yaml"], "baseOnly"],
+    // An overlay or env file appearing after a base-only or unmanaged start is a change.
+    [
+      "baseOnlyEnvironment",
+      ["hack.env.default.yaml", "hack.env.qa.yaml"],
+      appeared("hack.env.qa.yaml"),
+    ],
+    [
+      "unmanagedEnvironment",
+      ["hack.env.qa.yaml"],
+      appeared("hack.env.qa.yaml"),
+    ],
+    [
+      "unmanagedEnvironment",
+      ["hack.env.default.yaml"],
+      appeared("hack.env.default.yaml"),
+    ],
     // A mapping without a marker that finds only the base lost its overlay.
-    [undefined, [baseFile], "refused"],
+    [undefined, ["hack.env.default.yaml"], removed],
   ] as const) {
     const { opts, events } = await fixture(false);
+    const environmentFiles = files.map((name) =>
+      join(opts.scope.projectDir, name)
+    );
     const restore: NativeProjectRun = {
       run: "1".repeat(32),
       owner: "c".repeat(32),
@@ -4032,10 +4050,9 @@ test("a retained run that started with managed env files refuses before hooks on
       saved.push(request.run);
     };
     const started = startNativeProject({ ...opts, restore });
-    if (expected === "refused") {
-      await expectClosedRefusal(
-        started,
-        "Native retained environment selection changed; data was not replaced."
+    if (expected.startsWith("Native up refused")) {
+      expect((await expectClosedRefusal(started, expected)).message).toBe(
+        expected
       );
       expect(events).not.toContain("before");
       expect(saved).toEqual([]);

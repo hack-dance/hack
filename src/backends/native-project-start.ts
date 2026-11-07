@@ -107,13 +107,16 @@ import {
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
 import {
+  describeNativeRunEnvironmentChange,
   loadNativeProjectRun,
   loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
   type NativeRunEnvironmentMarkers,
   nativeRunEnvironmentAvailable,
+  nativeRunEnvironmentChange,
   nativeRunEnvironmentMarkers,
+  nativeRunEnvironmentRemedy,
   normalizeNativeProfiles,
   prepareNativeProjectRunStorage,
   removeNativeProjectRun,
@@ -1152,8 +1155,22 @@ function requireRetainedEnvironment(opts: {
   readonly retainedSelection: string | null | undefined;
   readonly restore: NativeProjectRun | undefined;
   readonly input: NativeProjectInput;
+  readonly scope: NativeProjectRunScope;
 }): NativeRunEnvironmentMarkers {
   const { restore, input } = opts;
+  const change =
+    restore &&
+    nativeRunEnvironmentChange({
+      run: restore,
+      environmentFiles: input.environmentFiles,
+      projectRoot: opts.scope.projectRoot,
+      projectDir: opts.scope.projectDir,
+    });
+  if (change) {
+    throw new ClosedCliError(
+      `Native up refused: ${describeNativeRunEnvironmentChange(change)}. ${nativeRunEnvironmentRemedy({ change, retry: "hack up" })}; retained data was not replaced.`
+    );
+  }
   if (
     (opts.retainedSelection !== undefined &&
       input.effectiveEnvName !== opts.retainedSelection) ||
@@ -1498,6 +1515,7 @@ export async function startNativeProject(opts: {
       retained && !opts.restore ? selection.envName : undefined,
     restore,
     input,
+    scope: opts.scope,
   });
   // The effective env (requested, retained or project default) picks the per-env
   // files, so a fresh start, a retained start and a restart select the same ones.

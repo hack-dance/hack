@@ -3,13 +3,22 @@ import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { adaptNativeGcloudEnvironment } from "./native-gcloud-environment.ts";
 import { prepareNativeProjectInput } from "./native-project-input.ts";
 import {
+  describeNativeRunEnvironmentChange,
   type NativeProjectRun,
   type NativeProjectRunScope,
   nativeRunEnvironmentAvailable,
+  nativeRunEnvironmentChange,
+  nativeRunEnvironmentRemedy,
 } from "./native-project-run.ts";
 
 /** Marks a selection that no longer matches the run's recorded startup selection. */
-class SelectionChanged extends Error {}
+class SelectionChanged extends Error {
+  readonly detail: string | undefined;
+  constructor(detail?: string) {
+    super("selection changed");
+    this.detail = detail;
+  }
+}
 
 /**
  * Both refusals keep `E_CONFIG_INVALID` for JSON callers. The messages differ:
@@ -56,6 +65,17 @@ export async function prepareNativeExecEnvironment(opts: {
     ) {
       throw new SelectionChanged();
     }
+    const change = nativeRunEnvironmentChange({
+      run: opts.run,
+      environmentFiles: input.environmentFiles,
+      projectRoot: opts.scope.projectRoot,
+      projectDir: opts.scope.projectDir,
+    });
+    if (change) {
+      throw new SelectionChanged(
+        `Native fresh exec selection changed since startup: ${describeNativeRunEnvironmentChange(change)}. ${nativeRunEnvironmentRemedy({ change, retry: "hack exec" })}; no command was requested. Values omitted.`
+      );
+    }
     if (
       !nativeRunEnvironmentAvailable({
         run: opts.run,
@@ -89,7 +109,7 @@ export async function prepareNativeExecEnvironment(opts: {
       code: "E_CONFIG_INVALID",
       message:
         error instanceof SelectionChanged
-          ? SELECTION_CHANGED_MESSAGE
+          ? (error.detail ?? SELECTION_CHANGED_MESSAGE)
           : ENVIRONMENT_UNAVAILABLE_MESSAGE,
     });
   }

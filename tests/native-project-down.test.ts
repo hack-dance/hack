@@ -20,6 +20,7 @@ import {
 } from "../src/backends/native-project-finalization.ts";
 import {
   loadNativeProjectRun,
+  type NativeProjectRun,
   type NativeProjectRunScope,
   removeNativeProjectRun,
   saveNativeProjectRun,
@@ -538,6 +539,8 @@ test("not-started native down does not run configured hooks", async () => {
   }
 });
 
+const DOWN_OVERLAY_REMOVED =
+  "Native down refused before cleanup: .hack/hack.env.qa.yaml or .hack/hack.env.qa.local.yaml was removed since this run started, and the down hooks need the values this run started with. Restore it and run hack down again; nothing was stopped.";
 test("down environment preserves explicit base and named overlay while legacy refuses", async () => {
   const opts = await fixture(false);
   const env = async (name: string, value: string) =>
@@ -585,7 +588,7 @@ test("down environment preserves explicit base and named overlay while legacy re
       run: { ...run, effectiveEnvName: "qa" },
       serviceNames: ["web"],
     }),
-    "unavailable"
+    DOWN_OVERLAY_REMOVED
   );
   await expectClosedRefusal(
     nativeDownEnvironment({ scope: opts.scope, run, serviceNames: ["web"] }),
@@ -602,7 +605,7 @@ test("down environment is empty only for a run recorded without managed env file
       run: { ...run, effectiveEnvName: "qa" },
       serviceNames: ["web"],
     }),
-    "unavailable"
+    DOWN_OVERLAY_REMOVED
   );
   for (const selected of [
     { effectiveEnvName: "qa", unmanagedEnvironment: true as const },
@@ -616,6 +619,33 @@ test("down environment is empty only for a run recorded without managed env file
       })
     ).toEqual({});
   }
+});
+test("down hooks keep the recorded selection when env files appeared since startup", async () => {
+  const opts = await fixture(false);
+  const env = async (name: string, value: string) =>
+    await writeFile(
+      join(opts.scope.projectDir, `hack.env.${name}.yaml`),
+      JSON.stringify({
+        version: 1,
+        environment: name,
+        secretsprovider: "project_key",
+        values: { global: { VALUE: value } },
+      })
+    );
+  const down = (selected: Partial<NativeProjectRun>) =>
+    nativeDownEnvironment({
+      scope: opts.scope,
+      run: { ...run, effectiveEnvName: "qa", ...selected },
+      serviceNames: ["web"],
+    });
+  // Started without managed env files: no values, even after files appear.
+  await env("default", "base");
+  await env("qa", "qa-value");
+  expect(await down({ unmanagedEnvironment: true })).toEqual({});
+  // Started base-only: the base values, never the overlay that appeared later.
+  expect(await down({ baseOnlyEnvironment: true })).toEqual({ VALUE: "base" });
+  // Started with the overlay: its current values while it exists.
+  expect(await down({})).toEqual({ VALUE: "qa-value" });
 });
 test("before failure prevents cleanup; after failure retains the stopped mapping", async () => {
   for (const phase of ["before", "after"] as const) {

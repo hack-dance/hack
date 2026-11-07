@@ -10,7 +10,7 @@ import {
   rmdir,
   unlink,
 } from "node:fs/promises";
-import { basename, join, relative } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -68,15 +68,17 @@ export type NativeRunEnvironmentMarkers = Pick<
   NativeProjectRun,
   "unmanagedEnvironment" | "baseOnlyEnvironment"
 >;
+function isOverlay(envName: string, path: string): boolean {
+  return [
+    `hack.env.${envName}.yaml`,
+    `hack.env.${envName}.local.yaml`,
+  ].includes(basename(path));
+}
 function overlayPresent(
   envName: string,
   environmentFiles: readonly string[]
 ): boolean {
-  return environmentFiles.some((path) =>
-    [`hack.env.${envName}.yaml`, `hack.env.${envName}.local.yaml`].includes(
-      basename(path)
-    )
-  );
+  return environmentFiles.some((path) => isOverlay(envName, path));
 }
 /**
  * The marker a fresh startup records for its selection: none for a base selection or
@@ -98,6 +100,37 @@ export function nativeRunEnvironmentMarkers(opts: {
     ? {}
     : { baseOnlyEnvironment: true };
 }
+/** A managed env file that appeared or was removed since a run started. */
+export type NativeRunEnvironmentChange = {
+  readonly change: "appeared" | "removed";
+  /** Project-relative file name(s) only; never contents. */
+  readonly file: string;
+};
+type ChangedPath =
+  | { readonly change: "appeared"; readonly path: string }
+  | { readonly change: "removed"; readonly envName: string };
+/** The one comparison behind both exported checks; undefined means unchanged. */
+function changedEnvironmentFile(opts: {
+  readonly run: NativeRunEnvironmentMarkers & { readonly envName: string };
+  readonly environmentFiles: readonly string[];
+}): ChangedPath | undefined {
+  const { envName } = opts.run;
+  const overlay = opts.environmentFiles.find((path) =>
+    isOverlay(envName, path)
+  );
+  if (opts.run.unmanagedEnvironment === true) {
+    const appeared = overlay ?? opts.environmentFiles[0];
+    return appeared === undefined
+      ? undefined
+      : { change: "appeared", path: appeared };
+  }
+  if (opts.run.baseOnlyEnvironment === true) {
+    return overlay === undefined
+      ? undefined
+      : { change: "appeared", path: overlay };
+  }
+  return overlay === undefined ? { change: "removed", envName } : undefined;
+}
 /**
  * Whether the managed env files a run's recorded selection needs are unchanged. A base
  * selection needs none. A named selection needs its overlay (`hack.env.<env>.yaml` or
@@ -116,14 +149,77 @@ export function nativeRunEnvironmentAvailable(opts: {
   if (selected === undefined) {
     return false;
   }
-  if (selected === null) {
-    return true;
+  return (
+    selected === null ||
+    changedEnvironmentFile({
+      run: { ...opts.run, envName: selected },
+      environmentFiles: opts.environmentFiles,
+    }) === undefined
+  );
+}
+/**
+ * The managed env file whose appearance or removal changed a recorded named selection,
+ * named relative to the project root (a file outside it by its base name), or
+ * undefined when nothing changed or the selection is a base or legacy one.
+ */
+export function nativeRunEnvironmentChange(opts: {
+  readonly run: Pick<
+    NativeProjectRun,
+    "effectiveEnvName" | "unmanagedEnvironment" | "baseOnlyEnvironment"
+  >;
+  readonly environmentFiles: readonly string[];
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): NativeRunEnvironmentChange | undefined {
+  const selected = opts.run.effectiveEnvName;
+  if (selected === undefined || selected === null) {
+    return undefined;
   }
-  if (opts.run.unmanagedEnvironment === true) {
-    return opts.environmentFiles.length === 0;
+  const changed = changedEnvironmentFile({
+    run: { ...opts.run, envName: selected },
+    environmentFiles: opts.environmentFiles,
+  });
+  if (changed === undefined) {
+    return undefined;
   }
-  const present = overlayPresent(selected, opts.environmentFiles);
-  return opts.run.baseOnlyEnvironment === true ? !present : present;
+  const label = (path: string) => {
+    const name = relative(opts.projectRoot, path);
+    return name === "" || name.startsWith("..") || isAbsolute(name)
+      ? basename(path)
+      : name;
+  };
+  if (changed.change === "appeared") {
+    return { change: "appeared", file: label(changed.path) };
+  }
+  const overlay = label(
+    join(opts.projectDir, `hack.env.${changed.envName}.yaml`)
+  );
+  const local = label(
+    join(opts.projectDir, `hack.env.${changed.envName}.local.yaml`)
+  );
+  return { change: "removed", file: `${overlay} or ${local}` };
+}
+/**
+ * How to apply a changed env file set: start again with the files as they are now. A
+ * removed overlay can also be restored to keep the run; a project with down hooks needs
+ * it restored for `hack down`, which runs them with the values the run started with.
+ */
+export function nativeRunEnvironmentRemedy(opts: {
+  readonly change: NativeRunEnvironmentChange;
+  /** The command the caller refused, e.g. `hack restart`. */
+  readonly retry: string;
+}): string {
+  return opts.change.change === "appeared"
+    ? "Run hack down, then hack up, to start with it"
+    : `Restore it and run ${opts.retry} again, or run hack down (with it restored if the project has down hooks), then hack up, to start without it`;
+}
+/** "<file> appeared since this run started" or "<file> was removed since ..." */
+export function describeNativeRunEnvironmentChange(
+  change: NativeRunEnvironmentChange
+): string {
+  return change.change === "appeared"
+    ? `${change.file} appeared since this run started`
+    : `${change.file} was removed since this run started`;
 }
 export type NativeProjectRunScope = {
   readonly projectRoot: string;

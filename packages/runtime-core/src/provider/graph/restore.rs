@@ -329,7 +329,14 @@ fn restore_inputs(
                 Some(change),
             )?;
         } else {
-            verify_fresh(&receipt, &inputs.review.plan_id, fresh, &generation)?;
+            // A source-independent review of the exact retained Compose input
+            // replays under the retained plan; resource bindings are rechecked below.
+            let plan = if normalized::source_independent_review(&receipt, &inputs.review.plan) {
+                &receipt.plan_id
+            } else {
+                &inputs.review.plan_id
+            };
+            verify_fresh(&receipt, plan, fresh, &generation)?;
         }
     } else {
         normalized::require_file_replay(&receipt)?;

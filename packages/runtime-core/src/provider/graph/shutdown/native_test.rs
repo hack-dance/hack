@@ -113,6 +113,7 @@ fn owned_graph_shutdown_signals_and_escalation() {
             shared_source: false,
             release_initializer_cache: std::collections::BTreeSet::new(),
             routing_enrolled: false,
+            loopback_ports: false,
             project: options(&fixture.0),
             expected_plan: &report.plan_id,
             source_revision: None,

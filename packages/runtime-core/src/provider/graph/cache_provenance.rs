@@ -276,6 +276,7 @@ mod tests {
     }
     fn container() -> Resource {
         Resource {
+            loopback_ports: Vec::new(),
             routing: None,
             networks: None,
             outbound: false,
@@ -368,6 +369,7 @@ mod tests {
             image: format!("sha256:{}", "d".repeat(64)),
         };
         let volume = Resource {
+            loopback_ports: Vec::new(),
             routing: None,
             networks: None,
             outbound: false,

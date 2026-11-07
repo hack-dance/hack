@@ -92,7 +92,10 @@ test("cached image prerequisite emits complete sparse JSON before carrier effect
 });
 
 test("cached image prerequisite refuses the faithful truncated sparse output", async () => {
-  const truncated = `{"id":"${NATIVE_STORAGE_DOCKER_ARTIFACT.imageId}","os":"linux","arch":"arm64","volumes":null\n`;
+  // Recorded bytes from the earlier Bun 1.4.2 helper image; truncation alone
+  // must refuse before any identity comparison.
+  const truncated =
+    '{"id":"sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61","os":"linux","arch":"arm64","volumes":null\n';
   expect(Buffer.byteLength(truncated)).toBe(123);
   expect(createHash("sha256").update(truncated).digest("hex")).toBe(
     "aea01511888599e3e1cacfc66c146dadb3ffdec207e1a620fe0136c2bca72ad8"
@@ -912,7 +915,9 @@ test.each([
 });
 test.each([
   NATIVE_STORAGE_DOCKER_ARTIFACT.imageId,
+  "oven/bun:1.4.4-slim",
   "oven/bun:1.4.2-slim",
+  "oven/bun@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61",
   `foreign/bun@${NATIVE_STORAGE_DOCKER_ARTIFACT.imageId}`,
   `oven/bun@sha256:${"f".repeat(64)}`,
 ])("configured image must remain the exact immutable repository reference: %s", (configImage) => {
@@ -1361,7 +1366,7 @@ test("an exhausted xattr carrier lifetime refuses with the storage budget reason
     version: 1,
     imageId: `sha256:${"a".repeat(64)}`,
     platform: "linux/arm64",
-    bunVersion: "1.4.2",
+    bunVersion: "1.4.4",
     bunHash: "b".repeat(64),
     libcHash: "c".repeat(64),
     helperHash: "e".repeat(64),

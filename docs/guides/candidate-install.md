@@ -82,6 +82,11 @@ bundled `hack-cli` directly or create a private `HACK_HOME` to test Compose.
 | Native (default) | `"$HOME/.hack-next/bin/hack-next" up --path /absolute/project` | The version's private `cli-home` and `native-home` | The candidate's native routing, set up through [native candidate preparation](native-candidate.md) |
 | Compose | `HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" up --path /absolute/project` | Your own `HACK_HOME` (default `~/.hack`) and `HACK_GLOBAL_CONFIG_PATH` | Your existing global Caddy, CoreDNS and local CA |
 
+On the native backend, every project root and linked worktree uses the version's
+one `native-home`, so they share one VM pool and one HTTPS router, as Compose
+projects share one Docker VM and the global Caddy. A root joins the pool while the
+pool is stopped; see [one pool, several project roots](native-candidate.md#explicit-writable-development-source).
+
 With `HACK_RUNTIME_BACKEND=compose`, `hack-next` verifies the selected bundle as
 usual and then runs its `hack-cli` on the Compose backend. It keeps your Hack home,
 so `https://<project>.hack` routes, container DNS and CA trust use the global

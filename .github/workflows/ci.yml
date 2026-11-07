@@ -328,10 +328,9 @@ jobs:
           docker pull alpine:3.20
           docker pull alpine:3.22
           docker pull node:24.22.1-bookworm-slim
+          # Also the cataloged native file and storage helper image
+          # (src/lib/native-compose-storage-witness-docker-artifact.ts).
           docker pull oven/bun:1.4.4-slim
-          # The qualified native file and storage helper artifact stays on this image
-          # until its catalog pins are requalified (src/lib/native-compose-vm-file-protocol.ts).
-          docker pull oven/bun:1.4.2-slim
           docker pull postgres:17.6-alpine
           docker pull lucaslorentz/caddy-docker-proxy:2.10.0-alpine
       - uses: dtolnay/rust-toolchain@1.97.1

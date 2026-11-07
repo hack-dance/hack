@@ -576,7 +576,7 @@ fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
     identity::verify(&e.process, &observed, &e.process.executable, unsafe {
         libc::geteuid()
     })?;
-    if !e.unix || !verify_directory(e)? || !e.binary.as_ref().is_some_and(|b| b.ready) {
+    if !verify_directory(e)? || !e.binary.as_ref().is_some_and(|b| b.ready) {
         return Err(error());
     }
     let file = OpenOptions::new()
@@ -603,7 +603,12 @@ fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
     if format!("{:x}", Sha256::digest(bytes)) != e.digest {
         return Err(error());
     }
-    check_socket(e, "frontend", "HKPF1", &e.reservation, false)?;
+    // A TCP frontend has no filesystem identity. The publisher binds its
+    // control socket only after the frontend listener is bound and listening,
+    // so an owned control socket also proves the TCP listener exists.
+    if e.unix {
+        check_socket(e, "frontend", "HKPF1", &e.reservation, false)?;
+    }
     check_socket(e, "control", "HKPC1", &e.token, false)?;
     // A second observation refuses death or identity change during filesystem checks.
     let after = identity::observe(e.process.pid)?;
@@ -651,6 +656,62 @@ pub fn lookup_hostname(c: &Candidate, value: &str) -> Result<serde_json::Value, 
         "endpoint":directory(entry).join("frontend"),"state":"publication-observed",
         "scope":"point-in-time-host-publication"}),
     )
+}
+
+/// Point-in-time observation of one owned loopback TCP publication, selected by
+/// its exact run and reservation. Not proof of guest reachability.
+pub fn lookup_port(
+    c: &Candidate,
+    run: &str,
+    reservation: &str,
+    port: u16,
+) -> Result<serde_json::Value, CandidateError> {
+    if !hex(run, 32) || !hex(reservation, 32) || port == 0 {
+        return Err(error());
+    }
+    let owner = state::Owner::load(c)?;
+    let entries = load(c, &owner.token)?;
+    let entry = entries
+        .get(reservation)
+        .filter(|e| !e.unix && e.port == port && e.run == run)
+        .ok_or_else(error)?;
+    observe_publication(entry)?;
+    let after_owner = state::Owner::load(c)?;
+    let after = load(c, &after_owner.token)?;
+    verify_claim_snapshot(entry, &after, &after_owner.token)?;
+    Ok(
+        serde_json::json!({"host":"127.0.0.1","port":port,"run":entry.run,
+        "reservation":entry.reservation,"state":"publication-observed",
+        "scope":"point-in-time-host-publication"}),
+    )
+}
+
+fn port_in_use() -> CandidateError {
+    CandidateError::new(
+        "published_port_in_use",
+        "A published host port is already accepting connections on loopback; stop the other listener or change the published port. Nothing was published.",
+    )
+}
+
+/// Refuse a loopback publication whose host port already accepts loopback
+/// connections. The publisher binds 127.0.0.1 with `SO_REUSEADDR`, which BSD
+/// lets coexist with another process's wildcard listener on the same port;
+/// that would silently take loopback traffic from it. A connect probe sees
+/// exactly that case (and an exact 127.0.0.1 or dual-stack listener).
+/// Point-in-time only: the publisher's own exclusive bind is the final check.
+pub fn require_loopback_port_free(port: u16) -> Result<(), CandidateError> {
+    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+    if port == 0 {
+        return Err(error());
+    }
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    match TcpStream::connect_timeout(&address, std::time::Duration::from_millis(250)) {
+        Ok(_) => Err(port_in_use()),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => Ok(()),
+        // A loopback connect that neither connects nor is refused is not
+        // evidence that the port is free.
+        Err(_) => Err(port_in_use()),
+    }
 }
 
 pub(super) struct Launch<'a> {
@@ -777,6 +838,32 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
     }
     let failure = publication_command(&e, options.upstream)?.exec();
     Err(state::io(failure))
+}
+
+#[cfg(test)]
+mod port_probe_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, TcpListener};
+
+    #[test]
+    fn loopback_probe_refuses_exact_and_wildcard_listeners_and_accepts_a_free_port() {
+        let exact = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = exact.local_addr().unwrap().port();
+        assert_eq!(
+            require_loopback_port_free(port).unwrap_err().code,
+            "published_port_in_use"
+        );
+        drop(exact);
+        require_loopback_port_free(port).unwrap();
+        // A wildcard listener would share loopback traffic under SO_REUSEADDR.
+        let wildcard = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let port = wildcard.local_addr().unwrap().port();
+        assert_eq!(
+            require_loopback_port_free(port).unwrap_err().code,
+            "published_port_in_use"
+        );
+        assert!(require_loopback_port_free(0).is_err());
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

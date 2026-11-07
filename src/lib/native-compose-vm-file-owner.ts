@@ -51,6 +51,7 @@ import { createNativeComposeVmFileClient } from "./native-compose-vm-file-client
 import {
   NATIVE_COMPOSE_VM_FILE_IMAGE,
   NATIVE_COMPOSE_VM_FILE_LIMIT,
+  NATIVE_COMPOSE_VM_FILE_SAVED_IMAGES,
   NATIVE_COMPOSE_VM_FILES_EXTENSION,
   parseVmFileFacts,
   parseVmFileJournal,
@@ -830,7 +831,7 @@ async function state(document: Document) {
     const helper = parseImage(raw.helper);
     requireValue(
       helper.workload === "" &&
-        helper.reference === NATIVE_COMPOSE_VM_FILE_IMAGE &&
+        NATIVE_COMPOSE_VM_FILE_SAVED_IMAGES.includes(helper.reference) &&
         helper.id === raw.observer.image
     );
     const images: Image[] = [];

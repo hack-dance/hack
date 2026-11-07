@@ -11,6 +11,7 @@ export async function inspectNativeProjectGraph(opts: {
   readonly projectRoot: string;
   readonly run: string;
   readonly invoke?: typeof invokeNativeRuntime;
+  readonly signal?: AbortSignal;
 }): Promise<unknown> {
   const deadline = performance.now() + 2000;
   for (;;) {
@@ -20,6 +21,7 @@ export async function inspectNativeProjectGraph(opts: {
         cwd: opts.projectRoot,
         args: ["graph", "inspect", "--run-id", opts.run, "--json"],
         timeoutMs: 30_000,
+        signal: opts.signal,
       });
     } catch (error) {
       if (

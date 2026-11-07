@@ -6,7 +6,7 @@
 //! code and value-free message and also names the service and the closed field
 //! to change. All wrapped services are checked in one pass so a project with
 //! several affected stock images learns about all of them from one start.
-use crate::error::{CandidateError, ProcessField, ProcessRefusal, ProcessRefusalsDiagnostic};
+use crate::error::{CandidateError, ProcessField, ProcessRefusal};
 
 /// One wrapper refusal before it is attributed to a service.
 #[derive(Debug)]
@@ -66,11 +66,7 @@ impl Collector {
                     "{} Refused process settings are named in process_refusals.",
                     error.message
                 );
-                error.process_refusals = Some(Box::new(ProcessRefusalsDiagnostic {
-                    version: 1,
-                    refusals: self.refusals,
-                }));
-                Err(error)
+                Err(error.with_process_refusals(self.refusals))
             }
         }
     }
@@ -110,7 +106,7 @@ mod tests {
         );
         let error = collector.finish().unwrap_err();
         assert_eq!(error.code, "environment_user");
-        let detail = error.process_refusals.expect("named refusals");
+        let detail = error.process_refusals().expect("named refusals");
         assert_eq!(detail.version, 1);
         assert_eq!(
             detail.refusals,
@@ -125,13 +121,10 @@ mod tests {
                 },
             ]
         );
-        let reply = serde_json::to_value(CandidateError {
-            process_refusals: Some(Box::new(ProcessRefusalsDiagnostic {
-                version: 1,
-                refusals: detail.refusals,
-            })),
-            ..CandidateError::new("environment_user", "Invalid.")
-        })
+        let reply = serde_json::to_value(
+            CandidateError::new("environment_user", "Invalid.")
+                .with_process_refusals(detail.refusals.clone()),
+        )
         .unwrap();
         assert_eq!(
             reply["process_refusals"],

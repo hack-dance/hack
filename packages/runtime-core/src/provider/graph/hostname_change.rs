@@ -411,7 +411,7 @@ pub(super) mod tests {
         // The routed service lost its route: a real hostname change, named.
         let failure = selected_routes(&plan, &receipt).unwrap_err();
         assert_eq!(failure.code, "graph_hostname_change");
-        let change = failure.plan_change.unwrap();
+        let change = failure.plan_change().unwrap();
         assert_eq!(change.service, "web");
         assert_eq!(change.field, PlanChangeField::Hostnames);
         // No route before or after: some other edit, which only reconciliation
@@ -419,6 +419,6 @@ pub(super) mod tests {
         receipt.resources.get_mut("container:web").unwrap().routing = None;
         let failure = selected_routes(&plan, &receipt).unwrap_err();
         assert_eq!(failure.code, "graph_plan_change_unsupported");
-        assert!(failure.plan_change.is_none());
+        assert!(failure.plan_change().is_none());
     }
 }

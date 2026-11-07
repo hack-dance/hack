@@ -1105,7 +1105,7 @@ mod tests {
             project.prepared_with(cached("one", "/bin/install"), true);
         let failure = prepare(&report.plan, &receipt, &identity).err().unwrap();
         assert_eq!(failure.code, "graph_plan_reconcile");
-        let change = failure.plan_change.as_deref().unwrap();
+        let change = failure.plan_change().unwrap();
         assert_eq!(change.service, "deps");
         assert_eq!(change.field, PlanChangeField::DependencyCacheVolume);
         // Admission repeats the check on the projection itself.
@@ -1118,7 +1118,7 @@ mod tests {
             next: identity,
         };
         let failure = proof.project(&mut next, &receipt).err().unwrap();
-        assert_eq!(failure.plan_change.unwrap().service, "deps");
+        assert_eq!(failure.plan_change().unwrap().service, "deps");
     }
 
     #[test]

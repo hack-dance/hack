@@ -102,7 +102,13 @@ impl ClientRelay {
     /// Connecting to `provider` happens per client connection, so starting never touches
     /// the engine.
     pub(super) fn start(provider: &Path) -> Result<Self, CandidateError> {
-        let directory = private_directory()?;
+        Self::start_in(temporary_root(), provider)
+    }
+
+    /// [`Self::start`] with its private directory (and the sweep of abandoned ones) under
+    /// `root` instead of the temporary directory; tests give each relay its own root.
+    fn start_in(root: &Path, provider: &Path) -> Result<Self, CandidateError> {
+        let directory = private_directory(root)?;
         let socket = directory.join(SOCKET_NAME);
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
@@ -198,10 +204,10 @@ fn temporary_root() -> &'static Path {
     }
 }
 
-/// A new mode-0700 directory with a short path, owned by this user. Its name carries
-/// this process's PID, so a later relay can remove what a killed process left behind.
-fn private_directory() -> Result<PathBuf, CandidateError> {
-    let parent = temporary_root();
+/// A new mode-0700 directory with a short path under `parent`, owned by this user. Its
+/// name carries this process's PID, so a later relay can remove what a killed process
+/// left behind.
+fn private_directory(parent: &Path) -> Result<PathBuf, CandidateError> {
     remove_abandoned(parent);
     for _ in 0..8 {
         let mut bytes = [0_u8; 6];

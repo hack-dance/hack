@@ -11,7 +11,7 @@ struct Provider {
 }
 impl Provider {
     fn new() -> Self {
-        let directory = private_directory().unwrap();
+        let directory = private_directory(temporary_root()).unwrap();
         let listener = UnixListener::bind(directory.join("provider.sock")).unwrap();
         Self {
             directory,
@@ -121,9 +121,14 @@ fn a_refused_provider_connection_ends_only_that_client_connection() {
     drop(provider);
     let relay = ClientRelay::start(&path).unwrap();
     let mut client = UnixStream::connect(relay.socket()).unwrap();
-    client
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    // The relay may already have closed this connection (its provider connect failed at
+    // once); macOS then refuses socket options with EINVAL. That is the outcome under
+    // test, and the read below returns at once.
+    match client.set_read_timeout(Some(Duration::from_secs(10))) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {}
+        Err(error) => panic!("unexpected socket option failure: {error}"),
+    }
     let mut bytes = Vec::new();
     // The client sees the connection end, as with an absent engine socket.
     let _ = client.read_to_end(&mut bytes);
@@ -163,10 +168,12 @@ fn a_relay_left_by_a_killed_process_is_removed_and_a_live_one_is_kept() {
         .arg("30")
         .spawn()
         .unwrap();
-    // `other` is written before the socket, so a relay starting in a concurrent test never
-    // sees that directory holding only a socket.
+    // Fixtures live under this test's own root, which no other relay sweeps (concurrent
+    // tests sweep the temporary directory itself), so only the relay started below can
+    // remove or keep them.
+    let root = FixtureRoot::new();
     let make = |pid: u32, other: bool| {
-        let directory = temporary_root().join(format!("{DIRECTORY_PREFIX}{pid}-0123456789ab"));
+        let directory = root.0.join(format!("{DIRECTORY_PREFIX}{pid}-0123456789ab"));
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&directory)
@@ -181,15 +188,35 @@ fn a_relay_left_by_a_killed_process_is_removed_and_a_live_one_is_kept() {
     let live = make(running.id(), false);
     // A directory holding anything besides the socket is never removed.
     let kept = make(dead + 1_000_000, true);
-    let relay = ClientRelay::start(Path::new("/nonexistent/docker.sock")).unwrap();
+    assert!(abandoned.join(SOCKET_NAME).exists());
+    let relay = ClientRelay::start_in(&root.0, Path::new("/nonexistent/docker.sock")).unwrap();
+    assert!(relay.socket().starts_with(&root.0));
     assert!(!abandoned.exists());
     assert!(live.join(SOCKET_NAME).exists());
     assert!(kept.join("other").exists());
     relay.finish(FINISH_GRACE);
     running.kill().unwrap();
     running.wait().unwrap();
-    for directory in [live, kept] {
-        let _ = fs::remove_dir_all(directory);
+}
+
+/// A fresh private directory for one test's relay fixtures, removed when dropped. Its name
+/// does not carry the relay prefix, so no relay sweep ever matches it.
+struct FixtureRoot(PathBuf);
+impl FixtureRoot {
+    fn new() -> Self {
+        let mut bytes = [0_u8; 6];
+        File::open("/dev/urandom")
+            .and_then(|mut random| random.read_exact(&mut bytes))
+            .unwrap();
+        let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let root = temporary_root().join(format!("hkt-{}-{name}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        Self(root)
+    }
+}
+impl Drop for FixtureRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 

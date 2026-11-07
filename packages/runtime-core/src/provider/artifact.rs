@@ -735,7 +735,8 @@ pub(super) mod tree_fixture {
     }
 
     /// A SmolVM tree and record under the real pins, without an archive: enough for
-    /// `verify` to pass until the tree changes.
+    /// `verify` to pass until the tree changes. Only the macOS lifecycle tests use it.
+    #[cfg(target_os = "macos")]
     pub(in crate::provider) fn prepared_smolvm(candidate: &Candidate) {
         let providers = candidate.state_root.join("providers");
         state::private_directory(&providers).unwrap();

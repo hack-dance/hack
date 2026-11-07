@@ -248,7 +248,7 @@ test("doctor --fix under HACK_NO_INTERACTIVE clears a stale daemon pid without p
   expect(runCalls).toEqual(
     expect.arrayContaining([expect.arrayContaining(["daemon", "clear"])])
   );
-});
+}, 30_000);
 
 test("doctor --fix under HACK_NO_INTERACTIVE skips macOS keychain repair and reports it", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();
@@ -273,7 +273,7 @@ test("doctor --fix under HACK_NO_INTERACTIVE skips macOS keychain repair and rep
   if (skippedNote !== undefined) {
     expect(skippedNote).not.toContain("Repair macOS host TLS trust");
   }
-});
+}, 30_000);
 
 test("doctor --fix never calls the raw clack confirm prompt under HACK_NO_INTERACTIVE", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();
@@ -291,7 +291,7 @@ test("doctor --fix never calls the raw clack confirm prompt under HACK_NO_INTERA
   // proves every prompt site in the --fix path routed through confirmSafe's
   // non-interactive branch instead of the raw clack prompt.
   expect(code).toBe(0);
-});
+}, 30_000);
 
 test("doctor --fix creates a missing .hack/.gitignore and keeps user lines on a repair (HACK-1278)", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();

@@ -8,6 +8,8 @@ mod prepared_boot;
 mod pressure_tests;
 #[cfg(any(target_os = "macos", test))]
 mod private_child;
+#[cfg(all(test, target_os = "macos"))]
+mod provider_repair_tests;
 mod relay_process;
 mod short_home;
 use super::{
@@ -1996,30 +1998,40 @@ fn engine_ping(path: &Path) -> Result<(), CandidateError> {
     Ok(())
 }
 
+/// Pool phases written only before a start or after proven provider absence.
+const STOPPED_PHASES: [&str; 4] = [
+    "stopped",
+    "stopped-before-engine",
+    "stopped-after-engine-failure",
+    "recovered-unclean",
+];
+
+/// A stopped phase with no live provider; no recorded provider (`None`) is as stopped
+/// as a dead one. Nothing runs from the prepared provider tree in this state.
+fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
+    STOPPED_PHASES.contains(&phase) && process_alive != Some(true)
+}
+
 pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     // Status is read-only and idempotent down on an uninitialized pool creates nothing.
     let initial = status(candidate)?;
     if initial.phase == "uninitialized" {
         return Ok(initial);
     }
-    artifact::verify(candidate)?;
     let _lock = state::Lock::acquire(&root(candidate))?;
     // Builds take their shared fence only under this lease, so none can start after this.
     super::image_build::require_no_active_build(candidate)?;
     let mut owner = Owner::load(candidate)?;
+    let stopped = provider_stopped(&owner.phase, initial.process_alive);
+    // Only stopping a provider reaches the prepared tree. A stopped pool's down executes
+    // nothing from it, so a tree changed outside Hack cannot block quiescence; any later
+    // start still verifies the tree (see `repair_provider_trees`).
+    if !stopped {
+        artifact::verify(candidate)?;
+    }
     super::hostname_authority::managed::stop(candidate, &owner)?;
     super::publication::release(candidate, &owner.token, None)?;
-    if [
-        "stopped",
-        "stopped-before-engine",
-        "stopped-after-engine-failure",
-        "recovered-unclean",
-    ]
-    .contains(&owner.phase.as_str())
-        && initial.process_alive != Some(true)
-    {
-        // These phases are written only before a start or after proven absence; no recorded
-        // provider (`None`) is as stopped as a dead one.
+    if stopped {
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
@@ -2033,6 +2045,63 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         }
         Err(error) => Err(error),
     }
+}
+
+/// The outcome of `runtime repair-provider-tree`.
+#[derive(Serialize)]
+pub struct ProviderRepair {
+    /// Each prepared provider tree, repaired or found intact.
+    pub trees: Vec<artifact::TreeRepair>,
+    pub runtime: RuntimeStatus,
+}
+
+/// Re-prepare provider trees that something outside Hack changed (for example a cleanup
+/// tool that pruned empty directories), from the archives preparation retained.
+///
+/// Requires a stopped or uninitialized pool under the provider lock, so no provider runs
+/// from a tree while it is replaced and no start can begin meanwhile. Each tree is
+/// re-proved from its pinned archive digest and recorded tree digest; see
+/// `artifact::repair_tree`. Runtime state, disks and volumes are untouched. Until a
+/// repair succeeds, every start keeps refusing the changed tree.
+pub fn repair_provider_trees(candidate: &Candidate) -> Result<ProviderRepair, CandidateError> {
+    repair_trees(candidate, &[artifact::SMOLVM, artifact::ENGINE])
+}
+
+fn repair_trees(
+    candidate: &Candidate,
+    pins: &[artifact::TreePin],
+) -> Result<ProviderRepair, CandidateError> {
+    let providers = candidate.state_root.join("providers");
+    let mut any = false;
+    for pin in pins {
+        any |= providers.join(pin.record_name()).try_exists().map_err(io)?;
+    }
+    if !any {
+        // Nothing was prepared: create no state, like status and down.
+        return Ok(ProviderRepair {
+            trees: Vec::new(),
+            runtime: status(candidate)?,
+        });
+    }
+    let lock = state::Lock::acquire(&root(candidate))?;
+    super::image_build::require_no_active_build(candidate)?;
+    let current = status(candidate)?;
+    if current.phase != "uninitialized" && !provider_stopped(&current.phase, current.process_alive)
+    {
+        return Err(CandidateError::new(
+            "provider_repair_requires_stopped_runtime",
+            "Provider tree repair requires a stopped runtime; run runtime down first.",
+        ));
+    }
+    let mut trees = Vec::new();
+    for pin in pins {
+        lock.verify_path(&root(candidate))?;
+        trees.extend(artifact::repair_tree(candidate, pin, &lock)?);
+    }
+    Ok(ProviderRepair {
+        trees,
+        runtime: status(candidate)?,
+    })
 }
 
 /// How many pings, a few seconds apart, a guest agent must leave unanswered before

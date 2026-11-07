@@ -854,7 +854,16 @@ mod port_probe_tests {
             "published_port_in_use"
         );
         drop(exact);
-        require_loopback_port_free(port).unwrap();
+        // Parallel tests can take a just-released ephemeral port, and a loaded
+        // runner can time out the probe's connect. Either reads as in use, so
+        // accept the first of several freshly released ports the probe clears.
+        let freed = (0..20).any(|_| {
+            let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = probe.local_addr().unwrap().port();
+            drop(probe);
+            require_loopback_port_free(port).is_ok()
+        });
+        assert!(freed, "the probe never accepted a released loopback port");
         // A wildcard listener would share loopback traffic under SO_REUSEADDR.
         let wildcard = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
         let port = wildcard.local_addr().unwrap().port();

@@ -738,6 +738,44 @@ test("a failed fresh start whose data removal is unconfirmed still reports the s
   expect(notices[0]).not.toContain("synthetic-do-not-print");
 });
 
+test("a restart policy the runtime does not apply is reported once per service and the start continues", async () => {
+  const { opts } = await fixture();
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) =>
+    await review({
+      ...request,
+      run: (reviewed) =>
+        request.run({
+          ...reviewed,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: {
+                web: { active: true, restart: "unless-stopped" },
+                worker: { active: true, restart: "always" },
+              },
+              diagnostics: [
+                {
+                  severity: "warning",
+                  code: "restart_policy_not_applied",
+                  field: "services.web.restart",
+                  message: "fixed",
+                },
+              ],
+            },
+          },
+        }),
+    });
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  expect(await startNativeProject(opts)).toBe(0);
+  const restart = notices.filter((line) => line.includes("HACK-1935"));
+  // Only the warned service is named; `worker` keeps its policy silently.
+  expect(restart).toEqual([
+    "Service web: restart: unless-stopped is not applied. Restart policies are not applied yet to services with published ports or routes (HACK-1935); the service starts without automatic restarts.",
+  ]);
+});
+
 test("published, attempted or retained runs never have their data removed", async () => {
   // A successful start publishes its mapping before the graph stops.
   const published = await fixture();

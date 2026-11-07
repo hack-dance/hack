@@ -587,6 +587,16 @@ fn receipt_restart_authority_excludes_incarnation_bound_publication() {
         false,
         Some(&Condition::Started)
     ));
+    // The planner never records a policy next to a route either.
+    let mut routed = container.clone();
+    routed.routing = Some(
+        serde_json::from_value(json!({"hostnames":["worker.example.test"],"port":3000})).unwrap(),
+    );
+    assert!(!restart_policy_valid(
+        &routed,
+        false,
+        Some(&Condition::Started)
+    ));
     // Publication without a policy, and the existing refusals, are unchanged.
     published.restart_policy = None;
     assert!(restart_policy_valid(
@@ -3197,34 +3207,6 @@ fn loopback_ports_are_admitted_only_for_the_foreground_owner() {
     // Publication is an owned host effect, never an engine port binding.
     let host = &prepared.configs["web"]["HostConfig"];
     assert!(host.get("PortBindings").is_none() && host.get("PublishAllPorts").is_none());
-    // A published port bridge is bound to one container incarnation, so a
-    // published service cannot yet use an engine restart policy. Without
-    // loopback publication the ports refusal is unchanged; an unpublished
-    // service in the same graph keeps its policy.
-    let mut restarting = published.clone();
-    restarting["services"]["web"]["restart"] = json!("unless-stopped");
-    assert_eq!(
-        prepare(&restarting, true).err().map(|e| e.code),
-        Some("graph_restart_policy")
-    );
-    assert_eq!(
-        prepare(&restarting, false).err().map(|e| e.code),
-        Some("graph_subset")
-    );
-    let mut sibling = published.clone();
-    sibling["services"]["init"]["restart"] = json!("on-failure:2");
-    let prepared_sibling = prepare(&sibling, true).unwrap();
-    assert_eq!(
-        prepared_sibling.resources["container:init"].restart_policy,
-        Some(restart_policy::RestartPolicy::OnFailure {
-            maximum_retry_count: 2
-        })
-    );
-    assert!(
-        prepared_sibling.resources["container:web"]
-            .restart_policy
-            .is_none()
-    );
     for (ports, check) in [
         (json!(["127.0.0.1:8787:3000/udp"]), "web"),
         (json!(["[::1]:8787:3000"]), "web"),
@@ -3266,6 +3248,115 @@ fn loopback_ports_are_admitted_only_for_the_foreground_owner() {
         prepare(&many, true).err().map(|e| e.code),
         Some("graph_port_publication")
     );
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
+fn restart_policy_is_not_applied_to_published_or_routed_services() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let review = |document: &Value| {
+        state::write(&fixture.0.join("compose.yaml"), document).unwrap();
+        project::plan(&candidate, fixture.options()).unwrap()
+    };
+    let prepare = |document: &Value, options: config::DeliveryOptions| {
+        let review = review(document);
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        config::prepare_delivery(
+            inputs,
+            &goals(),
+            &"a".repeat(32),
+            &"b".repeat(32),
+            None,
+            options,
+        )
+        .unwrap()
+    };
+    let mut published = compose(&image, "marker", false);
+    published["services"]["web"]["ports"] = json!(["127.0.0.1:8787:3000"]);
+    let mut routed = compose(&image, "marker", false);
+    routed["services"]["web"]["labels"] = json!({"caddy":"web.example.test",
+        "caddy.reverse_proxy":"{{upstreams 3000}}","caddy.tls":"internal"});
+    // Routes require the native HTTP probe; a routed restart policy would also
+    // have been refused for the probe, so this proves the route degrade runs first.
+    routed["services"]["web"]["healthcheck"] = json!({"x-hack-http":{"port":3000,
+        "path":"/health","interval_ms":100,"timeout_ms":500,"retries":3,"start_period_ms":0}});
+    // Lowering a route's native HTTP probe needs the native-http-probe build
+    // (CI tests all features); review runs in every build.
+    for (mut document, options, lowered) in [
+        (
+            published,
+            config::DeliveryOptions {
+                loopback_ports: true,
+                ..Default::default()
+            },
+            true,
+        ),
+        (
+            routed,
+            config::DeliveryOptions {
+                routing_enrolled: true,
+                ..Default::default()
+            },
+            cfg!(feature = "native-http-probe"),
+        ),
+    ] {
+        document["services"]["web"]["restart"] = json!("unless-stopped");
+        // An unpublished, unrouted service in the same graph keeps its policy.
+        document["services"]["init"]["restart"] = json!("on-failure:2");
+        let reviewed = review(&document);
+        assert!(reviewed.plan.enrollment_compatible);
+        let warnings = reviewed
+            .plan
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "restart_policy_not_applied")
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].severity, "warning");
+        assert_eq!(warnings[0].field, "services.web.restart");
+        assert!(warnings[0].message.contains("HACK-1935"));
+        if !lowered {
+            continue;
+        }
+        let prepared = prepare(&document, options);
+        // The bridged service starts with the engine's `no` and no receipt
+        // policy, so no restart authority or `restarting` state is admitted.
+        assert_eq!(
+            prepared.configs["web"]["HostConfig"]["RestartPolicy"],
+            json!({"Name":"no"})
+        );
+        let web = &prepared.resources["container:web"];
+        assert!(web.restart_policy.is_none());
+        assert!(!restart_policy::admits_restarting(web));
+        assert_eq!(
+            prepared.resources["container:init"].restart_policy,
+            Some(restart_policy::RestartPolicy::OnFailure {
+                maximum_retry_count: 2
+            })
+        );
+        assert_eq!(
+            prepared.configs["init"]["HostConfig"]["RestartPolicy"],
+            json!({"Name":"on-failure","MaximumRetryCount":2})
+        );
+        // Declaring `no` produces no warning.
+        document["services"]["web"]["restart"] = json!("no");
+        assert!(
+            review(&document)
+                .plan
+                .diagnostics
+                .iter()
+                .all(|d| d.code != "restart_policy_not_applied")
+        );
+    }
     assert!(!candidate.state_root.exists());
 }
 

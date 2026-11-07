@@ -341,6 +341,15 @@ pub struct ServicePlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<CapabilityPlan>,
 }
+impl ServicePlan {
+    /// A declared restart policy that native starts without (engine policy `no`):
+    /// published port bridges and route relays are bound to one container
+    /// incarnation, so they cannot yet follow an engine restart (HACK-1935).
+    /// Review warns with `restart_policy_not_applied`; graph admission applies it.
+    pub fn restart_policy_not_applied(&self) -> bool {
+        self.restart != "no" && (self.routing.is_some() || !self.ports.is_empty())
+    }
+}
 /// Normalized Compose capability adjustments (`CAP_` names, or `ALL` in `drop`).
 /// Lowering applies Docker's precedence; see [`capabilities::effective`].
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]

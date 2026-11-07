@@ -10,7 +10,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { nativeBuildsDisabledRefusal } from "../src/backends/native-project-builds.ts";
 import { NATIVE_CONFIGURATION_REFUSAL } from "../src/backends/native-project-start.ts";
+import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
+import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -325,20 +328,101 @@ test(
 test(
   "control: ordinary labels and a basic build keep today's native refusal",
   async () => {
-    for (const service of [
-      { image: IMAGE, labels: { "com.example.team": "web" } },
-      { build: ".." },
-    ]) {
+    for (const [service, refusal] of [
+      [
+        { image: IMAGE, labels: { "com.example.team": "web" } },
+        NATIVE_CONFIGURATION_REFUSAL,
+      ],
+      // A basic build stays refused unless native builds are explicitly enabled.
+      [{ build: ".." }, nativeBuildsDisabledRefusal("web")],
+    ] as const) {
       const f = await fixture({ services: { web: service } });
       const result = await cli(f, ["up"]);
-      expectOneClosedLine(
-        result,
-        `E_NATIVE_PROJECT_UNSUPPORTED: ${NATIVE_CONFIGURATION_REFUSAL}`
-      );
+      expectOneClosedLine(result, `E_NATIVE_PROJECT_UNSUPPORTED: ${refusal}`);
       expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
       // The check passed: native up went on to its own source preflight.
       expect(await f.calls()).toEqual(["runtime check-project-share"]);
     }
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+/** Native builds enabled, with the usual shared-source grant. */
+const BUILDS_ENV = { HACK_NATIVE_SHARED_SOURCE: "1", HACK_NATIVE_BUILDS: "1" };
+
+test(
+  "with native builds enabled, build args pass the check and reach native start",
+  async () => {
+    // HACK-1925: args are a native builds field, so the Compose-backend check
+    // passes and native start goes on to its own source preflight and runtime.
+    const f = await fixture({
+      services: {
+        web: {
+          build: { context: "../app", args: { GREETING: "synthetic" } },
+        },
+      },
+    });
+    const result = await cli(f, ["up"], BUILDS_ENV);
+    expect(result.output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+    expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
+    expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
+    const calls = await f.calls();
+    expect(calls).toEqual(
+      ["runtime check-project-share", "runtime up"].slice(0, calls.length)
+    );
+    expect(calls.length).toBeGreaterThan(0);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "with native builds enabled, a build arg equal to a managed secret refuses by name only",
+  async () => {
+    const secret = "synthetic-dummy-managed-value-1925";
+    const f = await fixture({
+      services: {
+        web: { build: { context: "../app", args: { GREETING: secret } } },
+      },
+    });
+    await writeFile(
+      join(f.project, PROJECT_ENV_KEY_FILENAME),
+      "synthetic-project-key"
+    );
+    await setProjectEnvValue({
+      projectRoot: f.project,
+      projectDir: join(f.project, ".hack"),
+      envName: null,
+      scope: "global",
+      key: "FIXTURE_TOKEN",
+      value: secret,
+      secret: true,
+    });
+    const result = await cli(f, ["up"], BUILDS_ENV);
+    expectOneClosedLine(
+      result,
+      "E_NATIVE_PROJECT_UNSUPPORTED: Native foreground up cannot build service web: build arg GREETING equals a hack env secret value. Build args are not secrets (images record them); pass secrets with BuildKit build secrets instead, which native builds do not support yet. Values were omitted; no hook, VM or build was started."
+    );
+    expect(result.output).not.toContain(secret);
+    // The Compose backend would record the value in the image history too.
+    expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
+    expect(await f.calls()).toEqual(["runtime check-project-share"]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "with native builds enabled, a build field native builds lack still selects the Compose backend",
+  async () => {
+    await expectComposeBackendRefusal({
+      compose: {
+        services: {
+          web: { build: { context: "../app", ssh: ["default"] } },
+        },
+      },
+      env: BUILDS_ENV,
+      phrase:
+        "a Compose build field other than context, dockerfile, target and args, or image together with build",
+    });
   },
   SPAWN_TIMEOUT_MS
 );

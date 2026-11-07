@@ -7,6 +7,7 @@ import {
   checkLegacyProjectAgentArtifacts,
   checkLegacyUserAgentArtifacts,
 } from "../agents/legacy-artifacts.ts";
+import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import { runNativeProjectCleanupCommand } from "../backends/native-project-cleanup-command.ts";
 import {
   parseNativeRunMappingRecoveryOptions,
@@ -3070,11 +3071,15 @@ async function checkComposeBackendFeatures(opts: {
           requestedEnvName: undefined,
         })
       : undefined;
+  // The same build classification native up applies under HACK_NATIVE_BUILDS.
+  const buildsEnabled = nativeBuildsEnabled();
   const reading = await readComposeBackendReading(ctx.composeFile, {
     adaptationCandidates,
+    buildsEnabled,
   });
   return composeBackendCheckResult({
     backend: opts.backend,
+    buildsEnabled,
     features: reading.features,
     basicBuild: reading.basicBuild,
   });

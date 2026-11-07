@@ -499,8 +499,8 @@ that does not name an owned network or `none`. Cold builds need free guest stora
 (at least 6 GiB, or twice the key's last image), successful builds prune BuildKit
 cache to 8 GiB, and `runtime reclaim-build-images` removes only owned, superseded,
 unreferenced images (`provider/image_build/reclaim.rs`; model
-`tests/models/tla/native-build-retention`). Native `up` does not call the build
-operation yet.
+`tests/models/tla/native-build-retention`). Native `up` calls the build operation
+for Compose `build:` services only when `HACK_NATIVE_BUILDS=1` is set.
 
 Three Cargo features build guest helpers with Zig: `native-http-probe`,
 `native-stream-relay` and `environment-launcher`. For each one, [`build.rs`](build.rs)

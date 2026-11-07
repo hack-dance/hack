@@ -1094,6 +1094,92 @@ test("stopped recovery reviews retained image IDs and resolves tags only after o
   }
 });
 
+test("restart pins an active build service to its retained image, drops its build declaration and leaves inactive ones unbuilt", async () => {
+  const listener = await listenerIntentFixture();
+  const previous = process.env.HACK_NATIVE_BUILDS;
+  process.env.HACK_NATIVE_BUILDS = "1";
+  try {
+    let reviewed: Record<string, unknown> | undefined;
+    let inactive: Record<string, unknown> | undefined;
+    const builtImage = `sha256:${"7".repeat(64)}`;
+    await preflightNativeRestart({
+      ...listener.options,
+      recoverStopped: true,
+      dependencies: {
+        ...listener.options.dependencies,
+        retainedImages: selectNativeRetainedImages,
+        prepare: async () => ({
+          originalSha256: "1".repeat(64),
+          environmentFiles: [],
+          serviceNames: ["app"],
+          normalizedComposeJson: JSON.stringify({
+            services: {
+              app: { build: { context: "..", args: { A: "1" } } },
+              // Outside the run's profiles: never built, pinned or required.
+              tools: { build: "..", profiles: ["tools"] },
+            },
+          }),
+          managedEnvironment: {},
+          lifecycleHostEnvironment: {},
+          effectiveEnvName: "qa",
+        }),
+        invoke: async (options) => {
+          if (options.args[1] === "inspect") {
+            const observed = stoppedRetainedGraph();
+            return {
+              ...observed,
+              receipt: {
+                ...observed.receipt,
+                normalized_input: {
+                  namespace: run.namespace,
+                  original_compose_sha256: "1".repeat(64),
+                  normalized_compose_sha256: "3".repeat(64),
+                },
+                resources: {
+                  default: observed.receipt.resources.default,
+                  data: observed.receipt.resources.data,
+                  "container:app": {
+                    kind: "container",
+                    key: "app",
+                    image: builtImage,
+                  },
+                },
+              },
+            };
+          }
+          if (options.args[1] === "ensure-image") {
+            throw new Error("restart must not resolve or build images");
+          }
+          return await listener.options.dependencies!.invoke!(options);
+        },
+        review: async (review) => {
+          const services = JSON.parse(
+            review.input.normalizedComposeJson
+          ).services;
+          reviewed = services.app;
+          inactive = services.tools;
+          return await review.run({
+            planId: run.planId,
+            namespace: run.namespace,
+            report: {},
+            projectArgs: [],
+          });
+        },
+      },
+    });
+    expect(reviewed?.image).toBe(builtImage);
+    expect(reviewed).not.toHaveProperty("build");
+    expect(inactive).toEqual({ build: "..", profiles: ["tools"] });
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
+    } else {
+      process.env.HACK_NATIVE_BUILDS = previous;
+    }
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
 test("invalid retained image provenance refuses stopped preflight before tag resolution", async () => {
   const listener = await listenerIntentFixture();
   try {

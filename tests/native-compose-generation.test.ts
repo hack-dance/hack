@@ -784,6 +784,14 @@ test("effect captures its dependent finalizer before the first asynchronous chec
   });
 });
 
+/**
+ * Spawns a child that retires a route and SIGKILLs mid-down, then recovers the
+ * pending stop. The old 10 s Bun timeout expired under load before the harness
+ * finished (HACK-1901 leftover after #419/#504). Harness-only: product clocks
+ * stay on HACK-1458. Match DEPENDENT_ROUTE_FINALIZER_BUDGET_MS headroom.
+ */
+const SIGKILL_ROUTE_RETIREMENT_BUDGET_MS = 30_000;
+
 test.each([
   "recovery",
   "finite-down",
@@ -893,7 +901,7 @@ test.each([
   expect(saved.stopped).toBe(true);
   expect((await foreign.reopen(replacement.reference)).phase).toBe("reserved");
   await foreign.rollback(replacement);
-}, 10_000);
+}, SIGKILL_ROUTE_RETIREMENT_BUDGET_MS);
 
 test("finite host intent is private, durable before effects, and cleared after verified completion", async () => {
   const owner = await store(await fixture());

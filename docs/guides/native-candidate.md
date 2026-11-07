@@ -2490,8 +2490,16 @@ their exact behavior.
 **Per-env files.** `adaptation.<env>.json` and `dependenciesByEnv.<env>` replace the
 base file for runs whose effective env is `<env>`: the `--env` you pass, the env a
 retained run recorded, or the project's default env. This holds even when the project
-has no `hack.env.*` files. Otherwise the base file applies. A fresh start, a retained
-start and a restart of one run therefore always select the same files.
+has no `hack.env.*` files, or has `hack.env.default.yaml` but no `hack.env.<env>.yaml`.
+Otherwise the base file applies. A fresh start, a retained start and a restart of one
+run therefore always select the same files. The run records which managed env files
+its env had at startup (none, the base only, or the overlay). A later `restart`,
+retained `up` or fresh `exec` refuses when that changed, and names the file: an
+overlay that existed is gone, or an overlay (or, for a run started without any, a
+managed env file) appeared. To apply an appeared file, run `hack down`, then `hack up`.
+`down` hooks of such a run get the values it started with (none, or the base values),
+so `down` is not blocked. A removed overlay can be restored to keep the run; `down`
+hooks of a run that started with it refuse, naming the file, until it is restored.
 
 **Identity and recovery.** Settings resolution only reads files. It writes no state,
 so Ctrl-C needs no cleanup, and `down`, `ps`, `logs`, `exec` and `run` keep using the

@@ -1580,6 +1580,7 @@ export async function startNativeProject(opts: {
     // Refuse Compose settings no process wrapper can run before the VM starts.
     requireWrappableNativeProcesses({
       services: specs,
+      profiles,
       managedEnvironment: input.managedEnvironment,
       managedFiles: input.managedFiles,
       dependencyServices: hostDependencies.map((binding) => binding.service),

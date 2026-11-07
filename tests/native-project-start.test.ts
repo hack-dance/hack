@@ -4515,3 +4515,73 @@ test("HACK-1939: runtime process refusals are named in the nothing-reserved repo
     "Native graph startup failed (environment_entrypoint) before any runtime state was reserved; nothing was created and no cleanup is needed. Native cannot wrap these services' processes: service web entrypoint or command (the process must name an executable); service worker user (use a numeric UID or UID:GID)."
   );
 });
+
+/** A fixture whose inactive-by-default `optional` service cannot be wrapped. */
+async function optionalProfileFixture() {
+  const fixtureResult = await fixture();
+  const prepare = fixtureResult.opts.dependencies.prepare!;
+  fixtureResult.opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.optional = {
+      image: `sha256:${"e".repeat(64)}`,
+      user: "postgres",
+      profiles: ["extra"],
+    };
+    return {
+      ...input,
+      normalizedComposeJson: JSON.stringify(compose),
+      managedEnvironment: {
+        ...input.managedEnvironment,
+        optional: { PASSWORD: "synthetic-secret" },
+      },
+      serviceNames: [...input.serviceNames, "optional"],
+    };
+  };
+  return fixtureResult;
+}
+
+test("an inactive-profile service a wrapper cannot run does not block up; an active one does", async () => {
+  const inactive = await optionalProfileFixture();
+  expect(await startNativeProject(inactive.opts)).toBe(0);
+  const active = await optionalProfileFixture();
+  const error = await startNativeProject({
+    ...active.opts,
+    profiles: ["extra"],
+  }).catch((caught: unknown) => caught);
+  expect((error as Error).message).toBe(
+    "Native up cannot wrap these services' processes; nothing was started. Refused: service optional user (use a numeric UID or UID:GID)."
+  );
+  expect(active.events).not.toContain("runtime up");
+});
+
+test("restart preflight ignores inactive-profile services a wrapper cannot run", async () => {
+  const { opts } = await optionalProfileFixture();
+  const preflight = (profiles: string[]) =>
+    preflightNativeRestart({
+      runtime: opts.runtime,
+      scope: opts.scope,
+      composeFile: opts.composeFile,
+      run: {
+        run: "1".repeat(32),
+        owner: "c".repeat(32),
+        namespace: "b".repeat(64),
+        planId: "a".repeat(64),
+        effectiveEnvName: null,
+        profiles,
+        aws: null,
+      },
+      dependencies: {
+        prepare: opts.dependencies.prepare,
+        review: opts.dependencies.review,
+        dependencies: async () => [],
+        invoke: restartPreflightInvoke,
+      },
+    });
+  const refusal = await preflight(["extra"]).catch((caught: unknown) => caught);
+  expect((refusal as Error).message).toContain(
+    "Refused: service optional user (use a numeric UID or UID:GID)."
+  );
+  // The same preflight without the profile completes.
+  await preflight([]);
+});

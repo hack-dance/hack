@@ -173,9 +173,7 @@ import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local
 import {
   NATIVE_PROCESS_CHECK,
   type NativeProcessReport,
-  nativeProcessCheckResult,
-  nativeWrappedServiceCandidates,
-  predictNativeProcessRefusals,
+  nativeProcessCheckFromCompose,
 } from "../lib/native-process-wrappers.ts";
 import { isMac } from "../lib/os.ts";
 import {
@@ -3088,11 +3086,10 @@ async function checkNativeProcessWrappers(opts: {
     projectDir: ctx.projectDir,
     staticHosts: cfg.internal?.extraHosts,
   }).catch(() => ({ hosts: {} }));
-  const candidates = nativeWrappedServiceCandidates({
+  return nativeProcessCheckFromCompose({
     compose: await readNativeComposeDocument(ctx.composeFile),
     projectWideAliases: Object.keys(aliases.hosts).length > 0,
   });
-  return nativeProcessCheckResult(predictNativeProcessRefusals(candidates));
 }
 
 /**

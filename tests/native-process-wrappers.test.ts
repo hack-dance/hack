@@ -5,6 +5,7 @@ import {
   describeNativeProcessRefusals,
   NATIVE_PROCESS_CHECK,
   NATIVE_PROCESS_WRAPPER_REFUSAL,
+  nativeProcessCheckFromCompose,
   nativeProcessCheckResult,
   nativeWrappedServiceCandidates,
   predictNativeProcessRefusals,
@@ -119,6 +120,7 @@ test("the up preflight refuses before runtime work, naming every service and fie
         web: { image: "nginx", healthcheck: { test: ["CMD"] } },
         idle: { image: "nginx", user: "nginx" },
       },
+      profiles: [],
       managedEnvironment: { db: { PASSWORD: "synthetic" }, idle: {} },
       dependencyServices: ["web"],
     });
@@ -207,4 +209,71 @@ test("doctor predicts for every service when project-wide aliases exist", () => 
     "service api user (use a numeric UID or UID:GID)"
   );
   expect(nativeProcessCheckResult([]).status).toBe("ok");
+});
+
+test("only profile-active services can block the up preflight", () => {
+  const services = {
+    web: { image: "nginx" },
+    optional: { image: "postgres", user: "postgres", profiles: ["extra"] },
+  };
+  const opts = {
+    services,
+    managedEnvironment: { optional: { PASSWORD: "synthetic" } },
+    dependencyServices: [],
+  };
+  requireWrappableNativeProcesses({ ...opts, profiles: [] });
+  requireWrappableNativeProcesses({ ...opts, profiles: ["other"] });
+  expect(() =>
+    requireWrappableNativeProcesses({ ...opts, profiles: ["extra"] })
+  ).toThrow("Refused: service optional user (use a numeric UID or UID:GID).");
+  // An empty profiles list always runs, like Compose.
+  expect(() =>
+    requireWrappableNativeProcesses({
+      ...opts,
+      services: { optional: { ...services.optional, profiles: [] } },
+      profiles: [],
+    })
+  ).toThrow("service optional user");
+});
+
+test("doctor reports profile-gated services as information, never as a warning", () => {
+  const compose = {
+    services: {
+      web: { image: "nginx", environment: ["TOKEN"] },
+      optional: {
+        image: "postgres",
+        user: "postgres",
+        environment: ["PASSWORD"],
+        profiles: ["extra"],
+      },
+    },
+  };
+  const gated = nativeProcessCheckFromCompose({
+    compose,
+    projectWideAliases: false,
+  });
+  expect(gated.status).toBe("ok");
+  expect(gated.nativeProcess).toEqual({
+    refusals: [],
+    profiled: [{ service: "optional", field: "user" }],
+  });
+  expect(gated.message).toContain(
+    "Only when their profile is selected: service optional user"
+  );
+  const always = nativeProcessCheckFromCompose({
+    compose: {
+      services: {
+        ...compose.services,
+        web: { ...compose.services.web, user: "nginx" },
+      },
+    },
+    projectWideAliases: false,
+  });
+  expect(always.status).toBe("warn");
+  expect(always.nativeProcess.refusals).toEqual([
+    { service: "web", field: "user" },
+  ]);
+  expect(always.nativeProcess.profiled).toEqual([
+    { service: "optional", field: "user" },
+  ]);
 });

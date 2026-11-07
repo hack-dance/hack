@@ -303,6 +303,46 @@ export function predictNativeProcessRefusals(opts: {
   return refusals;
 }
 
+/**
+ * Compose profile activation: a service without `profiles` (or with an empty
+ * list) always runs; otherwise it runs only when one of its profiles is
+ * selected. Inactive services are never scheduled, so nothing wraps them.
+ */
+export function activeNativeService(
+  service: Readonly<Record<string, unknown>>,
+  profiles: readonly string[]
+): boolean {
+  const declared = service.profiles;
+  if (declared === undefined || declared === null) {
+    return true;
+  }
+  return (
+    Array.isArray(declared) &&
+    (declared.length === 0 ||
+      declared.some(
+        (profile) => typeof profile === "string" && profiles.includes(profile)
+      ))
+  );
+}
+
+function activeServices(
+  services: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
+  profiles: readonly string[]
+): Record<string, Readonly<Record<string, unknown>>> {
+  const result: Record<string, Readonly<Record<string, unknown>>> = {};
+  for (const [name, service] of Object.entries(services)) {
+    if (activeNativeService(service, profiles)) {
+      Object.defineProperty(result, name, {
+        value: service,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
+  return result;
+}
+
 /** Leading text of the refusal for Compose settings no process wrapper can run. */
 export const NATIVE_PROCESS_WRAPPER_REFUSAL =
   "Native up cannot wrap these services' processes; nothing was started.";
@@ -318,6 +358,8 @@ export function requireWrappableNativeProcesses(opts: {
   readonly services: Readonly<
     Record<string, Readonly<Record<string, unknown>>>
   >;
+  /** Selected profiles: services outside them never run and are not checked. */
+  readonly profiles: readonly string[];
   readonly managedEnvironment: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
@@ -337,7 +379,7 @@ export function requireWrappableNativeProcesses(opts: {
       .map(([service]) => service)
   );
   const refusals = predictNativeProcessRefusals({
-    services: opts.services,
+    services: activeServices(opts.services, opts.profiles),
     wrapped,
     dependencies,
     fileOwners,
@@ -356,6 +398,8 @@ export const NATIVE_PROCESS_CHECK = "native process wrappers";
 /** Value-free JSON payload: service names and closed fields only. */
 export type NativeProcessReport = {
   readonly refusals: readonly NativeProcessRefusal[];
+  /** Services behind a profile: refused only when that profile is selected. */
+  readonly profiled?: readonly NativeProcessRefusal[];
 };
 
 function declaresHostGateway(extraHosts: unknown): boolean {
@@ -432,27 +476,58 @@ export function nativeWrappedServiceCandidates(opts: {
  * value-free apart from service names.
  */
 export function nativeProcessCheckResult(
-  refusals: readonly NativeProcessRefusal[]
+  refusals: readonly NativeProcessRefusal[],
+  /** Refusals of services that run only when one of their profiles is selected. */
+  profiled: readonly NativeProcessRefusal[] = []
 ): {
   readonly name: string;
   readonly status: "ok" | "warn";
   readonly message: string;
   readonly nativeProcess: NativeProcessReport;
 } {
-  const nativeProcess = { refusals: refusals.map((entry) => ({ ...entry })) };
+  const nativeProcess = {
+    refusals: refusals.map((entry) => ({ ...entry })),
+    ...(profiled.length > 0
+      ? { profiled: profiled.map((entry) => ({ ...entry })) }
+      : {}),
+  };
+  const note =
+    profiled.length > 0
+      ? ` Only when their profile is selected: ${describeNativeProcessRefusals(profiled)}.`
+      : "";
   if (refusals.length === 0) {
     return {
       name: NATIVE_PROCESS_CHECK,
       status: "ok",
-      message:
-        "No Compose setting blocks native process wrapping; native up checks image entrypoints, commands and users before it reserves anything and names every refused service at once.",
+      message: `No Compose setting blocks native process wrapping for the services that always run; native up checks image entrypoints, commands and users before it reserves anything and names every refused service at once.${note}`,
       nativeProcess,
     };
   }
   return {
     name: NATIVE_PROCESS_CHECK,
     status: "warn",
-    message: `Native up would refuse to wrap these services' processes: ${describeNativeProcessRefusals(refusals)}.`,
+    message: `Native up would refuse to wrap these services' processes: ${describeNativeProcessRefusals(refusals)}.${note}`,
     nativeProcess,
   };
+}
+
+/**
+ * Doctor's prediction, split by profile activation: services that always run
+ * can block `up` (warning); services behind a profile block it only when that
+ * profile is selected, so they are reported as information only.
+ */
+export function nativeProcessCheckFromCompose(opts: {
+  readonly compose: unknown;
+  readonly projectWideAliases: boolean;
+}): ReturnType<typeof nativeProcessCheckResult> {
+  const candidates = nativeWrappedServiceCandidates(opts);
+  const refusals = predictNativeProcessRefusals(candidates);
+  const always = refusals.filter((refusal) => {
+    const service = candidates.services[refusal.service];
+    return service !== undefined && activeNativeService(service, []);
+  });
+  return nativeProcessCheckResult(
+    always,
+    refusals.filter((refusal) => !always.includes(refusal))
+  );
 }

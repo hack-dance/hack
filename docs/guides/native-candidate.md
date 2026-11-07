@@ -2555,7 +2555,9 @@ checks settings inherited from the pinned image before reserving anything. Both
 name every refused service and field at once (for example
 `service db user (use a numeric UID or UID:GID)`). `hack doctor` on the native
 backend reports the Compose-declared cases in its `native process wrappers`
-check, for every service native may wrap.
+check, for every service native may wrap. Only profile-active services are
+checked by `up` and `restart`; a service behind an unselected profile never runs
+and cannot block them, so `doctor` lists such services as information only.
 
 ### Approved-host DNS on pool restart
 

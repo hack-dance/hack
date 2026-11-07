@@ -458,6 +458,7 @@ export async function preflightNativeRestart(opts: {
   // before the current graph is stopped.
   requireWrappableNativeProcesses({
     services: specs,
+    profiles: selected.profiles,
     managedEnvironment: input.managedEnvironment,
     managedFiles: input.managedFiles,
     dependencyServices: dependencies.map((binding) => binding.service),

@@ -263,6 +263,50 @@ test("ordinary capture refuses a still-present captured group even after leader 
   }
 });
 
+test("a captured group still being reaped after both EOFs settles once absent within the settlement budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completed-job-reaping-lag-"));
+  const captures = join(root, "capture");
+  const originalKill = process.kill.bind(process);
+  const groups: number[] = [];
+  let lagging = 3;
+  const signals = spyOn(process, "kill").mockImplementation((pid, signal) => {
+    // Pipe EOF precedes reaping of a reparented descendant: model a few
+    // present-group answers before the real (absent) probe result.
+    if (pid < 0 && signal === 0 && lagging > 0) {
+      lagging -= 1;
+      return true;
+    }
+    if (pid < 0 && signal !== 0) {
+      groups.push(pid);
+    }
+    return originalKill(pid, signal);
+  });
+  let unconfirmed = false;
+  try {
+    const result = await captureCompletedJobFixtureCommand({
+      argv: [process.execPath, "-e", "process.exit(0)"],
+      cwd: root,
+      env: {},
+      captures,
+      timeoutMs: 2000,
+      onUnconfirmed: () => {
+        unconfirmed = true;
+      },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(lagging).toBe(0);
+    const receipt = JSON.parse(
+      await Bun.file(`${captures}.settlement.json`).text()
+    );
+    expect(receipt.capturedGroupAbsent).toBe(true);
+    expect(groups).toEqual([]);
+    expect(unconfirmed).toBe(false);
+  } finally {
+    signals.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a delayed capture write cannot extend settlement or release teardown after late completion", async () => {
   const root = await mkdtemp(join(tmpdir(), "completed-job-delayed-write-"));
   const captures = join(root, "capture");
@@ -437,6 +481,7 @@ test("an exited leader with closed pipes receives zero former-group signals", as
         cwd: root,
         env: {},
         captures: join(root, "capture"),
+        ready: { path: ready, budgetMs: READY_BUDGET_MS },
         timeoutMs: 1000,
         beforeInterrupt: async () => {
           await waitForFile(ready);
@@ -469,8 +514,12 @@ test("inherited-pipe descendants withhold cancellation settlement without signal
     return originalKill(pid, signal);
   });
   let finished = false,
-    unconfirmed = false,
-    leaderPid = 0;
+    unconfirmed = false;
+  // The callback, not the descendant file, orders the leader pid observation.
+  let announceLeader: ((pid: number) => void) | undefined;
+  const leaderKnown = new Promise<number>((resolve) => {
+    announceLeader = resolve;
+  });
   let operation: Promise<void> | undefined;
   try {
     operation = captureCompletedJobFixtureInterrupt({
@@ -478,9 +527,10 @@ test("inherited-pipe descendants withhold cancellation settlement without signal
       cwd: root,
       env: {},
       captures: join(root, "capture"),
+      ready: { path: ready, budgetMs: READY_BUDGET_MS },
       timeoutMs: 250,
       beforeInterrupt: async ({ pid }) => {
-        leaderPid = pid;
+        announceLeader?.(pid);
         await waitForFile(ready);
       },
       onUnconfirmed: () => {
@@ -502,6 +552,13 @@ test("inherited-pipe descendants withhold cancellation settlement without signal
       complete: (text) => (text === "" ? undefined : Number(text)),
     });
     expect(Number.isSafeInteger(descendantPid) && descendantPid > 0).toBe(true);
+    const leaderPid = await Promise.race([
+      leaderKnown,
+      operation.then(
+        () => 0,
+        () => 0
+      ),
+    ]);
     expect(Number.isSafeInteger(leaderPid) && leaderPid > 0).toBe(true);
     await waitForAbsent(leaderPid);
     expect(finished).toBe(false);
@@ -549,6 +606,7 @@ test("expired readiness is canceled and cannot deliver late SIGINT or release te
         cwd: root,
         env: {},
         captures: join(root, "capture"),
+        ready: { path: ready, budgetMs: READY_BUDGET_MS },
         timeoutMs: 250,
         beforeInterrupt: ({ pid, signal }) => {
           leaderPid = pid;
@@ -583,6 +641,78 @@ test("expired readiness is canceled and cannot deliver late SIGINT or release te
   }
 });
 
+test("slow child startup is never charged to the capture deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completed-job-slow-start-"));
+  const ready = join(root, "ready");
+  let unconfirmed = false;
+  try {
+    // Startup alone outlasts the whole capture deadline; only post-ready time counts.
+    await captureCompletedJobFixtureInterrupt({
+      argv: [
+        process.execPath,
+        "-e",
+        `process.once('SIGINT',()=>process.exit(130)); await Bun.sleep(400); await Bun.write(${JSON.stringify(ready)},'ready'); await Bun.sleep(10_000);`,
+      ],
+      cwd: root,
+      env: {},
+      captures: join(root, "capture"),
+      ready: { path: ready, budgetMs: READY_BUDGET_MS },
+      timeoutMs: 250,
+      beforeInterrupt: async () => await waitForFile(ready),
+      onUnconfirmed: () => {
+        unconfirmed = true;
+      },
+    });
+    expect(unconfirmed).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a child that never becomes ready is bounded by the startup budget and its owned group is stopped", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completed-job-never-ready-"));
+  const captures = join(root, "capture");
+  const originalKill = process.kill.bind(process),
+    groups: number[] = [];
+  const signals = spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid < 0 && signal !== 0) {
+      groups.push(pid);
+    }
+    return originalKill(pid, signal);
+  });
+  let interrupted = false,
+    unconfirmed = false;
+  const started = Date.now();
+  try {
+    await expect(
+      captureCompletedJobFixtureInterrupt({
+        argv: [process.execPath, "-e", "await Bun.sleep(10_000);"],
+        cwd: root,
+        env: {},
+        captures,
+        ready: { path: join(root, "ready"), budgetMs: 400 },
+        timeoutMs: 250,
+        beforeInterrupt: async () => {
+          interrupted = true;
+        },
+        onUnconfirmed: () => {
+          unconfirmed = true;
+        },
+      })
+    ).rejects.toThrow("deadline expired");
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(interrupted).toBe(false);
+    expect(await Bun.file(`${captures}.owner.json`).exists()).toBe(false);
+    const [group] = groups;
+    expect(groups.length === 1 && group !== undefined && group < 0).toBe(true);
+    await waitForAbsent(group ?? 0);
+    expect(unconfirmed).toBe(false);
+  } finally {
+    signals.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("real SIGINT exit and both EOFs settle without signaling the retired group", async () => {
   const root = await mkdtemp(join(tmpdir(), "completed-job-interrupt-"));
   const ready = join(root, "ready");
@@ -605,6 +735,7 @@ test("real SIGINT exit and both EOFs settle without signaling the retired group"
       cwd: root,
       env: {},
       captures: join(root, "capture"),
+      ready: { path: ready, budgetMs: READY_BUDGET_MS },
       timeoutMs: 1000,
       beforeInterrupt: async () => await waitForFile(ready),
       onUnconfirmed: () => {
@@ -645,6 +776,7 @@ test("ambiguous final child absence retains ownership and blocks fixture teardow
         cwd: root,
         env: {},
         captures: join(root, "capture"),
+        ready: { path: ready, budgetMs: READY_BUDGET_MS },
         timeoutMs: 1000,
         beforeInterrupt: async () => {
           await waitForFile(ready);

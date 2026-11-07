@@ -970,6 +970,7 @@ mod tests {
         selected.boot = "11111111-1111-1111-1111-111111111111".into();
         selected.capacity = 3;
         let assignment = Assignment {
+            loopback_port: None,
             reservation: "d".repeat(32),
             run: selected.run.clone(),
             service: "web".into(),
@@ -1252,6 +1253,7 @@ mod tests {
         selection.previous_boot = Some(previous.into());
         selection.capacity = 2;
         let assignment = Assignment {
+            loopback_port: None,
             reservation: "d".repeat(32),
             run: selection.run.clone(),
             service: "web".into(),
@@ -1396,6 +1398,7 @@ mod tests {
             0,
             Selected {
                 assignment: Assignment {
+                    loopback_port: None,
                     reservation: "d".repeat(32),
                     run: current.run.clone(),
                     service: "web".into(),
@@ -1453,6 +1456,7 @@ mod tests {
         current.previous_boot = Some(old_boot.into());
         current.capacity = 1;
         let assignment = Assignment {
+            loopback_port: None,
             reservation: "d".repeat(32),
             run: current.run.clone(),
             service: "web".into(),
@@ -1543,6 +1547,7 @@ mod tests {
         prior.boot = old_boot.into();
         prior.capacity = 1;
         let assignment = Assignment {
+            loopback_port: None,
             reservation: "d".repeat(32),
             run: prior.run.clone(),
             service: "web".into(),

@@ -1016,7 +1016,8 @@ impl Backend for Fake {
                     failures: vec![crate::provider::engine::StopFailure {
                         id: selected[0].0.clone(),
                         stage: crate::error::StopFailureStage::Timeout,
-                    }],
+                    }]
+                    .into(),
                 },
                 admitted,
             ));
@@ -1100,6 +1101,54 @@ fn source_and_storage_receipt_wire_families_refuse_cross_fields() {
     wire["data"] = json!({});
     wire["data_mounts"] = json!({});
     assert!(serde_json::from_value::<Receipt>(wire).is_err());
+}
+
+#[test]
+fn only_a_fully_removed_own_receipt_releases_its_project_share_for_removal() {
+    let fixture = source_fixture();
+    let share = crate::provider::ProjectShareIntent::approve(&fixture.project, true).unwrap();
+    let unreferenced = |owner: &str| {
+        crate::provider::share_update::require_unreferenced(&fixture.candidate, owner, &share)
+    };
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
+    assert!(session.receipt.source.is_some());
+    assert!(!retired(&fixture.candidate, RUN, OWNER).unwrap());
+    // A live source-bearing receipt keeps its share.
+    assert_eq!(
+        unreferenced(OWNER).unwrap_err().code,
+        "project_share_in_use"
+    );
+    cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+    assert_eq!(session.receipt.phase, Phase::Removed);
+    assert!(retired(&fixture.candidate, RUN, OWNER).unwrap());
+    // The retained Removed receipt still names the share but no longer uses it.
+    let state = fs::read(session.root.join("state.json")).unwrap();
+    assert!(
+        state
+            .windows(share.guest_path.len())
+            .any(|w| w == share.guest_path.as_bytes())
+    );
+    unreferenced(OWNER).unwrap();
+    // Another owner's receipt, or a pending journal update, is never proven retired.
+    assert!(!retired_or_false(&fixture.candidate, RUN, &"d".repeat(32)));
+    assert_eq!(
+        unreferenced(&"d".repeat(32)).unwrap_err().code,
+        "project_share_in_use"
+    );
+    fs::write(session.root.join("state.pending"), &state).unwrap();
+    assert!(!retired_or_false(&fixture.candidate, RUN, OWNER));
+    assert_eq!(
+        unreferenced(OWNER).unwrap_err().code,
+        "project_share_in_use"
+    );
+    fs::remove_file(session.root.join("state.pending")).unwrap();
+    unreferenced(OWNER).unwrap();
+}
+
+fn retired_or_false(candidate: &Candidate, run: &str, owner: &str) -> bool {
+    retired(candidate, run, owner).unwrap_or(false)
 }
 
 #[test]

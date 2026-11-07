@@ -435,3 +435,108 @@ test("previous-boot HTTPS archive controls accept only model-derived move witnes
     ).toBe(false);
   }
 });
+
+test("restart-policy controls accept every reachable first violation only", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "service-restart-policy"
+  );
+  expect(model).toBeDefined();
+  const lateStart = (phase: string) =>
+    tlaWitness({
+      invariant: "NoIncarnationAfterStop",
+      action: "DaemonRestart",
+      fields: [
+        `phase = "${phase}"`,
+        'policy = "armed"',
+        'engine = "running"',
+        "lateStart = TRUE",
+      ],
+    });
+  for (const [phase, accepted] of [
+    ["stopping", true],
+    ["stopped", true],
+    ["disarmed", false],
+    ["retry", false],
+    ["serving", false],
+  ] as const) {
+    expect(
+      model?.verify({ negative: true, exitCode: 12, output: lateStart(phase) })
+    ).toBe(accepted);
+  }
+
+  const control = (name: string) =>
+    model?.additionalControls.find((entry) => entry.name === name);
+  const unprovedTerminal = control("unproved-terminal");
+  expect(unprovedTerminal).toBeDefined();
+  const terminal = (engine: string) =>
+    tlaWitness({
+      invariant: "TerminalProof",
+      action: "ObserveTerminal",
+      fields: [
+        'phase = "stopped"',
+        `engine = "${engine}"`,
+        "cancelled = TRUE",
+        "unsafeTerminal = TRUE",
+      ],
+    });
+  for (const [engine, accepted] of [
+    ["running", true],
+    ["restarting", true],
+    ["exited", false],
+    ["absent", false],
+  ] as const) {
+    expect(
+      unprovedTerminal?.verify({
+        negative: true,
+        exitCode: 12,
+        output: terminal(engine),
+      })
+    ).toBe(accepted);
+  }
+  expect(
+    unprovedTerminal?.verify({
+      negative: true,
+      exitCode: 12,
+      output: terminal("restarting").replace(
+        "unsafeTerminal = TRUE",
+        "unsafeTerminal = FALSE"
+      ),
+    })
+  ).toBe(false);
+
+  const staleGeneration = control("stale-generation");
+  expect(staleGeneration).toBeDefined();
+  const staleUse = (engine: string, bound: number, phase = "serving") =>
+    tlaWitness({
+      invariant: "NoStaleIncarnation",
+      action: "Use",
+      fields: [
+        `phase = "${phase}"`,
+        `engine = "${engine}"`,
+        `bound = ${bound}`,
+        "staleUse = TRUE",
+      ],
+    });
+  for (const engine of ["running", "restarting", "exited"]) {
+    for (const bound of [1, 2, 3]) {
+      // A bound current incarnation that is still running is not stale.
+      const accepted = !(engine === "running" && bound === 3);
+      expect(
+        staleGeneration?.verify({
+          negative: true,
+          exitCode: 12,
+          output: staleUse(engine, bound),
+        })
+      ).toBe(accepted);
+    }
+  }
+  for (const invalid of [
+    staleUse("exited", 0),
+    staleUse("exited", 1, "disarmed"),
+    staleUse("exited", 1).replace("<Use ", "<Bind "),
+  ]) {
+    expect(
+      staleGeneration?.verify({ negative: true, exitCode: 12, output: invalid })
+    ).toBe(false);
+  }
+});

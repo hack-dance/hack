@@ -8,7 +8,7 @@ import {
   sanitizeBranchSlug,
 } from "../lib/project.ts";
 import {
-  inspectNativeProjectRunFilesystemRecovery,
+  inspectNativeProjectRunMapping,
   recoverNativeProjectRunFilesystem,
 } from "./native-project-run.ts";
 import type { NativeRuntimeSelection } from "./native-runtime-client.ts";
@@ -108,7 +108,7 @@ export async function runNativeProjectMappingCommand(opts: {
   };
   const data =
     opts.selection.action === "inspect"
-      ? await inspectNativeProjectRunFilesystemRecovery({
+      ? await inspectNativeProjectRunMapping({
           scope,
           runtime: opts.runtime,
         })
@@ -120,6 +120,12 @@ export async function runNativeProjectMappingCommand(opts: {
         });
   if (opts.json) {
     emitCliResult({ result: okResult({ data }) });
+  } else if ("state" in data) {
+    process.stdout.write(
+      `Native run mapping is current: branch=${selected.branch ?? "base"}, run=${data.run.run}\n` +
+        `graph=${data.graph ? `${data.graph.phase}, ownership ${data.graph.ownershipMatches ? "matches" : "differs"}` : "unavailable"}\n` +
+        "No repair is needed. Graph recovery, retained-data readback and application readiness require separate verification.\n"
+    );
   } else {
     process.stdout.write(
       `Native run mapping ${opts.selection.action === "repair" ? "repaired" : "inspected"}: branch=${selected.branch ?? "base"}, run=${data.run.run}\n` +

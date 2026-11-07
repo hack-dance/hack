@@ -25,7 +25,8 @@
 //! Nothing unowned is adopted, stopped or removed.
 use super::super::{config_audit, disk_template::Stage, identity, state};
 use super::{
-    Owner, binary, finish_absent, invoke, recorded_process, stop_failed_boot, verify_templates,
+    Owner, binary, finish_absent, invoke, recorded_process, stop_verified_provider,
+    verify_templates,
 };
 use crate::{Candidate, CandidateError};
 use std::fs;
@@ -135,7 +136,7 @@ fn recover_start(
                 &binary(candidate),
                 unsafe { libc::geteuid() },
             )?;
-            stop_failed_boot(&process, &binary(candidate))?;
+            stop_verified_provider(&process, &binary(candidate))?;
         }
         // The record may be stale (a previous boot's) while an orphaned start is still running.
         provider_idle(candidate)?;

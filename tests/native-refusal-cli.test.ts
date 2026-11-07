@@ -413,7 +413,7 @@ test(
     const result = await cli({ fixture: f, args: ["up"], env: SHARED });
     expectOneClosedLine(
       result,
-      "Native restore selection changed; retained data was not adopted."
+      "Native restore selection changed; retained data was not adopted. Revert the change to keep that data, or run `hack down --remove-data` to discard it and start fresh."
     );
     expect((await f.calls()).at(-1)).toBe("graph restore-selection");
   },
@@ -486,12 +486,12 @@ test(
   SPAWN_TIMEOUT_MS
 );
 
-/** A project whose only service names a registry image the candidate refuses. */
+/** A project whose only service names a local registry the candidate refuses without an opt-in. */
 const REGISTRY_COMPOSE = JSON.stringify({
-  services: { web: { image: "ghcr.io/example/app:1" } },
+  services: { web: { image: "localhost:5000/example/app:1" } },
 });
 const IMAGE_REFUSAL =
-  "Native project image reference refused before runtime startup: use a public Docker Hub reference (shorthand such as alpine:3.21 is accepted) or a sha256 image ID; no VM, provider or image acquisition was started.";
+  "Native project image reference refused before runtime startup: use a Docker Hub or OCI registry reference (shorthand such as alpine:3.21 is accepted; local registries need HACK_NATIVE_LOCAL_REGISTRIES) or a sha256 image ID; no VM, provider or image acquisition was started.";
 
 test(
   "native-project-image-admission: a refused image reference is one coded line",
@@ -504,7 +504,7 @@ test(
       result,
       `E_NATIVE_PROJECT_UNSUPPORTED: ${IMAGE_REFUSAL}`
     );
-    expect(result.output).not.toContain("ghcr.io");
+    expect(result.output).not.toContain("localhost:5000");
     expect((await f.calls()).at(-1)).toBe("runtime admit-image");
   },
   SPAWN_TIMEOUT_MS
@@ -521,7 +521,7 @@ test(
       result,
       "Native runtime returned an invalid image admission response; no VM, provider or image acquisition was started."
     );
-    expect(result.output).not.toContain("ghcr.io");
+    expect(result.output).not.toContain("localhost:5000");
     expect((await f.calls()).at(-1)).toBe("runtime admit-image");
   },
   SPAWN_TIMEOUT_MS

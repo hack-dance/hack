@@ -7,6 +7,7 @@ pub use service_exec::{
 };
 mod hostname_change;
 mod normalized;
+mod plan_reconcile;
 #[cfg(target_os = "macos")]
 pub use normalized::run_normalized_with_host_dependencies_until;
 pub use normalized::{
@@ -63,6 +64,8 @@ pub use dependency_hosts::dependency_address;
 pub mod foreground;
 mod startup;
 mod startup_failure;
+#[cfg(any(target_os = "macos", test))]
+mod startup_logs;
 #[cfg(target_os = "macos")]
 pub use startup::{Dependency, HostRelayRuntime, RefreshPolicy};
 mod archive;
@@ -110,6 +113,7 @@ pub use host_relay::{
     HostRelayService, cleanup_with_relay, confirm_relay_cleanup, resume_relay_cleanup,
 };
 mod relay;
+mod restart_policy;
 pub use bridges::{
     ReserveBridgeOptions, RouteSlot, inspect_bridges, publish_bridge, reconcile_bridges,
     release_bridge, reserve_bridge, start_bridge,
@@ -120,6 +124,7 @@ pub use endpoints::GuestEndpoint;
 mod environment_crash_test;
 mod launcher;
 mod probes;
+mod process_refusals;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod startup_test;
 pub use environment::stage_environment;
@@ -176,8 +181,14 @@ const MAX_TOTAL_MEMORY_BYTES: u64 =
     super::Profile::Development.memory_mib() as u64 * 1024 * 1024 - GUEST_MEMORY_RESERVE_BYTES;
 const MAX_VOLUMES: usize = 16;
 
-fn error(code: &'static str, message: &str) -> CandidateError {
+fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
+}
+fn not_retained() -> CandidateError {
+    error(
+        "graph_cleanup_not_retained",
+        "Stopped-only data removal refused: the graph is not stopped with retained data. Nothing was stopped or removed.",
+    )
 }
 fn hex(value: &str, len: usize) -> bool {
     value.len() == len
@@ -211,12 +222,23 @@ impl Kind {
         }
     }
 }
+/// One reviewed Compose `127.0.0.1:host_port:target/tcp` publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopbackPort {
+    pub host_port: u16,
+    pub target: u16,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resource {
     /// Explicitly enrolled local HTTPS intent, not a claim of active publication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<project::RoutingPlan>,
+    /// Admitted Compose `ports` published on host IPv4 loopback by the
+    /// foreground owner. Intent only; publication is a separate owned effect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loopback_ports: Vec<LoopbackPort>,
     /// Ordered logical attachments; absent only on legacy container receipts or non-containers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub networks: Option<Vec<String>>,
@@ -231,12 +253,21 @@ pub struct Resource {
     /// Fixed at admission; only these exact paths may be explicitly quarantined.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disposable_caches: Vec<String>,
+    /// Admitted engine restart policy of a container; absent means `no`.
+    /// Only this receipt field authorizes engine restart states during stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_policy: Option<restart_policy::RestartPolicy>,
     pub kind: Kind,
     pub key: String,
     pub name: String,
     pub id: Option<String>,
     pub image: Option<String>,
     pub phase: String,
+    /// The service's reviewed opt-in policy for running a `linux/amd64` image under Rosetta
+    /// translation. Admission still requires an amd64 image to come from a
+    /// translation-enabled pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amd64_emulation: Option<crate::project::Amd64Emulation>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -278,7 +309,16 @@ pub struct Snapshot {
     pub interrupted_start_cleanup_incomplete: bool,
     pub observations: BTreeMap<String, Value>,
     pub guest_endpoints: BTreeMap<String, GuestEndpoint>,
+    /// Ready containers' loopback publication targets, keyed by
+    /// [`port_endpoint_key`]. Independent of HTTP probes: a published port
+    /// needs a running (and, when declared, healthy) owned container.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub port_endpoints: BTreeMap<String, GuestEndpoint>,
     pub storage_references: Value,
+}
+/// Service names are Compose identifiers and never contain `:`.
+pub(super) fn port_endpoint_key(service: &str, target: u16) -> String {
+    format!("{service}:{target}")
 }
 fn labels(owner: &str, run: &str, namespace: &str, plan: &str, resource: &Resource) -> Value {
     json!({"io.hack-local.owner":owner,"io.hack-local.graph":run,"io.hack-local.namespace":namespace,"io.hack-local.plan":plan,"io.hack-local.kind":resource.kind.word(),"io.hack-local.resource":resource.key})
@@ -389,6 +429,15 @@ fn verify_resource_identity(
 }
 fn observation(value: &Value) -> Result<Observation, CandidateError> {
     let state = &value["State"];
+    // A restarting container keeps its previous exit facts (including OOM) while
+    // the engine waits to start the next incarnation. Callers decide whether the
+    // receipt admits this state; see `probes::observe`.
+    if state["Restarting"] == true {
+        if state["Running"] != true || state["Pid"] != 0 || state["Dead"] == true {
+            return Err(error("graph_state", "Unexpected owned service state."));
+        }
+        return Ok(Observation::Restarting);
+    }
     if state["Dead"] == true || state["OOMKilled"] == true {
         return Ok(Observation::Dead);
     }
@@ -448,6 +497,8 @@ fn same_resource_bindings(
                     && old.cache == resource.cache
                     && old.outbound == resource.outbound
                     && old.routing == resource.routing
+                    && old.loopback_ports == resource.loopback_ports
+                    && old.restart_policy == resource.restart_policy
                     && (old.networks == resource.networks
                         // Old receipts predate attachment persistence and admitted at most
                         // one network. The caller also requires the unchanged plan identity.
@@ -455,6 +506,37 @@ fn same_resource_bindings(
                             && resource.networks.as_ref().is_some_and(|v| v.len() <= 1)))
             })
         })
+}
+
+/// Receipt-load bound for loopback publication intent: containers only, unique
+/// non-zero host ports graph-wide, and the admission budget.
+/// Restart authority exists only on containers, never alongside an
+/// incarnation-bound route, loopback publication, cache or probe, or a completion
+/// goal that cannot retry. A resource without a policy is always valid here.
+fn restart_policy_valid(resource: &Resource, probed: bool, readiness: Option<&Condition>) -> bool {
+    resource.restart_policy.as_ref().is_none_or(|policy| {
+        resource.kind == Kind::Container
+            && policy.valid()
+            && resource.routing.is_none()
+            && resource.loopback_ports.is_empty()
+            && resource.cache.is_none()
+            && !probed
+            && (readiness != Some(&Condition::Completed)
+                || matches!(policy, restart_policy::RestartPolicy::OnFailure { .. }))
+    })
+}
+fn loopback_ports_valid(resources: &BTreeMap<String, Resource>) -> bool {
+    let mut host_ports = BTreeSet::new();
+    resources.values().all(|resource| {
+        (resource.loopback_ports.is_empty() || resource.kind == Kind::Container)
+            && resource
+                .loopback_ports
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && resource.loopback_ports.iter().all(|port| {
+                port.host_port != 0 && port.target != 0 && host_ports.insert(port.host_port)
+            })
+    }) && host_ports.len() <= config::MAX_LOOPBACK_PORTS
 }
 
 fn network_bindings_valid(resources: &BTreeMap<String, Resource>) -> bool {
@@ -553,6 +635,14 @@ fn load_at(
                 resource.kind != Kind::Container || !routes::valid_intent(route)
             })
         })
+        || !loopback_ports_valid(&receipt.resources)
+        || !receipt.resources.values().all(|resource| {
+            restart_policy_valid(
+                resource,
+                receipt.probes.contains_key(&resource.key),
+                receipt.readiness.get(&resource.key),
+            )
+        })
         || ![
             "preparing",
             "ready-observed",
@@ -641,6 +731,9 @@ pub struct RunOptions<'a> {
     pub release_initializer_cache: BTreeSet<String>,
     /// Admit reviewed route intent; this does not itself publish an HTTPS route.
     pub routing_enrolled: bool,
+    /// Admit reviewed loopback TCP `ports`. Only the foreground owner, which
+    /// starts and retires the host publishers, may set this.
+    pub loopback_ports: bool,
     pub project: PlanOptions<'a>,
     pub expected_plan: &'a str,
     pub source_revision: Option<&'a str>,
@@ -786,6 +879,8 @@ impl Session<'_, '_> {
         one_off::record_effect(&self.root, key, &self.receipt.resources[key])
     }
     fn create_resources(&mut self, retain_data: bool) -> Result<(), CandidateError> {
+        // Restore reattaches every settled volume. A volume still `reserved` never
+        // received a create intent; it is created exclusively, never adopted.
         let keys: Vec<_> = self
             .receipt
             .resources
@@ -796,7 +891,7 @@ impl Session<'_, '_> {
         for key in keys {
             self.check_cancelled()?;
             let resource = self.receipt.resources[&key].clone();
-            if retain_data && resource.kind == Kind::Volume {
+            if retain_data && plan_reconcile::retained_volume(&resource) {
                 if inspect_resource(&self.engine, &self.receipt, &resource)?.is_none() {
                     return Err(error(
                         "graph_data_missing",
@@ -1277,16 +1372,43 @@ pub(super) fn validate_private_delivery(
     configs: &BTreeMap<String, Value>,
     environments: &BTreeMap<String, super::environment::PendingEnvironment>,
 ) -> Result<(), CandidateError> {
+    let mut refusals = process_refusals::Collector::default();
     for (name, pending) in environments {
         let config = &configs[name];
         if pending.wraps_process() {
-            launcher::validate(config)?;
+            refusals.check(name, launcher::validate(config));
         } else {
-            launcher::identity(config)?;
+            refusals.check(
+                name,
+                launcher::identity(config)
+                    .map(|_| ())
+                    .map_err(|error| process_refusals::Refused {
+                        field: crate::error::ProcessField::User,
+                        error,
+                    }),
+            );
         }
-        launcher::validate_files(config, &pending.file_targets())?;
+    }
+    refusals.finish()?;
+    for (name, pending) in environments {
+        launcher::validate_files(&configs[name], &pending.file_targets())?;
     }
     Ok(())
+}
+
+/// Wrapper admission for host-dependency services, before any runtime state is
+/// reserved: their release barrier runs the same materialized process.
+pub(super) fn validate_dependency_processes(
+    configs: &BTreeMap<String, Value>,
+    services: &BTreeSet<String>,
+) -> Result<(), CandidateError> {
+    let mut refusals = process_refusals::Collector::default();
+    for name in services {
+        if let Some(config) = configs.get(name) {
+            refusals.check(name, launcher::validate(config));
+        }
+    }
+    refusals.finish()
 }
 /// Services whose process the private launcher wraps, and files-only services whose
 /// image user must still be materialized for exact file ownership.
@@ -1388,6 +1510,7 @@ fn run_inputs(
             environment: !environments.is_empty(),
             dependency_hosts: startup.is_some(),
             routing_enrolled: options.routing_enrolled,
+            loopback_ports: options.loopback_ports,
         },
     )?;
     initializer_cache::validate_selection(
@@ -1400,8 +1523,17 @@ fn run_inputs(
         super::environment::preflight_capacity(engine.guest(), environments.len())?;
     }
     // Resolve inherited process defaults only from the exact verified image,
-    // before the private launcher takes ownership of Entrypoint and Cmd.
-    let (wrapped, file_owners) = private_services(&environments);
+    // before the private launcher or the dependency release barrier takes
+    // ownership of Entrypoint and Cmd.
+    let (mut wrapped, mut file_owners) = private_services(&environments);
+    let dependency_processes = startup
+        .as_ref()
+        .map(|driver| driver.process_services())
+        .unwrap_or_default();
+    for name in &dependency_processes {
+        file_owners.remove(name);
+        wrapped.insert(name.clone());
+    }
     let expected_environment = verify_images(
         &engine,
         &prepared.resources,
@@ -1410,6 +1542,7 @@ fn run_inputs(
         &file_owners,
     )?;
     validate_private_delivery(&prepared.configs, &environments)?;
+    validate_dependency_processes(&prepared.configs, &dependency_processes)?;
     if let Some(driver) = startup.as_ref() {
         driver.check_cancelled()?;
     }
@@ -1536,9 +1669,98 @@ fn endpoint_network<'a>(
 }
 
 /// Read-only recovery inspection; historical ready phase is not a current health assertion.
+/// Read-only inspection of one owned graph attempt.
+///
+/// A run whose active, archived and consumed journals are all exactly absent and
+/// whose foreground owner is not published refuses `graph_unreserved` before any
+/// guest access. Absence is a point-in-time observation: only a caller that
+/// separately proved its own consumer settled may treat it as "never reserved"
+/// (for example a foreground start refused before admission). Every other journal
+/// state keeps the ordinary receipt validation.
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
+    #[cfg(target_os = "macos")]
+    if unreserved(candidate, run)? {
+        return Err(error(
+            "graph_unreserved",
+            "No runtime state was reserved for this graph attempt: no journal exists and no foreground owner is published. Nothing was created, repaired or adopted.",
+        ));
+    }
     let engine = Engine::connect_cleanup(candidate)?;
     inspect_using(candidate, &engine, run)
+}
+
+/// Lock-free current service states for one owned graph attempt.
+///
+/// For observers that must not contend with an operation holding the provider
+/// lease, such as a foreground `up` reporting service exits while `exec` runs.
+/// It takes no lease, issues only engine GETs, verifies each recorded container's
+/// ownership labels and identity, runs no probes and grants no authority: the
+/// result is a point-in-time observation (`running` health is the engine's own).
+#[cfg(target_os = "macos")]
+pub fn observe(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
+    let observer = super::engine::Observer::connect(candidate)?;
+    let (receipt, _) = load_at(directory(candidate, run)?, run, observer.incarnation())?;
+    let mut services = serde_json::Map::new();
+    for resource in receipt
+        .resources
+        .values()
+        .filter(|resource| resource.kind == Kind::Container)
+    {
+        let state = match resource.id.as_deref() {
+            None => json!({"state":"absent"}),
+            Some(id) => match observer.get(&format!("/v1.53/containers/{id}/json")) {
+                Ok(value) => {
+                    verify_resource_identity(&receipt, resource, &value)?;
+                    observed_service_state(resource, &value)?
+                }
+                Err(error) if error.code == "engine_not_found" => json!({"state":"absent"}),
+                Err(error) => return Err(error),
+            },
+        };
+        services.insert(resource.key.clone(), state);
+    }
+    Ok(json!({"run":receipt.run,"phase":receipt.phase,"services":services}))
+}
+
+/// One lock-free service state. A pending engine restart is reported as
+/// `restarting` only when the receipt admitted a restart policy; it is never a
+/// stopped state, so exit observers keep the foreground graph up. Any other
+/// state the graph does not model (an unadmitted restart, a paused container)
+/// is `unknown`, which is neither running nor stopped.
+#[cfg(any(test, target_os = "macos"))]
+fn observed_service_state(resource: &Resource, value: &Value) -> Result<Value, CandidateError> {
+    match observation(value) {
+        Ok(Observation::Restarting) if !restart_policy::admits_restarting(resource) => {
+            Ok(json!({"state":"unknown"}))
+        }
+        Ok(observed) => serde_json::to_value(observed)
+            .map_err(|_| error("graph_output", "Cannot encode graph observation.")),
+        Err(_) => Ok(json!({"state":"unknown"})),
+    }
+}
+
+/// A foreground start binds its publication before it creates the journal, so
+/// the journal is checked on both sides of the publication check.
+#[cfg(target_os = "macos")]
+fn unreserved(candidate: &Candidate, run: &str) -> Result<bool, CandidateError> {
+    let absent = |path: &std::path::Path| match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Ok(_) => Ok(false),
+        Err(error) => Err(state::io(error)),
+    };
+    let journals_absent = || -> Result<bool, CandidateError> {
+        Ok(absent(&directory(candidate, run)?)?
+            && absent(&archive::path(candidate, run)?)?
+            && absent(&retention::consumed(candidate, run)?)?)
+    };
+    if !journals_absent()? {
+        return Ok(false);
+    }
+    let publication = foreground::transport::root(candidate, run)?;
+    if !(absent(&publication.join("owner.json"))? && absent(&publication.join("control.sock"))?) {
+        return Ok(false);
+    }
+    journals_absent()
 }
 
 fn unchanged_normalized_review(
@@ -1595,6 +1817,24 @@ pub fn source_compatibility(
     {
         return Err(refused());
     }
+    #[cfg(target_os = "macos")]
+    let rebinding = source_rebind.is_some();
+    #[cfg(not(target_os = "macos"))]
+    let rebinding = false;
+    if plan_reconcile::applies(&receipt, plan_id, plan, normalized, rebinding) {
+        // Compute is recreated from this review; retained data is reattached by
+        // verified identity at admission, which repeats this proof under the lease.
+        plan_reconcile::prepare(plan, &receipt, normalized)?;
+        return Ok(json!({
+            "run": receipt.run,
+            "owner": receipt.owner,
+            "namespace": receipt.namespace,
+            "plan": receipt.plan_id,
+            "reviewed_plan": plan_id,
+            "source_revision": Value::Null,
+            "reconcile": true,
+        }));
+    }
     let cached = plan
         .services
         .values()
@@ -1610,7 +1850,9 @@ pub fn source_compatibility(
     if needs_source && revision.is_none() {
         return Err(refused());
     }
-    if !unchanged_normalized_review(&receipt, plan_id, normalized) {
+    if !unchanged_normalized_review(&receipt, plan_id, normalized)
+        && !normalized::source_independent_review(&receipt, plan)
+    {
         let revision = revision.ok_or_else(refused)?;
         if hostname_change::prepare(&engine, plan, source_receipt, normalized)?.is_none() {
             source::prepare_shared_changed(
@@ -1651,6 +1893,7 @@ fn inspect_using(
         networks.insert(key.clone(), inspect_resource(engine, &receipt, resource)?);
     }
     let mut guest_endpoints = BTreeMap::new();
+    let mut port_endpoints = BTreeMap::new();
     for (key, resource) in &receipt.resources {
         let inspected = if resource.kind == Kind::Network {
             networks.get(key).expect("network inspected").clone()
@@ -1685,6 +1928,34 @@ fn inspect_using(
                         )?,
                     );
                 }
+                if !journal_incomplete
+                    && receipt.phase == "ready-observed"
+                    && resource.id.is_some()
+                    && !resource.loopback_ports.is_empty()
+                    && matches!(
+                        observation,
+                        Observation::Running {
+                            health: Health::Healthy | Health::None
+                        }
+                    )
+                    && endpoint_network(&receipt, &v, &networks)?.is_some()
+                {
+                    for port in &resource.loopback_ports {
+                        port_endpoints.insert(
+                            port_endpoint_key(&resource.key, port.target),
+                            endpoints::resolve_attached(
+                                &v,
+                                &networks,
+                                port.target,
+                                &endpoints::EndpointScope {
+                                    receipt: &receipt,
+                                    boot: engine.guest().boot_id(),
+                                    service: &resource.key,
+                                },
+                            )?,
+                        );
+                    }
+                }
                 serde_json::to_value(observation)
                     .map_err(|_| error("graph_state", "Cannot encode observation."))?
             }
@@ -1702,6 +1973,7 @@ fn inspect_using(
         interrupted_start_cleanup_incomplete,
         observations,
         guest_endpoints,
+        port_endpoints,
         storage_references,
     })
 }
@@ -1719,6 +1991,27 @@ pub fn cleanup(
     // its environment inventory, so history is compacted under the same lease. A refusal keeps
     // the records for the next cleanup, restore or archive; it never reports this cleanup failed.
     // Relay-enrolled graphs compact in restore instead (see `environment_recovery::compaction`).
+    if let Some(containers) = environment::bound_containers(&receipt) {
+        environment::compact_history(candidate, &engine, &receipt.run, &containers);
+    }
+    Ok(receipt)
+}
+
+/// Stopped-only data removal for a graph without a foreground owner. The phase
+/// is checked under the same mutation lease that restore needs, so a run that
+/// was restored or started since the caller's inspection refuses instead of
+/// having its compute stopped. A durable cleanup intent or an already removed
+/// receipt resumes.
+pub fn remove_retained_data(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (receipt, root) = load(candidate, &engine, run)?;
+    if receipt.relay_startup.is_some()
+        || !["stopped-data-retained", "cleanup-intent", "removed"].contains(&receipt.phase.as_str())
+    {
+        return Err(not_retained());
+    }
+    cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
+    let receipt = cleanup_owned(candidate, &engine, receipt, &root, true)?;
     if let Some(containers) = environment::bound_containers(&receipt) {
         environment::compact_history(candidate, &engine, &receipt.run, &containers);
     }
@@ -2228,6 +2521,36 @@ fn check_cache_capacity(engine: &Engine<'_>, owner: &str) -> Result<(), Candidat
     Ok(())
 }
 
+/// An image is admitted for exactly the platform its service's reviewed policy may run:
+/// Linux arm64 for a native or `prefer-native` service, and Linux amd64 for an opted-in
+/// service (either policy) only in a pool whose audited boot enabled x86_64 translation. An
+/// `amd64` service never runs an arm64 image natively, even a local content ID.
+pub(super) fn admitted_architecture(
+    engine: &Engine<'_>,
+    resource: &Resource,
+    image: &Value,
+) -> bool {
+    admitted_platform(
+        image,
+        resource.amd64_emulation,
+        engine.guest().amd64_emulation(),
+    )
+}
+
+fn admitted_platform(
+    image: &Value,
+    policy: Option<crate::project::Amd64Emulation>,
+    translation: bool,
+) -> bool {
+    use crate::project::Amd64Emulation;
+    image["Os"] == "linux"
+        && match (image["Architecture"].as_str(), policy) {
+            (Some("arm64"), None | Some(Amd64Emulation::PreferNative)) => true,
+            (Some("amd64"), Some(_)) => translation,
+            _ => false,
+        }
+}
+
 fn verify_images(
     engine: &Engine<'_>,
     resources: &BTreeMap<String, Resource>,
@@ -2236,6 +2559,7 @@ fn verify_images(
     file_owners: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>, CandidateError> {
     let mut expected = BTreeMap::new();
+    let mut refusals = process_refusals::Collector::default();
     for resource in resources.values().filter(|r| r.kind == Kind::Container) {
         let image = engine.request(
             Method::GET,
@@ -2246,13 +2570,13 @@ fn verify_images(
             None,
         )?;
         if image["Id"].as_str() != resource.image.as_deref()
-            || image["Os"] != "linux"
-            || image["Architecture"] != "arm64"
+            || !admitted_architecture(engine, resource, &image)
         {
             return Err(error(
                 "graph_image",
                 "Pinned image identity, OS or architecture is incompatible.",
-            ));
+            )
+            .with_service(&resource.key));
         }
         // Image VOLUME targets are admitted only when covered by exactly one owned
         // named mount; the engine never allocates anonymous storage for a graph.
@@ -2262,24 +2586,32 @@ fn verify_images(
             resources,
         )?;
         if private_services.contains(&resource.key) {
-            image_process::apply_private(
-                configs
-                    .get_mut(&resource.key)
-                    .expect("compiled service config"),
-                &image["Config"],
-            )?;
+            refusals.check(
+                &resource.key,
+                image_process::apply_private(
+                    configs
+                        .get_mut(&resource.key)
+                        .expect("compiled service config"),
+                    &image["Config"],
+                ),
+            );
         } else if file_owners.contains(&resource.key) {
-            image_process::apply_file_owner(
-                configs
-                    .get_mut(&resource.key)
-                    .expect("compiled service config"),
-                &image["Config"],
-            )?;
+            refusals.check(
+                &resource.key,
+                image_process::apply_file_owner(
+                    configs
+                        .get_mut(&resource.key)
+                        .expect("compiled service config"),
+                    &image["Config"],
+                ),
+            );
         }
         expected.insert(
             resource.key.clone(),
             image_environment::compose(&image["Config"]["Env"], &configs[&resource.key]["Env"])?,
         );
     }
+    // Every wrapped service is checked before the first refusal is reported.
+    refusals.finish()?;
     Ok(expected)
 }

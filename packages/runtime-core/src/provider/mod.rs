@@ -3,8 +3,11 @@ pub mod admission;
 mod agent;
 mod artifact;
 mod bridge;
+pub mod build_policy;
+pub mod build_scan;
 mod config_audit;
 mod dependency_socket;
+mod go_json;
 pub use bridge::BridgeIntent;
 pub use dependency_socket::quiescent_recovery as quiescent_dependency_socket_recovery;
 pub use dependency_socket::recovery as dependency_socket_recovery;
@@ -33,8 +36,11 @@ pub mod hostname_authority;
 pub mod http_probe;
 pub mod https_recovery;
 mod identity;
+pub mod image_build;
 pub mod image_ensure;
 mod image_load;
+pub mod image_platform;
+pub mod image_policy;
 pub mod image_reference;
 pub mod managed_environment;
 #[cfg(feature = "native-config-plan")]
@@ -43,6 +49,7 @@ mod native_environment;
 pub mod native_input;
 pub mod private_deadline;
 pub mod private_input;
+mod registry_credentials;
 pub mod registry_image;
 pub mod relay_auth;
 pub mod relay_client;
@@ -73,14 +80,16 @@ pub mod storage_usage;
 mod test_executable;
 #[cfg(all(test, unix))]
 mod test_socket;
-pub use image_load::load as load_image;
+pub use image_load::{load as load_image, load_with as load_image_with};
 mod lifecycle;
 pub use lifecycle::host_filesystem;
 mod network_intent;
 mod network_update;
 pub use network_update::{enable_internet, extend_network};
 mod project_share;
-pub use project_share::ProjectShareIntent;
+pub use project_share::{MAX_PROJECT_SHARES, ProjectShareIntent};
+mod share_update;
+pub use share_update::{add_project_share, remove_project_share};
 mod network_tools;
 pub mod prepared_base;
 mod prepared_inventory;
@@ -143,6 +152,8 @@ pub struct Status {
     pub lifecycle_qualified: bool,
     pub artifact_prepared: bool,
     pub engine_prepared: bool,
+    /// The optional pinned BuildKit client; verified whenever its record exists.
+    pub builder_prepared: bool,
     pub memory_admission: admission::Admission,
     pub runtime_effects: [&'static str; 0],
 }
@@ -164,11 +175,20 @@ pub fn probe(candidate: &Candidate) -> Result<Status, CandidateError> {
     if engine_prepared {
         artifact::verify_engine(candidate)?;
     }
+    let builder_prepared = candidate
+        .state_root
+        .join("providers/buildx.json")
+        .try_exists()
+        .map_err(state::io)?;
+    if builder_prepared {
+        artifact::verify_builder(candidate)?;
+    }
     Ok(Status {
         checkpoint: "WU02-provider-preflight",
         lifecycle_qualified: false,
         artifact_prepared: prepared,
         engine_prepared,
+        builder_prepared,
         memory_admission: admission::probe(&candidate.checkout)?,
         runtime_effects: [],
     })
@@ -183,6 +203,14 @@ pub fn prepare_engine(
     archive: &Path,
 ) -> Result<impl Serialize, CandidateError> {
     artifact::prepare_engine(candidate, archive)
+}
+
+/// Prepare the pinned host BuildKit client from its exact release asset.
+pub fn prepare_builder(
+    candidate: &Candidate,
+    binary: &Path,
+) -> Result<impl Serialize, CandidateError> {
+    artifact::prepare_builder(candidate, binary)
 }
 
 #[cfg(test)]

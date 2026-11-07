@@ -21,6 +21,15 @@ struct Owned {
     run: String,
     reservation: String,
     hostnames: Vec<String>,
+    /// Reviewed host port of a loopback TCP publication; `None` for a route.
+    port: Option<u16>,
+}
+
+/// What one publisher child serves: a route's hostname set over Unix, or one
+/// reviewed loopback TCP port.
+enum Frontend<'a> {
+    Hostnames(&'a [String]),
+    Port(u16),
 }
 
 #[derive(Default)]
@@ -34,7 +43,7 @@ fn command(
     run: &str,
     slot: u8,
     reservation: &str,
-    hostnames: &[String],
+    frontend: Frontend<'_>,
 ) -> Command {
     let mut command = Command::new(executable);
     command
@@ -46,9 +55,17 @@ fn command(
         .arg(checkout)
         .args(["graph", "publish-bridge", "--run-id", run, "--slot"])
         .arg(slot.to_string())
-        .args(["--expect-reservation", reservation, "--unix"]);
-    for hostname in hostnames {
-        command.args(["--hostname", hostname]);
+        .args(["--expect-reservation", reservation]);
+    match frontend {
+        Frontend::Hostnames(hostnames) => {
+            command.arg("--unix");
+            for hostname in hostnames {
+                command.args(["--hostname", hostname]);
+            }
+        }
+        Frontend::Port(port) => {
+            command.arg("--port").arg(port.to_string());
+        }
     }
     command
 }
@@ -99,27 +116,145 @@ impl Publishers {
         {
             return Err(refused());
         }
-        if routes.is_empty() {
+        let loopback = receipt
+            .resources
+            .values()
+            .flat_map(|resource| resource.loopback_ports.iter())
+            .count();
+        if loopback > graph::config::MAX_LOOPBACK_PORTS {
+            return Err(refused());
+        }
+        if routes.is_empty() && loopback == 0 {
             return Ok(());
         }
+        let executable = std::env::current_exe().map_err(|_| refused())?;
+        if !routes.is_empty() {
+            self.start_routes(
+                candidate,
+                receipt,
+                signals,
+                deadline,
+                slots,
+                &routes,
+                &executable,
+            )?;
+        }
+        if loopback > 0 {
+            self.start_loopback(candidate, receipt, signals, deadline, &executable)?;
+        }
+        self.verify_live(candidate)
+    }
+
+    /// Loopback TCP publications start after routes, each through its own
+    /// reserved bridge. A refusal leaves earlier publishers owned by this set
+    /// for the caller's enrolled cleanup, as for routes.
+    fn start_loopback(
+        &mut self,
+        candidate: &Candidate,
+        receipt: &Receipt,
+        signals: &signals::Events,
+        deadline: Instant,
+        executable: &Path,
+    ) -> Result<(), CandidateError> {
+        check_deadline(signals, deadline)?;
+        // `started` readiness can finish while an image healthcheck is still
+        // starting; wait for those endpoints within the same startup deadline.
+        let reserved = retry_pending_endpoint(
+            || super::super::bridges::reserve_loopback_ports(candidate, receipt),
+            || {
+                std::thread::sleep(PENDING_ENDPOINT_POLL);
+                check_deadline(signals, deadline)
+            },
+        )?;
+        for (port, selected) in reserved {
+            check_deadline(signals, deadline)?;
+            let assignment = &selected.assignment;
+            graph::start_bridge(
+                candidate,
+                &receipt.run,
+                selected.slot,
+                &assignment.reservation,
+            )?;
+            check_deadline(signals, deadline)?;
+            let child = command(
+                executable,
+                &candidate.checkout,
+                &receipt.run,
+                selected.slot,
+                &assignment.reservation,
+                Frontend::Port(port),
+            )
+            .spawn()
+            .map_err(|_| refused())?;
+            self.children.push(Owned {
+                child,
+                run: receipt.run.clone(),
+                reservation: assignment.reservation.clone(),
+                hostnames: Vec::new(),
+                port: Some(port),
+            });
+            self.await_published(candidate, signals, deadline)?;
+        }
+        Ok(())
+    }
+
+    fn await_published(
+        &mut self,
+        candidate: &Candidate,
+        signals: &signals::Events,
+        deadline: Instant,
+    ) -> Result<(), CandidateError> {
+        let owned = self.children.last().ok_or_else(refused)?;
+        signals.watch_child(&owned.child)?;
+        loop {
+            check_deadline(signals, deadline)?;
+            if self
+                .children
+                .last_mut()
+                .ok_or_else(refused)?
+                .child
+                .try_wait()
+                .map_err(|_| refused())?
+                .is_some()
+            {
+                return Err(refused());
+            }
+            let owned = self.children.last().ok_or_else(refused)?;
+            if published(candidate, owned).is_ok() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_routes(
+        &mut self,
+        candidate: &Candidate,
+        receipt: &Receipt,
+        signals: &signals::Events,
+        deadline: Instant,
+        slots: &BTreeMap<String, graph::RouteSlot>,
+        routes: &BTreeMap<&String, &crate::project::RoutingPlan>,
+        executable: &Path,
+    ) -> Result<(), CandidateError> {
         check_deadline(signals, deadline)?;
         let reserved = super::super::bridges::reserve_routes(candidate, receipt, slots)?;
-        let executable = std::env::current_exe().map_err(|_| refused())?;
         for (service, route) in routes {
             check_deadline(signals, deadline)?;
-            let selected = reserved.get(service).ok_or_else(refused)?;
+            let selected = reserved.get(*service).ok_or_else(refused)?;
             let slot = selected.slot;
             let assignment = &selected.assignment;
             check_deadline(signals, deadline)?;
             graph::start_bridge(candidate, &receipt.run, slot, &assignment.reservation)?;
             check_deadline(signals, deadline)?;
             let child = command(
-                &executable,
+                executable,
                 &candidate.checkout,
                 &receipt.run,
                 slot,
                 &assignment.reservation,
-                &route.hostnames,
+                Frontend::Hostnames(&route.hostnames),
             )
             .spawn()
             .map_err(|_| refused())?;
@@ -128,30 +263,11 @@ impl Publishers {
                 run: receipt.run.clone(),
                 reservation: assignment.reservation.clone(),
                 hostnames: route.hostnames.clone(),
+                port: None,
             });
-            let owned = self.children.last().ok_or_else(refused)?;
-            signals.watch_child(&owned.child)?;
-            loop {
-                check_deadline(signals, deadline)?;
-                if self
-                    .children
-                    .last_mut()
-                    .ok_or_else(refused)?
-                    .child
-                    .try_wait()
-                    .map_err(|_| refused())?
-                    .is_some()
-                {
-                    return Err(refused());
-                }
-                let owned = self.children.last().ok_or_else(refused)?;
-                if published(candidate, owned).is_ok() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
+            self.await_published(candidate, signals, deadline)?;
         }
-        self.verify_live(candidate)
+        Ok(())
     }
 
     /// Point-in-time publisher ownership, not guest health or TLS request proof.
@@ -192,6 +308,23 @@ impl Publishers {
     }
 }
 
+const PENDING_ENDPOINT_POLL: Duration = Duration::from_millis(100);
+
+/// Repeats `attempt` only while it refuses with `bridge_endpoint_pending`; each
+/// refusal wrote nothing. `wait` bounds the loop: its error ends it unchanged.
+/// Every other outcome, success or refusal, returns at once.
+fn retry_pending_endpoint<T>(
+    mut attempt: impl FnMut() -> Result<T, CandidateError>,
+    mut wait: impl FnMut() -> Result<(), CandidateError>,
+) -> Result<T, CandidateError> {
+    loop {
+        match attempt() {
+            Err(refusal) if refusal.code == "bridge_endpoint_pending" => wait()?,
+            outcome => return outcome,
+        }
+    }
+}
+
 fn check_deadline(signals: &signals::Events, deadline: Instant) -> Result<(), CandidateError> {
     if signals.pending() || Instant::now() >= deadline {
         Err(refused())
@@ -201,6 +334,14 @@ fn check_deadline(signals: &signals::Events, deadline: Instant) -> Result<(), Ca
 }
 
 fn published(candidate: &Candidate, owned: &Owned) -> Result<(), CandidateError> {
+    if let Some(port) = owned.port {
+        let value = publication::lookup_port(candidate, &owned.run, &owned.reservation, port)?;
+        return if value["state"] == "publication-observed" && value["port"] == port {
+            Ok(())
+        } else {
+            Err(refused())
+        };
+    }
     for hostname in &owned.hostnames {
         let value = publication::lookup_hostname(candidate, hostname)?;
         if !matches_publication(&value, hostname, &owned.run, &owned.reservation) {
@@ -254,7 +395,7 @@ mod tests {
             "run",
             3,
             "reservation",
-            &["one.example".into(), "two.example".into()],
+            Frontend::Hostnames(&["one.example".into(), "two.example".into()]),
         );
         let args = command
             .get_args()
@@ -282,5 +423,87 @@ mod tests {
         );
         assert_eq!(command.get_program(), "/candidate");
         assert_eq!(command.get_envs().count(), 0);
+    }
+
+    #[test]
+    fn loopback_child_argv_names_only_its_reviewed_port() {
+        let command = command(
+            Path::new("/candidate"),
+            Path::new("/checkout"),
+            "run",
+            4,
+            "reservation",
+            Frontend::Port(8787),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            [
+                "--candidate-root",
+                "/checkout",
+                "graph",
+                "publish-bridge",
+                "--run-id",
+                "run",
+                "--slot",
+                "4",
+                "--expect-reservation",
+                "reservation",
+                "--port",
+                "8787"
+            ]
+        );
+        assert_eq!(command.get_envs().count(), 0);
+    }
+
+    #[test]
+    fn pending_endpoint_waits_within_the_bound_but_other_refusals_do_not() {
+        let pending = || CandidateError::new("bridge_endpoint_pending", "pending");
+        let mut attempts = 0;
+        let mut waits = 0;
+        let reserved = retry_pending_endpoint(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(pending())
+                } else {
+                    Ok(attempts)
+                }
+            },
+            || {
+                waits += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!((reserved, waits), (3, 2));
+
+        let mut waits = 0;
+        let expired = retry_pending_endpoint(
+            || Err::<(), _>(pending()),
+            || {
+                waits += 1;
+                if waits < 2 { Ok(()) } else { Err(refused()) }
+            },
+        )
+        .unwrap_err();
+        assert_eq!((expired.code, waits), ("graph_route_publisher", 2));
+
+        let mut attempts = 0;
+        let unavailable = retry_pending_endpoint(
+            || {
+                attempts += 1;
+                Err::<(), _>(CandidateError::new("bridge_endpoint_unavailable", "gone"))
+            },
+            || panic!("a permanent refusal must not wait"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (unavailable.code, attempts),
+            ("bridge_endpoint_unavailable", 1)
+        );
     }
 }

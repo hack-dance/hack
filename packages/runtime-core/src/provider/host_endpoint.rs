@@ -202,35 +202,13 @@ impl HostEndpoint {
     pub fn discover(executable: &Path, port: u16) -> Result<(i32, String), CandidateError> {
         #[cfg(target_os = "macos")]
         {
-            const LIMIT: usize = 8192;
-            const PROC_ALL_PIDS: u32 = 1;
             if port == 0 || !executable.is_absolute() {
                 return Err(refused());
             }
             let expected = executable.canonicalize().map_err(|_| refused())?;
-            let mut pids = [0_i32; LIMIT];
-            // SAFETY: libproc receives a writable fixed-size PID array and retains no pointer.
-            let bytes = unsafe {
-                libc::proc_listpids(
-                    PROC_ALL_PIDS,
-                    0,
-                    pids.as_mut_ptr().cast(),
-                    std::mem::size_of_val(&pids) as i32,
-                )
-            };
-            if bytes <= 0
-                || bytes as usize >= std::mem::size_of_val(&pids)
-                || bytes as usize % std::mem::size_of::<i32>() != 0
-            {
-                return Err(refused());
-            }
             let uid = unsafe { libc::geteuid() };
             let mut found = None;
-            for pid in pids[..bytes as usize / std::mem::size_of::<i32>()]
-                .iter()
-                .copied()
-                .filter(|pid| *pid > 1)
-            {
+            for pid in listed_pids()? {
                 let Ok(process) = super::identity::observe(pid) else {
                     continue;
                 };
@@ -250,6 +228,80 @@ impl HostEndpoint {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (executable, port);
+            Err(CandidateError::new(
+                "unsupported_host",
+                "Native host endpoint discovery requires macOS.",
+            ))
+        }
+    }
+
+    /// Discover the one same-user exclusive loopback listener on `port` and prove
+    /// that it is the selected owner process or descends from it within eight
+    /// same-user ancestry links. The owner is selected by the caller's own
+    /// ownership record (a lifecycle pane or shared-helper claim), never by port,
+    /// argv or a common-ancestor search. A missing or ambiguous listener refuses
+    /// as `host_endpoint_identity`; a listener outside the owner's process tree
+    /// (an adopted, daemonized or foreign listener) refuses as `host_endpoint_owner`.
+    /// The result is selection evidence only: native review pins it again.
+    pub fn discover_descendant(
+        port: u16,
+        ancestor_pid: i32,
+    ) -> Result<DescendantListener, CandidateError> {
+        #[cfg(target_os = "macos")]
+        {
+            if port == 0 || ancestor_pid <= 1 {
+                return Err(refused());
+            }
+            let uid = unsafe { libc::geteuid() };
+            let ancestor = super::identity::observe(ancestor_pid).map_err(|_| owner_refused())?;
+            if ancestor.uid != uid {
+                return Err(owner_refused());
+            }
+            let mut found = None;
+            for pid in listed_pids()? {
+                let Ok(process) = super::identity::observe(pid) else {
+                    continue;
+                };
+                if process.uid != uid {
+                    continue;
+                }
+                let Ok(endpoint) = Self::capture(pid, port) else {
+                    continue;
+                };
+                if found.is_some() {
+                    return Err(refused());
+                }
+                found = Some(endpoint);
+            }
+            let endpoint = found.ok_or_else(refused)?;
+            let process = endpoint.process_identity();
+            let depth = if process.pid == ancestor.pid {
+                if process != ancestor {
+                    return Err(owner_refused());
+                }
+                0
+            } else {
+                descendant_depth(&process, &ancestor)?
+            };
+            super::identity::verify(
+                &ancestor,
+                &super::identity::observe(ancestor.pid).map_err(|_| owner_refused())?,
+                &ancestor.executable,
+                uid,
+            )
+            .map_err(|_| owner_refused())?;
+            let fingerprint = endpoint.fingerprint()?;
+            Ok(DescendantListener {
+                pid: process.pid,
+                fingerprint,
+                executable: process.executable,
+                depth,
+                ancestor_start_micros: ancestor.start_micros,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (port, ancestor_pid);
             Err(CandidateError::new(
                 "unsupported_host",
                 "Native host endpoint discovery requires macOS.",
@@ -540,6 +592,67 @@ impl PendingConnection {
         }
         Ok(true)
     }
+}
+
+/// A listener found beneath an explicitly selected owner process. `depth` is the
+/// number of ancestry links from the listener to the owner (0 when the owner is
+/// the listener itself). Contains no argv, environment or credential values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescendantListener {
+    pub pid: i32,
+    pub fingerprint: String,
+    pub executable: PathBuf,
+    pub depth: u8,
+    pub ancestor_start_micros: u64,
+}
+
+#[cfg(target_os = "macos")]
+fn owner_refused() -> CandidateError {
+    CandidateError::new(
+        "host_endpoint_owner",
+        "The selected listener is not owned by the selected host process.",
+    )
+}
+
+/// Same-user PIDs above launchd from one bounded libproc snapshot.
+#[cfg(target_os = "macos")]
+fn listed_pids() -> Result<Vec<i32>, CandidateError> {
+    const LIMIT: usize = 8192;
+    const PROC_ALL_PIDS: u32 = 1;
+    let mut pids = vec![0_i32; LIMIT];
+    let size = std::mem::size_of_val(pids.as_slice());
+    // SAFETY: libproc receives a writable fixed-size PID array and retains no pointer.
+    let bytes =
+        unsafe { libc::proc_listpids(PROC_ALL_PIDS, 0, pids.as_mut_ptr().cast(), size as i32) };
+    if bytes <= 0 || bytes as usize >= size || bytes as usize % std::mem::size_of::<i32>() != 0 {
+        return Err(refused());
+    }
+    pids.truncate(bytes as usize / std::mem::size_of::<i32>());
+    pids.retain(|pid| *pid > 1);
+    Ok(pids)
+}
+
+/// The smallest ancestry depth (1..=8) at which `ancestor` is found. Each probe is
+/// a complete double-checked lineage snapshot; a chain that ends, changes user or
+/// reaches launchd before the owner refuses rather than searching elsewhere.
+#[cfg(target_os = "macos")]
+fn descendant_depth(
+    process: &super::identity::ProcessIdentity,
+    ancestor: &super::identity::ProcessIdentity,
+) -> Result<u8, CandidateError> {
+    for depth in 1..=8_u8 {
+        let Ok(lineage) = super::identity::lineage(process, depth) else {
+            return Err(owner_refused());
+        };
+        if lineage.last() == Some(ancestor) {
+            return Ok(depth);
+        }
+        if lineage.iter().any(|parent| parent.pid == ancestor.pid) {
+            // Same PID with a different identity: the owner was replaced.
+            return Err(owner_refused());
+        }
+    }
+    Err(owner_refused())
 }
 
 #[cfg(target_os = "macos")]

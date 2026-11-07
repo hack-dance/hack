@@ -1,5 +1,6 @@
 use super::super::*;
 use super::fields::*;
+use super::ports::{port_number, ports};
 use serde_json::{Map, Value};
 use std::{collections::BTreeSet, fs, os::unix::fs::MetadataExt};
 
@@ -226,138 +227,6 @@ fn mounts(
         });
     }
     Ok(result)
-}
-fn port_number(value: &str) -> Result<u16, CandidateError> {
-    value.parse::<u16>().ok().filter(|p| *p>0).ok_or_else(|| problem("invalid_port", "Ports must be literal integers from 1 to 65535; ranges/interpolation are not supported."))
-}
-fn port_scalar(value: &Value) -> Result<u16, CandidateError> {
-    match value {
-        Value::String(s) => port_number(s),
-        Value::Number(n) => port_number(&n.to_string()),
-        _ => Err(problem("invalid_port", "Invalid port value.")),
-    }
-}
-/// Review every declared port entry. An entry outside the modeled subset becomes
-/// an `invalid_port` error diagnostic that points at `services.<name>.ports[<i>]`
-/// (messages never echo the authored value), so one unsupported port neither
-/// hides the rest of the review nor makes the plan enrollment compatible.
-fn ports(
-    value: Option<&Value>,
-    field: &str,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Result<Vec<PortPlan>, CandidateError> {
-    let Some(value) = value else {
-        return Ok(vec![]);
-    };
-    let Some(values) = value.as_array() else {
-        diagnostics.push(Diagnostic::error(
-            "invalid_port",
-            field,
-            "Ports must be a list.",
-        ));
-        return Ok(vec![]);
-    };
-    let mut result = Vec::new();
-    for (index, value) in values.iter().enumerate() {
-        match port(value, field, diagnostics) {
-            Ok(plan) => result.push(plan),
-            Err(error) if error.code == "invalid_port" => diagnostics.push(Diagnostic::error(
-                "invalid_port",
-                &format!("{field}[{index}]"),
-                &error.message,
-            )),
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(result)
-}
-fn port(
-    value: &Value,
-    field: &str,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Result<PortPlan, CandidateError> {
-    let (target, published, protocol, host) = if let Value::Object(m) = value {
-        keys(
-            m,
-            &["target", "published", "protocol", "host_ip"],
-            field,
-            diagnostics,
-        );
-        (
-            port_scalar(
-                m.get("target")
-                    .ok_or_else(|| problem("invalid_port", "Port target is required."))?,
-            )?,
-            m.get("published").map(port_scalar).transpose()?,
-            m.get("protocol")
-                .map(string)
-                .transpose()?
-                .unwrap_or("tcp")
-                .to_owned(),
-            m.get("host_ip")
-                .map(string)
-                .transpose()?
-                .unwrap_or("0.0.0.0")
-                .to_owned(),
-        )
-    } else {
-        let text = match value {
-            Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
-            _ => return Err(problem("invalid_port", "Invalid port form.")),
-        };
-        let (binding, protocol) = text.split_once('/').unwrap_or((&text, "tcp"));
-        let parts: Vec<_> = binding.split(':').collect();
-        match parts.as_slice() {
-            [target] => (
-                port_number(target)?,
-                None,
-                protocol.into(),
-                "0.0.0.0".into(),
-            ),
-            [published, target] => (
-                port_number(target)?,
-                Some(port_number(published)?),
-                protocol.into(),
-                "0.0.0.0".into(),
-            ),
-            [host, published, target] => (
-                port_number(target)?,
-                Some(port_number(published)?),
-                protocol.into(),
-                host.to_string(),
-            ),
-            _ => {
-                return Err(problem(
-                    "invalid_port",
-                    "Unsupported port syntax. Use a literal [host_ip:]published:target[/protocol] entry; interpolation, ranges and IPv6 bindings are not supported.",
-                ));
-            }
-        }
-    };
-    if !["tcp", "udp"].contains(&protocol.as_str()) {
-        return Err(problem(
-            "invalid_port",
-            "Only TCP and UDP ports are modeled.",
-        ));
-    }
-    if !["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
-        diagnostics.push(Diagnostic::error("unsupported_host_binding",field,"Only explicit IPv4 loopback or an explicit proposal to restrict an all-interface binding is supported."));
-    }
-    if host == "0.0.0.0" {
-        diagnostics.push(Diagnostic::warning("proposed_loopback_binding",field,"Enrollment proposes restricting the declared all-interface publication to 127.0.0.1. No port is bound by this checkpoint."));
-    }
-    Ok(PortPlan {
-        target,
-        published,
-        protocol,
-        declared_host_ip: if ["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
-            host
-        } else {
-            "[unsupported]".into()
-        },
-        proposed_host_ip: "127.0.0.1".into(),
-    })
 }
 fn dependencies(
     value: Option<&Value>,
@@ -835,6 +704,7 @@ pub(super) fn compile(
                 "working_dir",
                 "user",
                 "platform",
+                "x-hack-amd64-emulation",
                 "labels",
                 "logging",
                 "stop_grace_period",
@@ -842,6 +712,8 @@ pub(super) fn compile(
                 "privileged",
                 "stdin_open",
                 "tty",
+                "cap_add",
+                "cap_drop",
             ],
             &field,
             diagnostics,
@@ -853,6 +725,12 @@ pub(super) fn compile(
                 "Privileged containers cannot be enrolled.",
             ));
         }
+        let capabilities = super::super::capabilities::review(
+            m.get("cap_add"),
+            m.get("cap_drop"),
+            &field,
+            diagnostics,
+        )?;
         let image = image(m.get("image"), diagnostics, &format!("{field}.image"))?;
         let build = build(
             project,
@@ -1046,6 +924,29 @@ pub(super) fn compile(
                 "Only Linux arm64/amd64 image platform declarations are modeled.",
             ));
         }
+        let amd64_emulation = match m.get("x-hack-amd64-emulation") {
+            None => None,
+            Some(value) => Some(match value.as_str() {
+                Some("prefer-native") => Amd64Emulation::PreferNative,
+                Some("amd64") => Amd64Emulation::Amd64,
+                _ => {
+                    return Err(problem(
+                        "invalid_compose_field",
+                        "x-hack-amd64-emulation must be prefer-native or amd64.",
+                    ));
+                }
+            }),
+        };
+        if amd64_emulation.is_some()
+            && platform
+                .as_deref()
+                .is_some_and(|v| ["linux/arm64", "linux/arm64/v8"].contains(&v))
+        {
+            return Err(problem(
+                "unsupported_platform",
+                "x-hack-amd64-emulation cannot apply to a service that declares a Linux arm64 platform.",
+            ));
+        }
         let stdin_open = boolean(m.get("stdin_open"), false)?;
         let tty = boolean(m.get("tty"), false)?;
         if tty {
@@ -1151,8 +1052,20 @@ pub(super) fn compile(
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,
-            platform,labels,routing,dependency_cache,one_shot,inert_route_labels,interactive,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
+            platform,amd64_emulation,labels,routing,dependency_cache,one_shot,inert_route_labels,interactive,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,capabilities,
         });
+        // Appended after the service's own findings, so plans without this case
+        // keep their identity. Graph admission applies the same rule.
+        if result
+            .get(name.as_str())
+            .is_some_and(|service| service.active && service.restart_policy_not_applied())
+        {
+            diagnostics.push(Diagnostic::warning(
+                "restart_policy_not_applied",
+                &format!("{field}.restart"),
+                "Restart policies are not applied yet to services with published ports or routes (HACK-1935); the service starts without automatic restarts.",
+            ));
+        }
     }
     Ok(result)
 }

@@ -27,9 +27,17 @@ pub enum Health {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Observation {
     Created,
-    Running { health: Health },
-    Exited { code: i64 },
+    Running {
+        health: Health,
+    },
+    Exited {
+        code: i64,
+    },
     Dead,
+    /// The engine will start a new incarnation under an admitted restart policy.
+    /// It satisfies no readiness goal and is not a failure: an exhausted policy
+    /// is observed later as an ordinary exit.
+    Restarting,
 }
 impl Observation {
     fn satisfies(self, condition: Condition) -> bool {
@@ -94,7 +102,7 @@ pub trait Driver {
     fn start(&mut self, service: &str) -> Result<(), CandidateError>;
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError>;
 }
-fn error(code: &'static str, message: &str) -> CandidateError {
+fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 impl Graph {
@@ -260,7 +268,7 @@ fn inspect(
     if state.failed() {
         return Err(error(
             "graph_service_failed",
-            &match state {
+            match state {
                 Observation::Exited { code } => format!(
                     "Owned graph service {name} exited with code {code}; no further services will start."
                 ),
@@ -271,7 +279,8 @@ fn inspect(
                     "Owned graph service {name} is unhealthy; no further services will start."
                 ),
             },
-        ));
+        )
+        .with_service(name));
     }
     Ok(state)
 }

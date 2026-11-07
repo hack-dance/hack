@@ -3,7 +3,20 @@ use super::{CandidateError, refused, transport::Publication};
 use std::{
     os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
     sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
 };
+/// Marks EVFILT_PROC registrations for host dependency listeners. Publisher
+/// child watches keep a null tag, and their exit remains fatal to the owner.
+const LISTENER_EXIT: usize = 1;
+/// One foreground wake. `Ready` covers every readable descriptor (control
+/// listener and dependency notices); the caller re-reads them non-blockingly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::provider::graph) enum Wake {
+    Signal,
+    Ready,
+    ListenerExit,
+    Timeout,
+}
 static OWNED: AtomicBool = AtomicBool::new(false);
 static PENDING: AtomicBool = AtomicBool::new(false);
 extern "C" fn notified(_: libc::c_int) {
@@ -135,6 +148,79 @@ impl Events {
     pub fn pending(&self) -> bool {
         PENDING.load(Ordering::Acquire)
     }
+    /// Watch one admitted host dependency listener for exit, without adopting or
+    /// signalling it. The identity is rechecked after registration, so a PID that
+    /// already exited (or was reused) reports `false`: treat it as already stale.
+    pub fn watch_listener_exit(
+        &self,
+        identity: &crate::provider::identity::ProcessIdentity,
+    ) -> Result<bool, CandidateError> {
+        let change = libc::kevent {
+            ident: usize::try_from(identity.pid).map_err(|_| refused())?,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: LISTENER_EXIT as *mut libc::c_void,
+        };
+        // SAFETY: owned queue and initialized change remain valid for this call.
+        let result = unsafe {
+            libc::kevent(
+                self.queue.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if result < 0 {
+            return match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::ESRCH) => Ok(false),
+                _ => Err(refused()),
+            };
+        }
+        let current = crate::provider::identity::observe(identity.pid);
+        if current.as_ref().ok() != Some(identity) {
+            // The PID is gone or reused: stale either way. The one-shot watch
+            // can only fire for that PID, so a failed removal is harmless.
+            let _ = self.unwatch_listener_exit(identity.pid);
+            return Ok(false);
+        }
+        Ok(true)
+    }
+    /// Remove a listener watch that is no longer admitted. An already delivered
+    /// one-shot watch or an exited process is not an error.
+    pub fn unwatch_listener_exit(&self, pid: i32) -> Result<(), CandidateError> {
+        let change = libc::kevent {
+            ident: usize::try_from(pid).map_err(|_| refused())?,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_DELETE,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: owned queue and initialized change remain valid for this call.
+        let result = unsafe {
+            libc::kevent(
+                self.queue.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if result < 0
+            && !matches!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ENOENT | libc::ESRCH)
+            )
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
     /// The runtime retains this notification descriptor for this queue's lifetime.
     pub fn watch_read(&self, descriptor: BorrowedFd<'_>) -> Result<(), CandidateError> {
         let change = libc::kevent {
@@ -161,14 +247,30 @@ impl Events {
         }
         Ok(())
     }
+    /// Untimed wait: `true` for a termination signal. The compose foreground
+    /// loop uses [`Self::wait_until`] for its bounded refresh retries.
+    #[cfg(any(test, feature = "native-config-plan"))]
     pub fn wait(&self) -> Result<bool, CandidateError> {
+        Ok(self.wait_until(None)? == Wake::Signal)
+    }
+    /// Wait for one event, or until `deadline` (a bounded retry time; never an
+    /// idle poll). Publisher child exit remains an error; a watched dependency
+    /// listener's exit is reported as `ListenerExit`.
+    pub fn wait_until(&self, deadline: Option<Instant>) -> Result<Wake, CandidateError> {
         loop {
             if PENDING.load(Ordering::Acquire) {
-                return Ok(true);
+                return Ok(Wake::Signal);
             }
+            let timeout = deadline.map(|deadline| {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                libc::timespec {
+                    tv_sec: remaining.as_secs() as libc::time_t,
+                    tv_nsec: remaining.subsec_nanos() as libc::c_long,
+                }
+            });
             // SAFETY: kevent is plain C output storage filled by the kernel.
             let mut event: libc::kevent = unsafe { std::mem::zeroed() };
-            // SAFETY: queue and writable single event remain live, no changelist.
+            // SAFETY: queue, writable single event and optional timeout remain live.
             let count = unsafe {
                 libc::kevent(
                     self.queue.as_raw_fd(),
@@ -176,11 +278,13 @@ impl Events {
                     0,
                     &mut event,
                     1,
-                    std::ptr::null(),
+                    timeout
+                        .as_ref()
+                        .map_or(std::ptr::null(), |timeout| timeout as *const libc::timespec),
                 )
             };
             if PENDING.load(Ordering::Acquire) {
-                return Ok(true);
+                return Ok(Wake::Signal);
             }
             if count < 0 {
                 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
@@ -188,13 +292,23 @@ impl Events {
                 }
                 return Err(refused());
             }
+            if count == 0 && deadline.is_some() {
+                return Ok(Wake::Timeout);
+            }
             if count != 1 || event.flags & libc::EV_ERROR != 0 {
                 return Err(refused());
             }
             if event.filter == libc::EVFILT_PROC {
+                if event.udata as usize == LISTENER_EXIT {
+                    return Ok(Wake::ListenerExit);
+                }
                 return Err(refused());
             }
-            return Ok(event.filter == libc::EVFILT_SIGNAL);
+            return Ok(if event.filter == libc::EVFILT_SIGNAL {
+                Wake::Signal
+            } else {
+                Wake::Ready
+            });
         }
     }
 }

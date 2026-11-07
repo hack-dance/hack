@@ -1,6 +1,6 @@
 //! A public generation fence, not a credential or authentication boundary.
 use crate::CandidateError;
-use std::{ffi::OsString, os::unix::process::CommandExt, path::Path, process::Command};
+use std::{ffi::OsString, os::unix::process::CommandExt, process::Command};
 
 fn refused() -> CandidateError {
     CandidateError::new("relay_guest_barrier", "Guest startup release refused.")
@@ -18,7 +18,14 @@ pub(super) fn valid(args: &[OsString]) -> bool {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         })
         && args[2] == "--"
-        && Path::new(&args[3]).is_absolute()
+        && executable(&args[3])
+}
+/// Docker accepts an absolute path, a path relative to the working directory,
+/// or a bare name it resolves through the container's PATH. `Command` performs
+/// that same lookup with this process's (the container's) PATH; no shell runs.
+fn executable(name: &OsString) -> bool {
+    let bytes = name.as_encoded_bytes();
+    !bytes.is_empty() && bytes != b"/" && !bytes.contains(&0)
 }
 pub(super) fn run(args: &[OsString]) -> Result<(), CandidateError> {
     if !valid(args) {

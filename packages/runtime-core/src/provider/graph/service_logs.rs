@@ -1,5 +1,6 @@
 //! Explicit bounded application log reads. Output is returned to the caller, never journaled.
 use super::{Engine, Kind, Resource, error, hex, inspect_resource, load, service_exec_generation};
+use crate::provider::engine::LogLine;
 use crate::{Candidate, CandidateError};
 use serde::Serialize;
 
@@ -15,8 +16,11 @@ pub struct ServiceLogOptions<'a> {
 #[derive(Debug, Serialize)]
 pub struct ServiceLogResult {
     pub container: String,
+    /// The retained lines of each stream, kept for callers that read them apart.
     pub stdout: String,
     pub stderr: String,
+    /// The same retained lines in engine order (interleaved by time); whole lines only.
+    pub lines: Vec<LogLine>,
     pub truncated: bool,
 }
 
@@ -129,7 +133,8 @@ fn selected(resource: &Resource, options: &ServiceLogOptions<'_>) -> Result<(), 
 /// Read an explicitly selected service, including exited services, under the VM lease.
 /// Immutable identity and ownership are checked before and after reading. Application
 /// logs may contain sensitive values; callers must not persist them as diagnostic receipts.
-/// Text is UTF-8-lossy and capped at 16 KiB of JSON text per stream; truncation is explicit.
+/// Text is UTF-8-lossy whole lines, newest kept within the engine's bounded tail
+/// budget; truncation is explicit.
 pub fn service_logs(
     candidate: &Candidate,
     options: &ServiceLogOptions<'_>,
@@ -151,15 +156,17 @@ pub fn service_logs(
     if inspect_resource(&engine, &receipt, resource)?.is_none() {
         return Err(refused());
     }
-    let (stdout, stderr, truncated) = engine.logs_tail(options.expected_container, options.tail)?;
+    let tail = engine.logs_tail_lines(options.expected_container, options.tail)?;
     if inspect_resource(&engine, &receipt, resource)?.is_none() {
         return Err(refused());
     }
+    let (stdout, stderr) = tail.split();
     Ok(ServiceLogResult {
         container: options.expected_container.to_owned(),
         stdout,
         stderr,
-        truncated,
+        lines: tail.lines,
+        truncated: tail.truncated,
     })
 }
 

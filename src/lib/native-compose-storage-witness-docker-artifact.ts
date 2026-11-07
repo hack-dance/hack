@@ -3,23 +3,28 @@ import { isRecord } from "./guards.ts";
 import { NATIVE_STORAGE_WITNESS_HELPER } from "./native-compose-storage-witness-helper-bundle.ts";
 import {
   captureNativeComposeStorageXattrArtifact,
+  NATIVE_STORAGE_HELPER_BUN_VERSION,
   type NativeComposeStorageXattrArtifact,
   nativeComposeStorageXattrArtifactValid,
 } from "./native-compose-storage-witness-xattr-carrier.ts";
 import { refuseNativeComposeStorageXattr as refuse } from "./native-compose-storage-witness-xattr-codec.ts";
 
 /** Explicit cached dependency; the owner never pulls or builds this image. Other
- * platforms require their own artifact/ABI/volume qualification before admission. */
+ * platforms require their own artifact/ABI/volume qualification before admission.
+ * Pins for `oven/bun:1.4.4-slim` were derived from registry bytes: the OCI index,
+ * each platform manifest and config, and every layer blob verified against its
+ * digest, then `/usr/local/bin/bun` and the architecture's `libc.so.6` hashed from
+ * the extracted layers. A tag alone is not a pin. */
 export const NATIVE_STORAGE_DOCKER_ARTIFACT: NativeComposeStorageXattrArtifact =
   Object.freeze({
     version: 1,
     imageId:
-      "sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61",
+      "sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4",
     platform: "linux/arm64",
-    bunVersion: "1.4.2",
-    bunHash: "616f267a34278ff5ac282df37ffdfba1d7141f4f6926bca99af2cd6ef3ad32b1",
+    bunVersion: NATIVE_STORAGE_HELPER_BUN_VERSION,
+    bunHash: "354c2b049c716aca07b2e5cddb887928ac58950675d1258bb6312083917793b6",
     libcHash:
-      "9a325944115b36e74077786b29531963d96cd55cd6c82f11750a352cdb58fab0",
+      "70fa4c4cf57eabeb96097cce47582d02379c4cd1de3db3e98ade4dd7089a1b13",
     helperHash:
       "9d9c322ee35f43e047a41fd4901926789673a072c1e0bbf9030a106e7050ba5f",
     kernelAbi: 1,
@@ -53,29 +58,29 @@ export const NATIVE_STORAGE_DOCKER_DEPENDENCIES: Dependencies = Object.freeze({
     artifact: NATIVE_STORAGE_DOCKER_ARTIFACT,
     imageIds: Object.freeze([
       NATIVE_STORAGE_DOCKER_ARTIFACT.imageId,
-      "sha256:5c51cee225076d3c7db2150683141476298062489de4660f2d1729e522641f91",
-      "sha256:1cb8f81099813a0ec61f99b69348f6594e188cf1689c20a0a53a5ddd23b37708",
+      "sha256:b0d169a695f779087d0fe8c08b5b17f0d3a927dceac2a087c87a1351340c6565",
+      "sha256:f545ab0408208347c62fad5822a4621a4b7fc3a7da43a1dea66dc17335535b7e",
     ]),
   }),
   "linux/amd64": Object.freeze({
     artifact: Object.freeze({
       version: 1,
       imageId:
-        "sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61",
+        "sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4",
       platform: "linux/amd64",
-      bunVersion: "1.4.2",
+      bunVersion: NATIVE_STORAGE_HELPER_BUN_VERSION,
       bunHash:
-        "a83d263767d839e4d2649ca8e35d07159c7afc99afdc96d731ced29e056dda0c",
+        "10702245766b225e70bbf6235fd6b47214fd94b4760d00ffaed8ab0df57ac235",
       libcHash:
-        "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826",
+        "9792e3cbb541c8f44c7acf5f14f4022ea62998ecc787d326bed4d8b6547dfd92",
       helperHash:
         "9d9c322ee35f43e047a41fd4901926789673a072c1e0bbf9030a106e7050ba5f",
       kernelAbi: 1,
     }),
     imageIds: Object.freeze([
-      "sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61",
-      "sha256:debbe76858f2e398d2937c1eceeb82c571ac1fcd78aadf00e9634578ac2b5ef7",
-      "sha256:808ae5d87c721a0c738c37d17ae4837367baa0c9c4353f5ea1762802b0fb6392",
+      "sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4",
+      "sha256:13b43f8bb2c63f5d89c56205c4279b85620363296a00ada33ff7ad568f3688e7",
+      "sha256:bca1fb36a1a809a0aec806c0a239364f4873ead989e7f069e0a47f17e0a83cfa",
     ]),
   }),
 });
@@ -109,6 +114,7 @@ export function selectNativeComposeStorageDockerDependency(opts: {
       Array.isArray(dependency.imageIds)
     ) ||
     dependency.artifact.platform !== platform ||
+    dependency.artifact.bunVersion !== NATIVE_STORAGE_HELPER_BUN_VERSION ||
     dependency.artifact.helperHash !==
       NATIVE_STORAGE_DOCKER_ARTIFACT.helperHash ||
     dependency.imageIds.length !== 3 ||

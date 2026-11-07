@@ -42,6 +42,42 @@ impl NormalizedInputIdentity {
     }
 }
 
+/// Whether a stopped or active graph reads nothing from the project tree: no
+/// source binding, dependency cache or cache provenance was recorded for it.
+pub(super) fn source_free_receipt(receipt: &Receipt) -> bool {
+    receipt.source.is_none()
+        && receipt.initializer_cache_release.is_empty()
+        && receipt
+            .resources
+            .values()
+            .all(|resource| resource.cache.is_none() && resource.cache_provenance.is_none())
+}
+
+/// Whether `plan` reviews exactly the retained graph's Compose input for a graph
+/// that reads nothing from the project tree.
+///
+/// A plan ID also binds the project source inventory, which records the size and
+/// modification time of every selected project file. Rewriting the Compose file
+/// with its original bytes, or touching any project file, therefore changes the
+/// plan ID although the reviewed Compose input is identical. Only graphs that
+/// mount project source or use a dependency cache consume that inventory; they
+/// keep their shared-source proofs. For every other graph the identical original
+/// and normalized Compose bytes are the whole reviewed input. Restore then keeps
+/// the retained ownership plan and still requires identical resource bindings,
+/// images and readiness, so no compute, data or ownership changes.
+pub(super) fn source_independent_review(receipt: &Receipt, plan: &project::PlanData) -> bool {
+    receipt
+        .normalized_input
+        .as_ref()
+        .is_some_and(|input| input.valid(&receipt.namespace) && input.matches_plan(plan))
+        && source_free_receipt(receipt)
+        && plan.services.values().all(|service| {
+            !service.active
+                || (service.dependency_cache.is_none()
+                    && service.mounts.iter().all(|mount| mount.kind == "volume"))
+        })
+}
+
 pub(super) fn replay_refused() -> CandidateError {
     error(
         "graph_normalized_replay",
@@ -265,6 +301,114 @@ mod tests {
         );
     }
 
+    /// Rewriting the Compose file with its original bytes, or touching any project
+    /// file, changes only the source inventory. A graph without project source or
+    /// caches restores from that review; anything that reads source, or any change
+    /// of the reviewed Compose input itself, keeps the strict proofs.
+    #[test]
+    fn source_metadata_change_keeps_a_sourceless_review_restorable() {
+        let fixture = super::super::tests::Fixture::new();
+        let project = fixture.0.join("project");
+        fs::create_dir_all(project.join("app")).unwrap();
+        fs::write(project.join("app/hello.txt"), b"hello\n").unwrap();
+        let candidate = Candidate::discover(&fixture.0).unwrap();
+        let namespace = candidate.plan(&project).unwrap().namespace;
+        let review = |bytes: &[u8]| {
+            let original = format!("{:x}", Sha256::digest(bytes));
+            let report = project::plan_normalized(
+                &candidate,
+                project::NormalizedComposeOptions {
+                    branch: None,
+                    project: &project,
+                    compose_file: Path::new("compose.yaml"),
+                    profiles: &[],
+                    expected_namespace: &namespace,
+                    expected_compose_sha256: &original,
+                    compose_bytes: bytes,
+                },
+            )
+            .unwrap();
+            let identity = NormalizedInputIdentity {
+                namespace: namespace.clone(),
+                original_compose_sha256: original.clone(),
+                normalized_compose_sha256: original,
+            };
+            (report, identity)
+        };
+        let rewrite = |bytes: &[u8]| {
+            // Some filesystems keep coarse timestamps; make the rewrite observable.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            fs::write(project.join("compose.yaml"), bytes).unwrap();
+        };
+        let receipt_for = |plan_id: &str, identity: &NormalizedInputIdentity| -> Receipt {
+            serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":namespace,"plan_id":plan_id,"phase":"stopped-data-retained","readiness":{},"resources":{},"normalized_input":identity})).unwrap()
+        };
+        let image = b"services: {app: {image: 'sha256:1111111111111111111111111111111111111111111111111111111111111111', volumes: ['data:/data']}}\nvolumes: {data: {}}\n";
+        rewrite(image);
+        let (before, identity) = review(image);
+        let receipt = receipt_for(&before.plan_id, &identity);
+        assert!(super::super::unchanged_normalized_review(
+            &receipt,
+            &before.plan_id,
+            &identity
+        ));
+        // Edit, refuse, put back: same bytes, new modification time.
+        rewrite(b"services: {app: {image: alpine}}\n");
+        rewrite(image);
+        let (restored, restored_identity) = review(image);
+        assert_eq!(restored_identity, identity);
+        assert_ne!(restored.plan_id, before.plan_id);
+        assert!(!super::super::unchanged_normalized_review(
+            &receipt,
+            &restored.plan_id,
+            &identity
+        ));
+        assert!(source_independent_review(&receipt, &restored.plan));
+        // Touching an unrelated project file is the same kind of change.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(project.join("app/hello.txt"), b"hello\n").unwrap();
+        let (touched, _) = review(image);
+        assert_ne!(touched.plan_id, restored.plan_id);
+        assert!(source_independent_review(&receipt, &touched.plan));
+
+        // A changed Compose input is not this path (Compose edits are reconciled elsewhere).
+        let edited = b"services: {app: {image: 'sha256:1111111111111111111111111111111111111111111111111111111111111111', environment: {REVISION: '2'}, volumes: ['data:/data']}}\nvolumes: {data: {}}\n";
+        rewrite(edited);
+        let (changed, _) = review(edited);
+        assert!(!source_independent_review(&receipt, &changed.plan));
+        rewrite(image);
+
+        // A graph that recorded source, a cache or cache provenance keeps its proofs.
+        let mut sourced = receipt.clone();
+        sourced.source = Some(
+            serde_json::from_value(json!({"revision":"e".repeat(64),"archive_sha256":"f".repeat(64),"selection_sha256":"0".repeat(64)}))
+                .unwrap(),
+        );
+        assert!(!source_free_receipt(&sourced));
+        let (current, _) = review(image);
+        assert!(!source_independent_review(&sourced, &current.plan));
+        // A foreign namespace or missing provenance never qualifies.
+        let mut foreign = receipt.clone();
+        foreign.namespace = "f".repeat(64);
+        assert!(!source_independent_review(&foreign, &current.plan));
+        let mut legacy = receipt.clone();
+        legacy.normalized_input = None;
+        assert!(!source_independent_review(&legacy, &current.plan));
+
+        // A bind mount reads project source: the inventory is part of what it runs.
+        let bind = b"services: {app: {image: 'sha256:1111111111111111111111111111111111111111111111111111111111111111', volumes: ['./app:/app:ro']}}\n";
+        rewrite(bind);
+        let (mounted, mounted_identity) = review(bind);
+        let mounted_receipt = receipt_for(&mounted.plan_id, &mounted_identity);
+        rewrite(bind);
+        let (remounted, _) = review(bind);
+        assert_ne!(remounted.plan_id, mounted.plan_id);
+        assert!(!source_independent_review(
+            &mounted_receipt,
+            &remounted.plan
+        ));
+    }
+
     #[test]
     fn normalized_receipt_cannot_be_replayed_as_original() {
         let mut receipt: Receipt = serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready","readiness":{},"resources":{}})).unwrap();
@@ -331,6 +475,7 @@ mod tests {
                     shared_source: false,
                     release_initializer_cache: BTreeSet::new(),
                     routing_enrolled: false,
+                    loopback_ports: false,
                     project: PlanOptions {
                         branch: None,
                         project: &project,

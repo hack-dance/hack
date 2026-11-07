@@ -13,7 +13,7 @@ to use the [Compose command owner](native-compose-commands.md).
 
 This bounded native consumer requires each service's `image` to be an immutable
 `sha256:` image **content ID**, such as the `image_id` returned by a successful
-[`runtime ensure-image`](../guides/native-candidate.md#public-image-acquisition-without-docker)
+[`runtime ensure-image`](../guides/native-candidate.md#registry-image-acquisition-without-docker)
 acquisition. Keep that acquisition's pinned-reference and archive evidence. A
 registry tag or `repository@sha256:manifest-digest` is not the content ID. The
 native planner (`graph native plan` and `frontend-plan`) refuses it with the same

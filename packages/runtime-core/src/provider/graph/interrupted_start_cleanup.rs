@@ -275,7 +275,10 @@ fn failed_start(
         let state = &value["State"];
         let prepared = shutdown::prepare(resource, &value)?;
         let restart_count = value["RestartCount"].as_u64().ok_or_else(refused)?;
-        if restart_count != 0 {
+        // Only a receipt-admitted engine policy can explain a restarted
+        // incarnation; any other restart is a foreign effect.
+        let restarted = restart_count != 0;
+        if restarted && !restart_policy::admits_restarting(resource) {
             return Err(refused());
         }
         if state["Status"] == "created"
@@ -292,9 +295,10 @@ fn failed_start(
             failed = Some((key.clone(), resource.id.clone().ok_or_else(refused)?));
         } else if prepared.running {
             if resource.phase != "started"
-                || !state["FinishedAt"]
-                    .as_str()
-                    .is_some_and(|s| s.starts_with("0001-"))
+                || (!restarted
+                    && !state["FinishedAt"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with("0001-")))
             {
                 return Err(refused());
             }

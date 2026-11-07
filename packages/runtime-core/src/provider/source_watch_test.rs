@@ -24,7 +24,7 @@ printf '%s\n' "$value" > /output/value.next
 printf '%s\n' "$1" >> /output/events
 "#;
 
-fn fail(message: &str) -> CandidateError {
+fn fail(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("watch_observer", message)
 }
 

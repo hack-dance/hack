@@ -469,6 +469,28 @@ fn retained_publisher_exit_wakes_owner_and_retired_watch_does_not() {
     let mut notice = [0];
     std::io::Read::read_exact(&mut receiver, &mut notice).unwrap();
     assert_eq!(notice, [b'D']);
+    // A watched dependency listener's exit wakes the owner as a stale notice,
+    // not as a publisher failure, and a bounded retry deadline times out.
+    let mut listener = spawn();
+    let identity = crate::provider::identity::observe(listener.id() as i32).unwrap();
+    assert!(events.watch_listener_exit(&identity).unwrap());
+    assert_eq!(
+        events
+            .wait_until(Some(Instant::now() + Duration::from_millis(20)))
+            .unwrap(),
+        signals::Wake::Timeout
+    );
+    listener.kill().unwrap();
+    assert_eq!(
+        events
+            .wait_until(Some(Instant::now() + Duration::from_secs(10)))
+            .unwrap(),
+        signals::Wake::ListenerExit
+    );
+    listener.wait().unwrap();
+    // An exited or reused identity is already stale and leaves no watch.
+    assert!(!events.watch_listener_exit(&identity).unwrap());
+    events.unwatch_listener_exit(identity.pid).unwrap();
     let _client = Pin::load(&candidate, &run).unwrap().connect().unwrap();
     assert!(!events.wait().unwrap());
     drop(events);
@@ -532,4 +554,71 @@ fn dead_owner_selection_holds_lock_and_rejects_live_or_changed_records() {
     assert!(guard.verify().is_err());
     drop(guard);
     fs::remove_dir_all(path).unwrap();
+}
+#[test]
+fn stopped_only_removal_never_requests_an_owner_restored_after_inspection() {
+    let (_fixture, candidate, run) = fixture();
+    let path = root(&candidate, &run);
+    // The confirmed stopped run's owner retired; a restore then published a live owner.
+    let mut first = Publication::bind(&candidate, &run).unwrap();
+    first.finish().unwrap();
+    drop(first);
+    let mut restored = Publication::bind_retired(&candidate, &run).unwrap();
+    assert_eq!(
+        remove_retained_data(&candidate, &run).unwrap_err().code,
+        "graph_cleanup_not_retained"
+    );
+    // No request reached the restored owner, so it stopped nothing and deleted nothing.
+    assert!(restored.accept().unwrap().is_none());
+    // Control: the general cleanup request does fall back to that live owner.
+    std::thread::scope(|scope| {
+        let sender = scope.spawn(|| cleanup_request(&candidate, &run, true));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut server = loop {
+            if let Some(server) = restored.accept().unwrap() {
+                break server;
+            }
+            assert!(Instant::now() < deadline, "cleanup request never arrived");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let request: WireRequest =
+            transport::read(&mut server, Duration::from_secs(5), 64 * 1024).unwrap();
+        assert_eq!(request.remove_data, Some(true));
+        drop(server);
+        assert!(sender.join().unwrap().is_err());
+    });
+    restored.finish().unwrap();
+    drop(restored);
+    fs::remove_dir_all(path).unwrap();
+}
+#[test]
+fn inspect_names_only_an_absent_unpublished_attempt_as_unreserved() {
+    // HACK-1915: a foreground start refused before admission reserved nothing and
+    // must be distinguishable from retained or damaged graph state.
+    let (_fixture, candidate, run) = fixture();
+    let code = |candidate: &Candidate| match super::super::inspect(candidate, &run) {
+        Ok(_) => "inspected",
+        Err(error) => error.code,
+    };
+    assert_eq!(code(&candidate), "graph_unreserved");
+
+    // A published foreground owner is evidence, never "unreserved".
+    let mut publication = Publication::bind(&candidate, &run).unwrap();
+    assert_ne!(code(&candidate), "graph_unreserved");
+    publication.finish().unwrap();
+    drop(publication);
+    assert_eq!(code(&candidate), "graph_unreserved");
+
+    // Any journal (active, archived or consumed) keeps ordinary receipt validation.
+    for path in [
+        super::super::directory(&candidate, &run).unwrap(),
+        super::super::archive::path(&candidate, &run).unwrap(),
+        super::super::retention::consumed(&candidate, &run).unwrap(),
+    ] {
+        crate::provider::state::private_directory(&path).unwrap();
+        assert_ne!(code(&candidate), "graph_unreserved", "{}", path.display());
+        fs::remove_dir(&path).unwrap();
+    }
+    assert_eq!(code(&candidate), "graph_unreserved");
+    fs::remove_dir_all(root(&candidate, &run)).unwrap();
 }

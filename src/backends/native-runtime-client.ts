@@ -1,7 +1,21 @@
 import { isAbsolute } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import {
+  type NativeProcessRefusal,
+  readNativeProcessRefusals,
+} from "../lib/native-process-wrappers.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
+import {
+  type NativePlanChange,
+  nativePlanChangeGuidance,
+  readNativePlanChange,
+} from "./native-plan-change.ts";
+import {
+  NATIVE_STARTUP_FAILURE_REPLY_BYTES,
+  type NativeStartupLogTail,
+  readNativeStartupLogs,
+} from "./native-startup-logs.ts";
 import {
   type NativeStopFailure,
   nativeStopFailureSummary,
@@ -16,7 +30,64 @@ const NATIVE_HASH = /^[a-f0-9]{64}$/;
 interface NativeFailure {
   readonly code: string;
   readonly causeCode?: string;
+  /** Runtime message the runtime marked as a compile-time literal (value-free). */
+  readonly message?: string;
+  /** Admitted service the runtime named, as a plain service identifier. */
+  readonly service?: string;
   readonly stopFailures?: readonly NativeStopFailure[];
+  readonly startupLogs?: readonly NativeStartupLogTail[];
+  /** Services and closed fields a process wrapper refused; value-free. */
+  readonly processRefusals?: readonly NativeProcessRefusal[];
+  readonly planChange?: NativePlanChange;
+}
+
+const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
+
+/**
+ * Keep a runtime message only when the runtime marked it fixed (a literal that
+ * cannot carry runtime values) and it is one bounded printable line.
+ */
+function fixedNativeMessage(
+  value: Record<string, unknown>
+): string | undefined {
+  return value.message_fixed === true &&
+    typeof value.message === "string" &&
+    FIXED_MESSAGE.test(value.message)
+    ? value.message
+    : undefined;
+}
+
+/** The fixed message and validated service a runtime failure carries, if any. */
+function nativeFailureDetail(value: Record<string, unknown>): {
+  message?: string;
+  service?: string;
+} {
+  const message = fixedNativeMessage(value);
+  const service =
+    typeof value.service === "string" && NATIVE_SERVICE.test(value.service)
+      ? value.service
+      : undefined;
+  return {
+    ...(message ? { message } : {}),
+    ...(service ? { service } : {}),
+  };
+}
+
+/**
+ * Value-free runtime detail appended after a closed native failure sentence:
+ * the fixed runtime message and the service it concerns, when known.
+ */
+export function nativeFailureNote(detail: {
+  readonly message?: string;
+  readonly service?: string;
+}): string {
+  if (detail.service && detail.message) {
+    return ` Service ${detail.service}: ${detail.message}`;
+  }
+  if (detail.message) {
+    return ` Runtime: ${detail.message}`;
+  }
+  return detail.service ? ` Service: ${detail.service}.` : "";
 }
 
 /**
@@ -26,17 +97,24 @@ interface NativeFailure {
 export class NativeRuntimeRequestError extends ClosedCliError {
   readonly nativeCode: string | undefined;
   readonly nativeCauseCode: string | undefined;
+  /** Fixed (value-free) runtime message; see {@link nativeFailureNote}. */
+  readonly nativeMessage: string | undefined;
+  readonly nativeService: string | undefined;
   readonly nativeStopFailures: readonly NativeStopFailure[] | undefined;
 
   constructor(opts: {
     readonly message: string;
     readonly nativeCode?: string;
     readonly nativeCauseCode?: string;
+    readonly nativeMessage?: string;
+    readonly nativeService?: string;
     readonly nativeStopFailures?: readonly NativeStopFailure[];
   }) {
     super(opts.message);
     this.nativeCode = opts.nativeCode;
     this.nativeCauseCode = opts.nativeCauseCode;
+    this.nativeMessage = opts.nativeMessage;
+    this.nativeService = opts.nativeService;
     this.nativeStopFailures = opts.nativeStopFailures;
   }
 }
@@ -475,7 +553,10 @@ function nativeFailureMessage(failure: NativeFailure | undefined): string {
   const code = failure
     ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})`
     : "";
-  return `Native runtime request failed${code}; inspect owned state before retrying.${nativeStopFailureSummary(failure?.stopFailures)}`;
+  const guidance = failure
+    ? nativePlanChangeGuidance(failure.code, failure.planChange)
+    : undefined;
+  return `Native runtime request failed${code}; ${guidance ?? "inspect owned state before retrying."}${failure ? nativeFailureNote(failure) : ""}${nativeStopFailureSummary(failure?.stopFailures)}`;
 }
 
 function completionResponse(
@@ -495,6 +576,8 @@ function completionResponse(
         : nativeFailureMessage(failure),
       nativeCode: timedOut ? undefined : failure?.code,
       nativeCauseCode: timedOut ? undefined : failure?.causeCode,
+      nativeMessage: timedOut ? undefined : failure?.message,
+      nativeService: timedOut ? undefined : failure?.service,
       nativeStopFailures: timedOut ? undefined : failure?.stopFailures,
     });
   }
@@ -604,10 +687,57 @@ function nativeFailureCause(input: {
     : undefined;
 }
 
+/** Validate a parsed stderr reply; bounded startup logs only when the caller accepts them. */
+function nativeFailureFromReply(
+  value: unknown,
+  startupLogs: boolean
+): NativeFailure | undefined {
+  if (
+    !(
+      isRecord(value) &&
+      typeof value.code === "string" &&
+      ERROR_CODE.test(value.code)
+    )
+  ) {
+    return;
+  }
+  const causeCode = nativeFailureCause({
+    code: value.code,
+    cause: value.cause_code,
+  });
+  const planChange = readNativePlanChange(value.plan_change);
+  return {
+    code: value.code,
+    ...(causeCode ? { causeCode } : {}),
+    ...nativeFailureDetail(value),
+    ...(planChange ? { planChange } : {}),
+    ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
+      value.code === "graph_owner_recovery" &&
+        typeof value.cause_code === "string"
+        ? value.cause_code
+        : value.code
+    )
+      ? { stopFailures: readNativeStopFailures(value.stop_failures) }
+      : {}),
+    ...(startupLogs && value.startup_logs !== undefined
+      ? { startupLogs: readNativeStartupLogs(value.startup_logs) }
+      : {}),
+    ...processRefusalsOf(value.process_refusals),
+  };
+}
+function processRefusalsOf(value: unknown): {
+  readonly processRefusals?: readonly NativeProcessRefusal[];
+} {
+  const processRefusals =
+    value === undefined ? undefined : readNativeProcessRefusals(value);
+  return processRefusals ? { processRefusals } : {};
+}
+
 /** Only bounded native error codes leave this boundary, never stderr messages. */
 async function readNativeFailure(
   stream: ReadableStream<Uint8Array>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  limit = 8192
 ): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
   const cancel = () => {
@@ -627,36 +757,17 @@ async function readNativeFailure(
         break;
       }
       bytes += result.value.byteLength;
-      if (bytes <= 8192) {
+      if (bytes <= limit) {
         text += decoder.decode(result.value, { stream: true });
       }
     }
-    if (bytes > 8192) {
+    if (bytes > limit) {
       return;
     }
-    const value: unknown = JSON.parse(text + decoder.decode());
-    if (
-      isRecord(value) &&
-      typeof value.code === "string" &&
-      ERROR_CODE.test(value.code)
-    ) {
-      const causeCode = nativeFailureCause({
-        code: value.code,
-        cause: value.cause_code,
-      });
-      return {
-        code: value.code,
-        ...(causeCode ? { causeCode } : {}),
-        ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
-          value.code === "graph_owner_recovery" &&
-            typeof value.cause_code === "string"
-            ? value.cause_code
-            : value.code
-        )
-          ? { stopFailures: readNativeStopFailures(value.stop_failures) }
-          : {}),
-      };
-    }
+    return nativeFailureFromReply(
+      JSON.parse(text + decoder.decode()),
+      limit > 8192
+    );
   } catch {
     return;
   } finally {
@@ -672,17 +783,68 @@ export async function readNativeFailureCode(
   return (await readNativeFailure(stream, signal))?.code;
 }
 
-/** Like {@link readNativeFailureCode}, plus the bounded cause code it allows. */
+/**
+ * Like {@link readNativeFailureCode}, plus the bounded cause code it allows and
+ * the value-free detail of {@link nativeFailureNote}.
+ */
 export async function readNativeFailureCodes(
   stream: ReadableStream<Uint8Array>,
   signal?: AbortSignal
-): Promise<{ readonly code: string; readonly causeCode?: string } | undefined> {
+): Promise<
+  | {
+      readonly code: string;
+      readonly causeCode?: string;
+      readonly message?: string;
+      readonly service?: string;
+    }
+  | undefined
+> {
   const failure = await readNativeFailure(stream, signal);
   return failure === undefined
     ? undefined
     : {
         code: failure.code,
         ...(failure.causeCode ? { causeCode: failure.causeCode } : {}),
+        ...(failure.message ? { message: failure.message } : {}),
+        ...(failure.service ? { service: failure.service } : {}),
+      };
+}
+
+/**
+ * Like {@link readNativeFailureCodes} for a foreground startup reply, which may
+ * also carry failed services' bounded output. That output can contain managed
+ * values: the caller must redact it before display and never persist it.
+ */
+export async function readNativeStartupFailure(
+  stream: ReadableStream<Uint8Array>,
+  signal?: AbortSignal
+): Promise<
+  | {
+      readonly code: string;
+      readonly causeCode?: string;
+      readonly message?: string;
+      readonly service?: string;
+      readonly startupLogs?: readonly NativeStartupLogTail[];
+      readonly processRefusals?: readonly NativeProcessRefusal[];
+    }
+  | undefined
+> {
+  const failure = await readNativeFailure(
+    stream,
+    signal,
+    NATIVE_STARTUP_FAILURE_REPLY_BYTES
+  );
+  return failure === undefined
+    ? undefined
+    : {
+        code: failure.code,
+        ...(failure.causeCode ? { causeCode: failure.causeCode } : {}),
+        ...(failure.message ? { message: failure.message } : {}),
+        ...(failure.service ? { service: failure.service } : {}),
+        ...(failure.startupLogs ? { startupLogs: failure.startupLogs } : {}),
+        ...(failure.processRefusals
+          ? { processRefusals: failure.processRefusals }
+          : {}),
       };
 }
 

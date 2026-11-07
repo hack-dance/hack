@@ -82,12 +82,71 @@ fn selected(manifest: &ContentRevision, path: &str) -> Result<Option<Value>, Can
         _ => Err(refused()),
     }
 }
+/// Logical cache volumes that a service other than their initializers mounts
+/// read-write. Such a consumer can change the shared contents with inputs the
+/// identity does not hash (its image, command, environment or source), so the
+/// cache is scoped to this checkout and branch instance (the plan namespace)
+/// rather than shared across linked worktrees. Read-only consumers keep sharing.
+pub fn instance_scoped_volumes(plan: &PlanData) -> std::collections::BTreeSet<String> {
+    let active = || plan.services.iter().filter(|(_, s)| s.active);
+    active()
+        .filter_map(|(_, s)| s.dependency_cache.as_ref().map(|d| d.volume.clone()))
+        .filter(|volume| {
+            active().any(|(_, s)| {
+                s.dependency_cache
+                    .as_ref()
+                    .is_none_or(|d| &d.volume != volume)
+                    && s.mounts
+                        .iter()
+                        .any(|m| m.kind == "volume" && &m.source == volume && !m.read_only)
+            })
+        })
+        .collect()
+}
+
+/// Cache identities for one review: `current` names the volumes a fresh
+/// admission selects; `legacy` recomputes the earlier whole-document identity for
+/// the same inputs, so a retained receipt recorded under it can still be matched
+/// exactly. Neither map grants volume creation, adoption or deletion authority.
+pub struct Resolved {
+    pub current: BTreeMap<String, CacheBinding>,
+    pub legacy: BTreeMap<String, CacheBinding>,
+}
+
+#[cfg(test)]
 pub fn resolve(
     plan: &PlanData,
     manifest: &ContentRevision,
     scope: &str,
     executable: &BTreeMap<String, crate::project::inputs::ServiceInputs>,
 ) -> Result<BTreeMap<String, CacheBinding>, CandidateError> {
+    Ok(resolve_with_legacy(plan, manifest, scope, executable)?.current)
+}
+
+fn insert_binding(
+    result: &mut BTreeMap<String, CacheBinding>,
+    volume: &str,
+    binding: CacheBinding,
+) -> Result<(), CandidateError> {
+    if result
+        .get(volume)
+        .is_some_and(|existing| existing != &binding)
+    {
+        return Err(refused());
+    }
+    result.insert(volume.to_owned(), binding);
+    Ok(())
+}
+
+/// The current identity binds the initializer's own reviewed service definition
+/// and its cache volume declaration instead of the whole Compose document, so an
+/// edit to an unrelated service keeps the cache, as Compose keeps a named volume.
+pub fn resolve_with_legacy(
+    plan: &PlanData,
+    manifest: &ContentRevision,
+    scope: &str,
+    executable: &BTreeMap<String, crate::project::inputs::ServiceInputs>,
+) -> Result<Resolved, CandidateError> {
     manifest.validate().map_err(|_| refused())?;
     if !hex(scope)
         || !hex(&plan.compose_sha256)
@@ -95,7 +154,14 @@ pub fn resolve(
     {
         return Err(refused());
     }
-    let mut result = BTreeMap::new();
+    let mut current = BTreeMap::new();
+    let mut legacy = BTreeMap::new();
+    let scoped = instance_scoped_volumes(plan);
+    let instance_scope = hash(&(
+        "hack-dependency-cache-instance-scope-v1",
+        scope,
+        &plan.namespace,
+    ))?;
     for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
         let Some(declaration) = &service.dependency_cache else {
             continue;
@@ -141,10 +207,51 @@ pub fn resolve(
                 return Err(refused());
             }
         }
-        // Compose digest binds actual argv text (the plan's argv representation is redacted).
-        // Script content belongs in explicitly declared runtime files; whole source revisions
-        // would prevent compatible branches with unrelated source changes from sharing.
-        let base_fingerprint = hash(&(
+        // Every active service that mounts the cache volume, with its target,
+        // subpath and access mode. Any of them can write the shared contents, so a
+        // writer added, removed or changed elsewhere is a cache input, even though
+        // the rest of that service's definition is not.
+        let layout = plan
+            .services
+            .iter()
+            .filter(|(_, s)| s.active)
+            .flat_map(|(name, s)| {
+                s.mounts
+                    .iter()
+                    .filter(|m| m.kind == "volume" && m.source == declaration.volume)
+                    .map(move |m| (name, &m.target, &m.subpath, m.read_only))
+            })
+            .collect::<Vec<_>>();
+        // The plan's argv and literal values are redacted, so the resolved public
+        // command, entrypoint, environment, user and hosts are bound explicitly.
+        // Script content belongs in explicitly declared runtime files; whole source
+        // revisions would prevent compatible branches with unrelated source changes
+        // from sharing. The legacy identity also bound the whole Compose digest.
+        let writable = scoped.contains(&declaration.volume);
+        let current_scope = if writable {
+            instance_scope.as_str()
+        } else {
+            scope
+        };
+        let current_fingerprint = hash(&(
+            "hack-dependency-cache-v2",
+            current_scope,
+            &declaration.volume,
+            image,
+            service,
+            &plan.volumes[&declaration.volume],
+            &plan.registry,
+            declaration,
+            &inputs,
+            &public.command,
+            &public.entrypoint,
+            &public.environment,
+            &public.user,
+            &public.extra_hosts,
+            &service.working_dir,
+            &layout,
+        ))?;
+        let legacy_fingerprint = hash(&(
             "hack-dependency-cache-v1",
             scope,
             &declaration.volume,
@@ -160,38 +267,35 @@ pub fn resolve(
             &public.extra_hosts,
             &service.working_dir,
         ))?;
-        // Include the whole shared-volume layout, not only initializer mounts.
-        // Keep historical cache keys unchanged when no subpath is requested.
-        let layout = plan
-            .services
-            .iter()
-            .filter(|(_, s)| s.active)
-            .flat_map(|(name, s)| {
-                s.mounts
-                    .iter()
-                    .filter(|m| m.kind == "volume" && m.source == declaration.volume)
-                    .map(move |m| (name, &m.target, &m.subpath, m.read_only))
-            })
-            .collect::<Vec<_>>();
-        let fingerprint = if layout.iter().any(|(_, _, subpath, _)| subpath.is_some()) {
-            hash(&("hack-cache-volume-subpaths-v1", base_fingerprint, layout))?
+        // The legacy identity reproduces the earlier keys exactly: its Compose
+        // digest covered the layout, and only subpaths were bound again.
+        let legacy_fingerprint = if layout.iter().any(|(_, _, subpath, _)| subpath.is_some()) {
+            hash(&("hack-cache-volume-subpaths-v1", legacy_fingerprint, &layout))?
         } else {
-            base_fingerprint
+            legacy_fingerprint
         };
-        let binding = CacheBinding {
+        let binding = |scope: &str, fingerprint| CacheBinding {
             scope: scope.into(),
             fingerprint,
             image: image.clone(),
         };
-        if result
-            .get(&declaration.volume)
-            .is_some_and(|existing| existing != &binding)
-        {
-            return Err(refused());
+        insert_binding(
+            &mut current,
+            &declaration.volume,
+            binding(current_scope, current_fingerprint),
+        )?;
+        // An earlier shared cache with a writable consumer may hold another
+        // worktree's writes, so it is never matched again: such a receipt moves to
+        // its instance-scoped cache once.
+        if !writable {
+            insert_binding(
+                &mut legacy,
+                &declaration.volume,
+                binding(scope, legacy_fingerprint),
+            )?;
         }
-        result.insert(declaration.volume.clone(), binding);
     }
-    Ok(result)
+    Ok(Resolved { current, legacy })
 }
 
 fn owned_directory(path: &Path) -> Result<PathBuf, CandidateError> {
@@ -694,7 +798,9 @@ mod tests {
             .arguments[0]
             .environment_references
             .push("INSTALLER".into());
-        assert_eq!(baseline, resolve(&dynamic, &manifest, &scope).unwrap());
+        // The redacted plan form is part of the initializer's own definition.
+        let dynamic_baseline = resolve(&dynamic, &manifest, &scope).unwrap();
+        assert_ne!(baseline, dynamic_baseline);
         for field in [
             "command",
             "entrypoint",
@@ -716,7 +822,7 @@ mod tests {
                 }
             }
             assert_ne!(
-                baseline,
+                dynamic_baseline,
                 super::resolve(&dynamic, &manifest, &scope, &values).unwrap()
             );
         }
@@ -725,9 +831,53 @@ mod tests {
         changed.services.get_mut("deps").unwrap().image =
             Some(format!("sha256:{}", "e".repeat(64)));
         assert_ne!(baseline, resolve(&changed, &manifest, &scope).unwrap());
+        // Only the earlier whole-document identity follows unrelated Compose edits.
         changed = plan.clone();
         changed.compose_sha256 = "f".repeat(64);
-        assert_ne!(baseline, resolve(&changed, &manifest, &scope).unwrap());
+        assert_eq!(baseline, resolve(&changed, &manifest, &scope).unwrap());
+        let legacy = |plan: &PlanData| {
+            super::resolve_with_legacy(plan, &manifest, &scope, &executable(plan))
+                .unwrap()
+                .legacy
+        };
+        assert_ne!(legacy(&plan), legacy(&changed));
+        assert_ne!(legacy(&plan), baseline);
+        // Another service, with its own environment, is not a cache input.
+        let mut app = plan.services["deps"].clone();
+        app.dependency_cache = None;
+        let cache_mount = app.mounts.clone();
+        app.mounts.clear();
+        changed.services.insert("app".into(), app.clone());
+        assert_eq!(baseline, resolve(&changed, &manifest, &scope).unwrap());
+        // But a service that can write the shared cache is: adding a read-write
+        // mount of the cache volume changes the identity, with or without subpaths.
+        app.mounts = cache_mount;
+        assert!(
+            app.mounts
+                .iter()
+                .all(|m| !m.read_only && m.subpath.is_none())
+        );
+        changed.services.insert("app".into(), app.clone());
+        let writer = resolve(&changed, &manifest, &scope).unwrap();
+        assert_ne!(baseline, writer);
+        // Its access mode and target are part of the layout too.
+        let mut reader = app.clone();
+        reader.mounts[0].read_only = true;
+        changed.services.insert("app".into(), reader);
+        let read_only = resolve(&changed, &manifest, &scope).unwrap();
+        assert_ne!(writer, read_only);
+        assert_ne!(baseline, read_only);
+        // An environment edit to that writer keeps the identity it now has.
+        let mut edited = app;
+        edited.environment.insert(
+            "MARKER".into(),
+            crate::project::RedactedText {
+                environment_references: Vec::new(),
+                literal_redacted: true,
+            },
+        );
+        changed.services.insert("app".into(), edited);
+        assert_eq!(writer, resolve(&changed, &manifest, &scope).unwrap());
         changed = plan.clone();
         let mut other = changed.services["deps"].clone();
         other.dependency_cache.as_mut().unwrap().bootstrap = false;
@@ -741,8 +891,77 @@ mod tests {
             .as_mut()
             .unwrap()
             .bootstrap = true;
-        assert_eq!(baseline, resolve(&changed, &manifest, &scope).unwrap());
+        // Both initializers agree on one identity; the second writer of the shared
+        // volume is part of it.
+        let shared = resolve(&changed, &manifest, &scope).unwrap();
+        assert_eq!(shared.len(), 1);
+        assert_ne!(baseline, shared);
     }
+    #[test]
+    fn a_writable_consumer_scopes_the_cache_to_one_instance() {
+        let (_source, _home, plan, manifest) = prepared();
+        let scope = "a".repeat(64);
+        // Two linked worktrees (or branch instances) share the scope root but
+        // have their own plan namespaces.
+        let worktree = |plan: &PlanData, namespace: char| {
+            let mut plan = plan.clone();
+            plan.namespace = namespace.to_string().repeat(64);
+            plan
+        };
+        let with_consumer = |read_only: bool| {
+            let mut plan = plan.clone();
+            let mut app = plan.services["deps"].clone();
+            app.dependency_cache = None;
+            app.mounts[0].read_only = read_only;
+            plan.services.insert("app".into(), app);
+            plan
+        };
+        // Only initializers write: shared across worktrees.
+        assert!(instance_scoped_volumes(&plan).is_empty());
+        assert_eq!(
+            resolve(&worktree(&plan, 'b'), &manifest, &scope).unwrap(),
+            resolve(&worktree(&plan, 'c'), &manifest, &scope).unwrap()
+        );
+        // A read-only consumer cannot change the contents: still shared.
+        let reader = with_consumer(true);
+        assert!(instance_scoped_volumes(&reader).is_empty());
+        let shared = resolve(&worktree(&reader, 'b'), &manifest, &scope).unwrap();
+        assert_eq!(shared["deps"].scope, scope);
+        assert_eq!(
+            shared,
+            resolve(&worktree(&reader, 'c'), &manifest, &scope).unwrap()
+        );
+        // A writable consumer in worktree A never shares with worktree B, and has
+        // no earlier shared identity a receipt could keep.
+        let writer = with_consumer(false);
+        assert_eq!(
+            instance_scoped_volumes(&writer),
+            BTreeSet::from(["deps".to_owned()])
+        );
+        let a = super::resolve_with_legacy(
+            &worktree(&writer, 'b'),
+            &manifest,
+            &scope,
+            &executable(&writer),
+        )
+        .unwrap();
+        let b = resolve(&worktree(&writer, 'c'), &manifest, &scope).unwrap();
+        assert_ne!(a.current["deps"].scope, scope);
+        assert_ne!(a.current, b);
+        assert_ne!(a.current["deps"].name(), b["deps"].name());
+        assert!(a.legacy.is_empty());
+        // Inside one instance an environment edit to the writer keeps the cache.
+        let mut edited = worktree(&writer, 'b');
+        edited.services.get_mut("app").unwrap().environment.insert(
+            "MARKER".into(),
+            crate::project::RedactedText {
+                environment_references: Vec::new(),
+                literal_redacted: true,
+            },
+        );
+        assert_eq!(a.current, resolve(&edited, &manifest, &scope).unwrap());
+    }
+
     #[test]
     fn missing_lockfiles_and_symlink_inputs_refuse() {
         let (_source, _home, mut plan, mut manifest) = prepared();

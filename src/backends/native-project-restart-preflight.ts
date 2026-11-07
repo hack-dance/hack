@@ -56,9 +56,12 @@ import {
   withNativeProjectReview,
 } from "./native-project-review.ts";
 import {
+  describeNativeRunEnvironmentChange,
   type NativeProjectRun,
   type NativeProjectRunScope,
   nativeRunEnvironmentAvailable,
+  nativeRunEnvironmentChange,
+  nativeRunEnvironmentRemedy,
   normalizeNativeProfiles,
 } from "./native-project-run.ts";
 import {
@@ -414,6 +417,17 @@ export async function preflightNativeRestart(opts: {
     composeFile: opts.composeFile,
     envName: selected.envName,
   });
+  const environmentChange = nativeRunEnvironmentChange({
+    run: opts.run,
+    environmentFiles: input.environmentFiles,
+    projectRoot: opts.scope.projectRoot,
+    projectDir: opts.scope.projectDir,
+  });
+  if (environmentChange) {
+    throw new ClosedCliError(
+      `Native restart refused: ${describeNativeRunEnvironmentChange(environmentChange)}. ${nativeRunEnvironmentRemedy({ change: environmentChange, retry: "hack restart" })}. The current graph was not stopped.`
+    );
+  }
   if (
     !nativeRunEnvironmentAvailable({
       run: opts.run,

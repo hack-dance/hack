@@ -391,7 +391,11 @@ test(
       "registry.example.com",
       "upstream.example.test",
       "api.example.test",
-      f.root,
+      // No absolute project or machine-settings path: settings are reported
+      // by origin and relative or ~-anchored paths. Doctor's own receipts
+      // under the native home are not setting values.
+      f.project,
+      privateCliHome(f.root),
     ]) {
       expect(result.output).not.toContain(value);
     }

@@ -121,6 +121,34 @@ test("fresh exec delivers no values only for a run recorded without managed env 
     })
   ).toEqual({});
 });
+test("fresh exec names the env file that appeared or was removed", async () => {
+  const opts = await fixture();
+  await rm(join(opts.scope.projectDir, "hack.env.qa.yaml"));
+  await expect(prepareNativeExecEnvironment(opts)).rejects.toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native fresh exec selection changed since startup: .hack/hack.env.qa.yaml or .hack/hack.env.qa.local.yaml was removed since this run started. Restore it and run hack exec again, or run hack down (with it restored if the project has down hooks), then hack up, to start without it; no command was requested. Values omitted.",
+  });
+  await writeFile(
+    join(opts.scope.projectDir, "hack.env.qa.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "qa",
+      secretsprovider: "project_key",
+      values: { global: { VALUE: "late" } },
+    })
+  );
+  await expect(
+    prepareNativeExecEnvironment({
+      ...opts,
+      run: { ...opts.run, baseOnlyEnvironment: true },
+    })
+  ).rejects.toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native fresh exec selection changed since startup: .hack/hack.env.qa.yaml appeared since this run started. Run hack down, then hack up, to start with it; no command was requested. Values omitted.",
+  });
+});
 test("fresh exec names a changed selection apart from an unresolvable environment", async () => {
   const opts = await fixture();
   // The service this exec selects is no longer in the configuration.

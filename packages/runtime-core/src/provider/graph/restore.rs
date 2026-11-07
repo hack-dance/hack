@@ -484,7 +484,15 @@ fn restore_inputs(
     if !environments.is_empty() {
         super::super::environment::preflight_capacity(engine.guest(), environments.len())?;
     }
-    let (wrapped, file_owners) = private_services(&environments);
+    let (mut wrapped, mut file_owners) = private_services(&environments);
+    let dependency_processes = startup
+        .as_ref()
+        .map(|driver| driver.process_services())
+        .unwrap_or_default();
+    for name in &dependency_processes {
+        file_owners.remove(name);
+        wrapped.insert(name.clone());
+    }
     let expected_environment = verify_images(
         &engine,
         &prepared.resources,
@@ -492,6 +500,7 @@ fn restore_inputs(
         &wrapped,
         &file_owners,
     )?;
+    super::validate_dependency_processes(&prepared.configs, &dependency_processes)?;
     for resource in receipt.resources.values() {
         let present = inspect_resource(&engine, &receipt, resource)?.is_some();
         if resource.kind == Kind::Volume {

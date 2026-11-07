@@ -76,6 +76,39 @@ impl From<String> for ErrorMessage {
     }
 }
 
+/// The container setting a private process wrapper could not run, named so a
+/// refusal points at the Compose or image field to change. A closed vocabulary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessField {
+    /// The selected process: Compose `entrypoint`/`command` or the image's.
+    Entrypoint,
+    /// The selected health check test.
+    Healthcheck,
+    /// The selected user (Compose `user` or the image's).
+    User,
+    /// Compose `stop_signal`.
+    StopSignal,
+    /// A mount target overlapping reserved wrapper paths.
+    Mounts,
+}
+
+/// Value-free: admitted service names and closed fields only, never argv,
+/// paths, users or other configuration values.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessRefusal {
+    pub service: String,
+    pub field: ProcessField,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessRefusalsDiagnostic {
+    pub version: u8,
+    pub refusals: Vec<ProcessRefusal>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CandidateError {
     pub code: &'static str,
@@ -98,6 +131,10 @@ pub struct CandidateError {
     /// [`StartupLogTail`]. Never persist an error carrying it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub startup_logs: Option<Box<StartupLogsDiagnostic>>,
+    /// Every service whose selected process a private wrapper refused, found in
+    /// one pass before any runtime state is reserved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_refusals: Option<Box<ProcessRefusalsDiagnostic>>,
 }
 
 impl CandidateError {
@@ -111,6 +148,7 @@ impl CandidateError {
             cause_code: None,
             stop_failures: None,
             startup_logs: None,
+            process_refusals: None,
         }
     }
 

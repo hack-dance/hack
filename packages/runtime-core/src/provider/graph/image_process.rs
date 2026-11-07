@@ -1,8 +1,12 @@
 //! Process defaults from an already verified immutable image, before wrappers.
 //! Compose null inherits; explicit entrypoint (including empty) suppresses image
-//! CMD. No shell tokenization, PATH lookup or image selection occurs here.
+//! CMD. No shell tokenization, PATH lookup or image selection occurs here: a
+//! relative executable name stays relative and the wrapper resolves it through
+//! the container's own PATH at exec time, as Docker does.
 //! See https://docs.docker.com/reference/compose-file/services/#entrypoint.
+use super::process_refusals::Refused;
 use super::{CandidateError, error};
+use crate::error::ProcessField;
 use serde_json::{Value, json};
 
 const MAX_ARGUMENTS: usize = 4096;
@@ -78,47 +82,122 @@ pub(super) fn resolve(image: &Value, create: &Value) -> Result<Resolved, Candida
     })
 }
 
-fn selected_user(image: &Value, create: &Value) -> Result<String, CandidateError> {
+fn selected_user(image: &Value, create: &Value) -> Result<String, Refused> {
     fn nonempty(value: Option<&Value>) -> Option<&Value> {
         value.filter(|value| !value.is_null() && value.as_str() != Some(""))
     }
     let user = nonempty(create.get("User")).or_else(|| nonempty(image.get("User")));
     let user = match user {
         None => "",
-        Some(value) => value.as_str().ok_or_else(malformed)?,
+        Some(value) => value.as_str().ok_or_else(|| Refused {
+            field: ProcessField::User,
+            error: malformed(),
+        })?,
     };
-    super::launcher::identity(&json!({"User":user}))?;
+    super::launcher::identity(&json!({"User":user})).map_err(|error| Refused {
+        field: ProcessField::User,
+        error,
+    })?;
     Ok(user.into())
 }
+
+/// Docker runs a `CMD-SHELL` health check as the image's `SHELL` (default
+/// `/bin/sh -c`) followed by the test text. Express exactly that as an exec-form
+/// `CMD` test, which a wrapper can then prefix. Other tests are unchanged.
+fn exec_form_health(create: &Value, image: &Value) -> Result<Option<Value>, Refused> {
+    let refused = || {
+        Refused::new(
+            ProcessField::Healthcheck,
+            "environment_health",
+            "Private delivery requires a bounded health check test; values omitted.",
+        )
+    };
+    let Some(test) = create["Healthcheck"]["Test"].as_array() else {
+        return Ok(None);
+    };
+    if test.first().and_then(Value::as_str) != Some("CMD-SHELL") {
+        return Ok(None);
+    }
+    let [_, Value::String(command)] = test.as_slice() else {
+        return Err(refused());
+    };
+    if command.is_empty() || command.contains('\0') || command.len() > MAX_BYTES {
+        return Err(refused());
+    }
+    let shell: Vec<String> = match image.get("Shell") {
+        None | Some(Value::Null) => vec!["/bin/sh".into(), "-c".into()],
+        Some(Value::Array(values))
+            if !values.is_empty()
+                && values.len() <= 16
+                && values.iter().all(|value| {
+                    value
+                        .as_str()
+                        .is_some_and(|text| !text.is_empty() && !text.contains('\0'))
+                }) =>
+        {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect()
+        }
+        Some(_) => return Err(refused()),
+    };
+    let mut exec = vec![json!("CMD")];
+    exec.extend(shell.into_iter().map(Value::String));
+    exec.push(json!(command));
+    Ok(Some(json!(exec)))
+}
 /// Materialize exactly the selected process for a private environment/dependency
-/// wrapper. All validation precedes mutation. Relative executable names remain
-/// unsupported here; private launch must never add ambient PATH resolution.
-/// An empty entrypoint is preserved by `resolve` but refused by this adapter,
-/// even when Cmd alone names an absolute executable (a separate argv-only gate).
-pub(super) fn apply_private(create: &mut Value, image: &Value) -> Result<(), CandidateError> {
-    let process = resolve(image, create)?;
-    if !process
-        .entrypoint
-        .first()
-        .is_some_and(|name| name.starts_with('/') && name != "/")
-    {
-        return Err(error(
+/// wrapper. All validation precedes mutation.
+///
+/// Docker runs `Entrypoint ++ Cmd`; with no entrypoint, `Cmd` alone is the
+/// process, so it becomes the materialized entrypoint (the same argv). An
+/// executable name without `/` (such as `docker-entrypoint.sh`) is kept as is:
+/// the wrapper resolves it through the container's PATH at exec time exactly as
+/// Docker does, never through a host or wrapper PATH. A `CMD-SHELL` health check
+/// becomes the equivalent exec-form test. Only an empty process refuses.
+pub(super) fn apply_private(create: &mut Value, image: &Value) -> Result<(), Refused> {
+    let process = resolve(image, create).map_err(|error| Refused {
+        field: ProcessField::Entrypoint,
+        error,
+    })?;
+    let (entrypoint, cmd) = if process.entrypoint.is_empty() {
+        (process.cmd, Vec::new())
+    } else {
+        (process.entrypoint, process.cmd)
+    };
+    if !entrypoint.first().is_some_and(|name| executable(name)) {
+        return Err(Refused::new(
+            ProcessField::Entrypoint,
             "environment_entrypoint",
-            "Private delivery requires a pinned absolute entrypoint; values omitted.",
+            "Private delivery requires an entrypoint or command that names an executable; values omitted.",
         ));
     }
     let user = selected_user(image, create)?;
+    let health = exec_form_health(create, image)?;
     create["User"] = json!(user);
-    create["Entrypoint"] = json!(process.entrypoint);
-    create["Cmd"] = json!(process.cmd);
+    create["Entrypoint"] = json!(entrypoint);
+    create["Cmd"] = json!(cmd);
+    if let Some(test) = health {
+        create["Healthcheck"]["Test"] = test;
+    }
     Ok(())
+}
+
+/// An exec target Docker would accept: absolute, relative to the working
+/// directory, or a bare name resolved through the container's PATH.
+pub(super) fn executable(name: &str) -> bool {
+    !name.is_empty() && name != "/" && !name.contains('\0')
 }
 
 /// Files-only private delivery keeps the selected process unchanged and only pins the
 /// numeric owner that staged mode-0400 members must match. Validation precedes mutation.
-pub(super) fn apply_file_owner(create: &mut Value, image: &Value) -> Result<(), CandidateError> {
+pub(super) fn apply_file_owner(create: &mut Value, image: &Value) -> Result<(), Refused> {
     if !image.is_object() || !create.is_object() {
-        return Err(malformed());
+        return Err(Refused {
+            field: ProcessField::User,
+            error: malformed(),
+        });
     }
     let user = selected_user(image, create)?;
     create["User"] = json!(user);
@@ -219,23 +298,98 @@ mod tests {
     }
 
     #[test]
-    fn refuses_path_lookup_or_empty_entry_without_partial_mutation() {
-        for image in [
-            json!({"Entrypoint":["relative"],"Cmd":[]}),
-            json!({"Entrypoint":null,"Cmd":["/absolute"]}),
+    fn relative_stock_entrypoints_stay_relative_for_container_path_lookup() {
+        // A stock image such as `ENTRYPOINT ["docker-entrypoint.sh"]` keeps its
+        // exact argv; the wrapper resolves the name through the container PATH.
+        let image = json!({"Entrypoint":["docker-entrypoint.sh"],"Cmd":["mysqld"]});
+        let mut create = json!({});
+        apply_private(&mut create, &image).unwrap();
+        assert_eq!(create["Entrypoint"], json!(["docker-entrypoint.sh"]));
+        assert_eq!(create["Cmd"], json!(["mysqld"]));
+        let mut relative = json!({"Entrypoint":["./bin/start"],"Cmd":null});
+        apply_private(&mut relative, &json!({})).unwrap();
+        assert_eq!(relative["Entrypoint"], json!(["./bin/start"]));
+    }
+
+    #[test]
+    fn command_only_process_is_the_same_argv_as_docker_runs() {
+        for (image, create, argv) in [
+            (
+                json!({"Cmd":["python3","-m","http.server"]}),
+                json!({}),
+                json!(["python3", "-m", "http.server"]),
+            ),
+            (
+                json!({"Entrypoint":["/image"]}),
+                json!({"Entrypoint":[],"Cmd":["/explicit","a"]}),
+                json!(["/explicit", "a"]),
+            ),
+            (
+                json!({"Entrypoint":null,"Cmd":["/absolute"]}),
+                json!({}),
+                json!(["/absolute"]),
+            ),
         ] {
-            let mut create = json!({});
+            let mut create = create;
+            apply_private(&mut create, &image).unwrap();
+            assert_eq!(create["Entrypoint"], argv);
+            assert_eq!(create["Cmd"], json!([]));
+        }
+    }
+
+    #[test]
+    fn refuses_an_empty_process_without_partial_mutation() {
+        for (image, create) in [
+            (json!({"Entrypoint":null,"Cmd":null}), json!({})),
+            (json!({"Entrypoint":["/image"]}), json!({"Entrypoint":[]})),
+            (json!({"Entrypoint":[""],"Cmd":["x"]}), json!({})),
+            (json!({"Entrypoint":["/"]}), json!({})),
+        ] {
+            let mut create = create;
             let before = create.clone();
-            assert_eq!(
-                apply_private(&mut create, &image).unwrap_err().code,
-                "environment_entrypoint"
-            );
+            let refused = apply_private(&mut create, &image).unwrap_err();
+            assert_eq!(refused.error.code, "environment_entrypoint");
+            assert_eq!(refused.field, ProcessField::Entrypoint);
             assert_eq!(create, before);
         }
-        let mut create = json!({"Entrypoint":[],"Cmd":["/explicit"]});
-        let before = create.clone();
-        assert!(apply_private(&mut create, &json!({"Entrypoint":["/image"]})).is_err());
-        assert_eq!(create, before);
+    }
+
+    #[test]
+    fn shell_form_health_becomes_the_exec_form_docker_runs() {
+        let image = json!({"Entrypoint":["docker-entrypoint.sh"]});
+        let mut create = json!({"Healthcheck":{"Test":["CMD-SHELL","mysqladmin ping -h localhost"],"Retries":3}});
+        apply_private(&mut create, &image).unwrap();
+        assert_eq!(
+            create["Healthcheck"],
+            json!({"Test":["CMD","/bin/sh","-c","mysqladmin ping -h localhost"],"Retries":3})
+        );
+        let shell = json!({"Entrypoint":["/e"],"Shell":["/bin/bash","-o","pipefail","-c"]});
+        let mut create = json!({"Healthcheck":{"Test":["CMD-SHELL","true"]}});
+        apply_private(&mut create, &shell).unwrap();
+        assert_eq!(
+            create["Healthcheck"]["Test"],
+            json!(["CMD", "/bin/bash", "-o", "pipefail", "-c", "true"])
+        );
+        // Exec-form tests, including relative names, are unchanged.
+        let mut create = json!({"Healthcheck":{"Test":["CMD","mysqladmin","ping"]}});
+        apply_private(&mut create, &image).unwrap();
+        assert_eq!(
+            create["Healthcheck"]["Test"],
+            json!(["CMD", "mysqladmin", "ping"])
+        );
+        for test in [
+            json!(["CMD-SHELL"]),
+            json!(["CMD-SHELL", ""]),
+            json!(["CMD-SHELL", "a", "b"]),
+        ] {
+            let mut create = json!({"Healthcheck":{"Test":test}});
+            let before = create.clone();
+            let refused = apply_private(&mut create, &image).unwrap_err();
+            assert_eq!(refused.field, ProcessField::Healthcheck);
+            assert_eq!(create, before);
+        }
+        let mut create = json!({"Healthcheck":{"Test":["CMD-SHELL","true"]}});
+        assert!(apply_private(&mut create, &json!({"Entrypoint":["/e"],"Shell":"sh"})).is_err());
     }
 
     #[test]

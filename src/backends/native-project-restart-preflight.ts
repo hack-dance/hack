@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { requireWrappableNativeProcesses } from "../lib/native-process-wrappers.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import { adaptNativeGcloudEnvironment } from "./native-gcloud-environment.ts";
@@ -540,6 +541,15 @@ export async function preflightNativeRestart(opts: {
     sources: opts.internalExtraHostSources,
   });
   prepareNativeDependencyServices({ dependencies, services: specs });
+  // The replacement startup would refuse these before its VM work; refuse
+  // before the current graph is stopped.
+  requireWrappableNativeProcesses({
+    services: specs,
+    profiles: selected.profiles,
+    managedEnvironment: input.managedEnvironment,
+    managedFiles: input.managedFiles,
+    dependencyServices: dependencies.map((binding) => binding.service),
+  });
   const activeImages = stoppedRetry
     ? undefined
     : await deps.activeImages({

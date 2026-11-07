@@ -1088,7 +1088,8 @@ pub(super) fn run_guarded(
         verify_native_images(&engine, &config.resources, &mut config.configs, &private)?
     };
     for name in &private {
-        launcher::validate(&config.configs[name])?;
+        launcher::validate(&config.configs[name])
+            .map_err(super::super::process_refusals::Refused::into_error)?;
     }
     check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
@@ -1792,7 +1793,8 @@ fn verify_native_images(
             }
         }
         if private.contains(&resource.key) {
-            image_process::apply_private(config, &image["Config"])?;
+            image_process::apply_private(config, &image["Config"])
+                .map_err(super::super::process_refusals::Refused::into_error)?;
         }
         expected.insert(
             resource.key.clone(),

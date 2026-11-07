@@ -8,6 +8,11 @@ import {
   withComposeServiceEnvFingerprints,
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
+import {
+  describeNativeProcessRefusals,
+  type NativeProcessRefusal,
+  requireWrappableNativeProcesses,
+} from "../lib/native-process-wrappers.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
@@ -969,6 +974,14 @@ function cleanupUnconfirmed(
     `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startupDiagnostic(startupFailure)}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
   );
 }
+/** Runtime process-wrapper refusals: service names and closed fields only. */
+function refusedProcesses(
+  refusals: readonly NativeProcessRefusal[] | undefined
+): string {
+  return refusals && refusals.length > 0
+    ? ` Native cannot wrap these services' processes: ${describeNativeProcessRefusals(refusals)}.`
+    : "";
+}
 /**
  * A fresh startup whose graph owner exited before reserving any runtime state.
  * `graph inspect` refuses `graph_unreserved` only when the run's journals are
@@ -989,6 +1002,7 @@ function finalInspectionFailure(opts: {
   readonly restored: boolean;
   readonly mappingAttempted: boolean;
   readonly nativeCode: string | undefined;
+  readonly processRefusals?: readonly NativeProcessRefusal[];
 }): { readonly error: Error; readonly nothingReserved: boolean } {
   if (
     opts.serveFailure === undefined ||
@@ -1007,7 +1021,7 @@ function finalInspectionFailure(opts: {
   }
   return {
     error: new ClosedCliError(
-      `Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed.${startupDiagnostic(opts.serveFailure)}`
+      `Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed.${startupDiagnostic(opts.serveFailure)}${refusedProcesses(opts.processRefusals)}`
     ),
     nothingReserved: true,
   };
@@ -1832,6 +1846,14 @@ export async function startNativeProject(opts: {
       dependencies: hostDependencies,
       services: specs,
     });
+    // Refuse Compose settings no process wrapper can run before the VM starts.
+    requireWrappableNativeProcesses({
+      services: specs,
+      profiles,
+      managedEnvironment: input.managedEnvironment,
+      managedFiles: input.managedFiles,
+      dependencyServices: hostDependencies.map((binding) => binding.service),
+    });
     await verifyNativeRetainedMapping({
       run: retained,
       scope: opts.scope,
@@ -2058,6 +2080,9 @@ export async function startNativeProject(opts: {
           let code = 1;
           let serveFailure: unknown;
           let nativeExitCode: string | undefined;
+          let nativeProcessRefusals:
+            | readonly NativeProcessRefusal[]
+            | undefined;
           // Redacted at receipt; the raw tail is never retained or persisted.
           let startupLogReport = "";
           const services = Object.keys(specs).sort();
@@ -2099,6 +2124,7 @@ export async function startNativeProject(opts: {
               ...stop?.serve,
               onExitDiagnostic: (diagnostic) => {
                 nativeExitCode = diagnostic.nativeCode;
+                nativeProcessRefusals = diagnostic.processRefusals;
               },
               onStartupLogs: (logs) => {
                 startupLogReport = formatNativeStartupLogReport({
@@ -2247,6 +2273,7 @@ export async function startNativeProject(opts: {
                 restored: restore !== undefined,
                 mappingAttempted,
                 nativeCode: nativeExitCode,
+                processRefusals: nativeProcessRefusals,
               });
               graphCleanupConfirmed = settled.nothingReserved;
               throw settled.error;

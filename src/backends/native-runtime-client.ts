@@ -1,6 +1,10 @@
 import { isAbsolute } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import {
+  type NativeProcessRefusal,
+  readNativeProcessRefusals,
+} from "../lib/native-process-wrappers.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import {
   NATIVE_STARTUP_FAILURE_REPLY_BYTES,
@@ -27,6 +31,8 @@ interface NativeFailure {
   readonly service?: string;
   readonly stopFailures?: readonly NativeStopFailure[];
   readonly startupLogs?: readonly NativeStartupLogTail[];
+  /** Services and closed fields a process wrapper refused; value-free. */
+  readonly processRefusals?: readonly NativeProcessRefusal[];
 }
 
 const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
@@ -705,7 +711,15 @@ function nativeFailureFromReply(
     ...(startupLogs && value.startup_logs !== undefined
       ? { startupLogs: readNativeStartupLogs(value.startup_logs) }
       : {}),
+    ...processRefusalsOf(value.process_refusals),
   };
+}
+function processRefusalsOf(value: unknown): {
+  readonly processRefusals?: readonly NativeProcessRefusal[];
+} {
+  const processRefusals =
+    value === undefined ? undefined : readNativeProcessRefusals(value);
+  return processRefusals ? { processRefusals } : {};
 }
 
 /** Only bounded native error codes leave this boundary, never stderr messages. */
@@ -800,6 +814,7 @@ export async function readNativeStartupFailure(
       readonly message?: string;
       readonly service?: string;
       readonly startupLogs?: readonly NativeStartupLogTail[];
+      readonly processRefusals?: readonly NativeProcessRefusal[];
     }
   | undefined
 > {
@@ -816,6 +831,9 @@ export async function readNativeStartupFailure(
         ...(failure.message ? { message: failure.message } : {}),
         ...(failure.service ? { service: failure.service } : {}),
         ...(failure.startupLogs ? { startupLogs: failure.startupLogs } : {}),
+        ...(failure.processRefusals
+          ? { processRefusals: failure.processRefusals }
+          : {}),
       };
 }
 

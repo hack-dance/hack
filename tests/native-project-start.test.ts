@@ -5154,3 +5154,127 @@ test("the confirmed-stop line reflects whether data was retained", () => {
     nativeStoppedNotice({ receipt: { phase: "stopped-data-retained" } })
   ).toContain("Named volumes and the stopped run mapping are kept");
 });
+
+test("HACK-1939: a wrapped service whose Compose user cannot be wrapped refuses before the VM starts", async () => {
+  const { opts, events } = await fixture();
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.web.user = "postgres";
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  const error = await startNativeProject(opts).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(HackCliError);
+  expect(error).toHaveProperty("code", "E_NATIVE_PROJECT_UNSUPPORTED");
+  expect((error as Error).message).toBe(
+    "Native up cannot wrap these services' processes; nothing was started. Refused: service web user (use a numeric UID or UID:GID)."
+  );
+  expect(events).not.toContain("runtime up");
+  expect(events.at(-1)).toBe("cleanup");
+});
+
+test("HACK-1939: runtime process refusals are named in the nothing-reserved report", async () => {
+  const { opts } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.serve = async (request) => {
+    request.onExitDiagnostic?.({
+      exitCode: 2,
+      nativeCode: "environment_entrypoint",
+      processRefusals: [
+        { service: "web", field: "entrypoint" },
+        { service: "worker", field: "user" },
+      ],
+    });
+    throw new Error(
+      "Native graph startup was interrupted or failed (environment_entrypoint); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "inspect") {
+      throw new NativeRuntimeRequestError({
+        message: "Native graph run is not reserved.",
+        nativeCode: "graph_unreserved",
+      });
+    }
+    return await invoke(request);
+  };
+  const error = await startNativeProject(opts).catch(
+    (caught: unknown) => caught
+  );
+  expect((error as Error).message).toBe(
+    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (environment_entrypoint). Native cannot wrap these services' processes: service web entrypoint or command (the process must name an executable); service worker user (use a numeric UID or UID:GID)."
+  );
+});
+
+/** A fixture whose inactive-by-default `optional` service cannot be wrapped. */
+async function optionalProfileFixture() {
+  const fixtureResult = await fixture();
+  const prepare = fixtureResult.opts.dependencies.prepare!;
+  fixtureResult.opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.optional = {
+      image: `sha256:${"e".repeat(64)}`,
+      user: "postgres",
+      profiles: ["extra"],
+    };
+    return {
+      ...input,
+      normalizedComposeJson: JSON.stringify(compose),
+      managedEnvironment: {
+        ...input.managedEnvironment,
+        optional: { PASSWORD: "synthetic-secret" },
+      },
+      serviceNames: [...input.serviceNames, "optional"],
+    };
+  };
+  return fixtureResult;
+}
+
+test("an inactive-profile service a wrapper cannot run does not block up; an active one does", async () => {
+  const inactive = await optionalProfileFixture();
+  expect(await startNativeProject(inactive.opts)).toBe(0);
+  const active = await optionalProfileFixture();
+  const error = await startNativeProject({
+    ...active.opts,
+    profiles: ["extra"],
+  }).catch((caught: unknown) => caught);
+  expect((error as Error).message).toBe(
+    "Native up cannot wrap these services' processes; nothing was started. Refused: service optional user (use a numeric UID or UID:GID)."
+  );
+  expect(active.events).not.toContain("runtime up");
+});
+
+test("restart preflight ignores inactive-profile services a wrapper cannot run", async () => {
+  const { opts } = await optionalProfileFixture();
+  const preflight = (profiles: string[]) =>
+    preflightNativeRestart({
+      runtime: opts.runtime,
+      scope: opts.scope,
+      composeFile: opts.composeFile,
+      run: {
+        run: "1".repeat(32),
+        owner: "c".repeat(32),
+        namespace: "b".repeat(64),
+        planId: "a".repeat(64),
+        effectiveEnvName: null,
+        profiles,
+        aws: null,
+      },
+      dependencies: {
+        prepare: opts.dependencies.prepare,
+        review: opts.dependencies.review,
+        dependencies: async () => [],
+        invoke: restartPreflightInvoke,
+      },
+    });
+  const refusal = await preflight(["extra"]).catch((caught: unknown) => caught);
+  expect((refusal as Error).message).toContain(
+    "Refused: service optional user (use a numeric UID or UID:GID)."
+  );
+  // The same preflight without the profile completes.
+  await preflight([]);
+});

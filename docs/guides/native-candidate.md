@@ -646,6 +646,41 @@ graph history, remove data or establish browser readiness. Doctor's ordinary
 `--fix` never applies it. Run the normal project command separately after reviewing
 the result; its existing native graph and ownership checks still apply.
 
+#### A run mapping from another native home
+
+Each launcher version has its own native home, but the run mapping lives in the
+project. After an upgrade, a mapping the previous version left behind names that
+version's home. Project commands from the new home (`ps`, `up`, `down`,
+`doctor --native-cleanup inspect`) refuse it with a line that names the owning home
+and what to do:
+
+- **Stopped cleanly.** The owning home's frontend records show that the run's latest
+  `hack up` acknowledged confirmed graph cleanup, HTTPS retirement and down hooks.
+  The refusal names the exact release command. Inspection reports
+  `state: "foreign-home"`, `owner: "stopped"` and the `selectionSha256` it needs:
+
+  ```sh
+  ./hack-v5 doctor --path /absolute/project --native-run-mapping inspect --json
+  ./hack-v5 doctor --path /absolute/project --native-run-mapping release --expect-selection <selectionSha256> --json
+  ```
+
+- **Live.** The owning frontend's PID still exists. The refusal names the home and
+  PID. Stop it with Ctrl-C in that `hack up`, or run `hack down` with the version
+  that owns that home, then retry. Release refuses.
+- **Interrupted or unproven.** The frontend exited without acknowledging cleanup, or
+  the home has no readable record for the run (for example a legacy mapping, or a
+  home that was moved or replaced). Use the owning version's
+  `hack doctor --native-cleanup inspect` and `hack down`. Release refuses.
+
+Release proves ownership; it never just overwrites. The stored scope must differ
+from this checkout in its native home only, that home must still be the recorded
+directory, and the release holds the owning home's finalization lock, so that home
+cannot start the run again meanwhile. A changed selection, held project locks, or a
+pending restart or down-hook journal refuse. Release removes only the project's
+mapping and keeps its exact bytes in an audit file beside it. The previous home's
+graph and named volumes stay in that home; this home's next `hack up` starts the
+instance with fresh data.
+
 Compatibility is qualified for specific bundle hashes and state formats. The
 displayed version alone does not establish frontend/executor or downgrade
 compatibility. V4 and candidate homes remain separate; this procedure does not

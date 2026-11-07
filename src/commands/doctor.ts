@@ -383,9 +383,9 @@ const doctorOptions = [
     name: "nativeRunMapping",
     type: "string",
     long: "--native-run-mapping",
-    valueHint: "inspect|repair",
+    valueHint: "inspect|repair|release",
     description:
-      "Inspect a native run mapping, or explicitly repair it after filesystem device renumbering",
+      "Inspect a native run mapping, explicitly repair it after filesystem device renumbering, or release one another native home left after a clean stop",
   } as const),
   defineOption({
     name: "expectSelection",

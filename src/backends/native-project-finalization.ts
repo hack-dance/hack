@@ -530,3 +530,102 @@ export async function waitNativeProjectFinalization(opts: {
     await Bun.sleep(Math.min(100, Math.max(1, end - performance.now())));
   }
 }
+
+/**
+ * What a native home's own frontend records say about one run's latest lifetime,
+ * read without changing anything:
+ * - `completed`: that lifetime acknowledged confirmed graph cleanup, HTTPS
+ *   retirement and down hooks (a clean stop). Nothing else proves it.
+ * - `live`: its frontend PID still exists (or cannot be signalled), so it may own
+ *   resources. PID reuse can only make an exited owner look live.
+ * - `interrupted`: its frontend exited without acknowledging cleanup.
+ * - `unproven`: no readable lifetime, a legacy token without a PID, or an
+ *   explicitly recovered dead owner whose cleanup this record does not attest.
+ */
+export type NativeProjectFinalizationLifetime =
+  | { readonly state: "completed"; readonly attempt: string }
+  | { readonly state: "live"; readonly pid: number }
+  | { readonly state: "interrupted"; readonly pid: number }
+  | { readonly state: "unproven" };
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(isRecord(error) && error.code === "ESRCH");
+  }
+}
+
+async function lifetimeIn(
+  root: string,
+  hash: string,
+  run: NativeProjectRun,
+  alive: (pid: number) => boolean
+): Promise<NativeProjectFinalizationLifetime> {
+  const active = await read(join(root, "active.json"));
+  if (!(active && matches(active, hash, run))) {
+    return { state: "unproven" };
+  }
+  const completed = await read(join(root, "completed.json"));
+  if (completed && same(active, completed)) {
+    return { state: "completed", attempt: active.attempt };
+  }
+  if (active.version === 1) {
+    return { state: "unproven" };
+  }
+  if (alive(active.pid)) {
+    return { state: "live", pid: active.pid };
+  }
+  const recovered = await read(join(root, "recovered.json"));
+  return recovered && same(active, recovered)
+    ? { state: "unproven" }
+    : { state: "interrupted", pid: active.pid };
+}
+
+/**
+ * Classify the latest frontend lifetime of `run` under `scope.nativeHome`, which may
+ * be another native home than the caller's own. Unreadable or unsafe records are
+ * `unproven`, never an error, so callers can always name the owning home.
+ */
+export async function inspectNativeProjectFinalizationLifetime(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly isAlive?: (pid: number) => boolean;
+}): Promise<NativeProjectFinalizationLifetime> {
+  try {
+    const { root, hash } = await selected(opts.scope, opts.run, false);
+    return await lifetimeIn(
+      root,
+      hash,
+      opts.run,
+      opts.isAlive ?? processExists
+    );
+  } catch {
+    return { state: "unproven" };
+  }
+}
+
+/**
+ * Run `action` while holding the home's finalization operation lock for `run`, and
+ * only while its latest lifetime is still the exact completed `attempt`. A frontend
+ * of that home cannot begin, complete or recover a lifetime for this run meanwhile.
+ */
+export async function withCompletedNativeProjectFinalization<T>(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly attempt: string;
+  readonly action: () => Promise<T>;
+}): Promise<T> {
+  if (!HEX32.test(opts.attempt)) {
+    throw refused();
+  }
+  const { root, hash } = await selected(opts.scope, opts.run, false);
+  return await locked(root, async () => {
+    const lifetime = await lifetimeIn(root, hash, opts.run, processExists);
+    if (lifetime.state !== "completed" || lifetime.attempt !== opts.attempt) {
+      throw refused();
+    }
+    return await opts.action();
+  });
+}

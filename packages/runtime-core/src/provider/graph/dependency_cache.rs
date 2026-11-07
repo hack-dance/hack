@@ -179,12 +179,27 @@ pub fn resolve_with_legacy(
                 return Err(refused());
             }
         }
+        // Every active service that mounts the cache volume, with its target,
+        // subpath and access mode. Any of them can write the shared contents, so a
+        // writer added, removed or changed elsewhere is a cache input, even though
+        // the rest of that service's definition is not.
+        let layout = plan
+            .services
+            .iter()
+            .filter(|(_, s)| s.active)
+            .flat_map(|(name, s)| {
+                s.mounts
+                    .iter()
+                    .filter(|m| m.kind == "volume" && m.source == declaration.volume)
+                    .map(move |m| (name, &m.target, &m.subpath, m.read_only))
+            })
+            .collect::<Vec<_>>();
         // The plan's argv and literal values are redacted, so the resolved public
         // command, entrypoint, environment, user and hosts are bound explicitly.
         // Script content belongs in explicitly declared runtime files; whole source
         // revisions would prevent compatible branches with unrelated source changes
         // from sharing. The legacy identity also bound the whole Compose digest.
-        let base_fingerprint = hash(&(
+        let current_fingerprint = hash(&(
             "hack-dependency-cache-v2",
             scope,
             &declaration.volume,
@@ -200,6 +215,7 @@ pub fn resolve_with_legacy(
             &public.user,
             &public.extra_hosts,
             &service.working_dir,
+            &layout,
         ))?;
         let legacy_fingerprint = hash(&(
             "hack-dependency-cache-v1",
@@ -217,26 +233,12 @@ pub fn resolve_with_legacy(
             &public.extra_hosts,
             &service.working_dir,
         ))?;
-        // Include the whole shared-volume layout, not only initializer mounts.
-        // Keep historical cache keys unchanged when no subpath is requested.
-        let layout = plan
-            .services
-            .iter()
-            .filter(|(_, s)| s.active)
-            .flat_map(|(name, s)| {
-                s.mounts
-                    .iter()
-                    .filter(|m| m.kind == "volume" && m.source == declaration.volume)
-                    .map(move |m| (name, &m.target, &m.subpath, m.read_only))
-            })
-            .collect::<Vec<_>>();
-        let subpaths = layout.iter().any(|(_, _, subpath, _)| subpath.is_some());
-        let with_layout = |fingerprint: String| -> Result<String, CandidateError> {
-            if subpaths {
-                hash(&("hack-cache-volume-subpaths-v1", fingerprint, &layout))
-            } else {
-                Ok(fingerprint)
-            }
+        // The legacy identity reproduces the earlier keys exactly: its Compose
+        // digest covered the layout, and only subpaths were bound again.
+        let legacy_fingerprint = if layout.iter().any(|(_, _, subpath, _)| subpath.is_some()) {
+            hash(&("hack-cache-volume-subpaths-v1", legacy_fingerprint, &layout))?
+        } else {
+            legacy_fingerprint
         };
         let binding = |fingerprint| CacheBinding {
             scope: scope.into(),
@@ -246,12 +248,12 @@ pub fn resolve_with_legacy(
         insert_binding(
             &mut current,
             &declaration.volume,
-            binding(with_layout(base_fingerprint)?),
+            binding(current_fingerprint),
         )?;
         insert_binding(
             &mut legacy,
             &declaration.volume,
-            binding(with_layout(legacy_fingerprint)?),
+            binding(legacy_fingerprint),
         )?;
     }
     Ok(Resolved { current, legacy })
@@ -804,9 +806,39 @@ mod tests {
         // Another service, with its own environment, is not a cache input.
         let mut app = plan.services["deps"].clone();
         app.dependency_cache = None;
+        let cache_mount = app.mounts.clone();
         app.mounts.clear();
-        changed.services.insert("app".into(), app);
+        changed.services.insert("app".into(), app.clone());
         assert_eq!(baseline, resolve(&changed, &manifest, &scope).unwrap());
+        // But a service that can write the shared cache is: adding a read-write
+        // mount of the cache volume changes the identity, with or without subpaths.
+        app.mounts = cache_mount;
+        assert!(
+            app.mounts
+                .iter()
+                .all(|m| !m.read_only && m.subpath.is_none())
+        );
+        changed.services.insert("app".into(), app.clone());
+        let writer = resolve(&changed, &manifest, &scope).unwrap();
+        assert_ne!(baseline, writer);
+        // Its access mode and target are part of the layout too.
+        let mut reader = app.clone();
+        reader.mounts[0].read_only = true;
+        changed.services.insert("app".into(), reader);
+        let read_only = resolve(&changed, &manifest, &scope).unwrap();
+        assert_ne!(writer, read_only);
+        assert_ne!(baseline, read_only);
+        // An environment edit to that writer keeps the identity it now has.
+        let mut edited = app;
+        edited.environment.insert(
+            "MARKER".into(),
+            crate::project::RedactedText {
+                environment_references: Vec::new(),
+                literal_redacted: true,
+            },
+        );
+        changed.services.insert("app".into(), edited);
+        assert_eq!(writer, resolve(&changed, &manifest, &scope).unwrap());
         changed = plan.clone();
         let mut other = changed.services["deps"].clone();
         other.dependency_cache.as_mut().unwrap().bootstrap = false;
@@ -820,7 +852,11 @@ mod tests {
             .as_mut()
             .unwrap()
             .bootstrap = true;
-        assert_eq!(baseline, resolve(&changed, &manifest, &scope).unwrap());
+        // Both initializers agree on one identity; the second writer of the shared
+        // volume is part of it.
+        let shared = resolve(&changed, &manifest, &scope).unwrap();
+        assert_eq!(shared.len(), 1);
+        assert_ne!(baseline, shared);
     }
     #[test]
     fn missing_lockfiles_and_symlink_inputs_refuse() {

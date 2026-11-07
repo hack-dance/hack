@@ -3,8 +3,9 @@
    Compose edit. A cache is a shared volume named by an identity of its inputs;
    run-owned data lives under the run's own names. Compute is always recreated,
    so only which volume backs the cache key is modeled. `inputs` are the cache's
-   own inputs (initializer definition, declaration, image, lockfiles); `other` is
-   every other part of the Compose file. Broken constants are negative controls. *)
+   own inputs (initializer definition, declaration, image, lockfiles and every
+   service mount of the cache volume, since each can write it); `other` is every
+   other part of the Compose file. Broken constants are negative controls. *)
 EXTENDS Naturals, TLC
 CONSTANTS Values,
           WholeDocument,  \* identity also binds `other` (the earlier formula)

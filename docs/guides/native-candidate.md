@@ -718,10 +718,13 @@ namespace that created it.
 Graphs with `hack.dependencies.*` caches reconcile the same way. A cache's identity
 covers only its own inputs: the initializer's service definition and resolved
 command, entrypoint, environment and user, the cache declaration, its image, the
-declared lockfile and runtime-file contents, and the cache volume layout. An edit
-to another service, such as an environment value on the app, keeps the cache. An
-edit to one of those inputs, including a lockfile, selects the cache for the new
-identity as a fresh `up` would, so the initializer installs into it; the old cache
+declared lockfile and runtime-file contents, and the cache volume layout: every
+service that mounts the cache volume, with its target, subpath and `:ro` mode. Any
+of those services can write the shared contents, so adding, removing or changing
+such a mount is a cache input; mounts stay as declared, as in Compose and v4, and
+are not forced read-only. Any other edit to another service, such as an
+environment value on the app, keeps the cache. An edit to one of those inputs,
+including a lockfile, selects the cache for the new identity as a fresh `up` would, so the initializer installs into it; the old cache
 is shared and is only released by this run. Each such `up` publishes the current
 source snapshot. A retained named volume is never reused as a dependency cache:
 declaring one refuses and names the service and the `hack.dependencies.cache-volume`

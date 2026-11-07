@@ -746,8 +746,9 @@ or application data contents.
 cache key when a stopped graph is reconciled after a Compose edit. A cache is a
 shared volume named by an identity of its inputs; run-owned data uses the run's own
 names. Edits change the cache's own inputs (initializer definition, declaration,
-image, lockfiles), anything else in the Compose file, or whether the key is declared
-as a cache. Two values for each explore 54 distinct states.
+image, lockfiles, and every service mount of the cache volume, since any of those
+services can write it), anything else in the Compose file, or whether the key is
+declared as a cache. Two values for each explore 54 distinct states.
 
 | Model action | Implementation boundary |
 | --- | --- |

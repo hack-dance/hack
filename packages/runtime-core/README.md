@@ -1453,7 +1453,8 @@ created exclusively, and retained volumes the plan no longer declares stay in th
 receipt. Run, owner, namespace and the ownership plan on every label are unchanged.
 `graph source-compatibility` reports `"reconcile": true` for this path. Dependency
 caches reconcile too: a cache whose freshly resolved identity (the initializer's own
-definition and inputs, not the whole Compose digest) equals the recorded binding is
+definition and inputs plus every service mount of the cache volume, not the whole
+Compose digest) equals the recorded binding is
 kept with its provenance; a changed identity is selected like a fresh admission
 (adopted by labels or created) with a freshly published source revision, and the old
 shared cache is only released. A retained run-owned volume newly declared as a cache

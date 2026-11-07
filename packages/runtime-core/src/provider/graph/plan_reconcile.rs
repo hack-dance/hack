@@ -1045,6 +1045,29 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_cache_writer_selects_a_fresh_cache() {
+        let (project, receipt, _) = cached_project();
+        let old = receipt.resources["volume:deps"].clone();
+        // A new service that mounts the shared cache read-write can change what
+        // every run sharing it reuses, so it is part of the cache identity.
+        let mut next = cached("one", "/bin/install");
+        next["services"]["worker"] = json!({
+            "image": image('a'),
+            "network_mode": "none",
+            "entrypoint": ["/bin/worker"],
+            "volumes": ["deps:/deps"],
+        });
+        let (_, projection) = reconcile_cached(&project, &receipt, next);
+        let fresh = &projection.resources["volume:deps"];
+        assert_ne!(fresh.cache, old.cache);
+        assert_eq!(fresh.phase, "reserved");
+        assert!(same(
+            &projection.resources["volume:data"],
+            &receipt.resources["volume:data"]
+        ));
+    }
+
+    #[test]
     fn retained_run_data_is_never_reselected_as_a_dependency_cache() {
         let project = Project::new();
         fs::write(project.root.join("lock.txt"), "v1").unwrap();

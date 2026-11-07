@@ -175,16 +175,23 @@ pub fn prepare(candidate: &Candidate, archive: &Path) -> Result<Artifact, Candid
 }
 
 pub fn verify(candidate: &Candidate) -> Result<Artifact, CandidateError> {
-    reject_aliased_state(&root(candidate))?;
-    let artifact: Artifact = state::read(&candidate.state_root.join("providers/smolvm.json"))?;
-    if artifact.version != VERSION
-        || artifact.archive_sha256 != ARCHIVE_SHA256
-        || artifact.tree_sha256 != tree_digest(&root(candidate))?
+    verify_tree(candidate, &SMOLVM)
+}
+
+/// Verify a prepared tree against its record before anything executes from it.
+pub(super) fn verify_tree(
+    candidate: &Candidate,
+    pin: &TreePin,
+) -> Result<Artifact, CandidateError> {
+    let providers = candidate.state_root.join("providers");
+    let prepared = providers.join(pin.directory);
+    reject_aliased_state(&prepared)?;
+    let artifact: Artifact = state::read(&providers.join(pin.record))?;
+    if artifact.version != pin.version
+        || artifact.archive_sha256 != pin.archive_sha256
+        || artifact.tree_sha256 != tree_digest(&prepared)?
     {
-        return Err(CandidateError::new(
-            "artifact_digest_mismatch",
-            "Prepared SmolVM tree changed; refusing execution.",
-        ));
+        return Err(CandidateError::new("artifact_digest_mismatch", pin.changed));
     }
     Ok(artifact)
 }
@@ -247,18 +254,248 @@ pub fn prepare_engine(candidate: &Candidate, archive: &Path) -> Result<Artifact,
 }
 
 pub fn verify_engine(candidate: &Candidate) -> Result<Artifact, CandidateError> {
-    reject_aliased_state(&engine_root(candidate))?;
-    let artifact: Artifact = state::read(&candidate.state_root.join("providers/docker.json"))?;
-    if artifact.version != ENGINE_VERSION
-        || artifact.archive_sha256 != ENGINE_SHA256
-        || artifact.tree_sha256 != tree_digest(&engine_root(candidate))?
-    {
-        return Err(CandidateError::new(
+    verify_tree(candidate, &ENGINE)
+}
+
+/// A provider tree that preparation extracted from a pinned archive and whose archive
+/// it retained in its staging directory, so the tree can be re-prepared later.
+pub(super) struct TreePin {
+    label: &'static str,
+    version: &'static str,
+    archive_sha256: &'static str,
+    /// The prepared tree under `providers/`.
+    directory: &'static str,
+    /// The archive's top-level directory as extracted.
+    extracted: &'static str,
+    /// The tree's preparation record under `providers/`.
+    record: &'static str,
+    /// Preparation's staging directory under `providers/`; it retains the archive.
+    staging: &'static str,
+    archive: &'static str,
+    /// The executable whose code signature preparation checks, if any.
+    signed: Option<&'static str>,
+    /// The fixed refusal for a changed tree; it names the repair.
+    changed: &'static str,
+}
+
+impl TreePin {
+    pub(super) fn record_name(&self) -> &'static str {
+        self.record
+    }
+}
+
+pub(super) const SMOLVM: TreePin = TreePin {
+    label: "SmolVM",
+    version: VERSION,
+    archive_sha256: ARCHIVE_SHA256,
+    directory: DIRECTORY,
+    extracted: DIRECTORY,
+    record: "smolvm.json",
+    staging: "smolvm-installing",
+    archive: "release.tar.gz",
+    signed: Some("smolvm-bin"),
+    changed: "Prepared SmolVM tree changed; refusing execution. With the runtime stopped, run runtime repair-provider-tree to re-prepare it from the verified retained archive; runtime state and volumes are kept.",
+};
+
+pub(super) const ENGINE: TreePin = TreePin {
+    label: "Docker engine",
+    version: ENGINE_VERSION,
+    archive_sha256: ENGINE_SHA256,
+    directory: "docker-29.5.2-linux-arm64",
+    extracted: "docker",
+    record: "docker.json",
+    staging: "docker-installing",
+    archive: "release.tgz",
+    signed: None,
+    changed: "Prepared Docker engine changed; refusing execution. With the runtime stopped, run runtime repair-provider-tree to re-prepare it from the verified retained archive; runtime state and volumes are kept.",
+};
+
+/// The outcome of re-preparing one prepared provider tree.
+#[derive(Debug, Serialize)]
+pub struct TreeRepair {
+    pub provider: &'static str,
+    pub version: String,
+    pub tree_sha256: String,
+    /// `false` when the prepared tree already matched its record; nothing changed.
+    pub repaired: bool,
+    /// The changed tree's new name under `providers/`. It is retained, never deleted.
+    pub retained_changed_tree: Option<String>,
+}
+
+fn repair_refused(code: &'static str, message: &'static str) -> CandidateError {
+    CandidateError::new(code, message)
+}
+
+/// The archive preparation retained, when it is still an owned regular file in an
+/// owned directory that no other user can write.
+fn retained_archive(providers: &Path, pin: &TreePin) -> Result<PathBuf, CandidateError> {
+    let staging = providers.join(pin.staging);
+    let archive = staging.join(pin.archive);
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    for (path, directory) in [(&staging, true), (&archive, false)] {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(repair_refused(
+                    "provider_repair_unavailable",
+                    "No retained provider archive to repair from; prepare a fresh candidate home.",
+                ));
+            }
+            Err(error) => return Err(io(error)),
+        };
+        let kind = if directory {
+            metadata.is_dir()
+        } else {
+            metadata.is_file() && metadata.nlink() == 1
+        };
+        if !kind || metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
+            return Err(repair_refused(
+                "foreign_state",
+                "Retained provider archive is not an owned regular file in an owned directory.",
+            ));
+        }
+    }
+    Ok(archive)
+}
+
+fn nonce() -> Result<String, CandidateError> {
+    let mut random = [0_u8; 8];
+    File::open("/dev/urandom")
+        .map_err(io)?
+        .read_exact(&mut random)
+        .map_err(io)?;
+    Ok(random.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn sync_directory(path: &Path) -> Result<(), CandidateError> {
+    File::open(path).map_err(io)?.sync_all().map_err(io)
+}
+
+/// Re-prepare one prepared provider tree that something outside Hack changed.
+///
+/// The caller holds the provider lock with the runtime stopped, so nothing executes
+/// from the tree. The repair re-proves the tree from scratch: the preparation record
+/// must match this executor's pin, the retained archive must be an owned regular file
+/// whose SHA-256 is the pin, its owned copy is hashed again before extraction, and the
+/// fresh extraction (signature checked, as preparation does) must hash to the recorded
+/// tree digest. Only then is the changed tree renamed aside, retained and never
+/// deleted, and the fresh tree renamed into place. Runtime state, disks and volumes
+/// live under `run/` and are untouched. A failed repair keeps its private staging.
+///
+/// `None` means the tree was never prepared; an intact tree is reported unchanged.
+pub(super) fn repair_tree(
+    candidate: &Candidate,
+    pin: &TreePin,
+    _stopped: &state::Lock,
+) -> Result<Option<TreeRepair>, CandidateError> {
+    let providers = candidate.state_root.join("providers");
+    let record = providers.join(pin.record);
+    if !record.try_exists().map_err(io)? {
+        return Ok(None);
+    }
+    state::check_private_directory(&providers)?;
+    let recorded: Artifact = state::read(&record)?;
+    if recorded.version != pin.version || recorded.archive_sha256 != pin.archive_sha256 {
+        return Err(repair_refused(
             "artifact_digest_mismatch",
-            "Prepared Docker engine changed; refusing execution.",
+            "Provider preparation record does not match this executor's pin; repair refused.",
         ));
     }
-    Ok(artifact)
+    let prepared = providers.join(pin.directory);
+    let present = match fs::symlink_metadata(&prepared) {
+        Ok(metadata) if metadata.is_dir() => true,
+        Ok(_) => {
+            return Err(repair_refused(
+                "foreign_state",
+                "Prepared provider tree is not a directory; repair refused.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(io(error)),
+    };
+    let report = |repaired, retained_changed_tree| TreeRepair {
+        provider: pin.label,
+        version: recorded.version.clone(),
+        tree_sha256: recorded.tree_sha256.clone(),
+        repaired,
+        retained_changed_tree,
+    };
+    if present {
+        reject_aliased_state(&prepared)?;
+        // A tree that cannot even be hashed (for example a new special file) is changed.
+        if tree_digest(&prepared).ok().as_deref() == Some(recorded.tree_sha256.as_str()) {
+            return Ok(Some(report(false, None)));
+        }
+    }
+    let archive = retained_archive(&providers, pin)?;
+    if digest(&archive)? != pin.archive_sha256 {
+        return Err(repair_refused(
+            "artifact_digest_mismatch",
+            "Retained provider archive does not match the pinned SHA-256; repair refused.",
+        ));
+    }
+    let nonce = nonce()?;
+    let work = providers.join(format!("{}-repairing-{nonce}", pin.directory));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&work)
+        .map_err(io)?;
+    let owned = work.join(pin.archive);
+    let mut source = File::open(&archive).map_err(io)?;
+    let mut destination = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&owned)
+        .map_err(io)?;
+    std::io::copy(&mut source, &mut destination).map_err(io)?;
+    destination.sync_all().map_err(io)?;
+    drop(destination);
+    // Rehash the owned copy to close replacement between the check and extraction.
+    if digest(&owned)? != pin.archive_sha256 {
+        return Err(repair_refused(
+            "artifact_digest_mismatch",
+            "Retained provider archive changed during repair; repair staging retained.",
+        ));
+    }
+    run(
+        clean_command(Path::new("/usr/bin/tar"))
+            .arg("-xzf")
+            .arg(&owned)
+            .arg("-C")
+            .arg(&work),
+        Duration::from_secs(60),
+    )?;
+    let extracted = work.join(pin.extracted);
+    if let Some(executable) = pin.signed {
+        run(
+            clean_command(Path::new("/usr/bin/codesign"))
+                .args(["--verify", "--strict"])
+                .arg(extracted.join(executable)),
+            Duration::from_secs(10),
+        )?;
+    }
+    if tree_digest(&extracted)? != recorded.tree_sha256 {
+        return Err(repair_refused(
+            "artifact_digest_mismatch",
+            "Re-extracted provider tree does not match its recorded digest; repair staging retained.",
+        ));
+    }
+    let retained = if present {
+        let name = format!("{}-changed-{nonce}", pin.directory);
+        fs::rename(&prepared, providers.join(&name)).map_err(io)?;
+        Some(name)
+    } else {
+        None
+    };
+    fs::rename(&extracted, &prepared).map_err(io)?;
+    sync_directory(&providers)?;
+    // Only this repair's owned archive copy and its now-empty directory; never recursive.
+    let _ = fs::remove_file(&owned);
+    let _ = fs::remove_dir(&work);
+    verify_tree(candidate, pin)?;
+    Ok(Some(report(true, retained)))
 }
 
 /// Pinned standalone BuildKit client for native image builds.
@@ -411,6 +648,124 @@ fn verify_binary(candidate: &Candidate, pin: &BinaryPin) -> Result<Artifact, Can
     Ok(artifact)
 }
 
+/// Prepared-tree fixtures with nested empty directories, laid out exactly as preparation
+/// leaves state: the retained archive in staging, the tree and its record.
+#[cfg(test)]
+pub(super) mod tree_fixture {
+    use super::*;
+
+    const TEST_DIRECTORY: &str = "test-tree-1.0.0";
+    /// Empty directories, as in a guest root filesystem, that cleanup tools prune.
+    const EMPTY: [&str; 6] = [
+        "agent-rootfs/dev",
+        "agent-rootfs/proc",
+        "agent-rootfs/tmp",
+        "agent-rootfs/etc/init.d",
+        "agent-rootfs/etc/periodic/daily",
+        "agent-rootfs/etc/periodic/weekly",
+    ];
+
+    fn populate(tree: &Path) {
+        for directory in EMPTY {
+            fs::create_dir_all(tree.join(directory)).unwrap();
+        }
+        fs::create_dir_all(tree.join("lib")).unwrap();
+        fs::write(tree.join("README.txt"), b"fixture provider").unwrap();
+        fs::write(tree.join("lib/libfixture.dylib"), b"fixture library").unwrap();
+        fs::write(tree.join("smolvm-bin"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(tree.join("smolvm-bin"), fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("/sbin/init", tree.join("agent-rootfs/init")).unwrap();
+    }
+
+    fn tar(arguments: &[&std::ffi::OsStr]) {
+        run(
+            clean_command(Path::new("/usr/bin/tar")).args(arguments),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+    }
+
+    /// A pinned test archive, prepared into `candidate`; returns its pin.
+    pub(in crate::provider) fn prepare(candidate: &Candidate, scratch: &Path) -> TreePin {
+        let source = scratch.join("archive-source");
+        populate(&source.join(TEST_DIRECTORY));
+        let archive = scratch.join("fixture-release.tar.gz");
+        tar(&[
+            "-czf".as_ref(),
+            archive.as_os_str(),
+            "-C".as_ref(),
+            source.as_os_str(),
+            TEST_DIRECTORY.as_ref(),
+        ]);
+        let sha256: &'static str = Box::leak(digest(&archive).unwrap().into_boxed_str());
+        let pin = TreePin {
+            label: "Test tree",
+            version: "1.0.0",
+            archive_sha256: sha256,
+            directory: TEST_DIRECTORY,
+            extracted: TEST_DIRECTORY,
+            record: "test-tree.json",
+            staging: "test-tree-installing",
+            archive: "release.tar.gz",
+            signed: None,
+            changed: "Prepared test tree changed; refusing execution.",
+        };
+        let providers = candidate.state_root.join("providers");
+        state::private_directory(&providers).unwrap();
+        let staging = providers.join(pin.staging);
+        fs::create_dir(&staging).unwrap();
+        let retained = staging.join(pin.archive);
+        fs::copy(&archive, &retained).unwrap();
+        tar(&[
+            "-xzf".as_ref(),
+            retained.as_os_str(),
+            "-C".as_ref(),
+            staging.as_os_str(),
+        ]);
+        let extracted = staging.join(pin.extracted);
+        let artifact = Artifact {
+            version: pin.version.into(),
+            archive_sha256: sha256.into(),
+            tree_sha256: tree_digest(&extracted).unwrap(),
+        };
+        fs::rename(extracted, providers.join(pin.directory)).unwrap();
+        state::write(&providers.join(pin.record), &artifact).unwrap();
+        verify_tree(candidate, &pin).unwrap();
+        pin
+    }
+
+    /// A SmolVM tree and record under the real pins, without an archive: enough for
+    /// `verify` to pass until the tree changes.
+    pub(in crate::provider) fn prepared_smolvm(candidate: &Candidate) {
+        let providers = candidate.state_root.join("providers");
+        state::private_directory(&providers).unwrap();
+        populate(&root(candidate));
+        let artifact = Artifact {
+            version: VERSION.into(),
+            archive_sha256: ARCHIVE_SHA256.into(),
+            tree_sha256: tree_digest(&root(candidate)).unwrap(),
+        };
+        state::write(&providers.join(SMOLVM.record), &artifact).unwrap();
+        verify(candidate).unwrap();
+    }
+
+    /// Remove every empty directory below `path`, deepest first, as a cleanup tool does.
+    pub(in crate::provider) fn prune_empty_directories(path: &Path) -> usize {
+        let mut removed = 0;
+        for entry in fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                removed += prune_empty_directories(&entry.path());
+                if fs::read_dir(entry.path()).unwrap().next().is_none() {
+                    fs::remove_dir(entry.path()).unwrap();
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +783,136 @@ mod tests {
         fs::create_dir(&path).unwrap();
         path
     }
+    fn providers(candidate: &Candidate) -> PathBuf {
+        candidate.state_root.join("providers")
+    }
+    fn lease(candidate: &Candidate) -> state::Lock {
+        state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap()
+    }
+    fn repair_staging(candidate: &Candidate) -> Vec<String> {
+        fs::read_dir(providers(candidate))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("-repairing-"))
+            .collect()
+    }
+
+    #[test]
+    fn a_tree_pruned_of_empty_directories_is_repaired_from_its_retained_archive() {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        let pin = tree_fixture::prepare(&candidate, &root);
+        let prepared = providers(&candidate).join(pin.directory);
+        let record: Artifact = state::read(&providers(&candidate).join(pin.record)).unwrap();
+        assert!(tree_fixture::prune_empty_directories(&prepared) >= 6);
+        assert_eq!(
+            verify_tree(&candidate, &pin).unwrap_err().code,
+            "artifact_digest_mismatch"
+        );
+
+        let lease = lease(&candidate);
+        let repaired = repair_tree(&candidate, &pin, &lease).unwrap().unwrap();
+        assert!(repaired.repaired);
+        assert_eq!(repaired.tree_sha256, record.tree_sha256);
+        verify_tree(&candidate, &pin).unwrap();
+        assert!(prepared.join("agent-rootfs/etc/periodic/daily").is_dir());
+        // The changed tree is retained aside, never deleted.
+        let retained = providers(&candidate).join(repaired.retained_changed_tree.unwrap());
+        assert!(retained.join("README.txt").is_file());
+        assert!(!retained.join("agent-rootfs/dev").exists());
+        // The retained archive stays; this repair's own staging is gone.
+        assert!(
+            providers(&candidate)
+                .join(pin.staging)
+                .join(pin.archive)
+                .is_file()
+        );
+        assert!(repair_staging(&candidate).is_empty());
+        let after: Artifact = state::read(&providers(&candidate).join(pin.record)).unwrap();
+        assert_eq!(after.tree_sha256, record.tree_sha256);
+
+        // An intact tree is reported, not replaced.
+        let identity = fs::metadata(&prepared).unwrap().ino();
+        let again = repair_tree(&candidate, &pin, &lease).unwrap().unwrap();
+        assert!(!again.repaired);
+        assert!(again.retained_changed_tree.is_none());
+        assert_eq!(fs::metadata(&prepared).unwrap().ino(), identity);
+        drop(lease);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repair_refuses_without_a_verified_archive_or_a_matching_extraction() {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        // A tree without a preparation record was never prepared: nothing to repair.
+        let unprepared = tree_fixture::prepare(&candidate, &root);
+        fs::remove_file(providers(&candidate).join(unprepared.record)).unwrap();
+        let first = lease(&candidate);
+        assert!(
+            repair_tree(&candidate, &unprepared, &first)
+                .unwrap()
+                .is_none()
+        );
+        drop(first);
+        fs::remove_dir_all(&candidate.state_root).unwrap();
+        fs::remove_dir_all(root.join("archive-source")).unwrap();
+
+        let pin = tree_fixture::prepare(&candidate, &root);
+        let lease = lease(&candidate);
+        let prepared = providers(&candidate).join(pin.directory);
+        let retained = providers(&candidate).join(pin.staging).join(pin.archive);
+        tree_fixture::prune_empty_directories(&prepared);
+        let changed = tree_digest(&prepared).unwrap();
+
+        fs::write(&retained, b"not the pinned archive").unwrap();
+        assert_eq!(
+            repair_tree(&candidate, &pin, &lease).unwrap_err().code,
+            "artifact_digest_mismatch"
+        );
+        fs::remove_file(&retained).unwrap();
+        assert_eq!(
+            repair_tree(&candidate, &pin, &lease).unwrap_err().code,
+            "provider_repair_unavailable"
+        );
+        std::os::unix::fs::symlink(root.join("fixture-release.tar.gz"), &retained).unwrap();
+        assert_eq!(
+            repair_tree(&candidate, &pin, &lease).unwrap_err().code,
+            "foreign_state"
+        );
+        fs::remove_file(&retained).unwrap();
+        fs::copy(root.join("fixture-release.tar.gz"), &retained).unwrap();
+        assert!(repair_staging(&candidate).is_empty());
+
+        // A record no extraction can match keeps the changed tree and the repair staging.
+        let record = providers(&candidate).join(pin.record);
+        let mut recorded: Artifact = state::read(&record).unwrap();
+        let original = recorded.tree_sha256.clone();
+        recorded.tree_sha256 = "0".repeat(64);
+        fs::remove_file(&record).unwrap();
+        state::write(&record, &recorded).unwrap();
+        assert_eq!(
+            repair_tree(&candidate, &pin, &lease).unwrap_err().code,
+            "artifact_digest_mismatch"
+        );
+        assert_eq!(tree_digest(&prepared).unwrap(), changed);
+        assert_eq!(repair_staging(&candidate).len(), 1);
+
+        // A record for another version is refused before any extraction.
+        recorded.tree_sha256 = original;
+        recorded.version = "1.0.1".into();
+        fs::remove_file(&record).unwrap();
+        state::write(&record, &recorded).unwrap();
+        assert_eq!(
+            repair_tree(&candidate, &pin, &lease).unwrap_err().code,
+            "artifact_digest_mismatch"
+        );
+        assert_eq!(repair_staging(&candidate).len(), 1);
+        assert_eq!(tree_digest(&prepared).unwrap(), changed);
+        drop(lease);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn published_pin_manifest_matches_the_executor() {
         let pins: serde_json::Value =

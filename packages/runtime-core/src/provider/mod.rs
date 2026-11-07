@@ -7,6 +7,7 @@ pub mod build_policy;
 pub mod build_scan;
 mod config_audit;
 mod dependency_socket;
+mod go_json;
 pub use bridge::BridgeIntent;
 pub use dependency_socket::quiescent_recovery as quiescent_dependency_socket_recovery;
 pub use dependency_socket::recovery as dependency_socket_recovery;

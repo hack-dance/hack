@@ -1609,6 +1609,98 @@ fn stored_onbuild_triggers_are_detected_and_malformed_configs_refuse() {
 }
 
 #[test]
+fn onbuild_triggers_are_found_under_any_key_case_the_engine_accepts() {
+    // The engine's Go decoder matches field names case-insensitively.
+    for config in [
+        r#"{"config":{"onbuild":["ADD . /src"]}}"#,
+        r#"{"config":{"ONBUILD":["ADD . /src"]}}"#,
+        r#"{"config":{"oNbUiLd":["ADD . /src"]}}"#,
+        r#"{"CONFIG":{"OnBuild":["ADD . /src"]}}"#,
+        r#"{"Config":{"onBuild":["ADD . /src"]}}"#,
+        r#"{"container_config":{"OnBuild":["ADD . /src"]}}"#,
+        r#"{"Container_Config":{"onbuild":["ADD . /src"]}}"#,
+        r#"{"OnBuild":["ADD . /src"],"config":{}}"#,
+    ] {
+        assert!(declares_onbuild(config.as_bytes()).unwrap(), "{config}");
+    }
+    for config in [
+        r#"{"config":{"onbuild":[]}}"#,
+        r#"{"config":{"ONBUILD":null},"container_config":{"OnBuild":[]}}"#,
+        r#"{"config":{"Env":["OnBuild=x"],"onbuilds":["x"]}}"#,
+    ] {
+        assert!(!declares_onbuild(config.as_bytes()).unwrap(), "{config}");
+    }
+}
+
+#[test]
+fn onbuild_fields_named_more_than_once_or_malformed_refuse() {
+    // The engine keeps the last of several matching keys; a check here could see
+    // another, so any repetition, exact or by case, fails closed.
+    for config in [
+        r#"{"config":{"OnBuild":[],"onbuild":["ADD . /src"]}}"#,
+        r#"{"config":{"OnBuild":["ADD . /src"],"OnBuild":[]}}"#,
+        r#"{"config":{"OnBuild":[]},"Config":{"OnBuild":["ADD . /src"]}}"#,
+        r#"{"config":{},"config":{"OnBuild":["ADD . /src"]}}"#,
+        r#"{"container_config":{},"CONTAINER_CONFIG":{}}"#,
+        r#"{"config":{"onbuild":"ADD . /src"}}"#,
+        r#"{"config":"ADD . /src"}"#,
+        r#"["not an object"]"#,
+    ] {
+        let error = declares_onbuild(config.as_bytes()).unwrap_err();
+        assert_eq!(error.code, "registry_image", "{config}");
+    }
+}
+
+#[test]
+fn manifest_members_must_be_spelled_exactly_once() {
+    let parse = |text: &str| parse_manifest(text.as_bytes(), &digest(text.as_bytes())).map(drop);
+    let descriptor = format!(
+        r#"{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:{}","size":2,"platform":{{"os":"linux","architecture":"arm64"}}}}"#,
+        "a".repeat(64)
+    );
+    let index = format!(r#"{{"schemaVersion":2,"manifests":[{descriptor}]}}"#);
+    assert!(parse(&index).is_ok());
+    for variant in [
+        index.replace("\"manifests\"", "\"Manifests\""),
+        index.replace("\"schemaVersion\"", "\"SchemaVersion\""),
+        index.replace("\"digest\"", "\"Digest\""),
+        index.replace("\"architecture\"", "\"ARCHITECTURE\""),
+        index.replace(r#""os":"linux""#, r#""os":"linux","OS":"windows""#),
+        format!(r#"{{"schemaVersion":2,"manifests":[{descriptor}],"MANIFESTS":[]}}"#),
+        format!(
+            r#"{{"schemaVersion":2,"manifests":[{descriptor}],"config":{descriptor},"Config":{descriptor}}}"#
+        ),
+    ] {
+        let error = parse(&variant).unwrap_err();
+        assert!(error.message.contains("exact case"), "{variant}: {error:?}");
+    }
+}
+
+#[test]
+fn image_platform_fields_are_read_like_the_engine_and_refuse_repetition() {
+    let native = |config: &str| config_platform(config.as_bytes(), PlatformPolicy::Native, None);
+    // A case variant the engine accepts is read, not missed.
+    assert_eq!(
+        native(r#"{"OS":"linux","Architecture":"arm64"}"#).unwrap(),
+        ImagePlatform::LinuxArm64
+    );
+    assert!(native(r#"{"OS":"linux","Architecture":"amd64"}"#).is_err());
+    // A repeated field could mean another platform to the engine: refused.
+    for config in [
+        r#"{"os":"linux","architecture":"arm64","Architecture":"amd64"}"#,
+        r#"{"os":"linux","architecture":"arm64","architecture":"amd64"}"#,
+        r#"{"os":"linux","OS":"windows","architecture":"arm64"}"#,
+        r#"{"os":"linux","architecture":"arm64","variant":"v8","VARIANT":"v7"}"#,
+    ] {
+        let error = native(config).unwrap_err();
+        assert!(
+            error.message.contains("more than once"),
+            "{config}: {error:?}"
+        );
+    }
+}
+
+#[test]
 fn build_bases_accept_only_docker_hub_references() {
     let named = |value: &str| match normalize(value).unwrap() {
         ImageReference::Named(named) => named,

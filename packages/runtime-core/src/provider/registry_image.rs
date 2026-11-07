@@ -25,6 +25,7 @@
 //!   published. Archive and expansion sizes stay within the policy's budgets.
 //! - **Platform.** One unambiguous Linux ARM64 image by default; an explicit platform
 //!   policy may select Linux AMD64 instead (see `image_platform`).
+use super::go_json::GoJson;
 use super::image_load;
 use super::image_platform::{ImagePlatform, PlatformPolicy};
 use super::image_policy::ImagePolicy;
@@ -423,10 +424,67 @@ struct Manifest {
     #[serde(default)]
     layers: Vec<Descriptor>,
 }
+/// Refuse an object whose member for any of `fields` is not spelled exactly, or is
+/// named more than once. The engine's Go decoder also accepts case variants and keeps
+/// the last of repeated keys, while the exact-name parse below would miss or reject
+/// them; refusing keeps both reading the same member.
+fn canonical_members(value: &GoJson, fields: &[&str]) -> Result<(), CandidateError> {
+    let GoJson::Object(members) = value else {
+        return Ok(());
+    };
+    for field in fields {
+        let mut matching = members
+            .iter()
+            .filter(|(key, _)| super::go_json::names_field(key, field));
+        let first = matching.next();
+        if matching.next().is_some() || first.is_some_and(|(key, _)| key != field) {
+            return Err(error(
+                "Registry manifest member names are repeated or not in their exact case.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_descriptor(value: &GoJson) -> Result<(), CandidateError> {
+    canonical_members(value, &["digest", "size", "mediaType", "platform", "urls"])?;
+    if let Ok(Some(platform)) = value.field("platform") {
+        canonical_members(platform, &["os", "architecture", "variant"])?;
+    }
+    Ok(())
+}
+
+/// The manifest or index members this module reads, checked for exact spelling.
+fn canonical_manifest(bytes: &[u8]) -> Result<(), CandidateError> {
+    let document = GoJson::parse(bytes).map_err(|_| error("Invalid registry manifest."))?;
+    canonical_members(
+        &document,
+        &[
+            "schemaVersion",
+            "mediaType",
+            "manifests",
+            "config",
+            "layers",
+        ],
+    )?;
+    for list in ["manifests", "layers"] {
+        if let Ok(Some(GoJson::Array(descriptors))) = document.field(list) {
+            for descriptor in descriptors {
+                canonical_descriptor(descriptor)?;
+            }
+        }
+    }
+    if let Ok(Some(config)) = document.field("config") {
+        canonical_descriptor(config)?;
+    }
+    Ok(())
+}
+
 fn parse_manifest(bytes: &[u8], expected: &str) -> Result<Manifest, CandidateError> {
     if bytes.len() > MAX_METADATA || digest(bytes) != expected {
         return Err(error("Registry manifest digest or size mismatch."));
     }
+    canonical_manifest(bytes)?;
     let m: Manifest =
         serde_json::from_slice(bytes).map_err(|_| error("Invalid registry manifest."))?;
     if m.schema_version != 2 {
@@ -1266,8 +1324,7 @@ fn config_platform(
     policy: PlatformPolicy,
     indexed: Option<ImagePlatform>,
 ) -> Result<ImagePlatform, CandidateError> {
-    let config: serde_json::Value =
-        serde_json::from_slice(config_bytes).map_err(|_| error("Invalid image configuration."))?;
+    let config = platform_fields(config_bytes)?;
     let allowed: &[ImagePlatform] = match &indexed {
         Some(platform) => std::slice::from_ref(platform),
         None => policy.candidates(),
@@ -1370,15 +1427,56 @@ pub fn resolve_build_base(
     })
 }
 
-/// Whether an image configuration carries stored `ONBUILD` triggers.
+fn ambiguous(_: super::go_json::Ambiguous) -> CandidateError {
+    error(
+        "Image configuration names one field more than once (keys differing only in case count as the same field).",
+    )
+}
+
+/// The `os`, `architecture` and `variant` members of an image configuration as the
+/// engine reads them (see [`super::go_json`]), as a document for
+/// [`ImagePlatform::matches_config`]. A member named more than once refuses.
+pub(super) fn platform_fields(config_bytes: &[u8]) -> Result<serde_json::Value, CandidateError> {
+    let config = GoJson::parse(config_bytes).map_err(|_| error("Invalid image configuration."))?;
+    if !matches!(config, GoJson::Object(_)) {
+        return Err(error("Invalid image configuration."));
+    }
+    let mut fields = serde_json::Map::new();
+    for name in ["os", "architecture", "variant"] {
+        if let Some(value) = config.field(name).map_err(ambiguous)? {
+            fields.insert(name.to_owned(), value.to_value());
+        }
+    }
+    Ok(serde_json::Value::Object(fields))
+}
+
+/// Whether an image configuration carries stored `ONBUILD` triggers, read as the
+/// engine and BuildKit read it: keys match case-insensitively (`onbuild`, `ONBUILD`), at
+/// the top level and under `config` and the legacy `container_config`. A field named
+/// more than once, or holding anything but an array or `null`, refuses.
 fn declares_onbuild(config_bytes: &[u8]) -> Result<bool, CandidateError> {
-    let config: serde_json::Value =
-        serde_json::from_slice(config_bytes).map_err(|_| error("Invalid image configuration."))?;
-    Ok(match &config["config"]["OnBuild"] {
-        serde_json::Value::Null => false,
-        serde_json::Value::Array(triggers) => !triggers.is_empty(),
-        _ => return Err(error("Invalid image configuration.")),
-    })
+    let document =
+        GoJson::parse(config_bytes).map_err(|_| error("Invalid image configuration."))?;
+    if !matches!(document, GoJson::Object(_)) {
+        return Err(error("Invalid image configuration."));
+    }
+    let mut scopes = vec![&document];
+    for name in ["config", "container_config"] {
+        match document.field(name).map_err(ambiguous)? {
+            None | Some(GoJson::Null) => {}
+            Some(object @ GoJson::Object(_)) => scopes.push(object),
+            Some(_) => return Err(error("Invalid image configuration.")),
+        }
+    }
+    let mut declared = false;
+    for scope in scopes {
+        match scope.field("OnBuild").map_err(ambiguous)? {
+            None | Some(GoJson::Null) => {}
+            Some(GoJson::Array(triggers)) => declared |= !triggers.is_empty(),
+            Some(_) => return Err(error("Invalid image configuration.")),
+        }
+    }
+    Ok(declared)
 }
 
 fn layer_extension(media_type: &str) -> Result<&'static str, CandidateError> {

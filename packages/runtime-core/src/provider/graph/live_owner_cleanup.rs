@@ -34,6 +34,33 @@ pub(super) fn current_completion(
     Ok(intent.complete_sha256.as_deref() == Some(complete.as_str()))
 }
 
+/// The original receipt digest of a same-boot recovery whose durable intent exists but
+/// whose recovery has not finished (cleanup still pending, or the stale publication not
+/// yet retired), so an interrupted `hack down --recover` resumes it by its own selection.
+/// Selection only: `recover_live_owner` revalidates the intent against current evidence.
+pub(super) fn resumable_selection(
+    root: &Path,
+    receipt: &Receipt,
+    publication_present: bool,
+) -> Result<Option<String>, CandidateError> {
+    if !exists(&root.join(FILE))? {
+        return Ok(None);
+    }
+    let intent: Intent = state::read(&root.join(FILE))?;
+    let current = digest(receipt)?;
+    Ok(unfinished(
+        intent.complete_sha256.as_deref(),
+        &current,
+        publication_present,
+    )
+    .then_some(intent.original_sha256))
+}
+/// Cleanup not yet complete, or complete for this exact receipt with the stale
+/// publication still present. A completed recovery of an older receipt is history.
+fn unfinished(complete: Option<&str>, current: &str, publication_present: bool) -> bool {
+    complete.is_none_or(|complete| publication_present && complete == current)
+}
+
 /// Select an independent data-removal request from the exact completed same-boot
 /// generation. A retry pins the entire committed proof, not just receipt phases.
 pub(super) fn removal_selection(
@@ -650,6 +677,20 @@ pub(super) fn retire(
 }
 
 #[cfg(test)]
+mod resumable_tests {
+    #[test]
+    fn only_an_unfinished_recovery_is_resumed() {
+        // Interrupted after the cleanup intent: resumed whatever the receipt shows.
+        assert!(super::unfinished(None, "a", true));
+        assert!(super::unfinished(None, "a", false));
+        // Cleanup completed for this receipt but the publication was not retired.
+        assert!(super::unfinished(Some("a"), "a", true));
+        // Fully retired, or a completed recovery of an older generation: history.
+        assert!(!super::unfinished(Some("a"), "a", false));
+        assert!(!super::unfinished(Some("a"), "b", true));
+    }
+}
+#[cfg(test)]
 mod tests {
     use super::*;
     fn receipt() -> Receipt {
@@ -811,6 +852,43 @@ mod tests {
         );
         value
     }
+    #[test]
+    fn an_interrupted_recovery_is_selected_by_its_original_receipt_until_retired() {
+        let fixture = super::super::tests::Fixture::new();
+        let mut current = receipt();
+        // No recovery intent: nothing to resume (an unadmitted exit stays refused).
+        assert_eq!(
+            resumable_selection(&fixture.0, &current, true).unwrap(),
+            None
+        );
+        let mut intent = completed(receipt());
+        intent.original_sha256 = "1".repeat(64);
+        intent.complete_sha256 = None;
+        state::write(&fixture.0.join(FILE), &intent).unwrap();
+        current.phase = "cleanup-intent".into();
+        assert_eq!(
+            resumable_selection(&fixture.0, &current, true).unwrap(),
+            Some("1".repeat(64))
+        );
+        current.phase = "stopped-data-retained".into();
+        intent.complete_sha256 = Some(digest(&current).unwrap());
+        fs::remove_file(fixture.0.join(FILE)).unwrap();
+        state::write(&fixture.0.join(FILE), &intent).unwrap();
+        assert_eq!(
+            resumable_selection(&fixture.0, &current, true).unwrap(),
+            Some("1".repeat(64))
+        );
+        assert_eq!(
+            resumable_selection(&fixture.0, &current, false).unwrap(),
+            None
+        );
+        current.owner = "9".repeat(32);
+        assert_eq!(
+            resumable_selection(&fixture.0, &current, true).unwrap(),
+            None
+        );
+    }
+
     fn completed(original: Receipt) -> Intent {
         let mut stopped = original.clone();
         stopped.phase = "stopped-data-retained".into();

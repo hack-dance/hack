@@ -32,11 +32,17 @@ fn published_owner_refused(candidate: &Candidate, run: &str) -> CandidateError {
         _ => refused(),
     }
 }
+/// A ready graph, or a same-boot dead-owner recovery of one that was interrupted:
+/// both are stopped by `hack down --recover`.
 fn exited_ready(candidate: &Candidate, run: &str) -> bool {
     Owner::load(candidate)
         .ok()
         .and_then(|owner| load_at(directory(candidate, run).ok()?, run, &owner.token).ok())
-        .is_some_and(|(receipt, _)| receipt.phase == "ready-observed")
+        .is_some_and(|(receipt, root)| {
+            receipt.phase == "ready-observed"
+                || super::live_owner_cleanup::resumable_selection(&root, &receipt, true)
+                    .is_ok_and(|selected| selected.is_some())
+        })
 }
 
 fn no_file(root: &Path, name: &str) -> Result<(), CandidateError> {

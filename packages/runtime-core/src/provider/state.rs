@@ -110,6 +110,7 @@ impl Lock {
         Self::from_file(file)
     }
 
+    #[cfg(target_os = "macos")]
     /// [`Self::acquire_existing`], waiting up to `wait` for another holder, such as the
     /// short read-only inspection behind `hack ps`, to release the lock. Only acquisition
     /// is retried: nothing is created or admitted while waiting, and on expiry the
@@ -821,6 +822,7 @@ mod tests {
         assert!(Lock::acquire(&root).is_ok());
         fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn waiting_existing_acquisition_outlasts_a_brief_holder_and_refuses_a_lasting_one() {
         let root = fixture();

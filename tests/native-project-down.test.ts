@@ -1061,6 +1061,7 @@ function ownerSelection(foreground: string, phase = "ready-observed") {
     phase,
     receipt_sha256: receiptSha,
     foreground,
+    live_owner_recovery: null as string | null,
   };
 }
 
@@ -1205,6 +1206,11 @@ test.each([
     text: "cannot confirm this run's foreground owner state",
   },
   {
+    name: "a malformed recovery selection",
+    selection: { ...ownerSelection("exited"), live_owner_recovery: "short" },
+    text: "cannot confirm this run's foreground owner state",
+  },
+  {
     name: "a malformed receipt digest",
     selection: { ...ownerSelection("exited"), receipt_sha256: "short" },
     text: "cannot confirm this run's foreground owner state",
@@ -1285,5 +1291,59 @@ test("down --recover names the exact frontend recovery when the owning frontend 
   expect(recovered).toBe(true);
   // An exited frontend is not awaited for the ordinary finalization budget.
   expect(performance.now() - started).toBeLessThan(10_000);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("down --recover resumes an interrupted dead-owner recovery by its original receipt", async () => {
+  const opts = await fixture();
+  const original = "1".repeat(64);
+  const events: string[] = [];
+  let recovered = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    before: async () => {
+      events.push("before");
+    },
+    retireHostProcesses: async () => {
+      events.push("retire-host");
+    },
+    invoke: async (request) => {
+      events.push(request.args[1]!);
+      if (request.args[1] === "foreground-owner") {
+        // Interrupted after its cleanup intent: the receipt is no longer ready.
+        return {
+          ...ownerSelection("exited", "cleanup-intent"),
+          live_owner_recovery: original,
+        };
+      }
+      if (request.args[1] === "recover-live-owner") {
+        expect(request.args).toContain(original);
+        expect(request.args).not.toContain(receiptSha);
+        recovered = true;
+        return {
+          run: run.run,
+          phase: "stopped-data-retained",
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+        };
+      }
+      const value = snapshot(recovered);
+      if (!recovered) {
+        value.receipt.phase = "cleanup-intent";
+      }
+      return value;
+    },
+  });
+  expect(result.status).toBe("stopped");
+  // The resumed stop runs no before hook and requests no ordinary cleanup.
+  expect(events).toEqual([
+    "inspect",
+    "foreground-owner",
+    "recover-live-owner",
+    "inspect",
+    "retire-host",
+  ]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });

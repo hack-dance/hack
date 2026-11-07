@@ -105,6 +105,8 @@ type ForegroundOwnerSelection = {
   readonly phase: string;
   readonly receiptSha256: string;
   readonly foreground: "absent" | "running" | "exited" | "uncertain";
+  /** Original receipt digest of an interrupted same-boot dead-owner recovery. */
+  readonly liveOwnerRecovery: string | null;
 };
 
 function ownerRecoveryRefused(): Error {
@@ -134,7 +136,12 @@ async function selectForegroundOwner(opts: {
     typeof value.receipt_sha256 !== "string" ||
     !RECEIPT_SHA.test(value.receipt_sha256) ||
     typeof value.foreground !== "string" ||
-    !FOREGROUND_STATES.has(value.foreground)
+    !FOREGROUND_STATES.has(value.foreground) ||
+    !(
+      value.live_owner_recovery === null ||
+      (typeof value.live_owner_recovery === "string" &&
+        RECEIPT_SHA.test(value.live_owner_recovery))
+    )
   ) {
     throw ownerRecoveryRefused();
   }
@@ -142,6 +149,7 @@ async function selectForegroundOwner(opts: {
     phase: value.phase,
     receiptSha256: value.receipt_sha256,
     foreground: value.foreground as ForegroundOwnerSelection["foreground"],
+    liveOwnerRecovery: value.live_owner_recovery,
   };
 }
 
@@ -183,6 +191,17 @@ async function requestOwnedStop(opts: {
     }
     return;
   }
+  await recoverLiveOwner({ ...opts, expectReceipt: selection.receiptSha256 });
+}
+
+/** Same-boot dead-owner recovery of the exact selected receipt; it resumes its own intent. */
+async function recoverLiveOwner(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly expectReceipt: string;
+}): Promise<void> {
   const result = await opts.invoke({
     runtime: opts.runtime,
     cwd: opts.projectRoot,
@@ -192,7 +211,7 @@ async function requestOwnedStop(opts: {
       "--run-id",
       opts.run.run,
       "--expect-receipt",
-      selection.receiptSha256,
+      opts.expectReceipt,
       "--json",
     ],
     timeoutMs: 590_000,
@@ -214,6 +233,11 @@ function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
     throw new ClosedCliError(
       "Native down --recover found a running foreground owner for this run. Stop it with Ctrl-C in its terminal, or run hack down without --recover. Nothing was changed."
     );
+  }
+  // An interrupted recovery resumes by its own selection, whatever the receipt
+  // phase or partial publication retirement it left behind.
+  if (selection.liveOwnerRecovery !== null) {
+    return;
   }
   if (selection.foreground === "uncertain") {
     throw ownerRecoveryRefused();
@@ -286,7 +310,7 @@ export async function nativeProjectDown(opts: {
       run: run.run,
       invoke,
     });
-  const initial = await inspect();
+  let initial = await inspect();
   verify(initial, run, false);
   const selection = opts.recover
     ? await selectForegroundOwner({
@@ -298,6 +322,19 @@ export async function nativeProjectDown(opts: {
     : undefined;
   if (selection) {
     requireRecoverableOwner(selection);
+  }
+  if (selection?.liveOwnerRecovery) {
+    // Finish the interrupted recovery first; the stopped path below then retires
+    // host processes and runs only journaled owed hooks, never replaying a stop.
+    await recoverLiveOwner({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run,
+      invoke,
+      expectReceipt: selection.liveOwnerRecovery,
+    });
+    initial = await inspect();
+    verify(initial, run, false);
   }
   const finalization = opts.deferFinalization
     ? undefined

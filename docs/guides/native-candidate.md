@@ -662,6 +662,30 @@ Provider setup is separate and explicit. Obtain the exact archives identified in
 ./hack-native --candidate-root /absolute/private/candidate-home runtime probe --json
 ```
 
+Preparation keeps each archive it extracted (`providers/smolvm-installing/release.tar.gz`
+and `providers/docker-installing/release.tgz`). If something outside Hack changes a
+prepared tree, for example a cleanup or backup tool that prunes empty directories,
+every start refuses with `artifact_digest_mismatch` and the message names the repair.
+A stopped runtime's `runtime status` and `runtime down` still work, because they run
+nothing from the tree, so an installer quiescence check is not blocked. To repair the
+tree, stop the runtime and run:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime repair-provider-tree --json
+```
+
+The repair holds the provider lock and requires a stopped (or uninitialized) runtime.
+It requires the preparation record to match this executor's pins and the kept archive
+to be an owned regular file with the pinned SHA-256. It then copies and hashes the
+archive again, extracts it, checks the code signature (SmolVM), and requires the fresh
+tree to match the digest recorded at preparation. Only then does it rename the changed
+tree aside as `providers/<tree>-changed-<id>` and put the fresh tree in its place. It
+keeps the changed tree for inspection and never deletes it; remove it yourself once
+you no longer need it. Runtime state, disks and volumes under `run/` are not touched.
+An intact tree is reported with `repaired: false`. A repair that fails a check changes
+no tree and keeps its private `-repairing-` staging directory. Without a kept archive the repair
+refuses (`provider_repair_unavailable`); prepare a fresh candidate home instead.
+
 The pins also name a BuildKit client (`buildx`, `darwin-arm64`) for native image
 builds. Prepare it before using `HACK_NATIVE_BUILDS=1`; it is optional otherwise:
 

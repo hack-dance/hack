@@ -176,7 +176,9 @@ pub(super) fn observed_volumes_with(
         }
         if !plan_reconcile::retained_volume(resource) {
             // Never created: it holds no data, and an existing name is not adopted.
-            if observe(resource)?.is_some() {
+            // A not-yet-selected dependency cache is shared and content-addressed:
+            // admission adopts it by labels or creates it, as a fresh graph does.
+            if resource.cache.is_none() && observe(resource)?.is_some() {
                 return Err(error(
                     "graph_resource_exists",
                     "A never-created volume name already resolves; it will not be adopted.",
@@ -373,19 +375,20 @@ fn restore_inputs(
     #[cfg(not(target_os = "macos"))]
     let source_receipt = &receipt;
     let ordinary_source = if reconcile.is_some() {
-        // Exactly what a fresh admission of this review would select. Caches are
-        // not eligible here, so no retained cache publication may be named.
-        if options.source_revision.is_some() || options.live_source {
+        // Exactly what a fresh admission of this review would select: dependency
+        // caches name a publication that must match the current project contents
+        // (verified by the same mode checks); other graphs name none.
+        if options.live_source {
             return Err(error(
                 "graph_plan_reconcile",
-                "Reconciliation selects no retained cache publication or live source.",
+                "Reconciliation selects no live source.",
             ));
         }
         source::prepare_mode(
             candidate,
             &engine,
             &inputs.review.plan,
-            None,
+            options.source_revision,
             false,
             options.shared_source,
         )?
@@ -510,7 +513,7 @@ fn restore_inputs(
                     "Retained volume is missing; restore will not recreate it.",
                 ));
             }
-            if !plan_reconcile::retained_volume(resource) && present {
+            if !plan_reconcile::retained_volume(resource) && resource.cache.is_none() && present {
                 return Err(error(
                     "graph_resource_exists",
                     "A never-created volume name already resolves; it will not be adopted.",

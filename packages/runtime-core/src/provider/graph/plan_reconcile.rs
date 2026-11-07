@@ -13,16 +13,34 @@
 //!   (Compose also keeps project volumes of removed declarations); explicit
 //!   data removal still reaches it;
 //! * containers and networks of removed services are dropped from the receipt only
-//!   because their absence was confirmed before this projection.
+//!   because their absence was confirmed before this projection;
+//! * a dependency cache whose freshly resolved identity equals the recorded one is
+//!   kept with its provenance. Its identity binds only the initializer's own
+//!   definition, cache declaration, image and input files, so edits to other
+//!   services keep it. A changed identity selects that identity's shared cache
+//!   exactly as a fresh admission would (adopt by labels or create, then the
+//!   initializer runs); the old cache is shared, never run-owned data, so only
+//!   this run's reference to it is released. A retained run-owned volume is never
+//!   reselected as a cache.
 //!
 //! Ownership never moves: run, owner, namespace and the ownership plan recorded on
 //! every label are unchanged, so another instance's data cannot be selected.
-//! Dependency caches, live source and source-device rebinding keep their narrower
-//! dedicated proofs and are not eligible here.
+//! Live source, a cache scope carried across a source-device rebind and pending
+//! initializer cache-release effects keep their narrower dedicated proofs and are
+//! not eligible here.
 use super::*;
+use crate::error::PlanChangeField;
 
 fn refused(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     error("graph_plan_reconcile", message)
+}
+
+/// Run-owned data is never reselected as a shared, content-addressed cache.
+fn cache_over_retained_data(service: &str) -> CandidateError {
+    refused(
+        "A retained named volume is now declared as a dependency cache; its data was not reselected as a shared cache.",
+    )
+    .with_plan_change(service, PlanChangeField::DependencyCacheVolume)
 }
 
 /// Retained named data is any recorded volume that may have been created. A
@@ -45,45 +63,51 @@ fn active_volume_keys(plan: &project::PlanData) -> BTreeSet<String> {
         .collect()
 }
 
-/// Whether the plan or receipt uses machinery that has its own narrower proof.
-fn eligible(receipt: &Receipt, plan: &project::PlanData) -> bool {
+/// Whether the receipt uses machinery that has its own narrower proof.
+fn eligible(receipt: &Receipt) -> bool {
     receipt.normalized_input.is_some()
         && receipt.initializer_cache_release.is_empty()
-        && receipt
-            .resources
-            .values()
-            .all(|resource| resource.cache.is_none() && resource.cache_provenance.is_none())
         && receipt
             .source
             .as_ref()
             .is_none_or(|binding| binding.cache_scope.is_none() && binding.live.is_none())
-        && plan
-            .services
-            .values()
-            .all(|service| !service.active || service.dependency_cache.is_none())
 }
 
-/// The ordinary strict replay derives volume names from the sorted declared set.
+/// The ordinary strict replay derives run-owned volume names from the sorted
+/// declared set (a dependency cache takes an index but keeps its content name).
 /// Once a reconciliation reattached data out of that order, or retains data no
 /// longer declared, only this projection can restore the graph again.
+/// A cache with a writable consumer is scoped to this instance; a receipt recorded
+/// before that scoping names a shared cache that may hold another worktree's
+/// writes. Such graphs always take this path, which keeps the cache only when its
+/// freshly resolved instance-scoped identity equals the recorded binding exactly.
 fn ordinary_layout(receipt: &Receipt, plan: &project::PlanData) -> bool {
+    let scoped = dependency_cache::instance_scoped_volumes(plan);
+    if receipt.resources.values().any(|resource| {
+        resource.kind == Kind::Volume && resource.cache.is_some() && scoped.contains(&resource.key)
+    }) {
+        return false;
+    }
     let declared = active_volume_keys(plan);
     let recorded = receipt
         .resources
         .values()
         .filter(|resource| resource.kind == Kind::Volume)
-        .map(|resource| (resource.key.clone(), resource.name.clone()))
+        .map(|resource| (resource.key.clone(), resource))
         .collect::<BTreeMap<_, _>>();
     recorded.len() == declared.len()
         && declared.iter().enumerate().all(|(index, key)| {
-            recorded.get(key) == Some(&format!("{}{index}", volume_prefix(&receipt.run)))
+            recorded.get(key).is_some_and(|resource| {
+                resource.cache.is_some()
+                    || resource.name == format!("{}{index}", volume_prefix(&receipt.run))
+            })
         })
 }
 
 /// Selects reconciliation for a reviewed plan that the strict replay path cannot
-/// restore. Unchanged reviews with the ordinary layout keep strict replay;
-/// graphs with dependency caches, live source or a pending source-device rebind
-/// keep their dedicated hostname/shared-source proofs.
+/// restore. Unchanged reviews with the ordinary layout keep strict replay; live
+/// source, a carried cache scope or a pending source-device rebind keep their
+/// dedicated hostname/shared-source proofs.
 pub(super) fn applies(
     receipt: &Receipt,
     plan_id: &str,
@@ -92,7 +116,7 @@ pub(super) fn applies(
     source_rebind: bool,
 ) -> bool {
     !source_rebind
-        && eligible(receipt, plan)
+        && eligible(receipt)
         && !(receipt.plan_id == plan_id
             && receipt.normalized_input.as_ref() == Some(next)
             && ordinary_layout(receipt, plan))
@@ -126,9 +150,9 @@ pub(super) fn prepare(
         .normalized_input
         .clone()
         .ok_or_else(|| refused("Only normalized graphs can be reconciled."))?;
-    if !eligible(receipt, plan) {
+    if !eligible(receipt) {
         return Err(refused(
-            "Dependency caches, live source and cache-scoped source use their dedicated restore proofs.",
+            "Live source, a carried cache scope and pending initializer cache release use their dedicated restore proofs.",
         ));
     }
     if !next.matches_plan(plan)
@@ -156,15 +180,29 @@ pub(super) fn prepare(
         if resource.kind != Kind::Volume {
             continue;
         }
-        if !resource
-            .name
-            .strip_prefix(&prefix)
-            .is_some_and(|index| index.parse::<usize>().is_ok_and(|n| n < 64))
-            || !matches!(resource.phase.as_str(), "created" | "reserved")
-        {
+        let owned_name = resource.cache.as_ref().map_or_else(
+            || {
+                resource
+                    .name
+                    .strip_prefix(&prefix)
+                    .is_some_and(|index| index.parse::<usize>().is_ok_and(|n| n < 64))
+            },
+            |cache| cache.valid() && resource.name == cache.name(),
+        );
+        if !owned_name || !matches!(resource.phase.as_str(), "created" | "reserved") {
             return Err(refused(
                 "Retained data is not this run's settled owned volume; it was not reattached.",
             ));
+        }
+    }
+    for (service, declared) in plan.services.iter().filter(|(_, service)| service.active) {
+        if let Some(cache) = &declared.dependency_cache
+            && receipt
+                .resources
+                .get(&format!("volume:{}", cache.volume))
+                .is_some_and(|old| old.cache.is_none() && retained_volume(old))
+        {
+            return Err(cache_over_retained_data(service));
         }
     }
     Ok(Verified {
@@ -219,11 +257,14 @@ impl Verified {
         if !self.matches_receipt(receipt) || prepared.namespace != receipt.namespace {
             return Err(refused("Reconciliation ownership changed."));
         }
+        config::retain_recorded_legacy_caches(prepared, receipt);
         let prefix = volume_prefix(&receipt.run);
+        // Run-owned retained data. Dependency caches are shared, content-addressed
+        // volumes selected separately below; they are never reattached as data.
         let retained = receipt
             .resources
             .iter()
-            .filter(|(_, resource)| retained_volume(resource))
+            .filter(|(_, resource)| retained_volume(resource) && resource.cache.is_none())
             .collect::<BTreeMap<_, _>>();
         let mut used = retained
             .values()
@@ -236,12 +277,42 @@ impl Verified {
                 resources.insert(key.clone(), resource.clone());
                 continue;
             }
-            if resource.cache.is_some() {
-                return Err(refused(
-                    "Dependency cache volumes use their dedicated restore proof.",
-                ));
-            }
-            let selected = if let Some(old) = retained.get(key) {
+            let selected = if let Some(cache) = &resource.cache {
+                if retained.contains_key(key) {
+                    let service = prepared
+                        .cache_initializers
+                        .iter()
+                        .find(|(_, volume)| *volume == &resource.key)
+                        .map_or(resource.key.as_str(), |(service, _)| service.as_str());
+                    return Err(cache_over_retained_data(service));
+                }
+                match receipt.resources.get(key) {
+                    // Same identity: keep the cache and its provenance fence.
+                    Some(old)
+                        if old.cache.as_ref() == Some(cache)
+                            && old.name == resource.name
+                            && matches!(old.phase.as_str(), "created" | "reserved") =>
+                    {
+                        let mut kept = old.clone();
+                        if let Some(provenance) = kept.cache_provenance.as_mut() {
+                            provenance.retain_initializers(|service| {
+                                prepared
+                                    .resources
+                                    .contains_key(&format!("container:{service}"))
+                            });
+                        }
+                        kept
+                    }
+                    // New or changed identity: fresh-admission selection of the
+                    // shared cache; the recorded reference (if any) is released.
+                    _ => Resource {
+                        id: None,
+                        cache_provenance: None,
+                        phase: "reserved".into(),
+                        ..resource.clone()
+                    },
+                }
+            } else if let Some(old) = retained.get(key) {
                 if old.key != resource.key || old.disposable_caches != resource.disposable_caches {
                     return Err(refused(
                         "A retained volume's disposable-cache declaration changed; it was not reattached.",
@@ -270,6 +341,7 @@ impl Verified {
             resources.insert(key.clone(), selected);
         }
         // Retained data a changed plan no longer declares stays owned and recorded.
+        // A dependency cache is not run-owned data: an undeclared one is released.
         for (key, resource) in &retained {
             resources
                 .entry((*key).clone())
@@ -342,7 +414,7 @@ impl Verified {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::{os::unix::fs::DirBuilderExt, path::Path};
 
     const RUN: &str = "abababababababababababababababab";
 
@@ -398,6 +470,20 @@ mod tests {
             NormalizedInputIdentity,
             config::Prepared,
         ) {
+            self.prepared_with(document, false)
+        }
+
+        /// Dependency-cache graphs resolve their identities from a reviewed
+        /// source snapshot, as a fresh admission's publication supplies it.
+        fn prepared_with(
+            &self,
+            document: Value,
+            cached: bool,
+        ) -> (
+            project::PlanReport,
+            NormalizedInputIdentity,
+            config::Prepared,
+        ) {
             let (report, identity) = self.review(document);
             let inputs = project::inputs::compile(
                 &self.candidate,
@@ -416,9 +502,35 @@ mod tests {
                 .services
                 .iter()
                 .filter(|(_, service)| service.active)
-                .map(|(name, _)| (name.clone(), Condition::Started))
+                .map(|(name, service)| {
+                    let goal = if service.dependency_cache.is_some() {
+                        Condition::Completed
+                    } else {
+                        Condition::Started
+                    };
+                    (name.clone(), goal)
+                })
                 .collect();
-            let prepared = config::prepare(inputs, &readiness, RUN, &"b".repeat(32), None).unwrap();
+            let source = cached.then(|| {
+                let snapshot = project::snapshot::capture_plan(&report.plan).unwrap();
+                let manifest = snapshot.receipt().clone();
+                source::Inputs {
+                    current_manifest: None,
+                    binding: SourceBinding {
+                        cache_scope: None,
+                        shared: None,
+                        shared_contract: None,
+                        live: None,
+                        revision: manifest.revision.clone(),
+                        archive_sha256: "6".repeat(64),
+                        selection_sha256: manifest.selection_sha256.clone(),
+                    },
+                    manifest,
+                    paths: BTreeMap::new(),
+                }
+            });
+            let prepared =
+                config::prepare(inputs, &readiness, RUN, &"b".repeat(32), source.as_ref()).unwrap();
             (report, identity, prepared)
         }
     }
@@ -801,5 +913,319 @@ mod tests {
         let missing =
             super::super::restore::observed_volumes_with(&next, |_| Ok(None)).unwrap_err();
         assert_eq!(missing.code, "graph_data_missing");
+    }
+
+    /// An initializer populating a dependency cache, beside an app that mounts
+    /// the cache read-write (so the cache is instance-scoped) and its own data.
+    fn cached(marker: &str, installer: &str) -> Value {
+        cached_with(marker, installer, "deps:/deps")
+    }
+
+    /// The same graph whose app only reads the cache, so the cache is shared.
+    fn cached_shared(marker: &str, installer: &str) -> Value {
+        cached_with(marker, installer, "deps:/deps:ro")
+    }
+
+    fn cached_with(marker: &str, installer: &str, consumer: &str) -> Value {
+        json!({
+            "services": {
+                "deps": {
+                    "image": image('a'),
+                    "network_mode": "none",
+                    "entrypoint": [installer],
+                    "volumes": ["deps:/deps"],
+                    "labels": {
+                        "hack.dependencies.bootstrap": "true",
+                        "hack.dependencies.cache-volume": "deps",
+                        "hack.dependencies.lockfiles": "lock.txt",
+                    },
+                },
+                "app": {
+                    "image": image('a'),
+                    "network_mode": "none",
+                    "entrypoint": ["/bin/app"],
+                    "environment": {"MARKER": marker},
+                    "volumes": [consumer, "data:/data"],
+                },
+            },
+            "volumes": {"deps": {}, "data": {}},
+        })
+    }
+
+    fn cached_project() -> (Project, Receipt, config::Prepared) {
+        cached_project_with(cached("one", "/bin/install"))
+    }
+
+    fn cached_project_with(document: Value) -> (Project, Receipt, config::Prepared) {
+        let project = Project::new();
+        fs::write(project.root.join("lock.txt"), "v1").unwrap();
+        let shared = document["services"]["app"]["volumes"][0] == "deps:/deps:ro";
+        let (report, identity, prepared) = project.prepared_with(document, true);
+        let mut receipt = stopped(&prepared, &identity);
+        // A completed first admission recorded the cache's provenance fence.
+        let provenance: cache_provenance::CacheProvenance = serde_json::from_value(json!({
+            "version": 1, "origin": "created_here", "boot": "boot",
+            "identity": {"created_at": "2026-11-06T00:00:00Z", "directory": "1:2"},
+            "initializers": ["deps"], "completed": {},
+        }))
+        .unwrap();
+        receipt
+            .resources
+            .get_mut("volume:deps")
+            .unwrap()
+            .cache_provenance = Some(provenance);
+        assert!(receipt.resources["volume:deps"].cache.is_some());
+        // A shared cache keeps strict replay; an instance-scoped one always
+        // re-proves its identity through reconciliation.
+        assert_eq!(
+            applies(&receipt, &report.plan_id, &report.plan, &identity, false),
+            !shared
+        );
+        (project, receipt, prepared)
+    }
+
+    fn reconcile_cached(
+        project: &Project,
+        receipt: &Receipt,
+        next: Value,
+    ) -> (config::Prepared, Projection) {
+        let (report, identity, mut prepared) = project.prepared_with(next, true);
+        assert!(applies(
+            receipt,
+            &report.plan_id,
+            &report.plan,
+            &identity,
+            false
+        ));
+        let proof = prepare(&report.plan, receipt, &identity).unwrap();
+        let projection = proof.project(&mut prepared, receipt).unwrap();
+        let mut applied = receipt.clone();
+        let snapshot = Projection {
+            resources: projection.resources.clone(),
+        };
+        let readiness = projection
+            .resources
+            .values()
+            .filter(|resource| resource.kind == Kind::Container)
+            .map(|resource| (resource.key.clone(), Condition::Started))
+            .collect();
+        proof
+            .apply(&mut applied, snapshot, &readiness, None)
+            .unwrap();
+        // The reconciled receipt still loads: every cache name and provenance is valid.
+        let fixture = super::super::tests::Fixture::new();
+        let root = fixture.0.join(RUN);
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        state::write(&root.join("state.json"), &applied).unwrap();
+        super::super::load_at(root, RUN, &applied.owner).unwrap();
+        (prepared, projection)
+    }
+
+    #[test]
+    fn env_edit_to_another_service_reconciles_and_keeps_the_dependency_cache() {
+        let (project, receipt, original) = cached_project();
+        let cache = receipt.resources["volume:deps"].clone();
+        let (prepared, projection) =
+            reconcile_cached(&project, &receipt, cached("two", "/bin/install"));
+        // The same shared cache, with its provenance, and the same run-owned data.
+        assert!(same(&projection.resources["volume:deps"], &cache));
+        assert!(same(
+            &projection.resources["volume:data"],
+            &receipt.resources["volume:data"]
+        ));
+        assert!(added(&projection).is_empty());
+        assert_eq!(mounts(&prepared, "deps"), mounts(&original, "deps"));
+        assert_eq!(mounts(&prepared, "app"), mounts(&original, "app"));
+        assert_eq!(projection.resources["container:app"].phase, "reserved");
+    }
+
+    #[test]
+    fn changed_cache_inputs_select_a_fresh_cache_and_keep_run_data() {
+        let (project, receipt, _) = cached_project();
+        let old = receipt.resources["volume:deps"].clone();
+        // The initializer's own definition is a cache input.
+        let (prepared, projection) =
+            reconcile_cached(&project, &receipt, cached("one", "/bin/install-v2"));
+        let fresh = &projection.resources["volume:deps"];
+        assert_ne!(fresh.cache, old.cache);
+        assert_ne!(fresh.name, old.name);
+        assert_eq!(fresh.name, fresh.cache.as_ref().unwrap().name());
+        assert_eq!(fresh.phase, "reserved");
+        assert!(fresh.cache_provenance.is_none());
+        assert!(mounts(&prepared, "app").contains(&fresh.name));
+        assert!(!mounts(&prepared, "app").contains(&old.name));
+        assert!(same(
+            &projection.resources["volume:data"],
+            &receipt.resources["volume:data"]
+        ));
+        // So is a lockfile's content.
+        fs::write(project.root.join("lock.txt"), "v2").unwrap();
+        let (_, projection) = reconcile_cached(&project, &receipt, cached("two", "/bin/install"));
+        let rebuilt = &projection.resources["volume:deps"];
+        assert_ne!(rebuilt.cache, old.cache);
+        assert_eq!(rebuilt.phase, "reserved");
+    }
+
+    #[test]
+    fn adding_a_cache_writer_selects_a_fresh_cache() {
+        let (project, receipt, _) = cached_project();
+        let old = receipt.resources["volume:deps"].clone();
+        // A new service that mounts the shared cache read-write can change what
+        // every run sharing it reuses, so it is part of the cache identity.
+        let mut next = cached("one", "/bin/install");
+        next["services"]["worker"] = json!({
+            "image": image('a'),
+            "network_mode": "none",
+            "entrypoint": ["/bin/worker"],
+            "volumes": ["deps:/deps"],
+        });
+        let (_, projection) = reconcile_cached(&project, &receipt, next);
+        let fresh = &projection.resources["volume:deps"];
+        assert_ne!(fresh.cache, old.cache);
+        assert_eq!(fresh.phase, "reserved");
+        assert!(same(
+            &projection.resources["volume:data"],
+            &receipt.resources["volume:data"]
+        ));
+    }
+
+    #[test]
+    fn retained_run_data_is_never_reselected_as_a_dependency_cache() {
+        let project = Project::new();
+        fs::write(project.root.join("lock.txt"), "v1").unwrap();
+        let mut plain = cached("one", "/bin/install");
+        plain["services"]["deps"]
+            .as_object_mut()
+            .unwrap()
+            .remove("labels");
+        let (_, identity, prepared) = project.prepared(plain);
+        let receipt = stopped(&prepared, &identity);
+        assert!(receipt.resources["volume:deps"].cache.is_none());
+        let (report, identity, mut next) =
+            project.prepared_with(cached("one", "/bin/install"), true);
+        let failure = prepare(&report.plan, &receipt, &identity).err().unwrap();
+        assert_eq!(failure.code, "graph_plan_reconcile");
+        let change = failure.plan_change.as_deref().unwrap();
+        assert_eq!(change.service, "deps");
+        assert_eq!(change.field, PlanChangeField::DependencyCacheVolume);
+        // Admission repeats the check on the projection itself.
+        let proof = Verified {
+            run: receipt.run.clone(),
+            owner: receipt.owner.clone(),
+            namespace: receipt.namespace.clone(),
+            ownership_plan: receipt.plan_id.clone(),
+            previous: receipt.normalized_input.clone().unwrap(),
+            next: identity,
+        };
+        let failure = proof.project(&mut next, &receipt).err().unwrap();
+        assert_eq!(failure.plan_change.unwrap().service, "deps");
+    }
+
+    #[test]
+    fn dropping_a_cache_declaration_releases_the_reference_and_creates_run_data() {
+        let (project, receipt, _) = cached_project();
+        let mut plain = cached("one", "/bin/install");
+        plain["services"]["deps"]
+            .as_object_mut()
+            .unwrap()
+            .remove("labels");
+        let (report, identity, mut prepared) = project.prepared(plain);
+        let proof = prepare(&report.plan, &receipt, &identity).unwrap();
+        let projection = proof.project(&mut prepared, &receipt).unwrap();
+        let deps = &projection.resources["volume:deps"];
+        assert!(deps.cache.is_none());
+        assert_eq!(deps.phase, "reserved");
+        assert!(deps.name.starts_with(&volume_prefix(RUN)));
+        assert_ne!(deps.name, receipt.resources["volume:data"].name);
+    }
+
+    #[test]
+    fn legacy_cache_identity_is_kept_only_while_its_inputs_still_match() {
+        let (project, mut receipt, original) =
+            cached_project_with(cached_shared("one", "/bin/install"));
+        let legacy = original.legacy_caches["deps"].clone();
+        assert_ne!(
+            Some(&legacy),
+            original.resources["volume:deps"].cache.as_ref()
+        );
+        let deps = receipt.resources.get_mut("volume:deps").unwrap();
+        deps.cache = Some(legacy.clone());
+        deps.name = legacy.name();
+        // Unchanged review: strict replay keeps the recorded legacy cache.
+        let (report, identity, mut prepared) =
+            project.prepared_with(cached_shared("one", "/bin/install"), true);
+        // The review's source metadata is fresh; the receipt is that admission's.
+        receipt.plan_id = report.plan_id.clone();
+        assert!(!applies(
+            &receipt,
+            &report.plan_id,
+            &report.plan,
+            &identity,
+            false
+        ));
+        config::retain_replay_ownership(&mut prepared, &receipt).unwrap();
+        assert_eq!(prepared.resources["volume:deps"].name, legacy.name());
+        assert!(mounts(&prepared, "app").contains(&legacy.name()));
+        // An edit changes the legacy whole-document identity: the current one is
+        // selected once, after which edits elsewhere keep it.
+        let (_, projection) =
+            reconcile_cached(&project, &receipt, cached_shared("two", "/bin/install"));
+        let fresh = &projection.resources["volume:deps"];
+        assert_ne!(fresh.name, legacy.name());
+        assert_eq!(fresh.cache, original.resources["volume:deps"].cache);
+        assert_eq!(fresh.phase, "reserved");
+    }
+
+    #[test]
+    fn an_earlier_shared_cache_with_a_writable_consumer_moves_to_this_instance() {
+        let (project, mut receipt, original) = cached_project();
+        // No earlier identity is ever matched for a writable consumer.
+        assert!(!original.legacy_caches.contains_key("deps"));
+        let scoped = original.resources["volume:deps"].cache.clone().unwrap();
+        // A receipt from an earlier build names a cache shared across worktrees.
+        let shared = dependency_cache::CacheBinding {
+            scope: dependency_cache::scope(&project.root).unwrap(),
+            fingerprint: "c".repeat(64),
+            image: scoped.image.clone(),
+        };
+        assert_ne!(shared.scope, scoped.scope);
+        let deps = receipt.resources.get_mut("volume:deps").unwrap();
+        deps.cache = Some(shared.clone());
+        deps.name = shared.name();
+        // Even the unchanged review re-proves identity and selects this
+        // instance's cache once; the shared one is never mounted again.
+        let (prepared, projection) =
+            reconcile_cached(&project, &receipt, cached("one", "/bin/install"));
+        let fresh = &projection.resources["volume:deps"];
+        assert_eq!(fresh.cache.as_ref(), Some(&scoped));
+        assert_eq!(fresh.phase, "reserved");
+        assert!(!mounts(&prepared, "app").contains(&shared.name()));
+    }
+
+    #[test]
+    fn reserved_shared_caches_may_exist_but_reserved_run_names_may_not() {
+        let (project, receipt, _) = cached_project();
+        let (_, projection) =
+            reconcile_cached(&project, &receipt, cached("one", "/bin/install-v2"));
+        let mut next = receipt.clone();
+        next.resources = projection.resources;
+        let present = |_: &Resource| {
+            Ok(Some(
+                json!({"inspected": {"Name": "x"}, "directory": "1:2"}),
+            ))
+        };
+        // The fresh cache may already exist as another graph's shared cache.
+        let selected = super::super::restore::observed_volumes_with(&next, present).unwrap();
+        assert!(!selected.contains_key("volume:deps"));
+        assert!(selected.contains_key("volume:data"));
+        let mut owned = next.clone();
+        let data = owned.resources.get_mut("volume:data").unwrap();
+        data.phase = "reserved".into();
+        assert_eq!(
+            super::super::restore::observed_volumes_with(&owned, present)
+                .unwrap_err()
+                .code,
+            "graph_resource_exists"
+        );
     }
 }

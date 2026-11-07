@@ -109,6 +109,27 @@ pub struct ProcessRefusalsDiagnostic {
     pub refusals: Vec<ProcessRefusal>,
 }
 
+/// Closed vocabulary for the Compose field of a retained-run edit that cannot be
+/// applied in place.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanChangeField {
+    /// A retained run-owned named volume is now declared as a dependency cache.
+    DependencyCacheVolume,
+    /// Routed hostnames changed together with something only reconciliation applies.
+    Hostnames,
+}
+
+/// Value-free location of a refused retained-run edit. The service is an
+/// admitted Compose identifier, never a value, path or engine ID.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanChangeDiagnostic {
+    pub version: u8,
+    pub service: String,
+    pub field: PlanChangeField,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CandidateError {
     pub code: &'static str,
@@ -135,6 +156,9 @@ pub struct CandidateError {
     /// one pass before any runtime state is reserved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_refusals: Option<Box<ProcessRefusalsDiagnostic>>,
+    /// Value-free location of a refused retained-run edit; see [`PlanChangeDiagnostic`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_change: Option<Box<PlanChangeDiagnostic>>,
 }
 
 impl CandidateError {
@@ -149,6 +173,7 @@ impl CandidateError {
             stop_failures: None,
             startup_logs: None,
             process_refusals: None,
+            plan_change: None,
         }
     }
 
@@ -161,6 +186,16 @@ impl CandidateError {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
         self.service = valid.then(|| service.into());
+        self
+    }
+
+    /// Name the service and field of a refused retained-run edit.
+    pub fn with_plan_change(mut self, service: &str, field: PlanChangeField) -> Self {
+        self.plan_change = Some(Box::new(PlanChangeDiagnostic {
+            version: 1,
+            service: service.to_owned(),
+            field,
+        }));
         self
     }
 

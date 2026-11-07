@@ -7,6 +7,11 @@ import {
 } from "../lib/native-process-wrappers.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import {
+  type NativePlanChange,
+  nativePlanChangeGuidance,
+  readNativePlanChange,
+} from "./native-plan-change.ts";
+import {
   NATIVE_STARTUP_FAILURE_REPLY_BYTES,
   type NativeStartupLogTail,
   readNativeStartupLogs,
@@ -33,6 +38,7 @@ interface NativeFailure {
   readonly startupLogs?: readonly NativeStartupLogTail[];
   /** Services and closed fields a process wrapper refused; value-free. */
   readonly processRefusals?: readonly NativeProcessRefusal[];
+  readonly planChange?: NativePlanChange;
 }
 
 const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
@@ -547,7 +553,10 @@ function nativeFailureMessage(failure: NativeFailure | undefined): string {
   const code = failure
     ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})`
     : "";
-  return `Native runtime request failed${code}; inspect owned state before retrying.${failure ? nativeFailureNote(failure) : ""}${nativeStopFailureSummary(failure?.stopFailures)}`;
+  const guidance = failure
+    ? nativePlanChangeGuidance(failure.code, failure.planChange)
+    : undefined;
+  return `Native runtime request failed${code}; ${guidance ?? "inspect owned state before retrying."}${failure ? nativeFailureNote(failure) : ""}${nativeStopFailureSummary(failure?.stopFailures)}`;
 }
 
 function completionResponse(
@@ -696,10 +705,12 @@ function nativeFailureFromReply(
     code: value.code,
     cause: value.cause_code,
   });
+  const planChange = readNativePlanChange(value.plan_change);
   return {
     code: value.code,
     ...(causeCode ? { causeCode } : {}),
     ...nativeFailureDetail(value),
+    ...(planChange ? { planChange } : {}),
     ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
       value.code === "graph_owner_recovery" &&
         typeof value.cause_code === "string"

@@ -123,6 +123,7 @@ pub use endpoints::GuestEndpoint;
 mod environment_crash_test;
 mod launcher;
 mod probes;
+mod process_refusals;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod startup_test;
 pub use environment::stage_environment;
@@ -1329,16 +1330,43 @@ pub(super) fn validate_private_delivery(
     configs: &BTreeMap<String, Value>,
     environments: &BTreeMap<String, super::environment::PendingEnvironment>,
 ) -> Result<(), CandidateError> {
+    let mut refusals = process_refusals::Collector::default();
     for (name, pending) in environments {
         let config = &configs[name];
         if pending.wraps_process() {
-            launcher::validate(config)?;
+            refusals.check(name, launcher::validate(config));
         } else {
-            launcher::identity(config)?;
+            refusals.check(
+                name,
+                launcher::identity(config)
+                    .map(|_| ())
+                    .map_err(|error| process_refusals::Refused {
+                        field: crate::error::ProcessField::User,
+                        error,
+                    }),
+            );
         }
-        launcher::validate_files(config, &pending.file_targets())?;
+    }
+    refusals.finish()?;
+    for (name, pending) in environments {
+        launcher::validate_files(&configs[name], &pending.file_targets())?;
     }
     Ok(())
+}
+
+/// Wrapper admission for host-dependency services, before any runtime state is
+/// reserved: their release barrier runs the same materialized process.
+pub(super) fn validate_dependency_processes(
+    configs: &BTreeMap<String, Value>,
+    services: &BTreeSet<String>,
+) -> Result<(), CandidateError> {
+    let mut refusals = process_refusals::Collector::default();
+    for name in services {
+        if let Some(config) = configs.get(name) {
+            refusals.check(name, launcher::validate(config));
+        }
+    }
+    refusals.finish()
 }
 /// Services whose process the private launcher wraps, and files-only services whose
 /// image user must still be materialized for exact file ownership.
@@ -1453,8 +1481,17 @@ fn run_inputs(
         super::environment::preflight_capacity(engine.guest(), environments.len())?;
     }
     // Resolve inherited process defaults only from the exact verified image,
-    // before the private launcher takes ownership of Entrypoint and Cmd.
-    let (wrapped, file_owners) = private_services(&environments);
+    // before the private launcher or the dependency release barrier takes
+    // ownership of Entrypoint and Cmd.
+    let (mut wrapped, mut file_owners) = private_services(&environments);
+    let dependency_processes = startup
+        .as_ref()
+        .map(|driver| driver.process_services())
+        .unwrap_or_default();
+    for name in &dependency_processes {
+        file_owners.remove(name);
+        wrapped.insert(name.clone());
+    }
     let expected_environment = verify_images(
         &engine,
         &prepared.resources,
@@ -1463,6 +1500,7 @@ fn run_inputs(
         &file_owners,
     )?;
     validate_private_delivery(&prepared.configs, &environments)?;
+    validate_dependency_processes(&prepared.configs, &dependency_processes)?;
     if let Some(driver) = startup.as_ref() {
         driver.check_cancelled()?;
     }
@@ -2358,6 +2396,7 @@ fn verify_images(
     file_owners: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>, CandidateError> {
     let mut expected = BTreeMap::new();
+    let mut refusals = process_refusals::Collector::default();
     for resource in resources.values().filter(|r| r.kind == Kind::Container) {
         let image = engine.request(
             Method::GET,
@@ -2384,24 +2423,32 @@ fn verify_images(
             resources,
         )?;
         if private_services.contains(&resource.key) {
-            image_process::apply_private(
-                configs
-                    .get_mut(&resource.key)
-                    .expect("compiled service config"),
-                &image["Config"],
-            )?;
+            refusals.check(
+                &resource.key,
+                image_process::apply_private(
+                    configs
+                        .get_mut(&resource.key)
+                        .expect("compiled service config"),
+                    &image["Config"],
+                ),
+            );
         } else if file_owners.contains(&resource.key) {
-            image_process::apply_file_owner(
-                configs
-                    .get_mut(&resource.key)
-                    .expect("compiled service config"),
-                &image["Config"],
-            )?;
+            refusals.check(
+                &resource.key,
+                image_process::apply_file_owner(
+                    configs
+                        .get_mut(&resource.key)
+                        .expect("compiled service config"),
+                    &image["Config"],
+                ),
+            );
         }
         expected.insert(
             resource.key.clone(),
             image_environment::compose(&image["Config"]["Env"], &configs[&resource.key]["Env"])?,
         );
     }
+    // Every wrapped service is checked before the first refusal is reported.
+    refusals.finish()?;
     Ok(expected)
 }

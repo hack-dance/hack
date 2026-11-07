@@ -996,8 +996,16 @@ bound read-only at their targets. A compiled mount or tmpfs target that equals,
 contains or sits under a member target refuses before effects. Members carry no
 separate deadline: they live as long as the allocation, which is the container's, and
 are retired with it by the existing allocation cleanup. A service with values keeps the
-launcher contract (numeric user, absolute entrypoint, `CMD` health with an absolute
-executable). A files-only service keeps its own process and needs only a numeric image
+launcher contract: a numeric user, a non-empty selected process and an exec-form
+`CMD` health test. The selected process is the image or Compose `Entrypoint ++ Cmd`
+(with no entrypoint, `Cmd` alone), and a `CMD-SHELL` test becomes the exec form
+Docker runs (the image `SHELL`, default `/bin/sh -c`). Executables may be bare
+names such as `docker-entrypoint.sh`: the launcher resolves them through the
+container's PATH after applying the environment, as Docker does. Host-dependency
+services get the same materialized process behind their release barrier. Every
+wrapped service is checked before any runtime state is reserved; a refusal keeps
+its code and lists each service and closed field (`entrypoint`, `healthcheck`,
+`user`, `stop_signal`, `mounts`) in `process_refusals`. A files-only service keeps its own process and needs only a numeric image
 or Compose user. Live-owner restore and normalized serve-restore deliver fresh members
 into new allocations. `graph exec` and one-off runs refuse envelopes with files; files
 already in a running container are never re-delivered or renewed.

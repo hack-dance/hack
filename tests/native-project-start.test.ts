@@ -4461,3 +4461,57 @@ test("the confirmed-stop line reflects whether data was retained", () => {
     nativeStoppedNotice({ receipt: { phase: "stopped-data-retained" } })
   ).toContain("Named volumes and the stopped run mapping are kept");
 });
+
+test("HACK-1939: a wrapped service whose Compose user cannot be wrapped refuses before the VM starts", async () => {
+  const { opts, events } = await fixture();
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.web.user = "postgres";
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  const error = await startNativeProject(opts).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(HackCliError);
+  expect(error).toHaveProperty("code", "E_NATIVE_PROJECT_UNSUPPORTED");
+  expect((error as Error).message).toBe(
+    "Native up cannot wrap these services' processes; nothing was started. Refused: service web user (use a numeric UID or UID:GID)."
+  );
+  expect(events).not.toContain("runtime up");
+  expect(events.at(-1)).toBe("cleanup");
+});
+
+test("HACK-1939: runtime process refusals are named in the nothing-reserved report", async () => {
+  const { opts } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.serve = async (request) => {
+    request.onExitDiagnostic?.({
+      exitCode: 2,
+      nativeCode: "environment_entrypoint",
+      processRefusals: [
+        { service: "web", field: "entrypoint" },
+        { service: "worker", field: "user" },
+      ],
+    });
+    throw new Error(
+      "Native graph startup was interrupted or failed (environment_entrypoint); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "inspect") {
+      throw new NativeRuntimeRequestError({
+        message: "Native graph run is not reserved.",
+        nativeCode: NATIVE_GRAPH_UNRESERVED,
+      });
+    }
+    return await invoke(request);
+  };
+  const error = await startNativeProject(opts).catch(
+    (caught: unknown) => caught
+  );
+  expect((error as Error).message).toBe(
+    "Native graph startup failed (environment_entrypoint) before any runtime state was reserved; nothing was created and no cleanup is needed. Native cannot wrap these services' processes: service web entrypoint or command (the process must name an executable); service worker user (use a numeric UID or UID:GID)."
+  );
+});

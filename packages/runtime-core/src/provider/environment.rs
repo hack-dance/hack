@@ -197,7 +197,7 @@ impl PendingEnvironment {
     pub(super) fn service(&self) -> &str {
         &self.service
     }
-    /// Whether launcher admission (absolute entrypoint, CMD health) applies.
+    /// Whether launcher admission (selected process, exec-form CMD health) applies.
     pub(super) fn wraps_process(&self) -> bool {
         self.wraps
     }

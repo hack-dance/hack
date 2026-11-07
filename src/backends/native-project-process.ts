@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import type { NativeProcessRefusal } from "../lib/native-process-wrappers.ts";
 import {
   type NativeAuthoredReceipt,
   type NativeAuthoredReview,
@@ -29,6 +30,8 @@ export type NativeExitDiagnostic = {
   readonly nativeCode?: string;
   /** Bounded cause the runtime allows with `nativeCode`, such as a wrapped stopped runtime. */
   readonly nativeCauseCode?: string;
+  /** Every service and closed field a process wrapper refused; value-free. */
+  readonly processRefusals?: readonly NativeProcessRefusal[];
 };
 
 type ProcessOptions = {
@@ -482,6 +485,7 @@ async function serveGraphProcess(
     const failure = await failureCodes;
     const nativeCode = failure?.code;
     const nativeCauseCode = failure?.causeCode;
+    const processRefusals = failure?.processRefusals;
     clearTimeout(drainTimer);
     drain.abort();
     try {
@@ -489,6 +493,7 @@ async function serveGraphProcess(
         exitCode,
         ...(nativeCode ? { nativeCode } : {}),
         ...(nativeCauseCode ? { nativeCauseCode } : {}),
+        ...(processRefusals ? { processRefusals } : {}),
       });
     } catch {
       // Observation must never replace the startup result or cleanup authority.

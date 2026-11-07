@@ -188,6 +188,12 @@ pub(super) trait Driver {
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         Ok(())
     }
+    /// Services whose process this driver wraps behind its release barrier.
+    /// Their inherited image process is materialized before admission, exactly
+    /// as for private environment delivery, so the wrapper runs what Docker would.
+    fn process_services(&self) -> std::collections::BTreeSet<String> {
+        std::collections::BTreeSet::new()
+    }
     fn validate_inputs(
         &self,
         inputs: &project::inputs::ExecutionInputs,

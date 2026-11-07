@@ -662,3 +662,70 @@ test("a second stop request during beforeStop forces the owner to stop", async (
   );
   expect(canceled).toBe(true);
 }, 15_000);
+
+test("HACK-1939: a startup failure reports every named process refusal to the exit diagnostic", async () => {
+  const reply = JSON.stringify({
+    code: "environment_user",
+    message: "synthetic-private-detail",
+    process_refusals: {
+      version: 1,
+      refusals: [
+        { service: "db", field: "user" },
+        { service: "web", field: "healthcheck" },
+      ],
+    },
+  });
+  const opts = await fixture(
+    `console.error(${JSON.stringify(reply)}); process.exit(2);`
+  );
+  const diagnostics: unknown[] = [];
+  const failure = await serveNativeProjectGraph({
+    ...opts,
+    onExitDiagnostic: (diagnostic) => {
+      diagnostics.push(diagnostic);
+    },
+    onReady: async () => {
+      throw new Error("must not become ready");
+    },
+  }).catch((error: unknown) => String(error));
+  expect(failure).toContain("environment_user");
+  expect(failure).not.toContain("synthetic-private-detail");
+  expect(diagnostics).toEqual([
+    {
+      exitCode: 2,
+      nativeCode: "environment_user",
+      processRefusals: [
+        { service: "db", field: "user" },
+        { service: "web", field: "healthcheck" },
+      ],
+    },
+  ]);
+});
+
+test("a malformed process refusal list is dropped whole", async () => {
+  for (const process_refusals of [
+    { version: 2, refusals: [{ service: "db", field: "user" }] },
+    { version: 1, refusals: [{ service: "db", field: "argv" }] },
+    { version: 1, refusals: [{ service: "../db", field: "user" }] },
+    { version: 1, refusals: [] },
+    { version: 1, refusals: [{ service: "db", field: "user", value: "x" }] },
+  ]) {
+    const reply = JSON.stringify({
+      code: "environment_user",
+      process_refusals,
+    });
+    const opts = await fixture(
+      `console.error(${JSON.stringify(reply)}); process.exit(2);`
+    );
+    const diagnostics: Record<string, unknown>[] = [];
+    await serveNativeProjectGraph({
+      ...opts,
+      onExitDiagnostic: (diagnostic) => {
+        diagnostics.push(diagnostic);
+      },
+      onReady: async () => {},
+    }).catch(() => undefined);
+    expect(diagnostics[0]?.processRefusals).toBeUndefined();
+    expect(diagnostics[0]?.nativeCode).toBe("environment_user");
+  }
+});

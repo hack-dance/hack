@@ -2538,6 +2538,25 @@ checks. Named users/groups remain unsupported for private delivery and refuse
 instead of silently becoming root. An image with no user retains Docker's normal
 root default; an explicit Compose numeric user takes precedence.
 
+Services with private environment values and services with host dependency
+bindings (including every service when project-wide host aliases exist) run their
+process through a wrapper. The wrapper runs exactly what Docker would: the image
+or Compose `entrypoint` followed by `command` (with no entrypoint, `command`
+alone), and a bare executable name such as `docker-entrypoint.sh` or the
+`mysqladmin` of `CMD mysqladmin ping` is resolved through the container's own
+PATH after the environment is applied. A shell-form health check (`CMD-SHELL`
+or a string `test`) runs through the image's shell (`/bin/sh -c` by default), as
+Docker runs it. Stock images therefore need no absolute paths. What a wrapper
+still cannot run is an empty process, a health test that names no executable, a
+named (non-numeric) user, a stop signal other than SIGTERM, SIGINT, SIGQUIT or
+SIGKILL, and a volume target at `/`, `/run` or a reserved wrapper path. Native
+`up` refuses the Compose-declared cases before the VM starts, and the runtime
+checks settings inherited from the pinned image before reserving anything. Both
+name every refused service and field at once (for example
+`service db user (use a numeric UID or UID:GID)`). `hack doctor` on the native
+backend reports the Compose-declared cases in its `native process wrappers`
+check, for every service native may wrap.
+
 ### Approved-host DNS on pool restart
 
 The pinned Smol provider re-resolves approved hosts at each boot and appends the

@@ -8,6 +8,11 @@ import {
   withComposeServiceEnvFingerprints,
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
+import {
+  describeNativeProcessRefusals,
+  type NativeProcessRefusal,
+  requireWrappableNativeProcesses,
+} from "../lib/native-process-wrappers.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import {
@@ -872,13 +877,21 @@ const NATIVE_CODE = /^[A-Za-z0-9_]{1,80}$/;
  * inspection reports the run's journal exactly absent. Nothing was created, so
  * no cleanup is pending and the startup diagnostic is the whole story.
  */
-function nothingReserved(startupFailure: unknown, nativeCode?: string): Error {
+function nothingReserved(
+  startupFailure: unknown,
+  nativeCode?: string,
+  processRefusals?: readonly NativeProcessRefusal[]
+): Error {
   const message = startupFailure instanceof Error ? startupFailure.message : "";
   const diagnostic = SAFE_STARTUP_DIAGNOSTIC.exec(message);
   const code =
     nativeCode && NATIVE_CODE.test(nativeCode) ? nativeCode : diagnostic?.[2];
+  const refused =
+    processRefusals && processRefusals.length > 0
+      ? ` Native cannot wrap these services' processes: ${describeNativeProcessRefusals(processRefusals)}.`
+      : "";
   return new ClosedCliError(
-    `Native graph startup failed${code ? ` (${code})` : ""} before any runtime state was reserved; nothing was created and no cleanup is needed.`
+    `Native graph startup failed${code ? ` (${code})` : ""} before any runtime state was reserved; nothing was created and no cleanup is needed.${refused}`
   );
 }
 /**
@@ -894,6 +907,7 @@ function uninspectableStartupFailure(opts: {
   readonly restored: boolean;
   readonly mappingAttempted: boolean;
   readonly nativeCode: string | undefined;
+  readonly processRefusals?: readonly NativeProcessRefusal[];
 }): { readonly error: Error; readonly nothingReserved: boolean } {
   if (
     opts.serveFailure === undefined ||
@@ -911,7 +925,11 @@ function uninspectableStartupFailure(opts: {
     };
   }
   return {
-    error: nothingReserved(opts.serveFailure, opts.nativeCode),
+    error: nothingReserved(
+      opts.serveFailure,
+      opts.nativeCode,
+      opts.processRefusals
+    ),
     nothingReserved: true,
   };
 }
@@ -1559,6 +1577,13 @@ export async function startNativeProject(opts: {
       dependencies: hostDependencies,
       services: specs,
     });
+    // Refuse Compose settings no process wrapper can run before the VM starts.
+    requireWrappableNativeProcesses({
+      services: specs,
+      managedEnvironment: input.managedEnvironment,
+      managedFiles: input.managedFiles,
+      dependencyServices: hostDependencies.map((binding) => binding.service),
+    });
     await verifyNativeRetainedMapping({
       run: retained,
       scope: opts.scope,
@@ -1765,6 +1790,9 @@ export async function startNativeProject(opts: {
           let code = 1;
           let serveFailure: unknown;
           let nativeExitCode: string | undefined;
+          let nativeProcessRefusals:
+            | readonly NativeProcessRefusal[]
+            | undefined;
           // Redacted at receipt; the raw tail is never retained or persisted.
           let startupLogReport = "";
           try {
@@ -1803,6 +1831,7 @@ export async function startNativeProject(opts: {
               ...stop?.serve,
               onExitDiagnostic: (diagnostic) => {
                 nativeExitCode = diagnostic.nativeCode;
+                nativeProcessRefusals = diagnostic.processRefusals;
               },
               onStartupLogs: (logs) => {
                 startupLogReport = formatNativeStartupLogReport({
@@ -1937,6 +1966,7 @@ export async function startNativeProject(opts: {
                 restored: restore !== undefined,
                 mappingAttempted,
                 nativeCode: nativeExitCode,
+                processRefusals: nativeProcessRefusals,
               });
               graphCleanupConfirmed = settled.nothingReserved;
               throw settled.error;

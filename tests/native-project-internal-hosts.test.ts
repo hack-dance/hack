@@ -122,16 +122,59 @@ test("project-wide aliases are declared on every service like the Compose overri
 });
 
 test("project-wide aliases without any dependency selection refuse instead of being ignored", () => {
-  expectCodedThrow(
+  const error = expectCodedThrow(
     () =>
       applyNativeInternalHostAliases({
-        input: input({ web: { image: "nginx" } }),
+        input: input({ web: { image: "nginx" }, worker: { image: "nginx" } }),
         hosts: { "api.example.test": "host-gateway" },
+        sources: { "api.example.test": "inherited" },
         hasDependencySelection: false,
       }),
     "E_NATIVE_PROJECT_UNSUPPORTED",
     NATIVE_UNBOUND_HOST_ALIAS_REFUSAL
   );
+  expect(error.message).toContain(
+    "Unbound: api.example.test for service web, service worker (from the main checkout's .hack/.internal/extra-hosts.json, which this linked worktree inherits)."
+  );
+  expect(error.message).toContain(
+    'Add a binding with "aliases": ["api.example.test"] to the HACK_NATIVE_DEPENDENCIES selection'
+  );
+  expect(error.message).toContain(
+    "run `hack internal extra-hosts unset api.example.test` in this worktree"
+  );
+});
+
+test("an unbound refusal names each service, alias and where the alias comes from", () => {
+  const hostAliases = {
+    web: ["api.example.test", "auth.example.test", "own.example.test"],
+    worker: ["api.example.test", "local.example.test"],
+  };
+  const error = expectCodedThrow(
+    () =>
+      requireNativeHostAliasBindings({
+        dependencies: [binding("web", ["auth.example.test"])],
+        hostAliases,
+        sources: {
+          "api.example.test": "project",
+          "auth.example.test": "project",
+          "local.example.test": "checkout",
+        },
+      }),
+    "E_NATIVE_PROJECT_UNSUPPORTED",
+    NATIVE_UNBOUND_HOST_ALIAS_REFUSAL
+  );
+  expect(error.message).toContain(
+    "Unbound: api.example.test for service web, service worker (from internal.extra_hosts in the project configuration); local.example.test for service worker (from this checkout's .hack/.internal/extra-hosts.json); own.example.test for service web (from the service's Compose extra_hosts)."
+  );
+  expect(error.message).toContain(
+    '"aliases": ["api.example.test","local.example.test","own.example.test"]'
+  );
+  expect(error.message).toContain(
+    "remove api.example.test from internal.extra_hosts in the project configuration"
+  );
+  // Listener values are never echoed.
+  expect(error.message).not.toContain("8443");
+  expect(error.message).not.toContain("123");
 });
 
 test("project-wide aliases native cannot honor refuse value-free", () => {
@@ -170,6 +213,21 @@ test("a service that maps the alias to another target conflicts", () => {
     ["api.example.test:10.0.0.5"],
     ["api.example.test=10.0.0.5"],
     { "api.example.test": "10.0.0.5" },
+    ["${UNSET:-api.example.test}:10.0.0.5"],
+  ]) {
+    const error = expectCodedThrow(
+      () =>
+        applyNativeInternalHostAliases({
+          input: input({ web: { image: "nginx", extra_hosts } }),
+          hosts: { "api.example.test": "host-gateway" },
+          hasDependencySelection: true,
+        }),
+      "E_CONFIG_INVALID",
+      "Native host alias selection conflicts with declared configuration: service web maps project-wide host alias api.example.test to another target"
+    );
+    expect(error.message).not.toContain("10.0.0.5");
+  }
+  for (const extra_hosts of [
     "api.example.test:host-gateway",
     Array.from({ length: 32 }, (_, i) => `h${i}.example.test:host-gateway`),
   ]) {
@@ -224,10 +282,7 @@ test("service aliases are canonicalized like native review before matching bindi
     services: {
       web: { extra_hosts: ["API.Example.:host-gateway"] },
       map: { extra_hosts: { "Search.EXAMPLE.test.": "host-gateway" } },
-      both: {
-        extra_hosts: ["api.example:host-gateway", "API.EXAMPLE.=host-gateway"],
-      },
-      // Resolved by the runtime later; admission checks these exactly.
+      // A required reference refuses at execution; admission checks it there.
       later: { extra_hosts: ["${ALIAS}:host-gateway", "1.2.3.4:host-gateway"] },
     },
     profiles: [],
@@ -235,14 +290,12 @@ test("service aliases are canonicalized like native review before matching bindi
   expect(hostAliases).toEqual({
     web: ["api.example"],
     map: ["search.example.test"],
-    both: ["api.example"],
     later: [],
   });
   requireNativeHostAliasBindings({
     dependencies: [
       binding("web", ["api.example"]),
       binding("map", ["search.example.test"]),
-      binding("both", ["api.example"]),
     ],
     hostAliases,
   });
@@ -256,6 +309,119 @@ test("service aliases are canonicalized like native review before matching bindi
     "E_NATIVE_PROJECT_UNSUPPORTED",
     NATIVE_UNBOUND_HOST_ALIAS_REFUSAL
   );
+});
+
+test("an interpolated service alias is compiled like native execution before matching", () => {
+  // Native execution supplies no ambient environment: `${UNSET:+x-}` selects
+  // nothing and `${UNSET:-word}` selects its word.
+  const hostAliases = nativeServiceHostAliases({
+    services: {
+      plus: {
+        extra_hosts: ["${UNSET_PREFIX:+x-}api.example.test:host-gateway"],
+      },
+      dash: {
+        extra_hosts: { "${API_HOST:-API.example.test.}": "host-gateway" },
+      },
+      target: {
+        extra_hosts: ["api.example.test:${GATEWAY:-host-gateway}"],
+      },
+      // Managed values are delivered privately and never interpolated.
+      managed: { extra_hosts: ["${SECRET:-api.example.test}:host-gateway"] },
+      // The project name is bound only after review.
+      named: {
+        extra_hosts: ["${COMPOSE_PROJECT_NAME:-api}.example.test:host-gateway"],
+      },
+    },
+    profiles: [],
+    managedEnvironment: { managed: { SECRET: "synthetic" } },
+  });
+  expect(hostAliases).toEqual({
+    plus: ["api.example.test"],
+    dash: ["api.example.test"],
+    target: ["api.example.test"],
+    managed: [],
+    named: [],
+  });
+});
+
+test("one alias declared twice after interpolation refuses before runtime work, naming it", () => {
+  for (const extra_hosts of [
+    ["api.example:host-gateway", "API.EXAMPLE.=host-gateway"],
+    [
+      "api.example.test:host-gateway",
+      "${UNSET_PREFIX:+x-}api.example.test:host-gateway",
+    ],
+    {
+      "api.example.test": "host-gateway",
+      "${A:-api.example.test}": "host-gateway",
+    },
+  ]) {
+    const alias =
+      Array.isArray(extra_hosts) && extra_hosts[0]?.startsWith("api.example:")
+        ? "api.example"
+        : "api.example.test";
+    const error = expectCodedThrow(
+      () =>
+        nativeServiceHostAliases({
+          services: { web: { extra_hosts } },
+          profiles: [],
+        }),
+      "E_CONFIG_INVALID",
+      `Native host alias selection conflicts with declared configuration: service web declares host alias ${alias} more than once`
+    );
+    expect(error.message).not.toContain("host-gateway");
+  }
+});
+
+test("HACK-1938: an interpolated alias equal to a project-wide alias is not added twice", () => {
+  const hosts = { "api.example.test": "host-gateway" };
+  for (const declared of [
+    "${UNSET_PREFIX:+x-}api.example.test:host-gateway",
+    "${API_HOST:-api.example.test}:host-gateway",
+    // Literal control: the same name without interpolation.
+    "api.example.test:host-gateway",
+  ]) {
+    const result = applyNativeInternalHostAliases({
+      input: input({ app: { image: "alpine", extra_hosts: [declared] } }),
+      hosts,
+      hasDependencySelection: true,
+    });
+    const app = services(result).app;
+    expect(app.extra_hosts).toEqual([declared]);
+    // What native execution then compiles is exactly one alias.
+    expect(
+      nativeServiceHostAliases({ services: { app }, profiles: [] })
+    ).toEqual({ app: ["api.example.test"] });
+  }
+  // The map form is compared the same way.
+  const map = applyNativeInternalHostAliases({
+    input: input({
+      app: {
+        image: "alpine",
+        extra_hosts: { "${UNSET_PREFIX:+x-}api.example.test": "host-gateway" },
+      },
+    }),
+    hosts,
+    hasDependencySelection: true,
+  });
+  expect(services(map).app.extra_hosts).toEqual({
+    "${UNSET_PREFIX:+x-}api.example.test": "host-gateway",
+  });
+  // A name that interpolates to something else still receives the alias.
+  const other = applyNativeInternalHostAliases({
+    input: input({
+      app: {
+        image: "alpine",
+        extra_hosts: ["${UNSET_PREFIX:-x-}api.example.test:host-gateway"],
+      },
+    }),
+    hosts,
+    hasDependencySelection: true,
+  });
+  expect(services(other).app.extra_hosts).toEqual([
+    "${UNSET_PREFIX:-x-}api.example.test:host-gateway",
+    "api.example.test:host-gateway",
+  ]);
 });
 
 test("a project-wide alias another spelling already declares is not duplicated", () => {
@@ -287,7 +453,7 @@ test("a project-wide alias another spelling already declares is not duplicated",
         hasDependencySelection: true,
       }),
     "E_CONFIG_INVALID",
-    "Native host alias selection conflicts with declared configuration; values omitted."
+    "Native host alias selection conflicts with declared configuration: service web maps project-wide host alias api.example.test to another target"
   );
 });
 

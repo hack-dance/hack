@@ -49,7 +49,7 @@ import {
 } from "../backends/native-project-down.ts";
 import {
   requireNativeProjectInternalExtraHostsUnchanged,
-  resolveNativeInternalExtraHosts,
+  resolveNativeInternalExtraHostSelection,
 } from "../backends/native-project-internal-hosts.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
@@ -5887,10 +5887,8 @@ async function handleNativeUp({
   };
   const envFingerprints =
     createNativeEnvFingerprintSession(envFingerprintScope);
-  const internalExtraHosts = await resolveNativeInternalExtraHosts({
-    project,
-    cfg,
-  });
+  const { hosts: internalExtraHosts, sources: internalExtraHostSources } =
+    await resolveNativeInternalExtraHostSelection({ project, cfg });
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -5906,6 +5904,7 @@ async function handleNativeUp({
     dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
     adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
     internalExtraHosts,
+    internalExtraHostSources,
     allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
     preparedBase: parseNativePreparedBase(process.env),
     https: parseNativeHttpsSelection(process.env),
@@ -6108,6 +6107,7 @@ async function restartNativeImageProject({
         adaptationFile: startup.adaptationFile,
         dependencyFile: startup.dependencyFile,
         internalExtraHosts: startup.internalExtraHosts,
+        internalExtraHostSources: startup.internalExtraHostSources,
         allowedHosts: startup.allowedHosts,
         runtimeMetadata: startup.runtimeMetadata,
         httpsPort: startup.https?.httpsPort ?? null,

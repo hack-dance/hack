@@ -60,6 +60,7 @@ import {
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
   applyNativeInternalHostAliases,
+  type NativeHostAliasSource,
   nativeServiceHostAliases,
   requireNativeHostAliasBindings,
 } from "./native-project-internal-hosts.ts";
@@ -106,6 +107,8 @@ import {
 import { preflightNativeProjectSource } from "./native-project-source-preflight.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_GRAPH_UNRESERVED,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 import {
@@ -289,6 +292,8 @@ type Dependencies = {
   adaptGcloud: typeof adaptNativeGcloudEnvironment;
   /** Value-free operator notices (for example credential expiry); stderr by default. */
   warn: (line: string) => void;
+  /** Foreground progress lines (readiness, confirmed stop); stderr by default. */
+  notice: (line: string) => void;
   review: typeof withNativeProjectReview;
   selectReview: typeof selectNativeProjectReviewIdentity;
   retainedImages: typeof selectNativeRetainedImages;
@@ -314,6 +319,9 @@ const DEFAULTS: Dependencies = {
   adaptAws: adaptNativeAwsEnvironment,
   adaptGcloud: adaptNativeGcloudEnvironment,
   warn: (line) => {
+    process.stderr.write(`${line}\n`);
+  },
+  notice: (line) => {
     process.stderr.write(`${line}\n`);
   },
   review: withNativeProjectReview,
@@ -623,6 +631,77 @@ export async function verifyHttpsRoutes(
   }
 }
 
+const PRINTABLE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const PRINTABLE_HOST = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
+/**
+ * What a ready foreground graph serves on this host, from the reviewed plan
+ * only: each routed service's reviewed hostnames as HTTPS URLs when the
+ * native HTTPS frontend runs (with its port unless 443), and the published
+ * loopback ports. Names that fail their closed patterns are skipped.
+ */
+export function nativeReadySummary(opts: {
+  readonly run: string;
+  readonly plan: unknown;
+  readonly routed: ReadonlySet<string>;
+  readonly httpsPort: number | null;
+}): string[] {
+  const lines = [
+    `Native project ready (run ${RUN.test(opts.run) ? opts.run : "unknown"}). Press Ctrl-C to stop; use hack ps and hack logs from another terminal.`,
+  ];
+  const services =
+    isRecord(opts.plan) && isRecord(opts.plan.services)
+      ? opts.plan.services
+      : {};
+  const suffix =
+    opts.httpsPort === null || opts.httpsPort === 443
+      ? ""
+      : `:${opts.httpsPort}`;
+  let unserved = false;
+  for (const name of [...opts.routed].sort()) {
+    const service = services[name];
+    const hostnames =
+      isRecord(service) &&
+      isRecord(service.routing) &&
+      Array.isArray(service.routing.hostnames)
+        ? service.routing.hostnames.filter(
+            (host): host is string =>
+              typeof host === "string" && PRINTABLE_HOST.test(host)
+          )
+        : [];
+    if (!PRINTABLE_NAME.test(name) || hostnames.length === 0) {
+      continue;
+    }
+    if (opts.httpsPort === null) {
+      unserved = true;
+      continue;
+    }
+    lines.push(
+      `  ${name}: ${hostnames.map((host) => `https://${host}${suffix}`).join(" ")}`
+    );
+  }
+  if (unserved) {
+    lines.push(
+      "  Routes are not served on this host: the native HTTPS frontend is not selected (HACK_NATIVE_CADDY_BINARY, HACK_NATIVE_CADDY_SHA256 and HACK_NATIVE_HTTPS_PORT)."
+    );
+  }
+  const ports = reviewedNativeLoopbackPorts(opts.plan);
+  if (ports.length > 0) {
+    lines.push(
+      `  Published ports: ${ports.map((port) => `127.0.0.1:${port}`).join(" ")}`
+    );
+  }
+  return lines;
+}
+/** One confirmed-stop line for an interrupted ready graph, from its final receipt. */
+export function nativeStoppedNotice(final: unknown): string {
+  const removed =
+    isRecord(final) &&
+    isRecord(final.receipt) &&
+    final.receipt.phase === "removed";
+  return removed
+    ? "Native project stopped; owned cleanup confirmed and no runtime data was retained."
+    : "Native project stopped; owned cleanup confirmed. Named volumes and the stopped run mapping are kept for the next hack up.";
+}
 function foregroundExitCode(opts: {
   aborted: boolean;
   interruptedExit: number;
@@ -786,6 +865,80 @@ function cleanupUnconfirmed(
   return new ClosedCliError(
     `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startup}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
   );
+}
+const NATIVE_CODE = /^[A-Za-z0-9_]{1,80}$/;
+/**
+ * A fresh startup whose graph owner exited before reserving any runtime state:
+ * inspection reports the run's journal exactly absent. Nothing was created, so
+ * no cleanup is pending and the startup diagnostic is the whole story.
+ */
+function nothingReserved(startupFailure: unknown, nativeCode?: string): Error {
+  const message = startupFailure instanceof Error ? startupFailure.message : "";
+  const diagnostic = SAFE_STARTUP_DIAGNOSTIC.exec(message);
+  const code =
+    nativeCode && NATIVE_CODE.test(nativeCode) ? nativeCode : diagnostic?.[2];
+  return new ClosedCliError(
+    `Native graph startup failed${code ? ` (${code})` : ""} before any runtime state was reserved; nothing was created and no cleanup is needed.`
+  );
+}
+/**
+ * The report when final inspection of a settled startup fails. The graph
+ * owner has exited (serve settles only after its exit), so for a fresh run
+ * that never attempted a mapping, an exactly absent journal proves nothing was
+ * reserved ({@link nothingReserved}). Every other case keeps the
+ * unconfirmed-cleanup report.
+ */
+function uninspectableStartupFailure(opts: {
+  readonly serveFailure: unknown;
+  readonly inspectionFailure: unknown;
+  readonly restored: boolean;
+  readonly mappingAttempted: boolean;
+  readonly nativeCode: string | undefined;
+}): { readonly error: Error; readonly nothingReserved: boolean } {
+  if (
+    opts.serveFailure === undefined ||
+    opts.restored ||
+    opts.mappingAttempted ||
+    !(opts.inspectionFailure instanceof NativeRuntimeRequestError) ||
+    opts.inspectionFailure.nativeCode !== NATIVE_GRAPH_UNRESERVED
+  ) {
+    return {
+      error: cleanupUnconfirmed(
+        opts.serveFailure ?? opts.inspectionFailure,
+        opts.nativeCode
+      ),
+      nothingReserved: false,
+    };
+  }
+  return {
+    error: nothingReserved(opts.serveFailure, opts.nativeCode),
+    nothingReserved: true,
+  };
+}
+/** The HTTPS port routes are served on: only while the frontend lease runs. */
+function servedHttpsPort(
+  lease: unknown,
+  selection: NativeHttpsSelection | undefined
+): number | null {
+  return lease === undefined ? null : (selection?.httpsPort ?? null);
+}
+/** The confirmed-stop line, only for an interrupted graph that published a mapping. */
+function stoppedLines(opts: {
+  readonly aborted: boolean;
+  readonly published: boolean;
+  readonly final: unknown;
+}): string[] {
+  return opts.aborted && opts.published
+    ? [nativeStoppedNotice(opts.final)]
+    : [];
+}
+function reportLines(
+  notice: (line: string) => void,
+  lines: readonly string[]
+): void {
+  for (const line of lines) {
+    notice(line);
+  }
 }
 function requireConfirmedCleanup(
   final: unknown,
@@ -1186,6 +1339,10 @@ export async function startNativeProject(opts: {
    * override; each active pair then requires a reviewed dependency binding.
    */
   readonly internalExtraHosts?: Readonly<Record<string, string>>;
+  /** Where each project-wide alias comes from, for refusal text only. */
+  readonly internalExtraHostSources?: Readonly<
+    Record<string, NativeHostAliasSource>
+  >;
   readonly allowedHosts?: readonly string[];
   readonly preparedBase?: NativePreparedBase;
   readonly https?: NativeHttpsSelection;
@@ -1296,6 +1453,7 @@ export async function startNativeProject(opts: {
   input = applyNativeInternalHostAliases({
     input,
     hosts: opts.internalExtraHosts,
+    sources: opts.internalExtraHostSources,
     hasDependencySelection: opts.dependencyFile !== undefined,
   });
   input = (
@@ -1372,6 +1530,7 @@ export async function startNativeProject(opts: {
     const hostAliases = nativeServiceHostAliases({
       services: specs,
       profiles,
+      managedEnvironment: input.managedEnvironment,
     });
     const hostDependencies = await readNativeHostDependencies({
       path: opts.dependencyFile,
@@ -1394,6 +1553,7 @@ export async function startNativeProject(opts: {
     requireNativeHostAliasBindings({
       dependencies: hostDependencies,
       hostAliases,
+      sources: opts.internalExtraHostSources,
     });
     prepareNativeDependencyServices({
       dependencies: hostDependencies,
@@ -1748,6 +1908,15 @@ export async function startNativeProject(opts: {
                 }
                 await hooks?.ready?.();
                 await opts.onReady?.();
+                reportLines(
+                  deps.notice,
+                  nativeReadySummary({
+                    run,
+                    plan: review.report.plan,
+                    routed: routes.services,
+                    httpsPort: servedHttpsPort(https, opts.https),
+                  })
+                );
                 // Last: only microtasks separate this from readiness.
                 await stop?.owe(() => controller.signal.aborted);
               },
@@ -1762,10 +1931,15 @@ export async function startNativeProject(opts: {
             try {
               final = await invokeInspect();
             } catch (inspectionFailure) {
-              throw cleanupUnconfirmed(
-                serveFailure ?? inspectionFailure,
-                nativeExitCode
-              );
+              const settled = uninspectableStartupFailure({
+                serveFailure,
+                inspectionFailure,
+                restored: restore !== undefined,
+                mappingAttempted,
+                nativeCode: nativeExitCode,
+              });
+              graphCleanupConfirmed = settled.nothingReserved;
+              throw settled.error;
             }
             const confirmed = await confirmCleanupOrRecordOwner({
               confirm: {
@@ -1814,13 +1988,22 @@ export async function startNativeProject(opts: {
               mappingAttempted,
               invoke: deps.invoke,
             });
-            return foregroundExitCode({
+            const exit = foregroundExitCode({
               aborted: controller.signal.aborted,
               interruptedExit: stopSignals.interruptedExit(),
               failure: serveFailure,
               infrastructureFailure: httpsFailure,
               code,
             });
+            reportLines(
+              deps.notice,
+              stoppedLines({
+                aborted: controller.signal.aborted,
+                published: mapping !== undefined,
+                final,
+              })
+            );
+            return exit;
           } catch (error) {
             throw withStartupLogReport(error, startupLogReport);
           }

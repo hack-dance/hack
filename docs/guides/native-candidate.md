@@ -192,7 +192,7 @@ Compose backend. Native support for them is planned after v5.
 | External network | A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the selected adaptation (`HACK_NATIVE_ADAPTATION` or the committed `.hack/native/adaptation.json`; see [Native settings files](#native-settings-files)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
 | External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
 | Reserved ownership label | A service, network or volume label key starts with `com.docker.compose.`, `io.hack-local.`, `io.hack.native-config.`, `io.hack.native-file.` or `io.hack.storage-witness.`. Compose, the native runtime and native-config Compose use these labels to prove which resources they own. |
-| Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. |
+| Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. With `HACK_NATIVE_BUILDS=1` (see below), only a build field other than `context`, `dockerfile`, `target` and `args`, or `image` together with `build`, counts; native build admission reviews the values of those four fields itself. |
 | Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64. A missing or `null` `platform` is unset and passes. `linux/amd64` passes only for a service that the `HACK_NATIVE_ADAPTATION` selection opts in to [amd64 emulation](#amd64-emulation-with-rosetta-2); every other platform value stays on the Compose backend. |
 
 Native `hack up` and `hack restart` check for these features after selecting the
@@ -252,9 +252,51 @@ routing labels (`one_shot_route_conflict`).
 because it reads and adopts the Compose backend's existing containers and
 volumes. On the native backend it refuses before reading anything and names the
 rerun: `HACK_RUNTIME_BACKEND=compose hack config adopt --dry-run`. See
-[Legacy Compose adoption](../reference/native-compose-adoption.md). A basic build is also
-refused by native image-project `up`, with the general refusal: it needs the
-authored native format.
+[Legacy Compose adoption](../reference/native-compose-adoption.md).
+
+Native image-project `up` builds Compose `build:` services only when you opt in
+with `HACK_NATIVE_BUILDS=1` (and the usual `HACK_NATIVE_SHARED_SOURCE=1`). Without
+it, a `build:` service refuses before any hook or VM effect and names the variable.
+With it:
+
+- Accepted forms are `build: <context>` and a mapping of `context`, `dockerfile`,
+  `target` and `args`. Paths follow Compose (the context is relative to the Compose
+  file, the Dockerfile to the context) and must stay inside the project. `args` may be
+  a mapping of literal strings or numbers, or a list of `KEY=VALUE` literals. Any `$`
+  interpolation, a list item without `=` (host variable inheritance), `null`, other
+  build keys (`secrets`, `ssh`, `cache_from`, `platforms`, `network` and the rest),
+  remote contexts and `image` together with `build` refuse. Values are never shown.
+- Build args are not secrets: as with Docker, the image records them in its history.
+  A build arg whose value equals a `hack env` secret value of this project and
+  environment refuses before any hook or VM effect, naming the service and the
+  argument but never the value. The refusal does not suggest the Compose backend,
+  because a Compose build would record the value in the image history too. Pass
+  secrets with BuildKit build secrets instead; native builds do not support them yet.
+- Every build refusal names the service. A refusal from the runtime's build source
+  policy (for example a base image that is not a public Docker Hub reference) says
+  that it is the build source policy and what to change. Other build failures name
+  the service and keep the runtime's message.
+- After the runtime is up, each distinct build runs once with
+  `runtime build-image` (below), and its filtered output streams to your terminal.
+  Every service with that build is then pinned to the built content ID, so review,
+  readiness and restore treat it like an image service.
+- An existing image for the same build inputs is reused without building. Set
+  `HACK_NATIVE_REBUILD=1` to build again; base-image tags then resolve again too.
+  Edits to other files in the context do not trigger a rebuild, as with Compose.
+- Restoring an unchanged retained run uses the retained images and never builds; if
+  one is missing, `up` refuses and asks you to start fresh. `hack restart` also never
+  builds: it reuses the running or retained image, or refuses before stopping anything.
+- "Unchanged" means the same Compose bytes. A run that mounts no project source and
+  uses no dependency cache still restores after its Compose file was edited and put
+  back, or after any project file was touched; build-context edits do not rebuild it.
+  Its review then differs only in the project source inventory (file sizes and
+  modification times), which such a run never reads, and restore keeps the retained
+  ownership plan, images and data.
+- As with Compose `up`, only build services in the selected profiles are built and
+  pinned. A build service in a profile you did not select is not built, and restore
+  and restart need no image for it; selecting its profile in a later fresh `up` builds
+  it then. Native builds are `linux/arm64` only; `platform: linux/amd64` is still
+  refused.
 
 Native review reads Compose `ports` without reading environment values. Each
 entry may be short (`[host_ip:][published:]target[/protocol]`, with an IPv6 host
@@ -314,12 +356,14 @@ the same adaptation selection as native `up` without `--env` before it reports. 
 finds an external network, the message also names the `isolatedNetworks` selection
 above, which keeps that network's project on native.
 
-A basic build is not one of these features, but native image-project `up` still
-refuses it, so doctor does not report it as ok. On the native backend the check
-warns, names the general configuration refusal and the next step (preview the
-authored native conversion with `hack config import --dry-run`, or select the
-Compose backend), and its JSON adds `composeBackend.nativeUpRefusals:
-["basic_build"]`. On the Compose backend the same note is informational.
+A basic build is not one of these features, but without `HACK_NATIVE_BUILDS=1`
+native image-project `up` refuses it, so doctor does not report it as ok then. On the
+native backend the check warns, names the variable and the next steps (set
+`HACK_NATIVE_BUILDS=1`, preview the authored native conversion with
+`hack config import --dry-run`, or select the Compose backend), and its JSON adds
+`composeBackend.nativeUpRefusals: ["basic_build"]`. On the Compose backend the same
+note is informational. With `HACK_NATIVE_BUILDS=1` set, doctor classifies builds the
+way native builds admit them and reports no basic-build refusal.
 
 Publication control tokens are delivered to the relay through a one-shot inherited
 pipe (`--control-fd 0`), never through process arguments. The relay reads exactly
@@ -579,6 +623,11 @@ the mapping, inspect the exact instance with the current bundle:
 
 Omitting `--branch` uses the same linked-worktree default as project commands;
 detached linked worktrees require an explicit instance. Inspection writes nothing.
+A mapping that still matches the checkout reports `state: "current"` with its run,
+the native graph phase (or `null` while the pool is stopped), whether the graph's
+run, owner, namespace and plan match the mapping, and `repairRequired: false`.
+Only a mapping whose scope no longer matches goes through the legacy device-rebind
+inspection below, which returns the `selectionSha256` that repair requires.
 Repair requires the exact selection and explicit acceptance of unproven original
 filesystem volume continuity. It changes only the three scope directory device
 numbers, preserving canonical paths, inodes, branch, run, owner, plan, environment
@@ -607,6 +656,79 @@ Provider setup is separate and explicit. Obtain the exact archives identified in
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-network-tools --directory /absolute/private/pinned-apks
 ./hack-native --candidate-root /absolute/private/candidate-home runtime probe --json
 ```
+
+The pins also name a BuildKit client (`buildx`, `darwin-arm64`) for native image
+builds. Prepare it before using `HACK_NATIVE_BUILDS=1`; it is optional otherwise:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-builder --archive /absolute/docker-buildx
+```
+
+The command takes the exact release file named in `provider-pins.json`. It checks
+the SHA-256 before it changes any state, then copies the file into private candidate
+state and checks its code signature. If a prepared client exists, the command checks
+it again and does not replace it. If the prepared tree changes, `runtime probe`
+refuses; it reports `builder_prepared` when the client is present and unchanged.
+
+`runtime build-image --request <file> --json` builds one image in the running
+runtime's engine with that client. Native `up` calls it for `build:` services when
+`HACK_NATIVE_BUILDS=1` is set; you can also run it directly. The request is a private
+JSON file (a singly linked, mode-`0600` file owned by you):
+
+```json
+{"version": 1, "project_root": "/absolute/project", "context": "app",
+ "dockerfile": "Dockerfile", "target": null, "args": {"NAME": "literal"},
+ "policy": "missing", "timeout_seconds": 1800}
+```
+
+- The context and Dockerfile must be inside the project and reached without symlinks.
+  The Dockerfile is read, never run, to find every image it can pull. Each image must
+  be a public Docker Hub reference; it is pinned to a digest before the build starts.
+  Base images with stored `ONBUILD` triggers refuse. The client builds from a private
+  copy of the Dockerfile and ignore rules that were scanned, so editing either file
+  during the build has no effect on it.
+- Build arguments are not secrets, exactly as with Docker: the built image records
+  their values in its history, and an argument that selects a base image appears in
+  the resolved base references that the receipt and the result report. Never pass a
+  secret as a build argument. BuildKit build secrets are the right mechanism for
+  secrets; native builds do not support them yet.
+- Every build runs under a BuildKit source policy: only the pinned base images
+  resolve as images, and network sources (`ADD` of an `http`, `https` or git URL, and
+  image blob sources) are denied. The engine would otherwise fetch those from outside
+  the isolated build network. The policy also covers sources that a base image's
+  stored `ONBUILD` triggers add; such bases refuse before the build anyway.
+- Argument values reach the client only through a private definition file (mode
+  `0600`, removed after the build), never its command line or its environment; the
+  client's environment is a fixed list of its own settings. Names must be plain
+  identifiers. Names BuildKit or buildx interpret themselves (`BUILDKIT_*`,
+  `BUILDX_*`, `SOURCE_DATE_EPOCH`) and the platform arguments refuse.
+- Build output is shown on stderr after filtering, as defense in depth: every
+  argument value is replaced with `[redacted]`, also when quoted or escaped the way
+  the client prints values, terminal control characters are removed, lines are cut at
+  16 KiB and output stops after 4 MiB.
+- `missing` reuses a verified image for the same build key without running the client;
+  `rebuild` always builds. The key covers the Dockerfile and `.dockerignore` bytes,
+  target, arguments and versions, not the context's other files (as with Compose).
+- The runtime must have network egress and the isolated build network that a runtime
+  started by this version sets up. An older runtime refuses with
+  `native_build_runtime_restart`: stop it and start it again.
+- `runtime down` refuses while a build runs. Ctrl-C or SIGTERM cancels the build and
+  stops the client's whole process group; so does the time budget (default 30 minutes,
+  at most 2 hours). Both also apply while base images resolve, before the client
+  starts: the budget covers the whole operation.
+- A cold build needs at least 6 GiB free on the runtime's storage disk, or twice the
+  last image of the same build if that is larger; otherwise it refuses with
+  `native_build_storage` and deletes nothing. After each successful build, BuildKit's
+  cache is pruned to 8 GiB. The cache holds only build steps; pruning never removes
+  images, containers or volumes.
+
+`runtime reclaim-build-images --json` removes build images that a newer build of the
+same key replaced. It keeps every image a build receipt names as current, every image
+that any retained run's saved state mentions, every image a container still uses (the
+engine refuses those), and every image whose ownership labels are not exactly this
+runtime's. Each removal deletes that one image only, never its untagged parent
+images. It refuses while a build runs, and removes nothing if it cannot read all
+saved run state. The report lists removed images and why each other one was kept.
 
 Before startup, network-tool preparation additionally requires all four pinned
 Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), with

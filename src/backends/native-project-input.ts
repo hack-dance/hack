@@ -37,6 +37,11 @@ export type NativeProjectInput = {
   readonly managedFiles?: Readonly<
     Record<string, readonly NativeManagedFile[]>
   >;
+  /**
+   * Private in-memory only: the values Hack stores as secrets for this project and
+   * environment, so build arguments can refuse to carry one. Never log or write it.
+   */
+  readonly managedSecretValues?: readonly string[];
   /** Private lifecycle environment; not container environment. */
   readonly lifecycleHostEnvironment: Readonly<Record<string, string>>;
   /**
@@ -208,6 +213,38 @@ function normalizeManagedEnvironment(
   return managedEnvironment;
 }
 
+/** Every value the resolved project env stores as a secret, for any scope or target. */
+function managedSecretValues(
+  resolved: Awaited<ReturnType<typeof resolveProjectEnvConfig>>
+): string[] {
+  if (!resolved) {
+    return [];
+  }
+  const values = new Set<string>();
+  const collect = (
+    metadata: typeof resolved.effectiveMetadata,
+    valuesFor: (target: string) => Readonly<Record<string, string>> | undefined
+  ) => {
+    for (const [target, keys] of Object.entries(metadata)) {
+      const resolvedValues = valuesFor(target);
+      for (const [key, entry] of Object.entries(keys)) {
+        const value = resolvedValues?.[key];
+        if (entry.secret && typeof value === "string" && value !== "") {
+          values.add(value);
+        }
+      }
+    }
+  };
+  collect(resolved.effectiveMetadata, (target) =>
+    target === "global" ? resolved.globalEnv : resolved.serviceEnv[target]
+  );
+  collect(
+    resolved.hostEffectiveMetadata,
+    (target) => resolved.hostTargetEnv[target]
+  );
+  return [...values];
+}
+
 /**
  * Services the reviewed native plan marks active for the selected profiles. A
  * malformed plan, or a service absent from it, selects nothing.
@@ -322,6 +359,7 @@ export async function prepareNativeProjectInput(opts: {
       originalSha256: createHash("sha256").update(bytes).digest("hex"),
       normalizedComposeJson,
       managedEnvironment,
+      managedSecretValues: managedSecretValues(resolved),
       lifecycleHostEnvironment: resolved
         ? selectProjectEnvValuesForExecutionTarget({
             resolved,

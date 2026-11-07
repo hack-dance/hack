@@ -43,6 +43,7 @@ import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
 import { parseNativeGcloudSelection } from "../backends/native-gcloud-environment.ts";
+import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
   nativeDownEnvironment,
   nativeProjectDown,
@@ -5921,6 +5922,8 @@ async function handleNativeUp({
   // The selected adaptation applies first: a network it isolates is not
   // external here, exactly as native start normalizes it. Without --env every
   // committed per-env adaptation is a candidate (see nativeAdaptationCandidates).
+  // With native builds enabled, build fields native builds implement pass
+  // here and native build admission reviews them, secret-valued args included.
   const requestedEnvName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
@@ -5935,6 +5938,7 @@ async function handleNativeUp({
       requestedEnvName,
     }),
     restart,
+    buildsEnabled: nativeBuildsEnabled(),
   });
   const branch = await resolveEffectiveBranchForCommand({
     project,

@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   inspectNativeProjectRunFilesystemRecovery as inspect,
+  inspectNativeProjectRunMapping as inspectMapping,
   loadNativeProjectRun as load,
   type NativeProjectRunScope,
   recoverNativeProjectRunFilesystem as recover,
@@ -328,4 +329,122 @@ test("an exact published audit supports retry after prepublication refusal", asy
   });
   expect(repaired.repaired).toBe(true);
   expect(await load(pool.scope)).toEqual(run);
+});
+
+test("Doctor inspects a current mapping read-only and reports its graph", async () => {
+  const projectRoot = await realpath(
+    await mkdtemp(join(tmpdir(), "native-mapping-current-"))
+  );
+  roots.push(projectRoot);
+  const projectDir = join(projectRoot, ".hack");
+  const nativeHome = join(projectRoot, "candidate");
+  await mkdir(projectDir);
+  await mkdir(nativeHome);
+  const scope: NativeProjectRunScope = {
+    projectRoot,
+    projectDir,
+    nativeHome,
+    branch: null,
+  };
+  const current = {
+    run: "1".repeat(32),
+    owner: "2".repeat(32),
+    namespace: "3".repeat(64),
+    planId: "4".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+    runtimeMetadata: true as const,
+  };
+  await save({ ...scope, run: current });
+  const key = createHash("sha256").update(JSON.stringify(null)).digest("hex");
+  const file = join(projectDir, ".internal/native-runs", `${key}.json`);
+  const bytes = await readFile(file);
+  const calls: string[][] = [];
+  const graph =
+    (receipt: Record<string, unknown> | Error) =>
+    async (input: { readonly args: readonly string[] }) => {
+      calls.push([...input.args]);
+      if (receipt instanceof Error) {
+        throw receipt;
+      }
+      return { journal_incomplete: false, receipt };
+    };
+  const stopped = {
+    run: current.run,
+    owner: current.owner,
+    namespace: current.namespace,
+    plan_id: current.planId,
+    phase: "stopped-data-retained",
+  };
+
+  const inspected = await inspectMapping({
+    scope,
+    runtime,
+    invoke: graph(stopped),
+  });
+  expect(inspected).toEqual({
+    schema: "hack.native-project-run-mapping-inspection/v1",
+    state: "current",
+    mappingSha256: createHash("sha256").update(bytes).digest("hex"),
+    run: current,
+    graph: { phase: "stopped-data-retained", ownershipMatches: true },
+    repairRequired: false,
+  });
+  // Only the read-only graph inspection runs; the mapping is unchanged.
+  expect(calls).toEqual([
+    ["graph", "inspect", "--run-id", current.run, "--json"],
+  ]);
+  expect((await readFile(file)).equals(bytes)).toBe(true);
+
+  // A graph owned by a different plan is reported, never repaired.
+  const foreign = await inspectMapping({
+    scope,
+    runtime,
+    invoke: graph({ ...stopped, plan_id: "5".repeat(64) }),
+  });
+  expect(foreign).toMatchObject({
+    state: "current",
+    graph: { phase: "stopped-data-retained", ownershipMatches: false },
+  });
+  // A stopped pool leaves the graph unreadable; the mapping is still reported.
+  const unavailable = await inspectMapping({
+    scope,
+    runtime,
+    invoke: graph(new Error("runtime stopped")),
+  });
+  expect(unavailable).toMatchObject({ state: "current", graph: null });
+
+  // Repair still applies only to a device-renumbered mapping.
+  await expect(
+    recover({
+      scope,
+      runtime,
+      expectSelection: "6".repeat(64),
+      acceptLegacyDeviceRebind: true,
+      invoke: graph(stopped),
+    })
+  ).rejects.toThrow("Native project run mapping");
+  // An unsafe file mode is refused, as before.
+  await chmod(file, 0o644);
+  await expect(
+    inspectMapping({ scope, runtime, invoke: graph(stopped) })
+  ).rejects.toThrow("Native project run mapping");
+  expect(await load(scope).catch(() => "refused")).toBe("refused");
+  await chmod(file, 0o600);
+  expect(await load(scope)).toEqual(current);
+});
+
+test("Doctor inspection of a renumbered mapping keeps the legacy rebind selection", async () => {
+  const pool = await fixture();
+  const invoke = authority(pool);
+  const inspected = await inspectMapping({
+    scope: pool.scope,
+    runtime,
+    invoke,
+  });
+  expect("state" in inspected).toBe(false);
+  expect(inspected).toEqual(
+    await inspect({ scope: pool.scope, runtime, invoke })
+  );
 });

@@ -1597,3 +1597,374 @@ fn pinned_bun_node_image_downloads_without_docker() {
     .unwrap();
     println!("{}", serde_json::to_string(&receipt).unwrap());
 }
+
+#[test]
+fn stored_onbuild_triggers_are_detected_and_malformed_configs_refuse() {
+    assert!(!declares_onbuild(br#"{"config":{}}"#).unwrap());
+    assert!(!declares_onbuild(br#"{"config":{"OnBuild":null}}"#).unwrap());
+    assert!(!declares_onbuild(br#"{"config":{"OnBuild":[]}}"#).unwrap());
+    assert!(declares_onbuild(br#"{"config":{"OnBuild":["COPY --from=x / /"]}}"#).unwrap());
+    assert!(declares_onbuild(br#"{"config":{"OnBuild":"RUN x"}}"#).is_err());
+    assert!(declares_onbuild(b"not json").is_err());
+}
+
+#[test]
+fn onbuild_triggers_are_found_under_any_key_case_the_engine_accepts() {
+    // The engine's Go decoder matches field names case-insensitively.
+    for config in [
+        r#"{"config":{"onbuild":["ADD . /src"]}}"#,
+        r#"{"config":{"ONBUILD":["ADD . /src"]}}"#,
+        r#"{"config":{"oNbUiLd":["ADD . /src"]}}"#,
+        r#"{"CONFIG":{"OnBuild":["ADD . /src"]}}"#,
+        r#"{"Config":{"onBuild":["ADD . /src"]}}"#,
+        r#"{"container_config":{"OnBuild":["ADD . /src"]}}"#,
+        r#"{"Container_Config":{"onbuild":["ADD . /src"]}}"#,
+        r#"{"OnBuild":["ADD . /src"],"config":{}}"#,
+    ] {
+        assert!(declares_onbuild(config.as_bytes()).unwrap(), "{config}");
+    }
+    for config in [
+        r#"{"config":{"onbuild":[]}}"#,
+        r#"{"config":{"ONBUILD":null},"container_config":{"OnBuild":[]}}"#,
+        r#"{"config":{"Env":["OnBuild=x"],"onbuilds":["x"]}}"#,
+    ] {
+        assert!(!declares_onbuild(config.as_bytes()).unwrap(), "{config}");
+    }
+}
+
+#[test]
+fn onbuild_fields_named_more_than_once_or_malformed_refuse() {
+    // The engine keeps the last of several matching keys; a check here could see
+    // another, so any repetition, exact or by case, fails closed.
+    for config in [
+        r#"{"config":{"OnBuild":[],"onbuild":["ADD . /src"]}}"#,
+        r#"{"config":{"OnBuild":["ADD . /src"],"OnBuild":[]}}"#,
+        r#"{"config":{"OnBuild":[]},"Config":{"OnBuild":["ADD . /src"]}}"#,
+        r#"{"config":{},"config":{"OnBuild":["ADD . /src"]}}"#,
+        r#"{"container_config":{},"CONTAINER_CONFIG":{}}"#,
+        r#"{"config":{"onbuild":"ADD . /src"}}"#,
+        r#"{"config":"ADD . /src"}"#,
+        r#"["not an object"]"#,
+    ] {
+        let error = declares_onbuild(config.as_bytes()).unwrap_err();
+        assert_eq!(error.code, "registry_image", "{config}");
+    }
+}
+
+/// Non-ASCII spellings Go's folding can match to an ASCII field: dotless i (U+0131),
+/// long s (U+017F) and the Kelvin sign (U+212A).
+const NON_ASCII_KEYS: [(&str, &str); 4] = [
+    ("OnBuild", "OnBu\u{131}ld"),
+    ("architecture", "arch\u{131}tecture"),
+    ("os", "o\u{17f}"),
+    ("kind", "\u{212a}ind"),
+];
+
+#[test]
+fn image_configs_with_non_ascii_member_names_refuse() {
+    let onbuild = NON_ASCII_KEYS[0].1;
+    for config in [
+        format!(r#"{{"config":{{"{onbuild}":["ADD . /src"]}}}}"#),
+        format!(r#"{{"container_config":{{"{onbuild}":["ADD . /src"]}}}}"#),
+        format!(r#"{{"{onbuild}":["ADD . /src"],"config":{{}}}}"#),
+        r#"{"conf\u0131g":{"OnBuild":["ADD . /src"]}}"#.to_owned(),
+        r#"{"config":{"Env":[],"\u017fhell":["/bin/sh"]}}"#.to_owned(),
+    ] {
+        let error = declares_onbuild(config.as_bytes()).unwrap_err();
+        assert!(error.message.contains("ASCII"), "{config}: {error:?}");
+    }
+    let native = |config: &str| config_platform(config.as_bytes(), PlatformPolicy::Native, None);
+    for (_, key) in NON_ASCII_KEYS {
+        let config = format!(r#"{{"os":"linux","architecture":"arm64","{key}":"amd64"}}"#);
+        assert!(
+            native(&config).unwrap_err().message.contains("ASCII"),
+            "{config}"
+        );
+    }
+    // Real-looking OCI and Docker configurations still pass.
+    let oci = r#"{"created":"2024-01-01T00:00:00Z","architecture":"arm64","variant":"v8","os":"linux","config":{"Env":["PATH=/usr/local/bin:/usr/bin"],"Cmd":["/bin/sh"],"WorkingDir":"/","Labels":{"org.opencontainers.image.title":"base"},"OnBuild":null},"rootfs":{"type":"layers","diff_ids":["sha256:0000000000000000000000000000000000000000000000000000000000000000"]},"history":[{"created_by":"ADD file:x in /"}]}"#;
+    assert!(!declares_onbuild(oci.as_bytes()).unwrap());
+    assert_eq!(native(oci).unwrap(), ImagePlatform::LinuxArm64);
+    let docker = r##"{"architecture":"arm64","os":"linux","config":{"Hostname":"","User":"","ExposedPorts":{"80/tcp":{}},"Env":["A=b"],"Cmd":["nginx"],"Image":"sha256:x","Volumes":null,"Entrypoint":null,"OnBuild":[],"Labels":null},"container_config":{"Cmd":["/bin/sh","-c","#(nop) CMD [\"nginx\"]"],"OnBuild":null},"docker_version":"20.10.7","rootfs":{"type":"layers","diff_ids":[]}}"##;
+    assert!(!declares_onbuild(docker.as_bytes()).unwrap());
+    assert_eq!(native(docker).unwrap(), ImagePlatform::LinuxArm64);
+}
+
+#[test]
+fn manifests_with_non_ascii_member_names_refuse() {
+    let parse = |text: &str| parse_manifest(text.as_bytes(), &digest(text.as_bytes())).map(drop);
+    let digest_a = format!("sha256:{}", "a".repeat(64));
+    // A real-looking OCI index, and a Docker v2 manifest, pass.
+    let index = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{digest_a}","size":1234,"platform":{{"architecture":"arm64","os":"linux","variant":"v8"}},"annotations":{{"org.opencontainers.image.ref.name":"1"}}}}]}}"#
+    );
+    assert!(parse(&index).is_ok());
+    let manifest = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{{"mediaType":"application/vnd.docker.container.image.v1+json","size":1469,"digest":"{digest_a}"}},"layers":[{{"mediaType":"application/vnd.docker.image.rootfs.diff.tar.gzip","size":3623807,"digest":"{digest_a}"}}]}}"#
+    );
+    assert!(parse(&manifest).is_ok());
+    for (from, to) in [
+        // top-level index and manifest objects
+        ("\"manifests\"", "\"man\u{131}fests\""),
+        ("\"schemaVersion\"", "\"\u{17f}chemaVersion\""),
+        // descriptor
+        ("\"digest\"", "\"d\u{131}gest\""),
+        // platform
+        ("\"architecture\"", "\"arch\u{131}tecture\""),
+        ("\"os\"", "\"o\u{17f}\""),
+    ] {
+        let variant = index.replace(from, to);
+        assert_ne!(variant, index);
+        let error = parse(&variant).unwrap_err();
+        assert!(error.message.contains("ASCII"), "{variant}: {error:?}");
+    }
+    for (from, to) in [
+        ("\"layers\"", "\"\u{212a}layers\""),
+        ("\"size\":1469", "\"\u{17f}ize\":1469"),
+    ] {
+        let variant = manifest.replace(from, to);
+        assert_ne!(variant, manifest);
+        assert!(
+            parse(&variant).unwrap_err().message.contains("ASCII"),
+            "{variant}"
+        );
+    }
+}
+
+/// A single-image manifest whose config and layers declare these sizes.
+fn sized_manifest(config: &str, layers: &[&str]) -> String {
+    let digest_a = format!("sha256:{}", "a".repeat(64));
+    let layers: Vec<String> = layers
+        .iter()
+        .map(|size| {
+            format!(
+                r#"{{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"{digest_a}","size":{size}}}"#
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{digest_a}","size":{config}}},"layers":[{}]}}"#,
+        layers.join(",")
+    )
+}
+
+#[test]
+fn build_bases_are_bounded_by_the_image_budget_before_the_build() {
+    let reference = format!("docker.io/library/alpine@sha256:{}", "b".repeat(64));
+    let manifest = |text: &str| parse_manifest(text.as_bytes(), &digest(text.as_bytes()));
+    let limit = ImagePolicy::default().archive_limit;
+    // A normal base passes, also exactly at the budget.
+    let normal = manifest(&sized_manifest("1469", &["3623807", "1024"])).unwrap();
+    assert!(bounded_build_base(&normal, &reference, limit).is_ok());
+    let exact = limit - 100;
+    let at_budget = manifest(&sized_manifest("100", &[&exact.to_string()])).unwrap();
+    assert!(bounded_build_base(&at_budget, &reference, limit).is_ok());
+    // Over the budget, including by overflow: refused naming the base and the total.
+    let over = manifest(&sized_manifest("101", &[&exact.to_string()])).unwrap();
+    let error = bounded_build_base(&over, &reference, limit).unwrap_err();
+    assert_eq!(error.code, "native_build_base_image");
+    assert!(error.message.contains(&reference), "{error:?}");
+    assert!(
+        error.message.contains(&(limit + 1).to_string()),
+        "{error:?}"
+    );
+    assert!(error.message.contains(&limit.to_string()), "{error:?}");
+    let huge = u64::MAX.to_string();
+    let overflow = manifest(&sized_manifest("1", &[&huge])).unwrap();
+    // A layer beyond the acquisition ceiling refuses as a descriptor before any sum.
+    let error = bounded_build_base(&overflow, &reference, limit).unwrap_err();
+    assert_eq!(error.code, "native_build_base_image");
+    assert!(error.message.contains("size limits"), "{error:?}");
+    // Too many layers, or none.
+    let many: Vec<&str> = vec!["1"; MAX_LAYERS + 1];
+    let error = bounded_build_base(
+        &manifest(&sized_manifest("1", &many)).unwrap(),
+        &reference,
+        limit,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains(&format!("{} layers", MAX_LAYERS + 1)),
+        "{error:?}"
+    );
+    assert!(
+        bounded_build_base(
+            &manifest(&sized_manifest("1", &[])).unwrap(),
+            &reference,
+            limit
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn build_base_descriptors_are_validated_like_direct_acquisition() {
+    let reference = format!("docker.io/library/alpine@sha256:{}", "b".repeat(64));
+    let digest_a = format!("sha256:{}", "a".repeat(64));
+    let limit = ImagePolicy::default().archive_limit;
+    let check = |config_type: &str, layer: &str| {
+        let text = format!(
+            r#"{{"schemaVersion":2,"config":{{"mediaType":"{config_type}","digest":"{digest_a}","size":1469}},"layers":[{layer}]}}"#
+        );
+        let manifest = parse_manifest(text.as_bytes(), &digest(text.as_bytes())).unwrap();
+        bounded_build_base(&manifest, &reference, limit)
+    };
+    let layer = |media_type: &str, extra: &str| {
+        format!(r#"{{"mediaType":"{media_type}","digest":"{digest_a}","size":1024{extra}}}"#)
+    };
+    let docker_config = "application/vnd.docker.container.image.v1+json";
+    let oci_config = "application/vnd.oci.image.config.v1+json";
+    // Normal Docker v2 and OCI layers pass.
+    for (config_type, media_type) in [
+        (
+            docker_config,
+            "application/vnd.docker.image.rootfs.diff.tar.gzip",
+        ),
+        (oci_config, "application/vnd.oci.image.layer.v1.tar+gzip"),
+        (oci_config, "application/vnd.oci.image.layer.v1.tar+zstd"),
+        (oci_config, "application/vnd.oci.image.layer.v1.tar"),
+    ] {
+        assert!(
+            check(config_type, &layer(media_type, "")).is_ok(),
+            "{media_type}"
+        );
+    }
+    // An empty `urls` is treated as absent, as direct acquisition does.
+    assert!(
+        check(
+            oci_config,
+            &layer(
+                "application/vnd.oci.image.layer.v1.tar+gzip",
+                r#","urls":[]"#
+            )
+        )
+        .is_ok()
+    );
+    for (config_type, bad_layer) in [
+        // Foreign-layer URLs.
+        (
+            oci_config,
+            layer(
+                "application/vnd.oci.image.layer.v1.tar+gzip",
+                r#","urls":["http://100.96.0.1:8080/layer"]"#,
+            ),
+        ),
+        // Foreign and non-distributable layer types.
+        (
+            docker_config,
+            layer(
+                "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip",
+                "",
+            ),
+        ),
+        (
+            oci_config,
+            layer(
+                "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip",
+                "",
+            ),
+        ),
+        // Unknown layer type, and an invalid layer digest.
+        (oci_config, layer("application/vnd.example.layer", "")),
+        (
+            oci_config,
+            r#"{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"md5:x","size":1}"#
+                .to_owned(),
+        ),
+        // A config descriptor that is not an image configuration.
+        (
+            "application/vnd.example.config+json",
+            layer("application/vnd.oci.image.layer.v1.tar", ""),
+        ),
+    ] {
+        let error = check(config_type, &bad_layer).unwrap_err();
+        assert_eq!(error.code, "native_build_base_image", "{bad_layer}");
+        assert!(error.message.contains(&reference), "{error:?}");
+        assert!(!error.message.contains("100.96.0.1"), "{error:?}");
+    }
+}
+
+#[test]
+fn descriptor_sizes_must_be_present_unsigned_integers() {
+    let manifest = |text: &str| parse_manifest(text.as_bytes(), &digest(text.as_bytes())).map(drop);
+    assert!(manifest(&sized_manifest("1469", &["1024"])).is_ok());
+    for size in ["-1", "1.5", "\"1024\"", "null", "1e3"] {
+        assert!(
+            manifest(&sized_manifest("1469", &[size])).is_err(),
+            "layer {size}"
+        );
+        assert!(
+            manifest(&sized_manifest(size, &["1024"])).is_err(),
+            "config {size}"
+        );
+    }
+    let missing = sized_manifest("1469", &["1024"]).replace(r#","size":1024"#, "");
+    assert!(manifest(&missing).is_err());
+}
+
+#[test]
+fn manifest_members_must_be_spelled_exactly_once() {
+    let parse = |text: &str| parse_manifest(text.as_bytes(), &digest(text.as_bytes())).map(drop);
+    let descriptor = format!(
+        r#"{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:{}","size":2,"platform":{{"os":"linux","architecture":"arm64"}}}}"#,
+        "a".repeat(64)
+    );
+    let index = format!(r#"{{"schemaVersion":2,"manifests":[{descriptor}]}}"#);
+    assert!(parse(&index).is_ok());
+    for variant in [
+        index.replace("\"manifests\"", "\"Manifests\""),
+        index.replace("\"schemaVersion\"", "\"SchemaVersion\""),
+        index.replace("\"digest\"", "\"Digest\""),
+        index.replace("\"architecture\"", "\"ARCHITECTURE\""),
+        index.replace(r#""os":"linux""#, r#""os":"linux","OS":"windows""#),
+        format!(r#"{{"schemaVersion":2,"manifests":[{descriptor}],"MANIFESTS":[]}}"#),
+        format!(
+            r#"{{"schemaVersion":2,"manifests":[{descriptor}],"config":{descriptor},"Config":{descriptor}}}"#
+        ),
+    ] {
+        let error = parse(&variant).unwrap_err();
+        assert!(error.message.contains("exact case"), "{variant}: {error:?}");
+    }
+}
+
+#[test]
+fn image_platform_fields_are_read_like_the_engine_and_refuse_repetition() {
+    let native = |config: &str| config_platform(config.as_bytes(), PlatformPolicy::Native, None);
+    // A case variant the engine accepts is read, not missed.
+    assert_eq!(
+        native(r#"{"OS":"linux","Architecture":"arm64"}"#).unwrap(),
+        ImagePlatform::LinuxArm64
+    );
+    assert!(native(r#"{"OS":"linux","Architecture":"amd64"}"#).is_err());
+    // A repeated field could mean another platform to the engine: refused.
+    for config in [
+        r#"{"os":"linux","architecture":"arm64","Architecture":"amd64"}"#,
+        r#"{"os":"linux","architecture":"arm64","architecture":"amd64"}"#,
+        r#"{"os":"linux","OS":"windows","architecture":"arm64"}"#,
+        r#"{"os":"linux","architecture":"arm64","variant":"v8","VARIANT":"v7"}"#,
+    ] {
+        let error = native(config).unwrap_err();
+        assert!(
+            error.message.contains("more than once"),
+            "{config}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn build_bases_accept_only_docker_hub_references() {
+    let named = |value: &str| match normalize(value).unwrap() {
+        ImageReference::Named(named) => named,
+        ImageReference::ImageId(_) => unreachable!(),
+    };
+    for value in [
+        "ghcr.io/example/app:1",
+        "registry.test:5000/app:1",
+        "localhost/app:1",
+    ] {
+        let error = resolve_build_base(&named(value), Instant::now()).unwrap_err();
+        assert_eq!(error.code, "registry_image", "{value}");
+    }
+}

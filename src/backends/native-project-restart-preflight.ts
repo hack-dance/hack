@@ -13,6 +13,11 @@ import {
 } from "./native-image-policy.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
+  admitNativeProjectBuilds,
+  nativeBuildsEnabled,
+  nativeServiceActive,
+} from "./native-project-builds.ts";
+import {
   compileNativeHostDependencySelection,
   discoverNativeHostDependency,
   discoverNativeOwnedHostDependency,
@@ -300,6 +305,7 @@ async function stoppedRestartMode(opts: {
 async function pinRestartImages(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
+  readonly profiles: readonly string[];
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
   readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
@@ -309,7 +315,20 @@ async function pinRestartImages(opts: {
     const retainedImage = opts.retainedImages.get(name);
     if (retainedImage) {
       spec.image = retainedImage;
+      // Startup pins a built image the same way: the content ID replaces the build
+      // declaration, so the restart review matches the saved image-only plan.
+      Reflect.deleteProperty(spec, "build");
       continue;
+    }
+    if (spec.image === undefined && spec.build !== undefined) {
+      // Outside the selected profiles a build service is never built or pinned
+      // (as at startup), so it keeps its build declaration.
+      if (!nativeServiceActive(spec, opts.profiles)) {
+        continue;
+      }
+      throw new ClosedCliError(
+        `Native restart reuses built images and never builds; no running or retained image was found for ${name}. Run hack up to build it; nothing was stopped.`
+      );
     }
     const image = String(spec.image);
     if (IMAGE.test(image)) {
@@ -470,9 +489,25 @@ export async function preflightNativeRestart(opts: {
       })
     : undefined;
   input = metadata?.input ?? input;
+  // Restart never builds: an admitted build service must resolve to the image the
+  // current or retained graph already runs (see pinRestartImages).
   const specs = prepareNativeProjectServices(
     input,
-    dependencyFile !== undefined
+    dependencyFile !== undefined,
+    new Set(
+      admitNativeProjectBuilds({
+        services: Object.fromEntries(
+          Object.entries(
+            JSON.parse(input.normalizedComposeJson).services ?? {}
+          ).filter((entry): entry is [string, Record<string, unknown>] =>
+            isRecord(entry[1])
+          )
+        ),
+        projectRoot: opts.scope.projectRoot,
+        composeFile: opts.composeFile,
+        enabled: nativeBuildsEnabled(),
+      }).keys()
+    )
   );
   const hostAliases = nativeServiceHostAliases({
     services: specs,
@@ -531,6 +566,7 @@ export async function preflightNativeRestart(opts: {
   await pinRestartImages({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
+    profiles: selected.profiles ?? [],
     specs,
     retainedImages,
     amd64Emulation: input.amd64Emulation,

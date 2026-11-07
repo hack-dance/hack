@@ -7,6 +7,7 @@ import {
   checkLegacyProjectAgentArtifacts,
   checkLegacyUserAgentArtifacts,
 } from "../agents/legacy-artifacts.ts";
+import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import { runNativeProjectCleanupCommand } from "../backends/native-project-cleanup-command.ts";
 import {
   parseNativeRunMappingRecoveryOptions,
@@ -375,7 +376,7 @@ const doctorOptions = [
     long: "--native-run-mapping",
     valueHint: "inspect|repair",
     description:
-      "Inspect or explicitly repair a native run mapping after filesystem device renumbering",
+      "Inspect a native run mapping, or explicitly repair it after filesystem device renumbering",
   } as const),
   defineOption({
     name: "expectSelection",
@@ -3070,11 +3071,15 @@ async function checkComposeBackendFeatures(opts: {
           requestedEnvName: undefined,
         })
       : undefined;
+  // The same build classification native up applies under HACK_NATIVE_BUILDS.
+  const buildsEnabled = nativeBuildsEnabled();
   const reading = await readComposeBackendReading(ctx.composeFile, {
     adaptationCandidates,
+    buildsEnabled,
   });
   return composeBackendCheckResult({
     backend: opts.backend,
+    buildsEnabled,
     features: reading.features,
     basicBuild: reading.basicBuild,
   });

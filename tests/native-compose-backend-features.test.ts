@@ -167,6 +167,64 @@ test("builds follow the import preview's basic build path", () => {
   }
 });
 
+test("with native builds enabled, exactly the fields native builds implement pass", () => {
+  const enabled = { buildsEnabled: true } as const;
+  // HACK-1925: args and the other implemented fields reach native build admission,
+  // which reviews values (paths, interpolation, managed secrets) itself.
+  for (const build of [
+    "..",
+    "/absolute/context",
+    { context: "../app", args: { GREETING: "synthetic" } },
+    { context: "..", args: ["A=1"], dockerfile: "Dockerfile", target: "dev" },
+    { context: "../../outside" },
+    { args: { A: "${HOST_VALUE}" } },
+    {},
+  ]) {
+    expect(findComposeBackendFeatures(services({ build }), enabled)).toEqual(
+      []
+    );
+  }
+  for (const service of [
+    { build: { context: "..", platforms: ["linux/amd64"] } },
+    { build: { context: "..", ssh: ["default"] } },
+    { build: { context: "..", secrets: ["token"] } },
+    { build: { context: "..", args: { A: "1" }, cache_from: ["x"] } },
+    { build: "..", image: IMAGE },
+  ]) {
+    expect(findComposeBackendFeatures(services(service), enabled)).toEqual([
+      "unsupported_build",
+    ]);
+  }
+  // Without native builds, today's basic-form classification is unchanged.
+  expect(
+    findComposeBackendFeatures(
+      services({ build: { context: "..", args: { A: "1" } } })
+    )
+  ).toEqual(["unsupported_build"]);
+});
+
+test("the build refusal phrase follows whether native builds are enabled", () => {
+  const features = ["unsupported_build"] as const;
+  expect(composeBackendRefusal({ features, restart: false }).message).toContain(
+    "does not support a Compose build outside the basic context, dockerfile and target form;"
+  );
+  const enabled = composeBackendRefusal({
+    features,
+    restart: false,
+    buildsEnabled: true,
+  }).message;
+  expect(enabled).toContain(
+    "does not support a Compose build field other than context, dockerfile, target and args, or image together with build;"
+  );
+  expect(
+    composeBackendCheckResult({
+      backend: "native",
+      features,
+      buildsEnabled: true,
+    }).message
+  ).toContain("a Compose build field other than context, dockerfile");
+});
+
 test("only the native linux/arm64 platform passes", () => {
   for (const platform of ["linux/arm64", "linux/arm64/v8"]) {
     expect(
@@ -332,7 +390,7 @@ test("doctor warns for a basic build that native image-project up refuses", () =
     status: "warn",
     composeBackend: { features: [], nativeUpRefusals: ["basic_build"] },
   });
-  expect(native.message).toContain("general configuration refusal");
+  expect(native.message).toContain("HACK_NATIVE_BUILDS");
   expect(native.message).toContain("hack config import --dry-run");
   expect(native.message).toContain("HACK_RUNTIME_BACKEND=compose");
   const compose = composeBackendCheckResult({

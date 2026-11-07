@@ -394,7 +394,11 @@ pub(super) fn prepare_replay(
         .as_ref()
         .and_then(|source| source.live.as_ref());
     if !live || retained.is_none() {
-        if live || retained.is_some() || inputs.review.plan_id != receipt.plan_id {
+        if live
+            || retained.is_some()
+            || (inputs.review.plan_id != receipt.plan_id
+                && !super::normalized::source_independent_review(receipt, &inputs.review.plan))
+        {
             return Err(error(
                 "graph_source_changed",
                 "Replay source mode or immutable review changed.",

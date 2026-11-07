@@ -792,59 +792,58 @@ test("effect captures its dependent finalizer before the first asynchronous chec
  */
 const SIGKILL_ROUTE_RETIREMENT_BUDGET_MS = 30_000;
 
-test.each([
-  "recovery",
-  "finite-down",
-] as const)("SIGKILL after %s route retirement preserves the pending stop generation for idempotent recovery", async (mode) => {
-  const root = await fixture();
-  const owner = await store(root);
-  const generation = await owner.withMutation(async (mutation) => {
-    const published = await publish(mutation);
-    await mutation.runEffect({
-      generation: published,
-      operation: "up",
-      assertFresh: async () => {},
-      assertOwned: async () => {},
-      effect: async () => ({
-        outcome: mode === "recovery" ? "uncertain" : "complete",
-        value: 0,
-      }),
+test.each(["recovery", "finite-down"] as const)(
+  "SIGKILL after %s route retirement preserves the pending stop generation for idempotent recovery",
+  async (mode) => {
+    const root = await fixture();
+    const owner = await store(root);
+    const generation = await owner.withMutation(async (mutation) => {
+      const published = await publish(mutation);
+      await mutation.runEffect({
+        generation: published,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => ({
+          outcome: mode === "recovery" ? "uncertain" : "complete",
+          value: 0,
+        }),
+      });
+      return published;
     });
-    return published;
-  });
-  const claims = await routeStore(root, owner.identity);
-  const attempt = await claims.acquire({
-    hostnames: ["crash.fixture.test"],
-    generationIdentity: generation.generationId,
-  });
-  await claims.markEffectsPossible(attempt);
-  if (mode === "recovery") {
-    await claims.retain(attempt);
-  } else {
-    await claims.complete({ attempt, assertTransition: async () => {} });
-  }
-  const generationModule = new URL(
-    "../src/lib/native-compose-generation.ts",
-    import.meta.url
-  ).href;
-  const claimsModule = new URL(
-    "../src/lib/native-compose-route-claims.ts",
-    import.meta.url
-  ).href;
-  const binding = {
-    engineId: "fixture-engine:1",
-    proxyId: "a".repeat(64),
-    networkId: "b".repeat(64),
-  };
-  const claimOwner = {
-    composeProject: owner.identity.composeProject,
-    ownerToken: owner.identity.ownerToken,
-  };
-  const child = Bun.spawn(
-    [
-      process.execPath,
-      "-e",
-      `
+    const claims = await routeStore(root, owner.identity);
+    const attempt = await claims.acquire({
+      hostnames: ["crash.fixture.test"],
+      generationIdentity: generation.generationId,
+    });
+    await claims.markEffectsPossible(attempt);
+    if (mode === "recovery") {
+      await claims.retain(attempt);
+    } else {
+      await claims.complete({ attempt, assertTransition: async () => {} });
+    }
+    const generationModule = new URL(
+      "../src/lib/native-compose-generation.ts",
+      import.meta.url
+    ).href;
+    const claimsModule = new URL(
+      "../src/lib/native-compose-route-claims.ts",
+      import.meta.url
+    ).href;
+    const binding = {
+      engineId: "fixture-engine:1",
+      proxyId: "a".repeat(64),
+      networkId: "b".repeat(64),
+    };
+    const claimOwner = {
+      composeProject: owner.identity.composeProject,
+      ownerToken: owner.identity.ownerToken,
+    };
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        `
     import {openNativeComposeGenerationStore} from ${JSON.stringify(generationModule)};
     import {openNativeComposeRouteClaims} from ${JSON.stringify(claimsModule)};
     const owner=await openNativeComposeGenerationStore({projectRoot:${JSON.stringify(root)},instance:null,mode:"saved"});
@@ -857,51 +856,55 @@ test.each([
       process.kill(process.pid,"SIGKILL");
     }}));
   `,
-    ],
-    { stdin: "ignore", stdout: "pipe", stderr: "pipe" }
-  );
-  children.push(child);
-  expect(await child.exited).toBe(137);
-  expect(await Bun.file(join(root, "claims-retired")).text()).toBe("retired");
-  expect((await claims.reopen(attempt.reference)).phase).toBe("stopped");
-  expect((await owner.loadCurrent()).pending?.generationId).toBe(
-    generation.generationId
-  );
-  const foreign = await routeStore(root, {
-    composeProject: "foreign-crash-fixture",
-    ownerToken: "e".repeat(32),
-  });
-  const replacement = await foreign.acquire({
-    hostnames: ["crash.fixture.test"],
-    generationIdentity: "f".repeat(32),
-  });
-  await owner.recoverInterruptedLock();
-  let proofs = 0;
-  await owner.withMutation((mutation) =>
-    mutation.runEffect({
-      generation,
-      operation: "down",
-      recoverPending: true,
-      assertOwned: async () => {},
-      effect: async () => ({ outcome: "complete", value: 0 }),
-      beforeComplete: () =>
-        claims.recoverStopped({
-          references: [attempt.reference],
-          assertAbsent: async ({ hostnames }) => {
-            expect(hostnames).toEqual([]);
-            proofs += 1;
-          },
-        }),
-    })
-  );
-  expect(proofs).toBe(1);
-  const saved = await owner.loadCurrent();
-  expect(saved.pending).toBeNull();
-  expect(saved.generation?.generationId).toBe(generation.generationId);
-  expect(saved.stopped).toBe(true);
-  expect((await foreign.reopen(replacement.reference)).phase).toBe("reserved");
-  await foreign.rollback(replacement);
-}, SIGKILL_ROUTE_RETIREMENT_BUDGET_MS);
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" }
+    );
+    children.push(child);
+    expect(await child.exited).toBe(137);
+    expect(await Bun.file(join(root, "claims-retired")).text()).toBe("retired");
+    expect((await claims.reopen(attempt.reference)).phase).toBe("stopped");
+    expect((await owner.loadCurrent()).pending?.generationId).toBe(
+      generation.generationId
+    );
+    const foreign = await routeStore(root, {
+      composeProject: "foreign-crash-fixture",
+      ownerToken: "e".repeat(32),
+    });
+    const replacement = await foreign.acquire({
+      hostnames: ["crash.fixture.test"],
+      generationIdentity: "f".repeat(32),
+    });
+    await owner.recoverInterruptedLock();
+    let proofs = 0;
+    await owner.withMutation((mutation) =>
+      mutation.runEffect({
+        generation,
+        operation: "down",
+        recoverPending: true,
+        assertOwned: async () => {},
+        effect: async () => ({ outcome: "complete", value: 0 }),
+        beforeComplete: () =>
+          claims.recoverStopped({
+            references: [attempt.reference],
+            assertAbsent: async ({ hostnames }) => {
+              expect(hostnames).toEqual([]);
+              proofs += 1;
+            },
+          }),
+      })
+    );
+    expect(proofs).toBe(1);
+    const saved = await owner.loadCurrent();
+    expect(saved.pending).toBeNull();
+    expect(saved.generation?.generationId).toBe(generation.generationId);
+    expect(saved.stopped).toBe(true);
+    expect((await foreign.reopen(replacement.reference)).phase).toBe(
+      "reserved"
+    );
+    await foreign.rollback(replacement);
+  },
+  SIGKILL_ROUTE_RETIREMENT_BUDGET_MS
+);
 
 test("finite host intent is private, durable before effects, and cleared after verified completion", async () => {
   const owner = await store(await fixture());

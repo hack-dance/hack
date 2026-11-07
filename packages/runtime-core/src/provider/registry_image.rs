@@ -25,6 +25,7 @@
 //!   published. Archive and expansion sizes stay within the policy's budgets.
 //! - **Platform.** One unambiguous Linux ARM64 image by default; an explicit platform
 //!   policy may select Linux AMD64 instead (see `image_platform`).
+use super::go_json::GoJson;
 use super::image_load;
 use super::image_platform::{ImagePlatform, PlatformPolicy};
 use super::image_policy::ImagePolicy;
@@ -423,10 +424,70 @@ struct Manifest {
     #[serde(default)]
     layers: Vec<Descriptor>,
 }
+/// Refuse an object whose member for any of `fields` is not spelled exactly, or is
+/// named more than once. The engine's Go decoder also accepts case variants and keeps
+/// the last of repeated keys, while the exact-name parse below would miss or reject
+/// them; refusing keeps both reading the same member.
+fn canonical_members(value: &GoJson, fields: &[&str]) -> Result<(), CandidateError> {
+    let GoJson::Object(members) = value else {
+        return Ok(());
+    };
+    if super::go_json::ascii_keys(value).is_err() {
+        return Err(error("Registry manifest member names must be ASCII."));
+    }
+    for field in fields {
+        let mut matching = members
+            .iter()
+            .filter(|(key, _)| super::go_json::names_field(key, field));
+        let first = matching.next();
+        if matching.next().is_some() || first.is_some_and(|(key, _)| key != field) {
+            return Err(error(
+                "Registry manifest member names are repeated or not in their exact case.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_descriptor(value: &GoJson) -> Result<(), CandidateError> {
+    canonical_members(value, &["digest", "size", "mediaType", "platform", "urls"])?;
+    if let Ok(Some(platform)) = value.field("platform") {
+        canonical_members(platform, &["os", "architecture", "variant"])?;
+    }
+    Ok(())
+}
+
+/// The manifest or index members this module reads, checked for exact spelling.
+fn canonical_manifest(bytes: &[u8]) -> Result<(), CandidateError> {
+    let document = GoJson::parse(bytes).map_err(|_| error("Invalid registry manifest."))?;
+    canonical_members(
+        &document,
+        &[
+            "schemaVersion",
+            "mediaType",
+            "manifests",
+            "config",
+            "layers",
+        ],
+    )?;
+    for list in ["manifests", "layers"] {
+        if let Ok(Some(GoJson::Array(descriptors))) = document.field(list) {
+            for descriptor in descriptors {
+                canonical_descriptor(descriptor)?;
+            }
+        }
+    }
+    if let Ok(Some(config)) = document.field("config") {
+        canonical_descriptor(config)?;
+    }
+    Ok(())
+}
+
 fn parse_manifest(bytes: &[u8], expected: &str) -> Result<Manifest, CandidateError> {
     if bytes.len() > MAX_METADATA || digest(bytes) != expected {
         return Err(error("Registry manifest digest or size mismatch."));
     }
+    canonical_manifest(bytes)?;
     let m: Manifest =
         serde_json::from_slice(bytes).map_err(|_| error("Invalid registry manifest."))?;
     if m.schema_version != 2 {
@@ -1266,8 +1327,7 @@ fn config_platform(
     policy: PlatformPolicy,
     indexed: Option<ImagePlatform>,
 ) -> Result<ImagePlatform, CandidateError> {
-    let config: serde_json::Value =
-        serde_json::from_slice(config_bytes).map_err(|_| error("Invalid image configuration."))?;
+    let config = platform_fields(config_bytes)?;
     let allowed: &[ImagePlatform] = match &indexed {
         Some(platform) => std::slice::from_ref(platform),
         None => policy.candidates(),
@@ -1305,6 +1365,193 @@ pub(super) fn pinned_platform(
         .ok_or_else(|| error("Image config descriptor is missing."))?;
     let config_bytes = fetch.object("blobs", &config)?;
     config_platform(&config_bytes, platform, None)
+}
+
+/// A base image a native build may pull, pinned to the exact manifest the registry
+/// served when the build was admitted.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BuildBase {
+    /// `docker.io/<repository>@<source digest>`: the only form handed to the builder.
+    pub pinned_reference: String,
+    /// Digest of the manifest or index the reference resolved to.
+    pub source_digest: String,
+    /// Content ID of the selected Linux ARM64 image.
+    pub image_id: String,
+}
+
+/// Resolve one normalized base-image reference for a native build, through the same
+/// guarded, origin-bound client and address policy as acquisition. A tag resolves once
+/// to its current manifest; a digest-pinned reference must resolve to exactly that pin.
+/// Builds stay Docker Hub and Linux ARM64 only (the Dockerfile scan and the build source
+/// policy admit nothing else), and the configuration must declare no `ONBUILD`
+/// triggers: a stored trigger could pull images the Dockerfile scan never saw. Only
+/// bounded metadata is fetched. `deadline` bounds the whole resolution, never beyond
+/// the acquisition deadline.
+pub fn resolve_build_base(
+    named: &NamedReference,
+    deadline: Instant,
+) -> Result<BuildBase, CandidateError> {
+    if named.docker_hub_repository().is_none() {
+        return Err(error(
+            "Only public Docker Hub [namespace/]repository[:tag][@sha256] references are supported.",
+        ));
+    }
+    let policy = ImagePolicy::default();
+    let registry = registry(named, &policy)?;
+    let mut fetch = Fetch::new(&registry, &named.path, &policy)?;
+    fetch.deadline = fetch.deadline.min(deadline);
+    let (reference, expected) = match (&named.digest, &named.tag) {
+        (Some(pin), _) => (pin.as_str(), Some(pin.as_str())),
+        (None, Some(tag)) => (tag.as_str(), None),
+        (None, None) => ("latest", None),
+    };
+    let initial = fetch.manifest(reference)?;
+    let source_digest = digest(&initial);
+    if expected.is_some_and(|expected| expected != source_digest) {
+        return Err(error("Registry manifest digest or size mismatch."));
+    }
+    let (manifest, _, indexed) =
+        select(&mut fetch, &initial, &source_digest, PlatformPolicy::Native)?;
+    let pinned_reference = format!("{}/{}@{source_digest}", registry.domain, named.path);
+    // BuildKit pulls the base itself, outside acquisition's archive budget, so the sizes
+    // the manifest declares are bounded here before any build runs.
+    bounded_build_base(&manifest, &pinned_reference, policy.archive_limit)?;
+    let config = manifest
+        .config
+        .ok_or_else(|| error("Image config descriptor is missing."))?;
+    let config_bytes = fetch.object("blobs", &config)?;
+    config_platform(&config_bytes, PlatformPolicy::Native, indexed)?;
+    if declares_onbuild(&config_bytes)? {
+        return Err(CandidateError::new(
+            "native_build_base_image",
+            "A build base image declares ONBUILD triggers; native builds refuse stored triggers.",
+        ));
+    }
+    Ok(BuildBase {
+        pinned_reference,
+        source_digest,
+        image_id: config.digest,
+    })
+}
+
+/// Refuse a build base whose manifest declares more than `limit` compressed bytes of
+/// config and layers (the per-image archive budget acquisition applies), or no layers
+/// or more than the layer limit. Every descriptor's `size` is a required unsigned
+/// integer (the manifest parse refuses a missing, negative or fractional one), so the
+/// declared total is exact; it does not bound the unpacked size.
+fn bounded_build_base(
+    manifest: &Manifest,
+    reference: &str,
+    limit: u64,
+) -> Result<(), CandidateError> {
+    if manifest.layers.is_empty() || manifest.layers.len() > MAX_LAYERS {
+        return Err(CandidateError::new(
+            "native_build_base_image",
+            format!(
+                "Build base image {reference} declares {} layers; native builds accept 1 to {MAX_LAYERS}. No build was run.",
+                manifest.layers.len()
+            ),
+        ));
+    }
+    let config = manifest
+        .config
+        .as_ref()
+        .ok_or_else(|| error("Image config descriptor is missing."))?;
+    // The same descriptor checks direct acquisition applies: BuildKit fetches these
+    // itself, and a foreign-layer `urls` entry or a non-distributable layer would be
+    // fetched from the guest's own namespace, outside the build network's isolation.
+    let refused = |what: &str, reason: CandidateError| {
+        CandidateError::new(
+            "native_build_base_image",
+            format!(
+                "Build base image {reference} has an unsupported {what}: {} No build was run.",
+                reason.message
+            ),
+        )
+    };
+    if !config.media_type.is_empty() && !CONFIG_TYPES.contains(&config.media_type.as_str()) {
+        return Err(refused(
+            "config descriptor",
+            error("The manifest does not describe a container image."),
+        ));
+    }
+    Fetch::checked(config, MAX_METADATA as u64).map_err(|e| refused("config descriptor", e))?;
+    for layer in &manifest.layers {
+        layer_extension(&layer.media_type).map_err(|e| refused("layer", e))?;
+        Fetch::checked(layer, super::image_policy::ARCHIVE_CEILING)
+            .map_err(|e| refused("layer", e))?;
+    }
+    let declared = manifest
+        .layers
+        .iter()
+        .try_fold(config.size, |total, layer| total.checked_add(layer.size));
+    match declared {
+        Some(total) if total <= limit => Ok(()),
+        _ => Err(CandidateError::new(
+            "native_build_base_image",
+            format!(
+                "Build base image {reference} declares {} bytes of config and layers, more than the {limit}-byte image budget. No build was run.",
+                declared.map_or_else(|| "at least 2^64".to_owned(), |total| total.to_string())
+            ),
+        )),
+    }
+}
+
+fn ambiguous(reason: super::go_json::Unreadable) -> CandidateError {
+    match reason {
+        super::go_json::Unreadable::Ambiguous => error(
+            "Image configuration names one field more than once (keys differing only in case count as the same field).",
+        ),
+        super::go_json::Unreadable::NonAsciiKey => {
+            error("Image configuration member names must be ASCII.")
+        }
+    }
+}
+
+/// The `os`, `architecture` and `variant` members of an image configuration as the
+/// engine reads them (see [`super::go_json`]), as a document for
+/// [`ImagePlatform::matches_config`]. A member named more than once refuses.
+pub(super) fn platform_fields(config_bytes: &[u8]) -> Result<serde_json::Value, CandidateError> {
+    let config = GoJson::parse(config_bytes).map_err(|_| error("Invalid image configuration."))?;
+    if !matches!(config, GoJson::Object(_)) {
+        return Err(error("Invalid image configuration."));
+    }
+    let mut fields = serde_json::Map::new();
+    for name in ["os", "architecture", "variant"] {
+        if let Some(value) = config.field(name).map_err(ambiguous)? {
+            fields.insert(name.to_owned(), value.to_value());
+        }
+    }
+    Ok(serde_json::Value::Object(fields))
+}
+
+/// Whether an image configuration carries stored `ONBUILD` triggers, read as the
+/// engine and BuildKit read it: keys match case-insensitively (`onbuild`, `ONBUILD`), at
+/// the top level and under `config` and the legacy `container_config`. A field named
+/// more than once, or holding anything but an array or `null`, refuses.
+fn declares_onbuild(config_bytes: &[u8]) -> Result<bool, CandidateError> {
+    let document =
+        GoJson::parse(config_bytes).map_err(|_| error("Invalid image configuration."))?;
+    if !matches!(document, GoJson::Object(_)) {
+        return Err(error("Invalid image configuration."));
+    }
+    let mut scopes = vec![&document];
+    for name in ["config", "container_config"] {
+        match document.field(name).map_err(ambiguous)? {
+            None | Some(GoJson::Null) => {}
+            Some(object @ GoJson::Object(_)) => scopes.push(object),
+            Some(_) => return Err(error("Invalid image configuration.")),
+        }
+    }
+    let mut declared = false;
+    for scope in scopes {
+        match scope.field("OnBuild").map_err(ambiguous)? {
+            None | Some(GoJson::Null) => {}
+            Some(GoJson::Array(triggers)) => declared |= !triggers.is_empty(),
+            Some(_) => return Err(error("Invalid image configuration.")),
+        }
+    }
+    Ok(declared)
 }
 
 fn layer_extension(media_type: &str) -> Result<&'static str, CandidateError> {

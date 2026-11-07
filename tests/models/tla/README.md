@@ -735,9 +735,40 @@ Assumptions: admission through startup holds the provider mutation lease, so no
 replacement happens inside it. A replacement with copied ownership labels before
 selection is indistinguishable from the recorded volume by name and labels, as in
 the implementation; the generation fence protects only the selection-to-admission
-window. Dependency caches, live source and source-device rebinding keep their own
-proofs and are outside this model. It does not prove engine mount behavior, crash
-durability of the receipt, image resolution or application data contents.
+window. Dependency caches are checked by the next model; live source and
+source-device rebinding keep their own proofs and are outside this model. It does
+not prove engine mount behavior, crash durability of the receipt, image resolution
+or application data contents.
+
+## Dependency caches across plan changes
+
+`native-cache-reconcile/CacheReconcile.tla` checks which volume backs a dependency
+cache key when a stopped graph is reconciled after a Compose edit. A cache is a
+shared volume named by an identity of its inputs; run-owned data uses the run's own
+names. Edits change the cache's own inputs (initializer definition, declaration,
+image, lockfiles), anything else in the Compose file, or whether the key is declared
+as a cache. Two values for each explore 54 distinct states.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `EditInputs` / `EditOther` / `EditDeclaration` | Compose or lockfile edit between ups; `dependency_cache::resolve_with_legacy` computes the current identity |
+| `UpCache` | `plan_reconcile::prepare` refuses run data declared as a cache; `Verified::project` keeps a cache of the same identity or selects the new identity's shared cache, then `Session::create_resources` adopts it by labels or creates it |
+| `UpData` | A key that is no longer a cache gets a fresh run-owned volume; the cache reference is released, never deleted |
+| `Stop` | Ctrl-C or `down` keeps every recorded volume |
+
+The `negative` control binds the whole Compose document into the identity (the
+earlier formula) and must fail `UnrelatedEditKeepsCache` in an `UpCache` state with
+`needlessRebuild = TRUE`. The `stale` control reattaches the recorded cache whatever
+its identity and must fail `CacheMatchesInputs` with `staleMounted = TRUE`. The
+`data-as-cache` control mounts retained run data newly declared as a cache and must
+fail `NoDataAsCache` with `dataMounted = TRUE`.
+
+Assumptions: identities are exact (no collisions), the initializer populates a newly
+selected cache before dependents start, and admission holds the provider lease. The
+compatibility path that keeps a receipt recorded under the earlier identity while
+its inputs still match is covered by `plan_reconcile.rs` tests, not this model. It
+does not prove initializer idempotence, cache content, capacity limits or cache-wide
+collection.
 
 ## Graph admission
 

@@ -223,3 +223,55 @@ test("an edited Compose plan restores the same run after the native reconcile pr
     flags: ["--expect-generation", selected.generation],
   });
 });
+
+test("a reconciled dependency-cache graph publishes fresh source instead of the retained revision", async () => {
+  const review = {
+    ...options.review,
+    planId: "f".repeat(64),
+    report: {
+      plan: {
+        services: {
+          deps: { active: true, dependency_cache: { volume: "deps" } },
+          app: { active: true },
+        },
+      },
+    },
+  };
+  const compatibility = {
+    run: saved.run,
+    owner: saved.owner,
+    namespace: saved.namespace,
+    plan: saved.planId,
+    reviewed_plan: review.planId,
+    source_revision: null,
+    reconcile: true,
+  };
+  const restore = (reply: Record<string, unknown>) =>
+    selectNativeProjectRestore({
+      ...options,
+      review,
+      restore: saved,
+      invoke: async ({ args }) =>
+        args[1] === "restore-selection" ? selected : reply,
+    });
+  // No retained revision: the start path publishes the current snapshot.
+  expect(await restore(compatibility)).toEqual({
+    run: saved.run,
+    restoring: true,
+    flags: ["--expect-generation", selected.generation],
+  });
+  // A reconciliation never names a retained cache publication.
+  await expectClosedRefusal(
+    restore({ ...compatibility, source_revision: "1".repeat(64) }),
+    "compatibility changed"
+  );
+  // Without reconciliation the retained revision stays mandatory.
+  await expectClosedRefusal(
+    restore({ ...compatibility, reconcile: undefined }),
+    "compatibility changed"
+  );
+  await expectClosedRefusal(
+    restore({ ...compatibility, reconcile: "true" }),
+    "compatibility changed"
+  );
+});

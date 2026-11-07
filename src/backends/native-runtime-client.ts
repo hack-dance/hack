@@ -3,6 +3,11 @@ import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import {
+  type NativePlanChange,
+  nativePlanChangeGuidance,
+  readNativePlanChange,
+} from "./native-plan-change.ts";
+import {
   NATIVE_STARTUP_FAILURE_REPLY_BYTES,
   type NativeStartupLogTail,
   readNativeStartupLogs,
@@ -23,6 +28,7 @@ interface NativeFailure {
   readonly causeCode?: string;
   readonly stopFailures?: readonly NativeStopFailure[];
   readonly startupLogs?: readonly NativeStartupLogTail[];
+  readonly planChange?: NativePlanChange;
 }
 
 /**
@@ -481,7 +487,10 @@ function nativeFailureMessage(failure: NativeFailure | undefined): string {
   const code = failure
     ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})`
     : "";
-  return `Native runtime request failed${code}; inspect owned state before retrying.${nativeStopFailureSummary(failure?.stopFailures)}`;
+  const guidance = failure
+    ? nativePlanChangeGuidance(failure.code, failure.planChange)
+    : undefined;
+  return `Native runtime request failed${code}; ${guidance ?? "inspect owned state before retrying."}${nativeStopFailureSummary(failure?.stopFailures)}`;
 }
 
 function completionResponse(
@@ -628,9 +637,11 @@ function nativeFailureFromReply(
     code: value.code,
     cause: value.cause_code,
   });
+  const planChange = readNativePlanChange(value.plan_change);
   return {
     code: value.code,
     ...(causeCode ? { causeCode } : {}),
+    ...(planChange ? { planChange } : {}),
     ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
       value.code === "graph_owner_recovery" &&
         typeof value.cause_code === "string"

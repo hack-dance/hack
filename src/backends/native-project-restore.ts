@@ -88,8 +88,15 @@ export async function verifyNativeSourceCompatibility(opts: {
       `Native shared-source compatibility changed; ${NOT_ADOPTED}`
     );
   }
-  const cached = nativeCacheInitializers(opts.review.report.plan).size > 0;
-  if ((result.source_revision === null) !== !cached) {
+  // Reconciliation recreates compute exactly as a fresh admission: it never
+  // names a retained cache publication, so a cached review publishes afresh.
+  const cached =
+    result.reconcile !== true &&
+    nativeCacheInitializers(opts.review.report.plan).size > 0;
+  if (
+    (result.reconcile !== undefined && result.reconcile !== true) ||
+    (result.source_revision === null) !== !cached
+  ) {
     throw new ClosedCliError(
       `Native shared-source compatibility changed; ${NOT_ADOPTED}`
     );

@@ -16,12 +16,53 @@ pub(super) fn container_base(image: &str, labels: Value) -> Value {
 pub(super) struct Prepared {
     pub graph: Graph,
     pub cache_initializers: BTreeMap<String, String>,
+    /// Earlier whole-document identities of this review's cache volumes, keyed by
+    /// logical volume. Only [`retain_recorded_legacy_caches`] may select one.
+    pub legacy_caches: BTreeMap<String, dependency_cache::CacheBinding>,
     pub configs: BTreeMap<String, Value>,
     pub probes: BTreeMap<String, super::super::http_probe::HttpProbe>,
     pub resources: BTreeMap<String, Resource>,
     pub namespace: String,
     pub plan_id: String,
 }
+/// A receipt recorded before cache identities bound only the initializer's own
+/// definition keeps its exact cache volume while the review still resolves to
+/// that recorded identity under the earlier formula. Nothing else is projected:
+/// a changed input yields a different legacy identity and the current one stays.
+pub(super) fn retain_recorded_legacy_caches(prepared: &mut Prepared, receipt: &Receipt) {
+    let mut renamed = BTreeMap::new();
+    for (volume, legacy) in &prepared.legacy_caches {
+        let key = format!("volume:{volume}");
+        let Some(resource) = prepared.resources.get_mut(&key) else {
+            continue;
+        };
+        if resource.cache.as_ref() == Some(legacy)
+            || receipt
+                .resources
+                .get(&key)
+                .and_then(|old| old.cache.as_ref())
+                != Some(legacy)
+        {
+            continue;
+        }
+        renamed.insert(resource.name.clone(), legacy.name());
+        resource.name = legacy.name();
+        resource.cache = Some(legacy.clone());
+    }
+    if renamed.is_empty() {
+        return;
+    }
+    for config in prepared.configs.values_mut() {
+        if let Some(mounts) = config["HostConfig"]["Mounts"].as_array_mut() {
+            for mount in mounts.iter_mut().filter(|m| m["Type"] == "volume") {
+                if let Some(name) = mount["Source"].as_str().and_then(|s| renamed.get(s)) {
+                    mount["Source"] = json!(name);
+                }
+            }
+        }
+    }
+}
+
 /// After source replay admission, preserve the original graph ownership identity
 /// on restored requests. Never change resource names, images, routes or cache keys.
 pub(super) fn retain_replay_ownership(
@@ -44,6 +85,7 @@ fn retain_ownership(
     receipt: &Receipt,
     change: Option<&hostname_change::Verified>,
 ) -> Result<(), CandidateError> {
+    retain_recorded_legacy_caches(prepared, receipt);
     let same = change.map_or_else(
         || same_resource_bindings(&prepared.resources, &receipt.resources),
         |change| change.matches_resources(&prepared.resources, receipt),
@@ -229,7 +271,10 @@ pub(super) fn prepare_delivery(
             "At most 32 services fit this driver profile; aggregate resource limits also apply.",
         ));
     }
-    let caches = if plan
+    let dependency_cache::Resolved {
+        current: caches,
+        legacy: legacy_caches,
+    } = if plan
         .services
         .values()
         .any(|service| service.active && service.dependency_cache.is_some())
@@ -244,14 +289,17 @@ pub(super) fn prepare_delivery(
             || dependency_cache::scope(&plan.source),
             |scope| scope.scope(&plan.source),
         )?;
-        dependency_cache::resolve(
+        dependency_cache::resolve_with_legacy(
             plan,
             source.current_manifest.as_ref().unwrap_or(&source.manifest),
             &scope,
             &inputs.services,
         )?
     } else {
-        BTreeMap::new()
+        dependency_cache::Resolved {
+            current: BTreeMap::new(),
+            legacy: BTreeMap::new(),
+        }
     };
     let publications = loopback_publications(plan, loopback_ports)?;
     let mut networks = BTreeSet::new();
@@ -651,6 +699,7 @@ pub(super) fn prepare_delivery(
         .collect();
     Ok(Prepared {
         cache_initializers,
+        legacy_caches,
         graph,
         configs,
         probes,

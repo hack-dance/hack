@@ -150,6 +150,28 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-cache-reconcile",
+    module: "CacheReconcile",
+    states: 54,
+    invariant: "UnrelatedEditKeepsCache",
+    action: "UpCache",
+    fields: ["needlessRebuild = TRUE", "staleMounted = FALSE"],
+    additionalControls: [
+      {
+        name: "stale",
+        negative: true,
+        invariant: "CacheMatchesInputs",
+        fields: ["staleMounted = TRUE", "needlessRebuild = FALSE"],
+      },
+      {
+        name: "data-as-cache",
+        negative: true,
+        invariant: "NoDataAsCache",
+        fields: ["dataMounted = TRUE", "staleMounted = FALSE"],
+      },
+    ],
+  },
+  {
     name: "pre-ready-retirement",
     module: "Retirement",
     states: 10_965,

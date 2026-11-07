@@ -713,10 +713,30 @@ is reattached under its recorded name after the same label and identity checks; 
 newly declared volume is created fresh; a retained volume the new file no longer
 declares stays owned and unmounted until `hack down --remove-data` (Compose also
 keeps project volumes). Retained data is only ever reattached to the run and
-namespace that created it. Graphs with dependency caches, live source or a pending
-source-device rebind keep the narrower rules below. `hack restart` of a stopped
-graph refuses and points to `hack up`.
-For a shared-source graph admitted with a retained compatibility contract, ordinary
+namespace that created it.
+
+Graphs with `hack.dependencies.*` caches reconcile the same way. A cache's identity
+covers only its own inputs: the initializer's service definition and resolved
+command, entrypoint, environment and user, the cache declaration, its image, the
+declared lockfile and runtime-file contents, and the cache volume layout. An edit
+to another service, such as an environment value on the app, keeps the cache. An
+edit to one of those inputs, including a lockfile, selects the cache for the new
+identity as a fresh `up` would, so the initializer installs into it; the old cache
+is shared and is only released by this run. Each such `up` publishes the current
+source snapshot. A retained named volume is never reused as a dependency cache:
+declaring one refuses and names the service and the `hack.dependencies.cache-volume`
+field. Caches recorded by earlier builds, whose identity also covered the whole
+Compose file, are kept while that file is unchanged and replaced once on the first
+edit. Live source, a cache scope carried across a source-device rebind or a pending
+initializer cache release keep the narrower rules below: a Compose edit other than
+a routed hostname change refuses there with `graph_plan_change_unsupported`, and a
+hostname change mixed with other edits refuses with `graph_hostname_change` and the
+service name. Every refusal says to revert the edit, or to run
+`hack down --remove-data` and then `hack up`. `hack restart` of a stopped graph
+refuses and points to `hack up`.
+For a shared-source graph that reconciliation does not select (live source, a
+carried cache scope, a pending source-device rebind or initializer cache release)
+and that was admitted with a retained compatibility contract, ordinary
 source-content edits may change the reviewed plan ID: restart checks the stable
 execution, exclusion, mount and dependency-cache inputs before cleanup and again
 under the provider lease. The original installer publication and graph ownership

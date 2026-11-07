@@ -82,12 +82,49 @@ fn selected(manifest: &ContentRevision, path: &str) -> Result<Option<Value>, Can
         _ => Err(refused()),
     }
 }
+/// Cache identities for one review: `current` names the volumes a fresh
+/// admission selects; `legacy` recomputes the earlier whole-document identity for
+/// the same inputs, so a retained receipt recorded under it can still be matched
+/// exactly. Neither map grants volume creation, adoption or deletion authority.
+pub struct Resolved {
+    pub current: BTreeMap<String, CacheBinding>,
+    pub legacy: BTreeMap<String, CacheBinding>,
+}
+
+#[cfg(test)]
 pub fn resolve(
     plan: &PlanData,
     manifest: &ContentRevision,
     scope: &str,
     executable: &BTreeMap<String, crate::project::inputs::ServiceInputs>,
 ) -> Result<BTreeMap<String, CacheBinding>, CandidateError> {
+    Ok(resolve_with_legacy(plan, manifest, scope, executable)?.current)
+}
+
+fn insert_binding(
+    result: &mut BTreeMap<String, CacheBinding>,
+    volume: &str,
+    binding: CacheBinding,
+) -> Result<(), CandidateError> {
+    if result
+        .get(volume)
+        .is_some_and(|existing| existing != &binding)
+    {
+        return Err(refused());
+    }
+    result.insert(volume.to_owned(), binding);
+    Ok(())
+}
+
+/// The current identity binds the initializer's own reviewed service definition
+/// and its cache volume declaration instead of the whole Compose document, so an
+/// edit to an unrelated service keeps the cache, as Compose keeps a named volume.
+pub fn resolve_with_legacy(
+    plan: &PlanData,
+    manifest: &ContentRevision,
+    scope: &str,
+    executable: &BTreeMap<String, crate::project::inputs::ServiceInputs>,
+) -> Result<Resolved, CandidateError> {
     manifest.validate().map_err(|_| refused())?;
     if !hex(scope)
         || !hex(&plan.compose_sha256)
@@ -95,7 +132,8 @@ pub fn resolve(
     {
         return Err(refused());
     }
-    let mut result = BTreeMap::new();
+    let mut current = BTreeMap::new();
+    let mut legacy = BTreeMap::new();
     for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
         let Some(declaration) = &service.dependency_cache else {
             continue;
@@ -141,10 +179,29 @@ pub fn resolve(
                 return Err(refused());
             }
         }
-        // Compose digest binds actual argv text (the plan's argv representation is redacted).
-        // Script content belongs in explicitly declared runtime files; whole source revisions
-        // would prevent compatible branches with unrelated source changes from sharing.
+        // The plan's argv and literal values are redacted, so the resolved public
+        // command, entrypoint, environment, user and hosts are bound explicitly.
+        // Script content belongs in explicitly declared runtime files; whole source
+        // revisions would prevent compatible branches with unrelated source changes
+        // from sharing. The legacy identity also bound the whole Compose digest.
         let base_fingerprint = hash(&(
+            "hack-dependency-cache-v2",
+            scope,
+            &declaration.volume,
+            image,
+            service,
+            &plan.volumes[&declaration.volume],
+            &plan.registry,
+            declaration,
+            &inputs,
+            &public.command,
+            &public.entrypoint,
+            &public.environment,
+            &public.user,
+            &public.extra_hosts,
+            &service.working_dir,
+        ))?;
+        let legacy_fingerprint = hash(&(
             "hack-dependency-cache-v1",
             scope,
             &declaration.volume,
@@ -173,25 +230,31 @@ pub fn resolve(
                     .map(move |m| (name, &m.target, &m.subpath, m.read_only))
             })
             .collect::<Vec<_>>();
-        let fingerprint = if layout.iter().any(|(_, _, subpath, _)| subpath.is_some()) {
-            hash(&("hack-cache-volume-subpaths-v1", base_fingerprint, layout))?
-        } else {
-            base_fingerprint
+        let subpaths = layout.iter().any(|(_, _, subpath, _)| subpath.is_some());
+        let with_layout = |fingerprint: String| -> Result<String, CandidateError> {
+            if subpaths {
+                hash(&("hack-cache-volume-subpaths-v1", fingerprint, &layout))
+            } else {
+                Ok(fingerprint)
+            }
         };
-        let binding = CacheBinding {
+        let binding = |fingerprint| CacheBinding {
             scope: scope.into(),
             fingerprint,
             image: image.clone(),
         };
-        if result
-            .get(&declaration.volume)
-            .is_some_and(|existing| existing != &binding)
-        {
-            return Err(refused());
-        }
-        result.insert(declaration.volume.clone(), binding);
+        insert_binding(
+            &mut current,
+            &declaration.volume,
+            binding(with_layout(base_fingerprint)?),
+        )?;
+        insert_binding(
+            &mut legacy,
+            &declaration.volume,
+            binding(with_layout(legacy_fingerprint)?),
+        )?;
     }
-    Ok(result)
+    Ok(Resolved { current, legacy })
 }
 
 fn owned_directory(path: &Path) -> Result<PathBuf, CandidateError> {
@@ -694,7 +757,9 @@ mod tests {
             .arguments[0]
             .environment_references
             .push("INSTALLER".into());
-        assert_eq!(baseline, resolve(&dynamic, &manifest, &scope).unwrap());
+        // The redacted plan form is part of the initializer's own definition.
+        let dynamic_baseline = resolve(&dynamic, &manifest, &scope).unwrap();
+        assert_ne!(baseline, dynamic_baseline);
         for field in [
             "command",
             "entrypoint",
@@ -716,7 +781,7 @@ mod tests {
                 }
             }
             assert_ne!(
-                baseline,
+                dynamic_baseline,
                 super::resolve(&dynamic, &manifest, &scope, &values).unwrap()
             );
         }
@@ -725,9 +790,23 @@ mod tests {
         changed.services.get_mut("deps").unwrap().image =
             Some(format!("sha256:{}", "e".repeat(64)));
         assert_ne!(baseline, resolve(&changed, &manifest, &scope).unwrap());
+        // Only the earlier whole-document identity follows unrelated Compose edits.
         changed = plan.clone();
         changed.compose_sha256 = "f".repeat(64);
-        assert_ne!(baseline, resolve(&changed, &manifest, &scope).unwrap());
+        assert_eq!(baseline, resolve(&changed, &manifest, &scope).unwrap());
+        let legacy = |plan: &PlanData| {
+            super::resolve_with_legacy(plan, &manifest, &scope, &executable(plan))
+                .unwrap()
+                .legacy
+        };
+        assert_ne!(legacy(&plan), legacy(&changed));
+        assert_ne!(legacy(&plan), baseline);
+        // Another service, with its own environment, is not a cache input.
+        let mut app = plan.services["deps"].clone();
+        app.dependency_cache = None;
+        app.mounts.clear();
+        changed.services.insert("app".into(), app);
+        assert_eq!(baseline, resolve(&changed, &manifest, &scope).unwrap());
         changed = plan.clone();
         let mut other = changed.services["deps"].clone();
         other.dependency_cache.as_mut().unwrap().bootstrap = false;

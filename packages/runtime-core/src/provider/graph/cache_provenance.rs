@@ -63,6 +63,15 @@ impl CacheProvenance {
                     && bounded(&c.finished_at)
             })
     }
+    /// Keep only initializers the reconciled graph still declares. The volume
+    /// identity fence is unchanged; removed services' history is dropped so the
+    /// receipt never names a container it no longer records.
+    pub(super) fn retain_initializers(&mut self, mut present: impl FnMut(&str) -> bool) {
+        self.initializers.retain(|service| present(service));
+        let initializers = &self.initializers;
+        self.completed
+            .retain(|service, _| initializers.contains(service));
+    }
     pub(super) fn needs_completion(&self, service: &str) -> bool {
         self.origin == Origin::CreatedHere
             && self.initializers.contains(service)

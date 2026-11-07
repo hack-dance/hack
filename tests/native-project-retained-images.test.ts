@@ -459,3 +459,43 @@ test("restart of a stopped graph points at up instead of reporting image drift",
     "stopped with data retained. Run hack up"
   );
 });
+
+test("a reconciled graph's reserved shared cache may already exist; reserved run data may not", () => {
+  const baseline = observation();
+  const withCache = (state: string, cache: boolean) => ({
+    ...baseline,
+    receipt: {
+      ...baseline.receipt,
+      resources: {
+        ...baseline.receipt.resources,
+        "volume:deps": {
+          kind: "volume",
+          key: "deps",
+          phase: "reserved",
+          ...(cache
+            ? {
+                cache: {
+                  scope: "1".repeat(64),
+                  fingerprint: "2".repeat(64),
+                  image,
+                },
+              }
+            : {}),
+        },
+      },
+    },
+    observations: { ...baseline.observations, "volume:deps": { state } },
+  });
+  expect(confirmedNativeRetainedGraph(withCache("present", true), saved)).toBe(
+    true
+  );
+  expect(confirmedNativeRetainedGraph(withCache("absent", true), saved)).toBe(
+    true
+  );
+  expect(confirmedNativeRetainedGraph(withCache("unknown", true), saved)).toBe(
+    false
+  );
+  expect(confirmedNativeRetainedGraph(withCache("present", false), saved)).toBe(
+    false
+  );
+});

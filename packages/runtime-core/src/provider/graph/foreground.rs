@@ -163,7 +163,11 @@ pub fn restore_selection(candidate: &Candidate, run: &str) -> Result<Value, Cand
         let observed = super::inspect_resource(&engine, &receipt, resource)?;
         if resource.kind == super::Kind::Volume {
             // A never-created (`reserved`) volume must be absent; settled data present.
-            if observed.is_none() == super::plan_reconcile::retained_volume(resource) {
+            // A not-yet-selected shared dependency cache may already exist.
+            let retained = super::plan_reconcile::retained_volume(resource);
+            if (retained && observed.is_none())
+                || (!retained && resource.cache.is_none() && observed.is_some())
+            {
                 return Err(refused());
             }
         } else if resource.phase != "absent" || observed.is_some() {

@@ -1530,7 +1530,7 @@ fn start_pool(
         // Disk rejection must not keep an allocation alive. Process authority is
         // independent of disk adoption; this is an unclean stop, never reconciliation.
         let process = owner.process.as_ref().expect("process just recorded");
-        let cleanup = stop_failed_boot(process, &binary(candidate));
+        let cleanup = stop_verified_provider(process, &binary(candidate));
         state::write(
             &root(candidate).join("failed-boot.json"),
             &json!({
@@ -1575,7 +1575,8 @@ fn start_machine(
     .map(drop)
 }
 
-fn stop_failed_boot(
+/// SIGTERM a provider whose identity is verified at the signal, then wait for it to exit.
+fn stop_verified_provider(
     process: &identity::ProcessIdentity,
     binary: &Path,
 ) -> Result<(), CandidateError> {
@@ -1588,7 +1589,7 @@ fn stop_failed_boot(
         if Instant::now() >= deadline {
             return Err(CandidateError::new(
                 "stop_uncertain",
-                "Verified failed-boot provider did not stop after SIGTERM.",
+                "Verified provider did not stop after SIGTERM.",
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -2015,6 +2016,90 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
+    match guest_stop(candidate, &mut owner) {
+        Ok(()) => status(candidate),
+        Err(error)
+            if error.code == "agent_protocol_uncertain" && agent_silent(candidate, &owner)? =>
+        {
+            stop_silent_guest(candidate, &mut owner)?;
+            status(candidate)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// How many pings, a few seconds apart, a guest agent must leave unanswered before
+/// `down` or `recover` treats it as stopped responding.
+const SILENT_PINGS: u32 = 3;
+#[cfg(not(test))]
+const SILENT_PING_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(not(test))]
+const SILENT_PING_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const SILENT_PING_TIMEOUT: Duration = Duration::from_millis(200);
+#[cfg(test)]
+const SILENT_PING_INTERVAL: Duration = Duration::from_millis(50);
+
+/// `true` when the owned guest agent answered none of [`SILENT_PINGS`] pings.
+fn agent_silent(candidate: &Candidate, owner: &Owner) -> Result<bool, CandidateError> {
+    Ok(agent_silent_at(&socket(candidate, owner, "agent.sock")?))
+}
+
+/// Any reply, even an unexpected one, means the guest is alive and keeps the normal stop
+/// path.
+fn agent_silent_at(path: &Path) -> bool {
+    for attempt in 0..SILENT_PINGS {
+        if attempt > 0 {
+            std::thread::sleep(SILENT_PING_INTERVAL);
+        }
+        if agent::answers_ping(path, SILENT_PING_TIMEOUT) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Stop the verified provider of a guest whose agent stopped responding. Nothing in the
+/// guest is quiesced or flushed, so the pool is recorded `recovered-unclean`, as after a
+/// provider exit; the next start checks its retained disks as usual. The signal reaches
+/// only this home's recorded provider, rechecked by PID, start time, user and executable
+/// immediately before it is sent. A provider that already exited is only recorded.
+fn stop_silent_guest(candidate: &Candidate, owner: &mut Owner) -> Result<(), CandidateError> {
+    // Checked again at the effect: the caller holds the operation lease, but a running
+    // build holds only its shared fence while its client runs.
+    require_no_build_for_silent_stop(candidate)?;
+    let process = owner.process.clone().ok_or_else(|| {
+        CandidateError::new("process_identity_unavailable", "No recorded provider.")
+    })?;
+    if identity::alive(process.pid)? {
+        verify_live(candidate, owner)?;
+        stop_verified_provider(&process, &binary(candidate))?;
+    }
+    finish_stopped(candidate, owner, "recovered-unclean")
+}
+
+/// Refuse to stop a silent guest while a native image build is admitted. A build releases
+/// the operation lease while its client runs and keeps only the shared build fence
+/// (`run/image-builds/active.lock`), so the lease alone does not prove the engine is idle.
+/// The fence is a `flock`: it is released when the build's processes exit, including on
+/// SIGKILL, so a refusal lasts only while a build process is alive. Callers hold the
+/// operation lease, under which no new build can take the fence.
+fn require_no_build_for_silent_stop(candidate: &Candidate) -> Result<(), CandidateError> {
+    super::image_build::require_no_active_build(candidate).map_err(|error| {
+        if error.code == "provider_busy" {
+            CandidateError::new(
+                "provider_busy",
+                "A native image build is running against this guest. Finish or cancel it first (Ctrl-C the `hack up` that started it); the next attempt then stops the guest that stopped responding.",
+            )
+        } else {
+            error
+        }
+    })
+}
+
+/// `down`'s guest-facing part: quiesce the engine, ask the guest to flush and shut down,
+/// stop the provider and record the stop.
+fn guest_stop(candidate: &Candidate, owner: &mut Owner) -> Result<(), CandidateError> {
     let before_engine = engine_was_not_started(
         &owner.phase,
         owner.guest_boot_id.as_deref(),
@@ -2026,7 +2111,7 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     if failed_engine {
         guest(
             candidate,
-            &owner,
+            owner,
             r#"set -eu
 test "$(cat /storage/.hack-local-owner)" = "$1"
 test "$(cat /proc/sys/kernel/random/boot_id)" = "$2"
@@ -2059,10 +2144,10 @@ sync"#,
         } else {
             "initial"
         };
-        phase(candidate, &mut owner, "quiescing")?;
+        phase(candidate, owner, "quiescing")?;
         let quiescence = guest(
             candidate,
-            &owner,
+            owner,
             include_str!("guest-quiesce.sh"),
             &[
                 &owner.token,
@@ -2081,9 +2166,9 @@ sync"#,
             }),
         )?;
     }
-    phase(candidate, &mut owner, "stopping")?;
+    phase(candidate, owner, "stopping")?;
     let response = agent::request(
-        &socket(candidate, &owner, "agent.sock")?,
+        &socket(candidate, owner, "agent.sock")?,
         json!({"method":"shutdown"}),
         Duration::from_secs(15),
     )?;
@@ -2093,7 +2178,7 @@ sync"#,
             "Guest did not acknowledge flush/unmount.",
         ));
     }
-    verify_live(candidate, &owner)?;
+    verify_live(candidate, owner)?;
     let process = owner.process.as_ref().expect("live identity verified");
     // Revalidate immediately before signalling. macOS has no Linux pidfd equivalent;
     // this is cooperative same-user ownership, not hostile-process containment.
@@ -2109,17 +2194,17 @@ sync"#,
         ));
     }
     if before_engine {
-        finish_stopped(candidate, &mut owner, "stopped-before-engine")?;
+        finish_stopped(candidate, owner, "stopped-before-engine")?;
     } else if failed_engine {
-        finish_stopped(candidate, &mut owner, "stopped-after-engine-failure")?;
+        finish_stopped(candidate, owner, "stopped-after-engine-failure")?;
     } else {
-        finish_quiesced_stop(candidate, &mut owner)?;
+        finish_quiesced_stop(candidate, owner)?;
         // The stopped receipt is written. The `/private/tmp` HOME alias stays reserved for
         // this pool, so no other user can take its name; only the provider sockets the
         // stop proved closed are removed.
-        remove_closed_sockets(candidate, &owner)?;
+        remove_closed_sockets(candidate, owner)?;
     }
-    status(candidate)
+    Ok(())
 }
 
 /// Restore a clean stop's HOME alias under the caller's pool lock, when host cleanup removed
@@ -2395,10 +2480,20 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return status(candidate);
     };
     if identity::alive(process.pid)? {
-        return Err(CandidateError::new(
-            "recovery_required",
-            "Recovery only accepts a confirmed dead recorded process. Use down for a verified live guest.",
-        ));
+        // A live provider is stopped here only when its identity verifies and its guest
+        // agent stopped responding; a responsive guest is stopped cleanly by `down`.
+        // Refuse first, without probing, while a build is admitted.
+        require_no_build_for_silent_stop(candidate)?;
+        verify_live(candidate, &owner)?;
+        if !agent_silent(candidate, &owner)? {
+            return Err(CandidateError::new(
+                "recovery_required",
+                "Recovery only accepts a confirmed dead recorded process or a guest that stopped responding. Use down for a responsive guest.",
+            ));
+        }
+        // The operation lease taken above stays held through the stop and its receipt.
+        stop_silent_guest(candidate, &mut owner)?;
+        return status(candidate);
     }
     finish_stopped(candidate, &mut owner, "recovered-unclean")?;
     status(candidate)
@@ -3086,6 +3181,112 @@ printf 'verified-cache\n'
         );
     }
 
+    /// A short private directory for a fake agent socket (`sockaddr_un` is small).
+    struct ShortDirectory(std::path::PathBuf);
+    impl ShortDirectory {
+        fn new() -> Self {
+            let mut bytes = [0_u8; 6];
+            File::open("/dev/urandom")
+                .unwrap()
+                .read_exact(&mut bytes)
+                .unwrap();
+            let name: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let path = Path::new("/tmp").join(format!("hka-{name}"));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for ShortDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn only_a_guest_agent_that_never_starts_a_reply_counts_as_silent() {
+        use std::os::unix::net::UnixListener;
+        let directory = ShortDirectory::new();
+        let path = directory.0.join("agent.sock");
+        // No listener: refused connections are silence.
+        assert!(agent_silent_at(&path));
+        let listener = UnixListener::bind(&path).unwrap();
+        // Accepted but never answered, as when the guest's vsock path is saturated.
+        let held = std::thread::spawn(move || {
+            // Keep every connection open and unanswered until the probe is over.
+            let kept: Vec<_> = listener
+                .incoming()
+                .take(SILENT_PINGS as usize)
+                .map(Result::unwrap)
+                .collect();
+            kept.len()
+        });
+        let started = Instant::now();
+        assert!(agent_silent_at(&path));
+        // Each probe waits out its deadline (the last sees the fake end the connection).
+        assert!(started.elapsed() >= SILENT_PING_TIMEOUT * (SILENT_PINGS - 1));
+        assert_eq!(held.join().unwrap(), SILENT_PINGS as usize);
+        fs::remove_file(&path).unwrap();
+        // Any reply byte, even of an unexpected response, is an answer.
+        let listener = UnixListener::bind(&path).unwrap();
+        let answering = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"?").unwrap();
+        });
+        assert!(!agent_silent_at(&path));
+        answering.join().unwrap();
+        fs::remove_file(&path).unwrap();
+        // A connection the guest side ends before replying is silence.
+        let listener = UnixListener::bind(&path).unwrap();
+        let closing = std::thread::spawn(move || {
+            for stream in listener.incoming().take(SILENT_PINGS as usize) {
+                drop(stream.unwrap());
+            }
+        });
+        assert!(agent_silent_at(&path));
+        closing.join().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_silent_guest_is_not_stopped_under_an_admitted_build() {
+        let root = crate::test_root::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-silent-stop-build",
+        );
+        let checkout = root.join("checkout");
+        state::private_directory(&checkout).unwrap();
+        let candidate = Candidate::discover(&checkout).unwrap();
+        // A live process stands in for the recorded provider; it must not be signalled.
+        let mut provider = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut owner: Owner = serde_json::from_value(json!({
+            "version":1,"checkout":"/fixture","token":"fixture","machine":"fixture",
+            "short_home":"/fixture","created":true,"phase":"running","process":null,
+            "storage":null,"overlay":null,"guest_boot_id":null,
+            "daemon_pid":null,"daemon_start":null,"rootfs_digest":null
+        }))
+        .unwrap();
+        owner.process = Some(identity::observe(provider.id() as i32).unwrap());
+        // An admitted build holds the shared fence, as `image_build::run` does.
+        let fence = super::super::image_build::hold_build_fence_for_test(&candidate);
+        let refused = stop_silent_guest(&candidate, &mut owner).unwrap_err();
+        assert_eq!(refused.code, "provider_busy");
+        assert!(refused.message.contains("Ctrl-C"));
+        assert!(
+            provider.try_wait().unwrap().is_none(),
+            "provider was signalled"
+        );
+        assert_eq!(owner.phase, "running");
+        drop(fence);
+        // Without a build, the check passes and the stop proceeds to identity checks.
+        assert!(require_no_build_for_silent_stop(&candidate).is_ok());
+        provider.kill().unwrap();
+        provider.wait().unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn failed_boot_cleanup_stops_only_the_verified_process() {
@@ -3099,7 +3300,7 @@ printf 'verified-cache\n'
             .unwrap();
         let observed = identity::observe(child.id() as i32).unwrap();
         let reaper = std::thread::spawn(move || child.wait().unwrap());
-        stop_failed_boot(&observed, &observed.executable).unwrap();
+        stop_verified_provider(&observed, &observed.executable).unwrap();
         reaper.join().unwrap();
         assert!(!identity::alive(observed.pid).unwrap());
         assert!(sentinel.try_wait().unwrap().is_none());

@@ -1,7 +1,16 @@
 import { isAbsolute } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import {
+  type NativeProcessRefusal,
+  readNativeProcessRefusals,
+} from "../lib/native-process-wrappers.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
+import {
+  type NativePlanChange,
+  nativePlanChangeGuidance,
+  readNativePlanChange,
+} from "./native-plan-change.ts";
 import {
   NATIVE_STARTUP_FAILURE_REPLY_BYTES,
   type NativeStartupLogTail,
@@ -27,6 +36,9 @@ interface NativeFailure {
   readonly service?: string;
   readonly stopFailures?: readonly NativeStopFailure[];
   readonly startupLogs?: readonly NativeStartupLogTail[];
+  /** Services and closed fields a process wrapper refused; value-free. */
+  readonly processRefusals?: readonly NativeProcessRefusal[];
+  readonly planChange?: NativePlanChange;
 }
 
 const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
@@ -541,7 +553,10 @@ function nativeFailureMessage(failure: NativeFailure | undefined): string {
   const code = failure
     ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})`
     : "";
-  return `Native runtime request failed${code}; inspect owned state before retrying.${failure ? nativeFailureNote(failure) : ""}${nativeStopFailureSummary(failure?.stopFailures)}`;
+  const guidance = failure
+    ? nativePlanChangeGuidance(failure.code, failure.planChange)
+    : undefined;
+  return `Native runtime request failed${code}; ${guidance ?? "inspect owned state before retrying."}${failure ? nativeFailureNote(failure) : ""}${nativeStopFailureSummary(failure?.stopFailures)}`;
 }
 
 function completionResponse(
@@ -690,10 +705,12 @@ function nativeFailureFromReply(
     code: value.code,
     cause: value.cause_code,
   });
+  const planChange = readNativePlanChange(value.plan_change);
   return {
     code: value.code,
     ...(causeCode ? { causeCode } : {}),
     ...nativeFailureDetail(value),
+    ...(planChange ? { planChange } : {}),
     ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
       value.code === "graph_owner_recovery" &&
         typeof value.cause_code === "string"
@@ -705,7 +722,15 @@ function nativeFailureFromReply(
     ...(startupLogs && value.startup_logs !== undefined
       ? { startupLogs: readNativeStartupLogs(value.startup_logs) }
       : {}),
+    ...processRefusalsOf(value.process_refusals),
   };
+}
+function processRefusalsOf(value: unknown): {
+  readonly processRefusals?: readonly NativeProcessRefusal[];
+} {
+  const processRefusals =
+    value === undefined ? undefined : readNativeProcessRefusals(value);
+  return processRefusals ? { processRefusals } : {};
 }
 
 /** Only bounded native error codes leave this boundary, never stderr messages. */
@@ -800,6 +825,7 @@ export async function readNativeStartupFailure(
       readonly message?: string;
       readonly service?: string;
       readonly startupLogs?: readonly NativeStartupLogTail[];
+      readonly processRefusals?: readonly NativeProcessRefusal[];
     }
   | undefined
 > {
@@ -816,6 +842,9 @@ export async function readNativeStartupFailure(
         ...(failure.message ? { message: failure.message } : {}),
         ...(failure.service ? { service: failure.service } : {}),
         ...(failure.startupLogs ? { startupLogs: failure.startupLogs } : {}),
+        ...(failure.processRefusals
+          ? { processRefusals: failure.processRefusals }
+          : {}),
       };
 }
 

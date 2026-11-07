@@ -683,6 +683,13 @@ impl Driver for HostRelayRuntime {
         self.run.is_some()
     }
 
+    fn process_services(&self) -> std::collections::BTreeSet<String> {
+        self.dependencies
+            .keys()
+            .map(|(service, _)| service.clone())
+            .collect()
+    }
+
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         if self.startup_cancelled.is_some_and(|check| check()) {
             return Err(error(
@@ -816,7 +823,8 @@ impl Driver for HostRelayRuntime {
             let config = configs
                 .get(name)
                 .ok_or_else(|| stage_refused("graph_startup_service_config"))?;
-            launcher::validate(config)?;
+            launcher::validate(config)
+                .map_err(super::super::process_refusals::Refused::into_error)?;
             if config["HostConfig"]["Init"] != true {
                 return Err(stage_refused("graph_startup_init"));
             }

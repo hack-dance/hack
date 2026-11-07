@@ -389,9 +389,14 @@ keep it open, use `hack ps` and `hack logs` from another terminal, and press
 Ctrl-C to stop it. For detached startup, use the Compose backend.
 
 Foreground image-project `up` prints each startup step (input, runtime, images,
-services) and one ready line, `Project is ready (SERVICES)`, after the graph is
-ready and its run mapping is published. Ctrl-C prints the stop sequence and
-`Native project stopped.` once owned cleanup is confirmed. Until the ready line,
+services) and one ready line, `Project is ready (SERVICES; run RUN)`, after the
+graph is ready and its run mapping is published. Under it, `up` lists each routed
+service's reviewed hostnames as HTTPS URLs (with the `HACK_NATIVE_HTTPS_PORT`
+port unless it is 443) and the published loopback ports. Without the native
+HTTPS frontend it says that routes are not served on this host. Ctrl-C prints the
+stop sequence and, once owned cleanup is confirmed, one stopped line that says
+whether named volumes and the stopped run mapping were kept (`Native project
+stopped.` when no run mapping was published). Until the ready line,
 startup holds the runtime's exclusive provider lease, so graph admission cannot
 interleave with another operation. A `hack ps` from another terminal during that
 window waits briefly, then reports that the runtime is busy (`runtime_busy`,
@@ -414,8 +419,8 @@ Runtime refusals print their code and, when the runtime marks its message as a f
 literal that cannot carry values, that message and the service it concerns (for
 example `Service web: Pinned image architecture or implicit volumes are
 incompatible.`). Formatted runtime messages stay omitted. A start refused before the
-runtime reserved any graph state reports that nothing was retained instead of
-unconfirmed cleanup.
+runtime reserved any graph state reports that nothing was created and no cleanup is
+needed, with the startup diagnostic, instead of unconfirmed cleanup.
 
 ### Network aliases and the Compose project name
 
@@ -887,10 +892,40 @@ is reattached under its recorded name after the same label and identity checks; 
 newly declared volume is created fresh; a retained volume the new file no longer
 declares stays owned and unmounted until `hack down --remove-data` (Compose also
 keeps project volumes). Retained data is only ever reattached to the run and
-namespace that created it. Graphs with dependency caches, live source or a pending
-source-device rebind keep the narrower rules below. `hack restart` of a stopped
-graph refuses and points to `hack up`.
-For a shared-source graph admitted with a retained compatibility contract, ordinary
+namespace that created it.
+
+Graphs with `hack.dependencies.*` caches reconcile the same way. A cache's identity
+covers only its own inputs: the initializer's service definition and resolved
+command, entrypoint, environment and user, the cache declaration, its image, the
+declared lockfile and runtime-file contents, and the cache volume layout: every
+service that mounts the cache volume, with its target, subpath and `:ro` mode. Any
+of those services can write the shared contents, so adding, removing or changing
+such a mount is a cache input; mounts stay as declared, as in Compose and v4, and
+are not forced read-only. Caches are shared across linked worktrees and branch
+instances only while every service other than the initializers mounts them
+read-only. A service that mounts the cache read-write can change its contents
+through its own image, command, environment or source, which the identity does not
+cover, so that cache is scoped to this checkout and branch instance and never
+shared. To share it again, mount it with `:ro` in the other services. A run created
+by an earlier build whose cache has such a writer moves to its own instance cache
+once instead of reusing the shared one. Any other edit to another service, such as an
+environment value on the app, keeps the cache. An edit to one of those inputs,
+including a lockfile, selects the cache for the new identity as a fresh `up` would, so the initializer installs into it; the old cache
+is shared and is only released by this run. Each such `up` publishes the current
+source snapshot. A retained named volume is never reused as a dependency cache:
+declaring one refuses and names the service and the `hack.dependencies.cache-volume`
+field. Caches recorded by earlier builds, whose identity also covered the whole
+Compose file, are kept while that file is unchanged and replaced once on the first
+edit. Live source, a cache scope carried across a source-device rebind or a pending
+initializer cache release keep the narrower rules below: a Compose edit other than
+a routed hostname change refuses there with `graph_plan_change_unsupported`, and a
+hostname change mixed with other edits refuses with `graph_hostname_change` and the
+service name. Every refusal says to revert the edit, or to run
+`hack down --remove-data` and then `hack up`. `hack restart` of a stopped graph
+refuses and points to `hack up`.
+For a shared-source graph that reconciliation does not select (live source, a
+carried cache scope, a pending source-device rebind or initializer cache release)
+and that was admitted with a retained compatibility contract, ordinary
 source-content edits may change the reviewed plan ID: restart checks the stable
 execution, exclusion, mount and dependency-cache inputs before cleanup and again
 under the provider lease. The original installer publication and graph ownership
@@ -1356,7 +1391,11 @@ run mapping before exiting, so `hack ps`, `hack down` and
 `hack doctor --native-cleanup inspect` select that run instead of reporting the
 project as not started; nothing is stopped or replayed to do so. When the
 receipt itself cannot be authenticated, nothing is recorded and the runtime
-journal keeps the graph for explicit recovery.
+journal keeps the graph for explicit recovery. When the graph owner exited
+before reserving any runtime state (for example a configuration refusal during
+execution compilation), inspection finds no journal for the run: startup then
+reports the failure code and that nothing was created, instead of an
+unconfirmed cleanup.
 
 Managed values are declared on every authored service, so the reviewed plan is the
 same for every profile selection, but they are delivered only to the services the
@@ -2149,12 +2188,27 @@ must then have a selected binding for each alias it declares. A missing binding
 refuses with `E_NATIVE_PROJECT_UNSUPPORTED` ("Native host alias has no reviewed
 host dependency binding; configuration was not dropped."), before any runtime
 work; with no dependency selection at all it refuses before lifecycle hooks.
+The refusal lists every unbound alias with the services that declare it and
+where it comes from: the service's Compose `extra_hosts`, `internal.extra_hosts`
+in project configuration, this checkout's `.hack/.internal/extra-hosts.json`, or
+the main checkout's map that a linked worktree inherits. It then names the
+`aliases` a binding needs and how to remove the alias instead
+(`hack internal extra-hosts unset <alias>` hides an inherited entry in this
+worktree). Listener values are never printed.
 An entry whose target is not `host-gateway` (for example a fixed address), a name
 that is not an exact lowercase DNS name, or a service that already maps the name
 to a different target also refuses. Service-declared names are matched in the
-form native review compiles them to (one trailing dot removed, lowercased), so a
-service that declares `API.Example.` is covered by a binding for `api.example` and
-does not receive a second spelling. Earlier native builds ignored these entries,
+form native execution compiles them to: Compose interpolation resolved as the
+native runtime resolves it (no ambient environment, so `${UNSET:-word}` selects
+`word` and `${UNSET:+word}` selects nothing), then one trailing dot removed and
+lowercased. So a service that declares `API.Example.` or
+`${UNSET_PREFIX:+x-}api.example` is covered by a binding for `api.example` and
+does not receive a second copy of a project-wide `api.example`. A service whose
+declarations compile to the same alias twice refuses with `E_CONFIG_INVALID`,
+naming the service and alias, before any runtime work; native execution would
+refuse it only after the VM started. A name that refers to a required variable,
+a Hack-managed value or `COMPOSE_PROJECT_NAME` is left to native review and
+execution. Earlier native builds ignored these entries,
 which let a container resolve the public name instead of the local listener.
 Native reads these aliases before lifecycle hooks, because they are part of the
 reviewed configuration; unlike the Compose backend, a hook that changes them makes
@@ -3134,6 +3188,27 @@ owner-only mode 0400 with exact UID, regular-file, single-link, size, and no-fol
 checks. Named users/groups remain unsupported for private delivery and refuse
 instead of silently becoming root. An image with no user retains Docker's normal
 root default; an explicit Compose numeric user takes precedence.
+
+Services with private environment values and services with host dependency
+bindings (including every service when project-wide host aliases exist) run their
+process through a wrapper. The wrapper runs exactly what Docker would: the image
+or Compose `entrypoint` followed by `command` (with no entrypoint, `command`
+alone), and a bare executable name such as `docker-entrypoint.sh` or the
+`mysqladmin` of `CMD mysqladmin ping` is resolved through the container's own
+PATH after the environment is applied. A shell-form health check (`CMD-SHELL`
+or a string `test`) runs through the image's shell (`/bin/sh -c` by default), as
+Docker runs it. Stock images therefore need no absolute paths. What a wrapper
+still cannot run is an empty process, a health test that names no executable, a
+named (non-numeric) user, a stop signal other than SIGTERM, SIGINT, SIGQUIT or
+SIGKILL, and a volume target at `/`, `/run` or a reserved wrapper path. Native
+`up` refuses the Compose-declared cases before the VM starts, and the runtime
+checks settings inherited from the pinned image before reserving anything. Both
+name every refused service and field at once (for example
+`service db user (use a numeric UID or UID:GID)`). `hack doctor` on the native
+backend reports the Compose-declared cases in its `native process wrappers`
+check, for every service native may wrap. Only profile-active services are
+checked by `up` and `restart`; a service behind an unselected profile never runs
+and cannot block them, so `doctor` lists such services as information only.
 
 ### Approved-host DNS on pool restart
 

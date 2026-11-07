@@ -146,6 +146,7 @@ import {
   confirmSafe,
   requireInteractive,
 } from "../lib/interactivity.ts";
+import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
@@ -167,6 +168,7 @@ import {
 import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
 import {
   readComposeBackendReading,
+  readNativeComposeDocument,
   readNativePlatformModes,
 } from "../lib/native-compose-backend-features.ts";
 import {
@@ -186,6 +188,11 @@ import {
   reportHackLocalRoute,
 } from "../lib/native-hack-local-route.ts";
 import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local-route-host.ts";
+import {
+  NATIVE_PROCESS_CHECK,
+  type NativeProcessReport,
+  nativeProcessCheckFromCompose,
+} from "../lib/native-process-wrappers.ts";
 import { isMac } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
@@ -276,6 +283,8 @@ interface CheckResult {
   readonly amd64Emulation?: Amd64EmulationReport;
   /** Native setting origins and closed warnings only; never setting values. */
   readonly nativeSettings?: NativeSettingsReport;
+  /** Service names and closed process fields only. */
+  readonly nativeProcess?: NativeProcessReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -1192,6 +1201,11 @@ async function handleNativeDoctor(opts: {
         { timeoutMs: 5000 }
       )
     );
+    results.push(
+      await runCheck(progress, NATIVE_PROCESS_CHECK, () =>
+        checkNativeProcessWrappers({ startDir: opts.startDir })
+      )
+    );
   }
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
   const hasError = results.some((result) => result.status === "error");
@@ -1385,6 +1399,8 @@ export type DoctorJsonCheck = {
   readonly amd64Emulation?: Amd64EmulationReport;
   /** Present only on the native settings check: origins and closed warnings. */
   readonly nativeSettings?: NativeSettingsReport;
+  /** Present only on the native process-wrapper check: service names and closed fields. */
+  readonly nativeProcess?: NativeProcessReport;
 };
 
 export type DoctorJsonData = {
@@ -1430,6 +1446,7 @@ export function buildDoctorJsonData(opts: {
       ...(result.nativeSettings
         ? { nativeSettings: result.nativeSettings }
         : {}),
+      ...(result.nativeProcess ? { nativeProcess: result.nativeProcess } : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,
@@ -3160,6 +3177,36 @@ async function checkNativeProjectSettings(opts: {
     };
   }
   return await checkNativeSettings({ project: ctx, cfg, env: process.env });
+}
+
+/**
+ * Predicts the Compose-declared settings native up's process wrappers refuse
+ * (HACK-1939), for the services it may wrap: every service when project-wide
+ * host aliases exist, services with host-gateway extra hosts, and services
+ * with bare environment keys. Read-only and value-free; image-inherited
+ * settings are checked by native up against the pinned image.
+ */
+async function checkNativeProcessWrappers(opts: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(opts.startDir);
+  if (!ctx) {
+    return {
+      name: NATIVE_PROCESS_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  const cfg = await readProjectConfig(ctx);
+  const aliases = await resolveInternalExtraHosts({
+    projectRoot: ctx.projectRoot,
+    projectDir: ctx.projectDir,
+    staticHosts: cfg.internal?.extraHosts,
+  }).catch(() => ({ hosts: {} }));
+  return nativeProcessCheckFromCompose({
+    compose: await readNativeComposeDocument(ctx.composeFile),
+    projectWideAliases: Object.keys(aliases.hosts).length > 0,
+  });
 }
 
 /**

@@ -1,11 +1,28 @@
 //! Scoped normalized hostname transition, reverified under the provider lease.
 //! A proof never permits changing compute, data, source selection or ownership.
 use super::*;
+use crate::error::PlanChangeField;
 
 fn refused() -> CandidateError {
     error(
         "graph_hostname_change",
         "Retained hostname change requires its original literal-preserving contract and unchanged graph bindings; values omitted.",
+    )
+}
+
+/// A hostname change of `service` that is refused, named so the caller can say
+/// which routed service and field the edit touched.
+fn refused_for(service: &str) -> CandidateError {
+    refused().with_plan_change(service, PlanChangeField::Hostnames)
+}
+
+/// The review changed, but no routed hostname did. Only receipts that plan
+/// reconciliation cannot select reach this proof, so the edit is not applicable
+/// in place; reporting it as a hostname change would name the wrong field.
+pub(super) fn not_hostname_change() -> CandidateError {
+    error(
+        "graph_plan_change_unsupported",
+        "This retained graph uses live source, a carried cache scope, a pending source-device rebind or a pending initializer cache release; only a routed hostname change can be applied to it in place. Values omitted.",
     )
 }
 
@@ -23,7 +40,7 @@ pub(super) struct Verified {
 fn selected_routes(
     plan: &project::PlanData,
     receipt: &Receipt,
-) -> Result<BTreeMap<String, project::RoutingPlan>, CandidateError> {
+) -> Result<(BTreeMap<String, project::RoutingPlan>, String), CandidateError> {
     let mut names = BTreeSet::new();
     let routes = plan
         .services
@@ -46,6 +63,17 @@ fn selected_routes(
                 .map(|route| (resource.key.clone(), route))
         })
         .collect::<BTreeMap<_, _>>();
+    let changed = routes
+        .iter()
+        .find(|(service, route)| prior.get(*service) != Some(route))
+        .map(|(service, _)| service.clone())
+        .or_else(|| {
+            prior
+                .keys()
+                .find(|service| !routes.contains_key(*service))
+                .cloned()
+        })
+        .ok_or_else(not_hostname_change)?;
     if routes.is_empty()
         || routes.len() != prior.len()
         || !routes.iter().all(|(service, route)| {
@@ -56,13 +84,10 @@ fn selected_routes(
                     .iter()
                     .all(|name| names.insert(name.clone()))
         })
-        || routes
-            .iter()
-            .all(|(service, route)| prior.get(service).is_some_and(|old| *old == route))
     {
-        return Err(refused());
+        return Err(refused_for(&changed));
     }
-    Ok(routes)
+    Ok((routes, changed))
 }
 
 /// Identical normalized input remains on the ordinary strict replay path.
@@ -81,18 +106,29 @@ pub(super) fn prepare(
     if previous == next {
         return Ok(None);
     }
-    let routes = selected_routes(plan, receipt)?;
-    let binding = receipt.source.as_ref().ok_or_else(refused)?;
+    let (routes, changed) = selected_routes(plan, receipt)?;
+    let binding = receipt
+        .source
+        .as_ref()
+        .ok_or_else(|| refused_for(&changed))?;
     let cached = plan
         .services
         .values()
         .any(|service| service.active && service.dependency_cache.is_some());
+    // Anything besides the hostnames changed too: name the routed service.
     let source = source::prepare_shared_hostnames(
         engine,
         plan,
         receipt,
         cached.then_some(binding.revision.as_str()),
-    )?;
+    )
+    .map_err(|failure| {
+        if failure.code == "live_source_contract" {
+            refused_for(&changed)
+        } else {
+            failure
+        }
+    })?;
     super::super::publication::check_hostname_change(
         engine.guest().candidate(),
         &receipt.owner,
@@ -356,5 +392,33 @@ pub(super) mod tests {
             }
             assert!(proof.apply(&mut stale).is_err());
         }
+    }
+
+    #[test]
+    fn a_review_without_a_hostname_change_is_not_reported_as_one() {
+        let (fixture, mut receipt, _) = transition();
+        let plan = project::plan(
+            &Candidate::discover(&fixture.0).unwrap(),
+            project::PlanOptions {
+                branch: None,
+                project: &fixture.0.join("project"),
+                compose_file: Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )
+        .unwrap()
+        .plan;
+        // The routed service lost its route: a real hostname change, named.
+        let failure = selected_routes(&plan, &receipt).unwrap_err();
+        assert_eq!(failure.code, "graph_hostname_change");
+        let change = failure.plan_change().unwrap();
+        assert_eq!(change.service, "web");
+        assert_eq!(change.field, PlanChangeField::Hostnames);
+        // No route before or after: some other edit, which only reconciliation
+        // applies. The accurate code says so instead of naming hostnames.
+        receipt.resources.get_mut("container:web").unwrap().routing = None;
+        let failure = selected_routes(&plan, &receipt).unwrap_err();
+        assert_eq!(failure.code, "graph_plan_change_unsupported");
+        assert!(failure.plan_change().is_none());
     }
 }

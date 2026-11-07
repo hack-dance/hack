@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveNativeInternalExtraHostSelection } from "../src/backends/native-project-internal-hosts.ts";
 import { resolveInternalExtraHosts } from "../src/lib/internal-extra-hosts.ts";
 import { resolvePrimaryLocalProjectDir } from "../src/lib/worktree-local-config.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
@@ -253,5 +254,40 @@ test("explicit local static aliases override inherited aliases; local dynamic wi
   await f.write(f.branch, { "search.test": "127.0.0.3" });
   expect((await resolveInternalExtraHosts(opts)).hosts).toEqual({
     "search.test": "127.0.0.3",
+  });
+});
+
+test("native alias sources distinguish project config, this checkout and the inherited main checkout", async () => {
+  const f = await fixture();
+  await f.write(f.primary, { "inherited.example.test": "host-gateway" });
+  await f.write(f.branch, { "local.example.test": "host-gateway" });
+  const configFile = join(f.context.projectDir, "hack.config.json");
+  await Bun.write(
+    configFile,
+    JSON.stringify({
+      name: "sources-fixture",
+      internal: { extra_hosts: { "project.example.test": "host-gateway" } },
+    })
+  );
+  const selection = await resolveNativeInternalExtraHostSelection({
+    project: {
+      ...f.context,
+      projectDirName: ".hack",
+      composeFile: join(f.context.projectDir, "docker-compose.yml"),
+      envFile: join(f.context.projectDir, ".env"),
+      configFile,
+    },
+  });
+  expect(selection).toEqual({
+    hosts: {
+      "inherited.example.test": "host-gateway",
+      "local.example.test": "host-gateway",
+      "project.example.test": "host-gateway",
+    },
+    sources: {
+      "inherited.example.test": "inherited",
+      "local.example.test": "checkout",
+      "project.example.test": "project",
+    },
   });
 });

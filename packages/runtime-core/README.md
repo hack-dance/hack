@@ -1037,8 +1037,16 @@ bound read-only at their targets. A compiled mount or tmpfs target that equals,
 contains or sits under a member target refuses before effects. Members carry no
 separate deadline: they live as long as the allocation, which is the container's, and
 are retired with it by the existing allocation cleanup. A service with values keeps the
-launcher contract (numeric user, absolute entrypoint, `CMD` health with an absolute
-executable). A files-only service keeps its own process and needs only a numeric image
+launcher contract: a numeric user, a non-empty selected process and an exec-form
+`CMD` health test. The selected process is the image or Compose `Entrypoint ++ Cmd`
+(with no entrypoint, `Cmd` alone), and a `CMD-SHELL` test becomes the exec form
+Docker runs (the image `SHELL`, default `/bin/sh -c`). Executables may be bare
+names such as `docker-entrypoint.sh`: the launcher resolves them through the
+container's PATH after applying the environment, as Docker does. Host-dependency
+services get the same materialized process behind their release barrier. Every
+wrapped service is checked before any runtime state is reserved; a refusal keeps
+its code and lists each service and closed field (`entrypoint`, `healthcheck`,
+`user`, `stop_signal`, `mounts`) in `process_refusals`. A files-only service keeps its own process and needs only a numeric image
 or Compose user. Live-owner restore and normalized serve-restore deliver fresh members
 into new allocations. `graph exec` and one-off runs refuse envelopes with files; files
 already in a running container are never re-delivered or renewed.
@@ -1493,10 +1501,26 @@ admission would, retained volumes are projected by logical key onto their record
 names, newly declared volumes receive unused `reserved` names in this run and are
 created exclusively, and retained volumes the plan no longer declares stay in the
 receipt. Run, owner, namespace and the ownership plan on every label are unchanged.
-`graph source-compatibility` reports `"reconcile": true` for this path. Receipts
-with dependency caches, live source or a pending source-device rebind keep the
-hostname/shared-source proofs. A volume still `reserved` in a stopped receipt was
-never created; selection requires it absent and restore creates it.
+`graph source-compatibility` reports `"reconcile": true` for this path. Dependency
+caches reconcile too: a cache whose freshly resolved identity (the initializer's own
+definition and inputs plus every service mount of the cache volume, not the whole
+Compose digest) equals the recorded binding is
+kept with its provenance; a changed identity is selected like a fresh admission
+(adopted by labels or created) with a freshly published source revision, and the old
+shared cache is only released. A cache that a non-initializer service mounts
+read-write (`dependency_cache::instance_scoped_volumes`) binds the plan namespace
+into its scope, so it is never shared across linked worktrees or branch instances;
+such graphs always re-prove the cache through reconciliation, and no earlier
+whole-document identity is matched for them. A retained run-owned volume newly declared as a cache
+refuses with `graph_plan_reconcile` and a `plan_change` diagnostic naming the service
+and field. A receipt recorded under the earlier whole-document identity keeps that
+cache while the review still resolves to it (`config::retain_recorded_legacy_caches`).
+Receipts with live source, a carried cache scope, pending initializer cache release
+or a pending source-device rebind keep the hostname/shared-source proofs; a
+non-hostname edit there refuses with `graph_plan_change_unsupported`. A volume still
+`reserved` in a stopped receipt was never created; selection requires it absent and
+restore creates it, except a reserved dependency cache, which may already exist as a
+shared cache.
 
 Selection binds the receipt, current VM boot and verified current volume
 observations. Restoration rechecks these before effects, requires the old owner

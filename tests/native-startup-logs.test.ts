@@ -76,6 +76,19 @@ test("values shorter than four characters are redacted only as whole tokens", ()
   );
 });
 
+test("HACK-1939: short values never shred version strings, decimals or hyphenated words", () => {
+  expect(
+    redactNativeStartupLog(
+      "mysqld 8.0.46 ready; ratio 0.5; build 1-2; flag v-1; DEBUG=0; exit -1; mode 0.",
+      ["0", "1"]
+    )
+  ).toBe(
+    "mysqld 8.0.46 ready; ratio 0.5; build 1-2; flag v-1; DEBUG=[REDACTED]; exit -[REDACTED]; mode [REDACTED]."
+  );
+  // Long values are still redacted wherever they occur.
+  expect(redactNativeStartupLog("v8.0.46-x", ["8.0.46"])).toBe("v[REDACTED]-x");
+});
+
 test("remaining control characters cannot reach the terminal", () => {
   expect(redactNativeStartupLog("bell\u0007 tab\tback\b", [])).toBe(
     "bell� tab\tback�"

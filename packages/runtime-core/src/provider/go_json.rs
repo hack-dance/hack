@@ -9,7 +9,10 @@
 //!
 //! [`GoJson`] keeps every member, duplicates included, and [`GoJson::field`] returns the
 //! one member a Go field would receive. More than one candidate member is ambiguous and
-//! refuses, so a check here never passes a document the engine would read differently.
+//! refuses. Go's case folding also matches some non-ASCII runes to ASCII letters (for
+//! example U+0131, U+017F and U+212A, with rules that differ between Go versions), so an
+//! object with any non-ASCII key refuses outright instead of being folded here. A check
+//! here therefore never passes a document the engine could read differently.
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 
@@ -24,30 +27,30 @@ pub(super) enum GoJson {
     Object(Vec<(String, GoJson)>),
 }
 
-/// More than one member of an object names the same Go struct field.
+/// Why an object member cannot be read the way the engine reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Ambiguous;
+pub(super) enum Unreadable {
+    /// More than one member names the same Go struct field.
+    Ambiguous,
+    /// A member name contains a non-ASCII character, which Go may fold onto a field.
+    NonAsciiKey,
+}
 
-/// Whether `key` names the Go field `name`, as `bytes.EqualFold` decides for the ASCII
-/// field names Hack inspects. Besides ASCII case, Unicode simple case folding maps only
-/// U+017F (long s) to `s` and U+212A (Kelvin sign) to `k` among ASCII letters.
+/// Whether the ASCII `key` names the ASCII Go field `name`: equal under ASCII case
+/// folding. Objects with a non-ASCII key never reach this comparison
+/// ([`GoJson::field`] and [`ascii_keys`] refuse them).
 pub(super) fn names_field(key: &str, name: &str) -> bool {
-    let mut key = key.chars();
-    for expected in name.chars() {
-        let Some(actual) = key.next() else {
-            return false;
-        };
-        let folded = match actual {
-            '\u{17f}' => 's',
-            '\u{212a}' => 'k',
-            other if other.is_ascii() => other.to_ascii_lowercase(),
-            _ => return false,
-        };
-        if folded != expected.to_ascii_lowercase() {
-            return false;
+    key.is_ascii() && key.eq_ignore_ascii_case(name)
+}
+
+/// Refuse an object (any other value passes) with a non-ASCII member name.
+pub(super) fn ascii_keys(value: &GoJson) -> Result<(), Unreadable> {
+    match value {
+        GoJson::Object(members) if members.iter().any(|(key, _)| !key.is_ascii()) => {
+            Err(Unreadable::NonAsciiKey)
         }
+        _ => Ok(()),
     }
-    key.next().is_none()
 }
 
 impl GoJson {
@@ -56,16 +59,18 @@ impl GoJson {
     }
 
     /// The member a Go struct field named `name` receives: `None` when no key names it
-    /// (or this is not an object), [`Ambiguous`] when more than one does.
-    pub(super) fn field(&self, name: &str) -> Result<Option<&GoJson>, Ambiguous> {
+    /// (or this is not an object). Refuses when more than one key names it, or when any
+    /// key of this object is not ASCII.
+    pub(super) fn field(&self, name: &str) -> Result<Option<&GoJson>, Unreadable> {
         let Self::Object(members) = self else {
             return Ok(None);
         };
+        ascii_keys(self)?;
         let mut found = None;
         for (key, value) in members {
             if names_field(key, name) {
                 if found.is_some() {
-                    return Err(Ambiguous);
+                    return Err(Unreadable::Ambiguous);
                 }
                 found = Some(value);
             }
@@ -154,13 +159,17 @@ mod tests {
         for key in ["OnBuilds", "OnBuil", "On_Build", "ÖnBuild", ""] {
             assert!(!names_field(key, "OnBuild"), "{key}");
         }
-        // Unicode simple folding reaches these two ASCII letters.
-        assert!(names_field("o\u{17f}", "os"));
-        assert!(names_field("\u{212a}ind", "kind"));
+        // Go folds some non-ASCII runes onto ASCII letters; such keys are never matched
+        // here, and an object holding one refuses as a whole.
+        for key in ["o\u{17f}", "\u{212a}ind", "OnBu\u{131}ld"] {
+            assert!(!names_field(key, "OnBuild") && !names_field(key, "os"));
+            let document = GoJson::parse(format!(r#"{{"{key}": 1, "a": 2}}"#).as_bytes()).unwrap();
+            assert_eq!(document.field("a"), Err(Unreadable::NonAsciiKey), "{key}");
+        }
         let document = GoJson::parse(br#"{"a": 1, "os": "linux", "OS": "windows"}"#).unwrap();
-        assert_eq!(document.field("os"), Err(Ambiguous));
+        assert_eq!(document.field("os"), Err(Unreadable::Ambiguous));
         let exact = GoJson::parse(br#"{"os": "linux", "os": "linux"}"#).unwrap();
-        assert_eq!(exact.field("os"), Err(Ambiguous));
+        assert_eq!(exact.field("os"), Err(Unreadable::Ambiguous));
         assert_eq!(
             document.field("a").unwrap().map(GoJson::to_value),
             Some(serde_json::json!(1))

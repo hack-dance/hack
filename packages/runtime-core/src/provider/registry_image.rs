@@ -432,6 +432,9 @@ fn canonical_members(value: &GoJson, fields: &[&str]) -> Result<(), CandidateErr
     let GoJson::Object(members) = value else {
         return Ok(());
     };
+    if super::go_json::ascii_keys(value).is_err() {
+        return Err(error("Registry manifest member names must be ASCII."));
+    }
     for field in fields {
         let mut matching = members
             .iter()
@@ -1427,10 +1430,15 @@ pub fn resolve_build_base(
     })
 }
 
-fn ambiguous(_: super::go_json::Ambiguous) -> CandidateError {
-    error(
-        "Image configuration names one field more than once (keys differing only in case count as the same field).",
-    )
+fn ambiguous(reason: super::go_json::Unreadable) -> CandidateError {
+    match reason {
+        super::go_json::Unreadable::Ambiguous => error(
+            "Image configuration names one field more than once (keys differing only in case count as the same field).",
+        ),
+        super::go_json::Unreadable::NonAsciiKey => {
+            error("Image configuration member names must be ASCII.")
+        }
+    }
 }
 
 /// The `os`, `architecture` and `variant` members of an image configuration as the

@@ -7,7 +7,10 @@
 //! cannot complete an import. Memory use is bounded by small metadata members, not by
 //! archive size.
 use super::{
-    engine::Engine, go_json::GoJson, image_platform::ImagePlatform, image_policy::ImagePolicy,
+    engine::Engine,
+    go_json::{GoJson, Unreadable},
+    image_platform::ImagePlatform,
+    image_policy::ImagePolicy,
     state,
 };
 use crate::{Candidate, CandidateError};
@@ -487,10 +490,14 @@ fn validated(
     // Read as the engine reads it: keys match case-insensitively and a field named more
     // than once refuses (see `go_json`), so these checks see what the load will use.
     let config = GoJson::parse(config_bytes).map_err(|_| error("Invalid image configuration."))?;
+    let unreadable = |reason: Unreadable| match reason {
+        Unreadable::Ambiguous => error("Image configuration names one field more than once."),
+        Unreadable::NonAsciiKey => error("Image configuration member names must be ASCII."),
+    };
     let field = |document: &GoJson, name: &str| -> Result<Value, CandidateError> {
         document
             .field(name)
-            .map_err(|_| error("Image configuration names one field more than once."))
+            .map_err(unreadable)
             .map(|value| value.map_or(Value::Null, GoJson::to_value))
     };
     if field(&config, "architecture")? != platform.architecture()
@@ -502,7 +509,7 @@ fn validated(
     }
     let rootfs = config
         .field("rootfs")
-        .map_err(|_| error("Image configuration names one field more than once."))?
+        .map_err(unreadable)?
         .cloned()
         .unwrap_or(GoJson::Null);
     let diffs = field(&rootfs, "diff_ids")?;
@@ -1245,6 +1252,31 @@ pub(super) mod tests {
         ] {
             assert!(check(config.clone()).is_err(), "{config}");
         }
+        // Non-ASCII member names (which Go may fold onto a field) refuse in the config
+        // and in rootfs; a real-looking configuration still validates.
+        for config in [
+            format!(
+                r#"{{"arch\u0131tecture":"amd64","architecture":"arm64","os":"linux","rootfs":{{"type":"layers","diff_ids":["{diff}"]}}}}"#
+            ),
+            format!(
+                r#"{{"architecture":"arm64","o\u017f":"windows","os":"linux","rootfs":{{"type":"layers","diff_ids":["{diff}"]}}}}"#
+            ),
+            format!(
+                r#"{{"architecture":"arm64","os":"linux","rootfs":{{"type":"layers","diff_ids":["{diff}"],"diff_\u0131ds":[]}}}}"#
+            ),
+            format!(
+                r#"{{"architecture":"arm64","os":"linux","rootfs":{{"\u212aind":"x","diff_ids":["{diff}"]}}}}"#
+            ),
+        ] {
+            let error = check(config.clone()).unwrap_err();
+            assert!(error.message.contains("ASCII"), "{config}: {error:?}");
+        }
+        assert!(
+            check(format!(
+                r#"{{"created":"2024-01-01T00:00:00Z","architecture":"arm64","os":"linux","config":{{"Env":["PATH=/usr/bin"],"Cmd":["/bin/sh"]}},"rootfs":{{"type":"layers","diff_ids":["{diff}"]}},"history":[{{"created_by":"ADD file:x in /"}}]}}"#
+            ))
+            .is_ok()
+        );
     }
 
     #[test]

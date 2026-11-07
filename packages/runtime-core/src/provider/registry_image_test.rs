@@ -1651,6 +1651,86 @@ fn onbuild_fields_named_more_than_once_or_malformed_refuse() {
     }
 }
 
+/// Non-ASCII spellings Go's folding can match to an ASCII field: dotless i (U+0131),
+/// long s (U+017F) and the Kelvin sign (U+212A).
+const NON_ASCII_KEYS: [(&str, &str); 4] = [
+    ("OnBuild", "OnBu\u{131}ld"),
+    ("architecture", "arch\u{131}tecture"),
+    ("os", "o\u{17f}"),
+    ("kind", "\u{212a}ind"),
+];
+
+#[test]
+fn image_configs_with_non_ascii_member_names_refuse() {
+    let onbuild = NON_ASCII_KEYS[0].1;
+    for config in [
+        format!(r#"{{"config":{{"{onbuild}":["ADD . /src"]}}}}"#),
+        format!(r#"{{"container_config":{{"{onbuild}":["ADD . /src"]}}}}"#),
+        format!(r#"{{"{onbuild}":["ADD . /src"],"config":{{}}}}"#),
+        r#"{"conf\u0131g":{"OnBuild":["ADD . /src"]}}"#.to_owned(),
+        r#"{"config":{"Env":[],"\u017fhell":["/bin/sh"]}}"#.to_owned(),
+    ] {
+        let error = declares_onbuild(config.as_bytes()).unwrap_err();
+        assert!(error.message.contains("ASCII"), "{config}: {error:?}");
+    }
+    let native = |config: &str| config_platform(config.as_bytes(), PlatformPolicy::Native, None);
+    for (_, key) in NON_ASCII_KEYS {
+        let config = format!(r#"{{"os":"linux","architecture":"arm64","{key}":"amd64"}}"#);
+        assert!(
+            native(&config).unwrap_err().message.contains("ASCII"),
+            "{config}"
+        );
+    }
+    // Real-looking OCI and Docker configurations still pass.
+    let oci = r#"{"created":"2024-01-01T00:00:00Z","architecture":"arm64","variant":"v8","os":"linux","config":{"Env":["PATH=/usr/local/bin:/usr/bin"],"Cmd":["/bin/sh"],"WorkingDir":"/","Labels":{"org.opencontainers.image.title":"base"},"OnBuild":null},"rootfs":{"type":"layers","diff_ids":["sha256:0000000000000000000000000000000000000000000000000000000000000000"]},"history":[{"created_by":"ADD file:x in /"}]}"#;
+    assert!(!declares_onbuild(oci.as_bytes()).unwrap());
+    assert_eq!(native(oci).unwrap(), ImagePlatform::LinuxArm64);
+    let docker = r##"{"architecture":"arm64","os":"linux","config":{"Hostname":"","User":"","ExposedPorts":{"80/tcp":{}},"Env":["A=b"],"Cmd":["nginx"],"Image":"sha256:x","Volumes":null,"Entrypoint":null,"OnBuild":[],"Labels":null},"container_config":{"Cmd":["/bin/sh","-c","#(nop) CMD [\"nginx\"]"],"OnBuild":null},"docker_version":"20.10.7","rootfs":{"type":"layers","diff_ids":[]}}"##;
+    assert!(!declares_onbuild(docker.as_bytes()).unwrap());
+    assert_eq!(native(docker).unwrap(), ImagePlatform::LinuxArm64);
+}
+
+#[test]
+fn manifests_with_non_ascii_member_names_refuse() {
+    let parse = |text: &str| parse_manifest(text.as_bytes(), &digest(text.as_bytes())).map(drop);
+    let digest_a = format!("sha256:{}", "a".repeat(64));
+    // A real-looking OCI index, and a Docker v2 manifest, pass.
+    let index = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{digest_a}","size":1234,"platform":{{"architecture":"arm64","os":"linux","variant":"v8"}},"annotations":{{"org.opencontainers.image.ref.name":"1"}}}}]}}"#
+    );
+    assert!(parse(&index).is_ok());
+    let manifest = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{{"mediaType":"application/vnd.docker.container.image.v1+json","size":1469,"digest":"{digest_a}"}},"layers":[{{"mediaType":"application/vnd.docker.image.rootfs.diff.tar.gzip","size":3623807,"digest":"{digest_a}"}}]}}"#
+    );
+    assert!(parse(&manifest).is_ok());
+    for (from, to) in [
+        // top-level index and manifest objects
+        ("\"manifests\"", "\"man\u{131}fests\""),
+        ("\"schemaVersion\"", "\"\u{17f}chemaVersion\""),
+        // descriptor
+        ("\"digest\"", "\"d\u{131}gest\""),
+        // platform
+        ("\"architecture\"", "\"arch\u{131}tecture\""),
+        ("\"os\"", "\"o\u{17f}\""),
+    ] {
+        let variant = index.replace(from, to);
+        assert_ne!(variant, index);
+        let error = parse(&variant).unwrap_err();
+        assert!(error.message.contains("ASCII"), "{variant}: {error:?}");
+    }
+    for (from, to) in [
+        ("\"layers\"", "\"\u{212a}layers\""),
+        ("\"size\":1469", "\"\u{17f}ize\":1469"),
+    ] {
+        let variant = manifest.replace(from, to);
+        assert_ne!(variant, manifest);
+        assert!(
+            parse(&variant).unwrap_err().message.contains("ASCII"),
+            "{variant}"
+        );
+    }
+}
+
 #[test]
 fn manifest_members_must_be_spelled_exactly_once() {
     let parse = |text: &str| parse_manifest(text.as_bytes(), &digest(text.as_bytes())).map(drop);

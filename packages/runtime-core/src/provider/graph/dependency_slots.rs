@@ -41,6 +41,16 @@ fn refused() -> CandidateError {
 fn root(candidate: &Candidate) -> PathBuf {
     candidate.state_root.join("run/dependency-assignments")
 }
+/// Whether a dependency reservation record exists for this run. Observation only.
+pub(super) fn reservation_recorded(
+    candidate: &Candidate,
+    run: &str,
+) -> Result<bool, CandidateError> {
+    if !hex(run, 32) {
+        return Err(refused());
+    }
+    Ok(!absent(&root(candidate).join(format!("{run}.json")))?)
+}
 fn socket(home: &Path, slot: u8) -> PathBuf {
     home.join(format!("dependency-{slot:02}.sock"))
 }

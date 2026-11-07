@@ -35,10 +35,13 @@ pub(super) fn current_completion(
 }
 
 /// The original receipt digest of a same-boot recovery whose durable intent exists but
-/// whose recovery has not finished (cleanup still pending, or the stale publication not
-/// yet retired), so an interrupted `hack down --recover` resumes it by its own selection.
+/// whose recovery has not finished, so an interrupted `hack down --recover` resumes it
+/// by its own selection. Unfinished means cleanup is still pending, or cleanup completed
+/// for this exact receipt while a retirement effect of `finish_retirement` remains: the
+/// stale publication, or this run's dependency reservation (released last).
 /// Selection only: `recover_live_owner` revalidates the intent against current evidence.
 pub(super) fn resumable_selection(
+    candidate: &Candidate,
     root: &Path,
     receipt: &Receipt,
     publication_present: bool,
@@ -48,17 +51,17 @@ pub(super) fn resumable_selection(
     }
     let intent: Intent = state::read(&root.join(FILE))?;
     let current = digest(receipt)?;
-    Ok(unfinished(
-        intent.complete_sha256.as_deref(),
-        &current,
-        publication_present,
+    let remaining =
+        publication_present || dependency_slots::reservation_recorded(candidate, &receipt.run)?;
+    Ok(
+        unfinished(intent.complete_sha256.as_deref(), &current, remaining)
+            .then_some(intent.original_sha256),
     )
-    .then_some(intent.original_sha256))
 }
-/// Cleanup not yet complete, or complete for this exact receipt with the stale
-/// publication still present. A completed recovery of an older receipt is history.
-fn unfinished(complete: Option<&str>, current: &str, publication_present: bool) -> bool {
-    complete.is_none_or(|complete| publication_present && complete == current)
+/// Cleanup not yet complete, or complete for this exact receipt with a retirement effect
+/// remaining. A completed recovery of an older receipt is history.
+fn unfinished(complete: Option<&str>, current: &str, retirement_remaining: bool) -> bool {
+    complete.is_none_or(|complete| retirement_remaining && complete == current)
 }
 
 /// Select an independent data-removal request from the exact completed same-boot
@@ -683,7 +686,7 @@ mod resumable_tests {
         // Interrupted after the cleanup intent: resumed whatever the receipt shows.
         assert!(super::unfinished(None, "a", true));
         assert!(super::unfinished(None, "a", false));
-        // Cleanup completed for this receipt but the publication was not retired.
+        // Cleanup completed for this receipt but a retirement effect remains.
         assert!(super::unfinished(Some("a"), "a", true));
         // Fully retired, or a completed recovery of an older generation: history.
         assert!(!super::unfinished(Some("a"), "a", false));
@@ -855,38 +858,38 @@ mod tests {
     #[test]
     fn an_interrupted_recovery_is_selected_by_its_original_receipt_until_retired() {
         let fixture = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&fixture.0).unwrap();
+        let select = |receipt: &Receipt, publication: bool| {
+            resumable_selection(&candidate, &fixture.0, receipt, publication).unwrap()
+        };
         let mut current = receipt();
         // No recovery intent: nothing to resume (an unadmitted exit stays refused).
-        assert_eq!(
-            resumable_selection(&fixture.0, &current, true).unwrap(),
-            None
-        );
+        assert_eq!(select(&current, true), None);
         let mut intent = completed(receipt());
         intent.original_sha256 = "1".repeat(64);
         intent.complete_sha256 = None;
         state::write(&fixture.0.join(FILE), &intent).unwrap();
+        // Interrupted after the cleanup intent.
         current.phase = "cleanup-intent".into();
-        assert_eq!(
-            resumable_selection(&fixture.0, &current, true).unwrap(),
-            Some("1".repeat(64))
-        );
+        assert_eq!(select(&current, true), Some("1".repeat(64)));
         current.phase = "stopped-data-retained".into();
         intent.complete_sha256 = Some(digest(&current).unwrap());
         fs::remove_file(fixture.0.join(FILE)).unwrap();
         state::write(&fixture.0.join(FILE), &intent).unwrap();
-        assert_eq!(
-            resumable_selection(&fixture.0, &current, true).unwrap(),
-            Some("1".repeat(64))
-        );
-        assert_eq!(
-            resumable_selection(&fixture.0, &current, false).unwrap(),
-            None
-        );
+        // Interrupted after cleanup, before publisher retirement.
+        assert_eq!(select(&current, true), Some("1".repeat(64)));
+        // Interrupted after both publisher paths were retired but before the
+        // dependency reservation was released: still resumed by its receipt.
+        let reservations = candidate.state_root.join("run/dependency-assignments");
+        state::private_directory(&reservations).unwrap();
+        let record = reservations.join(format!("{}.json", current.run));
+        fs::write(&record, b"{}").unwrap();
+        assert_eq!(select(&current, false), Some("1".repeat(64)));
+        // Every retirement effect done: history, not a resumable recovery.
+        fs::remove_file(&record).unwrap();
+        assert_eq!(select(&current, false), None);
         current.owner = "9".repeat(32);
-        assert_eq!(
-            resumable_selection(&fixture.0, &current, true).unwrap(),
-            None
-        );
+        assert_eq!(select(&current, true), None);
     }
 
     fn completed(original: Receipt) -> Intent {

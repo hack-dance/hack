@@ -40,7 +40,7 @@ fn exited_ready(candidate: &Candidate, run: &str) -> bool {
         .and_then(|owner| load_at(directory(candidate, run).ok()?, run, &owner.token).ok())
         .is_some_and(|(receipt, root)| {
             receipt.phase == "ready-observed"
-                || super::live_owner_cleanup::resumable_selection(&root, &receipt, true)
+                || super::live_owner_cleanup::resumable_selection(candidate, &root, &receipt, true)
                     .is_ok_and(|selected| selected.is_some())
         })
 }

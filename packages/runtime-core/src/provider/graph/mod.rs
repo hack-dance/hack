@@ -1685,6 +1685,7 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
     let bytes = host_pin_recovery::read_raw(&root.join("state.json"), 1024 * 1024)?;
     let publication = foreground::transport::published_owner(candidate, run)?;
     let resumable = live_owner_cleanup::resumable_selection(
+        candidate,
         &root,
         &receipt,
         publication != foreground::transport::PublishedOwner::Absent,

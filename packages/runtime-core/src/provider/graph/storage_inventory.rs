@@ -202,6 +202,7 @@ mod tests {
             image: format!("sha256:{}", "c".repeat(64)),
         };
         let resource = Resource {
+            loopback_ports: Vec::new(),
             routing: None,
             networks: None,
             outbound: false,

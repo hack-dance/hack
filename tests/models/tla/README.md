@@ -852,6 +852,7 @@ have canonical copies and were not duplicated.
 | authority-lifetime | 9 | Authority cannot outlive completed runtime shutdown; removing the startup lease permits a late bind | `hostname_authority.rs` startup lock and shutdown |
 | publication-journal | 50 | Recovery cannot adopt a live writer's pending entry; unsafe recovery violates that condition | `publication.rs` journal recovery |
 | publication | 16 | A live native publication retains its intent, directory and guest; early retirement breaks ownership | `publication.rs`, `publication_stage.rs` |
+| loopback-port-publication | 1008 | One listener per published host port, forwarding only to the pinned container incarnation, recovery only for a dead owner, and no listener after acknowledged stop. Negative controls: recovery without the dead-owner check (`negative`), no loopback probe (`no-probe`), no endpoint identity check (`stale-target`), acknowledging stop before closing the listener (`ack-before-close`) | `publication.rs` (`require_loopback_port_free`, `release`), `graph/bridges.rs` loopback bridges, `graph/foreground/publishers.rs` |
 | fence-first | 24 | First recovery needs terminal prior state, no occupied slot, and complete evidence; ignoring occupancy fails | `graph/relay-fence.sh` initial recovery |
 | fence-pending | 7 | Recover only permitted pending transitions; accepting launching-to-stopped leaves a live process | `graph/relay-fence.sh` pending recovery |
 | relay-staging | 9 | Discarded preparation cannot contain a live child; discarding an authorized launch fails | `publication_stage.rs` and `graph/relay-fence.sh` launch ordering |
@@ -863,6 +864,11 @@ other models use finite phase/boolean sets. No fairness or eventual-progress cla
 is made. The first-fence model checks an admission predicate, not an interleaving
 proof. Journal `skipped` is constrained by the recovery guard and its negative
 control specifically tests live-writer recovery, not every corruption condition.
+Loopback port publication uses two owners and one foreign listener for one host
+port, and one container replacement per publication. Publish is one step: the
+real interval between the loopback probe and the publisher's own bind is not
+modeled, so a foreign wildcard listener that binds inside it is a documented
+residual risk rather than a checked property.
 OS process identity, file locks, fsync, symlink races, host mounts, credentials,
 network behavior and actual crash recovery require implementation tests and live
 qualification. A passing abstract model does not close those runtime gates.
@@ -1149,3 +1155,38 @@ Closing the residual needs a mutation fence rather than a timeout: target tmux
 mutations by session ID (`#{session_id}`, never reused by a server) captured with
 the token read. That fence, and full zellij support for shared-helper lifecycle
 sessions, are tracked in HACK-1849 and are not in this slice.
+
+## Multi-root pool shares
+
+`multi-root-share/Shares.tla` models one development pool that hosts several
+project roots. The share set is the pool's mount intent. It changes only through
+the journaled stopped-pool update in `provider::share_update`: the provider record
+commits before the owner receipt, and startup refuses while the journal exists.
+Boot mounts exactly the audited set. A graph binds only the share whose root equals
+its own reviewed source, and a share stays while any graph of that project is live
+or retained.
+
+The positive configuration (three roots, a two-share bound) exhausts **55 distinct
+states**. Four guard-removal controls must fail at the named action with the exact
+same-state witness: `negative` (a graph may select any mounted share) fails
+`OwnShareOnly` at `StartGraph`; `unfenced-boot` fails `RunningMountsAudited` at
+`Boot`; `owner-first` fails `OwnerNeverAhead` at `CommitOwner`; and
+`referenced-removal` fails `ReferencedSharesKept` at `CommitRecord`. The controls
+check two roots (`a`, `b`), so no symmetric third root can stand in for `b`.
+TLC's two-worker search also does not always report the shortest trace, so each
+control accepts exactly the first violations its model can reach (9, 12, 4 and 2
+complete states). They were enumerated from each control's complete state graph,
+restricted to steps from states that still satisfy the invariant, and are listed in
+`scripts/lib/tla-runtime-models.ts`.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `BeginAdd` / `BeginRemove` | `share_update::plan`: owned stopped pool (`network_update::stopped_with`), primary share kept, bounded set, removal refused while a graph record names the share (`require_unreferenced`). An interrupted add resumes from its recorded share without a live root check (`addition`). |
+| `CommitRecord` / `CommitOwner` / `Finish` | `network_update::apply_record`, then the owner save, then journal removal; `validate_sides` refuses an owner ahead of its record. |
+| `Boot` | `share_update::require_complete`, `project_share::check_boot` and `config_audit` mount verification before `machine start`. |
+| `CleanGraph` | One run's own cleanup; a native receipt that the pool owner proves `Removed` (`graph::native::retired`) no longer counts as a reference. |
+| `StartGraph` | `OwnedGuest::project_share_for(plan.source)` in shared source selection; `ProjectShareIntent::bind_path` keeps every bind under that share. |
+
+The model does not cover provider behavior: that the pinned provider mounts an
+updated record at the next boot, virtio-fs device limits, or live multi-project
+graphs on a host VM. Cleanup is abstracted to one run's own resources.

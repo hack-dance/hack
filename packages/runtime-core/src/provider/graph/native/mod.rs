@@ -16,6 +16,21 @@ pub(super) use runtime::reservations_except;
 pub use runtime::run_with_storage_tool;
 pub use runtime::{Snapshot, cleanup, inspect, run};
 
+/// True only when this pool owner's run has fully retired: its journal passes the
+/// strict same-owner read, no staging file or data-tool intent remains, and its phase
+/// is `Removed`, which already requires every owned resource to be removed. Such a run
+/// no longer uses the project share its source binding names. Any other state,
+/// including an unreadable or foreign journal, is not retired.
+pub(in crate::provider) fn retired(
+    candidate: &Candidate,
+    run: &str,
+    owner: &str,
+) -> Result<bool, CandidateError> {
+    let (receipt, root) = journal::load_owned(candidate, run, owner)?;
+    persistent_data::tool::require_idle(&root)?;
+    Ok(receipt.phase == Phase::Removed)
+}
+
 pub(in crate::provider) fn environment_binding(
     candidate: &Candidate,
     owner: &str,
@@ -156,6 +171,7 @@ fn configuration_with_source(
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            loopback_ports: Vec::new(),
             kind: Kind::Network,
             key: key.clone(),
             name: format!("hkn-{}-network-{index}", review.scope().run),
@@ -184,6 +200,7 @@ fn configuration_with_source(
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            loopback_ports: Vec::new(),
             kind: Kind::Container,
             key: name.clone(),
             name: format!("hkn-{}-container-{index}", review.scope().run),

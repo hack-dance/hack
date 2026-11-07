@@ -133,18 +133,85 @@ impl ProjectShareIntent {
         json!([self.project, self.guest_path, false])
     }
 }
-pub(super) fn check_request(
-    existing: Option<&ProjectShareIntent>,
-    requested: Option<&ProjectShareIntent>,
+/// Upper bound for one pool's share set: the primary share plus additional roots.
+/// Each share is one provider filesystem device for the life of the machine.
+pub const MAX_PROJECT_SHARES: usize = 8;
+
+fn extension_required() -> CandidateError {
+    CandidateError::new(
+        "project_share_extension_required",
+        "This pool does not share this project root. Add it to the stopped pool with `runtime project-share add`; a running pool's mounts are never changed.",
+    )
+}
+
+/// Offline shape of a pool share set. Every share keeps its own exact receipt and
+/// guest path; no two shares name the same root or guest mount point. Additional
+/// shares exist only beside a primary share, which defines the pool as a
+/// development source pool.
+pub(super) fn validate_set(
+    primary: Option<&ProjectShareIntent>,
+    additional: &[ProjectShareIntent],
 ) -> Result<(), CandidateError> {
-    if let Some(requested) = requested {
-        requested.validate()?;
-        if existing != Some(requested) {
+    if primary.is_none() && !additional.is_empty() {
+        return Err(refused());
+    }
+    let shares: Vec<_> = primary.into_iter().chain(additional).collect();
+    if shares.len() > MAX_PROJECT_SHARES {
+        return Err(refused());
+    }
+    for (index, share) in shares.iter().enumerate() {
+        share.validate_receipt()?;
+        if shares[..index]
+            .iter()
+            .any(|other| other.project == share.project || other.guest_path == share.guest_path)
+        {
             return Err(refused());
         }
     }
-    if let Some(existing) = existing {
-        existing.validate()?;
+    Ok(())
+}
+
+/// Admit a requested share only when it is already an exact member of the pool's
+/// share set. A root outside the set is refused with a distinct code: the set changes
+/// only through the explicit stopped-pool extension, never as a side effect of `up`.
+/// Without a request every share is checked live, as before; with a request, the
+/// requested share is checked live and the others offline, so a moved or deleted
+/// neighbor root cannot block an unrelated project on a running pool. Boot checks
+/// every share live before the provider starts.
+pub(super) fn check_request(
+    existing: &[&ProjectShareIntent],
+    requested: Option<&ProjectShareIntent>,
+) -> Result<(), CandidateError> {
+    for share in existing {
+        share.validate_receipt()?;
+    }
+    if let Some(requested) = requested {
+        requested.validate()?;
+        if !existing.contains(&requested) {
+            return Err(if existing.is_empty() {
+                refused()
+            } else {
+                extension_required()
+            });
+        }
+    } else {
+        for share in existing {
+            share.validate()?;
+        }
+    }
+    Ok(())
+}
+
+/// Every share must still name its exact approved directory before the provider boots
+/// with it; a stale additional share is removed explicitly, never skipped.
+pub(super) fn check_boot(existing: &[&ProjectShareIntent]) -> Result<(), CandidateError> {
+    for share in existing {
+        share.validate().map_err(|_| {
+            CandidateError::new(
+                "project_share_stale",
+                "A shared project root moved, changed or was removed. Remove that additional share from the stopped pool with `runtime project-share remove` before booting.",
+            )
+        })?;
     }
     Ok(())
 }
@@ -473,9 +540,76 @@ mod tests {
         let second = Fixture::new();
         let a = ProjectShareIntent::approve(&first.0, true).unwrap();
         let b = ProjectShareIntent::approve(&second.0, true).unwrap();
-        assert!(check_request(Some(&a), Some(&a)).is_ok());
-        assert!(check_request(Some(&a), None).is_ok());
-        assert!(check_request(Some(&a), Some(&b)).is_err());
-        assert!(check_request(None, Some(&a)).is_err());
+        assert!(check_request(&[&a], Some(&a)).is_ok());
+        assert!(check_request(&[&a], None).is_ok());
+        assert_eq!(
+            check_request(&[&a], Some(&b)).unwrap_err().code,
+            "project_share_extension_required"
+        );
+        assert_eq!(
+            check_request(&[], Some(&a)).unwrap_err().code,
+            "project_share"
+        );
+        // Membership is exact: a forged receipt for the same root is not a member.
+        let mut forged = b.clone();
+        forged.inode += 1;
+        assert!(check_request(&[&a, &b], Some(&forged)).is_err());
+        assert!(check_request(&[&a, &b], Some(&b)).is_ok());
+    }
+
+    #[test]
+    fn project_share_set_is_bounded_unique_and_requires_a_primary() {
+        let fixtures: Vec<_> = (0..MAX_PROJECT_SHARES + 1)
+            .map(|_| Fixture::new())
+            .collect();
+        let shares: Vec<_> = fixtures
+            .iter()
+            .map(|f| ProjectShareIntent::approve(&f.0, true).unwrap())
+            .collect();
+        assert!(validate_set(None, &[]).is_ok());
+        assert!(validate_set(Some(&shares[0]), &[]).is_ok());
+        assert!(validate_set(Some(&shares[0]), &shares[1..MAX_PROJECT_SHARES]).is_ok());
+        assert!(validate_set(Some(&shares[0]), &shares[1..]).is_err());
+        assert!(validate_set(None, &shares[1..2]).is_err());
+        assert!(validate_set(Some(&shares[0]), &[shares[0].clone()]).is_err());
+        let mut same_guest = shares[1].clone();
+        same_guest.guest_path = shares[0].guest_path.clone();
+        assert!(validate_set(Some(&shares[0]), &[same_guest]).is_err());
+    }
+
+    #[test]
+    fn project_share_running_neighbor_removal_does_not_block_other_roots_but_blocks_boot() {
+        let first = Fixture::new();
+        let second = Fixture::new();
+        let a = ProjectShareIntent::approve(&first.0, true).unwrap();
+        let b = ProjectShareIntent::approve(&second.0, true).unwrap();
+        let moved = Fixture::new();
+        fs::rename(&second.0, moved.0.join("gone")).unwrap();
+        assert!(check_request(&[&a, &b], Some(&a)).is_ok());
+        assert!(check_request(&[&a, &b], Some(&b)).is_err());
+        assert!(check_request(&[&a, &b], None).is_err());
+        assert_eq!(
+            check_boot(&[&a, &b]).unwrap_err().code,
+            "project_share_stale"
+        );
+        assert!(check_boot(&[&a]).is_ok());
+    }
+
+    #[test]
+    fn project_share_bind_paths_never_cross_into_a_neighbor_share() {
+        let first = Fixture::new();
+        let second = Fixture::new();
+        let a = ProjectShareIntent::approve(&first.0, true).unwrap();
+        let b = ProjectShareIntent::approve(&second.0, true).unwrap();
+        assert_ne!(a.guest_path, b.guest_path);
+        for source in [
+            b.guest_path.as_str(),
+            second.0.to_str().unwrap(),
+            "../",
+            "/mnt/hack-projects",
+        ] {
+            assert!(a.bind_path(source).is_err(), "accepted {source}");
+        }
+        assert!(a.bind_path(".").unwrap().starts_with(&a.guest_path));
     }
 }

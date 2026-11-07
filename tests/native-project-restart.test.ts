@@ -27,6 +27,7 @@ import {
   saveNativeRestartIntent,
   withNativeRestartLock,
 } from "../src/backends/native-project-run.ts";
+import { NativeStartupCanceledError } from "../src/backends/native-project-start.ts";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
   expectClosedRefusal,
@@ -2114,6 +2115,52 @@ test("a new start stopped by request before ready leaves no pending restart", as
     "finalized",
     "remove",
   ]);
+});
+
+test("a start canceled after the hand-off before any service retires the intent so up resumes", async () => {
+  const f = stopFixture("never");
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      start: async ({ onStopSignals }) => {
+        onStopSignals();
+        // Ctrl-C while discovering host dependencies or waiting for runtime up.
+        throw new NativeStartupCanceledError(130, true);
+      },
+    })
+  ).toBe(130);
+  expect(f.pending()).toBeNull();
+  expect(f.events).toEqual([
+    "preflight",
+    "intent",
+    "down",
+    "finalized",
+    "remove",
+    "stopping",
+    "stopped",
+  ]);
+});
+
+test.each([
+  { name: "uncertain cleanup", error: new Error("lifecycle cleanup failed") },
+  {
+    name: "a cancellation without confirmed cleanup",
+    error: new NativeStartupCanceledError(130, false),
+  },
+])("a start that ends in $name after the hand-off keeps the pending restart", async ({
+  error,
+}) => {
+  const f = stopFixture("never");
+  await expect(
+    restartNativeProject({
+      ...f.options,
+      start: async ({ onStopSignals }) => {
+        onStopSignals();
+        throw error;
+      },
+    })
+  ).rejects.toBe(error);
+  expect(f.pending()).toMatchObject({ phase: "cleaned" });
 });
 
 test("a new start that fails without a stop request keeps the pending restart", async () => {

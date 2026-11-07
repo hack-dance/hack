@@ -413,10 +413,44 @@ function httpsVerificationFailed(code: string): Error {
 }
 
 /** Cancellation is not a configuration refusal: it carries no refusal code. */
+/**
+ * A foreground start ended by a stop request. `beforeServices` is set only when
+ * the request arrived after the start's own stop handling was installed and
+ * before any service of the run was requested, and the start's cleanup (hooks,
+ * finalization) then completed: nothing of the new run was admitted.
+ */
+export class NativeStartupCanceledError extends ClosedCliError {
+  readonly interruptedExit: number;
+  readonly beforeServices: boolean;
+  constructor(interruptedExit = 130, beforeServices = false) {
+    super("Native foreground up was canceled; values omitted.");
+    this.interruptedExit = interruptedExit;
+    this.beforeServices = beforeServices;
+  }
+}
+/**
+ * The error a failed foreground start reports. A stop request before any service
+ * was requested is a confirmed cancellation: the run was never admitted. The
+ * caller's cleanup must still complete, or its own failure replaces this outcome.
+ */
+function foregroundStartFailure(opts: {
+  readonly error: unknown;
+  readonly stopRequested: boolean;
+  readonly servicesRequested: boolean;
+  readonly httpsAcquisitionFailure: unknown;
+  readonly interruptedExit: number;
+}): unknown {
+  if (
+    opts.stopRequested &&
+    !opts.servicesRequested &&
+    opts.httpsAcquisitionFailure === undefined
+  ) {
+    return new NativeStartupCanceledError(opts.interruptedExit, true);
+  }
+  return httpsCleanupFailure(opts.httpsAcquisitionFailure, opts.error);
+}
 function canceled(): Error {
-  return new ClosedCliError(
-    "Native foreground up was canceled; values omitted."
-  );
+  return new NativeStartupCanceledError();
 }
 
 function requireActiveStartup(signal: AbortSignal | undefined): void {
@@ -1812,6 +1846,8 @@ export async function startNativeProject(opts: {
   let hooks: Hooks | undefined;
   let foregroundStop: NativeForegroundStop | undefined;
   let failed = false;
+  // Set before the first service of this run is requested from the runtime.
+  let servicesRequested = false;
   let finalization:
     | Awaited<ReturnType<typeof beginNativeProjectFinalization>>
     | undefined;
@@ -2126,6 +2162,7 @@ export async function startNativeProject(opts: {
           progress({ phase: "services", services });
           let stopWatching: (() => Promise<void>) | undefined;
           try {
+            servicesRequested = true;
             code = await deps.serve({
               runtime: opts.runtime,
               projectRoot: opts.scope.projectRoot,
@@ -2400,7 +2437,13 @@ export async function startNativeProject(opts: {
     });
   } catch (error) {
     failed = true;
-    throw httpsCleanupFailure(httpsAcquisitionFailure, error);
+    throw foregroundStartFailure({
+      error,
+      stopRequested: controller.signal.aborted,
+      servicesRequested,
+      httpsAcquisitionFailure,
+      interruptedExit: stopSignals.interruptedExit(),
+    });
   } finally {
     cancelAwsExpiry?.();
     // The stop listeners stay installed until down.after and the finalization

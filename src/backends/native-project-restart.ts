@@ -17,6 +17,7 @@ import {
   saveNativeRestartIntent,
   withNativeRestartLock,
 } from "./native-project-run.ts";
+import { NativeStartupCanceledError } from "./native-project-start.ts";
 
 /**
  * Stop requests of a native restart until its new foreground `up` installs its
@@ -337,6 +338,19 @@ async function startOrStop(opts: {
     // the new run, so a refusal caused by this cancel leaves the old run stopped.
     if (stop.signal.aborted && !handedOff) {
       return await canceled();
+    }
+    // After the hand-off, a stop request the start confirmed it honored before
+    // requesting any service (its cleanup completed): the old run stays stopped and
+    // nothing new was admitted. Any other failure keeps the pending restart.
+    if (
+      handedOff &&
+      error instanceof NativeStartupCanceledError &&
+      error.beforeServices
+    ) {
+      await deps.remove({ ...context.scope, expected: selected });
+      context.reportStopping();
+      context.progress?.({ phase: "stopped", summary: STOPPED });
+      return error.interruptedExit;
     }
     throw error;
   }

@@ -330,7 +330,7 @@ fn run_helper(
             "The Docker credential helper failed; its output was discarded.",
         ));
     }
-    if written.is_some_and(|result| result.is_err()) {
+    if written.as_ref().is_some_and(helper_write_failed) {
         return Err(error(
             "Cannot send the server address to the Docker credential helper.",
         ));
@@ -413,6 +413,14 @@ pub(super) fn lookup(
                 .map(|(_, entry)| entry)
         });
     entry.map_or(Ok(None), file_credential)
+}
+
+/// Like Go's `os/exec`, which Docker uses to run helpers, a helper that exits without
+/// reading its input is not a failure: its exit status and reply decide the outcome.
+fn helper_write_failed(result: &std::io::Result<()>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|error| error.kind() != std::io::ErrorKind::BrokenPipe)
 }
 
 #[cfg(test)]
@@ -638,5 +646,20 @@ pub(super) mod tests {
                 .message
                 .contains("PRIVATE_CANARY")
         );
+    }
+
+    #[test]
+    fn a_helper_that_closes_its_input_early_is_judged_by_its_reply() {
+        use std::io::{Error, ErrorKind};
+        assert!(!helper_write_failed(&Ok(())));
+        assert!(!helper_write_failed(&Err(Error::from(
+            ErrorKind::BrokenPipe
+        ))));
+        assert!(helper_write_failed(&Err(Error::from(
+            ErrorKind::PermissionDenied
+        ))));
+        assert!(helper_write_failed(&Err(Error::from(
+            ErrorKind::Interrupted
+        ))));
     }
 }

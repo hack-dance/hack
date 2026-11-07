@@ -10,26 +10,45 @@ function refused(): Error {
       "Native routes require reviewed Caddy labels and existing matching native HTTP health probes; no probe or route was invented.",
   });
 }
-function labelKeys(labels: unknown): string[] | undefined {
+/**
+ * Hack's authored one-shot marker. Only this exact key with the literal value `true`
+ * (map form) or the exact entry `hack.service.one-shot=true` (list form) is admitted,
+ * matching the native review; the review owns its completion role and conflicts.
+ */
+const ONE_SHOT_LABEL = "hack.service.one-shot";
+function labelEntries(
+  labels: unknown
+): (readonly [string, unknown])[] | undefined {
   if (labels === undefined) {
     return [];
   }
   if (isRecord(labels)) {
-    return Object.keys(labels);
+    return Object.entries(labels);
   }
   if (
     Array.isArray(labels) &&
     labels.every((label) => typeof label === "string")
   ) {
-    return labels.map((label: string) => label.split("=", 1)[0] ?? "");
+    return labels.map((label: string) => {
+      const separator = label.indexOf("=");
+      return separator < 0
+        ? [label, undefined]
+        : [label.slice(0, separator), label.slice(separator + 1)];
+    });
   }
   return undefined;
+}
+function labelKeys(labels: unknown): string[] | undefined {
+  return labelEntries(labels)?.map(([key]) => key);
 }
 /** Values and complete routing semantics remain native review's responsibility. */
 export function hasOnlyNativeSupportedLabels(labels: unknown): boolean {
   return (
-    labelKeys(labels)?.every(
-      (key) => ROUTE_LABELS.has(key) || hasOnlyNativeCacheLabels({ [key]: "" })
+    labelEntries(labels)?.every(
+      ([key, value]) =>
+        ROUTE_LABELS.has(key) ||
+        hasOnlyNativeCacheLabels({ [key]: "" }) ||
+        (key === ONE_SHOT_LABEL && value === "true")
     ) ?? false
   );
 }

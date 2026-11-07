@@ -14,7 +14,14 @@ import {
   stat,
   unlink,
 } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { YAML } from "bun";
 import {
   HACK_PROJECT_DIR_PRIMARY,
@@ -5137,11 +5144,33 @@ export type LegacyProjectEnvMigration = {
   readonly cleanupCandidates: readonly string[];
   readonly blockedCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
-  readonly retainedEnvFiles: readonly {
-    readonly path: string;
-    readonly keys: readonly string[];
-  }[];
+  readonly retainedEnvFiles: readonly RetainedLegacyEnvFile[];
 };
+
+/**
+ * A legacy dotenv file the migration keeps, and why:
+ * - `undelivered`: env layers don't hold these keys with the file's values.
+ * - `compose_interpolation`: Compose interpolates these keys, which the env
+ *   layers now set only for a service. Compose reads `.hack/.env` on its own,
+ *   and Hack passes it only global values, so removing the file would drop them.
+ */
+export type RetainedLegacyEnvFile = {
+  readonly path: string;
+  readonly keys: readonly string[];
+  readonly reason: "undelivered" | "compose_interpolation";
+};
+
+/** Value-free line saying why a legacy env file was kept. */
+export function describeRetainedLegacyEnvFile(opts: {
+  readonly shownPath: string;
+  readonly retained: RetainedLegacyEnvFile;
+}): string {
+  const keys = opts.retained.keys.join(", ");
+  if (opts.retained.reason === "compose_interpolation") {
+    return `Kept ${opts.shownPath}: Compose interpolates ${keys}, which the env layers now set only for a service, and service values don't reach interpolation (values omitted). To remove the file, set ${opts.retained.keys.length === 1 ? "that key" : "those keys"} without --service or export ${opts.retained.keys.length === 1 ? "it" : "them"} in your shell.`;
+  }
+  return `Kept ${opts.shownPath}: keys not preserved in env layers: ${keys} (values omitted).`;
+}
 
 /**
  * Migrates a legacy v2 `.env`-based project env layout to the v3
@@ -5449,6 +5478,15 @@ export async function migrateLegacyProjectEnv(opts: {
     configCleanupCandidates: configCleanup.cleanupCandidates,
     deliveredValues,
     composeEnvFileReferences,
+    composeInterpolatedKeys: new Map([
+      [
+        resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+        await composeInterpolatedServiceOnlyKeys({
+          projectDir: opts.projectDir,
+          resolvedValues: baseResolved.values,
+        }),
+      ],
+    ]),
   });
 
   return {
@@ -5481,7 +5519,7 @@ export class LegacyDotenvMigrationRefusalError extends HackCliError {
   }) {
     super({
       code: opts.code,
-      message: `Refusing to migrate the legacy .hack/.env files: ${opts.reason} ${opts.closing ?? "The legacy files are kept. Earlier migration writes may remain; check the layers and ignore rules before retrying."}`,
+      message: `Refusing to migrate the legacy env config: ${opts.reason} ${opts.closing ?? "The legacy files are kept. Earlier migration writes may remain; check the layers and ignore rules before retrying."}`,
     });
     this.name = "LegacyDotenvMigrationRefusalError";
   }
@@ -5511,19 +5549,228 @@ async function filterUntrackedLegacyCleanupCandidates(opts: {
 }): Promise<string[]> {
   const kept: string[] = [];
   for (const path of opts.paths) {
-    const tracked = await isGitTrackedProjectEnvPath({
-      projectRoot: opts.projectRoot,
-      path,
-    });
-    const untracked =
-      tracked === null
-        ? !(await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
-        : !tracked;
-    if (untracked) {
+    if (
+      !(await isGitTrackedOrUnknownProjectPath({
+        projectRoot: opts.projectRoot,
+        path,
+      }))
+    ) {
       kept.push(path);
     }
   }
   return kept;
+}
+
+/**
+ * Whether git tracks `path`, failing closed: a path whose status git cannot
+ * report counts as tracked when the project or the path is inside a git
+ * checkout, because it may be. A path outside every checkout, such as an
+ * encrypted backend file in the user's home, is not tracked.
+ */
+export async function isGitTrackedOrUnknownProjectPath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<boolean> {
+  const tracked = await isGitTrackedProjectEnvPath(opts);
+  if (tracked !== null) {
+    return tracked;
+  }
+  const inside = relative(opts.projectRoot, opts.path);
+  const withinProject = !(
+    inside === ".." ||
+    inside.startsWith(`..${sep}`) ||
+    isAbsolute(inside)
+  );
+  return await isInsideGitCheckoutMarker({
+    startDir: withinProject ? opts.projectRoot : dirname(opts.path),
+  });
+}
+
+/** A git-tracked file the explicit env migration may change. */
+export type TrackedEnvMigrationChange = {
+  readonly path: string;
+  readonly change: "delete" | "edit";
+};
+
+/**
+ * The git-tracked files `hack doctor --migrate-env-config` may delete or edit,
+ * found before it writes anything so a run that can't ask may refuse instead.
+ *
+ * With a contract and no env layers, the migration offers the contract and the
+ * legacy dotenv files it delivered for deletion, rewrites legacy keys in
+ * `hack.config.json`, and offers an encrypted backend file it no longer uses
+ * for deletion. In every case it offers to drop legacy `.hack/.env*`
+ * `env_file` entries from the Compose file. The list is conservative: a file
+ * the migration would keep, for example a dotenv file with an undelivered
+ * value, can still be listed. Without a contract, tracked legacy dotenv files
+ * are never offered for deletion, so none are listed. A state the migration
+ * itself refuses (an unusable layer entry or contract) lists nothing more;
+ * the migration reports it.
+ *
+ * Teammates share these files, so a change to one reaches them on the next
+ * commit. Paths are absolute and sorted; no file content is returned.
+ */
+export async function planTrackedEnvMigrationChanges(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly composeFile: string;
+}): Promise<readonly TrackedEnvMigrationChange[]> {
+  const candidates = new Map<string, TrackedEnvMigrationChange["change"]>();
+  const references = await inspectLegacyComposeEnvFileReferences({
+    composeFile: opts.composeFile,
+    projectDir: opts.projectDir,
+  }).catch(() => []);
+  if (references.length > 0) {
+    candidates.set(opts.composeFile, "edit");
+  }
+  const contract = await readHackEnvContract({ projectDir: opts.projectDir });
+  const layersExist = await projectEnvConfigExistsForMutation({
+    projectDir: opts.projectDir,
+  }).catch(() => true);
+  if (contract.exists && contract.parseError === undefined && !layersExist) {
+    candidates.set(contract.path, "delete");
+    const overlayNames = await discoverLegacyOverlayNames({
+      projectDir: opts.projectDir,
+      includeSymlinks: false,
+    }).catch(() => []);
+    for (const name of [
+      PROJECT_ENV_FILENAME,
+      ...overlayNames.map((overlay) => `${PROJECT_ENV_FILENAME}.${overlay}`),
+    ]) {
+      candidates.set(resolve(opts.projectDir, name), "delete");
+    }
+    const config = await planLegacyProjectConfigChanges({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+    });
+    if (config.changed) {
+      candidates.set(config.path, "edit");
+    }
+    for (const path of config.cleanupCandidates) {
+      candidates.set(path, "delete");
+    }
+  }
+  const changes: TrackedEnvMigrationChange[] = [];
+  for (const [path, change] of candidates) {
+    if (
+      (await pathExists(path)) &&
+      (await isGitTrackedOrUnknownProjectPath({
+        projectRoot: opts.projectRoot,
+        path,
+      }))
+    ) {
+      changes.push({ path, change });
+    }
+  }
+  return changes.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+/**
+ * What {@link migrateLegacyProjectConfig} would change in `hack.config.json`,
+ * without writing it.
+ */
+async function planLegacyProjectConfigChanges(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<{
+  readonly path: string;
+  readonly changed: boolean;
+  readonly cleanupCandidates: readonly string[];
+}> {
+  const path = resolve(opts.projectDir, PROJECT_CONFIG_FILENAME);
+  const text = await readTextFile(path).catch(() => null);
+  let parsed: unknown = null;
+  try {
+    parsed = text === null ? null : JSON.parse(text);
+  } catch {
+    parsed = null;
+  }
+  if (!isRecord(parsed)) {
+    return { path, changed: false, cleanupCandidates: [] };
+  }
+  const planned = normalizeLegacyProjectTopLevelConfig({
+    parsed,
+    projectRoot: opts.projectRoot,
+  });
+  return {
+    path,
+    changed: planned.changed,
+    cleanupCandidates: planned.cleanupCandidates,
+  };
+}
+
+/** Outcome of {@link finishImplicitLegacyEnvMigration}. */
+export type ImplicitLegacyEnvMigrationReport = {
+  /** Legacy dotenv files removed because env layers now hold every entry. */
+  readonly removed: readonly string[];
+  /** Value-free report lines: written layers, moved keys, kept and removed files. */
+  readonly lines: readonly string[];
+};
+
+/**
+ * Finishes a contract migration that another command ran implicitly (such as
+ * `hack env exec`), the way doctor's cleanup does for untracked files. It
+ * removes a legacy `.hack/.env` or `.hack/.env.<overlay>` file only when every
+ * entry in it now lives in an env layer, Compose no longer names it as
+ * `env_file`, and git does not track it (or, inside a checkout, cannot say),
+ * so no second plaintext copy stays behind. This step never removes or edits
+ * `hack.env.json`, the Compose file, an encrypted backend file or any other
+ * tracked file; `hack doctor --migrate-env-config` offers those. (The
+ * migration itself still rewrites legacy keys in `hack.config.json`.)
+ *
+ * The report names written paths and moved keys, never values.
+ */
+export async function finishImplicitLegacyEnvMigration(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly migrated: LegacyProjectEnvMigration;
+}): Promise<ImplicitLegacyEnvMigrationReport> {
+  const { migrated } = opts;
+  if (!migrated.legacyDetected || migrated.wroteFiles.length === 0) {
+    return { removed: [], lines: [] };
+  }
+  const shown = (path: string) => relative(opts.projectRoot, path);
+  const lines = [
+    `Migrated legacy env config to ${migrated.wroteFiles.map(shown).join(", ")}`,
+    ...migrated.movedPlainValues.map(
+      (moved) => `Moved ${moved.key} to ${shown(moved.path)} (values omitted).`
+    ),
+  ];
+  const dotenvFiles = new Set([
+    resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+    ...migrated.migratedOverlays.map((overlay) =>
+      resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlay}`)
+    ),
+  ]);
+  const removable = await filterUntrackedLegacyCleanupCandidates({
+    projectRoot: opts.projectRoot,
+    paths: migrated.cleanupCandidates.filter((path) => dotenvFiles.has(path)),
+  });
+  const removed = await removeLegacyProjectEnvArtifacts({
+    projectRoot: opts.projectRoot,
+    paths: removable,
+  });
+  if (removed.length > 0) {
+    lines.push(
+      `Removed ${removed.map(shown).join(", ")}: env layers now hold every value ${removed.length === 1 ? "it" : "they"} set.`
+    );
+  }
+  for (const retained of migrated.retainedEnvFiles) {
+    lines.push(
+      describeRetainedLegacyEnvFile({
+        shownPath: shown(retained.path),
+        retained,
+      })
+    );
+  }
+  for (const path of migrated.blockedCleanupCandidates) {
+    if (dotenvFiles.has(path)) {
+      lines.push(
+        `Kept ${shown(path)}: Compose still names it as env_file. Run \`hack doctor --migrate-env-config\` to remove that reference.`
+      );
+    }
+  }
+  return { removed, lines };
 }
 
 /**
@@ -5726,13 +5973,14 @@ function assertNoComposeToolKeys(opts: {
 
 /**
  * Text of each non-legacy `env_file`, because Compose expands variables inside
- * those files too. An absent file adds nothing; an unreadable one was refused
- * by {@link composeEnvFileKeyConflicts}.
+ * those files too. An absent file adds nothing. An unreadable one returns null,
+ * so a caller can't mistake it for a file that names nothing; the refusal path
+ * already refused it in {@link composeEnvFileKeyConflicts}.
  */
 async function composeOtherEnvFileText(opts: {
   readonly projectDir: string;
   readonly services: Record<string, unknown>;
-}): Promise<string> {
+}): Promise<string | null> {
   const paths = new Set(
     composeServiceEntries(opts.services).flatMap(([, rawService]) =>
       readComposeEnvFilePaths({ rawService })
@@ -5749,7 +5997,10 @@ async function composeOtherEnvFileText(opts: {
   const texts: string[] = [];
   for (const path of paths) {
     const read = await readOptionalTextFile(path);
-    if (read.kind !== "absent" && read.kind !== "unreadable") {
+    if (read.kind === "unreadable") {
+      return null;
+    }
+    if (read.kind === "text") {
       texts.push(read.text);
     }
   }
@@ -6032,10 +6283,12 @@ async function assertComposeEnvironmentKeepsPrecedence(opts: {
     projectDir: opts.projectDir,
   });
   const referenced = composeReferencedOverlayKeys({
-    searchText: `${JSON.stringify(parsed)}\n${await composeOtherEnvFileText({
-      projectDir: opts.projectDir,
-      services,
-    })}`,
+    searchText: `${JSON.stringify(parsed)}\n${
+      (await composeOtherEnvFileText({
+        projectDir: opts.projectDir,
+        services,
+      })) ?? ""
+    }`,
     legacyValues: opts.legacyValues,
     defaultOverlay,
   });
@@ -8022,6 +8275,111 @@ async function readLegacyDotenvCleanupEntries(opts: {
   return parseDotEnv(source.text);
 }
 
+/**
+ * Keys from the base `.hack/.env` that the contract migration moves only into
+ * service scopes and that Compose may interpolate. Compose reads `.hack/.env`
+ * from its project directory for interpolation on its own, while Hack passes
+ * Compose only global values under their own names, so after the migration
+ * that file is the only interpolation source for these keys.
+ *
+ * A key counts when its name appears anywhere in the Compose file or another
+ * `env_file` it names (Compose expands variables there too), or when it is one
+ * of Compose's own `COMPOSE_*` settings. Matching the name anywhere keeps the
+ * file more often than it must, which is the safe direction. When the Compose
+ * input can't be fully read here (an unreadable file, not one YAML document, or
+ * an input {@link uncheckableComposeEnvInputs} names, such as `include`,
+ * `extends` or an `env_file` path with a variable), every service-only key
+ * counts. Key names only.
+ */
+async function composeInterpolatedServiceOnlyKeys(opts: {
+  readonly projectDir: string;
+  readonly resolvedValues: readonly {
+    readonly key: string;
+    readonly value: string | null;
+    readonly services: readonly string[] | null;
+  }[];
+}): Promise<ReadonlySet<string>> {
+  // Mirrors buildMigratedValues: no services, or a blank or `global` entry, reaches the global scope.
+  const serviceOnly = opts.resolvedValues
+    .filter(
+      (entry) =>
+        entry.value !== null &&
+        entry.services !== null &&
+        entry.services.length > 0 &&
+        entry.services.every(
+          (scope) => scope.trim().length > 0 && scope !== "global"
+        )
+    )
+    .map((entry) => entry.key);
+  if (serviceOnly.length === 0) {
+    return new Set();
+  }
+  const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
+  const composeRead = await readOptionalTextFile(composeFile);
+  if (composeRead.kind === "absent") {
+    return new Set();
+  }
+  const parsed =
+    composeRead.kind === "text" ? await readComposeFile({ composeFile }) : null;
+  if (composeRead.kind !== "text" || parsed === null) {
+    return composeRead.kind === "text" && composeRead.text.trim().length === 0
+      ? new Set()
+      : new Set(serviceOnly);
+  }
+  const services = getRecord(parsed, "services") ?? {};
+  const otherEnvFileText = await composeOtherEnvFileText({
+    projectDir: opts.projectDir,
+    services,
+  });
+  if (
+    otherEnvFileText === null ||
+    uncheckableComposeEnvInputs({
+      projectDir: opts.projectDir,
+      composeText: composeRead.text,
+      parsed,
+      services,
+    }).length > 0
+  ) {
+    return new Set(serviceOnly);
+  }
+  const searchText = `${composeRead.text}\n${otherEnvFileText}`;
+  return new Set(
+    serviceOnly.filter(
+      // Keys match PROJECT_ENV_KEY_PATTERN, so they are safe in a pattern.
+      (key) =>
+        COMPOSE_OWN_KEY_PATTERN.test(key) ||
+        new RegExp(`(?<![A-Za-z0-9_])${key}(?![A-Za-z0-9_])`).test(searchText)
+    )
+  );
+}
+
+/** Why a legacy dotenv file must stay after its values were migrated, or null when it may go. */
+function retainLegacyEnvFile(opts: {
+  readonly path: string;
+  readonly entries: Readonly<Record<string, string>>;
+  readonly delivered: ReadonlyMap<string, string | null>;
+  readonly interpolated: ReadonlySet<string> | undefined;
+}): RetainedLegacyEnvFile | null {
+  const undelivered = Object.entries(opts.entries)
+    .filter(([key, value]) => opts.delivered.get(key) !== value)
+    .map(([key]) => key)
+    .sort();
+  if (undelivered.length > 0) {
+    return { path: opts.path, keys: undelivered, reason: "undelivered" };
+  }
+  const interpolated = Object.keys(opts.entries)
+    .filter((key) => opts.interpolated?.has(key) === true)
+    .sort();
+  if (interpolated.length > 0) {
+    return {
+      path: opts.path,
+      keys: interpolated,
+      reason: "compose_interpolation",
+    };
+  }
+  return null;
+}
+
 export async function collectLegacyProjectEnvCleanupCandidates(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -8033,13 +8391,16 @@ export async function collectLegacyProjectEnvCleanupCandidates(opts: {
   >;
   readonly configCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
+  /**
+   * Per legacy file, keys Compose still reads from that file for
+   * interpolation that no env layer delivers to it. A file that sets one is
+   * kept even when env layers hold all its values.
+   */
+  readonly composeInterpolatedKeys?: ReadonlyMap<string, ReadonlySet<string>>;
 }): Promise<{
   readonly allowed: readonly string[];
   readonly blocked: readonly string[];
-  readonly retainedEnvFiles: readonly {
-    readonly path: string;
-    readonly keys: readonly string[];
-  }[];
+  readonly retainedEnvFiles: readonly RetainedLegacyEnvFile[];
 }> {
   const candidates = new Set<string>();
   candidates.add(resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME));
@@ -8058,7 +8419,7 @@ export async function collectLegacyProjectEnvCleanupCandidates(opts: {
   const blockedPaths = new Set(
     opts.composeEnvFileReferences.map((reference) => reference.resolvedPath)
   );
-  const retainedEnvFiles: { path: string; keys: string[] }[] = [];
+  const retainedEnvFiles: RetainedLegacyEnvFile[] = [];
   const allowed: string[] = [];
   const blocked: string[] = [];
   for (const path of candidates) {
@@ -8067,13 +8428,14 @@ export async function collectLegacyProjectEnvCleanupCandidates(opts: {
       // must never promote a file holding undelivered values into cleanup.
       const delivered = opts.deliveredValues.get(path);
       if (delivered) {
-        const entries = await readLegacyDotenvCleanupEntries({ path });
-        const keys = Object.entries(entries)
-          .filter(([key, value]) => delivered.get(key) !== value)
-          .map(([key]) => key)
-          .sort();
-        if (keys.length > 0) {
-          retainedEnvFiles.push({ path, keys });
+        const retained = retainLegacyEnvFile({
+          path,
+          entries: await readLegacyDotenvCleanupEntries({ path }),
+          delivered,
+          interpolated: opts.composeInterpolatedKeys?.get(path),
+        });
+        if (retained) {
+          retainedEnvFiles.push(retained);
           continue;
         }
       }

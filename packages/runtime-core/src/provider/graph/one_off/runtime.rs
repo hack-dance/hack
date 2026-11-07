@@ -59,9 +59,10 @@ pub fn begin(
     };
     let expected_environment = verify_images(
         &engine,
-        &BTreeMap::from([(key.clone(), resource.clone())]),
+        &config::verification_resources(&original, &key, &resource),
         &mut configs,
         &private,
+        &BTreeSet::new(),
     )?;
     let mut environments = BTreeMap::new();
     if let Some(values) = values.filter(|v| !v.is_empty()) {

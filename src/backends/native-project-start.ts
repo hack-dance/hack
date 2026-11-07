@@ -9,6 +9,11 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
+import {
+  adaptNativeGcloudEnvironment,
+  type NativeGcloudSelection,
+} from "./native-gcloud-environment.ts";
 import {
   acquireNativeHttpsLease,
   NativeHttpsLeaseAcquisitionError,
@@ -30,17 +35,34 @@ import {
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
 import {
+  admitNativeDownHookGeneration,
+  createNativeForegroundDownHooks,
+} from "./native-project-down-hooks.ts";
+import { discardUnpublishedNativeStart } from "./native-project-failed-start.ts";
+import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
+import {
+  createNativeForegroundStop,
+  type NativeForegroundStop,
+  type NativeForegroundStopCommands,
+  nativeForegroundStopSignals,
+} from "./native-project-foreground-stop.ts";
 import { isNativeHttpsProbePath } from "./native-project-https.ts";
 import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
   type NativeProjectInput,
   prepareNativeProjectInput,
+  selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
+import {
+  applyNativeInternalHostAliases,
+  nativeServiceHostAliases,
+  requireNativeHostAliasBindings,
+} from "./native-project-internal-hosts.ts";
 import {
   NativePartialShutdownError,
   recoverNativeInterruptedStartupCleanup,
@@ -85,9 +107,11 @@ import {
   type NativeRuntimeMetadataSelection,
   verifyNativeRuntimeMetadataRoutes,
 } from "./native-runtime-metadata.ts";
+import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
 const OWNER = /^[a-f0-9]{32}$/;
+const RUN = OWNER;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const BOOT_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 export type NativeHttpsSelection = {
@@ -245,11 +269,20 @@ export function reviewedNativeHttpsRoutes(
 type Hooks = {
   readonly cleanup: () => Promise<void>;
   readonly ready?: () => Promise<void>;
+  /**
+   * The project's `down.before`/`down.after` commands, present only when it
+   * declares them. Each resolves to the exit status after its child exited;
+   * the signal cancels a running phase (a second interrupt).
+   */
+  readonly stop?: NativeForegroundStopCommands;
 };
 type Dependencies = {
   prepare: typeof prepareNativeProjectInput;
   prepareStorage: typeof prepareNativeProjectRunStorage;
   adaptAws: typeof adaptNativeAwsEnvironment;
+  adaptGcloud: typeof adaptNativeGcloudEnvironment;
+  /** Value-free operator notices (for example credential expiry); stderr by default. */
+  warn: (line: string) => void;
   review: typeof withNativeProjectReview;
   selectReview: typeof selectNativeProjectReviewIdentity;
   retainedImages: typeof selectNativeRetainedImages;
@@ -265,11 +298,18 @@ type Dependencies = {
   finalization: typeof beginNativeProjectFinalization;
   captureFinalization: typeof captureNativeProjectFinalization;
   waitFinalization: typeof waitNativeProjectFinalization;
+  discardFailedStart: typeof discardUnpublishedNativeStart;
+  admitDownHooks: typeof admitNativeDownHookGeneration;
+  downHooks: typeof createNativeForegroundDownHooks;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
   prepareStorage: prepareNativeProjectRunStorage,
   adaptAws: adaptNativeAwsEnvironment,
+  adaptGcloud: adaptNativeGcloudEnvironment,
+  warn: (line) => {
+    process.stderr.write(`${line}\n`);
+  },
   review: withNativeProjectReview,
   selectReview: selectNativeProjectReviewIdentity,
   retainedImages: selectNativeRetainedImages,
@@ -286,6 +326,9 @@ const DEFAULTS: Dependencies = {
   finalization: beginNativeProjectFinalization,
   captureFinalization: captureNativeProjectFinalization,
   waitFinalization: waitNativeProjectFinalization,
+  discardFailedStart: discardUnpublishedNativeStart,
+  admitDownHooks: admitNativeDownHookGeneration,
+  downHooks: createNativeForegroundDownHooks,
 };
 /** Fixed text of the native foreground configuration refusal. */
 export const NATIVE_CONFIGURATION_REFUSAL =
@@ -394,13 +437,24 @@ async function pinNativeProjectImages(opts: {
     spec.image = ensured.image_id;
   }
 }
+/** Services whose review carries Hack's exact one-shot marker as `one_shot: true`. */
+function reviewedOneShots(
+  reviewed: Readonly<Record<string, unknown>>
+): string[] {
+  return Object.entries(reviewed)
+    .filter(([, service]) => isRecord(service) && service.one_shot === true)
+    .map(([name]) => name);
+}
+
 /**
  * Build `--ready` goals for exactly the services the reviewed plan marks active.
  *
  * Compose services outside the selected profiles stay in the normalized specs (they are
  * still reviewed and pinned), but the runtime does not schedule them and refuses readiness
  * goals for inactive or unknown services. Dependency edges declared by inactive services
- * are ignored so they cannot raise an active service's readiness goal.
+ * are ignored so they cannot raise an active service's readiness goal. A service the
+ * review marks `one_shot` (Hack's exact `hack.service.one-shot: "true"` label) must
+ * finish successfully, so its goal is completion, as for dependency cache initializers.
  */
 export function nativeReadinessArgs(opts: {
   readonly specs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
@@ -439,7 +493,7 @@ export function nativeReadinessArgs(opts: {
       }
     }
   }
-  for (const name of opts.initializers) {
+  for (const name of [...reviewedOneShots(reviewed), ...opts.initializers]) {
     ready[name] = "completed";
   }
   for (const name of opts.routed) {
@@ -582,33 +636,137 @@ function foregroundExitCode(opts: {
   }
   return opts.code;
 }
-function environmentDelivery(
-  input: NativeProjectInput,
-  plan: string,
-  run: string
-): { flags: string[]; payload?: Buffer } {
-  if (Object.keys(input.managedEnvironment).length === 0) {
+/**
+ * Credential adapters run after lifecycle hooks so a login hook can refresh
+ * host credentials first. Returns the same input object when none is selected.
+ * AWS values are a startup snapshot, so expiry warnings are scheduled; the
+ * caller cancels them when the foreground exits.
+ */
+async function adaptNativeCredentials(opts: {
+  readonly input: NativeProjectInput;
+  readonly selection: {
+    readonly aws?: { readonly profile: string; readonly region?: string };
+    readonly gcloud?: NativeGcloudSelection;
+  };
+  readonly deps: Pick<Dependencies, "adaptAws" | "adaptGcloud" | "warn">;
+}): Promise<{
+  readonly input: NativeProjectInput;
+  readonly cancelExpiry?: () => void;
+}> {
+  let { input } = opts;
+  let cancelExpiry: (() => void) | undefined;
+  if (opts.selection.aws) {
+    const adapted = await opts.deps.adaptAws({
+      input,
+      ...opts.selection.aws,
+    });
+    input = adapted.input;
+    cancelExpiry = scheduleNativeAwsExpiryWarnings({
+      expiry: adapted.receipt.expiry,
+      services: adapted.receipt.services.length,
+      write: opts.deps.warn,
+    });
+  }
+  if (opts.selection.gcloud) {
+    try {
+      input = (
+        await opts.deps.adaptGcloud({
+          input,
+          mode: opts.selection.gcloud.mode,
+        })
+      ).input;
+    } catch (error) {
+      cancelExpiry?.();
+      throw error;
+    }
+  }
+  return { input, ...(cancelExpiry ? { cancelExpiry } : {}) };
+}
+
+/**
+ * Private envelope for `graph serve --environment-stdin`. Version 1 carries values
+ * only; version 2 adds service-scoped file members and is sent only when files
+ * exist, so a runtime without file support refuses instead of dropping them.
+ *
+ * Adapters normalize every authored service, including those outside the selected
+ * profiles, so public Compose stays identical across profile selections. File
+ * members are delivered only for services the reviewed plan marks active: the
+ * runtime refuses file ownership for inactive services, so an optional disabled
+ * service must not block the selected graph.
+ */
+export function nativeEnvironmentDelivery(opts: {
+  readonly input: NativeProjectInput;
+  readonly planId: string;
+  readonly reviewedPlan: unknown;
+  readonly run: string;
+}): { flags: string[]; payload?: Buffer } {
+  const { input, planId: plan, run } = opts;
+  const reviewed =
+    isRecord(opts.reviewedPlan) && isRecord(opts.reviewedPlan.services)
+      ? opts.reviewedPlan.services
+      : {};
+  const files = Object.entries(input.managedFiles ?? {}).filter(
+    ([service, members]) => {
+      const reviewedService = reviewed[service];
+      return (
+        members.length > 0 &&
+        isRecord(reviewedService) &&
+        reviewedService.active === true
+      );
+    }
+  );
+  if (
+    Object.keys(input.managedEnvironment).length === 0 &&
+    files.length === 0
+  ) {
     return { flags: [] };
   }
   return {
     flags: ["--environment-stdin"],
     payload: Buffer.from(
       JSON.stringify({
-        version: 1,
+        version: files.length > 0 ? 2 : 1,
         plan,
         run,
         lifetime_seconds: 300,
         services: input.managedEnvironment,
+        ...(files.length > 0
+          ? {
+              files: Object.fromEntries(
+                files.map(([service, members]) => [
+                  service,
+                  members.map((member) => ({
+                    name: member.name,
+                    target: member.target,
+                    mode: "0400",
+                    content_b64: member.content.toString("base64"),
+                  })),
+                ])
+              ),
+            }
+          : {}),
       })
     ),
   };
+}
+/**
+ * Append the redacted output of failed services to the final startup failure
+ * report. Applied after diagnostics that parse the original closed message; the
+ * error keeps its class so recovery handling is unchanged.
+ */
+function withStartupLogReport(error: unknown, report: string): unknown {
+  if (report !== "" && error instanceof Error) {
+    error.message = `${error.message}\n${report}`;
+  }
+  return error;
 }
 const SAFE_STARTUP_DIAGNOSTIC =
   /^(Native (?:graph startup (?:failed|was interrupted or failed)|HTTPS verification failed)) \(([A-Za-z0-9_]{1,80})\); (?:inspect owned state before retrying\.|peer values omitted\.)$/;
 /** Preserve only the fixed diagnostic envelope emitted by the native clients. */
 function cleanupUnconfirmed(
   startupFailure?: unknown,
-  nativeCode?: string
+  nativeCode?: string,
+  recordedRun?: string
 ): Error {
   const message = startupFailure instanceof Error ? startupFailure.message : "";
   const diagnostic = SAFE_STARTUP_DIAGNOSTIC.exec(message);
@@ -616,8 +774,12 @@ function cleanupUnconfirmed(
     startupFailure === undefined
       ? ""
       : ` Startup diagnostic: ${diagnostic ? `${diagnostic[1]} (${diagnostic[2]})` : "STARTUP_FAILURE (details omitted)"}.`;
+  const recorded =
+    recordedRun !== undefined && RUN.test(recordedRun)
+      ? ` The failed run ${recordedRun} is recorded as this project's run mapping; hack ps, hack down and hack doctor --native-cleanup inspect select it.`
+      : "";
   return new ClosedCliError(
-    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startup}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}`
+    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startup}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
   );
 }
 function requireConfirmedCleanup(
@@ -679,6 +841,106 @@ async function confirmForegroundCleanup(opts: {
   return { final, owned };
 }
 
+/**
+ * HACK-1917: a fresh startup that failed after the graph started resources, and
+ * whose cleanup this frontend cannot confirm, must not leave them without a
+ * project owner. Publish the authenticated receipt identity as the project's
+ * run mapping, with a frontend finalization lifetime exactly as readiness
+ * publishes one, so ps, down and `doctor --native-cleanup inspect` select the
+ * retained run instead of reporting the project as not started. Nothing is
+ * stopped or replayed here. A receipt that cannot be authenticated, an existing
+ * or retained mapping, or any refusal records nothing and keeps the original
+ * failure; the runtime journal still holds the graph for explicit recovery.
+ */
+async function recordFailedStartupOwner(opts: {
+  readonly final: unknown;
+  readonly run: string;
+  readonly namespace: string;
+  readonly planId: string;
+  readonly scope: NativeProjectRunScope;
+  readonly selection: Omit<Parameters<typeof selectedMapping>[0], "ready">;
+  readonly finalization:
+    | Awaited<ReturnType<typeof beginNativeProjectFinalization>>
+    | undefined;
+  readonly deps: Pick<Dependencies, "finalization" | "save">;
+}): Promise<
+  | {
+      readonly mapping: NativeProjectRun;
+      readonly finalization: Awaited<
+        ReturnType<typeof beginNativeProjectFinalization>
+      >;
+    }
+  | undefined
+> {
+  let owned: NativeProjectRun;
+  try {
+    owned = authoritative(opts.final, opts.run, opts.namespace, opts.planId);
+  } catch {
+    return undefined;
+  }
+  const mapping = selectedMapping({ ...opts.selection, ready: owned });
+  try {
+    const finalization =
+      opts.finalization ??
+      (await opts.deps.finalization({
+        scope: opts.scope,
+        run: mapping,
+        httpsPort: null,
+      }));
+    await opts.deps.save({ ...opts.scope, run: mapping });
+    return { mapping, finalization };
+  } catch {
+    return undefined;
+  }
+}
+
+type FailedStartupOwner = NonNullable<
+  Awaited<ReturnType<typeof recordFailedStartupOwner>>
+>;
+/** Confirm foreground cleanup; when it is unconfirmed, record an unowned fresh run. */
+async function confirmCleanupOrRecordOwner(opts: {
+  readonly confirm: Parameters<typeof confirmForegroundCleanup>[0];
+  /** A published or retained mapping already owns the run; nothing is recorded. */
+  readonly existing: NativeProjectRun | undefined;
+  readonly scope: NativeProjectRunScope;
+  readonly selection: Parameters<
+    typeof recordFailedStartupOwner
+  >[0]["selection"];
+  readonly finalization: Parameters<
+    typeof recordFailedStartupOwner
+  >[0]["finalization"];
+  readonly deps: Pick<Dependencies, "finalization" | "save">;
+  readonly onRecorded: (recorded: FailedStartupOwner) => void;
+}): Promise<Awaited<ReturnType<typeof confirmForegroundCleanup>>> {
+  try {
+    return await confirmForegroundCleanup(opts.confirm);
+  } catch (cleanupFailure) {
+    const recorded = opts.existing
+      ? undefined
+      : await recordFailedStartupOwner({
+          final: opts.confirm.final,
+          run: opts.confirm.run,
+          namespace: opts.confirm.namespace,
+          planId: opts.confirm.planId,
+          scope: opts.scope,
+          selection: opts.selection,
+          finalization: opts.finalization,
+          deps: opts.deps,
+        });
+    if (!recorded) {
+      throw cleanupFailure;
+    }
+    opts.onRecorded(recorded);
+    throw cleanupFailure instanceof NativePartialShutdownError
+      ? cleanupFailure
+      : cleanupUnconfirmed(
+          opts.confirm.startupFailure,
+          opts.confirm.nativeCode,
+          opts.confirm.run
+        );
+  }
+}
+
 async function refusePendingFreshStart(
   restore: NativeProjectRun | undefined,
   scope: NativeProjectRunScope,
@@ -695,6 +957,7 @@ function retainedStartupSelection(opts: {
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly gcloud?: NativeGcloudSelection;
 }) {
   const { run } = opts;
   if (
@@ -707,16 +970,20 @@ function retainedStartupSelection(opts: {
         JSON.stringify(run.profiles)) ||
     (opts.aws !== undefined &&
       (opts.aws.profile !== run.aws?.profile ||
-        opts.aws.region !== run.aws?.region))
+        opts.aws.region !== run.aws?.region)) ||
+    // Like the AWS selector, an omitted gcloud selection keeps the retained one
+    // (which delivers a fresh file); a different explicit selection refuses.
+    (opts.gcloud !== undefined && opts.gcloud.mode !== run.gcloud?.mode)
   ) {
     throw new ClosedCliError(
-      "Native up cannot change the retained run's environment, profiles or AWS profile; data was not replaced."
+      "Native up cannot change the retained run's environment, profiles, AWS profile or gcloud selection; data was not replaced."
     );
   }
   return {
     envName: run.effectiveEnvName,
     profiles: run.profiles,
     aws: run.aws ?? undefined,
+    gcloud: run.gcloud ?? undefined,
   };
 }
 async function selectNativeStartup(opts: {
@@ -727,6 +994,7 @@ async function selectNativeStartup(opts: {
   readonly profiles?: readonly string[];
   readonly requestedProfiles: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly gcloud?: NativeGcloudSelection;
   readonly load: typeof loadNativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
   readonly signal?: AbortSignal;
@@ -739,11 +1007,13 @@ async function selectNativeStartup(opts: {
           envName: opts.envName,
           profiles: opts.profiles,
           aws: opts.aws,
+          gcloud: opts.gcloud,
         })
       : {
           envName: opts.envName,
           profiles: opts.requestedProfiles,
           aws: opts.aws,
+          gcloud: opts.gcloud,
         };
   let retainedFlags: string[] = [];
   if (retained) {
@@ -789,6 +1059,7 @@ function selectedMapping(opts: {
   readonly effectiveEnvName: string | null;
   readonly profiles: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly gcloud?: NativeGcloudSelection;
   readonly runtimeMetadata: boolean;
 }): NativeProjectRun {
   return {
@@ -801,6 +1072,9 @@ function selectedMapping(opts: {
           ...(opts.aws.region ? { region: opts.aws.region } : {}),
         }
       : null,
+    // Written only when selected, so mappings without it stay readable by
+    // earlier candidates; a mapping that carries it refuses there.
+    ...(opts.gcloud ? { gcloud: { mode: opts.gcloud.mode } } : {}),
     ...(opts.runtimeMetadata ? { runtimeMetadata: true as const } : {}),
   };
 }
@@ -901,10 +1175,18 @@ export async function startNativeProject(opts: {
   readonly onReady?: () => Promise<void>;
   readonly dependencyFile?: string;
   readonly adaptationFile?: string;
+  /**
+   * Effective project-wide host aliases (`internal.extra_hosts` and
+   * checkout-local entries). Declared on every service like the Compose
+   * override; each active pair then requires a reviewed dependency binding.
+   */
+  readonly internalExtraHosts?: Readonly<Record<string, string>>;
   readonly allowedHosts?: readonly string[];
   readonly preparedBase?: NativePreparedBase;
   readonly https?: NativeHttpsSelection;
   readonly aws?: { readonly profile: string; readonly region?: string };
+  /** Explicit gcloud Application Default Credentials adapter selection. */
+  readonly gcloud?: NativeGcloudSelection;
   /** Public instance identity delivered as runtime host metadata; omitted delivers none. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
   readonly before: (input: NativeProjectInput) => Promise<Hooks>;
@@ -920,6 +1202,8 @@ export async function startNativeProject(opts: {
     readonly fingerprint: ComposeEnvFingerprintRecord;
   }) => Promise<void>;
   readonly signal?: AbortSignal;
+  /** A second stop request: cancels a running down hook and forces cleanup. */
+  readonly forceSignal?: AbortSignal;
   readonly dependencies?: Partial<Dependencies>;
 }): Promise<number> {
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
@@ -943,6 +1227,7 @@ export async function startNativeProject(opts: {
       profiles: opts.profiles,
       requestedProfiles,
       aws: opts.aws,
+      gcloud: opts.gcloud,
       load: deps.load,
       invoke: deps.invoke,
       signal: opts.signal,
@@ -966,6 +1251,9 @@ export async function startNativeProject(opts: {
     });
     requireActiveStartup(opts.signal);
   }
+  // A down hook of an earlier generation with unknown completion blocks this
+  // one before any hook runs; any other leftover record is superseded.
+  await deps.admitDownHooks(opts.scope);
   const profiles = selection.profiles;
   await preflightNativeProjectSource({
     runtime: opts.runtime,
@@ -999,6 +1287,11 @@ export async function startNativeProject(opts: {
   input = await prepareNativeProjectAdaptation({
     input,
     path: opts.adaptationFile,
+  });
+  input = applyNativeInternalHostAliases({
+    input,
+    hosts: opts.internalExtraHosts,
+    hasDependencySelection: opts.dependencyFile !== undefined,
   });
   input = (
     await prepareNativeReviewBranch({
@@ -1038,40 +1331,44 @@ export async function startNativeProject(opts: {
   const artifactHash = createHash("sha256")
     .update(new Uint8Array(await artifactFile.arrayBuffer()))
     .digest("hex");
-  const controller = new AbortController();
-  let interruptedExit = 130;
-  const cancel = () => controller.abort();
-  const terminate = () => {
-    interruptedExit = 143;
-    cancel();
-  };
-  process.on("SIGINT", cancel);
-  process.on("SIGTERM", terminate);
-  opts.signal?.addEventListener("abort", cancel, { once: true });
+  const stopSignals = nativeForegroundStopSignals(opts);
+  const controller = stopSignals.controller;
   let hooks: Hooks | undefined;
+  let foregroundStop: NativeForegroundStop | undefined;
+  let failed = false;
   let finalization:
     | Awaited<ReturnType<typeof beginNativeProjectFinalization>>
     | undefined;
   let graphCleanupConfirmed = false;
   let httpsCleanupConfirmed = false;
   let httpsAcquisitionFailure: unknown;
+  let cancelAwsExpiry: (() => void) | undefined;
   try {
-    if (opts.signal?.aborted) {
-      cancel();
-    }
+    stopSignals.admitPending();
     requireActiveStartup(controller.signal);
     hooks = await opts.before(input);
-    if (selection.aws) {
-      input = (await deps.adaptAws({ input, ...selection.aws })).input;
+    const credentials = await adaptNativeCredentials({
+      input,
+      selection,
+      deps,
+    });
+    cancelAwsExpiry = credentials.cancelExpiry;
+    if (credentials.input !== input) {
+      input = credentials.input;
       specs = prepareNativeProjectServices(
         input,
         opts.dependencyFile !== undefined
       );
     }
     const dependencyDiscoveryDeadline = performance.now() + 60_000;
+    const hostAliases = nativeServiceHostAliases({
+      services: specs,
+      profiles,
+    });
     const hostDependencies = await readNativeHostDependencies({
       path: opts.dependencyFile,
       services: Object.keys(specs),
+      hostAliases,
       discover: (selection) =>
         discoverNativeHostDependency({
           runtime: opts.runtime,
@@ -1086,6 +1383,10 @@ export async function startNativeProject(opts: {
         }),
     });
     requireActiveStartup(controller.signal);
+    requireNativeHostAliasBindings({
+      dependencies: hostDependencies,
+      hostAliases,
+    });
     prepareNativeDependencyServices({
       dependencies: hostDependencies,
       services: specs,
@@ -1222,7 +1523,19 @@ export async function startNativeProject(opts: {
         });
         const directory = await mkdtemp(join(tmpdir(), "hack-native-start-"));
         const run = runSelection.run;
+        const stop = hooks?.stop
+          ? createNativeForegroundStop({
+              scope: opts.scope,
+              run,
+              commands: hooks.stop,
+              force: stopSignals.force,
+              journal: deps.downHooks,
+            })
+          : undefined;
+        foregroundStop = stop;
         let mapping: NativeProjectRun | undefined;
+        // Set before any mapping write: a lost reply may still have published it.
+        let mappingAttempted = false;
         let https:
           | Awaited<ReturnType<typeof acquireNativeHttpsLease>>
           | undefined;
@@ -1267,10 +1580,20 @@ export async function startNativeProject(opts: {
               run,
               invoke: deps.invoke,
             });
-          const delivery = environmentDelivery(input, review.planId, run);
+          const delivery = nativeEnvironmentDelivery({
+            input: selectActiveNativeProjectInput({
+              input,
+              reviewedPlan: review.report.plan,
+            }),
+            planId: review.planId,
+            reviewedPlan: review.report.plan,
+            run,
+          });
           let code = 1;
           let serveFailure: unknown;
           let nativeExitCode: string | undefined;
+          // Redacted at receipt; the raw tail is never retained or persisted.
+          let startupLogReport = "";
           try {
             code = await deps.serve({
               runtime: opts.runtime,
@@ -1303,8 +1626,17 @@ export async function startNativeProject(opts: {
               privateInput: delivery.payload,
               startupTimeoutMs: 300_000,
               signal: controller.signal,
+              // Down hooks run on the first stop request of a ready graph.
+              ...stop?.serve,
               onExitDiagnostic: (diagnostic) => {
                 nativeExitCode = diagnostic.nativeCode;
+              },
+              onStartupLogs: (logs) => {
+                startupLogReport = formatNativeStartupLogReport({
+                  logs,
+                  managedEnvironment: input.managedEnvironment,
+                  managedFiles: input.managedFiles,
+                });
               },
               onReady: async () => {
                 const readyMapping = authoritative(
@@ -1323,6 +1655,7 @@ export async function startNativeProject(opts: {
                   effectiveEnvName: input.effectiveEnvName,
                   profiles,
                   aws: selection.aws,
+                  gcloud: selection.gcloud,
                   runtimeMetadata: metadata !== undefined,
                 });
                 // Enrollment must exist before taking a shared lease: release
@@ -1345,6 +1678,7 @@ export async function startNativeProject(opts: {
                       httpsIntent = identity;
                       // This is an ownership mapping, not a readiness signal.
                       // Recovery must be able to select the run after a lost reply.
+                      mappingAttempted = true;
                       await deps.save({
                         ...opts.scope,
                         run: persistedMapping,
@@ -1383,6 +1717,7 @@ export async function startNativeProject(opts: {
                   throw httpsFailure;
                 }
                 if (!mapping) {
+                  mappingAttempted = true;
                   await deps.save({
                     ...opts.scope,
                     run: persistedMapping,
@@ -1400,6 +1735,8 @@ export async function startNativeProject(opts: {
                 }
                 await hooks?.ready?.();
                 await opts.onReady?.();
+                // Last: only microtasks separate this from readiness.
+                await stop?.owe(() => controller.signal.aborted);
               },
             });
           } catch (error) {
@@ -1407,42 +1744,73 @@ export async function startNativeProject(opts: {
           } finally {
             delivery.payload?.fill(0);
           }
-          let final: unknown;
           try {
-            final = await invokeInspect();
-          } catch (inspectionFailure) {
-            throw cleanupUnconfirmed(
-              serveFailure ?? inspectionFailure,
-              nativeExitCode
-            );
+            let final: unknown;
+            try {
+              final = await invokeInspect();
+            } catch (inspectionFailure) {
+              throw cleanupUnconfirmed(
+                serveFailure ?? inspectionFailure,
+                nativeExitCode
+              );
+            }
+            const confirmed = await confirmCleanupOrRecordOwner({
+              confirm: {
+                final,
+                runtime: opts.runtime,
+                projectRoot: opts.scope.projectRoot,
+                run,
+                namespace: review.namespace,
+                planId: restore?.planId ?? review.planId,
+                invoke: deps.invoke,
+                startupFailure: serveFailure,
+                nativeCode: nativeExitCode,
+              },
+              existing: mapping ?? expectedMapping,
+              scope: opts.scope,
+              selection: {
+                effectiveEnvName: input.effectiveEnvName,
+                profiles,
+                aws: selection.aws,
+                gcloud: selection.gcloud,
+                runtimeMetadata: metadata !== undefined,
+              },
+              finalization,
+              deps,
+              onRecorded: (recorded) => {
+                mapping = recorded.mapping;
+                finalization = recorded.finalization;
+              },
+            });
+            final = confirmed.final;
+            graphCleanupConfirmed = true;
+            await retireRemovedMapping({
+              final,
+              mapping,
+              owned: confirmed.owned,
+              scope: opts.scope,
+              remove: deps.remove,
+            });
+            await deps.discardFailedStart({
+              runtime: opts.runtime,
+              projectRoot: opts.scope.projectRoot,
+              run,
+              owner: confirmed.owned.owner,
+              final,
+              restored: restore !== undefined,
+              mappingAttempted,
+              invoke: deps.invoke,
+            });
+            return foregroundExitCode({
+              aborted: controller.signal.aborted,
+              interruptedExit: stopSignals.interruptedExit(),
+              failure: serveFailure,
+              infrastructureFailure: httpsFailure,
+              code,
+            });
+          } catch (error) {
+            throw withStartupLogReport(error, startupLogReport);
           }
-          const confirmed = await confirmForegroundCleanup({
-            final,
-            runtime: opts.runtime,
-            projectRoot: opts.scope.projectRoot,
-            run,
-            namespace: review.namespace,
-            planId: restore?.planId ?? review.planId,
-            invoke: deps.invoke,
-            startupFailure: serveFailure,
-            nativeCode: nativeExitCode,
-          });
-          final = confirmed.final;
-          graphCleanupConfirmed = true;
-          await retireRemovedMapping({
-            final,
-            mapping,
-            owned: confirmed.owned,
-            scope: opts.scope,
-            remove: deps.remove,
-          });
-          return foregroundExitCode({
-            aborted: controller.signal.aborted,
-            interruptedExit,
-            failure: serveFailure,
-            infrastructureFailure: httpsFailure,
-            code,
-          });
         } finally {
           httpsClosing = true;
           try {
@@ -1462,20 +1830,37 @@ export async function startNativeProject(opts: {
       },
     });
   } catch (error) {
+    failed = true;
     throw httpsCleanupFailure(httpsAcquisitionFailure, error);
   } finally {
-    process.off("SIGINT", cancel);
-    process.off("SIGTERM", terminate);
-    opts.signal?.removeEventListener("abort", cancel);
-    await hooks?.cleanup().catch((error: unknown) => {
-      throw httpsCleanupFailure(httpsAcquisitionFailure, error);
-    });
-    await acknowledgeFinalization(
-      finalization,
-      graphCleanupConfirmed,
-      httpsCleanupConfirmed
-    ).catch((error: unknown) => {
-      throw httpsCleanupFailure(httpsAcquisitionFailure, error);
-    });
+    cancelAwsExpiry?.();
+    // The stop listeners stay installed until down.after and the finalization
+    // acknowledgement settle: a further interrupt then cancels the running
+    // hook through the force signal instead of terminating this frontend
+    // with the hook's journal record or the acknowledgement unsettled.
+    try {
+      await hooks?.cleanup().catch((error: unknown) => {
+        throw httpsCleanupFailure(httpsAcquisitionFailure, error);
+      });
+      // down.after follows confirmed cleanup and lifecycle-process retirement,
+      // and precedes the finalization acknowledgement `down` waits for.
+      const stopFailure = await foregroundStop?.finish(graphCleanupConfirmed);
+      await acknowledgeFinalization(
+        finalization,
+        graphCleanupConfirmed,
+        httpsCleanupConfirmed
+      ).catch((error: unknown) => {
+        throw httpsCleanupFailure(httpsAcquisitionFailure, error);
+      });
+      reportForegroundStopFailure(stopFailure, failed);
+    } finally {
+      stopSignals.dispose();
+    }
+  }
+}
+/** A failed stop hook replaces the interrupted status, never a startup error. */
+function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
+  if (failure !== undefined && !failed) {
+    throw failure;
   }
 }

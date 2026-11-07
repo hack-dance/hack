@@ -57,6 +57,32 @@ test("supported routing and cache label keys remain bounded without rewriting va
     )
   ).toThrow();
 });
+test("only the exact one-shot marker joins the supported label keys", () => {
+  expect(
+    hasOnlyNativeSupportedLabels({ "hack.service.one-shot": "true" })
+  ).toBe(true);
+  expect(hasOnlyNativeSupportedLabels(["hack.service.one-shot=true"])).toBe(
+    true
+  );
+  for (const nearMiss of [
+    { "hack.service.one-shot": "false" },
+    { "hack.service.one-shot": "TRUE" },
+    { "hack.service.one-shot": true },
+    { "hack.service.one-shot": "" },
+    { "hack.service.one-shot.extra": "true" },
+    { "hack.service.oneshot": "true" },
+    { "hack.service.other": "true" },
+    { "hack.x": "true" },
+    { "io.hack-local.owner": "true", "hack.service.one-shot": "true" },
+    ["hack.service.one-shot"],
+    ["hack.service.one-shot="],
+    ["hack.service.one-shot=false"],
+    ["hack.service.one-shot=true=extra"],
+    ["hack.service.one-shot.extra=true"],
+  ]) {
+    expect(hasOnlyNativeSupportedLabels(nearMiss)).toBe(false);
+  }
+});
 test("active reviewed routes request pool allocation with matching existing probes", () => {
   const opts = {
     plan: {

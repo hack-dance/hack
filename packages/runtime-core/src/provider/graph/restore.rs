@@ -41,8 +41,13 @@ pub(crate) fn restore_with_environment_until(
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     deadline: std::time::Instant,
 ) -> Result<Receipt, CandidateError> {
-    let (inputs, environments) =
-        compile_environment_inputs_until(candidate, &options, managed, deadline)?;
+    let (inputs, environments) = compile_environment_inputs_until(
+        candidate,
+        &options,
+        managed,
+        &ManagedFiles::new(),
+        deadline,
+    )?;
     restore_inputs(candidate, options, inputs, environments, true, None, None)
 }
 /// Retains the existing control-only foreground driver for owner checks at every
@@ -52,11 +57,12 @@ pub(super) fn restore_with_foreground(
     candidate: &Candidate,
     options: RunOptions<'_>,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
+    files: &ManagedFiles,
     deadline: std::time::Instant,
     runtime: &mut HostRelayRuntime,
 ) -> Result<Receipt, CandidateError> {
     let (inputs, environments) =
-        compile_environment_inputs_until(candidate, &options, managed, deadline)?;
+        compile_environment_inputs_until(candidate, &options, managed, files, deadline)?;
     restore_inputs(
         candidate,
         options,
@@ -78,12 +84,13 @@ pub(super) struct FreshOwnerRestore<'a> {
 pub(super) fn restore_normalized_foreground(
     candidate: &Candidate,
     options: NormalizedRunOptions<'_>,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    managed: ManagedInput<'_>,
     deadline: std::time::Instant,
     runtime: &mut HostRelayRuntime,
     generation: &str,
     verify_publication: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<Receipt, CandidateError> {
+    let (managed, files) = (managed.values, managed.files);
     startup::Driver::check_cancelled(runtime)?;
     check_environment_deadline(deadline)?;
     let compiled = compile_normalized_inputs(candidate, &options, managed)?;
@@ -92,14 +99,7 @@ pub(super) fn restore_normalized_foreground(
         original_compose_sha256: options.compose.expected_compose_sha256.into(),
         normalized_compose_sha256: compiled.executable.review.plan.compose_sha256.clone(),
     };
-    let environments = compiled
-        .managed_environment
-        .iter()
-        .map(|(name, values)| {
-            super::super::environment::PendingEnvironment::until(name, values, deadline)
-                .map(|pending| (name.clone(), pending))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let environments = pending_environments(&compiled, files, deadline)?;
     check_environment_deadline(deadline)?;
     restore_inputs(
         candidate,
@@ -172,6 +172,16 @@ pub(super) fn observed_volumes_with(
     let mut volumes = BTreeMap::new();
     for (key, resource) in &receipt.resources {
         if resource.kind != Kind::Volume {
+            continue;
+        }
+        if !plan_reconcile::retained_volume(resource) {
+            // Never created: it holds no data, and an existing name is not adopted.
+            if observe(resource)?.is_some() {
+                return Err(error(
+                    "graph_resource_exists",
+                    "A never-created volume name already resolves; it will not be adopted.",
+                ));
+            }
             continue;
         }
         let projection = observe(resource)?
@@ -256,7 +266,26 @@ fn restore_inputs(
             "Source-device continuity requires a new foreground restore owner.",
         ));
     }
-    let hostname_change = if let Some(fresh) = &fresh {
+    // A changed reviewed plan that strict replay cannot restore is reconciled:
+    // compute is recreated from the review and retained data reattached by identity.
+    let reconcile = if let Some(fresh) = &fresh {
+        #[cfg(target_os = "macos")]
+        let rebinding = source_rebind.is_some();
+        #[cfg(not(target_os = "macos"))]
+        let rebinding = false;
+        plan_reconcile::applies(
+            &receipt,
+            &inputs.review.plan_id,
+            &inputs.review.plan,
+            &fresh.identity,
+            rebinding,
+        )
+        .then(|| plan_reconcile::prepare(&inputs.review.plan, &receipt, &fresh.identity))
+        .transpose()?
+    } else {
+        None
+    };
+    let hostname_change = if let Some(fresh) = fresh.as_ref().filter(|_| reconcile.is_none()) {
         #[cfg(target_os = "macos")]
         let source_receipt = source_rebind
             .as_ref()
@@ -289,7 +318,9 @@ fn restore_inputs(
             restore_generation_with_source_rebind(&engine, &receipt, source_rebind.as_ref())?;
         #[cfg(not(target_os = "macos"))]
         let generation = restore_generation(&engine, &receipt)?;
-        if let Some(change) = &hostname_change {
+        if let Some(proof) = &reconcile {
+            proof.verify_fresh(&receipt, &fresh.identity, fresh.generation, &generation)?;
+        } else if let Some(change) = &hostname_change {
             verify_fresh_change(
                 &receipt,
                 &inputs.review.plan_id,
@@ -320,7 +351,7 @@ fn restore_inputs(
     if root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
         || receipt.phase != "stopped-data-retained"
-        || receipt.readiness != *options.readiness
+        || (reconcile.is_none() && receipt.readiness != *options.readiness)
     {
         return Err(error(
             "graph_restore_refused",
@@ -334,7 +365,24 @@ fn restore_inputs(
         .map_or(&receipt, |selected| selected.source_receipt());
     #[cfg(not(target_os = "macos"))]
     let source_receipt = &receipt;
-    let ordinary_source = if hostname_change.is_none() {
+    let ordinary_source = if reconcile.is_some() {
+        // Exactly what a fresh admission of this review would select. Caches are
+        // not eligible here, so no retained cache publication may be named.
+        if options.source_revision.is_some() || options.live_source {
+            return Err(error(
+                "graph_plan_reconcile",
+                "Reconciliation selects no retained cache publication or live source.",
+            ));
+        }
+        source::prepare_mode(
+            candidate,
+            &engine,
+            &inputs.review.plan,
+            None,
+            false,
+            options.shared_source,
+        )?
+    } else if hostname_change.is_none() {
         source::prepare_replay(
             &engine,
             &inputs,
@@ -384,40 +432,71 @@ fn restore_inputs(
             routing_enrolled: options.routing_enrolled,
         },
     )?;
-    if let Some(change) = &hostname_change {
-        config::retain_hostname_change_ownership(&mut prepared, &receipt, change)?;
+    let projection = if let Some(proof) = &reconcile {
+        Some(proof.project(&mut prepared, &receipt)?)
     } else {
-        config::retain_replay_ownership(&mut prepared, &receipt)?;
-    }
-    if prepared.namespace != receipt.namespace
-        || !hostname_change.as_ref().map_or_else(
-            || same_resource_bindings(&prepared.resources, &receipt.resources),
-            |change| change.matches_resources(&prepared.resources, &receipt),
-        )
-    {
-        return Err(error(
-            "graph_receipt",
-            "Restore resources differ from the reviewed graph.",
-        ));
+        if let Some(change) = &hostname_change {
+            config::retain_hostname_change_ownership(&mut prepared, &receipt, change)?;
+        } else {
+            config::retain_replay_ownership(&mut prepared, &receipt)?;
+        }
+        if prepared.namespace != receipt.namespace
+            || !hostname_change.as_ref().map_or_else(
+                || same_resource_bindings(&prepared.resources, &receipt.resources),
+                |change| change.matches_resources(&prepared.resources, &receipt),
+            )
+        {
+            return Err(error(
+                "graph_receipt",
+                "Restore resources differ from the reviewed graph.",
+            ));
+        }
+        None
+    };
+    if let Some(projection) = &projection {
+        // Routes of the reconciled graph are preflighted like a hostname change;
+        // foreground launch rechecks every claim atomically.
+        let hostnames: BTreeSet<String> = projection
+            .resources
+            .values()
+            .filter_map(|resource| resource.routing.as_ref())
+            .flat_map(|route| route.hostnames.iter().cloned())
+            .collect();
+        if !hostnames.is_empty() {
+            super::super::publication::check_hostname_change(
+                candidate,
+                &receipt.owner,
+                &receipt.run,
+                &hostnames,
+            )?;
+        }
     }
     check_network_intent(&engine, &prepared.resources)?;
     admission::check(candidate, &engine, Some(options.run_id), &prepared.configs)?;
     if !environments.is_empty() {
         super::super::environment::preflight_capacity(engine.guest(), environments.len())?;
     }
+    let (wrapped, file_owners) = private_services(&environments);
     let expected_environment = verify_images(
         &engine,
         &prepared.resources,
         &mut prepared.configs,
-        &environments.keys().cloned().collect(),
+        &wrapped,
+        &file_owners,
     )?;
     for resource in receipt.resources.values() {
         let present = inspect_resource(&engine, &receipt, resource)?.is_some();
         if resource.kind == Kind::Volume {
-            if !present {
+            if plan_reconcile::retained_volume(resource) && !present {
                 return Err(error(
                     "graph_data_missing",
                     "Retained volume is missing; restore will not recreate it.",
+                ));
+            }
+            if !plan_reconcile::retained_volume(resource) && present {
+                return Err(error(
+                    "graph_resource_exists",
+                    "A never-created volume name already resolves; it will not be adopted.",
                 ));
             }
         } else {
@@ -434,9 +513,7 @@ fn restore_inputs(
             }
         }
     }
-    for name in environments.keys() {
-        launcher::validate(&prepared.configs[name])?;
-    }
+    validate_private_delivery(&prepared.configs, &environments)?;
     if let Some(fresh) = &fresh {
         check_environment_deadline(fresh.deadline)?;
         #[cfg(target_os = "macos")]
@@ -507,12 +584,25 @@ fn restore_inputs(
     if let Some(change) = &hostname_change {
         change.apply(&mut receipt)?;
     }
+    let reconciled = projection.is_some();
+    if let (Some(proof), Some(projection)) = (&reconcile, projection) {
+        proof.apply(
+            &mut receipt,
+            projection,
+            options.readiness,
+            ordinary_source
+                .as_ref()
+                .map(|inputs| inputs.binding.clone()),
+        )?;
+    }
     receipt.startup_failure = None;
     receipt.probes = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     receipt.phase = "restoring".into();
-    for (key, resource) in &mut receipt.resources {
-        if resource.kind != Kind::Volume {
-            *resource = prepared.resources[key].clone();
+    if !reconciled {
+        for (key, resource) in &mut receipt.resources {
+            if resource.kind != Kind::Volume {
+                *resource = prepared.resources[key].clone();
+            }
         }
     }
     let mut session = Session {

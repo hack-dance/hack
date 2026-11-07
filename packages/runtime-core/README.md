@@ -245,7 +245,13 @@ retire frontend start/ready/source artifacts or enable ordinary `up` takeover.
 
 Guarded native cleanup checks its retained authority before and after every
 engine observation, removal request and admitted stop batch, including failed
-calls. The existing stop batch retains its concurrent HTTP-stop semantics. Cleanup
+calls. The stop batch sends at most four HTTP stops at a time from one shared
+queue and joins every worker, so 14 or more services do not open one engine
+connection each at once. A connect that fails or times out sent no request, so the
+batch retries it with capped backoff inside the batch deadline and a 30-second
+window from that stop's first connect failure. Once one stop exhausts the window,
+the batch treats the engine as unreachable and later connect failures return at
+once. Any other stop failure is never retried. Cleanup
 checks authority before each journal publication. It also
 checks each private-environment absence and retirement call. A lost guard refuses
 before the next request or journal transition; an already attempted effect remains
@@ -971,6 +977,27 @@ construction; fresh admission revalidates project inputs. The existing guest tmp
 and startup launcher deliver values under the selected UID/GID. Cleanup retains
 value-free allocation identities and verifies the selected tmpfs has been retired.
 
+Envelope `version: 2` additionally requires a nonempty `files` map from service name
+to one to four members, each `{"name", "target", "mode": "0400", "content_b64"}`. A
+version 1 envelope with `files`, a version 2 envelope without them, and unknown or
+duplicate member fields refuse, so an older runtime refuses file delivery instead of
+dropping it. Names use the service-name alphabet. Targets are absolute, normalized
+container paths outside `/proc`, `/sys`, `/dev`, `/run` and `/var/run`; within one
+service they are unique and never nest. Each member holds 1 to 16 KiB of decoded bytes,
+and the encoded values plus every member of a service share the 32 KiB payload budget.
+A service may receive files without values. Members are decoded into zeroized memory,
+staged in the same per-container tmpfs allocation as `values.json` (directory `files`,
+root-owned 0700; each member owned by the container's numeric UID with mode 0400), and
+bound read-only at their targets. A compiled mount or tmpfs target that equals,
+contains or sits under a member target refuses before effects. Members carry no
+separate deadline: they live as long as the allocation, which is the container's, and
+are retired with it by the existing allocation cleanup. A service with values keeps the
+launcher contract (numeric user, absolute entrypoint, `CMD` health with an absolute
+executable). A files-only service keeps its own process and needs only a numeric image
+or Compose user. Live-owner restore and normalized serve-restore deliver fresh members
+into new allocations. `graph exec` and one-off runs refuse envelopes with files; files
+already in a running container are never re-delivered or renewed.
+
 Expiry prevents new staging or execution; it does not revoke an already-running
 process's environment. Ordinary environment-bound restart/restore still require
 fresh-delivery support. This interface does not provide AWS credential acquisition,
@@ -1224,6 +1251,25 @@ other ownership or image-populated volume content need a separate explicit contr
 Root-only volume mounts without subpaths keep their existing behavior. Native
 workspace installation and engine subpath confinement require separate qualification.
 
+An image that declares `VOLUME` targets is admitted on a Compose-file graph only when
+each declared target is covered by exactly one explicit mount, and that mount is a
+whole (no subpath), writable named volume owned by the same graph receipt. A missing,
+duplicate, read-only, bind, subpath, tmpfs or dependency-cache cover refuses with
+`graph_image_volume_uncovered` before any container is created; a foreign OS,
+architecture or image identity still refuses with `graph_image`. Start, restart,
+restore and one-off share the same predicate, and it reads only reviewed
+configuration, so plan and receipt identities do not change. The engine therefore
+never allocates an anonymous volume for a graph. Because these covers have no subpath,
+Docker copy-up gives a freshly created, empty owned volume the image directory's
+contents, owner and mode; a retained, non-empty volume is mounted unchanged. Copy-up
+runs before a read-only mount applies, so a read-only cover would still receive image
+content, which is why it refuses. No
+capability is added: an image entrypoint that starts as root and changes ownership
+(`chown` followed by a user switch) still fails under the dropped capability set, so
+declare an explicit numeric `user:` matching the image's data user instead. A graph
+may own at most 16 volumes, dependency caches included, beside 32 networks and 32
+services.
+
 Fresh `graph run` or `graph serve` may explicitly select
 `--release-initializer-cache <service>` (repeatable). The service must be a reviewed
 dependency-cache bootstrap initializer with completed readiness. This optional
@@ -1394,11 +1440,23 @@ changed or uncertain mapping refuses before new graph effects. Earlier candidate
 builds removed the mapping on down; their retained volumes are not guessed or
 silently adopted by a fresh up and require explicit owned-state recovery.
 
+When the reviewed plan changed and the strict replay layout no longer applies,
+`serve-restore` reconciles instead (`provider/graph/plan_reconcile.rs`): after the
+same generation, absence and label checks, compute is prepared exactly as a fresh
+admission would, retained volumes are projected by logical key onto their recorded
+names, newly declared volumes receive unused `reserved` names in this run and are
+created exclusively, and retained volumes the plan no longer declares stay in the
+receipt. Run, owner, namespace and the ownership plan on every label are unchanged.
+`graph source-compatibility` reports `"reconcile": true` for this path. Receipts
+with dependency caches, live source or a pending source-device rebind keep the
+hostname/shared-source proofs. A volume still `reserved` in a stopped receipt was
+never created; selection requires it absent and restore creates it.
+
 Selection binds the receipt, current VM boot and verified current volume
 observations. Restoration rechecks these before effects, requires the old owner
 publication and lock to be retired, and verifies the historical cleanup
-acknowledgment in its original boot context. A changed plan, missing volume,
-active owner, or stale selection is refused. The prior stopped receipt is archived
+acknowledgment in its original boot context. A changed plan outside the
+reconciliation path above, missing volume, active owner, or stale selection is refused. The prior stopped receipt is archived
 before fresh dependency ownership is admitted. This does not enable file-based
 `graph restart`/`restore` or normalized live-owner redelivery, and does not replay
 initializer cache-release effects. Native same-run restoration and cross-boot

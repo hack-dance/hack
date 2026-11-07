@@ -71,6 +71,7 @@ fn owner_child() {
         },
         &mut runtime,
         &BTreeMap::new(),
+        &graph::ManagedFiles::new(),
         Instant::now() + Duration::from_secs(90),
     )
     .unwrap();

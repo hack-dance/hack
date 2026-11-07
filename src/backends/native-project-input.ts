@@ -12,12 +12,26 @@ import {
 const LIMIT = 256 * 1024;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/**
+ * One private file member delivered into a service's environment allocation and
+ * bound read-only at `target`. `content` is private; never log or persist it.
+ */
+export type NativeManagedFile = {
+  readonly name: string;
+  readonly target: string;
+  readonly content: Buffer;
+};
+
 export type NativeProjectInput = {
   readonly originalSha256: string;
   readonly normalizedComposeJson: string;
   /** Private in-memory transport only. Never log or write this map to Compose. */
   readonly managedEnvironment: Readonly<
     Record<string, Readonly<Record<string, string>>>
+  >;
+  /** Private file members by service (credential adapters only); never logged. */
+  readonly managedFiles?: Readonly<
+    Record<string, readonly NativeManagedFile[]>
   >;
   /** Private lifecycle environment; not container environment. */
   readonly lifecycleHostEnvironment: Readonly<Record<string, string>>;
@@ -129,6 +143,48 @@ function normalizeManagedEnvironment(
     managedEnvironment[name] = managed;
   }
   return managedEnvironment;
+}
+
+/**
+ * Services the reviewed native plan marks active for the selected profiles. A
+ * malformed plan, or a service absent from it, selects nothing.
+ */
+export function nativeReviewedActiveServices(
+  reviewedPlan: unknown
+): ReadonlySet<string> {
+  const services =
+    isRecord(reviewedPlan) && isRecord(reviewedPlan.services)
+      ? reviewedPlan.services
+      : {};
+  return new Set(
+    Object.entries(services)
+      .filter(([, service]) => isRecord(service) && service.active === true)
+      .map(([name]) => name)
+  );
+}
+
+/**
+ * Restrict private delivery to the reviewed, profile-active service set.
+ *
+ * Normalization declares managed keys on every authored service, including
+ * services outside the selected profiles, so public Compose and the reviewed
+ * plan stay identical across profile selections. The runtime refuses managed
+ * values for a service it will not schedule, so an optional disabled service
+ * must not receive them and block the selected graph.
+ */
+export function selectActiveNativeProjectInput(opts: {
+  readonly input: NativeProjectInput;
+  readonly reviewedPlan: unknown;
+}): NativeProjectInput {
+  const active = nativeReviewedActiveServices(opts.reviewedPlan);
+  return {
+    ...opts.input,
+    managedEnvironment: Object.fromEntries(
+      Object.entries(opts.input.managedEnvironment).filter(([service]) =>
+        active.has(service)
+      )
+    ),
+  };
 }
 
 /**

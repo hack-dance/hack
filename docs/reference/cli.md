@@ -713,7 +713,7 @@ Explicitly adopt a stopped, verified existing Compose instance
 hack config adopt [options]
 ```
 
-Qualifies a strict static legacy subset with exact existing data volumes. --dry-run reports fields without writes. Adoption journals the stopped format switch and holds original files for rollback; retained-container commands never create replacement data. Requires an upgraded launcher. Verified linked Git checkouts retain explicit existing identities. Local inheritance, generated overrides and container recreation remain unsupported.
+Qualifies a strict static legacy subset with exact existing data volumes. --dry-run reports fields without writes. Adoption journals the stopped format switch and holds original files for rollback; retained-container commands never create replacement data. Requires an upgraded launcher and the Compose backend, also for --dry-run; on another backend, rerun with HACK_RUNTIME_BACKEND=compose. Verified linked Git checkouts retain explicit existing identities. Local inheritance, generated overrides and container recreation remain unsupported.
 
 ### Options
 
@@ -1423,6 +1423,7 @@ hack doctor [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
 | `--migrate-env-config` | Migrate legacy hack.env.json/.env state to the new env config files |
+| `--accept-tracked-env-changes` | With --migrate-env-config and no prompt, allow deleting or editing git-tracked files (hack.env.json, the Compose file) |
 | `--domain-migration preview|apply|rollback` | Preview, apply, or roll back only this project's hack.local migration |
 | `--json` | Output JSON (machine-readable) |
 | `--browser-url https://app.hack` | HTTPS origin manually tested in the browser (no path or credentials) |

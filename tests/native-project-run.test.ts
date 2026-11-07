@@ -222,6 +222,41 @@ test("AWS startup selection roundtrips without admitting credentials or ambient 
   }
 });
 
+test("gcloud file-mode selector roundtrips only as an exact public mode", async () => {
+  const opts = await fixture();
+  const selected = {
+    ...run,
+    effectiveEnvName: "qa",
+    aws: null,
+    profiles: [],
+    gcloud: { mode: "file" as const },
+  };
+  await save({ ...opts, run: selected });
+  expect(await load(opts)).toEqual(selected);
+  await remove({ ...opts, expected: selected });
+  for (const gcloud of [
+    null,
+    { mode: "token" },
+    { mode: "file", account: "synthetic-rejected" },
+    { refresh_token: "synthetic-rejected" },
+  ]) {
+    const opts = await fixture();
+    await expect(
+      save({
+        ...opts,
+        run: {
+          ...run,
+          effectiveEnvName: null,
+          aws: null,
+          profiles: [],
+          gcloud,
+        } as any,
+      })
+    ).rejects.toThrow();
+    expect(await load(opts)).toBeNull();
+  }
+});
+
 test("profile selectors roundtrip canonically while legacy absence stays unknown", async () => {
   const opts = await fixture();
   const selected = {

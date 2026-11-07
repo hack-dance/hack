@@ -31,7 +31,7 @@ const spec = defineCommand({
   summary: "Explicitly adopt a stopped, verified existing Compose instance",
   group: "Project",
   description:
-    "Qualifies a strict static legacy subset with exact existing data volumes. --dry-run reports fields without writes. Adoption journals the stopped format switch and holds original files for rollback; retained-container commands never create replacement data. Requires an upgraded launcher. Verified linked Git checkouts retain explicit existing identities. Local inheritance, generated overrides and container recreation remain unsupported.",
+    "Qualifies a strict static legacy subset with exact existing data volumes. --dry-run reports fields without writes. Adoption journals the stopped format switch and holds original files for rollback; retained-container commands never create replacement data. Requires an upgraded launcher and the Compose backend, also for --dry-run; on another backend, rerun with HACK_RUNTIME_BACKEND=compose. Verified linked Git checkouts retain explicit existing identities. Local inheritance, generated overrides and container recreation remain unsupported.",
   options: [
     defineOption({
       name: "stop",
@@ -371,8 +371,30 @@ async function apply(opts: {
   }
 }
 
+/** Preserve operation modes without echoing user-supplied values in refusal text. */
+function adoptRerunCommand(opts: {
+  readonly dryRun?: boolean;
+  readonly rollback?: boolean;
+  readonly recover?: boolean;
+  readonly stop?: boolean;
+}): string {
+  return [
+    "hack config adopt",
+    ...(opts.dryRun ? ["--dry-run"] : []),
+    ...(opts.rollback ? ["--rollback"] : []),
+    ...(opts.recover ? ["--recover"] : []),
+    ...(opts.stop ? ["--stop"] : []),
+  ].join(" ");
+}
+
 export const configAdoptCommand = withHandler(spec, async ({ ctx, args }) => {
-  requireNativeComposeBackend({ backend: process.env.HACK_RUNTIME_BACKEND });
+  // The preview reads the Compose backend's existing containers and volumes,
+  // and adoption hands them to native configuration on that backend, so both
+  // refuse another runtime selection and name the explicit rerun.
+  requireNativeComposeBackend({
+    backend: process.env.HACK_RUNTIME_BACKEND,
+    command: adoptRerunCommand(args.options),
+  });
   if (args.options.stop && args.options.rollback) {
     throw new CliUsageError("Use --stop separately from --rollback.");
   }

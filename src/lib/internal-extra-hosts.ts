@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
-import { readTextFile } from "./fs.ts";
+import { HackCliError } from "./cli-result.ts";
+import { readOptionalTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import {
   resolvePrimaryLocalProjectDir,
@@ -10,15 +11,31 @@ export function resolveExtraHostsPath(projectDir: string): string {
   return resolve(projectDir, ".internal", "extra-hosts.json");
 }
 
-/** Null is a checkout-local tombstone hiding a primary alias. */
+/** Fixed text when a checkout-local alias map exists but cannot be read. */
+export const UNREADABLE_EXTRA_HOSTS_MAP =
+  "Cannot read the internal extra-hosts map; aliases were not dropped.";
+
+/**
+ * Null is a checkout-local tombstone hiding a primary alias.
+ *
+ * An absent map is empty. A map that exists but cannot be read (a directory,
+ * a dangling link, no read permission) refuses with `E_CONFIG_INVALID`, so a
+ * configured alias is never silently omitted or overwritten.
+ */
 export async function readLocalExtraHosts(
   path: string
 ): Promise<Record<string, string | null>> {
-  const text = await readTextFile(path);
-  if (!text) {
+  const file = await readOptionalTextFile(path);
+  if (file.kind === "unreadable") {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: UNREADABLE_EXTRA_HOSTS_MAP,
+    });
+  }
+  if (file.kind === "absent" || !file.text) {
     return {};
   }
-  const parsed: unknown = JSON.parse(text);
+  const parsed: unknown = JSON.parse(file.text);
   if (!isRecord(parsed)) {
     throw new Error("Invalid internal extra-hosts map");
   }

@@ -281,6 +281,57 @@ Implementation regressions and the registered `native-config-routing` Docker
 scenario supply separate evidence. The model does not prove those checks,
 browser access, performance or whole NC03 completion.
 
+## Native foreground down hooks
+
+`native-foreground-down-hooks/DownHooks.tla` checks the value-free down-hook journal
+that a native Compose-import foreground `up` shares with `hack down`. One generation
+whose project declares down hooks starts with the frontend running `up.after`. The
+frontend owes the hooks, publishes readiness, and on the first interrupt claims its
+owed record, runs `down.before`, stops the graph, retires lifecycle processes and runs
+`down.after`. A second interrupt cancels a running `down.before` (known, unsuccessful
+completion). The graph can also end by itself. One `hack down` client may run, and be
+retried once, from another terminal: on a live graph it claims an owed record, or no
+record (an older frontend, or one still in `up.after`); on a stopped graph it waits for
+the frontend's finalization and runs only what is still owed. A known `down.before`
+failure of `down` restores the claimed record so an explicit retry may run it, as on
+Compose. Either process may crash at any step; a crash keeps the durable record, so a
+started phase becomes unknown. A later `up` (`NewUp`) supersedes any record except a
+started one. The journal is one record replaced by compare-and-swap; the model treats
+each replacement as atomic.
+
+The positive configuration explores **1,246 distinct states**. `Safe` requires that
+`down.before` never starts while another start is running or unknown, or after a known
+success; that `down.after` starts once, only after the graph stopped and a known
+successful `down.before`; that a started-unknown phase blocks a new generation; and
+that an interrupt during `up.after` never runs, or leaves owed, the frontend's down
+hooks. No fairness or eventual cleanup is asserted.
+
+The main negative control removes the journal guard (claims ignore the record) and
+must fail `Safe` when `DStart` or `FInterrupt` starts a second concurrent
+`down.before`. `unknown-generation` removes the started-phase refusal and must fail at
+`NewUp` with `unsafeGen = TRUE`. `owed-after-interrupt` removes the owe withdrawal and
+must fail at `FInterruptAtPublish` with the frontend's owed record left behind.
+`complete-reachable` and `recovery-reachable` assert `NeverComplete` and
+`NeverRecovered` and must fail at a safe `FAfterDone`/`DAfterDone`, and at `DAfterDone`
+after a frontend crash: the positive model does not pass by disabling the stop or the
+crash-recovery path.
+
+| Model action | Implementation boundary under `src/backends/` |
+| --- | --- |
+| `FOwe` / `FPublish` / `FInterruptAtPublish` | `native-project-start.ts` calls the journal's `owe` as the last step of readiness publication; `native-project-down-hooks.ts` withdraws it when an interrupt was observed. |
+| `FUpAfterInterrupted` | `native-project-process.ts` takes the forced stop path for a stop request before readiness; no `beforeStop`. |
+| `FInterrupt` / `FBeforeFinish` / `FCancelBefore` | `beforeStop` from `native-project-foreground-stop.ts`; the second interrupt aborts the force signal that cancels the hook (`runLifecycleCommands` in `src/commands/project.ts`). |
+| `FCleanup` / `FAfter` / `FAfterDone` | Confirmed foreground cleanup, `hooks.cleanup` and then the journal's `after`, before the finalization acknowledgement. |
+| `DStart` / `DBeforeFinish` / `DCleanup` / `DAfter` / `DAfterDone` | `openNativeDownHookSession` in `native-project-down-hooks.ts`, used by `native-project-down.ts`; the stopped path reads the journal only after `waitNativeProjectFinalization`. |
+| `NewUp` | `admitNativeDownHookGeneration`, called before `up.before`. |
+| `FCrash` / `DCrash` / `OrphanStops` | Process death leaves the record; a detached graph owner may finish stopping or be stopped by recovery. |
+
+The model does not cover real fsync or power-loss durability, a journal lock left by a
+crash inside the lock (it refuses closed and needs inspection), multiple generations,
+more than two `down` invocations, environment resolution, or the graph owner's process
+group on a real host. Ordinary tests map its counterexamples: concurrent claim,
+second-interrupt cancellation, failure, crash recovery and unknown refusal.
+
 ## Projects registry writer ownership
 
 `registry-writer/RegistryWriter.tla` models two one-shot writers, two independent
@@ -597,6 +648,21 @@ drain/revocation; this model checks the later commit-before-new-grant boundary.
 
 ## Stopped retained-pool startup
 
+`native-startup-owner/Owner.tla` checks project ownership after a foreground
+Compose startup fails (HACK-1917). The positive control explores 32 states.
+Readiness publishes the run mapping. A failure before readiness lets the graph
+owner's retaining cleanup either complete or be refused; the frontend then makes
+one read-only inspection that authenticates the exact receipt or is refused.
+`NoUnownedResources` requires resources that outlive the frontend under an
+authenticated receipt to have a published mapping; the `negative` control (no
+recording on failure) violates it with an unowned started graph. `NoUnprovenOwner`
+allows only readiness or an authenticated receipt to publish. The
+`refused-inspection` control violates `NoUnrecordedRefusal` to keep the remaining
+gap explicit: when inspection itself is refused, nothing can be authenticated and
+only the runtime journal retains the graph. The model does not cover crashes
+between finalization registration and mapping publication, concurrent starts, or
+the later dead-owner recovery, which other models and runtime tests own.
+
 `stopped-pool-startup/Resume.tla` checks one explicit startup from shape-valid
 stopped owner/retained receipt evidence. The positive control explores 71 states.
 Offline preflight records owner and receipt generations without granting graph
@@ -638,6 +704,40 @@ volume integrity and live application behavior remain separate tests. `Cancel`
 represents an observed abort check, not arbitrary OS signal delivery; cancellation
 does not reverse an already-admitted boot. There is no fairness or eventual-start
 claim, and a model pass is not native startup qualification.
+
+## Retained-data handoff across plan changes
+
+`native-plan-reconcile/Reconcile.tla` checks how a stopped native graph hands its
+named data to the next admission after a Compose edit. Two interchangeable
+instances (checked up to permutation), two logical volume keys and three volume
+identities explore 747,656 distinct states. Every admission recreates compute from
+the current plan, so command, image and environment edits are abstracted; the model
+varies only the declared volume set. A declared key that the run already records is
+reattached; a newly declared key gets an exclusively created volume; recorded data
+the plan no longer declares stays recorded and unmounted until explicit removal.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `Edit` | Compose edit between ups; a new review and normalized identity |
+| `Select` | `provider/graph/foreground.rs::restore_selection` generation over the receipt and observed volume identities |
+| `Replace` / `Substitute` | Volume replaced between selection and admission, or a foreign-labeled volume under a recorded name |
+| `Admit` | `provider/graph/restore.rs::restore_inputs`: `plan_reconcile::Verified::verify_fresh` generation recheck and label/presence checks under the provider lease |
+| `CreateDeclared` | `plan_reconcile::Verified::project` fresh `reserved` names, then `Session::create_resources` exclusive create |
+| `Start` / `Stop` / `RemoveData` | Container creation with projected mounts; ordinary stop keeps volumes; `down --remove-data` deletes recorded volumes |
+
+The `negative` control adopts any live volume with a declared key and must fail
+`NoForeignAttach` in a `Start` state with `foreignAttach = TRUE`. The `replacement`
+control skips the generation recheck and must fail `AttachSelected` with
+`unrecordedAttach = TRUE`. The `drop-orphans` control forgets undeclared retained
+data and must fail `RetainedDataRecorded` with `lostData = TRUE`.
+
+Assumptions: admission through startup holds the provider mutation lease, so no
+replacement happens inside it. A replacement with copied ownership labels before
+selection is indistinguishable from the recorded volume by name and labels, as in
+the implementation; the generation fence protects only the selection-to-admission
+window. Dependency caches, live source and source-device rebinding keep their own
+proofs and are outside this model. It does not prove engine mount behavior, crash
+durability of the receipt, image resolution or application data contents.
 
 ## Graph admission
 

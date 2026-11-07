@@ -1257,7 +1257,11 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
                     println!("  build: {} using {}", build.context, build.dockerfile);
                 }
                 for (dependency, detail) in &service.dependencies {
-                    println!("  depends on {dependency}: {}", detail.condition);
+                    println!(
+                        "  depends on {dependency}: {}{}",
+                        detail.condition,
+                        if detail.required { "" } else { " (optional)" }
+                    );
                 }
                 for mount in &service.mounts {
                     println!(

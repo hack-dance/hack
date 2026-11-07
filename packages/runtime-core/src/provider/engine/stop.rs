@@ -1,7 +1,14 @@
 //! Cleanup-only stop effects. Workers share transport, never the VM mutation lease.
 use super::*;
 use crate::error::StopFailureStage;
-use std::{collections::BTreeSet, time::Instant};
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Instant,
+};
 
 // Native recovery fixtures may route one immutable stop target to an owned
 // test socket. This never exists in a production build or changes the guest
@@ -154,17 +161,52 @@ fn stop_budget(stops: &[(String, u64)]) -> Duration {
     Duration::from_secs(seconds.clamp(40, 540))
 }
 
+/// Stop requests in flight per batch. Each stop holds one engine connection for
+/// up to its grace period. Dispatching all 14 stops of a qualification graph at
+/// once failed at the connect stage while the provider host process held most of
+/// its descriptor limit in lingering engine connections (HACK-1302).
+/// [`stop_budget`] already covers fully serialized grace periods, so bounded
+/// dispatch still fits the budget when every stop takes its full grace.
+const STOP_CONCURRENCY: usize = 4;
+/// A connect that failed or timed out sent no request bytes, so another attempt
+/// is not a replay. Retries stay inside the batch deadline and inside this window
+/// from a stop's first connect failure, which covers observed descriptor drain.
+const CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(30);
+const CONNECT_BACKOFF_START: Duration = Duration::from_millis(25);
+const CONNECT_BACKOFF_MAX: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy)]
+struct Policy {
+    concurrency: usize,
+    connect_window: Duration,
+    backoff_start: Duration,
+    backoff_max: Duration,
+    /// Waits between connect attempts. Tests substitute a scheduler that
+    /// oversleeps, as a loaded host does.
+    pause: fn(Duration),
+}
+
+const POLICY: Policy = Policy {
+    concurrency: STOP_CONCURRENCY,
+    connect_window: CONNECT_RETRY_WINDOW,
+    backoff_start: CONNECT_BACKOFF_START,
+    backoff_max: CONNECT_BACKOFF_MAX,
+    pause: std::thread::sleep,
+};
+
+type Attempt = Result<(), (CandidateError, StopFailureStage)>;
+
 fn batch(
     client: &Client,
     stops: &[(String, u64)],
     deadline: Instant,
 ) -> Result<(), StopBatchFailure> {
     validate(stops).map_err(StopBatchFailure::plain)?;
-    std::thread::scope(|scope| {
-        let mut workers = Vec::with_capacity(stops.len());
-        let mut first_error = None;
-        let mut failures = Vec::new();
-        for (id, grace) in stops {
+    // Test transport selection is thread-local to the caller, so resolve every
+    // target before any worker starts.
+    let targets = stops
+        .iter()
+        .map(|(id, grace)| {
             let client = client.clone();
             #[cfg(all(
                 test,
@@ -173,66 +215,164 @@ fn batch(
                 feature = "environment-launcher"
             ))]
             let client = test_socket::for_id(id).unwrap_or(client);
-            let path = format!("http://hack-local/v1.53/containers/{id}/stop?t={grace}");
-            match std::thread::Builder::new().name("hack-container-stop".into()).spawn_scoped(scope, move || {
-                let remaining = deadline.checked_duration_since(Instant::now())
-                    .filter(|d| !d.is_zero())
-                    .ok_or_else(|| (failure("Container stop batch deadline expired; effects may be uncertain."), StopFailureStage::Deadline))?;
-                let response = client.post(path).timeout(remaining).send()
-                    .map_err(|error| {
-                        let stage = if error.is_connect() && error.is_timeout() {
-                            StopFailureStage::ConnectTimeout
-                        } else if error.is_connect() {
-                            StopFailureStage::Connect
-                        } else if error.is_timeout() {
-                            StopFailureStage::Timeout
-                        } else {
-                            StopFailureStage::Transport
-                        };
-                        (failure("Container stop failed or timed out; no stop was replayed and no forced deletion was authorized."), stage)
-                    })?;
-                // A natural exit can race the preceding running observation. Only
-                // subsequent ownership-checked inspection establishes terminal state.
-                if response.status().as_u16() == 304 {
-                    return Ok(());
-                }
-                response_bytes(response).map(|_| ()).map_err(|error| (error, StopFailureStage::Response))
-            }) {
-                Ok(worker) => workers.push((id.clone(), worker)),
-                Err(_) => {
-                    first_error = Some(failure("Cannot start every container stop worker; partial effects require inspection."));
-                    failures.push(StopFailure { id: id.clone(), stage: StopFailureStage::Worker });
-                    break;
-                }
-            }
-        }
-        for (id, worker) in workers {
-            let result = join_worker(worker);
-            if let Err((error, stage)) = result {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-                failures.push(StopFailure { id, stage });
-            }
-        }
-        if let Some(error) = first_error {
-            failures.sort_by_key(|failure| stops.iter().position(|(id, _)| id == &failure.id));
-            Err(StopBatchFailure { error, failures })
-        } else {
-            Ok(())
-        }
+            (
+                client,
+                format!("http://hack-local/v1.53/containers/{id}/stop?t={grace}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    dispatch(stops, deadline, POLICY, |index, remaining| {
+        let (client, path) = &targets[index];
+        send(client, path, remaining)
     })
 }
 
-fn join_worker(
-    worker: std::thread::ScopedJoinHandle<'_, Result<(), (CandidateError, StopFailureStage)>>,
-) -> Result<(), (CandidateError, StopFailureStage)> {
-    worker.join().unwrap_or_else(|_| {
-        Err((
-            failure("Container stop worker failed; effects require inspection."),
-            StopFailureStage::Worker,
-        ))
-    })
+/// One HTTP stop. A non-connect failure is never retried: the request may have
+/// reached the engine, and only later ownership-checked inspection decides.
+fn send(client: &Client, path: &str, remaining: Duration) -> Attempt {
+    let response = client.post(path).timeout(remaining).send().map_err(|error| {
+        let stage = if error.is_connect() && error.is_timeout() {
+            StopFailureStage::ConnectTimeout
+        } else if error.is_connect() {
+            StopFailureStage::Connect
+        } else if error.is_timeout() {
+            StopFailureStage::Timeout
+        } else {
+            StopFailureStage::Transport
+        };
+        (
+            failure(
+                "Container stop failed or timed out; no stop was replayed and no forced deletion was authorized.",
+            ),
+            stage,
+        )
+    })?;
+    // A natural exit can race the preceding running observation. Only
+    // subsequent ownership-checked inspection establishes terminal state.
+    if response.status().as_u16() == 304 {
+        return Ok(());
+    }
+    response_bytes(response)
+        .map(|_| ())
+        .map_err(|error| (error, StopFailureStage::Response))
+}
+
+/// Runs every stop through at most `policy.concurrency` workers that share one
+/// queue, then joins them all, even after failures. Every stop gets exactly one
+/// recorded outcome: a stop whose worker panicked, or that no worker could take,
+/// is reported with the `worker` stage, because its effect is unknown.
+fn dispatch<S>(
+    stops: &[(String, u64)],
+    deadline: Instant,
+    policy: Policy,
+    send: S,
+) -> Result<(), StopBatchFailure>
+where
+    S: Fn(usize, Duration) -> Attempt + Sync,
+{
+    let next = AtomicUsize::new(0);
+    let unreachable = AtomicBool::new(false);
+    let outcomes = stops.iter().map(|_| Mutex::new(None)).collect::<Vec<_>>();
+    std::thread::scope(|scope| {
+        let workers = (0..policy.concurrency.clamp(1, stops.len().max(1)))
+            .map_while(|_| {
+                std::thread::Builder::new()
+                    .name("hack-container-stop".into())
+                    .spawn_scoped(scope, || {
+                        loop {
+                            let index = next.fetch_add(1, Ordering::SeqCst);
+                            let Some(slot) = outcomes.get(index) else {
+                                break;
+                            };
+                            let outcome = attempt(index, deadline, policy, &unreachable, &send);
+                            *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
+                        }
+                    })
+                    .ok()
+            })
+            .collect::<Vec<_>>();
+        // A panicked worker leaves its current stop unrecorded; its siblings
+        // keep draining the queue.
+        for worker in workers {
+            let _ = worker.join();
+        }
+    });
+    let mut first_error = None;
+    let mut failures = Vec::new();
+    for ((id, _), slot) in stops.iter().zip(outcomes) {
+        let outcome = slot.into_inner().unwrap_or_else(PoisonError::into_inner);
+        let (error, stage) = match outcome {
+            Some(Ok(())) => continue,
+            Some(Err(failed)) => failed,
+            None => (
+                failure(
+                    "Container stop worker failed or did not start; effects require inspection.",
+                ),
+                StopFailureStage::Worker,
+            ),
+        };
+        first_error.get_or_insert(error);
+        failures.push(StopFailure {
+            id: id.clone(),
+            stage,
+        });
+    }
+    match first_error {
+        Some(error) => Err(StopBatchFailure { error, failures }),
+        None => Ok(()),
+    }
+}
+
+/// Sends one stop, retrying only connect-stage failures with capped backoff.
+/// Once any stop exhausts its connect window, the engine is treated as
+/// unreachable for this batch and later connect failures return at once.
+/// When the deadline passes during a backoff, the stop keeps its last connect
+/// stage: no attempt sent request bytes, so its effect is known, not uncertain.
+fn attempt<S>(
+    index: usize,
+    deadline: Instant,
+    policy: Policy,
+    unreachable: &AtomicBool,
+    send: &S,
+) -> Attempt
+where
+    S: Fn(usize, Duration) -> Attempt,
+{
+    let mut window = None;
+    let mut backoff = policy.backoff_start;
+    let mut last_connect = None;
+    loop {
+        let Some(remaining) = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+        else {
+            return Err(last_connect.unwrap_or_else(|| {
+                (
+                    failure("Container stop batch deadline expired; effects may be uncertain."),
+                    StopFailureStage::Deadline,
+                )
+            }));
+        };
+        match send(index, remaining) {
+            Err((error, stage))
+                if matches!(
+                    stage,
+                    StopFailureStage::Connect | StopFailureStage::ConnectTimeout
+                ) =>
+            {
+                let now = Instant::now();
+                let until = (*window.get_or_insert(now + policy.connect_window)).min(deadline);
+                if unreachable.load(Ordering::SeqCst) || now + backoff >= until {
+                    unreachable.store(true, Ordering::SeqCst);
+                    return Err((error, stage));
+                }
+                last_connect = Some((error, stage));
+                (policy.pause)(backoff);
+                backoff = backoff.saturating_mul(2).min(policy.backoff_max);
+            }
+            outcome => return outcome,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -268,95 +408,145 @@ mod tests {
         assert_eq!(stop_budget(&largest), Duration::from_secs(540));
     }
 
+    fn ids(count: usize) -> Vec<(String, u64)> {
+        (0..count).map(|n| (format!("{n:064x}"), 1)).collect()
+    }
+
+    fn socket_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "hs-{label}-{}-{}.sock",
+            std::process::id(),
+            crate::node::now()
+        ))
+    }
+
+    /// Reads one request head and returns the stop target index from its path.
+    fn read_stop(socket: &mut std::os::unix::net::UnixStream) -> usize {
+        socket.set_nonblocking(false).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+            assert!(request.len() <= 8192);
+        }
+        let line = std::str::from_utf8(&request)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_owned();
+        let target = line
+            .strip_prefix("POST /v1.53/containers/")
+            .and_then(|rest| rest.strip_suffix("/stop?t=1 HTTP/1.1"))
+            .unwrap_or_else(|| panic!("unexpected stop request {line}"));
+        usize::from_str_radix(target, 16).unwrap()
+    }
+
+    fn reply(socket: &mut std::os::unix::net::UnixStream, status: &str, body: &str) {
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+
+    fn quick(window: Duration) -> Policy {
+        Policy {
+            concurrency: STOP_CONCURRENCY,
+            connect_window: window,
+            backoff_start: Duration::from_millis(1),
+            backoff_max: Duration::from_millis(4),
+            pause: std::thread::sleep,
+        }
+    }
+
+    fn connect_failure(stage: StopFailureStage) -> Attempt {
+        Err((failure("value-free connect failure"), stage))
+    }
+
     #[test]
-    fn all_32_stops_arrive_before_replies_and_failure_joins_every_worker_without_retry() {
+    fn socket_batch_bounds_in_flight_stops_and_joins_every_worker_without_response_retry() {
         for fail in [false, true] {
-            let path = std::env::temp_dir().join(format!(
-                "hs-{}-{}-{fail}.sock",
-                std::process::id(),
-                crate::node::now()
-            ));
+            let path = socket_path(&format!("bound-{fail}"));
             let listener = UnixListener::bind(&path).unwrap();
             listener.set_nonblocking(true).unwrap();
             let server = std::thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(10);
-                let mut sockets = Vec::new();
-                let mut targets = BTreeSet::new();
-                while sockets.len() < 32 {
+                let deadline = Instant::now() + Duration::from_secs(20);
+                let mut seen = BTreeSet::new();
+                let mut held = Vec::new();
+                let mut peak = 0;
+                let mut last_accept = Instant::now();
+                while seen.len() < 32 || !held.is_empty() {
+                    assert!(Instant::now() < deadline, "stop batch stalled");
                     match listener.accept() {
                         Ok((mut socket, _)) => {
-                            socket.set_nonblocking(false).unwrap();
-                            socket
-                                .set_read_timeout(Some(Duration::from_secs(2)))
-                                .unwrap();
-                            let mut request = Vec::new();
-                            while !request.ends_with(b"\r\n\r\n") {
-                                let mut byte = [0];
-                                socket.read_exact(&mut byte).unwrap();
-                                request.push(byte[0]);
-                                assert!(request.len() <= 8192);
+                            let index = read_stop(&mut socket);
+                            assert!(seen.insert(index), "stop {index} was replayed");
+                            held.push((index, socket));
+                            peak = peak.max(held.len());
+                            last_accept = Instant::now();
+                            if held.len() < STOP_CONCURRENCY {
+                                continue;
                             }
-                            let line = std::str::from_utf8(&request)
-                                .unwrap()
-                                .lines()
-                                .next()
-                                .unwrap()
-                                .to_owned();
-                            assert!(
-                                line.starts_with("POST /v1.53/containers/")
-                                    && line.ends_with("/stop?t=1 HTTP/1.1")
-                            );
-                            assert!(targets.insert(line));
-                            sockets.push(socket);
+                            // A bounded client cannot open another stop before
+                            // one of the held stops is answered.
+                            std::thread::sleep(Duration::from_millis(100));
+                            if let Ok((mut extra, _)) = listener.accept() {
+                                let index = read_stop(&mut extra);
+                                held.push((index, extra));
+                                peak = peak.max(held.len());
+                            }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(Instant::now() < deadline, "Stop dispatch became sequential");
-                            std::thread::sleep(Duration::from_millis(2));
+                            if held.is_empty() || last_accept.elapsed() < Duration::from_millis(300)
+                            {
+                                std::thread::sleep(Duration::from_millis(2));
+                                continue;
+                            }
                         }
                         Err(e) => panic!("{e}"),
                     }
+                    for (index, mut socket) in held.drain(..) {
+                        if fail && (index == 0 || index == 31) {
+                            reply(&mut socket, "500 Failed", "private-stop-canary");
+                        } else if index == 1 {
+                            reply(&mut socket, "304 Not Modified", "");
+                        } else {
+                            reply(&mut socket, "204 No Content", "");
+                        }
+                    }
                 }
-                for (index, socket) in sockets.iter_mut().enumerate() {
-                    let status = if fail && (index == 0 || index == 31) {
-                        "500 Failed"
-                    } else if index == 1 {
-                        "304 Not Modified"
-                    } else {
-                        "204 No Content"
-                    };
-                    let body = if status == "500 Failed" {
-                        "private-stop-canary"
-                    } else {
-                        ""
-                    };
-                    socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
-                }
-                32
+                (seen.len(), peak)
             });
             let transport = Transport::new(&path, Duration::from_secs(10)).unwrap();
-            let stops = (0..32)
-                .map(|n| (format!("{n:064x}"), 1))
-                .collect::<Vec<_>>();
+            let stops = ids(32);
             let result = batch(
                 &transport.client,
                 &stops,
-                Instant::now() + Duration::from_secs(10),
+                Instant::now() + Duration::from_secs(20),
             );
             assert_eq!(result.is_err(), fail);
             if fail {
                 let failure = result.err().unwrap();
-                assert_eq!(failure.failures.len(), 2);
-                assert!(
-                    failure
-                        .failures
-                        .iter()
-                        .all(|item| item.stage == StopFailureStage::Response)
-                );
-                assert!(
-                    failure
-                        .failures
-                        .iter()
-                        .all(|item| stops.iter().any(|(id, _)| id == &item.id))
+                let failed = failure
+                    .failures
+                    .iter()
+                    .map(|item| (item.id.clone(), item.stage))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    failed,
+                    vec![
+                        (stops[0].0.clone(), StopFailureStage::Response),
+                        (stops[31].0.clone(), StopFailureStage::Response),
+                    ]
                 );
                 assert_eq!(failure.error.code, "engine_rejected");
                 assert!(
@@ -365,23 +555,52 @@ mod tests {
                         .contains("private-stop-canary")
                 );
             }
-            assert_eq!(server.join().unwrap(), 32);
+            assert_eq!(server.join().unwrap(), (32, STOP_CONCURRENCY));
             std::fs::remove_file(path).unwrap();
         }
     }
 
     #[test]
-    fn unavailable_socket_reports_connect_without_replaying() {
-        let path = std::env::temp_dir().join(format!("hs-missing-{}.sock", std::process::id()));
+    fn refused_connects_retry_until_the_engine_listens_and_each_stop_arrives_once() {
+        let path = socket_path("late");
+        let bound = path.clone();
+        let server = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let listener = UnixListener::bind(&bound).unwrap();
+            let mut seen = BTreeSet::new();
+            while seen.len() < 14 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let index = read_stop(&mut socket);
+                assert!(seen.insert(index), "stop {index} was replayed");
+                reply(&mut socket, "204 No Content", "");
+            }
+            seen.len()
+        });
+        let transport = Transport::new(&path, Duration::from_secs(10)).unwrap();
+        batch(
+            &transport.client,
+            &ids(14),
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        assert_eq!(server.join().unwrap(), 14);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn unavailable_socket_reports_connect_after_retrying_only_within_the_deadline() {
+        let path = socket_path("missing");
         let transport = Transport::new(&path, Duration::from_secs(1)).unwrap();
         let id = "a".repeat(64);
+        let started = Instant::now();
         let failure = batch(
             &transport.client,
             &[(id.clone(), 0)],
-            Instant::now() + Duration::from_secs(1),
+            Instant::now() + Duration::from_millis(400),
         )
         .err()
         .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3));
         assert_eq!(failure.error.code, "engine_protocol");
         assert_eq!(failure.failures.len(), 1);
         assert_eq!(failure.failures[0].id, id);
@@ -389,8 +608,150 @@ mod tests {
     }
 
     #[test]
-    fn expired_batch_and_failed_worker_keep_fixed_stages() {
-        let path = std::env::temp_dir().join(format!("hs-deadline-{}.sock", std::process::id()));
+    fn connect_failures_for_some_of_fourteen_stops_retry_within_the_bound_without_replay() {
+        let stops = ids(14);
+        let attempts = (0..14).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>();
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        dispatch(
+            &stops,
+            Instant::now() + Duration::from_secs(10),
+            quick(Duration::from_secs(5)),
+            |index, _| {
+                let attempt = attempts[index].fetch_add(1, Ordering::SeqCst);
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(5));
+                active.fetch_sub(1, Ordering::SeqCst);
+                match index {
+                    2 | 5 | 9 if attempt < 3 => connect_failure(StopFailureStage::Connect),
+                    11 if attempt == 0 => connect_failure(StopFailureStage::ConnectTimeout),
+                    _ => Ok(()),
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        let attempts = attempts
+            .iter()
+            .map(|count| count.load(Ordering::SeqCst))
+            .collect::<Vec<_>>();
+        assert_eq!(attempts, vec![1, 1, 4, 1, 1, 4, 1, 1, 1, 4, 1, 2, 1, 1]);
+        assert!(peak.load(Ordering::SeqCst) <= STOP_CONCURRENCY);
+        assert!(peak.load(Ordering::SeqCst) > 1, "stops became sequential");
+    }
+
+    #[test]
+    fn persistent_connect_failures_record_only_unreachable_stops_as_resumable_progress() {
+        let stops = ids(14);
+        let attempts = (0..14).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>();
+        let failure = dispatch(
+            &stops,
+            Instant::now() + Duration::from_secs(10),
+            quick(Duration::from_millis(50)),
+            |index, _| {
+                attempts[index].fetch_add(1, Ordering::SeqCst);
+                if index == 3 || index == 8 {
+                    connect_failure(StopFailureStage::Connect)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(failure.error.code, "engine_protocol");
+        let failed = failure
+            .failures
+            .iter()
+            .map(|item| (item.id.clone(), item.stage))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            failed,
+            vec![
+                (stops[3].0.clone(), StopFailureStage::Connect),
+                (stops[8].0.clone(), StopFailureStage::Connect),
+            ]
+        );
+        for (index, count) in attempts.iter().enumerate() {
+            let count = count.load(Ordering::SeqCst);
+            if index == 3 || index == 8 {
+                assert!(count >= 1);
+            } else {
+                assert_eq!(count, 1, "stop {index} was replayed");
+            }
+        }
+    }
+
+    #[test]
+    fn deadline_passing_during_connect_backoff_keeps_the_connect_stage() {
+        fn oversleep(backoff: Duration) {
+            std::thread::sleep(backoff + Duration::from_millis(80));
+        }
+        let stops = ids(1);
+        let attempts = AtomicUsize::new(0);
+        let failure = dispatch(
+            &stops,
+            Instant::now() + Duration::from_millis(40),
+            Policy {
+                pause: oversleep,
+                ..quick(Duration::from_secs(5))
+            },
+            |_, _| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                connect_failure(StopFailureStage::ConnectTimeout)
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(failure.error.code, "engine_protocol");
+        assert_eq!(failure.failures.len(), 1);
+        assert_eq!(failure.failures[0].stage, StopFailureStage::ConnectTimeout);
+    }
+
+    #[test]
+    fn non_connect_failures_are_never_retried_and_keep_their_stage() {
+        let stops = ids(6);
+        let attempts = (0..6).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>();
+        let failure = dispatch(
+            &stops,
+            Instant::now() + Duration::from_secs(10),
+            quick(Duration::from_secs(5)),
+            |index, _| {
+                attempts[index].fetch_add(1, Ordering::SeqCst);
+                match index {
+                    1 => connect_failure(StopFailureStage::Timeout),
+                    2 => connect_failure(StopFailureStage::Transport),
+                    4 => connect_failure(StopFailureStage::Response),
+                    _ => Ok(()),
+                }
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(
+            attempts
+                .iter()
+                .all(|count| count.load(Ordering::SeqCst) == 1)
+        );
+        let stages = failure
+            .failures
+            .iter()
+            .map(|item| item.stage)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stages,
+            vec![
+                StopFailureStage::Timeout,
+                StopFailureStage::Transport,
+                StopFailureStage::Response,
+            ]
+        );
+    }
+
+    #[test]
+    fn expired_batch_and_panicked_worker_keep_fixed_stages() {
+        let path = socket_path("deadline");
         let transport = Transport::new(&path, Duration::from_secs(1)).unwrap();
         let failure = batch(
             &transport.client,
@@ -400,28 +761,32 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(failure.failures[0].stage, StopFailureStage::Deadline);
-        std::thread::scope(|scope| {
-            let worker = scope.spawn(|| -> Result<(), (CandidateError, StopFailureStage)> {
-                panic!("private worker panic");
-            });
-            let (error, stage) = join_worker(worker).unwrap_err();
-            assert_eq!(error.code, "engine_protocol");
-            assert_eq!(stage, StopFailureStage::Worker);
-            assert!(
-                !serde_json::to_string(&error)
-                    .unwrap()
-                    .contains("private worker panic")
-            );
-        });
+        let stops = ids(8);
+        let failure = dispatch(
+            &stops,
+            Instant::now() + Duration::from_secs(10),
+            quick(Duration::from_secs(5)),
+            |index, _| {
+                assert!(index != 4, "private worker panic");
+                Ok(())
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(failure.error.code, "engine_protocol");
+        assert_eq!(failure.failures.len(), 1);
+        assert_eq!(failure.failures[0].id, stops[4].0);
+        assert_eq!(failure.failures[0].stage, StopFailureStage::Worker);
+        assert!(
+            !serde_json::to_string(&failure.error)
+                .unwrap()
+                .contains("private worker panic")
+        );
     }
 
     #[test]
     fn accepted_stop_without_reply_reports_timeout_without_replay() {
-        let path = std::env::temp_dir().join(format!(
-            "hs-timeout-{}-{}.sock",
-            std::process::id(),
-            crate::node::now()
-        ));
+        let path = socket_path("timeout");
         let listener = UnixListener::bind(&path).unwrap();
         let server = std::thread::spawn(move || {
             let (_socket, _) = listener.accept().unwrap();

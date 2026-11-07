@@ -41,6 +41,28 @@ const laterIncompleteMissingLockStages = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "native-plan-reconcile",
+    module: "Reconcile",
+    states: 747_656,
+    invariant: "NoForeignAttach",
+    action: "Start",
+    fields: ["foreignAttach = TRUE", "unrecordedAttach = FALSE"],
+    additionalControls: [
+      {
+        name: "replacement",
+        negative: true,
+        invariant: "AttachSelected",
+        fields: ["unrecordedAttach = TRUE", "foreignAttach = FALSE"],
+      },
+      {
+        name: "drop-orphans",
+        negative: true,
+        invariant: "RetainedDataRecorded",
+        fields: ["lostData = TRUE", "foreignAttach = FALSE"],
+      },
+    ],
+  },
+  {
     name: "pre-ready-retirement",
     module: "Retirement",
     states: 10_965,
@@ -689,6 +711,83 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-foreground-down-hooks",
+    module: "DownHooks",
+    states: 1246,
+    invariant: "Safe",
+    action: "DStart",
+    fields: [
+      "unsafeBefore = TRUE",
+      "beforeOpen = 2",
+      'jState = "beforeStarted"',
+      'jGen = "D"',
+    ],
+    alternativeWitnesses: [
+      {
+        action: "FInterrupt",
+        fields: [
+          "unsafeBefore = TRUE",
+          "beforeOpen = 2",
+          'jState = "beforeStarted"',
+          'jGen = "F"',
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "unknown-generation",
+        negative: true,
+        action: "NewUp",
+        fields: ["unsafeGen = TRUE", "newGen = TRUE", 'jState = "absent"'],
+      },
+      {
+        name: "owed-after-interrupt",
+        negative: true,
+        action: "FInterruptAtPublish",
+        fields: [
+          "unsafeOwe = TRUE",
+          "upInterrupted = TRUE",
+          'jState = "owed"',
+          'jGen = "F"',
+        ],
+      },
+      {
+        name: "complete-reachable",
+        negative: true,
+        invariant: "NeverComplete",
+        action: "FAfterDone",
+        fields: [
+          'jState = "complete"',
+          "afterDone = TRUE",
+          "unsafeAfter = FALSE",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "DAfterDone",
+            fields: [
+              'jState = "complete"',
+              "afterDone = TRUE",
+              "unsafeAfter = FALSE",
+            ],
+          },
+        ],
+      },
+      {
+        name: "recovery-reachable",
+        negative: true,
+        invariant: "NeverRecovered",
+        action: "DAfterDone",
+        fields: [
+          'fpc = "dead"',
+          'jState = "complete"',
+          'jGen = "D"',
+          "unsafeBefore = FALSE",
+          "unsafeAfter = FALSE",
+        ],
+      },
+    ],
+  },
+  {
     name: "native-route-stop",
     module: "Stop",
     states: 202,
@@ -1038,6 +1137,32 @@ const contracts: readonly ModelContract[] = [
               "unsafeArchive = TRUE",
             ],
           },
+        ],
+      },
+    ],
+  },
+  {
+    name: "native-startup-owner",
+    module: "Owner",
+    states: 32,
+    invariant: "NoUnownedResources",
+    action: "ExitUnconfirmed",
+    fields: [
+      'mapping = "none"',
+      'phase = "exited"',
+      'receipt = "authenticated"',
+      'resources = "present"',
+    ],
+    additionalControls: [
+      {
+        name: "refused-inspection",
+        negative: true,
+        invariant: "NoUnrecordedRefusal",
+        fields: [
+          'mapping = "none"',
+          'phase = "exited"',
+          'receipt = "refused"',
+          'resources = "present"',
         ],
       },
     ],

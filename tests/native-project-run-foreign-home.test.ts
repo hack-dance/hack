@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { replaceNativeDownHookRecord } from "../src/backends/native-project-down-hooks.ts";
 import {
   admitNativeProjectFinalization,
   beginNativeProjectFinalization,
@@ -286,9 +287,10 @@ test("pending down hooks, held locks and the owning home's lock refuse release",
   const base = join(f.runs, mapping.slice(0, -5));
 
   await writeFile(`${base}.down-hooks.json`, "{}", { mode: 0o600 });
-  await expect(
-    release({ scope: f.b, expectSelection: selection })
-  ).rejects.toThrow();
+  await expectClosedRefusal(
+    release({ scope: f.b, expectSelection: selection }),
+    "down hooks that are owed, unknown or not this run's"
+  );
   await rm(`${base}.down-hooks.json`);
 
   await mkdir(`${base}.lock`);
@@ -321,6 +323,76 @@ test("pending down hooks, held locks and the owning home's lock refuse release",
   expect(
     (await release({ scope: f.b, expectSelection: selection })).released
   ).toBe(true);
+});
+
+/** A down-hook journal record exactly as the journal writes it. */
+async function downHookJournal(
+  f: Awaited<ReturnType<typeof fixture>>,
+  record: { readonly run: string; readonly state: string }
+) {
+  const mapping =
+    (await readdir(f.runs)).find((name) => /^[a-f0-9]{64}\.json$/.test(name)) ??
+    "absent.json";
+  const path = join(f.runs, `${mapping.slice(0, -5)}.down-hooks.json`);
+  await rm(path, { force: true });
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      kind: "hack.native-project-down-hooks",
+      run: record.run,
+      generation: "9".repeat(32),
+      state: record.state,
+    }),
+    { mode: 0o600 }
+  );
+  return path;
+}
+
+test("a completed down-hook journal of the selected run does not block release", async () => {
+  const f = await fixture();
+  await startInHomeA(f, true);
+  const selection = (await f.inspect()).selectionSha256 ?? "";
+  // The journal's own writer, as a successful stop leaves it.
+  expect(
+    await replaceNativeDownHookRecord(f.a, null, {
+      run: run.run,
+      generation: "9".repeat(32),
+      state: "complete",
+    })
+  ).toBe(true);
+  const journal = join(
+    f.runs,
+    (await readdir(f.runs)).find((name) => name.endsWith(".down-hooks.json")) ??
+      "absent"
+  );
+  const released = await release({ scope: f.b, expectSelection: selection });
+  expect(released.released).toBe(true);
+  expect(await load(f.b)).toBeNull();
+  // The journal is the owning home's history; release does not touch it.
+  expect(JSON.parse(await readFile(journal, "utf8")).state).toBe("complete");
+});
+
+test("an owed, unknown or another run's down-hook journal refuses release", async () => {
+  for (const record of [
+    { run: "f".repeat(32), state: "complete" },
+    { run: run.run, state: "owed" },
+    { run: run.run, state: "after-owed" },
+    { run: run.run, state: "before-started" },
+    { run: run.run, state: "after-started" },
+    { run: run.run, state: "before-failed" },
+    { run: run.run, state: "settled" },
+  ]) {
+    const f = await fixture();
+    await startInHomeA(f, true);
+    const selection = (await f.inspect()).selectionSha256 ?? "";
+    await downHookJournal(f, record);
+    await expectClosedRefusal(
+      release({ scope: f.b, expectSelection: selection }),
+      "down hooks that are owed, unknown or not this run's"
+    );
+    expect(await load(f.a)).toEqual(run);
+  }
 });
 
 test("a mapping that differs in more than its native home keeps the generic refusal", async () => {

@@ -680,9 +680,11 @@ an admission under that same lock before its last mapping check and before any
 runtime effect, and keeps it until it registers its own frontend lifetime. Release
 refuses while an admission exists (a live startup is reported as live; one whose
 startup exited is reported as interrupted). Owning homes from versions without this
-admission record are not covered by it. A changed selection, held project locks, or a
-pending restart or down-hook journal refuse. Release removes only the project's
-mapping and keeps its exact bytes in an audit file beside it. The previous home's
+admission record are not covered by it. A changed selection, held project locks or a
+pending restart refuse, as does a down-hook journal that is owed, unknown or another
+run's. A completed record of the same run, which a successful stop keeps, is allowed.
+Release removes only the project's mapping and keeps its exact bytes in an audit
+file beside it. The previous home's
 graph and named volumes stay in that home; this home's next `hack up` starts the
 instance with fresh data.
 

@@ -1524,11 +1524,55 @@ async function foreignHomeRefusal(
   }
 }
 
+/** The kind tag of the value-free down-hook journal beside the run mapping. */
+const DOWN_HOOK_KIND = "hack.native-project-down-hooks";
+
+function pendingDownHooks(): Error {
+  return new ClosedCliError(
+    "Native project run mapping from another native home has down hooks that are owed, unknown or not this run's; it was not released. Run hack down with the Hack version that owns that home first."
+  );
+}
+
+/**
+ * No down hook is owed for the selected run: its journal is absent, or it is a
+ * completed record of exactly this run (a successful stop keeps that terminal
+ * record rather than removing it). An owed, started (unknown), failed, unreadable or
+ * another run's record refuses. The journal's own writers hold its lock, which the
+ * caller checks separately.
+ */
+async function downHooksSettled(path: string, run: string): Promise<void> {
+  let value: unknown;
+  try {
+    value = (await readRecoveryFile(path)).value;
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return;
+    }
+    throw pendingDownHooks();
+  }
+  if (
+    !(
+      isRecord(value) &&
+      Object.keys(value).sort().join() ===
+        "generation,kind,run,state,version" &&
+      value.version === 1 &&
+      value.kind === DOWN_HOOK_KIND &&
+      value.run === run &&
+      typeof value.generation === "string" &&
+      HEX32.test(value.generation) &&
+      value.state === "complete"
+    )
+  ) {
+    throw pendingDownHooks();
+  }
+}
+
 /**
  * Release a mapping that another native home left after a clean stop, so this home
  * can start the instance afresh. Ownership is proved, never assumed: the stored scope
  * differs only in its native home, that home is still the recorded directory, and
  * its frontend records show the run's latest lifetime acknowledged confirmed cleanup.
+ * A down-hook journal must be absent or this run's completed record.
  * The owning home's finalization lock is held throughout, so it cannot begin a new
  * lifetime meanwhile. Pending restart or down-hook state refuses. The exact mapping
  * bytes are kept in an audit file; the owning home's graph and data are untouched.
@@ -1583,7 +1627,10 @@ export async function releaseNativeProjectRunForeignHome(opts: {
           }
           await Promise.all([
             absentPath(`${base}.restart.json`),
-            absentPath(`${base}.down-hooks.json`),
+            downHooksSettled(
+              `${base}.down-hooks.json`,
+              selected.inspection.run.run
+            ),
             absentPath(`${base}.down-hooks.lock`),
           ]);
           const audit = `${base}.foreign-home-release-${selected.inspection.mappingSha256}.json`;

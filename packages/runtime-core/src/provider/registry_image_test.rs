@@ -1731,6 +1731,90 @@ fn manifests_with_non_ascii_member_names_refuse() {
     }
 }
 
+/// A single-image manifest whose config and layers declare these sizes.
+fn sized_manifest(config: &str, layers: &[&str]) -> String {
+    let digest_a = format!("sha256:{}", "a".repeat(64));
+    let layers: Vec<String> = layers
+        .iter()
+        .map(|size| {
+            format!(
+                r#"{{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"{digest_a}","size":{size}}}"#
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{digest_a}","size":{config}}},"layers":[{}]}}"#,
+        layers.join(",")
+    )
+}
+
+#[test]
+fn build_bases_are_bounded_by_the_image_budget_before_the_build() {
+    let reference = format!("docker.io/library/alpine@sha256:{}", "b".repeat(64));
+    let manifest = |text: &str| parse_manifest(text.as_bytes(), &digest(text.as_bytes()));
+    let limit = ImagePolicy::default().archive_limit;
+    // A normal base passes, also exactly at the budget.
+    let normal = manifest(&sized_manifest("1469", &["3623807", "1024"])).unwrap();
+    assert!(bounded_build_base(&normal, &reference, limit).is_ok());
+    let exact = limit - 100;
+    let at_budget = manifest(&sized_manifest("100", &[&exact.to_string()])).unwrap();
+    assert!(bounded_build_base(&at_budget, &reference, limit).is_ok());
+    // Over the budget, including by overflow: refused naming the base and the total.
+    let over = manifest(&sized_manifest("101", &[&exact.to_string()])).unwrap();
+    let error = bounded_build_base(&over, &reference, limit).unwrap_err();
+    assert_eq!(error.code, "native_build_base_image");
+    assert!(error.message.contains(&reference), "{error:?}");
+    assert!(
+        error.message.contains(&(limit + 1).to_string()),
+        "{error:?}"
+    );
+    assert!(error.message.contains(&limit.to_string()), "{error:?}");
+    let huge = u64::MAX.to_string();
+    let overflow = manifest(&sized_manifest("1", &[&huge])).unwrap();
+    let error = bounded_build_base(&overflow, &reference, limit).unwrap_err();
+    assert!(error.message.contains("at least 2^64"), "{error:?}");
+    // Too many layers, or none.
+    let many: Vec<&str> = vec!["1"; MAX_LAYERS + 1];
+    let error = bounded_build_base(
+        &manifest(&sized_manifest("1", &many)).unwrap(),
+        &reference,
+        limit,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains(&format!("{} layers", MAX_LAYERS + 1)),
+        "{error:?}"
+    );
+    assert!(
+        bounded_build_base(
+            &manifest(&sized_manifest("1", &[])).unwrap(),
+            &reference,
+            limit
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn descriptor_sizes_must_be_present_unsigned_integers() {
+    let manifest = |text: &str| parse_manifest(text.as_bytes(), &digest(text.as_bytes())).map(drop);
+    assert!(manifest(&sized_manifest("1469", &["1024"])).is_ok());
+    for size in ["-1", "1.5", "\"1024\"", "null", "1e3"] {
+        assert!(
+            manifest(&sized_manifest("1469", &[size])).is_err(),
+            "layer {size}"
+        );
+        assert!(
+            manifest(&sized_manifest(size, &["1024"])).is_err(),
+            "config {size}"
+        );
+    }
+    let missing = sized_manifest("1469", &["1024"]).replace(r#","size":1024"#, "");
+    assert!(manifest(&missing).is_err());
+}
+
 #[test]
 fn manifest_members_must_be_spelled_exactly_once() {
     let parse = |text: &str| parse_manifest(text.as_bytes(), &digest(text.as_bytes())).map(drop);

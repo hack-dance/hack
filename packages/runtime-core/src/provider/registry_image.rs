@@ -1412,6 +1412,10 @@ pub fn resolve_build_base(
     }
     let (manifest, _, indexed) =
         select(&mut fetch, &initial, &source_digest, PlatformPolicy::Native)?;
+    let pinned_reference = format!("{}/{}@{source_digest}", registry.domain, named.path);
+    // BuildKit pulls the base itself, outside acquisition's archive budget, so the sizes
+    // the manifest declares are bounded here before any build runs.
+    bounded_build_base(&manifest, &pinned_reference, policy.archive_limit)?;
     let config = manifest
         .config
         .ok_or_else(|| error("Image config descriptor is missing."))?;
@@ -1424,10 +1428,49 @@ pub fn resolve_build_base(
         ));
     }
     Ok(BuildBase {
-        pinned_reference: format!("{}/{}@{source_digest}", registry.domain, named.path),
+        pinned_reference,
         source_digest,
         image_id: config.digest,
     })
+}
+
+/// Refuse a build base whose manifest declares more than `limit` compressed bytes of
+/// config and layers (the per-image archive budget acquisition applies), or no layers
+/// or more than the layer limit. Every descriptor's `size` is a required unsigned
+/// integer (the manifest parse refuses a missing, negative or fractional one), so the
+/// declared total is exact; it does not bound the unpacked size.
+fn bounded_build_base(
+    manifest: &Manifest,
+    reference: &str,
+    limit: u64,
+) -> Result<(), CandidateError> {
+    if manifest.layers.is_empty() || manifest.layers.len() > MAX_LAYERS {
+        return Err(CandidateError::new(
+            "native_build_base_image",
+            format!(
+                "Build base image {reference} declares {} layers; native builds accept 1 to {MAX_LAYERS}. No build was run.",
+                manifest.layers.len()
+            ),
+        ));
+    }
+    let config = manifest
+        .config
+        .as_ref()
+        .ok_or_else(|| error("Image config descriptor is missing."))?;
+    let declared = manifest
+        .layers
+        .iter()
+        .try_fold(config.size, |total, layer| total.checked_add(layer.size));
+    match declared {
+        Some(total) if total <= limit => Ok(()),
+        _ => Err(CandidateError::new(
+            "native_build_base_image",
+            format!(
+                "Build base image {reference} declares {} bytes of config and layers, more than the {limit}-byte image budget. No build was run.",
+                declared.map_or_else(|| "at least 2^64".to_owned(), |total| total.to_string())
+            ),
+        )),
+    }
 }
 
 fn ambiguous(reason: super::go_json::Unreadable) -> CandidateError {

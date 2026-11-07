@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  admitNativeProjectFinalization,
   beginNativeProjectFinalization,
   recoverNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
@@ -213,6 +214,38 @@ test("an explicitly recovered dead owner does not attest a clean stop", async ()
     owner: "unproven",
     selectionSha256: null,
   });
+});
+
+test("a retained startup admission in the owning home excludes release until retired", async () => {
+  const f = await fixture();
+  await startInHomeA(f, true);
+  const selection = (await f.inspect()).selectionSha256 ?? "";
+  const admission = await admitNativeProjectFinalization({ scope: f.a, run });
+  expect(await f.inspect()).toMatchObject({
+    owner: "live",
+    ownerPid: process.pid,
+    selectionSha256: null,
+  });
+  await expectClosedRefusal(
+    release({ scope: f.b, expectSelection: selection }),
+    "is owned by live run"
+  );
+  expect(await load(f.a)).toEqual(run);
+  // An admission whose startup exited without registering a lifetime is interrupted.
+  expect(await f.inspect(() => false)).toMatchObject({
+    owner: "interrupted",
+    ownerPid: process.pid,
+  });
+  await admission.retire();
+  await admission.retire();
+  expect((await f.inspect()).selectionSha256).toBe(selection);
+  expect(
+    (await release({ scope: f.b, expectSelection: selection })).released
+  ).toBe(true);
+  // A startup admitted after the release finds no mapping at its last check.
+  const late = await admitNativeProjectFinalization({ scope: f.a, run });
+  expect(await load(f.a)).toBeNull();
+  await late.retire();
 });
 
 test("a selection goes stale when the owning home starts the run again", async () => {

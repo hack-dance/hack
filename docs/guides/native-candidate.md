@@ -675,7 +675,12 @@ and what to do:
 Release proves ownership; it never just overwrites. The stored scope must differ
 from this checkout in its native home only, that home must still be the recorded
 directory, and the release holds the owning home's finalization lock, so that home
-cannot start the run again meanwhile. A changed selection, held project locks, or a
+cannot start the run again meanwhile. A retained `hack up` in the owning home records
+an admission under that same lock before its last mapping check and before any
+runtime effect, and keeps it until it registers its own frontend lifetime. Release
+refuses while an admission exists (a live startup is reported as live; one whose
+startup exited is reported as interrupted). Owning homes from versions without this
+admission record are not covered by it. A changed selection, held project locks, or a
 pending restart or down-hook journal refuse. Release removes only the project's
 mapping and keeps its exact bytes in an audit file beside it. The previous home's
 graph and named volumes stay in that home; this home's next `hack up` starts the

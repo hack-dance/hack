@@ -221,6 +221,17 @@ async function selected(
 async function read(
   path: string
 ): Promise<NativeProjectFinalizationToken | null> {
+  const value = await readRecord(path);
+  if (value === null) {
+    return null;
+  }
+  if (!isNativeProjectFinalizationToken(value)) {
+    throw refused();
+  }
+  return value;
+}
+/** One private, singly linked, bounded JSON record; absence is null. */
+async function readRecord(path: string): Promise<unknown> {
   let file: Awaited<ReturnType<typeof open>>;
   try {
     file = await open(
@@ -259,22 +270,12 @@ async function read(
     ) {
       throw refused();
     }
-    const value: unknown = JSON.parse(
-      bytes.subarray(0, bytesRead).toString("utf8")
-    );
-    if (!isNativeProjectFinalizationToken(value)) {
-      throw refused();
-    }
-    return value;
+    return JSON.parse(bytes.subarray(0, bytesRead).toString("utf8"));
   } finally {
     await file.close();
   }
 }
-async function write(
-  root: string,
-  name: string,
-  token: NativeProjectFinalizationToken
-) {
+async function write(root: string, name: string, token: unknown) {
   const temporary = join(root, `${randomBytes(16).toString("hex")}.tmp`);
   const file = await open(
     temporary,
@@ -312,7 +313,7 @@ async function locked<T>(root: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 function matches(
-  token: NativeProjectFinalizationToken,
+  token: FinalizationIdentity,
   hash: string,
   run: NativeProjectRun
 ): boolean {
@@ -557,12 +558,115 @@ function processExists(pid: number): boolean {
   }
 }
 
+/**
+ * A retained startup's admission: present from just before its last run-mapping check
+ * (so before any runtime effect) until it registers its own frontend lifetime. While
+ * it exists, the run's latest lifetime record is not the whole truth.
+ */
+type FinalizationAdmission = FinalizationIdentity & {
+  readonly version: 1;
+  readonly pid: number;
+};
+const ADMISSION = "admission.json";
+function isAdmission(value: unknown): value is FinalizationAdmission {
+  return (
+    isRecord(value) &&
+    Object.keys(value).sort().join() ===
+      "attempt,namespace,owner,pid,planId,run,scope,version" &&
+    value.version === 1 &&
+    validPid(value.pid) &&
+    [value.attempt, value.run, value.owner].every(
+      (v) => typeof v === "string" && HEX32.test(v)
+    ) &&
+    [value.scope, value.namespace, value.planId].every(
+      (v) => typeof v === "string" && HEX64.test(v)
+    )
+  );
+}
+async function readAdmission(
+  root: string
+): Promise<FinalizationAdmission | null> {
+  const value = await readRecord(join(root, ADMISSION));
+  if (value !== null && !isAdmission(value)) {
+    throw refused();
+  }
+  return value;
+}
+
+/**
+ * Admit a retained startup of `run` in this native home before its last mapping
+ * check and any runtime effect. Under the run's finalization lock, so a release of
+ * the mapping from another home either completed first (the caller's mapping check
+ * then refuses) or sees this admission and refuses. Another live admission refuses.
+ * `retire` removes only this admission: after the new lifetime is registered, or
+ * when startup ends before any runtime effect. Otherwise it stays as evidence of an
+ * interrupted startup until a later admission of this home replaces it.
+ */
+export async function admitNativeProjectFinalization(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+}): Promise<{ readonly retire: () => Promise<void> }> {
+  const { root, hash } = await selected(opts.scope, opts.run, true);
+  const admission: FinalizationAdmission = {
+    version: 1,
+    attempt: randomBytes(16).toString("hex"),
+    scope: hash,
+    run: opts.run.run,
+    owner: opts.run.owner,
+    namespace: opts.run.namespace,
+    planId: opts.run.planId,
+    pid: process.pid,
+  };
+  await locked(root, async () => {
+    const prior = await readAdmission(root);
+    if (prior && prior.pid !== process.pid && processExists(prior.pid)) {
+      throw refused();
+    }
+    await write(root, ADMISSION, admission);
+  });
+  let retired = false;
+  return {
+    retire: async () => {
+      if (retired) {
+        return;
+      }
+      await locked(root, async () => {
+        const current = await readAdmission(root);
+        if (current?.attempt === admission.attempt) {
+          await unlink(join(root, ADMISSION));
+          const dir = await open(
+            root,
+            constants.O_RDONLY | constants.O_NOFOLLOW
+          );
+          try {
+            await dir.sync();
+          } finally {
+            await dir.close();
+          }
+        }
+      });
+      retired = true;
+    },
+  };
+}
+
 async function lifetimeIn(
   root: string,
   hash: string,
   run: NativeProjectRun,
   alive: (pid: number) => boolean
 ): Promise<NativeProjectFinalizationLifetime> {
+  const admission = await readAdmission(root);
+  if (admission) {
+    // A startup is (or was, until interrupted) restoring this run; its records
+    // below may still describe the previous lifetime.
+    if (!matches(admission, hash, run)) {
+      return { state: "unproven" };
+    }
+    return alive(admission.pid)
+      ? { state: "live", pid: admission.pid }
+      : { state: "interrupted", pid: admission.pid };
+  }
   const active = await read(join(root, "active.json"));
   if (!(active && matches(active, hash, run))) {
     return { state: "unproven" };

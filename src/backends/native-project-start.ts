@@ -1641,6 +1641,13 @@ export async function startNativeProject(opts: {
   readonly signal?: AbortSignal;
   /** A second stop request: cancels a running down hook and forces cleanup. */
   readonly forceSignal?: AbortSignal;
+  /**
+   * Called once this start's own SIGINT/SIGTERM handling is installed, before any
+   * hook, runtime start or service. A caller that handled stop requests until
+   * now (such as `hack restart`) removes its handlers here; `signal` still
+   * carries a request that arrived earlier.
+   */
+  readonly onStopSignals?: () => void;
   /** Foreground progress and the ready line; see {@link NativeStartupProgress}. */
   readonly onProgress?: (event: NativeStartupProgress) => void;
   readonly dependencies?: Partial<Dependencies>;
@@ -1795,6 +1802,7 @@ export async function startNativeProject(opts: {
     .update(new Uint8Array(await artifactFile.arrayBuffer()))
     .digest("hex");
   const stopSignals = nativeForegroundStopSignals(opts);
+  opts.onStopSignals?.();
   const controller = stopSignals.controller;
   controller.signal.addEventListener(
     "abort",

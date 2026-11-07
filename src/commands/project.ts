@@ -6147,6 +6147,17 @@ async function restartNativeImageProject({
   };
   readonly dropEnvFingerprint: () => void;
 }): Promise<number> {
+  // One "Stopping…" line, whether the restart or its new start sees the request.
+  let stoppingReported = false;
+  const progress = (event: NativeStartupProgress): void => {
+    if (event.phase === "stopping") {
+      if (stoppingReported) {
+        return;
+      }
+      stoppingReported = true;
+    }
+    reportNativeStartupProgress(event);
+  };
   return await restartNativeProject({
     scope: startup.scope,
     envName: startup.envName,
@@ -6237,12 +6248,21 @@ async function restartNativeImageProject({
         });
       }
     },
-    start: ({ run, onReady }) =>
+    progress,
+    start: ({ run, onReady, signal, onStopSignals, onStopRequested }) =>
       startNativeProject({
         ...startup,
         ...nativeRestartSelection({ run }),
         restore: run,
         onReady,
+        signal,
+        onStopSignals,
+        onProgress: (event) => {
+          if (event.phase === "stopping") {
+            onStopRequested();
+          }
+          progress(event);
+        },
       }),
   });
 }
